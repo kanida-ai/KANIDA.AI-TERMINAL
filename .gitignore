@@ -1,0 +1,40 @@
+# Credentials — never commit
+config/.env
+backend/.env
+.env
+*.env
+
+# Databases — never commit production data
+data/db/*.db
+outputs/snapshots/*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/.turbo/
+
+# Outputs (generated, not source)
+outputs/logs/
+outputs/reports/
+outputs/cache/
+
+# Frontend env
+frontend/.env.local
+frontend/.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Railway / deployment
+*.log
+outputs/fno_fetch.log
+outputs/pipeline_*.log
+outputs/fetch_*.log
+outputs/refresh_*.log

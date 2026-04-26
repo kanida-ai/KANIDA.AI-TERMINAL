@@ -1,0 +1,107 @@
+The Zerodha account is very useful — it actually changes the recommendation significantly.
+
+## The Honest Answer: Two Vendors, Zero Switching
+
+**NSE + F&O → Zerodha Kite Connect**
+**US Stocks + F&O → Polygon.io**
+
+That's it. These two carry you from today through commercial launch without a vendor migration.
+
+---
+
+### Why Kite Connect specifically (not the others)
+
+You already have the Zerodha demat account. That means:
+
+- No new KYC, no new account creation
+- API subscription is ₹2,000/month — activate from your existing Zerodha dashboard today
+- You get NSE + BSE + F&O historical OHLCV (3 years daily, 60 days minute-level), live quotes, full F&O chain for **any NSE instrument** — not just your own portfolio
+
+The critical commercial path that makes this work at scale:
+
+> Zerodha has a **Connect / Publisher program** — your users log in to KANIDA using their own Zerodha account (OAuth). Their account provides their live data feed. You never pay per user for data.
+
+This means:
+- **You** pay ₹2,000/mo for your backend data pipeline (pattern learning, OHLCV ingestion)
+- **Each user** authenticates via their Zerodha account → their live positions + data flow through
+- Zerodha has 15M+ active accounts — that's your immediate addressable market without a single extra data contract
+
+---
+
+### Why Polygon.io for US (not yfinance)
+
+| | yfinance | Polygon.io |
+|--|---------|------------|
+| Commercial ToS | **Prohibited** — Yahoo Finance ToS explicitly bans commercial redistribution | **Explicitly allowed** — commercial license included |
+| Data quality | Caused April 2026 corruption you just hit | Guaranteed — they own and clean the feed |
+| Options chain | Basic | Full chain with Greeks |
+| Cost at launch | Free but legally unusable commercially | Free tier now → $29/mo Starter when live |
+
+The April 2026 AMZN corruption was a yfinance artifact. That exact failure mode doesn't happen with Polygon.io.
+
+---
+
+### What you do this week
+
+**Step 1 — Kite Connect (today):**
+```
+Zerodha dashboard → Apps → Create App → API subscription → ₹2,000/mo
+```
+You get `api_key` + `api_secret`. Done.
+
+**Step 2 — Polygon.io (today, free):**
+```
+polygon.io → Sign up → Free tier → API key instantly
+```
+
+**Step 3 — Write one adapter each:**
+
+```python
+# kite_adapter.py — wraps KiteConnect to match kanida_signals.db schema
+from kiteconnect import KiteConnect
+
+def fetch_ohlcv_nse(ticker: str, from_date: str, to_date: str) -> list[dict]:
+    kite = KiteConnect(api_key=API_KEY)
+    # returns [{date, open, high, low, close, volume}]
+    data = kite.historical_data(
+        instrument_token=get_token(ticker),
+        from_date=from_date,
+        to_date=to_date,
+        interval="day"
+    )
+    return normalize_to_kanida_schema(data, market="NSE", ticker=ticker)
+```
+
+```python
+# polygon_adapter.py — wraps Polygon to match kanida_signals.db schema  
+from polygon import RESTClient
+
+def fetch_ohlcv_us(ticker: str, from_date: str, to_date: str) -> list[dict]:
+    client = RESTClient(API_KEY)
+    aggs = client.get_aggs(ticker, 1, "day", from_date, to_date)
+    return normalize_to_kanida_schema(aggs, market="US", ticker=ticker)
+```
+
+Both normalize to the same schema your `ohlc_daily` table already uses — `trade_date`, `open`, `high`, `low`, `close`, `volume`, `market`, `ticker`.
+
+---
+
+### The single architecture diagram
+
+```
+Kite Connect API  ──→  NSE OHLCV + F&O  ──┐
+                                            ├──→  kanida_signals.db  ──→  Pattern Engine
+Polygon.io API    ──→  US OHLCV + F&O   ──┘
+
+                         ↑
+              Data quality gate (volume + gap check)
+              catches bad data before DB write
+```
+
+---
+
+### What you'd be giving up
+
+Kite Connect limits you to Zerodha users at the commercial layer (live data per-user). If you eventually want to serve Upstox or Angel One users with their live portfolios, you'd add those broker OAuth integrations — but that's an expansion, not a vendor migration. The **pattern engine, historical data, and OHLCV pipeline stay on Kite Connect + Polygon.io forever**.
+
+Bottom line: Sign up for Kite Connect API today. You already have the account. ₹2,000/mo buys you clean NSE data now and a commercial path when you launch.

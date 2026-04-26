@@ -1,0 +1,93 @@
+{
+  "project_root": "C:/Users/SPS/Desktop/KANIDA.AI_TERMINAL",
+  "signals_db": "data/db/kanida_signals.db",
+  "outputs_dir": "outputs",
+  "markets": ["NSE", "US"],
+  "validation_market": "auto",
+  "report_scopes": ["COMBINED", "NSE", "US"],
+  "roster_passed_only": true,
+  "timeframes": ["1D", "1W"],
+  "outcome_horizon": "15d",
+  "max_learning_groups": 50000,
+  "max_live_groups": 50000,
+  "trend": {
+    "lookbacks": [1, 5, 20, 60],
+    "compression_lookback": 20,
+    "weekly_proxy_lookback": 60
+  },
+  "pattern_mining": {
+    "same_bar": {
+      "enabled": true,
+      "max_combo_size": 3,
+      "max_signals_per_group": 12
+    },
+    "sequential": {
+      "enabled": true,
+      "lookback_bars": [3, 5],
+      "max_sequence_length": 3,
+      "max_signals_per_bar": 4
+    },
+    "cross_timeframe": {
+      "enabled": true,
+      "daily_timeframe": "1D",
+      "weekly_timeframe": "1W"
+    }
+  },
+  "anti_overfit": {
+    "min_occurrences": {
+      "single": 12,
+      "pair": 20,
+      "triple": 30,
+      "sequence": 25,
+      "cross_timeframe": 20
+    },
+    "complexity_penalty_per_extra_signal": 0.05,
+    "context_penalty": 0.03,
+    "low_support_penalty": 0.45
+  },
+  "decay": {
+    "recent_occurrences": 50,
+    "min_recent_samples": 10,
+    "warn_winrate_drop": 0.08,
+    "warn_return_drop": 0.015
+  },
+  "evidence": {
+    "target_return": 0.05,
+    "max_abs_return_for_scoring": 0.5,
+    "min_keep_score": 0.65,
+    "min_watch_score": 0.50
+  },
+  "reports": {
+    "top_n": 50,
+    "max_candidate_rows": 200000,
+    "max_patterns_per_stock_trend": 8,
+    "portfolio_cluster_min_matches": 3
+  },
+  "opportunity": {
+    "target_per_market": 12,
+    "max_per_stock": 3,
+    "min_signal_overlap_ratio": 0.34,
+    "exact_context_bonus": 0.18,
+    "trend_context_bonus": 0.12,
+    "coarse_context_bonus": 0.08,
+    "signal_overlap_bonus": 0.14,
+    "recent_bonus": 0.10,
+    "fallback_top_per_market": 8
+  },
+  "outcome_first": {
+    "enabled": true,
+    "forward_windows": [5, 10, 15, 20],
+    "move_targets": [0.01, 0.03, 0.05, 0.10, 0.15],
+    "primary_windows": [15, 20],
+    "primary_targets": [0.03, 0.05, 0.10],
+    "min_history_bars": 260,
+    "min_pattern_occurrences": 10,
+    "max_pattern_size": 4,
+    "max_patterns_per_stock_target": 8,
+    "recent_occurrences": 40,
+    "max_abs_return_for_scoring": 0.5,
+    "top_opportunities_per_market": 20,
+    "similarity_min_overlap": 0.35,
+    "baseline_lift_floor": 1.15
+  }
+}

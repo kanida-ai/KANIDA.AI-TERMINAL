@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KANIDA.AI Quant Terminal</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brandline">
+        <div class="brand-mark">K</div>
+        <div>
+          <div class="eyebrow">KANIDA.AI Quant Terminal</div>
+          <h1>Outcome-first market intelligence</h1>
+          <p class="subtle">Live resemblance engine for stock-specific rally and breakdown setups.</p>
+        </div>
+      </div>
+      <div class="toolbar">
+        <select id="marketFilter" class="control">
+          <option value="COMBINED">Combined</option>
+          <option value="NSE">NSE</option>
+          <option value="US">US</option>
+        </select>
+        <select id="directionFilter" class="control">
+          <option value="ALL">All Moves</option>
+          <option value="rally">Rallies</option>
+          <option value="fall">Falls</option>
+        </select>
+        <button id="refreshBtn" class="button primary">Refresh Prototype</button>
+      </div>
+    </header>
+
+    <section class="hero-band">
+      <div class="metrics-grid" id="summaryCards"></div>
+    </section>
+
+    <main class="content-grid">
+      <section class="main-column">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Opportunity Blotter</h2>
+              <p class="subtle">Ranked current setups based on each stock's own historical pre-move behavior.</p>
+            </div>
+          </div>
+          <div id="outcomeOpportunitiesList" class="stack"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Signal Context</h2>
+              <p class="subtle">Secondary view from the earlier signal-playbook matcher.</p>
+            </div>
+          </div>
+          <div id="opportunitiesList" class="stack"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Stock Playbooks</h2>
+              <p class="subtle">Per-stock trusted pattern sets. Select a stock to inspect the playbook.</p>
+            </div>
+            <input id="stockSearch" class="control search" type="search" placeholder="Search ticker">
+          </div>
+          <div id="stockGrid" class="stock-grid"></div>
+        </section>
+      </section>
+
+      <aside class="side-column">
+        <section class="panel">
+          <h2>System Status</h2>
+          <div id="visionAudit" class="stack compact"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Selected Stock</h2>
+          <div id="stockDetail" class="stack"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Desk Notes</h2>
+          <div id="insightsPanel" class="markdown-panel"></div>
+        </section>
+      </aside>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

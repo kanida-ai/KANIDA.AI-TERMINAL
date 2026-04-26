@@ -1,0 +1,1 @@
+"""Signal pattern mining."""
