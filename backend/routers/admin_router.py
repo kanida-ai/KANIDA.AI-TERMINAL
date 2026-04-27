@@ -85,6 +85,7 @@ async def refresh_token(body: TokenRequest):
     return {
         "status":          "ok",
         "token_preview":   access_token[:10] + "...",
+        "access_token":    access_token,
         "railway_updated": railway_updated,
         "message":         "Token refreshed. Railway env updated." if railway_updated
                            else "Token refreshed (in-process only — Railway env not updated, set RAILWAY_TOKEN).",

@@ -113,9 +113,20 @@ export default function AdminPage() {
           <div style={{ padding: '12px 16px', borderRadius: 8, background: status.status === 'ok' ? '#052e16' : '#2d0a0a', border: `1px solid ${status.status === 'ok' ? '#166534' : '#7f1d1d'}`, fontSize: 13 }}>
             {status.status === 'ok' ? (
               <>
-                <div style={{ color: '#4ade80', fontWeight: 700, marginBottom: 4 }}>✓ Token refreshed successfully</div>
-                <div style={{ color: '#86efac' }}>Token: <code>{status.token_preview}</code></div>
-                <div style={{ color: '#86efac' }}>{status.railway_updated ? '✓ Railway env var updated automatically' : '⚠ Railway env not updated — set RAILWAY_TOKEN in Railway vars'}</div>
+                <div style={{ color: '#4ade80', fontWeight: 700, marginBottom: 8 }}>✓ Token refreshed successfully</div>
+                {status.railway_updated
+                  ? <div style={{ color: '#86efac' }}>✓ Railway env var updated automatically</div>
+                  : <>
+                      <div style={{ color: '#fbbf24', marginBottom: 8 }}>⚠ Railway env not updated automatically. Copy the token below and paste it manually in Railway → Variables → KITE_ACCESS_TOKEN</div>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <code style={{ background: '#0f172a', padding: '6px 10px', borderRadius: 4, color: '#e2e8f0', fontSize: 12, flex: 1, wordBreak: 'break-all' }}>{status.access_token}</code>
+                        <button onClick={() => navigator.clipboard.writeText(status.access_token)}
+                          style={{ background: '#1e293b', border: 'none', color: '#94a3b8', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', whiteSpace: 'nowrap', fontSize: 12 }}>
+                          Copy
+                        </button>
+                      </div>
+                    </>
+                }
               </>
             ) : (
               <div style={{ color: '#f87171' }}>✗ {status.detail || status.message}</div>
