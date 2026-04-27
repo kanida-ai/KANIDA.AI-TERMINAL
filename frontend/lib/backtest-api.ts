@@ -410,6 +410,7 @@ export type SwingEngine = {
 
 export type ActiveSignal = {
   ticker:            string
+  bucket:            string
   tier:              string
   opportunity_score: number
   credibility:       string
