@@ -5,7 +5,7 @@ backend/.env
 *.env
 
 # Databases — never commit production data
-data/db/*.db
+# data/db/*.db   ← temporarily included for Railway deployment (baked into image)
 outputs/snapshots/*.db
 
 # Python
