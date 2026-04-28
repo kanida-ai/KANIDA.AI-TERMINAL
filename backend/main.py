@@ -3,8 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)                          # so 'routers.*' resolves
-sys.path.insert(0, os.path.join(_HERE, "agents"))
+sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, ".."))
 
 # ── Load .env file if present ─────────────────────────────────────────────────
@@ -26,8 +25,12 @@ if os.path.exists(_env):
                 os.environ[_k] = _v
 
 # ── DB path — kanida_quant.db ─────────────────────────────────────────────────
-_DB = os.path.normpath(os.path.join(_HERE, "..", "data", "db", "kanida_quant.db"))
-os.environ["KANIDA_DB_PATH"] = _DB
+# Respect KANIDA_DB_PATH if already set (e.g. Railway env var), otherwise default to local path
+if not os.environ.get("KANIDA_DB_PATH"):
+    os.environ["KANIDA_DB_PATH"] = os.path.normpath(
+        os.path.join(_HERE, "..", "data", "db", "kanida_quant.db")
+    )
+_DB = os.environ["KANIDA_DB_PATH"]
 
 from routers.quant_router      import router as quant_router
 from routers.backtest_router   import router as backtest_router
