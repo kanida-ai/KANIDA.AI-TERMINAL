@@ -12,12 +12,13 @@ export default function AdminPage() {
   const [loading, setLoading]           = useState(false)
   const [tokenStatus, setTokenStatus]   = useState<any>(null)
   const [autoDetected, setAutoDetected] = useState(false)
+  const [secretSaved, setSecretSaved]   = useState(false)
 
   // On mount: check token status, restore saved secret, auto-detect request_token from URL
   useEffect(() => {
     checkToken()
     const saved = localStorage.getItem(SECRET_KEY)
-    if (saved) setSecret(saved)
+    if (saved) { setSecret(saved); setSecretSaved(true) }
 
     const params = new URLSearchParams(window.location.search)
     const rt = params.get('request_token')
@@ -57,6 +58,7 @@ export default function AdminPage() {
       setStatus(data)
       if (data.status === 'ok') {
         localStorage.setItem(SECRET_KEY, sec)
+        setSecretSaved(true)
         setRequestToken('')
         setAutoDetected(false)
         checkToken()
@@ -140,7 +142,7 @@ export default function AdminPage() {
             </div>
 
             {/* Secret field (only shown if not saved) */}
-            {!localStorage?.getItem?.(SECRET_KEY) && (
+            {!secretSaved && (
               <div style={{ background: '#111827', border: '1px solid #1e293b', borderRadius: 8, padding: 16 }}>
                 <label style={{ fontSize: 12, color: '#94a3b8', display: 'block', marginBottom: 6 }}>Admin Secret <span style={{ color: '#475569' }}>(saved after first use)</span></label>
                 <input type="password" value={secret} onChange={e => setSecret(e.target.value)}
