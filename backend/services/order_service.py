@@ -87,23 +87,29 @@ def _market_is_open() -> bool:
 
 def _daily_order_count() -> int:
     today = date.today().isoformat()
-    with _conn() as conn:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM orders WHERE DATE(created_at)=? AND status='PLACED'",
-            (today,),
-        ).fetchone()
-    return row[0] if row else 0
+    try:
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM orders WHERE DATE(created_at)=? AND status='PLACED'",
+                (today,),
+            ).fetchone()
+        return row[0] if row else 0
+    except Exception:
+        return 0
 
 
 def _position_already_open(ticker: str) -> bool:
     """True if there's already an open order for this ticker today."""
     today = date.today().isoformat()
-    with _conn() as conn:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM orders WHERE ticker=? AND DATE(created_at)=? AND status='PLACED'",
-            (ticker, today),
-        ).fetchone()
-    return (row[0] or 0) > 0
+    try:
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM orders WHERE ticker=? AND DATE(created_at)=? AND status='PLACED'",
+                (ticker, today),
+            ).fetchone()
+        return (row[0] or 0) > 0
+    except Exception:
+        return False
 
 
 def _log_order(record: dict) -> int:
