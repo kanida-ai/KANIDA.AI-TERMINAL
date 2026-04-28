@@ -62,33 +62,34 @@ def get_freshness() -> dict:
 
         # Latest snapshot run
         snap = conn.execute(
-            "SELECT run_date, signal_count FROM snapshot_runs ORDER BY run_date DESC LIMIT 1"
+            "SELECT started_at, live_opportunities FROM snapshot_runs ORDER BY id DESC LIMIT 1"
         ).fetchone()
 
-        # Live opportunities count and created_at
+        # Live opportunities count and created_at for latest snapshot
         opp = conn.execute(
             """
             SELECT COUNT(*) as cnt, MAX(created_at) as latest
             FROM live_opportunities lo
-            JOIN snapshot_runs sr ON sr.id = lo.snapshot_run_id
-            WHERE sr.run_date = (SELECT MAX(run_date) FROM snapshot_runs)
+            WHERE lo.snapshot_run_id = (SELECT id FROM snapshot_runs ORDER BY id DESC LIMIT 1)
             """
         ).fetchone()
 
+    snap_date = snap["started_at"][:10] if snap and snap["started_at"] else None
+
     result["ohlcv"] = {
-        "latest_date":  ohlcv,
+        "latest_date":        ohlcv,
         "nse_total_tickers":  nse_total,
         "nse_fresh_tickers":  nse_fresh,
         "nse_stale_tickers":  nse_total - nse_fresh,
-        "is_fresh":     nse_latest == str(last_trading) if nse_latest else False,
+        "is_fresh":           nse_latest == str(last_trading) if nse_latest else False,
     }
 
     result["signals"] = {
-        "latest_snapshot_date": snap["run_date"] if snap else None,
-        "signal_count":         snap["signal_count"] if snap else 0,
+        "latest_snapshot_date": snap_date,
+        "signal_count":         snap["live_opportunities"] if snap else 0,
         "live_opportunities":   opp["cnt"] if opp else 0,
         "last_generated":       opp["latest"] if opp else None,
-        "is_fresh": (snap["run_date"] == str(last_trading)) if snap else False,
+        "is_fresh":             snap_date == str(last_trading) if snap_date else False,
     }
 
     # Pipeline log file status

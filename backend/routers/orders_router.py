@@ -83,16 +83,15 @@ def list_orders(days: int = 7):
     try:
         with _conn() as conn:
             conn.execute("SELECT 1 FROM orders LIMIT 1")
+            rows = conn.execute(
+                """
+                SELECT * FROM orders
+                WHERE DATE(created_at) >= DATE('now', ?)
+                ORDER BY created_at DESC
+                LIMIT 200
+                """,
+                (f"-{days} days",),
+            ).fetchall()
+        return {"orders": [dict(r) for r in rows]}
     except Exception:
         return {"orders": [], "note": "Orders table not yet created — place an order first"}
-
-    rows = conn.execute(
-        """
-        SELECT * FROM orders
-        WHERE DATE(created_at) >= DATE('now', ?)
-        ORDER BY created_at DESC
-        LIMIT 200
-        """,
-        (f"-{days} days",),
-    ).fetchall()
-    return {"orders": [dict(r) for r in rows]}
