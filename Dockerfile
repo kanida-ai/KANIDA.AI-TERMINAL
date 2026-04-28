@@ -15,6 +15,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app
 COPY . .
 
-# Run from backend directory
+# Bundle the DB as the seed for fresh Railway volumes
+RUN mkdir -p /app/data/db/_bundle && \
+    cp /app/data/db/kanida_quant.db /app/data/db/_bundle/kanida_quant.db 2>/dev/null || true
+
+# Entrypoint handles volume init then starts uvicorn
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 WORKDIR /app/backend
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["/entrypoint.sh"]
