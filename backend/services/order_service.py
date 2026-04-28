@@ -184,17 +184,14 @@ def place_order(
                     "opportunity_id": opportunity_id, "signal_date": signal_date, "placed_at": None})
         return {"status": "rejected", "reason": reason}
 
-    # Place order via Kite
-    api_key    = os.environ.get("KITE_API_KEY", "")
-    access_tok = os.environ.get("KITE_ACCESS_TOKEN", "")
-    if not api_key or not access_tok:
-        raise OrderError("KITE_API_KEY or KITE_ACCESS_TOKEN not set")
+    # Place order via Kite — use central auth service
+    try:
+        from services.kite_auth import get_kite_client, KiteAuthError
+        kite = get_kite_client()
+    except Exception as e:
+        raise OrderError(str(e))
 
     try:
-        from kiteconnect import KiteConnect
-        kite = KiteConnect(api_key=api_key)
-        kite.set_access_token(access_tok)
-
         kite_order_id = kite.place_order(
             variety=kite.VARIETY_REGULAR,
             exchange=kite.EXCHANGE_NSE,

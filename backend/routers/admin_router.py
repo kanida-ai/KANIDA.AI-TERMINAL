@@ -1,10 +1,10 @@
 """
-Admin router — Zerodha token refresh endpoint.
-POST /api/admin/refresh-token
-  body: { "request_token": "...", "secret": "..." }
-  - Exchanges Kite request_token → access_token
-  - Updates KITE_ACCESS_TOKEN in Railway env via GraphQL API
-  - Updates in-process os.environ so current instance works immediately
+Admin router — Zerodha token management.
+All Kite credential logic is delegated to services.kite_auth.
+
+GET  /api/admin/kite/login-url     — returns Zerodha OAuth login URL
+POST /api/admin/kite/refresh-token — exchanges request_token, saves to DB
+GET  /api/admin/kite/status        — token validity (safe fields only, no full token)
 """
 from __future__ import annotations
 
@@ -23,92 +23,96 @@ class TokenRequest(BaseModel):
     secret: str
 
 
-@router.post("/admin/refresh-token")
+@router.get("/admin/kite/login-url")
+def kite_login_url():
+    from services.kite_auth import _load_env_file
+    _load_env_file()
+    api_key = os.environ.get("KITE_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="KITE_API_KEY not configured")
+    return {
+        "login_url": f"https://kite.zerodha.com/connect/login?api_key={api_key}&v=3"
+    }
+
+
+@router.post("/admin/kite/refresh-token")
 async def refresh_token(body: TokenRequest):
+    # Verify admin secret
     admin_secret = os.getenv("ADMIN_SECRET", "")
     if not admin_secret or body.secret != admin_secret:
         raise HTTPException(status_code=403, detail="Invalid secret")
 
-    api_key    = os.getenv("KITE_API_KEY", "")
-    api_secret = os.getenv("KITE_API_SECRET", "")
-    if not api_key or not api_secret:
-        raise HTTPException(status_code=500, detail="KITE_API_KEY or KITE_API_SECRET not configured")
-
-    # Exchange request_token → access_token
+    from services.kite_auth import exchange_and_save, KiteAuthError
     try:
-        from kiteconnect import KiteConnect
-        kite = KiteConnect(api_key=api_key)
-        session = kite.generate_session(body.request_token, api_secret=api_secret)
-        access_token: str = session["access_token"]
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Kite session error: {e}")
+        access_token = exchange_and_save(body.request_token)
+    except KiteAuthError as e:
+        raise HTTPException(status_code=400, detail=f"{e.code}: {e.detail}")
 
-    # Update in-process env immediately (current container works right away)
-    os.environ["KITE_ACCESS_TOKEN"] = access_token
-
-    # Persist to Railway env vars so it survives restarts
-    railway_token   = os.getenv("RAILWAY_TOKEN", "")
-    project_id      = os.getenv("RAILWAY_PROJECT_ID", "")
-    environment_id  = os.getenv("RAILWAY_ENV_ID", "")
-    service_id      = os.getenv("RAILWAY_SERVICE_ID", "")
-
-    railway_updated = False
-    if railway_token and project_id and environment_id and service_id:
-        mutation = """
-        mutation($input: VariableUpsertInput!) {
-            variableUpsert(input: $input)
-        }
-        """
-        payload = {
-            "query": mutation,
-            "variables": {
-                "input": {
-                    "projectId":     project_id,
-                    "environmentId": environment_id,
-                    "serviceId":     service_id,
-                    "name":          "KITE_ACCESS_TOKEN",
-                    "value":         access_token,
-                }
-            },
-        }
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(
-                    _RAILWAY_GQL,
-                    json=payload,
-                    headers={"Authorization": f"Bearer {railway_token}"},
-                )
-            railway_updated = resp.status_code == 200 and "errors" not in resp.json()
-        except Exception:
-            pass
+    # Optionally persist to Railway env vars so it survives restarts
+    railway_updated = await _push_to_railway(access_token)
 
     return {
         "status":          "ok",
-        "token_preview":   access_token[:10] + "...",
-        "access_token":    access_token,
+        "token_preview":   access_token[:8] + "...",
         "railway_updated": railway_updated,
-        "message":         "Token refreshed. Railway env updated." if railway_updated
-                           else "Token refreshed (in-process only — Railway env not updated, set RAILWAY_TOKEN).",
+        "message":         "Token refreshed and saved to DB. Railway env updated." if railway_updated
+                           else "Token refreshed and saved to DB (Railway env not updated — set RAILWAY_TOKEN to enable).",
     }
 
 
-@router.get("/admin/token-status")
+@router.get("/admin/kite/status")
 def token_status():
-    """Check if the current Kite token is valid."""
-    api_key     = os.getenv("KITE_API_KEY", "")
-    access_tok  = os.getenv("KITE_ACCESS_TOKEN", "")
-    if not api_key or not access_tok:
-        return {"valid": False, "reason": "credentials not set"}
+    from services.kite_auth import get_token_status
+    return get_token_status()
+
+
+# ── Keep old paths as aliases so existing frontend doesn't break ─────────────
+
+@router.post("/admin/refresh-token")
+async def refresh_token_legacy(body: TokenRequest):
+    return await refresh_token(body)
+
+
+@router.get("/admin/token-status")
+def token_status_legacy():
+    return token_status()
+
+
+# ── Railway env var update (best-effort, non-blocking) ───────────────────────
+
+async def _push_to_railway(access_token: str) -> bool:
+    railway_token  = os.getenv("RAILWAY_TOKEN", "")
+    project_id     = os.getenv("RAILWAY_PROJECT_ID", "")
+    environment_id = os.getenv("RAILWAY_ENV_ID", "")
+    service_id     = os.getenv("RAILWAY_SERVICE_ID", "")
+
+    if not all([railway_token, project_id, environment_id, service_id]):
+        return False
+
+    mutation = """
+    mutation($input: VariableUpsertInput!) {
+        variableUpsert(input: $input)
+    }
+    """
+    payload = {
+        "query": mutation,
+        "variables": {
+            "input": {
+                "projectId":     project_id,
+                "environmentId": environment_id,
+                "serviceId":     service_id,
+                "name":          "KITE_ACCESS_TOKEN",
+                "value":         access_token,
+            }
+        },
+    }
     try:
-        from kiteconnect import KiteConnect
-        kite = KiteConnect(api_key=api_key)
-        kite.set_access_token(access_tok)
-        profile = kite.profile()
-        return {
-            "valid":     True,
-            "user":      profile.get("user_name", ""),
-            "email":     profile.get("email", ""),
-            "token_tip": access_tok[:10] + "...",
-        }
-    except Exception as e:
-        return {"valid": False, "reason": str(e)}
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                _RAILWAY_GQL,
+                json=payload,
+                headers={"Authorization": f"Bearer {railway_token}"},
+            )
+        return resp.status_code == 200 and "errors" not in resp.json()
+    except Exception:
+        return False

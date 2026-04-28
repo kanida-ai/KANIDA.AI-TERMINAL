@@ -87,10 +87,31 @@ def _run_step(step: dict) -> bool:
     return ok
 
 
+def _preflight_token_check() -> bool:
+    """Abort pipeline early if Kite token is missing/expired rather than letting 188 fetches fail."""
+    sys.path.insert(0, str(ROOT / "backend"))
+    try:
+        from services.kite_auth import get_token_status
+        status = get_token_status()
+        if status.get("valid"):
+            log.info("Kite token OK — user: %s", status.get("user", ""))
+            return True
+        log.error("Kite token invalid: %s — %s", status.get("code"), status.get("reason"))
+        log.error("Visit https://www.kanida.ai/admin to refresh the token, then re-run.")
+        return False
+    except Exception as e:
+        log.error("Token preflight check failed: %s", e)
+        return False
+
+
 def run_pipeline() -> bool:
     log.info("=" * 60)
     log.info("KANIDA.AI pipeline starting — %s", datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"))
     log.info("=" * 60)
+
+    if not _preflight_token_check():
+        log.error("Pipeline aborted — Kite token not valid.")
+        return False
 
     for step in PIPELINE_STEPS:
         if not _run_step(step):

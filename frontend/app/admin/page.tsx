@@ -41,7 +41,7 @@ export default function AdminPage() {
 
   async function checkToken() {
     try {
-      const r = await fetch(`${API}/api/admin/token-status`)
+      const r = await fetch(`${API}/api/admin/kite/status`)
       setTokenStatus(await r.json())
     } catch {}
   }
@@ -50,7 +50,7 @@ export default function AdminPage() {
     setLoading(true)
     setStatus(null)
     try {
-      const r = await fetch(`${API}/api/admin/refresh-token`, {
+      const r = await fetch(`${API}/api/admin/kite/refresh-token`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ request_token: rt, secret: sec }),
@@ -113,19 +113,13 @@ export default function AdminPage() {
         {status?.status === 'ok' && (
           <div style={{ padding: '16px', borderRadius: 8, background: '#052e16', border: '1px solid #166534', marginBottom: 16 }}>
             <div style={{ color: '#4ade80', fontWeight: 700, fontSize: 15, marginBottom: 6 }}>✓ Authentication complete</div>
-            {status.railway_updated
-              ? <div style={{ color: '#86efac', fontSize: 13 }}>✓ Railway env updated automatically — token will persist after restarts</div>
-              : <>
-                  <div style={{ color: '#fbbf24', fontSize: 13, marginBottom: 8 }}>Token active for this session. Copy & save in Railway → Variables → KITE_ACCESS_TOKEN to persist:</div>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <code style={{ background: '#0f172a', padding: '6px 10px', borderRadius: 4, color: '#e2e8f0', fontSize: 11, flex: 1, wordBreak: 'break-all' }}>{status.access_token}</code>
-                    <button onClick={() => navigator.clipboard.writeText(status.access_token)}
-                      style={{ background: '#1e293b', border: 'none', color: '#94a3b8', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' }}>
-                      Copy
-                    </button>
-                  </div>
-                </>
-            }
+            <div style={{ color: '#86efac', fontSize: 13 }}>
+              Token saved to DB — all services will use it automatically.
+              {status.railway_updated && ' Railway env also updated.'}
+            </div>
+            <div style={{ color: '#475569', fontSize: 12, marginTop: 6 }}>
+              Preview: <code style={{ color: '#94a3b8' }}>{status.token_preview}</code>
+            </div>
           </div>
         )}
 
