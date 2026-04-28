@@ -681,7 +681,7 @@ function MpiTab({ ticker }: { ticker: string }) {
         mpiData.trades.length === 0
           ? <div style={{ color: C.t3, padding: 20 }}>No MPI events (&gt;2% continuation) found.</div>
           : (
-            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, overflowX: 'auto', overflowY: 'auto', maxHeight: '65vh' }}>
+            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, overflowX: 'auto', overflowY: 'auto', height: 'calc(100vh - 510px)', minHeight: 200 }}>
               <table style={{ minWidth: 'max-content', width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                 <thead style={{ position: 'sticky', top: 0, background: C.card }}>
                   <tr style={{ borderBottom: `1px solid ${C.border}` }}>
@@ -848,7 +848,7 @@ function LiveTradesTab({ ticker }: { ticker: string }) {
       </div>
     )
     return (
-      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, overflowX: 'auto', overflowY: 'auto', maxHeight: '65vh' }}>
+      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, overflowX: 'auto', overflowY: 'auto', height: 'calc(100vh - 510px)', minHeight: 200 }}>
         <table style={{ minWidth: 'max-content', width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
           <thead style={{ position: 'sticky', top: 0, background: C.card, zIndex: 1 }}>
             <tr style={{ borderBottom: `1px solid ${C.border}` }}>
@@ -1128,7 +1128,7 @@ function LiveTradesTab({ ticker }: { ticker: string }) {
           {histData.history.length === 0 ? (
             <div style={{ color: C.t3, padding: 20 }}>No closed trades in the last 90 days.</div>
           ) : (
-            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, overflowX: 'auto', overflowY: 'auto', maxHeight: '65vh' }}>
+            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, overflowX: 'auto', overflowY: 'auto', height: 'calc(100vh - 510px)', minHeight: 200 }}>
               <table style={{ minWidth: 'max-content', width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                 <thead style={{ position: 'sticky', top: 0, background: C.card, zIndex: 1 }}>
                   <tr style={{ borderBottom: `1px solid ${C.border}` }}>
