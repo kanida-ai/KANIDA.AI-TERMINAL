@@ -3,7 +3,7 @@
 
 DB_PATH="${KANIDA_DB_PATH:-/app/data/db/kanida_quant.db}"
 DB_DIR=$(dirname "$DB_PATH")
-BUNDLE="/app/data/db/_bundle/kanida_quant.db"
+BUNDLE="/app/data/db_bundle/kanida_quant.db"
 
 # If DB is missing (first deploy on a fresh volume), copy the bundled version
 if [ ! -f "$DB_PATH" ]; then
