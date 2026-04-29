@@ -53,6 +53,7 @@ PIPELINE_STEPS = [
     {"name": "Pattern Learning",   "cmd": [sys.executable, "engine/jobs/run_learning.py"]},
     {"name": "Backtest",           "cmd": [sys.executable, "engine/backtest/run_backtest.py"]},
     {"name": "Execution Analysis", "cmd": [sys.executable, "engine/backtest/run_execution_analysis.py"]},
+    {"name": "Pending Entries",    "cmd": [sys.executable, "engine/jobs/create_pending_entries.py"]},
 ]
 
 
