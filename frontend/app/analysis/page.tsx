@@ -781,6 +781,152 @@ function ExpiryBar({ daysOpen, maxDays }: { daysOpen: number; maxDays: number })
   )
 }
 
+// ── PositionsTable — defined OUTSIDE LiveTradesTab so React never unmounts it
+// on countdown ticks, preserving scroll position across re-renders.
+function PositionsTable({
+  rows, expanded, onExpand,
+}: {
+  rows: LivePosition[]
+  expanded: number | null
+  onExpand: (id: number | null) => void
+}) {
+  if (rows.length === 0) return (
+    <div style={{
+      color: C.t3, padding: 40, textAlign: 'center',
+      background: C.card, borderRadius: 10, border: `1px solid ${C.border}`,
+    }}>
+      No positions in this view.
+    </div>
+  )
+  return (
+    <div style={{
+      background: C.card, border: `1px solid ${C.border}`, borderRadius: 10,
+      overflow: 'auto',
+      height: 'clamp(420px, calc(100vh - 360px), 72vh)',
+      minHeight: 420,
+      overscrollBehavior: 'contain',
+      scrollbarGutter: 'stable both-edges',
+    }}>
+      <table style={{ minWidth: 1650, width: 'max-content', borderCollapse: 'collapse', fontSize: 11 }}>
+        <thead style={{ position: 'sticky', top: 0, background: C.card, zIndex: 2 }}>
+          <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+            {['Status','Stock','Bucket','Signal Type','Dir',
+              'Signal DateTime','Entry DateTime',
+              'Entry ₹','Current ₹','Live P&L %','Live P&L ₹',
+              'SL ₹','Target ₹','Dist to TP','Dist to SL',
+              'Days Open','Expiry','Score',
+            ].map((h, hi) => (
+              <th key={h} style={{
+                padding: '7px 10px', color: C.t3, fontWeight: 600, textAlign: 'left',
+                whiteSpace: 'nowrap', fontSize: 10,
+                ...(hi < 2 ? {
+                  position: 'sticky', left: hi === 0 ? 0 : 130,
+                  background: C.card, zIndex: 3,
+                  boxShadow: hi === 1 ? '2px 0 6px rgba(0,0,0,0.25)' : undefined,
+                } : {}),
+              }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(p => {
+            const bm   = BUCKET_META[p.bucket.toLowerCase()]
+            const sm2  = STATUS_META[p.status_code]
+            const isEx = expanded === p.trade_id
+            const rowBg =
+              p.status_code === 'near_target'   ? `${C.green}07` :
+              p.status_code === 'near_stop'     ? `${C.red}07`   :
+              p.status_code === 'target_hit'    ? `${C.green}04` :
+              p.status_code === 'stop_hit'      ? `${C.red}04`   :
+              p.status_code === 'pending_entry' ? `${C.amber}06` :
+              'transparent'
+            return (
+              <React.Fragment key={p.trade_id}>
+                <tr
+                  onClick={() => onExpand(isEx ? null : p.trade_id)}
+                  style={{ borderBottom: `1px solid ${C.border}1a`, cursor: 'pointer', background: isEx ? `${C.violet}0c` : rowBg }}
+                >
+                  <td style={{ padding: '6px 10px', position: 'sticky', left: 0, zIndex: 1, background: isEx ? `${C.violet}0c` : rowBg || C.bg }}>
+                    <span style={{
+                      background: `${sm2?.color || C.t3}22`, color: sm2?.color || C.t3,
+                      border: `1px solid ${sm2?.color || C.t3}44`,
+                      padding: '1px 6px', borderRadius: 4, fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap',
+                      animation: sm2?.pulse ? 'liveGlow 1.6s ease-in-out infinite' : undefined,
+                    }}>
+                      {sm2?.icon} {sm2?.label || p.status_label}
+                    </span>
+                  </td>
+                  <td style={{ padding: '6px 10px', color: C.violet, fontWeight: 800, position: 'sticky', left: 130, zIndex: 1, background: isEx ? `${C.violet}0c` : rowBg || C.bg, boxShadow: '2px 0 6px rgba(0,0,0,0.25)' }}>{p.ticker}</td>
+                  <td style={{ padding: '6px 10px' }}>{bm && <Chip val={`${bm.icon} ${bm.label}`} color={bm.color} small />}</td>
+                  <td style={{ padding: '6px 10px', color: C.t2, maxWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.signal_type}</td>
+                  <td style={{ padding: '6px 10px' }}><Chip val={p.direction === 'long' ? '▲ LONG' : '▼ SHORT'} color={p.direction === 'long' ? C.green : C.red} small /></td>
+                  <td style={{ padding: '6px 10px', color: C.t3, fontFamily: 'monospace', fontSize: 10, whiteSpace: 'nowrap' }}>{p.signal_datetime}</td>
+                  <td style={{ padding: '6px 10px', color: C.t2, fontFamily: 'monospace', fontSize: 10, whiteSpace: 'nowrap' }}>{p.entry_date ? p.entry_datetime : <span style={{ color: C.amber }}>Pending</span>}</td>
+                  <td style={{ padding: '6px 10px', color: C.t, fontFamily: 'monospace' }}>{price(p.entry_price)}</td>
+                  <td style={{ padding: '6px 10px', fontFamily: 'monospace' }}>
+                    {p.current_price != null ? <span style={{ color: p.current_price >= p.entry_price ? C.green : C.red, fontWeight: 600 }}>{price(p.current_price)}</span> : <span style={{ color: C.t3 }}>—</span>}
+                  </td>
+                  <td style={{ padding: '6px 10px', fontWeight: 800, color: p.live_pnl_pct >= 0 ? C.green : C.red }}>{pctS(p.live_pnl_pct)}</td>
+                  <td style={{ padding: '6px 10px', fontFamily: 'monospace', color: p.live_pnl_rs >= 0 ? C.green : C.red }}>{p.live_pnl_rs >= 0 ? '+' : ''}{p.live_pnl_rs.toFixed(2)}</td>
+                  <td style={{ padding: '6px 10px', color: C.red,   fontFamily: 'monospace' }}>{price(p.stop_price)}</td>
+                  <td style={{ padding: '6px 10px', color: C.green, fontFamily: 'monospace' }}>{price(p.target_price)}</td>
+                  <td style={{ padding: '6px 10px' }}><span style={{ color: p.pct_to_tp <= 3 ? C.green : p.pct_to_tp <= 6 ? C.amber : C.t3, fontWeight: p.pct_to_tp <= 3 ? 700 : 400 }}>{pctS(p.pct_to_tp)}</span></td>
+                  <td style={{ padding: '6px 10px' }}><span style={{ color: p.pct_to_sl <= 2 ? C.red : p.pct_to_sl <= 4 ? C.amber : C.t3, fontWeight: p.pct_to_sl <= 2 ? 700 : 400 }}>{pctS(p.pct_to_sl)}</span></td>
+                  <td style={{ padding: '6px 10px', color: C.t3 }}>{p.days_open}d</td>
+                  <td style={{ padding: '6px 10px' }}><ExpiryBar daysOpen={p.days_open} maxDays={p.max_hold_days} /></td>
+                  <td style={{ padding: '6px 10px' }}><ScoreBar score={p.opportunity_score} /></td>
+                </tr>
+                {isEx && (
+                  <tr style={{ background: `${C.violet}08` }}>
+                    <td colSpan={18} style={{ padding: '14px 20px' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 16, fontSize: 11 }}>
+                        <div>
+                          <div style={{ color: C.t3, marginBottom: 6, fontWeight: 600 }}>POSITION DETAIL</div>
+                          <KV label="Signal ID"      val={p.signal_id} />
+                          <KV label="Status"         val={p.status_label} color={sm2?.color} />
+                          <KV label="R:R ratio"      val={`1:${p.rr.toFixed(1)}`} />
+                          <KV label="Days open"      val={`${p.days_open} of ${p.max_hold_days} max`} color={p.days_open > p.max_hold_days * 0.75 ? C.red : C.t2} />
+                          <KV label="Days remaining" val={`${p.days_left}d`} color={p.days_left <= 5 ? C.red : C.sky} />
+                          <KV label="Bucket"         val={p.bucket} color={BUCKET_META[p.bucket.toLowerCase()]?.color} />
+                          <KV label="Conviction"     val={p.opportunity_score?.toFixed(4) || '—'} color={C.sky} />
+                        </div>
+                        <div>
+                          <div style={{ color: C.t3, marginBottom: 6, fontWeight: 600 }}>DATETIME FLOW</div>
+                          <KV label="Signal fired"    val={p.signal_datetime} />
+                          <KV label="Entry executed"  val={p.entry_date ? p.entry_datetime : 'Pending next open'} color={p.entry_date ? C.t2 : C.amber} />
+                          <KV label="Execution delay" val={p.delay_label} color={C.sky} />
+                          <div style={{ marginTop: 10 }}>
+                            <div style={{ color: C.t3, marginBottom: 6, fontWeight: 600 }}>SIGNAL QUALITY</div>
+                            <KV label="Signal type"      val={p.signal_type} />
+                            <KV label="Reason code"      val={p.reason_code} color={reasonColor(p.reason_code)} />
+                            <KV label="Competing patt."  val={`${p.multi_pattern_count} patterns that day`} />
+                            <KV label="Tier"             val={p.tier || '—'} />
+                          </div>
+                        </div>
+                        <div>
+                          <div style={{ color: C.t3, marginBottom: 6, fontWeight: 600 }}>LEVELS &amp; LIVE P&amp;L</div>
+                          <KV label="Entry price" val={`₹${price(p.entry_price)}`} />
+                          <KV label="Stop Loss"   val={`₹${price(p.stop_price)}`}   color={C.red} />
+                          <KV label="Target"      val={`₹${price(p.target_price)}`} color={C.green} />
+                          <KV label="Current"     val={p.current_price != null ? `₹${price(p.current_price)}` : 'Market closed'} color={p.current_price != null && p.current_price >= p.entry_price ? C.green : C.red} />
+                          <KV label="Live P&amp;L %" val={pctS(p.live_pnl_pct)} color={p.live_pnl_pct >= 0 ? C.green : C.red} />
+                          <KV label="Dist to TP"  val={pctS(p.pct_to_tp)} color={p.pct_to_tp <= 3 ? C.green : C.t2} />
+                          <KV label="Dist to SL"  val={pctS(p.pct_to_sl)} color={p.pct_to_sl <= 2 ? C.red : C.t2} />
+                          <div style={{ color: C.t3, marginTop: 8, fontSize: 10, lineHeight: 1.5, wordBreak: 'break-word' }}>{p.pattern}</div>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 function LiveTradesTab({ ticker }: { ticker: string }) {
   const [liveData,  setLiveData]  = useState<LivePositionsResponse | null>(null)
   const [histData,  setHistData]  = useState<LiveHistoryResponse   | null>(null)
@@ -843,186 +989,6 @@ function LiveTradesTab({ ticker }: { ticker: string }) {
   if (loading && !liveData) return (
     <div style={{ color: C.t3, padding: 40, textAlign: 'center' }}>Loading live positions...</div>
   )
-
-  // ── shared position table renderer ─────────────────────────────────────────
-  const PositionsTable = ({ rows }: { rows: LivePosition[] }) => {
-    if (rows.length === 0) return (
-      <div style={{
-        color: C.t3, padding: 40, textAlign: 'center',
-        background: C.card, borderRadius: 10, border: `1px solid ${C.border}`,
-      }}>
-        No positions in this view.
-      </div>
-    )
-    return (
-      <div style={{
-        background: C.card, border: `1px solid ${C.border}`, borderRadius: 10,
-        overflow: 'auto',
-        height: 'clamp(420px, calc(100vh - 360px), 72vh)',
-        minHeight: 420,
-        overscrollBehavior: 'contain',
-        scrollbarGutter: 'stable both-edges',
-      }}>
-        <table style={{ minWidth: 1650, width: 'max-content', borderCollapse: 'collapse', fontSize: 11 }}>
-          <thead style={{ position: 'sticky', top: 0, background: C.card, zIndex: 2 }}>
-            <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-              {['Status','Stock','Bucket','Signal Type','Dir',
-                'Signal DateTime','Entry DateTime',
-                'Entry ₹','Current ₹','Live P&L %','Live P&L ₹',
-                'SL ₹','Target ₹','Dist to TP','Dist to SL',
-                'Days Open','Expiry','Score',
-              ].map((h, hi) => (
-                <th key={h} style={{
-                  padding: '7px 10px', color: C.t3, fontWeight: 600, textAlign: 'left',
-                  whiteSpace: 'nowrap', fontSize: 10,
-                  ...(hi < 2 ? {
-                    position: 'sticky', left: hi === 0 ? 0 : 130,
-                    background: C.card, zIndex: 3,
-                    boxShadow: hi === 1 ? '2px 0 6px rgba(0,0,0,0.25)' : undefined,
-                  } : {}),
-                }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(p => {
-              const bm   = BUCKET_META[p.bucket.toLowerCase()]
-              const sm2  = STATUS_META[p.status_code]
-              const isEx = expanded === p.trade_id
-              const rowBg =
-                p.status_code === 'near_target' ? `${C.green}07` :
-                p.status_code === 'near_stop'   ? `${C.red}07`   :
-                p.status_code === 'target_hit'  ? `${C.green}04` :
-                p.status_code === 'stop_hit'    ? `${C.red}04`   :
-                p.status_code === 'pending_entry' ? `${C.amber}06` :
-                'transparent'
-              return (
-                <React.Fragment key={p.trade_id}>
-                  <tr
-                    onClick={() => setExpanded(isEx ? null : p.trade_id)}
-                    style={{ borderBottom: `1px solid ${C.border}1a`, cursor: 'pointer', background: isEx ? `${C.violet}0c` : rowBg }}
-                  >
-                    {/* ── Col 0: Status — sticky left ── */}
-                    <td style={{
-                      padding: '6px 10px',
-                      position: 'sticky', left: 0, zIndex: 1,
-                      background: isEx ? `${C.violet}0c` : rowBg || C.bg,
-                    }}>
-                      <span style={{
-                        background: `${sm2?.color || C.t3}22`, color: sm2?.color || C.t3,
-                        border: `1px solid ${sm2?.color || C.t3}44`,
-                        padding: '1px 6px', borderRadius: 4, fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap',
-                        animation: sm2?.pulse ? 'liveGlow 1.6s ease-in-out infinite' : undefined,
-                      }}>
-                        {sm2?.icon} {sm2?.label || p.status_label}
-                      </span>
-                    </td>
-                    {/* ── Col 1: Stock — sticky left (after Status ~130px) ── */}
-                    <td style={{
-                      padding: '6px 10px', color: C.violet, fontWeight: 800,
-                      position: 'sticky', left: 130, zIndex: 1,
-                      background: isEx ? `${C.violet}0c` : rowBg || C.bg,
-                      boxShadow: '2px 0 6px rgba(0,0,0,0.25)',
-                    }}>{p.ticker}</td>
-                    <td style={{ padding: '6px 10px' }}>
-                      {bm && <Chip val={`${bm.icon} ${bm.label}`} color={bm.color} small />}
-                    </td>
-                    <td style={{ padding: '6px 10px', color: C.t2, maxWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.signal_type}</td>
-                    <td style={{ padding: '6px 10px' }}>
-                      <Chip val={p.direction === 'long' ? '▲ LONG' : '▼ SHORT'} color={p.direction === 'long' ? C.green : C.red} small />
-                    </td>
-                    <td style={{ padding: '6px 10px', color: C.t3, fontFamily: 'monospace', fontSize: 10, whiteSpace: 'nowrap' }}>{p.signal_datetime}</td>
-                    <td style={{ padding: '6px 10px', color: C.t2, fontFamily: 'monospace', fontSize: 10, whiteSpace: 'nowrap' }}>
-                      {p.entry_date ? p.entry_datetime : <span style={{ color: C.amber }}>Pending</span>}
-                    </td>
-                    <td style={{ padding: '6px 10px', color: C.t, fontFamily: 'monospace' }}>{price(p.entry_price)}</td>
-                    <td style={{ padding: '6px 10px', fontFamily: 'monospace' }}>
-                      {p.current_price != null
-                        ? <span style={{ color: p.current_price >= p.entry_price ? C.green : C.red, fontWeight: 600 }}>{price(p.current_price)}</span>
-                        : <span style={{ color: C.t3 }}>—</span>}
-                    </td>
-                    <td style={{ padding: '6px 10px', fontWeight: 800,
-                      color: p.live_pnl_pct >= 0 ? C.green : C.red }}>
-                      {pctS(p.live_pnl_pct)}
-                    </td>
-                    <td style={{ padding: '6px 10px', fontFamily: 'monospace',
-                      color: p.live_pnl_rs >= 0 ? C.green : C.red }}>
-                      {p.live_pnl_rs >= 0 ? '+' : ''}{p.live_pnl_rs.toFixed(2)}
-                    </td>
-                    <td style={{ padding: '6px 10px', color: C.red, fontFamily: 'monospace' }}>{price(p.stop_price)}</td>
-                    <td style={{ padding: '6px 10px', color: C.green, fontFamily: 'monospace' }}>{price(p.target_price)}</td>
-                    <td style={{ padding: '6px 10px' }}>
-                      <span style={{
-                        color: p.pct_to_tp <= 3 ? C.green : p.pct_to_tp <= 6 ? C.amber : C.t3,
-                        fontWeight: p.pct_to_tp <= 3 ? 700 : 400,
-                      }}>
-                        {pctS(p.pct_to_tp)}
-                      </span>
-                    </td>
-                    <td style={{ padding: '6px 10px' }}>
-                      <span style={{
-                        color: p.pct_to_sl <= 2 ? C.red : p.pct_to_sl <= 4 ? C.amber : C.t3,
-                        fontWeight: p.pct_to_sl <= 2 ? 700 : 400,
-                      }}>
-                        {pctS(p.pct_to_sl)}
-                      </span>
-                    </td>
-                    <td style={{ padding: '6px 10px', color: C.t3 }}>{p.days_open}d</td>
-                    <td style={{ padding: '6px 10px' }}>
-                      <ExpiryBar daysOpen={p.days_open} maxDays={p.max_hold_days} />
-                    </td>
-                    <td style={{ padding: '6px 10px' }}><ScoreBar score={p.opportunity_score} /></td>
-                  </tr>
-                  {isEx && (
-                    <tr style={{ background: `${C.violet}08` }}>
-                      <td colSpan={18} style={{ padding: '14px 20px' }}>
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 16, fontSize: 11 }}>
-                          <div>
-                            <div style={{ color: C.t3, marginBottom: 6, fontWeight: 600 }}>POSITION DETAIL</div>
-                            <KV label="Signal ID"      val={p.signal_id} />
-                            <KV label="Status"         val={p.status_label} color={sm2?.color} />
-                            <KV label="R:R ratio"      val={`1:${p.rr.toFixed(1)}`} />
-                            <KV label="Days open"      val={`${p.days_open} of ${p.max_hold_days} max`} color={p.days_open > p.max_hold_days * 0.75 ? C.red : C.t2} />
-                            <KV label="Days remaining" val={`${p.days_left}d`} color={p.days_left <= 5 ? C.red : C.sky} />
-                            <KV label="Bucket"         val={p.bucket} color={BUCKET_META[p.bucket.toLowerCase()]?.color} />
-                            <KV label="Conviction"     val={p.opportunity_score?.toFixed(4) || '—'} color={C.sky} />
-                          </div>
-                          <div>
-                            <div style={{ color: C.t3, marginBottom: 6, fontWeight: 600 }}>DATETIME FLOW</div>
-                            <KV label="Signal fired" val={p.signal_datetime} />
-                            <KV label="Entry executed" val={p.entry_date ? p.entry_datetime : 'Pending next open'} color={p.entry_date ? C.t2 : C.amber} />
-                            <KV label="Execution delay" val={p.delay_label} color={C.sky} />
-                            <div style={{ marginTop: 10 }}>
-                              <div style={{ color: C.t3, marginBottom: 6, fontWeight: 600 }}>SIGNAL QUALITY</div>
-                              <KV label="Signal type"   val={p.signal_type} />
-                              <KV label="Reason code"   val={p.reason_code} color={reasonColor(p.reason_code)} />
-                              <KV label="Competing patt." val={`${p.multi_pattern_count} patterns that day`} />
-                              <KV label="Tier"          val={p.tier || '—'} />
-                            </div>
-                          </div>
-                          <div>
-                            <div style={{ color: C.t3, marginBottom: 6, fontWeight: 600 }}>LEVELS &amp; LIVE P&amp;L</div>
-                            <KV label="Entry price"  val={`₹${price(p.entry_price)}`} />
-                            <KV label="Stop Loss"    val={`₹${price(p.stop_price)}`}   color={C.red} />
-                            <KV label="Target"       val={`₹${price(p.target_price)}`} color={C.green} />
-                            <KV label="Current"      val={p.current_price != null ? `₹${price(p.current_price)}` : 'Market closed'} color={p.current_price != null && p.current_price >= p.entry_price ? C.green : C.red} />
-                            <KV label="Live P&amp;L %" val={pctS(p.live_pnl_pct)} color={p.live_pnl_pct >= 0 ? C.green : C.red} />
-                            <KV label="Dist to TP"   val={pctS(p.pct_to_tp)} color={p.pct_to_tp <= 3 ? C.green : C.t2} />
-                            <KV label="Dist to SL"   val={pctS(p.pct_to_sl)} color={p.pct_to_sl <= 2 ? C.red : C.t2} />
-                            <div style={{ color: C.t3, marginTop: 8, fontSize: 10, lineHeight: 1.5, wordBreak: 'break-word' }}>{p.pattern}</div>
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-    )
-  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -1135,7 +1101,7 @@ function LiveTradesTab({ ticker }: { ticker: string }) {
             status is determined by current market price vs TP / SL levels ·
             click any row to expand
           </div>
-          <PositionsTable rows={activePositions} />
+          <PositionsTable rows={activePositions} expanded={expanded} onExpand={setExpanded} />
         </div>
       )}
 
@@ -1145,7 +1111,7 @@ function LiveTradesTab({ ticker }: { ticker: string }) {
           <div style={{ color: C.t3, fontSize: 11, marginBottom: 8 }}>
             {closedPositions.length} resolved position{closedPositions.length !== 1 ? 's' : ''} within the last {28} days
           </div>
-          <PositionsTable rows={closedPositions} />
+          <PositionsTable rows={closedPositions} expanded={expanded} onExpand={setExpanded} />
         </div>
       )}
 
