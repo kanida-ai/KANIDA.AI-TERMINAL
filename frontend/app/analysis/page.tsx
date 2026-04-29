@@ -681,9 +681,16 @@ function MpiTab({ ticker }: { ticker: string }) {
         mpiData.trades.length === 0
           ? <div style={{ color: C.t3, padding: 20 }}>No MPI events (&gt;2% continuation) found.</div>
           : (
-            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, overflowX: 'auto', overflowY: 'auto', height: 'calc(100vh - 510px)', minHeight: 200 }}>
-              <table style={{ minWidth: 'max-content', width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
-                <thead style={{ position: 'sticky', top: 0, background: C.card }}>
+            <div style={{
+              background: C.card, border: `1px solid ${C.border}`, borderRadius: 10,
+              overflow: 'auto',
+              height: 'clamp(420px, calc(100vh - 360px), 72vh)',
+              minHeight: 420,
+              overscrollBehavior: 'contain',
+              scrollbarGutter: 'stable both-edges',
+            }}>
+              <table style={{ minWidth: 1400, width: 'max-content', borderCollapse: 'collapse', fontSize: 11 }}>
+                <thead style={{ position: 'sticky', top: 0, background: C.card, zIndex: 2 }}>
                   <tr style={{ borderBottom: `1px solid ${C.border}` }}>
                     {['Signal ID','Stock','TF','Signal Time','Entry Time','Dir','Entry ₹','Exit ₹','Booked','Continued','Total Avail','MISSED','Signal Type'].map(h => (
                       <th key={h} style={{ padding: '8px 10px', color: C.t3, fontWeight: 600, textAlign: 'left', fontSize: 10, whiteSpace: 'nowrap' }}>{h}</th>
@@ -848,17 +855,32 @@ function LiveTradesTab({ ticker }: { ticker: string }) {
       </div>
     )
     return (
-      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, overflowX: 'auto', overflowY: 'auto', height: 'calc(100vh - 510px)', minHeight: 200 }}>
-        <table style={{ minWidth: 'max-content', width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
-          <thead style={{ position: 'sticky', top: 0, background: C.card, zIndex: 1 }}>
+      <div style={{
+        background: C.card, border: `1px solid ${C.border}`, borderRadius: 10,
+        overflow: 'auto',
+        height: 'clamp(420px, calc(100vh - 360px), 72vh)',
+        minHeight: 420,
+        overscrollBehavior: 'contain',
+        scrollbarGutter: 'stable both-edges',
+      }}>
+        <table style={{ minWidth: 1650, width: 'max-content', borderCollapse: 'collapse', fontSize: 11 }}>
+          <thead style={{ position: 'sticky', top: 0, background: C.card, zIndex: 2 }}>
             <tr style={{ borderBottom: `1px solid ${C.border}` }}>
               {['Status','Stock','Bucket','Signal Type','Dir',
                 'Signal DateTime','Entry DateTime',
                 'Entry ₹','Current ₹','Live P&L %','Live P&L ₹',
                 'SL ₹','Target ₹','Dist to TP','Dist to SL',
                 'Days Open','Expiry','Score',
-              ].map(h => (
-                <th key={h} style={{ padding: '7px 10px', color: C.t3, fontWeight: 600, textAlign: 'left', whiteSpace: 'nowrap', fontSize: 10 }}>{h}</th>
+              ].map((h, hi) => (
+                <th key={h} style={{
+                  padding: '7px 10px', color: C.t3, fontWeight: 600, textAlign: 'left',
+                  whiteSpace: 'nowrap', fontSize: 10,
+                  ...(hi < 2 ? {
+                    position: 'sticky', left: hi === 0 ? 0 : 130,
+                    background: C.card, zIndex: 3,
+                    boxShadow: hi === 1 ? '2px 0 6px rgba(0,0,0,0.25)' : undefined,
+                  } : {}),
+                }}>{h}</th>
               ))}
             </tr>
           </thead>
@@ -880,7 +902,12 @@ function LiveTradesTab({ ticker }: { ticker: string }) {
                     onClick={() => setExpanded(isEx ? null : p.trade_id)}
                     style={{ borderBottom: `1px solid ${C.border}1a`, cursor: 'pointer', background: isEx ? `${C.violet}0c` : rowBg }}
                   >
-                    <td style={{ padding: '6px 10px' }}>
+                    {/* ── Col 0: Status — sticky left ── */}
+                    <td style={{
+                      padding: '6px 10px',
+                      position: 'sticky', left: 0, zIndex: 1,
+                      background: isEx ? `${C.violet}0c` : rowBg || C.bg,
+                    }}>
                       <span style={{
                         background: `${sm2?.color || C.t3}22`, color: sm2?.color || C.t3,
                         border: `1px solid ${sm2?.color || C.t3}44`,
@@ -890,7 +917,13 @@ function LiveTradesTab({ ticker }: { ticker: string }) {
                         {sm2?.icon} {sm2?.label || p.status_label}
                       </span>
                     </td>
-                    <td style={{ padding: '6px 10px', color: C.violet, fontWeight: 800 }}>{p.ticker}</td>
+                    {/* ── Col 1: Stock — sticky left (after Status ~130px) ── */}
+                    <td style={{
+                      padding: '6px 10px', color: C.violet, fontWeight: 800,
+                      position: 'sticky', left: 130, zIndex: 1,
+                      background: isEx ? `${C.violet}0c` : rowBg || C.bg,
+                      boxShadow: '2px 0 6px rgba(0,0,0,0.25)',
+                    }}>{p.ticker}</td>
                     <td style={{ padding: '6px 10px' }}>
                       {bm && <Chip val={`${bm.icon} ${bm.label}`} color={bm.color} small />}
                     </td>
@@ -1128,9 +1161,16 @@ function LiveTradesTab({ ticker }: { ticker: string }) {
           {histData.history.length === 0 ? (
             <div style={{ color: C.t3, padding: 20 }}>No closed trades in the last 90 days.</div>
           ) : (
-            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, overflowX: 'auto', overflowY: 'auto', height: 'calc(100vh - 510px)', minHeight: 200 }}>
-              <table style={{ minWidth: 'max-content', width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
-                <thead style={{ position: 'sticky', top: 0, background: C.card, zIndex: 1 }}>
+            <div style={{
+              background: C.card, border: `1px solid ${C.border}`, borderRadius: 10,
+              overflow: 'auto',
+              height: 'clamp(420px, calc(100vh - 360px), 72vh)',
+              minHeight: 420,
+              overscrollBehavior: 'contain',
+              scrollbarGutter: 'stable both-edges',
+            }}>
+              <table style={{ minWidth: 1200, width: 'max-content', borderCollapse: 'collapse', fontSize: 11 }}>
+                <thead style={{ position: 'sticky', top: 0, background: C.card, zIndex: 2 }}>
                   <tr style={{ borderBottom: `1px solid ${C.border}` }}>
                     {['Exit Date','Stock','Signal Type','Dir','Bucket','Entry ₹','Exit ₹','P&L %','Exit Reason','Days','Current ₹','Cumulative P&L'].map(h => (
                       <th key={h} style={{ padding: '7px 10px', color: C.t3, fontWeight: 600, textAlign: 'left', whiteSpace: 'nowrap', fontSize: 10 }}>{h}</th>
@@ -1719,7 +1759,7 @@ export default function AnalysisPage() {
 
   return (
     <div style={{ background: C.bg, minHeight: '100vh', color: C.t, fontFamily: 'Inter, system-ui, sans-serif' }}>
-      <div style={{ maxWidth: 1500, margin: '0 auto', padding: '0 20px 60px' }}>
+      <div style={{ maxWidth: activeTab === 4 ? 'none' : 1500, margin: '0 auto', padding: activeTab === 4 ? '0 16px 32px' : '0 20px 60px' }}>
 
         {/* Header */}
         <div style={{ padding: '24px 0 18px', borderBottom: `1px solid ${C.border}` }}>
