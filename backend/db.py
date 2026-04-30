@@ -30,7 +30,9 @@ _SQLITE_PATH = os.environ.get(
 )
 _PG_URL = os.environ.get("DATABASE_URL", "")
 
-IS_POSTGRES = bool(_PG_URL)
+# Only use Postgres if DATABASE_URL is a valid URI (starts with postgres:// or postgresql://).
+# Rejects unresolved Railway references like "${{Postgres.DATABASE_URL}}" or bad values.
+IS_POSTGRES = _PG_URL.startswith(("postgres://", "postgresql://"))
 
 
 # ── Public interface ───────────────────────────────────────────────────────────
