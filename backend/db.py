@@ -30,8 +30,18 @@ _SQLITE_PATH = os.environ.get(
 )
 _PG_URL = os.environ.get("DATABASE_URL", "")
 
-# Only use Postgres if DATABASE_URL is a valid URI (starts with postgres:// or postgresql://).
-# Rejects unresolved Railway references like "${{Postgres.DATABASE_URL}}" or bad values.
+# ── Production DB mode decision ────────────────────────────────────────────────
+# CURRENT INTENDED MODE: SQLite (bundled in Docker image via entrypoint.sh).
+# The 83 MB kanida_quant.db is baked into the Railway image at build time.
+# Data persists between restarts but resets on a full Railway redeploy.
+#
+# TO SWITCH TO POSTGRES/SUPABASE (Sprint 2):
+#   1. Set DATABASE_URL=postgresql://user:pass@host:5432/dbname in Railway env vars
+#   2. Run scripts/migrate_to_supabase.py once to copy SQLite data → Postgres
+#   3. IS_POSTGRES will activate automatically on next deploy
+#
+# Guard: only activates for valid postgres:// or postgresql:// URIs.
+# Rejects unresolved Railway template refs like "${{Postgres.DATABASE_URL}}".
 IS_POSTGRES = _PG_URL.startswith(("postgres://", "postgresql://"))
 
 

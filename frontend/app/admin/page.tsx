@@ -262,6 +262,32 @@ function OverviewTab({ secret }: { secret: string }) {
         </Card>
       )}
 
+      {/* Environment / infrastructure status */}
+      <Card style={{ marginBottom: 16, marginTop: 4 }}>
+        <div style={{ fontSize: 11, color: C.t3, marginBottom: 12 }}>INFRASTRUCTURE</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 11, color: C.t3, marginBottom: 4 }}>Environment</div>
+            <Pill color="green">PRODUCTION</Pill>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, color: C.t3, marginBottom: 4 }}>DB Mode</div>
+            <Pill color="amber">SQLite — bundled</Pill>
+            <div style={{ fontSize: 11, color: C.t3, marginTop: 4 }}>Persists until Railway redeploy</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, color: C.t3, marginBottom: 4 }}>Backend</div>
+            <Pill color={fresh ? 'green' : 'red'}>{fresh ? '✓ Connected' : loading ? '…' : '✗ Unreachable'}</Pill>
+            <div style={{ fontSize: 11, color: C.t3, marginTop: 4 }}>web-production-50ff.up.railway.app</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, color: C.t3, marginBottom: 4 }}>Strategy Lab</div>
+            <Pill color="amber">⚠ Scaffold only</Pill>
+            <div style={{ fontSize: 11, color: C.t3, marginTop: 4 }}>Backtest engine not yet wired</div>
+          </div>
+        </div>
+      </Card>
+
       <div style={{ textAlign: 'right', marginTop: 12 }}>
         <Btn variant="ghost" small onClick={load} disabled={loading}>
           {loading ? 'Refreshing…' : '↺ Refresh'}
@@ -889,6 +915,38 @@ const STATUS_NEXT_LABEL: Partial<Record<StrategyStatus, string>> = {
   prod:    'Archive',
 }
 
+// ── Strategy Lab scaffold banner (Sprint 1: backtest engine not yet wired) ─────
+function StrategyLabScaffoldBanner() {
+  return (
+    <div style={{
+      background: 'rgba(245,158,11,0.08)',
+      border: '1px solid rgba(245,158,11,0.35)',
+      borderRadius: 8,
+      padding: '12px 16px',
+      marginBottom: 20,
+      display: 'flex',
+      gap: 12,
+      alignItems: 'flex-start',
+    }}>
+      <span style={{ fontSize: 18, lineHeight: 1 }}>⚠</span>
+      <div>
+        <div style={{ color: C.a, fontWeight: 700, fontSize: 13, marginBottom: 4 }}>
+          Strategy Lab — Scaffold Only (Sprint 1)
+        </div>
+        <div style={{ color: '#d97706', fontSize: 12, lineHeight: 1.6 }}>
+          Creating, promoting, and archiving strategies works.{' '}
+          <strong style={{ color: C.a }}>Compute Backtest</strong> reads{' '}
+          <code style={{ background: 'rgba(255,255,255,0.06)', padding: '1px 5px', borderRadius: 3 }}>trade_log</code>{' '}
+          where <code style={{ background: 'rgba(255,255,255,0.06)', padding: '1px 5px', borderRadius: 3 }}>strategy_id</code> matches —
+          the backtest engine does not yet tag trades with a strategy_id.
+          Compute will return 0 trades until Sprint 2 refactors the pipeline.
+          Do not promote strategies to prod based on Compute results yet.
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function StrategyLabTab({ secret }: { secret: string }) {
   const [strategies, setStrategies] = useState<Strategy[]>([])
   const [loading, setLoading]       = useState(true)
@@ -990,6 +1048,7 @@ function StrategyLabTab({ secret }: { secret: string }) {
 
   return (
     <div>
+      <StrategyLabScaffoldBanner />
       <SectionTitle>Strategy lab</SectionTitle>
 
       {/* Active prod strategy */}

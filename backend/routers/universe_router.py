@@ -359,11 +359,13 @@ def add_instrument(body: AddInstrumentRequest):
                 body.notes,
             ))
             conn.commit()
-        except sqlite3.IntegrityError:
-            raise HTTPException(
-                status_code=409,
-                detail=f"{body.symbol.upper()} already exists on {body.exchange}. Use PUT to update it.",
-            )
+        except (sqlite3.IntegrityError, Exception) as exc:
+            if "unique" in str(exc).lower() or "duplicate" in str(exc).lower() or "already exists" in str(exc).lower():
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{body.symbol.upper()} already exists on {body.exchange}. Use PUT to update it.",
+                )
+            raise
 
     return {"status": "added", "symbol": body.symbol.upper(), "exchange": body.exchange.upper()}
 
