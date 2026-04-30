@@ -179,6 +179,8 @@ class _PgConn:
         Convert SQLite-dialect SQL to Postgres.
         Handles the patterns actually used in this codebase.
         """
+        import re
+
         # Placeholder: ? → %s (skip ? inside string literals)
         out: list[str] = []
         in_str = False
@@ -202,6 +204,20 @@ class _PgConn:
         s = s.replace("datetime('now')", "NOW()")
         s = s.replace("date('now')", "CURRENT_DATE")
         s = s.replace("lower(hex(randomblob(8)))", "gen_random_uuid()::text")
+
+        # json_extract(col, '$.key') → col::jsonb->>'key'
+        s = re.sub(
+            r"json_extract\(([^,]+),\s*'\$\.(\w+)'\)",
+            r"\1::jsonb->>'\\2'",
+            s,
+        )
+
+        # strftime('%Y', col) → EXTRACT(YEAR FROM col)::text
+        s = re.sub(
+            r"strftime\('%Y',\s*([^)]+)\)",
+            r"EXTRACT(YEAR FROM \1)::text",
+            s,
+        )
 
         # DDL differences
         s = s.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")

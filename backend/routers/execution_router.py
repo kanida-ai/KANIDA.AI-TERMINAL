@@ -9,6 +9,7 @@ All data sourced from execution_log table (populated by run_execution_analysis.p
 from __future__ import annotations
 
 import os
+import sys
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -17,17 +18,18 @@ from fastapi import APIRouter, HTTPException, Query
 
 router  = APIRouter()
 _HERE   = Path(__file__).parent
+sys.path.insert(0, str(_HERE.parent))
+from db import get_conn
+
 DB_PATH = os.environ.get("KANIDA_DB_PATH",
           str(_HERE.parent.parent / "data" / "db" / "kanida_quant.db"))
 
 
-def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    return c
+def _conn():
+    return get_conn()
 
 
-def _row(r: sqlite3.Row) -> dict:
+def _row(r) -> dict:
     return dict(r)
 
 

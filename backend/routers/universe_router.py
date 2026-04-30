@@ -16,6 +16,7 @@ import csv
 import io
 import json
 import os
+import sys
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -27,6 +28,9 @@ from pydantic import BaseModel
 router = APIRouter()
 
 _HERE = Path(__file__).parent
+sys.path.insert(0, str(_HERE.parent))
+from db import get_conn
+
 DB_PATH = os.environ.get(
     "KANIDA_DB_PATH",
     str(_HERE.parent.parent / "data" / "db" / "kanida_quant.db"),
@@ -91,10 +95,8 @@ _FNO_TICKERS_WITH_SECTORS: list[tuple[str, str]] = [
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 
-def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    return c
+def _conn():
+    return get_conn()
 
 
 def _ensure_table(conn: sqlite3.Connection) -> None:

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import sqlite3
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -24,6 +25,9 @@ from fastapi import APIRouter, HTTPException
 
 router  = APIRouter()
 _HERE   = Path(__file__).parent
+sys.path.insert(0, str(_HERE.parent))
+from db import get_conn
+
 DB_PATH = os.environ.get(
     "KANIDA_DB_PATH",
     str(_HERE.parent.parent / "data" / "db" / "kanida_quant.db"),
@@ -37,10 +41,8 @@ NEAR_STOP_PCT   = 2.0  # % from stop   → NEAR STOP
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    return c
+def _conn():
+    return get_conn()
 
 
 def _n(notes_str) -> dict:

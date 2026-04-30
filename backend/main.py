@@ -127,6 +127,9 @@ async def lifespan(app: FastAPI):
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────
+from db import db_url as _db_url
+log.info("DB: %s", _db_url())
+
 from routers.quant_router      import router as quant_router
 from routers.backtest_router   import router as backtest_router
 from routers.live_router       import router as live_router
