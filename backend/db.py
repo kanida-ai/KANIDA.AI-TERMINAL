@@ -170,8 +170,8 @@ class _PgConn:
 
     # Internal helpers
     def _pg_cursor(self) -> Any:
-        from psycopg2.extras import RealDictCursor
-        return self._conn.cursor(cursor_factory=RealDictCursor)
+        from psycopg2.extras import DictCursor
+        return self._conn.cursor(cursor_factory=DictCursor)
 
     @staticmethod
     def _adapt(sql: str) -> str:
@@ -208,7 +208,7 @@ class _PgConn:
         # json_extract(col, '$.key') → col::jsonb->>'key'
         s = re.sub(
             r"json_extract\(([^,]+),\s*'\$\.(\w+)'\)",
-            r"\1::jsonb->>'\\2'",
+            r"\1::jsonb->>'\2'",
             s,
         )
 

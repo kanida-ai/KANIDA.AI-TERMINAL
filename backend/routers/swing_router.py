@@ -518,7 +518,7 @@ def swing_leaderboard(
           {bucket_filter}
           {date_filter}
         GROUP BY t.ticker, json_extract(t.notes,'$.bucket')
-        HAVING total_trades >= 2
+        HAVING COUNT(*) >= 2
         ORDER BY {sort_by} DESC
         LIMIT ?
     """, bucket_params + date_params + [limit]).fetchall()

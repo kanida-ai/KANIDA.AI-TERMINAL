@@ -117,9 +117,30 @@ def _schedule_daily_pipeline():
         _run_pipeline_sync()
 
 
+def _apply_postgres_schema():
+    """Create all tables in Postgres if they don't exist yet (idempotent)."""
+    import pathlib
+    sql_path = pathlib.Path(_HERE).parent / "db" / "migrations" / "0001_initial.sql"
+    if not sql_path.exists():
+        log.warning("Schema migration not found at %s — skipping", sql_path)
+        return
+    sql = sql_path.read_text()
+    try:
+        from db import get_conn
+        with get_conn() as conn:
+            conn.executescript(sql)
+        log.info("Postgres schema applied from %s", sql_path)
+    except Exception as exc:
+        log.error("Failed to apply Postgres schema: %s", exc)
+
+
 # ── FastAPI lifespan: start scheduler thread on startup ──────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from db import IS_POSTGRES
+    if IS_POSTGRES:
+        _apply_postgres_schema()
+
     t = threading.Thread(target=_schedule_daily_pipeline, daemon=True, name="pipeline-scheduler")
     t.start()
     log.info("Daily pipeline scheduler started (16:05 IST weekdays).")
