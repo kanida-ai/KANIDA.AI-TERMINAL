@@ -1,25 +1,839 @@
 'use client'
 export const dynamic = 'force-dynamic'
-import { useState, useEffect } from 'react'
 
-const API          = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import {
+  fetchUniverse, fetchUniverseStats, fetchDataAudit,
+  fetchPipelineStatus, fetchDataFreshness, fetchKiteStatus,
+  triggerPipeline, refreshKiteToken, seedUniverse, bulkImport,
+  addStock, updateStock, deactivateStock,
+  type UniverseStock, type UniverseStats, type DataAudit,
+  type PipelineStatus, type DataFreshness, type KiteStatus,
+} from '@/lib/admin-api'
+
+// ── Design tokens (consistent with the rest of the app) ───────────────────────
+const C = {
+  bg:    '#07070d',
+  s1:    '#0c0c18',
+  s2:    '#101022',
+  s3:    '#14142a',
+  b:     'rgba(255,255,255,0.07)',
+  b2:    'rgba(255,255,255,0.13)',
+  g:     '#00c98a',
+  gd:    'rgba(0,201,138,0.08)',
+  r:     '#ff4d6d',
+  rd:    'rgba(255,77,109,0.10)',
+  a:     '#ffd166',
+  ad:    'rgba(255,209,102,0.10)',
+  t:     '#f4f4fc',
+  t2:    '#d6d6ea',
+  t3:    '#8888a8',
+  indigo:'#6366f1',
+}
+
+const SECRET_KEY = 'kanida_admin_secret'
 const KITE_API_KEY = process.env.NEXT_PUBLIC_KITE_API_KEY || ''
-const SECRET_KEY   = 'kanida_admin_secret'
 
-export default function AdminPage() {
+// ── Shared UI primitives ───────────────────────────────────────────────────────
+
+function Pill({ color, children }: { color: string; children: React.ReactNode }) {
+  return (
+    <span style={{
+      display: 'inline-block', padding: '2px 10px', borderRadius: 20,
+      fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
+      background: color === 'green' ? C.gd : color === 'red' ? C.rd : C.ad,
+      color:      color === 'green' ? C.g   : color === 'red' ? C.r   : C.a,
+      border:     `1px solid ${color === 'green' ? 'rgba(0,201,138,0.3)' : color === 'red' ? 'rgba(255,77,109,0.3)' : 'rgba(255,209,102,0.3)'}`,
+    }}>
+      {children}
+    </span>
+  )
+}
+
+function Card({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
+  return (
+    <div style={{
+      background: C.s1, border: `1px solid ${C.b}`, borderRadius: 10,
+      padding: 20, ...style,
+    }}>
+      {children}
+    </div>
+  )
+}
+
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ fontSize: 11, color: C.indigo, letterSpacing: 3, textTransform: 'uppercase', marginBottom: 16, fontWeight: 700 }}>
+      {children}
+    </div>
+  )
+}
+
+function Btn({
+  children, onClick, variant = 'primary', disabled = false, small = false, style,
+}: {
+  children: React.ReactNode
+  onClick?: () => void
+  variant?: 'primary' | 'danger' | 'ghost' | 'success'
+  disabled?: boolean
+  small?: boolean
+  style?: React.CSSProperties
+}) {
+  const colors = {
+    primary: { bg: C.indigo,  border: C.indigo,  text: '#fff' },
+    danger:  { bg: C.r,       border: C.r,        text: '#fff' },
+    success: { bg: C.g,       border: C.g,        text: '#07070d' },
+    ghost:   { bg: 'transparent', border: C.b2,   text: C.t2 },
+  }
+  const { bg, border, text } = colors[variant]
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        background: disabled ? C.s2 : bg,
+        border: `1px solid ${disabled ? C.b : border}`,
+        color: disabled ? C.t3 : text,
+        padding: small ? '5px 14px' : '9px 20px',
+        borderRadius: 6,
+        fontSize: small ? 12 : 13,
+        fontWeight: 600,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        fontFamily: 'inherit',
+        transition: 'opacity 0.15s',
+        opacity: disabled ? 0.5 : 1,
+        ...style,
+      }}
+    >
+      {children}
+    </button>
+  )
+}
+
+function Input({ value, onChange, placeholder, type = 'text', style }: {
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+  type?: string
+  style?: React.CSSProperties
+}) {
+  return (
+    <input
+      type={type}
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      placeholder={placeholder}
+      style={{
+        background: C.s2, border: `1px solid ${C.b2}`, borderRadius: 6,
+        padding: '9px 12px', color: C.t, fontSize: 13, fontFamily: 'inherit',
+        outline: 'none', width: '100%', boxSizing: 'border-box', ...style,
+      }}
+    />
+  )
+}
+
+function Spinner() {
+  return <span style={{ display: 'inline-block', animation: 'spin 0.8s linear infinite' }}>⟳</span>
+}
+
+// ── Tab: Overview ──────────────────────────────────────────────────────────────
+
+function OverviewTab({ secret }: { secret: string }) {
+  const [fresh, setFresh]   = useState<DataFreshness | null>(null)
+  const [kite, setKite]     = useState<KiteStatus | null>(null)
+  const [pipe, setPipe]     = useState<PipelineStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [f, k, p] = await Promise.all([
+        fetchDataFreshness().catch(() => null),
+        fetchKiteStatus().catch(() => null),
+        fetchPipelineStatus().catch(() => null),
+      ])
+      setFresh(f as DataFreshness)
+      setKite(k as KiteStatus)
+      setPipe(p as PipelineStatus)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const healthy = fresh?.overall_healthy
+  const kiteOk  = kite?.valid
+
+  return (
+    <div>
+      <SectionTitle>System overview</SectionTitle>
+
+      {/* 3-column health row */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 16 }}>
+        <Card>
+          <div style={{ fontSize: 11, color: C.t3, marginBottom: 8 }}>DATA FRESHNESS</div>
+          {loading
+            ? <div style={{ color: C.t3 }}>Loading…</div>
+            : <div>
+                <Pill color={healthy ? 'green' : 'red'}>{healthy ? '✓ Fresh' : '✗ Stale'}</Pill>
+                <div style={{ fontSize: 12, color: C.t3, marginTop: 8 }}>
+                  Last trading day: {fresh?.last_trading_day ?? '—'}
+                </div>
+                <div style={{ fontSize: 12, color: C.t3 }}>
+                  NSE tickers fresh: {fresh?.ohlcv.nse_fresh_tickers ?? '—'} / {fresh?.ohlcv.nse_total_tickers ?? '—'}
+                </div>
+              </div>
+          }
+        </Card>
+
+        <Card>
+          <div style={{ fontSize: 11, color: C.t3, marginBottom: 8 }}>ZERODHA TOKEN</div>
+          {loading
+            ? <div style={{ color: C.t3 }}>Loading…</div>
+            : <div>
+                <Pill color={kiteOk ? 'green' : 'red'}>{kiteOk ? `✓ Valid — ${kite?.user ?? ''}` : '✗ Expired'}</Pill>
+                {!kiteOk && (
+                  <div style={{ fontSize: 12, color: C.a, marginTop: 8 }}>
+                    Go to Auth tab → re-authenticate to unblock the pipeline.
+                  </div>
+                )}
+              </div>
+          }
+        </Card>
+
+        <Card>
+          <div style={{ fontSize: 11, color: C.t3, marginBottom: 8 }}>PIPELINE</div>
+          {loading
+            ? <div style={{ color: C.t3 }}>Loading…</div>
+            : <div>
+                <Pill color={pipe?.running ? 'amber' : pipe?.last_result === 'SUCCESS' ? 'green' : pipe?.last_result ? 'red' : 'amber'}>
+                  {pipe?.running ? '⟳ Running' : pipe?.last_result ?? 'Never run'}
+                </Pill>
+                <div style={{ fontSize: 12, color: C.t3, marginTop: 8 }}>
+                  Last: {pipe?.last_run ? new Date(pipe.last_run).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—'}
+                </div>
+              </div>
+          }
+        </Card>
+      </div>
+
+      {/* Pipeline step log */}
+      {fresh?.pipeline_logs && (
+        <Card style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 11, color: C.t3, marginBottom: 12 }}>PIPELINE STEP LOG</div>
+          <div style={{ display: 'grid', gap: 8 }}>
+            {Object.entries(fresh.pipeline_logs).map(([step, info]) => (
+              <div key={step} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 12, color: C.t2, textTransform: 'capitalize', minWidth: 160 }}>
+                  {step.replace(/_/g, ' ')}
+                </span>
+                <span style={{ fontSize: 11, color: info.last_run ? C.t3 : C.r, flex: 1 }}>
+                  {info.last_run ?? 'Never run'}
+                </span>
+                <span style={{ fontSize: 11, color: C.t3, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {info.last_line ?? '—'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* Signal stats */}
+      {fresh?.signals && (
+        <Card>
+          <div style={{ fontSize: 11, color: C.t3, marginBottom: 12 }}>SIGNAL ENGINE</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 16 }}>
+            {[
+              { label: 'Live Opportunities', value: fresh.signals.live_opportunities },
+              { label: 'Last Snapshot',       value: fresh.signals.latest_snapshot_date ?? '—' },
+              { label: 'Signals in Snapshot', value: fresh.signals.signal_count },
+            ].map(({ label, value }) => (
+              <div key={label}>
+                <div style={{ fontSize: 11, color: C.t3 }}>{label}</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: C.t, marginTop: 4 }}>{value}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      <div style={{ textAlign: 'right', marginTop: 12 }}>
+        <Btn variant="ghost" small onClick={load} disabled={loading}>
+          {loading ? 'Refreshing…' : '↺ Refresh'}
+        </Btn>
+      </div>
+    </div>
+  )
+}
+
+// ── Tab: Universe ──────────────────────────────────────────────────────────────
+
+function UniverseTab({ secret }: { secret: string }) {
+  const [stocks, setStocks]     = useState<UniverseStock[]>([])
+  const [stats, setStats]       = useState<UniverseStats | null>(null)
+  const [total, setTotal]       = useState(0)
+  const [search, setSearch]     = useState('')
+  const [loading, setLoading]   = useState(true)
+  const [msg, setMsg]           = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+
+  // Add stock form
+  const [showAdd, setShowAdd]   = useState(false)
+  const [addSymbol, setAddSym]  = useState('')
+  const [addSector, setAddSec]  = useState('')
+  const [addName, setAddName]   = useState('')
+  const [addSets, setAddSets]   = useState('FNO')
+  const [addLoading, setAddLoading] = useState(false)
+
+  // Import CSV
+  const [showImport, setShowImport] = useState(false)
+  const [csvText, setCsvText]       = useState('')
+  const [importLoading, setImportLoading] = useState(false)
+
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const load = useCallback(async (q?: string) => {
+    setLoading(true)
+    try {
+      const [u, s] = await Promise.all([
+        fetchUniverse({ search: q, limit: 500 }),
+        fetchUniverseStats(),
+      ])
+      setStocks(u.results)
+      setTotal(u.total)
+      setStats(s)
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e.message })
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  function onSearch(v: string) {
+    setSearch(v)
+    if (searchTimer.current) clearTimeout(searchTimer.current)
+    searchTimer.current = setTimeout(() => load(v), 300)
+  }
+
+  async function doAdd() {
+    if (!addSymbol.trim()) return
+    setAddLoading(true)
+    setMsg(null)
+    try {
+      await addStock({
+        symbol:        addSymbol.trim().toUpperCase(),
+        sector:        addSector.trim() || undefined,
+        company_name:  addName.trim() || undefined,
+        universe_sets: addSets.split(',').map(s => s.trim()).filter(Boolean),
+      })
+      setMsg({ type: 'ok', text: `✓ ${addSymbol.toUpperCase()} added to universe.` })
+      setAddSym(''); setAddSec(''); setAddName(''); setShowAdd(false)
+      load()
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e.message })
+    } finally {
+      setAddLoading(false)
+    }
+  }
+
+  async function doDeactivate(symbol: string) {
+    if (!confirm(`Deactivate ${symbol}? It won't be fetched or learned from. You can re-activate it later.`)) return
+    try {
+      await deactivateStock(symbol)
+      setMsg({ type: 'ok', text: `✓ ${symbol} deactivated.` })
+      load()
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e.message })
+    }
+  }
+
+  async function doReactivate(symbol: string) {
+    try {
+      await updateStock(symbol, { is_active: true })
+      setMsg({ type: 'ok', text: `✓ ${symbol} reactivated.` })
+      load()
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e.message })
+    }
+  }
+
+  async function doSeed() {
+    if (!secret) { setMsg({ type: 'err', text: 'Enter admin secret first (Auth tab).' }); return }
+    if (!confirm('Seed universe with built-in 188 F&O stocks? Existing rows will not be overwritten.')) return
+    try {
+      const r = await seedUniverse(secret)
+      setMsg({ type: 'ok', text: r.message })
+      load()
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e.message })
+    }
+  }
+
+  async function doImport() {
+    if (!csvText.trim()) return
+    setImportLoading(true)
+    setMsg(null)
+    try {
+      const r = await bulkImport({ csv_text: csvText })
+      setMsg({ type: 'ok', text: `✓ Imported ${r.inserted} stocks. ${r.errors} errors.` })
+      setCsvText(''); setShowImport(false)
+      load()
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e.message })
+    } finally {
+      setImportLoading(false)
+    }
+  }
+
+  return (
+    <div>
+      <SectionTitle>Stock universe</SectionTitle>
+
+      {/* Stats row */}
+      {stats && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 16 }}>
+          {[
+            { label: 'Total Stocks',    value: stats.total },
+            { label: 'Active',          value: stats.active },
+            { label: 'Inactive',        value: stats.inactive },
+            { label: 'Sectors',         value: stats.by_sector.length },
+          ].map(({ label, value }) => (
+            <Card key={label} style={{ padding: 14 }}>
+              <div style={{ fontSize: 10, color: C.t3, marginBottom: 4 }}>{label}</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: C.t }}>{value}</div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* Action bar */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <Input value={search} onChange={onSearch} placeholder="Search symbol or company…" />
+        </div>
+        <Btn onClick={() => { setShowAdd(!showAdd); setShowImport(false) }} variant="primary">
+          + Add Stock
+        </Btn>
+        <Btn onClick={() => { setShowImport(!showImport); setShowAdd(false) }} variant="ghost">
+          ↑ Import CSV
+        </Btn>
+        <Btn onClick={doSeed} variant="ghost">
+          Seed F&O list
+        </Btn>
+      </div>
+
+      {/* Message */}
+      {msg && (
+        <div style={{
+          padding: '10px 14px', borderRadius: 6, marginBottom: 12,
+          background: msg.type === 'ok' ? C.gd : C.rd,
+          border: `1px solid ${msg.type === 'ok' ? 'rgba(0,201,138,0.3)' : 'rgba(255,77,109,0.3)'}`,
+          color: msg.type === 'ok' ? C.g : C.r, fontSize: 13,
+        }}>
+          {msg.text}
+          <button onClick={() => setMsg(null)} style={{ float: 'right', background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 16 }}>×</button>
+        </div>
+      )}
+
+      {/* Add form */}
+      {showAdd && (
+        <Card style={{ marginBottom: 14, border: `1px solid ${C.indigo}` }}>
+          <div style={{ fontSize: 12, color: C.indigo, marginBottom: 12, fontWeight: 700 }}>ADD NEW STOCK</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10, marginBottom: 12 }}>
+            <div>
+              <div style={{ fontSize: 11, color: C.t3, marginBottom: 4 }}>SYMBOL *</div>
+              <Input value={addSymbol} onChange={setAddSym} placeholder="e.g. HDFCBANK" />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: C.t3, marginBottom: 4 }}>SECTOR</div>
+              <Input value={addSector} onChange={setAddSec} placeholder="e.g. Banks" />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: C.t3, marginBottom: 4 }}>COMPANY NAME</div>
+              <Input value={addName} onChange={setAddName} placeholder="e.g. HDFC Bank Ltd" />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: C.t3, marginBottom: 4 }}>UNIVERSE SETS (comma-sep)</div>
+              <Input value={addSets} onChange={setAddSets} placeholder="FNO,NIFTY500" />
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <Btn onClick={doAdd} disabled={addLoading || !addSymbol.trim()} variant="success">
+              {addLoading ? 'Adding…' : 'Add Stock'}
+            </Btn>
+            <Btn onClick={() => setShowAdd(false)} variant="ghost">Cancel</Btn>
+          </div>
+        </Card>
+      )}
+
+      {/* Import form */}
+      {showImport && (
+        <Card style={{ marginBottom: 14, border: `1px solid ${C.indigo}` }}>
+          <div style={{ fontSize: 12, color: C.indigo, marginBottom: 8, fontWeight: 700 }}>BULK IMPORT — CSV</div>
+          <div style={{ fontSize: 12, color: C.t3, marginBottom: 10 }}>
+            Paste CSV with columns: <code style={{ color: C.t2 }}>symbol, sector, exchange, industry</code>
+            <br />Example: <code style={{ color: C.t2 }}>PAYTM,Fintech,NSE,Digital Payments</code>
+          </div>
+          <textarea
+            value={csvText}
+            onChange={e => setCsvText(e.target.value)}
+            placeholder={'PAYTM,Fintech,NSE\nZOMATOQ,Internet,NSE\n...'}
+            rows={6}
+            style={{
+              width: '100%', background: C.s2, border: `1px solid ${C.b2}`,
+              borderRadius: 6, padding: 10, color: C.t, fontSize: 12,
+              fontFamily: 'monospace', resize: 'vertical', boxSizing: 'border-box',
+            }}
+          />
+          <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
+            <Btn onClick={doImport} disabled={importLoading || !csvText.trim()} variant="success">
+              {importLoading ? 'Importing…' : `Import ${csvText.trim().split('\n').filter(Boolean).length} rows`}
+            </Btn>
+            <Btn onClick={() => { setShowImport(false); setCsvText('') }} variant="ghost">Cancel</Btn>
+          </div>
+        </Card>
+      )}
+
+      {/* Table */}
+      <Card style={{ padding: 0, overflow: 'hidden' }}>
+        <div style={{ padding: '12px 16px', borderBottom: `1px solid ${C.b}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 12, color: C.t3 }}>
+            {loading ? 'Loading…' : `${total} stocks${search ? ` matching "${search}"` : ''}`}
+          </span>
+        </div>
+        <div style={{ overflowX: 'auto', maxHeight: 480 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: C.s2, position: 'sticky', top: 0, zIndex: 1 }}>
+                {['Symbol', 'Company', 'Sector', 'Universe Sets', 'Exchange', 'Added', 'Status', ''].map(h => (
+                  <th key={h} style={{ padding: '10px 14px', textAlign: 'left', color: C.t3, fontWeight: 600, letterSpacing: 0.5, fontSize: 11, whiteSpace: 'nowrap' }}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {stocks.map(s => (
+                <tr key={`${s.symbol}:${s.exchange}`} style={{ borderBottom: `1px solid ${C.b}` }}
+                  onMouseEnter={e => (e.currentTarget.style.background = C.s2)}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                  <td style={{ padding: '9px 14px', color: C.t, fontWeight: 700, fontFamily: 'monospace' }}>{s.symbol}</td>
+                  <td style={{ padding: '9px 14px', color: C.t2, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.company_name ?? '—'}</td>
+                  <td style={{ padding: '9px 14px', color: C.t3 }}>{s.sector ?? '—'}</td>
+                  <td style={{ padding: '9px 14px' }}>
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      {s.universe_sets.map(us => (
+                        <span key={us} style={{ background: C.s3, border: `1px solid ${C.b2}`, borderRadius: 4, padding: '1px 7px', fontSize: 10, color: C.t2 }}>{us}</span>
+                      ))}
+                    </div>
+                  </td>
+                  <td style={{ padding: '9px 14px', color: C.t3 }}>{s.exchange}</td>
+                  <td style={{ padding: '9px 14px', color: C.t3 }}>{s.added_date}</td>
+                  <td style={{ padding: '9px 14px' }}>
+                    <Pill color={s.is_active ? 'green' : 'red'}>{s.is_active ? 'Active' : 'Inactive'}</Pill>
+                  </td>
+                  <td style={{ padding: '9px 14px' }}>
+                    {s.is_active
+                      ? <Btn small variant="ghost" onClick={() => doDeactivate(s.symbol)}>Deactivate</Btn>
+                      : <Btn small variant="ghost" onClick={() => doReactivate(s.symbol)}>Reactivate</Btn>
+                    }
+                  </td>
+                </tr>
+              ))}
+              {!loading && stocks.length === 0 && (
+                <tr><td colSpan={8} style={{ padding: 32, textAlign: 'center', color: C.t3 }}>
+                  No stocks found. Use "Seed F&O list" to populate the universe.
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+// ── Tab: Pipeline ──────────────────────────────────────────────────────────────
+
+function PipelineTab({ secret }: { secret: string }) {
+  const [pipe, setPipe]   = useState<PipelineStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [triggering, setTriggering] = useState(false)
+  const [msg, setMsg]     = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      const p = await fetchPipelineStatus()
+      setPipe(p)
+    } catch {
+      // silent
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    load()
+    pollRef.current = setInterval(load, 5000)
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+  }, [load])
+
+  async function doTrigger() {
+    if (!secret) { setMsg({ type: 'err', text: 'Save your admin secret first (Auth tab → enter secret → it auto-saves).' }); return }
+    setTriggering(true)
+    setMsg(null)
+    try {
+      const r = await triggerPipeline(secret)
+      setMsg({ type: 'ok', text: r.message })
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e.message })
+    } finally {
+      setTriggering(false)
+    }
+  }
+
+  const isRunning = pipe?.running
+
+  const STEPS = [
+    { name: 'OHLCV Fetch',         desc: 'Download latest daily + weekly candles from Zerodha for all active universe stocks' },
+    { name: 'Pattern Learning',    desc: 'Mine recurring price behaviors across the F&O universe. Updates pattern_library table.' },
+    { name: 'Backtest',            desc: 'Replay signals against historical data. Produces trade_log, win rates, bucket analysis.' },
+    { name: 'Execution Analysis',  desc: 'Compares blind entry vs smart entry P&L. Produces execution_log + Execution IQ scores.' },
+    { name: 'Pending Entries',     desc: 'Identifies live setups for tomorrow's open. Populates live_opportunities table.' },
+  ]
+
+  return (
+    <div>
+      <SectionTitle>Pipeline control</SectionTitle>
+
+      {/* Status + trigger */}
+      <Card style={{ marginBottom: 16, display: 'flex', gap: 24, alignItems: 'center' }}>
+        <div>
+          <div style={{ fontSize: 11, color: C.t3, marginBottom: 6 }}>CURRENT STATUS</div>
+          <Pill color={isRunning ? 'amber' : pipe?.last_result === 'SUCCESS' ? 'green' : pipe?.last_result ? 'red' : 'amber'}>
+            {isRunning ? '⟳ Running now' : pipe?.last_result ?? 'Never run'}
+          </Pill>
+          {pipe?.last_run && (
+            <div style={{ fontSize: 12, color: C.t3, marginTop: 6 }}>
+              Last run: {new Date(pipe.last_run).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST
+            </div>
+          )}
+        </div>
+
+        <div style={{ marginLeft: 'auto' }}>
+          <Btn
+            onClick={doTrigger}
+            disabled={isRunning || triggering}
+            variant={isRunning ? 'ghost' : 'primary'}
+          >
+            {isRunning ? <><Spinner /> Running…</> : triggering ? 'Starting…' : '▶ Run Pipeline Now'}
+          </Btn>
+          <div style={{ fontSize: 11, color: C.t3, marginTop: 6, textAlign: 'right' }}>
+            Auto-runs weekdays at 16:05 IST
+          </div>
+        </div>
+      </Card>
+
+      {msg && (
+        <div style={{
+          padding: '10px 14px', borderRadius: 6, marginBottom: 14,
+          background: msg.type === 'ok' ? C.gd : C.rd,
+          border: `1px solid ${msg.type === 'ok' ? 'rgba(0,201,138,0.3)' : 'rgba(255,77,109,0.3)'}`,
+          color: msg.type === 'ok' ? C.g : C.r, fontSize: 13,
+        }}>
+          {msg.text}
+        </div>
+      )}
+
+      {/* Steps */}
+      <Card>
+        <div style={{ fontSize: 11, color: C.t3, marginBottom: 14 }}>PIPELINE STEPS (run in order)</div>
+        <div style={{ display: 'grid', gap: 12 }}>
+          {STEPS.map((step, i) => (
+            <div key={step.name} style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
+              <div style={{
+                width: 28, height: 28, borderRadius: '50%', display: 'flex',
+                alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                background: C.s3, border: `1px solid ${C.b2}`,
+                color: C.indigo, fontSize: 12, fontWeight: 700,
+              }}>{i + 1}</div>
+              <div>
+                <div style={{ fontSize: 13, color: C.t, fontWeight: 600 }}>{step.name}</div>
+                <div style={{ fontSize: 12, color: C.t3, marginTop: 2 }}>{step.desc}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <div style={{ marginTop: 12, fontSize: 12, color: C.t3 }}>
+        ℹ Requires a valid Zerodha token. If the pipeline aborts, check the Auth tab first.
+      </div>
+    </div>
+  )
+}
+
+// ── Tab: Data Audit ────────────────────────────────────────────────────────────
+
+function DataAuditTab() {
+  const [audit, setAudit] = useState<DataAudit | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      setAudit(await fetchDataAudit())
+    } catch {
+      // silent
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  return (
+    <div>
+      <SectionTitle>Data quality audit</SectionTitle>
+
+      {loading && <div style={{ color: C.t3, padding: 32, textAlign: 'center' }}>Loading audit…</div>}
+
+      {audit && (
+        <>
+          {/* Warnings */}
+          {audit.warnings.length > 0 && (
+            <div style={{ display: 'grid', gap: 10, marginBottom: 16 }}>
+              {audit.warnings.map((w, i) => (
+                <div key={i} style={{
+                  padding: '12px 16px', borderRadius: 8,
+                  background: w.level === 'critical' ? C.rd : w.level === 'warning' ? C.ad : C.gd,
+                  border: `1px solid ${w.level === 'critical' ? 'rgba(255,77,109,0.3)' : w.level === 'warning' ? 'rgba(255,209,102,0.3)' : 'rgba(0,201,138,0.3)'}`,
+                }}>
+                  <div style={{ fontWeight: 700, color: w.level === 'critical' ? C.r : w.level === 'warning' ? C.a : C.g, fontSize: 13 }}>
+                    {w.level === 'critical' ? '⚠ CRITICAL' : w.level === 'warning' ? '⚠ WARNING' : 'ℹ INFO'} — {w.message}
+                  </div>
+                  <div style={{ fontSize: 12, color: C.t2, marginTop: 4 }}>Action: {w.action}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Summary cards */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 16 }}>
+            {[
+              { label: 'Total OHLCV Rows',    value: audit.total_ohlcv_rows.toLocaleString() },
+              { label: 'Contaminated (yfinance)', value: audit.yfinance_rows.toLocaleString(), warn: audit.yfinance_rows > 0 },
+              { label: 'Contamination %',     value: `${audit.contamination_pct}%`, warn: audit.contamination_pct > 0 },
+            ].map(({ label, value, warn }) => (
+              <Card key={label} style={{ border: warn ? `1px solid rgba(255,77,109,0.3)` : undefined }}>
+                <div style={{ fontSize: 11, color: C.t3, marginBottom: 6 }}>{label}</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: warn ? C.r : C.t }}>{value}</div>
+              </Card>
+            ))}
+          </div>
+
+          {/* Source breakdown */}
+          <Card style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11, color: C.t3, marginBottom: 12 }}>SOURCE BREAKDOWN</div>
+            {audit.sources.length === 0
+              ? <div style={{ color: C.t3, fontSize: 13 }}>No OHLCV data found in database.</div>
+              : <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      {['Source', 'Rows', 'Tickers', 'Latest Date', 'Status'].map(h => (
+                        <th key={h} style={{ padding: '8px 12px', textAlign: 'left', color: C.t3, borderBottom: `1px solid ${C.b}` }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {audit.sources.map(s => (
+                      <tr key={s.source} style={{ borderBottom: `1px solid ${C.b}` }}>
+                        <td style={{ padding: '8px 12px', fontFamily: 'monospace', color: s.source === 'yfinance' ? C.r : C.t }}>{s.source ?? 'null'}</td>
+                        <td style={{ padding: '8px 12px', color: C.t2 }}>{s.rows.toLocaleString()}</td>
+                        <td style={{ padding: '8px 12px', color: C.t2 }}>{s.tickers}</td>
+                        <td style={{ padding: '8px 12px', color: C.t3 }}>{s.latest_date ?? '—'}</td>
+                        <td style={{ padding: '8px 12px' }}>
+                          <Pill color={s.source === 'kite' ? 'green' : 'red'}>
+                            {s.source === 'kite' ? '✓ Clean' : '✗ Contaminated'}
+                          </Pill>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+            }
+          </Card>
+
+          {/* Stale tickers */}
+          {audit.stale_tickers.length > 0 && (
+            <Card style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 11, color: C.a, marginBottom: 12 }}>
+                ⚠ STALE TICKERS (no data in 5+ days)
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {audit.stale_tickers.map(t => (
+                  <div key={t.ticker} style={{ background: C.s3, border: `1px solid ${C.b2}`, borderRadius: 6, padding: '4px 10px', fontSize: 12 }}>
+                    <span style={{ color: C.t, fontWeight: 700 }}>{t.ticker}</span>
+                    <span style={{ color: C.t3, marginLeft: 6 }}>{t.latest}</span>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+
+          {/* Missing from universe */}
+          {audit.universe_missing_data.length > 0 && (
+            <Card>
+              <div style={{ fontSize: 11, color: C.t3, marginBottom: 12 }}>
+                ACTIVE UNIVERSE STOCKS WITH NO OHLCV DATA
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {audit.universe_missing_data.map(sym => (
+                  <span key={sym} style={{ background: C.s3, border: `1px solid ${C.b2}`, borderRadius: 4, padding: '2px 8px', fontSize: 12, color: C.a }}>{sym}</span>
+                ))}
+              </div>
+              <div style={{ fontSize: 12, color: C.t3, marginTop: 8 }}>
+                Run the pipeline to fetch their history.
+              </div>
+            </Card>
+          )}
+        </>
+      )}
+
+      <div style={{ textAlign: 'right', marginTop: 12 }}>
+        <Btn variant="ghost" small onClick={load} disabled={loading}>
+          {loading ? 'Refreshing…' : '↺ Refresh Audit'}
+        </Btn>
+      </div>
+    </div>
+  )
+}
+
+// ── Tab: Auth ──────────────────────────────────────────────────────────────────
+
+function AuthTab({
+  secret, setSecret, onSecretSaved,
+}: {
+  secret: string
+  setSecret: (s: string) => void
+  onSecretSaved: () => void
+}) {
   const [requestToken, setRequestToken] = useState('')
-  const [secret, setSecret]             = useState('')
   const [status, setStatus]             = useState<any>(null)
   const [loading, setLoading]           = useState(false)
-  const [tokenStatus, setTokenStatus]   = useState<any>(null)
+  const [tokenStatus, setTokenStatus]   = useState<KiteStatus | null>(null)
   const [autoDetected, setAutoDetected] = useState(false)
-  const [secretSaved, setSecretSaved]   = useState(false)
 
-  // On mount: check token status, restore saved secret, auto-detect request_token from URL
+  const loginUrl = KITE_API_KEY
+    ? `https://kite.zerodha.com/connect/login?api_key=${KITE_API_KEY}&v=3`
+    : 'https://kite.zerodha.com'
+
   useEffect(() => {
-    checkToken()
-    const saved = localStorage.getItem(SECRET_KEY)
-    if (saved) { setSecret(saved); setSecretSaved(true) }
+    fetchKiteStatus().then(setTokenStatus).catch(() => {})
 
     const params = new URLSearchParams(window.location.search)
     const rt = params.get('request_token')
@@ -27,43 +841,27 @@ export default function AdminPage() {
     if (rt && ok === 'success') {
       setRequestToken(rt)
       setAutoDetected(true)
-      // Clean URL without reloading
       window.history.replaceState({}, '', '/admin')
     }
   }, [])
 
-  // Auto-submit when both token and secret are ready after redirect
   useEffect(() => {
     if (autoDetected && requestToken && secret) {
       doRefresh(requestToken, secret)
     }
   }, [autoDetected, requestToken, secret])
 
-  async function checkToken() {
-    try {
-      const r = await fetch(`${API}/api/admin/kite/status`)
-      setTokenStatus(await r.json())
-    } catch {}
-  }
-
   async function doRefresh(rt: string, sec: string) {
     setLoading(true)
     setStatus(null)
     try {
-      const r = await fetch(`${API}/api/admin/kite/refresh-token`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ request_token: rt, secret: sec }),
-      })
-      const data = await r.json()
-      setStatus(data)
-      if (data.status === 'ok') {
-        localStorage.setItem(SECRET_KEY, sec)
-        setSecretSaved(true)
-        setRequestToken('')
-        setAutoDetected(false)
-        checkToken()
-      }
+      const data = await refreshKiteToken(rt, sec)
+      setStatus({ status: 'ok', ...data })
+      localStorage.setItem(SECRET_KEY, sec)
+      onSecretSaved()
+      setRequestToken('')
+      setAutoDetected(false)
+      fetchKiteStatus().then(setTokenStatus).catch(() => {})
     } catch (e: any) {
       setStatus({ status: 'error', message: e.message })
     } finally {
@@ -71,97 +869,186 @@ export default function AdminPage() {
     }
   }
 
-  const loginUrl = KITE_API_KEY
-    ? `https://kite.zerodha.com/connect/login?api_key=${KITE_API_KEY}&v=3`
-    : 'https://kite.zerodha.com'
-
   const tokenValid = tokenStatus?.valid
 
   return (
-    <div style={{ minHeight: '100vh', background: '#0a0a0f', color: '#e2e8f0', fontFamily: 'monospace', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-      <div style={{ width: '100%', maxWidth: 500 }}>
+    <div style={{ maxWidth: 520 }}>
+      <SectionTitle>Zerodha authentication</SectionTitle>
 
-        <div style={{ marginBottom: 28 }}>
-          <div style={{ fontSize: 11, color: '#6366f1', letterSpacing: 3, textTransform: 'uppercase', marginBottom: 6 }}>KANIDA.AI</div>
-          <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>Zerodha Auth</h1>
-          <p style={{ color: '#64748b', fontSize: 13, marginTop: 4 }}>Token expires daily at midnight IST.</p>
+      {/* Token status */}
+      <Card style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <div style={{ fontSize: 11, color: C.t3, marginBottom: 6 }}>TOKEN STATUS</div>
+          <Pill color={tokenValid ? 'green' : 'red'}>
+            {tokenStatus == null ? 'Checking…' : tokenValid ? `✓ Valid — ${tokenStatus.user}` : '✗ Expired — refresh needed'}
+          </Pill>
+        </div>
+        <Btn variant="ghost" small onClick={() => fetchKiteStatus().then(setTokenStatus)}>Recheck</Btn>
+      </Card>
+
+      {/* Admin secret */}
+      <Card style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 11, color: C.t3, marginBottom: 8 }}>ADMIN SECRET</div>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <Input type="password" value={secret} onChange={setSecret} placeholder="Enter ADMIN_SECRET value" />
+          <Btn variant="ghost" onClick={() => { localStorage.setItem(SECRET_KEY, secret); onSecretSaved() }}>
+            Save
+          </Btn>
+        </div>
+        <div style={{ fontSize: 11, color: C.t3, marginTop: 6 }}>
+          Saved locally in your browser. Required to trigger the pipeline and manage the universe.
+        </div>
+      </Card>
+
+      {/* One-click login */}
+      {!tokenValid && !loading && (
+        <Card style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 13, color: C.t2, marginBottom: 14 }}>
+            Click below — Zerodha will redirect back to this page and authenticate automatically.
+          </div>
+          <a href={loginUrl} style={{
+            display: 'block', textAlign: 'center', background: C.indigo,
+            color: '#fff', padding: 12, borderRadius: 6, fontSize: 14,
+            textDecoration: 'none', fontWeight: 700,
+          }}>
+            Login with Zerodha →
+          </a>
+        </Card>
+      )}
+
+      {loading && (
+        <Card style={{ textAlign: 'center', padding: 32 }}>
+          <div style={{ fontSize: 15, color: C.indigo, marginBottom: 8 }}>⟳ Authenticating with Zerodha…</div>
+          <div style={{ fontSize: 12, color: C.t3 }}>Exchanging request token for access token</div>
+        </Card>
+      )}
+
+      {status?.status === 'ok' && (
+        <Card style={{ border: `1px solid rgba(0,201,138,0.3)` }}>
+          <div style={{ color: C.g, fontWeight: 700, fontSize: 14, marginBottom: 8 }}>✓ Authentication complete</div>
+          <div style={{ color: C.t2, fontSize: 13 }}>
+            Token saved to DB — all services will use it automatically.
+            {status.railway_updated && ' Railway env also updated.'}
+          </div>
+          <div style={{ color: C.t3, fontSize: 12, marginTop: 6 }}>
+            Preview: <code style={{ color: C.t2 }}>{status.token_preview}</code>
+          </div>
+        </Card>
+      )}
+
+      {status?.status === 'error' && (
+        <Card style={{ border: `1px solid rgba(255,77,109,0.3)` }}>
+          <div style={{ color: C.r, fontSize: 13 }}>✗ {status.message}</div>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+// ── Root component ─────────────────────────────────────────────────────────────
+
+type Tab = 'overview' | 'universe' | 'pipeline' | 'audit' | 'auth'
+
+const TABS: { key: Tab; label: string; icon: string }[] = [
+  { key: 'overview',  label: 'Overview',    icon: '⬡' },
+  { key: 'universe',  label: 'Universe',    icon: '◈' },
+  { key: 'pipeline',  label: 'Pipeline',    icon: '▶' },
+  { key: 'audit',     label: 'Data Audit',  icon: '◎' },
+  { key: 'auth',      label: 'Zerodha Auth',icon: '⚿' },
+]
+
+export default function AdminPage() {
+  const [tab, setTab]       = useState<Tab>('overview')
+  const [secret, setSecret] = useState('')
+
+  useEffect(() => {
+    const saved = localStorage.getItem(SECRET_KEY)
+    if (saved) setSecret(saved)
+
+    // Style for spinner animation
+    const style = document.createElement('style')
+    style.textContent = `@keyframes spin { to { transform: rotate(360deg); } }`
+    document.head.appendChild(style)
+    return () => { document.head.removeChild(style) }
+  }, [])
+
+  return (
+    <div style={{ minHeight: '100vh', background: C.bg, color: C.t, fontFamily: 'system-ui, sans-serif', display: 'flex' }}>
+
+      {/* Sidebar */}
+      <div style={{
+        width: 200, flexShrink: 0, background: C.s1,
+        borderRight: `1px solid ${C.b}`, padding: '24px 0',
+        display: 'flex', flexDirection: 'column',
+      }}>
+        {/* Logo */}
+        <div style={{ padding: '0 20px 24px', borderBottom: `1px solid ${C.b}` }}>
+          <div style={{ fontSize: 10, color: C.indigo, letterSpacing: 3, marginBottom: 4 }}>KANIDA.AI</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: C.t }}>Admin Portal</div>
         </div>
 
-        {/* Token status banner */}
-        <div style={{ padding: '12px 16px', borderRadius: 8, marginBottom: 24, background: tokenValid ? '#052e16' : '#1a0a0a', border: `1px solid ${tokenValid ? '#166534' : '#3f1515'}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ fontSize: 13, color: tokenValid ? '#4ade80' : '#f87171' }}>
-            {tokenStatus == null
-              ? 'Checking...'
-              : tokenValid
-                ? `✓ Valid — ${tokenStatus.user}`
-                : `✗ Expired — refresh needed`}
-          </span>
-          <button onClick={checkToken} style={{ fontSize: 11, background: 'transparent', border: '1px solid #334155', color: '#64748b', padding: '3px 10px', borderRadius: 4, cursor: 'pointer' }}>
-            Refresh status
-          </button>
+        {/* Nav */}
+        <nav style={{ padding: '16px 10px', flex: 1 }}>
+          {TABS.map(t => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                width: '100%', padding: '10px 12px', borderRadius: 8,
+                border: 'none', cursor: 'pointer', fontFamily: 'inherit',
+                background: tab === t.key ? C.s3 : 'transparent',
+                color: tab === t.key ? C.t : C.t3,
+                fontSize: 13, fontWeight: tab === t.key ? 600 : 400,
+                marginBottom: 2, transition: 'all 0.1s',
+              }}
+            >
+              <span style={{ fontSize: 15, width: 20, textAlign: 'center' }}>{t.icon}</span>
+              {t.label}
+            </button>
+          ))}
+        </nav>
+
+        {/* Back link */}
+        <div style={{ padding: '16px 20px', borderTop: `1px solid ${C.b}` }}>
+          <a href="/terminal" style={{ fontSize: 12, color: C.t3, textDecoration: 'none' }}>
+            ← Back to Terminal
+          </a>
         </div>
+      </div>
 
-        {/* Loading state when auto-processing */}
-        {loading && (
-          <div style={{ textAlign: 'center', padding: 32, background: '#111827', borderRadius: 8, marginBottom: 16 }}>
-            <div style={{ fontSize: 15, color: '#6366f1', marginBottom: 8 }}>⟳ Authenticating with Zerodha...</div>
-            <div style={{ fontSize: 12, color: '#475569' }}>Exchanging request token for access token</div>
-          </div>
-        )}
+      {/* Main content */}
+      <div style={{ flex: 1, padding: 32, overflowY: 'auto', maxHeight: '100vh' }}>
+        <div style={{ maxWidth: 1100, margin: '0 auto' }}>
 
-        {/* Success result */}
-        {status?.status === 'ok' && (
-          <div style={{ padding: '16px', borderRadius: 8, background: '#052e16', border: '1px solid #166534', marginBottom: 16 }}>
-            <div style={{ color: '#4ade80', fontWeight: 700, fontSize: 15, marginBottom: 6 }}>✓ Authentication complete</div>
-            <div style={{ color: '#86efac', fontSize: 13 }}>
-              Token saved to DB — all services will use it automatically.
-              {status.railway_updated && ' Railway env also updated.'}
+          {/* Page header */}
+          <div style={{ marginBottom: 28 }}>
+            <div style={{ fontSize: 20, fontWeight: 700, color: C.t }}>
+              {TABS.find(t => t.key === tab)?.label}
             </div>
-            <div style={{ color: '#475569', fontSize: 12, marginTop: 6 }}>
-              Preview: <code style={{ color: '#94a3b8' }}>{status.token_preview}</code>
+            <div style={{ fontSize: 13, color: C.t3, marginTop: 4 }}>
+              {tab === 'overview'  && 'System health at a glance'}
+              {tab === 'universe'  && 'Add, import, or deactivate stocks — changes take effect on the next pipeline run'}
+              {tab === 'pipeline'  && 'Trigger or monitor the nightly data pipeline'}
+              {tab === 'audit'     && 'Inspect data source quality and detect contamination'}
+              {tab === 'auth'      && 'Zerodha token management — token expires daily at midnight IST'}
             </div>
           </div>
-        )}
 
-        {status?.status !== 'ok' && !loading && (
-          <>
-            {/* One-click login */}
-            <div style={{ background: '#111827', border: '1px solid #1e293b', borderRadius: 8, padding: 20, marginBottom: 16 }}>
-              <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 14 }}>
-                Click below — Zerodha will redirect back here and authenticate automatically.
-              </div>
-              <a href={loginUrl}
-                style={{ display: 'block', textAlign: 'center', background: '#6366f1', color: '#fff', padding: '12px', borderRadius: 6, fontSize: 14, textDecoration: 'none', fontWeight: 700 }}>
-                Login with Zerodha →
-              </a>
-            </div>
+          {/* Tab content */}
+          {tab === 'overview'  && <OverviewTab  secret={secret} />}
+          {tab === 'universe'  && <UniverseTab  secret={secret} />}
+          {tab === 'pipeline'  && <PipelineTab  secret={secret} />}
+          {tab === 'audit'     && <DataAuditTab />}
+          {tab === 'auth'      && (
+            <AuthTab
+              secret={secret}
+              setSecret={setSecret}
+              onSecretSaved={() => {}}
+            />
+          )}
 
-            {/* Secret field (only shown if not saved) */}
-            {!secretSaved && (
-              <div style={{ background: '#111827', border: '1px solid #1e293b', borderRadius: 8, padding: 16 }}>
-                <label style={{ fontSize: 12, color: '#94a3b8', display: 'block', marginBottom: 6 }}>Admin Secret <span style={{ color: '#475569' }}>(saved after first use)</span></label>
-                <input type="password" value={secret} onChange={e => setSecret(e.target.value)}
-                  placeholder="Enter ADMIN_SECRET"
-                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', borderRadius: 6, padding: '10px 12px', color: '#e2e8f0', fontSize: 13, boxSizing: 'border-box' }} />
-              </div>
-            )}
-          </>
-        )}
-
-        {status?.status === 'error' && (
-          <div style={{ padding: '12px 16px', borderRadius: 8, background: '#2d0a0a', border: '1px solid #7f1d1d', fontSize: 13, color: '#f87171' }}>
-            ✗ {status.detail || status.message}
-          </div>
-        )}
-
-        {/* Try again after success */}
-        {status?.status === 'ok' && (
-          <button onClick={() => { setStatus(null) }}
-            style={{ marginTop: 12, background: 'transparent', border: '1px solid #334155', color: '#64748b', padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontSize: 12, width: '100%' }}>
-            Refresh again
-          </button>
-        )}
-
+        </div>
       </div>
     </div>
   )

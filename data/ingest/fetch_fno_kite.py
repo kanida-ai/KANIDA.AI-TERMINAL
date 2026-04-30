@@ -232,12 +232,85 @@ def register_instruments(con: sqlite3.Connection) -> None:
     print(f"  Registered {len(FNO_TICKERS)} instruments")
 
 
+# -- Universe table bootstrap --------------------------------------------------
+
+def _ensure_universe_table(con: sqlite3.Connection) -> None:
+    """Create universe table if it doesn't exist yet."""
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS universe (
+            symbol          TEXT NOT NULL,
+            exchange        TEXT NOT NULL DEFAULT 'NSE',
+            asset_class     TEXT NOT NULL DEFAULT 'EQUITY',
+            company_name    TEXT,
+            sector          TEXT,
+            industry        TEXT,
+            universe_sets   TEXT NOT NULL DEFAULT '["FNO"]',
+            is_active       INTEGER NOT NULL DEFAULT 1,
+            added_date      TEXT NOT NULL,
+            added_by        TEXT NOT NULL DEFAULT 'system',
+            notes           TEXT,
+            PRIMARY KEY (symbol, exchange)
+        )
+    """)
+    con.commit()
+
+
+def _seed_universe_if_empty(con: sqlite3.Connection) -> int:
+    """
+    If the universe table has no NSE rows, seed it from the built-in FNO list.
+    Returns number of rows seeded (0 means table already had data).
+    """
+    count = con.execute(
+        "SELECT COUNT(*) FROM universe WHERE exchange='NSE'"
+    ).fetchone()[0]
+    if count > 0:
+        return 0
+
+    today = date.today().isoformat()
+    seeded = 0
+    for ticker in FNO_TICKERS:
+        try:
+            con.execute("""
+                INSERT OR IGNORE INTO universe
+                    (symbol, exchange, asset_class, sector, universe_sets,
+                     is_active, added_date, added_by)
+                VALUES (?, 'NSE', 'EQUITY', ?, '["FNO"]', 1, ?, 'fetch_bootstrap')
+            """, (ticker, SECTOR_MAP.get(ticker, "Other"), today))
+            seeded += 1
+        except Exception:
+            pass
+    con.commit()
+    print(f"  [universe] Bootstrapped {seeded} stocks from built-in F&O list.")
+    print("  [universe] Going forward, manage your stock universe at /admin → Universe tab.")
+    return seeded
+
+
+def _get_active_nse_tickers(con: sqlite3.Connection) -> list[str]:
+    """
+    Return active NSE tickers from the universe table.
+    This is the authoritative ticker list — managed via the admin portal.
+    """
+    rows = con.execute(
+        "SELECT symbol FROM universe WHERE exchange='NSE' AND is_active=1 ORDER BY symbol"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
 # -- Main ----------------------------------------------------------------------
 
 def main() -> None:
+    con = sqlite3.connect(DB_PATH)
+
+    # Bootstrap universe table on first run
+    _ensure_universe_table(con)
+    _seed_universe_if_empty(con)
+
+    # Read authoritative ticker list from DB (managed via admin portal)
+    active_tickers = _get_active_nse_tickers(con)
+
     print("=" * 60)
     print("KANIDA.AI -- NSE F&O Data Fetch (Zerodha Kite)")
-    print(f"  Stocks : {len(FNO_TICKERS)} F&O tickers")
+    print(f"  Stocks : {len(active_tickers)} active in universe")
     print(f"  Period : {FROM_DATE}  to  {TO_DATE}")
     print(f"  DB     : {DB_PATH}")
     print("=" * 60)
@@ -245,22 +318,21 @@ def main() -> None:
     kite = connect_kite()
     print(f"  Kite connected (api_key={API_KEY})")
 
-    token_map = get_instrument_tokens(kite, FNO_TICKERS)
-    print(f"  Resolved {len(token_map)}/{len(FNO_TICKERS)} tokens\n")
+    token_map = get_instrument_tokens(kite, active_tickers)
+    print(f"  Resolved {len(token_map)}/{len(active_tickers)} tokens\n")
 
-    con = sqlite3.connect(DB_PATH)
     register_instruments(con)
 
     summary = {}
-    for i, ticker in enumerate(FNO_TICKERS, 1):
+    for i, ticker in enumerate(active_tickers, 1):
         token = token_map.get(ticker)
-        print(f"\n[{i:>3}/{len(FNO_TICKERS)}] {ticker}")
+        print(f"\n[{i:>3}/{len(active_tickers)}] {ticker}")
         if not token:
             print(f"  SKIP -- token not found")
             summary[ticker] = {"status": "no_token"}
             continue
         d = fetch_and_store(kite, con, ticker, token, "day")
-        time.sleep(0.35)   # same rate-limit pause as pilot script
+        time.sleep(0.35)   # Kite rate-limit: stay under 3 req/sec per instrument
         w = fetch_and_store(kite, con, ticker, token, "week")
         time.sleep(0.35)
         summary[ticker] = {"daily": d, "weekly": w}

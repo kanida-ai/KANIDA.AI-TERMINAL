@@ -8,18 +8,20 @@ Usage:
     python engine/backtest/run_execution_analysis.py [--dry-run]
 
 Steps:
-  1. Fetch NIFTY 50 daily OHLCV via yfinance → store in ohlc_daily
-  2. Create / refresh execution_log table
-  3. For each trade_log row:
+  1. Create / refresh execution_log table
+  2. For each trade_log row:
        - get signal-day OHLCV (prev_close)
        - get entry-day OHLCV  (open/high/low/close)
-       - get NIFTY entry-day open/close
+       - get NIFTY entry-day open/close (from ohlc_daily — populated by Kite ingest)
        - call execution_engine.analyze()
        - compute smart P&L: (exit_price - smart_entry) / smart_entry * 100
-  4. Bulk-insert into execution_log
-  5. Print comparison summary: blind vs smart
+  3. Bulk-insert into execution_log
+  4. Print comparison summary: blind vs smart
 
 Column note: trade_log primary key is 'id' (not 'trade_id').
+NIFTY data: fetched via Kite Connect in the daily OHLCV pipeline (fetch_fno_kite.py).
+            yfinance is NOT used here. If NIFTY data is missing, NIFTY context is
+            skipped gracefully — trade P&L analysis still runs correctly.
 """
 from __future__ import annotations
 
@@ -27,7 +29,7 @@ import argparse
 import json
 import sqlite3
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -37,45 +39,6 @@ DB    = ROOT / "data" / "db" / "kanida_quant.db"
 sys.path.insert(0, str(ROOT))
 
 from engine.backtest.execution_engine import analyze, Exec, NO_TRADE_CODES
-
-# ── NIFTY fetch ───────────────────────────────────────────────────────────────
-
-def _fetch_nifty(conn: sqlite3.Connection) -> int:
-    """Download NIFTY 50 data from yfinance and upsert into ohlc_daily."""
-    try:
-        import yfinance as yf
-    except ImportError:
-        print("  [WARN] yfinance not installed — NIFTY data unavailable")
-        return 0
-
-    print("  Fetching NIFTY 50 from yfinance (^NSEI) 2024-01-01 -> today ...")
-    ticker = yf.Ticker("^NSEI")
-    df = ticker.history(start="2024-01-01", end=str(date.today() + timedelta(days=1)), auto_adjust=True)
-    if df.empty:
-        print("  [WARN] Empty NIFTY response")
-        return 0
-
-    df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
-    df.index = df.index.tz_localize(None)
-    df.index = df.index.strftime("%Y-%m-%d")
-
-    cur = conn.cursor()
-    inserted = 0
-    for trade_date, row in df.iterrows():
-        cur.execute("""
-            INSERT INTO ohlc_daily (market, ticker, trade_date, open, high, low, close, volume, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(market, ticker, trade_date) DO UPDATE SET
-                open=excluded.open, high=excluded.high, low=excluded.low,
-                close=excluded.close, volume=excluded.volume, source=excluded.source
-        """, ("NSE", "NIFTY50", trade_date,
-              float(row["Open"]), float(row["High"]), float(row["Low"]),
-              float(row["Close"]), int(row["Volume"]), "yfinance"))
-        inserted += 1
-
-    conn.commit()
-    print(f"  Upserted {inserted} NIFTY rows")
-    return inserted
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────
@@ -164,12 +127,8 @@ def run(dry_run: bool = False) -> None:
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
 
-    # 1. NIFTY
-    print("\n[1/4] Refreshing NIFTY 50 data …")
-    _fetch_nifty(conn)
-
-    # 2. Schema — drop and recreate to pick up schema changes cleanly
-    print("[2/4] Creating execution_log table ...")
+    # 1. Schema — drop and recreate to pick up schema changes cleanly
+    print("\n[1/3] Creating execution_log table ...")
     conn.execute("DROP TABLE IF EXISTS execution_log")
     conn.executescript(CREATE_EXEC_LOG)
     for stmt in CREATE_INDEX.strip().split("\n"):
@@ -177,8 +136,8 @@ def run(dry_run: bool = False) -> None:
             conn.execute(stmt.strip())
     conn.commit()
 
-    # 3. Load all OHLC data into memory (one query per ticker)
-    print("[3/4] Loading OHLC data for all tickers …")
+    # 2. Load all OHLC data into memory (one query per ticker)
+    print("[2/3] Loading OHLC data for all tickers …")
     cur = conn.cursor()
     cur.execute("SELECT DISTINCT ticker FROM trade_log")
     stock_tickers = [r[0] for r in cur.fetchall()]
@@ -186,8 +145,8 @@ def run(dry_run: bool = False) -> None:
     ohlc["NIFTY50"] = _load_ohlc(conn, "NIFTY50")
     print(f"  Tickers: {stock_tickers}")
 
-    # 4. Iterate trades
-    print("[4/4] Running execution analysis over trade_log …")
+    # 3. Iterate trades
+    print("[3/3] Running execution analysis over trade_log …")
     cur.execute("""
         SELECT id, ticker, direction, signal_date, entry_date,
                entry_price, exit_price, notes
@@ -216,7 +175,7 @@ def run(dry_run: bool = False) -> None:
             dir_norm = "short"
 
         stock_ohlc  = ohlc.get(ticker, {})
-        nifty_ohlc  = ohlc["NIFTY50"]
+        nifty_ohlc  = ohlc.get("NIFTY50", {})
 
         # Get prev_close = signal_date's close (the bar the pattern fired on)
         sig_bar  = stock_ohlc.get(signal_date)
