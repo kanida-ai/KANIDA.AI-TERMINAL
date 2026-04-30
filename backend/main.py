@@ -136,6 +136,7 @@ from routers.admin_router      import router as admin_router
 from routers.jobs_router       import router as jobs_router
 from routers.orders_router     import router as orders_router
 from routers.universe_router   import router as universe_router
+from routers.strategy_router   import router as strategy_router
 
 app = FastAPI(title="KANIDA.AI Swing Trading Terminal", version="3.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -148,6 +149,7 @@ app.include_router(admin_router,     prefix="/api", tags=["Admin"])
 app.include_router(jobs_router,      prefix="/api", tags=["Jobs"])
 app.include_router(orders_router,    prefix="/api", tags=["Orders"])
 app.include_router(universe_router,  prefix="/api", tags=["Universe"])
+app.include_router(strategy_router,  prefix="/api", tags=["Strategy"])
 
 
 @app.get("/")

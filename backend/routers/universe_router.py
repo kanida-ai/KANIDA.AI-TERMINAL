@@ -466,6 +466,36 @@ def seed_universe(body: SeedRequest):
     }
 
 
+@router.post("/universe/purge-yfinance")
+def purge_yfinance(body: SeedRequest):
+    """
+    Hard-delete all ohlc_daily rows with source='yfinance' or source IS NULL.
+    These are contaminated rows that must be removed before relying on Kite data.
+    Requires ADMIN_SECRET. IRREVERSIBLE — run the Kite fetch pipeline after this.
+    """
+    admin_secret = os.getenv("ADMIN_SECRET", "")
+    if not admin_secret or body.secret != admin_secret:
+        raise HTTPException(status_code=403, detail="Invalid admin secret.")
+
+    with _conn() as conn:
+        try:
+            n = conn.execute(
+                "DELETE FROM ohlc_daily WHERE source='yfinance' OR source IS NULL"
+            ).rowcount
+            conn.commit()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Purge failed: {e}")
+
+    return {
+        "status":       "purged",
+        "rows_deleted": n,
+        "message":      (
+            f"Deleted {n:,} contaminated rows from ohlc_daily. "
+            "Run the Kite OHLCV fetch pipeline to repopulate clean data."
+        ),
+    }
+
+
 @router.post("/universe/bulk-import")
 def bulk_import(body: BulkImportRequest):
     """

@@ -6,9 +6,12 @@ import {
   fetchUniverse, fetchUniverseStats, fetchDataAudit,
   fetchPipelineStatus, fetchDataFreshness, fetchKiteStatus,
   triggerPipeline, refreshKiteToken, seedUniverse, bulkImport,
-  addStock, updateStock, deactivateStock,
+  addStock, updateStock, deactivateStock, purgeYfinanceData,
+  fetchStrategies, createStrategy, computeStrategyResults,
+  promoteStrategy, deleteStrategy,
   type UniverseStock, type UniverseStats, type DataAudit,
   type PipelineStatus, type DataFreshness, type KiteStatus,
+  type Strategy, type StrategyStatus,
 } from '@/lib/admin-api'
 
 // ── Design tokens (consistent with the rest of the app) ───────────────────────
@@ -679,9 +682,11 @@ function PipelineTab({ secret }: { secret: string }) {
 
 // ── Tab: Data Audit ────────────────────────────────────────────────────────────
 
-function DataAuditTab() {
-  const [audit, setAudit] = useState<DataAudit | null>(null)
+function DataAuditTab({ secret }: { secret: string }) {
+  const [audit, setAudit]     = useState<DataAudit | null>(null)
   const [loading, setLoading] = useState(true)
+  const [purging, setPurging] = useState(false)
+  const [purgeMsg, setPurgeMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -695,6 +700,30 @@ function DataAuditTab() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  async function doPurge() {
+    if (!secret) {
+      setPurgeMsg({ type: 'err', text: 'Enter admin secret first (Auth tab).' })
+      return
+    }
+    if (!confirm(
+      `This will permanently delete ALL yfinance rows from ohlc_daily.\n\n` +
+      `You must run the Kite OHLCV fetch pipeline after this to repopulate clean data.\n\n` +
+      `Are you sure?`
+    )) return
+
+    setPurging(true)
+    setPurgeMsg(null)
+    try {
+      const r = await purgeYfinanceData(secret)
+      setPurgeMsg({ type: 'ok', text: r.message })
+      load()
+    } catch (e: any) {
+      setPurgeMsg({ type: 'err', text: e.message })
+    } finally {
+      setPurging(false)
+    }
+  }
 
   return (
     <div>
@@ -804,10 +833,334 @@ function DataAuditTab() {
         </>
       )}
 
+      {/* Purge action */}
+      {audit && audit.yfinance_rows > 0 && (
+        <Card style={{ marginTop: 16, border: `1px solid rgba(255,77,109,0.3)` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <div style={{ fontSize: 13, color: C.r, fontWeight: 700, marginBottom: 4 }}>
+                ⚠ Purge yfinance Contamination
+              </div>
+              <div style={{ fontSize: 12, color: C.t3 }}>
+                Permanently removes {audit.yfinance_rows.toLocaleString()} contaminated rows.
+                Run the pipeline after to repopulate with clean Kite data.
+              </div>
+            </div>
+            <Btn variant="danger" onClick={doPurge} disabled={purging}>
+              {purging ? 'Purging…' : 'Purge yfinance Data'}
+            </Btn>
+          </div>
+          {purgeMsg && (
+            <div style={{
+              marginTop: 10, padding: '8px 12px', borderRadius: 6,
+              background: purgeMsg.type === 'ok' ? C.gd : C.rd,
+              border: `1px solid ${purgeMsg.type === 'ok' ? 'rgba(0,201,138,0.3)' : 'rgba(255,77,109,0.3)'}`,
+              color: purgeMsg.type === 'ok' ? C.g : C.r, fontSize: 12,
+            }}>
+              {purgeMsg.text}
+            </div>
+          )}
+        </Card>
+      )}
+
       <div style={{ textAlign: 'right', marginTop: 12 }}>
         <Btn variant="ghost" small onClick={load} disabled={loading}>
           {loading ? 'Refreshing…' : '↺ Refresh Audit'}
         </Btn>
+      </div>
+    </div>
+  )
+}
+
+// ── Tab: Strategy Lab ──────────────────────────────────────────────────────────
+
+const STATUS_COLOR: Record<StrategyStatus, string> = {
+  draft:    'amber',
+  sandbox:  'amber',
+  staging:  'amber',
+  prod:     'green',
+  archived: 'red',
+}
+
+const STATUS_NEXT_LABEL: Partial<Record<StrategyStatus, string>> = {
+  draft:   'Promote → Sandbox',
+  sandbox: 'Promote → Staging',
+  staging: 'Promote → Prod',
+  prod:    'Archive',
+}
+
+function StrategyLabTab({ secret }: { secret: string }) {
+  const [strategies, setStrategies] = useState<Strategy[]>([])
+  const [loading, setLoading]       = useState(true)
+  const [msg, setMsg]               = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+
+  // Create form
+  const [showCreate, setShowCreate] = useState(false)
+  const [newName, setNewName]       = useState('')
+  const [newDesc, setNewDesc]       = useState('')
+  const [newNotes, setNewNotes]     = useState('')
+  const [creating, setCreating]     = useState(false)
+
+  // Per-row loading state
+  const [computing, setComputing]   = useState<string | null>(null)
+  const [promoting, setPromoting]   = useState<string | null>(null)
+  const [deleting, setDeleting]     = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      setStrategies(await fetchStrategies())
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e.message })
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  async function doCreate() {
+    if (!newName.trim()) return
+    setCreating(true)
+    setMsg(null)
+    try {
+      const r = await createStrategy({ name: newName.trim(), description: newDesc.trim() || undefined, notes: newNotes.trim() || undefined })
+      setMsg({ type: 'ok', text: `✓ Strategy "${r.name}" created (draft).` })
+      setNewName(''); setNewDesc(''); setNewNotes(''); setShowCreate(false)
+      load()
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e.message })
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  async function doCompute(id: string) {
+    setComputing(id)
+    setMsg(null)
+    try {
+      const r = await computeStrategyResults(id)
+      const res = r.result as any
+      setMsg({ type: 'ok', text: `✓ Computed: ${res.trades} trades, win rate ${res.win_rate ?? '—'}%` })
+      load()
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e.message })
+    } finally {
+      setComputing(null)
+    }
+  }
+
+  async function doPromote(strategy: Strategy) {
+    if (!secret) { setMsg({ type: 'err', text: 'Enter admin secret first (Auth tab).' }); return }
+    const nextStatus = STATUS_NEXT_LABEL[strategy.status]
+    if (!nextStatus) return
+    if (!confirm(`${nextStatus} "${strategy.name}"?`)) return
+
+    setPromoting(strategy.id)
+    setMsg(null)
+    try {
+      const r = await promoteStrategy(strategy.id, secret)
+      setMsg({ type: 'ok', text: `✓ "${strategy.name}" moved to ${r.new_status}.` })
+      load()
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e.message })
+    } finally {
+      setPromoting(null)
+    }
+  }
+
+  async function doDelete(strategy: Strategy) {
+    if (!secret) { setMsg({ type: 'err', text: 'Enter admin secret first (Auth tab).' }); return }
+    if (!confirm(`Delete draft "${strategy.name}"? This cannot be undone.`)) return
+
+    setDeleting(strategy.id)
+    setMsg(null)
+    try {
+      await deleteStrategy(strategy.id, secret)
+      setMsg({ type: 'ok', text: `✓ Draft "${strategy.name}" deleted.` })
+      load()
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e.message })
+    } finally {
+      setDeleting(null)
+    }
+  }
+
+  const prodStrategy = strategies.find(s => s.status === 'prod')
+
+  return (
+    <div>
+      <SectionTitle>Strategy lab</SectionTitle>
+
+      {/* Active prod strategy */}
+      {prodStrategy ? (
+        <Card style={{ marginBottom: 16, border: `1px solid rgba(0,201,138,0.3)` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ fontSize: 11, color: C.g, marginBottom: 6, letterSpacing: 2, fontWeight: 700 }}>ACTIVE PROD STRATEGY</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: C.t, marginBottom: 4 }}>{prodStrategy.name}</div>
+              <div style={{ fontSize: 12, color: C.t3 }}>{prodStrategy.description ?? 'No description'}</div>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontSize: 11, color: C.t3, marginBottom: 4 }}>Version {prodStrategy.version}</div>
+              <div style={{ fontSize: 11, color: C.t3 }}>
+                Promoted {prodStrategy.promoted_at ? new Date(prodStrategy.promoted_at).toLocaleDateString('en-IN') : '—'}
+              </div>
+            </div>
+          </div>
+          {prodStrategy.backtest_result && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginTop: 14, paddingTop: 14, borderTop: `1px solid ${C.b}` }}>
+              {[
+                { label: 'Trades',    value: (prodStrategy.backtest_result as any).trades },
+                { label: 'Win Rate',  value: `${(prodStrategy.backtest_result as any).win_rate ?? '—'}%` },
+                { label: 'Avg Return',value: `${(prodStrategy.backtest_result as any).avg_return ?? '—'}%` },
+                { label: 'Total PnL', value: `${(prodStrategy.backtest_result as any).total_pnl_pct ?? '—'}%` },
+              ].map(({ label, value }) => (
+                <div key={label}>
+                  <div style={{ fontSize: 10, color: C.t3 }}>{label}</div>
+                  <div style={{ fontSize: 17, fontWeight: 700, color: C.t, marginTop: 3 }}>{value}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      ) : (
+        <Card style={{ marginBottom: 16, padding: '14px 18px' }}>
+          <div style={{ fontSize: 13, color: C.t3 }}>
+            No prod strategy active. Create a strategy, compute backtest results, and promote it through the lifecycle.
+          </div>
+        </Card>
+      )}
+
+      {/* Create button */}
+      <div style={{ marginBottom: 14 }}>
+        <Btn onClick={() => setShowCreate(!showCreate)} variant="primary">
+          + New Strategy
+        </Btn>
+      </div>
+
+      {/* Message */}
+      {msg && (
+        <div style={{
+          padding: '10px 14px', borderRadius: 6, marginBottom: 14,
+          background: msg.type === 'ok' ? C.gd : C.rd,
+          border: `1px solid ${msg.type === 'ok' ? 'rgba(0,201,138,0.3)' : 'rgba(255,77,109,0.3)'}`,
+          color: msg.type === 'ok' ? C.g : C.r, fontSize: 13,
+        }}>
+          {msg.text}
+          <button onClick={() => setMsg(null)} style={{ float: 'right', background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 16 }}>×</button>
+        </div>
+      )}
+
+      {/* Create form */}
+      {showCreate && (
+        <Card style={{ marginBottom: 14, border: `1px solid ${C.indigo}` }}>
+          <div style={{ fontSize: 12, color: C.indigo, marginBottom: 12, fontWeight: 700 }}>NEW DRAFT STRATEGY</div>
+          <div style={{ display: 'grid', gap: 10, marginBottom: 12 }}>
+            <div>
+              <div style={{ fontSize: 11, color: C.t3, marginBottom: 4 }}>NAME *</div>
+              <Input value={newName} onChange={setNewName} placeholder="e.g. Rally Breakout v1" />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: C.t3, marginBottom: 4 }}>DESCRIPTION</div>
+              <Input value={newDesc} onChange={setNewDesc} placeholder="Brief strategy description" />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: C.t3, marginBottom: 4 }}>NOTES</div>
+              <Input value={newNotes} onChange={setNewNotes} placeholder="Any additional context" />
+            </div>
+          </div>
+          <div style={{ fontSize: 12, color: C.t3, marginBottom: 12 }}>
+            Params default to: RR 2.0, min_overlap 0.65, max_hold 21d, smart entry, rally + pullback.
+            Edit them after creation via the API or update endpoint.
+          </div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <Btn onClick={doCreate} disabled={creating || !newName.trim()} variant="success">
+              {creating ? 'Creating…' : 'Create Draft'}
+            </Btn>
+            <Btn onClick={() => setShowCreate(false)} variant="ghost">Cancel</Btn>
+          </div>
+        </Card>
+      )}
+
+      {/* Strategies table */}
+      <Card style={{ padding: 0, overflow: 'hidden' }}>
+        <div style={{ padding: '12px 16px', borderBottom: `1px solid ${C.b}` }}>
+          <span style={{ fontSize: 12, color: C.t3 }}>
+            {loading ? 'Loading…' : `${strategies.length} strategies`}
+          </span>
+        </div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: C.s2 }}>
+                {['Name', 'Status', 'Ver', 'Trades', 'Win%', 'Avg Return', 'Last Backtest', 'Actions'].map(h => (
+                  <th key={h} style={{ padding: '10px 14px', textAlign: 'left', color: C.t3, fontWeight: 600, fontSize: 11, whiteSpace: 'nowrap' }}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {strategies.map(s => {
+                const br = s.backtest_result as any
+                return (
+                  <tr key={s.id} style={{ borderBottom: `1px solid ${C.b}` }}
+                    onMouseEnter={e => (e.currentTarget.style.background = C.s2)}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                    <td style={{ padding: '10px 14px' }}>
+                      <div style={{ color: C.t, fontWeight: 600 }}>{s.name}</div>
+                      {s.description && <div style={{ color: C.t3, fontSize: 11, marginTop: 2 }}>{s.description}</div>}
+                    </td>
+                    <td style={{ padding: '10px 14px' }}>
+                      <Pill color={STATUS_COLOR[s.status]}>{s.status}</Pill>
+                    </td>
+                    <td style={{ padding: '10px 14px', color: C.t3 }}>v{s.version}</td>
+                    <td style={{ padding: '10px 14px', color: C.t2 }}>{br?.trades ?? '—'}</td>
+                    <td style={{ padding: '10px 14px', color: br?.win_rate != null ? (br.win_rate >= 50 ? C.g : C.r) : C.t3 }}>
+                      {br?.win_rate != null ? `${br.win_rate}%` : '—'}
+                    </td>
+                    <td style={{ padding: '10px 14px', color: br?.avg_return != null ? (br.avg_return >= 0 ? C.g : C.r) : C.t3 }}>
+                      {br?.avg_return != null ? `${br.avg_return}%` : '—'}
+                    </td>
+                    <td style={{ padding: '10px 14px', color: C.t3 }}>
+                      {s.last_backtest_at ? new Date(s.last_backtest_at).toLocaleDateString('en-IN') : '—'}
+                    </td>
+                    <td style={{ padding: '10px 14px' }}>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {s.status !== 'archived' && (
+                          <Btn small variant="ghost" onClick={() => doCompute(s.id)} disabled={computing === s.id}>
+                            {computing === s.id ? '⟳' : '⊞ Compute'}
+                          </Btn>
+                        )}
+                        {STATUS_NEXT_LABEL[s.status] && (
+                          <Btn small variant="primary" onClick={() => doPromote(s)} disabled={promoting === s.id}>
+                            {promoting === s.id ? '…' : STATUS_NEXT_LABEL[s.status]}
+                          </Btn>
+                        )}
+                        {s.status === 'draft' && (
+                          <Btn small variant="danger" onClick={() => doDelete(s)} disabled={deleting === s.id}>
+                            {deleting === s.id ? '…' : 'Delete'}
+                          </Btn>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
+              {!loading && strategies.length === 0 && (
+                <tr><td colSpan={8} style={{ padding: 32, textAlign: 'center', color: C.t3 }}>
+                  No strategies yet. Create one to get started.
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <div style={{ marginTop: 10, fontSize: 12, color: C.t3 }}>
+        ℹ Compute reads from <code style={{ color: C.t2 }}>trade_log</code> where strategy_id matches.
+        Run the Backtest pipeline step to populate trades for a strategy.
       </div>
     </div>
   )
@@ -947,13 +1300,14 @@ function AuthTab({
 
 // ── Root component ─────────────────────────────────────────────────────────────
 
-type Tab = 'overview' | 'universe' | 'pipeline' | 'audit' | 'auth'
+type Tab = 'overview' | 'universe' | 'pipeline' | 'audit' | 'strategy' | 'auth'
 
 const TABS: { key: Tab; label: string; icon: string }[] = [
   { key: 'overview',  label: 'Overview',    icon: '⬡' },
   { key: 'universe',  label: 'Universe',    icon: '◈' },
   { key: 'pipeline',  label: 'Pipeline',    icon: '▶' },
   { key: 'audit',     label: 'Data Audit',  icon: '◎' },
+  { key: 'strategy',  label: 'Strategy Lab',icon: '⊞' },
   { key: 'auth',      label: 'Zerodha Auth',icon: '⚿' },
 ]
 
@@ -1031,15 +1385,17 @@ export default function AdminPage() {
               {tab === 'universe'  && 'Add, import, or deactivate stocks — changes take effect on the next pipeline run'}
               {tab === 'pipeline'  && 'Trigger or monitor the nightly data pipeline'}
               {tab === 'audit'     && 'Inspect data source quality and detect contamination'}
+              {tab === 'strategy'  && 'Create strategies, compute backtest results, and promote to production'}
               {tab === 'auth'      && 'Zerodha token management — token expires daily at midnight IST'}
             </div>
           </div>
 
           {/* Tab content */}
-          {tab === 'overview'  && <OverviewTab  secret={secret} />}
-          {tab === 'universe'  && <UniverseTab  secret={secret} />}
-          {tab === 'pipeline'  && <PipelineTab  secret={secret} />}
-          {tab === 'audit'     && <DataAuditTab />}
+          {tab === 'overview'  && <OverviewTab    secret={secret} />}
+          {tab === 'universe'  && <UniverseTab   secret={secret} />}
+          {tab === 'pipeline'  && <PipelineTab   secret={secret} />}
+          {tab === 'audit'     && <DataAuditTab  secret={secret} />}
+          {tab === 'strategy'  && <StrategyLabTab secret={secret} />}
           {tab === 'auth'      && (
             <AuthTab
               secret={secret}

@@ -207,6 +207,129 @@ export async function fetchDataFreshness(): Promise<DataFreshness> {
   return r.json()
 }
 
+// ── Strategy types ─────────────────────────────────────────────────────────────
+
+export type StrategyStatus = 'draft' | 'sandbox' | 'staging' | 'prod' | 'archived'
+
+export type Strategy = {
+  id:               string
+  name:             string
+  description:      string | null
+  version:          number
+  status:           StrategyStatus
+  universe_filter:  Record<string, unknown>
+  params:           Record<string, unknown>
+  backtest_result:  Record<string, unknown> | null
+  last_backtest_at: string | null
+  promoted_by:      string | null
+  promoted_at:      string | null
+  created_at:       string
+  notes:            string | null
+}
+
+export type PurgeResult = {
+  status:       string
+  rows_deleted: number
+  message:      string
+}
+
+// ── Strategy endpoints ─────────────────────────────────────────────────────────
+
+export async function fetchStrategies(): Promise<Strategy[]> {
+  const r = await fetch(`${API}/api/strategies`)
+  if (!r.ok) throw new Error(`Strategies fetch failed: ${r.status}`)
+  const data = await r.json()
+  return data.strategies
+}
+
+export async function createStrategy(body: {
+  name:             string
+  description?:     string
+  universe_filter?: Record<string, unknown>
+  params?:          Record<string, unknown>
+  notes?:           string
+}): Promise<{ status: string; id: string; name: string }> {
+  const r = await fetch(`${API}/api/strategies`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(body),
+  })
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }))
+    throw new Error(err.detail || 'Create strategy failed')
+  }
+  return r.json()
+}
+
+export async function updateStrategy(
+  id: string,
+  body: Partial<{ name: string; description: string; params: Record<string, unknown>; notes: string }>
+): Promise<{ status: string }> {
+  const r = await fetch(`${API}/api/strategies/${encodeURIComponent(id)}`, {
+    method:  'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(body),
+  })
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }))
+    throw new Error(err.detail || 'Update failed')
+  }
+  return r.json()
+}
+
+export async function computeStrategyResults(id: string): Promise<{ status: string; result: Record<string, unknown> }> {
+  const r = await fetch(`${API}/api/strategies/${encodeURIComponent(id)}/compute`, {
+    method: 'POST',
+  })
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }))
+    throw new Error(err.detail || 'Compute failed')
+  }
+  return r.json()
+}
+
+export async function promoteStrategy(
+  id: string,
+  secret: string,
+  promoted_by = 'admin'
+): Promise<{ status: string; old_status: string; new_status: string }> {
+  const r = await fetch(`${API}/api/strategies/${encodeURIComponent(id)}/promote`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ secret, promoted_by }),
+  })
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }))
+    throw new Error(err.detail || 'Promote failed')
+  }
+  return r.json()
+}
+
+export async function deleteStrategy(id: string, secret: string): Promise<{ status: string }> {
+  const r = await fetch(
+    `${API}/api/strategies/${encodeURIComponent(id)}?secret=${encodeURIComponent(secret)}`,
+    { method: 'DELETE' }
+  )
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }))
+    throw new Error(err.detail || 'Delete failed')
+  }
+  return r.json()
+}
+
+export async function purgeYfinanceData(secret: string): Promise<PurgeResult> {
+  const r = await fetch(`${API}/api/universe/purge-yfinance`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ secret }),
+  })
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }))
+    throw new Error(err.detail || 'Purge failed')
+  }
+  return r.json()
+}
+
 // ── Auth endpoints ─────────────────────────────────────────────────────────────
 
 export async function fetchKiteStatus(): Promise<KiteStatus> {
