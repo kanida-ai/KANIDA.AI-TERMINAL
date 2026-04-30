@@ -6,11 +6,11 @@ import {
   fetchUniverse, fetchUniverseStats, fetchDataAudit,
   fetchPipelineStatus, fetchDataFreshness, fetchKiteStatus,
   triggerPipeline, refreshKiteToken, seedUniverse, bulkImport,
-  addStock, updateStock, deactivateStock, purgeYfinanceData,
+  addStock, updateStock, deactivateStock, purgeYfinanceData,h
   fetchStrategies, createStrategy, computeStrategyResults,
   promoteStrategy, deleteStrategy,
   type UniverseStock, type UniverseStats, type DataAudit,
-  type PipelineStatus, type DataFreshness, type KiteStatus,
+  type PipelineStatus, type DataFreshness, type KiteStatus,h
   type Strategy, type StrategyStatus,
 } from '@/lib/admin-api'
 
@@ -606,7 +606,7 @@ function PipelineTab({ secret }: { secret: string }) {
     { name: 'Pattern Learning',    desc: 'Mine recurring price behaviors across the F&O universe. Updates pattern_library table.' },
     { name: 'Backtest',            desc: 'Replay signals against historical data. Produces trade_log, win rates, bucket analysis.' },
     { name: 'Execution Analysis',  desc: 'Compares blind entry vs smart entry P&L. Produces execution_log + Execution IQ scores.' },
-    { name: 'Pending Entries',     desc: 'Identifies live setups for tomorrow's open. Populates live_opportunities table.' },
+    { name: 'Pending Entries',     desc: "Identifies live setups for tomorrow's open. Populates live_opportunities table." },
   ]
 
   return (
