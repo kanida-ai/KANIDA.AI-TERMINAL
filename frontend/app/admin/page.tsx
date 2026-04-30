@@ -1209,7 +1209,7 @@ function AuthTab({
     setStatus(null)
     try {
       const data = await refreshKiteToken(rt, sec)
-      setStatus({ status: 'ok', ...data })
+      setStatus({ ...data, status: 'ok' })
       localStorage.setItem(SECRET_KEY, sec)
       onSecretSaved()
       setRequestToken('')
