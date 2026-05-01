@@ -196,8 +196,37 @@ const kbd: React.CSSProperties = {
   padding: '1px 4px', background: T.bg2, color: T.dim2, marginLeft: 4,
 }
 
+// ── Mode toggle (TERMINAL ↔ MODERN) ──────────────────────────────────────────
+type Mode = 'TERMINAL' | 'MODERN'
+function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => void }) {
+  const opts: Mode[] = ['TERMINAL', 'MODERN']
+  return (
+    <div style={{
+      display: 'inline-flex', alignItems: 'center', height: 28,
+      border: `1px solid ${T.borderHi}`, background: T.bg2,
+      fontFamily: 'IBM Plex Mono, monospace', fontSize: 10,
+      letterSpacing: '0.08em',
+    }}>
+      {opts.map(o => (
+        <button
+          key={o}
+          onClick={() => onChange(o)}
+          style={{
+            padding: '0 14px', height: '100%', border: 'none', cursor: 'pointer',
+            background: mode === o ? T.label : 'transparent',
+            color: mode === o ? T.bg0 : T.dim2,
+            fontWeight: 700, fontFamily: 'inherit', fontSize: 'inherit',
+            letterSpacing: 'inherit',
+          }}
+        >{o}</button>
+      ))}
+    </div>
+  )
+}
+
+
 // ── Brand bar (prominent, top of page) ────────────────────────────────────────
-function BrandBar() {
+function BrandBar({ mode, setMode }: { mode: Mode; setMode: (m: Mode) => void }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center',
@@ -235,25 +264,15 @@ function BrandBar() {
         </span>
       </div>
 
-      {/* Right side: workspace + actions */}
+      {/* Right side: mode toggle + actions */}
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14 }}>
-        <span style={{ color: T.dim, fontSize: 10, fontFamily: 'IBM Plex Mono', letterSpacing: '0.06em' }}>
-          WORKSPACE
-        </span>
-        <span style={{ color: T.data, fontSize: 12, fontFamily: 'Inter Tight', fontWeight: 600, letterSpacing: '0.06em' }}>
-          OVERVIEW
-        </span>
+        <ModeToggle mode={mode} onChange={setMode} />
         <span style={{ color: T.dim, fontFamily: 'IBM Plex Mono', fontSize: 11 }}>·</span>
         <button style={{
           fontFamily: 'IBM Plex Mono', fontSize: 11, padding: '5px 10px',
           background: 'transparent', border: `1px solid ${T.border}`, color: T.dim2,
           cursor: 'pointer', letterSpacing: '0.04em',
         }}>SAVE LAYOUT</button>
-        <button style={{
-          fontFamily: 'IBM Plex Mono', fontSize: 11, padding: '5px 10px',
-          background: T.label, border: 'none', color: T.bg0, fontWeight: 600,
-          cursor: 'pointer', letterSpacing: '0.04em',
-        }}>+ ADD WIDGET</button>
       </div>
     </div>
   )
@@ -893,9 +912,412 @@ function FunctionFooter() {
   )
 }
 
-// ── Page ──────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// MODERN MODE — AI-first, conversational, generous whitespace
+// Same data, totally different framing.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── Modern: filter bar (compact, friendly) ───────────────────────────────────
+function ModernFilterBar({
+  ticker, setTicker, year, setYear, idx, setIdx,
+}: {
+  ticker: string; setTicker: (v: string) => void
+  year: string;   setYear:   (v: string) => void
+  idx: string;    setIdx:    (v: string) => void
+}) {
+  const labelStyle: React.CSSProperties = { color: T.dim, fontSize: 11, fontWeight: 500, letterSpacing: '0.04em' }
+  const dropStyle: React.CSSProperties = {
+    background: T.bg2, border: `1px solid ${T.borderHi}`,
+    color: T.data, padding: '8px 14px', borderRadius: 8,
+    fontFamily: 'Inter Tight, sans-serif', fontSize: 14, fontWeight: 500,
+    outline: 'none', cursor: 'pointer', minWidth: 130,
+  }
+  const chipActive = (a: boolean): React.CSSProperties => ({
+    padding: '7px 14px', borderRadius: 6, fontSize: 13, fontWeight: 500, cursor: 'pointer',
+    background: a ? T.label : 'transparent',
+    color: a ? T.bg0 : T.dim2,
+    border: `1px solid ${a ? T.label : T.borderHi}`,
+    fontFamily: 'Inter Tight, sans-serif',
+  })
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap',
+      padding: '14px 18px', background: T.bg1, borderRadius: 10,
+      border: `1px solid ${T.border}`, marginBottom: 24,
+    }}>
+      <span style={labelStyle}>Showing</span>
+      <select value={ticker} onChange={e => setTicker(e.target.value)} style={dropStyle}>
+        <option value="ALL">All stocks</option>
+        <option>HDFCBANK</option><option>TCS</option><option>POWERGRID</option>
+        <option>ADANIENT</option><option>BPCL</option><option>DRREDDY</option>
+      </select>
+      <span style={labelStyle}>in</span>
+      <select value={idx} onChange={e => setIdx(e.target.value)} style={dropStyle}>
+        <option value="ALL">All indices</option>
+        <option>NIFTY 50</option>
+        <option>NIFTY 100</option>
+        <option>NIFTY 500</option>
+        <option>NIFTY MIDCAP 150</option>
+        <option>NIFTY BANK</option>
+      </select>
+      <span style={labelStyle}>·</span>
+      <div style={{ display: 'flex', gap: 6 }}>
+        {['ALL', '2024', '2025', '2026'].map(y => (
+          <button key={y} onClick={() => setYear(y)} style={chipActive(year === y)}>{y}</button>
+        ))}
+      </div>
+      <div style={{ marginLeft: 'auto', color: T.dim2, fontSize: 12, fontFamily: 'Inter Tight' }}>
+        149 stocks · 26 indices loaded
+      </div>
+    </div>
+  )
+}
+
+// ── Modern: greeting hero ────────────────────────────────────────────────────
+function ModernGreeting() {
+  const [now, setNow] = useState<Date | null>(null)
+  useEffect(() => { setNow(new Date()) }, [])
+  const hour = now?.getHours() ?? 9
+  const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
+
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <div style={{
+        color: T.dim, fontSize: 13, letterSpacing: '0.06em',
+        textTransform: 'uppercase', fontWeight: 500, marginBottom: 8,
+      }}>
+        {greeting}
+      </div>
+      <h1 style={{
+        color: T.data, fontFamily: 'Inter Tight, sans-serif',
+        fontSize: 36, fontWeight: 600, letterSpacing: '-0.02em',
+        margin: 0, marginBottom: 14, lineHeight: 1.15, maxWidth: 820,
+      }}>
+        Here's what's worth your attention today.
+      </h1>
+      <p style={{
+        color: T.dim2, fontFamily: 'Inter Tight', fontSize: 16,
+        lineHeight: 1.55, margin: 0, maxWidth: 720,
+      }}>
+        Markets are up. <span style={{ color: T.green, fontWeight: 600 }}>Power +1.83%</span> is leading,
+        <span style={{ color: T.red, fontWeight: 600 }}> Metals -1.30%</span> are weak.
+        Our engine flagged <span style={{ color: T.label, fontWeight: 600 }}>5 long opportunities</span> overnight —
+        the top three are below.
+      </p>
+    </div>
+  )
+}
+
+// ── Modern: signal card ──────────────────────────────────────────────────────
+function ModernSignalCard({ rank, sig }: {
+  rank: number
+  sig: { tk: string; eng: string; score: number; sec: string; setup: string; close?: string }
+}) {
+  const engineColor = sig.eng === 'TURBO' ? T.label : sig.eng === 'SUPER' ? T.green : T.blue
+  const conf = Math.round(sig.score * 100)
+  return (
+    <div style={{
+      background: T.bg1, border: `1px solid ${T.border}`, borderRadius: 12,
+      padding: '20px 22px', display: 'flex', flexDirection: 'column', gap: 14,
+    }}>
+      {/* Top: rank + ticker + engine */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{
+          color: T.dim, fontFamily: 'IBM Plex Mono', fontSize: 12,
+          width: 28, height: 28, borderRadius: 14, background: T.bg2,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          border: `1px solid ${T.border}`,
+        }}>{rank}</span>
+        <span style={{
+          color: T.data, fontFamily: 'Inter Tight', fontSize: 22,
+          fontWeight: 700, letterSpacing: '-0.01em',
+        }}>{sig.tk}</span>
+        <span style={{
+          color: engineColor, fontSize: 11, fontWeight: 600, letterSpacing: '0.08em',
+          padding: '3px 9px', border: `1px solid ${engineColor}55`,
+          background: `${engineColor}11`, borderRadius: 4, fontFamily: 'Inter Tight',
+        }}>{sig.eng}</span>
+        <span style={{ color: T.dim, fontSize: 13, marginLeft: 'auto', fontFamily: 'Inter Tight' }}>
+          {sig.sec}
+        </span>
+      </div>
+
+      {/* Confidence bar */}
+      <div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+          <span style={{ color: T.dim, fontSize: 12, fontFamily: 'Inter Tight' }}>Confidence</span>
+          <span style={{ color: T.label, fontSize: 14, fontWeight: 600,
+                         fontFamily: 'IBM Plex Mono', fontFeatureSettings: '"tnum" 1' }}>
+            {conf}%
+          </span>
+        </div>
+        <div style={{ height: 6, background: T.bg2, borderRadius: 3, overflow: 'hidden' }}>
+          <div style={{
+            width: `${conf}%`, height: '100%',
+            background: `linear-gradient(90deg, ${T.label} 0%, ${T.label}cc 100%)`,
+          }} />
+        </div>
+      </div>
+
+      {/* Plain-English explanation */}
+      <p style={{
+        color: T.dim2, fontSize: 14, lineHeight: 1.55, margin: 0,
+        fontFamily: 'Inter Tight',
+      }}>
+        {sig.setup}
+      </p>
+
+      {/* Actions */}
+      <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+        <button style={modernBtnPrimary}>Explain why</button>
+        <button style={modernBtnGhost}>+ Watchlist</button>
+        <button style={modernBtnGhost}>Set alert</button>
+      </div>
+    </div>
+  )
+}
+
+const modernBtnPrimary: React.CSSProperties = {
+  background: T.label, color: T.bg0, border: 'none',
+  padding: '8px 14px', borderRadius: 6, fontWeight: 600, fontSize: 13,
+  fontFamily: 'Inter Tight, sans-serif', cursor: 'pointer',
+}
+const modernBtnGhost: React.CSSProperties = {
+  background: 'transparent', color: T.dim2,
+  border: `1px solid ${T.borderHi}`,
+  padding: '8px 14px', borderRadius: 6, fontWeight: 500, fontSize: 13,
+  fontFamily: 'Inter Tight, sans-serif', cursor: 'pointer',
+}
+
+// ── Modern: AI panel (front-and-center, not side-rail) ──────────────────────
+function ModernAIPanel() {
+  const [input, setInput] = useState('')
+  const messages = [
+    { who: 'ai', body: (
+      <>
+        Hi — I've reviewed the 149 stocks in your universe overnight. There are
+        <span style={{ color: T.label, fontWeight: 600 }}> 3 high-conviction setups</span> today.
+        I can:
+      </>
+    )},
+  ]
+  const suggestions = [
+    'Walk me through #1 (ADANIENT)',
+    'Compare ADANIENT vs POWERGRID',
+    'How would I size a position in BPCL?',
+    'What changed since yesterday?',
+  ]
+  return (
+    <div style={{
+      background: T.bg1, border: `1px solid ${T.border}`, borderRadius: 12,
+      padding: '20px 22px', display: 'flex', flexDirection: 'column',
+      minHeight: 380, gap: 16,
+    }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{
+          width: 32, height: 32, borderRadius: 16, background: `${T.ai}22`,
+          border: `1px solid ${T.ai}55`, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          color: T.ai, fontWeight: 700, fontSize: 14, fontFamily: 'IBM Plex Mono',
+        }}>K</span>
+        <div>
+          <div style={{ color: T.data, fontWeight: 600, fontSize: 16, fontFamily: 'Inter Tight' }}>
+            Kanida AI
+          </div>
+          <div style={{ color: T.dim, fontSize: 12, fontFamily: 'Inter Tight' }}>
+            <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: 6,
+                           background: T.ai, marginRight: 6, verticalAlign: 'middle' }} />
+            Connected · context-aware
+          </div>
+        </div>
+      </div>
+
+      {/* Conversation */}
+      <div style={{ flex: 1 }}>
+        {messages.map((m, i) => (
+          <div key={i} style={{
+            color: T.data, fontSize: 15, lineHeight: 1.6,
+            fontFamily: 'Inter Tight',
+          }}>
+            {m.body}
+          </div>
+        ))}
+      </div>
+
+      {/* Suggestion chips */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {suggestions.map(s => (
+          <button key={s} onClick={() => setInput(s)} style={{
+            background: T.bg2, border: `1px solid ${T.border}`,
+            color: T.data, padding: '11px 14px', borderRadius: 8,
+            fontFamily: 'Inter Tight', fontSize: 14, textAlign: 'left',
+            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
+          }}>
+            <span style={{ color: T.ai, fontFamily: 'IBM Plex Mono', fontSize: 12 }}>→</span>
+            {s}
+          </button>
+        ))}
+      </div>
+
+      {/* Input */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        background: T.bg2, border: `1px solid ${T.borderHi}`,
+        padding: '12px 14px', borderRadius: 10,
+      }}>
+        <span style={{ color: T.ai, fontFamily: 'IBM Plex Mono' }}>{'>'}</span>
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          placeholder="Ask anything — try 'why is ADANIENT firing?'"
+          style={{
+            flex: 1, background: 'transparent', border: 'none', outline: 'none',
+            color: T.data, fontFamily: 'Inter Tight', fontSize: 14,
+          }}
+        />
+        <button style={{
+          background: T.ai, color: T.bg0, border: 'none',
+          padding: '6px 12px', borderRadius: 6, fontWeight: 700, fontSize: 12,
+          fontFamily: 'IBM Plex Mono', cursor: 'pointer', letterSpacing: '0.06em',
+        }}>SEND</button>
+      </div>
+    </div>
+  )
+}
+
+// ── Modern: engine summary ribbon (collapsed) ────────────────────────────────
+function ModernEngineRibbon() {
+  return (
+    <div style={{
+      background: T.bg1, border: `1px solid ${T.border}`, borderRadius: 12,
+      padding: '18px 22px', marginBottom: 24,
+      display: 'flex', alignItems: 'center', gap: 30, flexWrap: 'wrap',
+    }}>
+      <div>
+        <div style={{ color: T.dim, fontSize: 12, marginBottom: 4, fontFamily: 'Inter Tight' }}>
+          Engine performance · all time
+        </div>
+        <div style={{ color: T.data, fontSize: 16, fontFamily: 'Inter Tight', lineHeight: 1.5 }}>
+          <span style={{ color: T.green, fontWeight: 700 }}>99.4%</span> win rate across
+          <span style={{ color: T.data, fontWeight: 600 }}> 1,893</span> high-conviction trades · average
+          <span style={{ color: T.green, fontWeight: 700 }}> +5.19%</span> per trade
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 16, marginLeft: 'auto' }}>
+        {[
+          { k: 'Turbo',    wr: '99.4%', n: '824'  },
+          { k: 'Super',    wr: '99.8%', n: '1,069' },
+          { k: 'Standard', wr: '30.0%', n: '6,722' },
+        ].map(e => (
+          <div key={e.k} style={{
+            padding: '8px 14px', background: T.bg2, borderRadius: 8,
+            border: `1px solid ${T.border}`, minWidth: 110,
+          }}>
+            <div style={{ color: T.dim, fontSize: 11, fontFamily: 'Inter Tight' }}>{e.k}</div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 2 }}>
+              <span style={{
+                color: e.k === 'Standard' ? T.yellow : T.green,
+                fontWeight: 700, fontSize: 16, fontFamily: 'IBM Plex Mono',
+                fontFeatureSettings: '"tnum" 1',
+              }}>{e.wr}</span>
+              <span style={{ color: T.dim2, fontSize: 11, fontFamily: 'IBM Plex Mono' }}>n={e.n}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <button style={modernBtnGhost}>View detailed performance ›</button>
+    </div>
+  )
+}
+
+// ── Modern body ──────────────────────────────────────────────────────────────
+function ModernBody() {
+  const [ticker, setTicker] = useState('ALL')
+  const [year, setYear]     = useState('ALL')
+  const [idx, setIdx]       = useState('ALL')
+
+  const TOP_CALLS = [
+    { tk: 'ADANIENT',  eng: 'TURBO', score: 0.943, sec: 'Conglomerate',
+      setup: 'Breakout above 60-day range with volume divergence. Pattern matched 14× historically — 13 reached the +5% target within 3 days.' },
+    { tk: 'POWERGRID', eng: 'TURBO', score: 0.917, sec: 'Power',
+      setup: 'Short-term slope turning up inside a contracting range. Volume rising for 4 sessions. Smart entry suggests waiting for 09:18 IST.' },
+    { tk: 'BPCL',      eng: 'SUPER', score: 0.878, sec: 'Energy',
+      setup: 'Rejection wick at the lower boundary with rising volume — classic setup that has produced reversals in 11 of 14 historical matches.' },
+  ]
+
+  return (
+    <div style={{
+      flex: 1, overflow: 'auto', background: T.bg0,
+      padding: '36px 48px 80px',
+    }}>
+      <div style={{ maxWidth: 1280, margin: '0 auto' }}>
+        <ModernGreeting />
+        <ModernFilterBar
+          ticker={ticker} setTicker={setTicker}
+          year={year}     setYear={setYear}
+          idx={idx}       setIdx={setIdx}
+        />
+
+        {/* Two-column: signals + AI */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 0.9fr)', gap: 24, marginBottom: 28 }}>
+          <div>
+            <h2 style={{
+              color: T.data, fontSize: 18, fontWeight: 600, margin: '0 0 16px',
+              fontFamily: 'Inter Tight', letterSpacing: '-0.01em',
+            }}>
+              Top calls today
+            </h2>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {TOP_CALLS.map((c, i) => (
+                <ModernSignalCard key={c.tk} rank={i + 1} sig={c} />
+              ))}
+            </div>
+            <button style={{ ...modernBtnGhost, marginTop: 14, width: '100%' }}>
+              Show 2 more signals  ↓
+            </button>
+          </div>
+
+          <div>
+            <h2 style={{
+              color: T.data, fontSize: 18, fontWeight: 600, margin: '0 0 16px',
+              fontFamily: 'Inter Tight', letterSpacing: '-0.01em',
+            }}>
+              Ask Kanida
+            </h2>
+            <ModernAIPanel />
+          </div>
+        </div>
+
+        <ModernEngineRibbon />
+
+        <div style={{
+          color: T.dim, fontSize: 12, textAlign: 'center', marginTop: 24,
+          fontFamily: 'Inter Tight',
+        }}>
+          Switch to <span style={{ color: T.label, fontWeight: 600 }}>Terminal</span> mode
+          for the full data view.
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Page
+// ═════════════════════════════════════════════════════════════════════════════
 export default function AnalysisV3Mock() {
-  const [tab, setTab] = useState('MACRO')
+  const [tab, setTab]   = useState('MACRO')
+  const [mode, setMode] = useState<Mode>('TERMINAL')
+
+  // Persist mode across reloads (UX nicety)
+  useEffect(() => {
+    const saved = typeof window !== 'undefined' ? window.localStorage.getItem('kanida.mode') as Mode | null : null
+    if (saved === 'TERMINAL' || saved === 'MODERN') setMode(saved)
+  }, [])
+  useEffect(() => {
+    if (typeof window !== 'undefined') window.localStorage.setItem('kanida.mode', mode)
+  }, [mode])
+
   return (
     <>
       <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -907,41 +1329,45 @@ export default function AnalysisV3Mock() {
 
       <div style={{
         background: T.bg0, color: T.data, minHeight: '100vh',
-        fontFamily: 'Inter Tight, sans-serif', paddingBottom: 56,
+        fontFamily: 'Inter Tight, sans-serif',
+        paddingBottom: mode === 'TERMINAL' ? 56 : 0,
         display: 'flex', flexDirection: 'column',
       }}>
-        <BrandBar />
-        <StatusBar />
-        <MacroStrip />
-        <WorkspaceTabs active={tab} onChange={setTab} />
+        <BrandBar mode={mode} setMode={setMode} />
 
-        {/* 3-column workspace */}
-        <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-          <LeftRail />
+        {mode === 'TERMINAL' ? (
+          <>
+            <StatusBar />
+            <MacroStrip />
+            <WorkspaceTabs active={tab} onChange={setTab} />
 
-          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
-            <Breadcrumb />
-            {/* Hero: engines first, big and bold — the headline */}
-            <HeroEngines />
-            {/* Active signals second — the call to action */}
-            <ActiveSignalsPanel />
-            {/* Supporting context below the fold */}
-            <SectorHeatmap />
-            <TopMoversPanel />
-          </div>
+            <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+              <LeftRail />
 
-          <div style={{
-            width: 380, borderLeft: `1px solid ${T.border}`, background: T.bg1,
-            display: 'flex', flexDirection: 'column', minHeight: 0,
-          }}>
-            <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-              <AIChatPanel />
+              <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
+                <Breadcrumb />
+                <HeroEngines />
+                <ActiveSignalsPanel />
+                <SectorHeatmap />
+                <TopMoversPanel />
+              </div>
+
+              <div style={{
+                width: 380, borderLeft: `1px solid ${T.border}`, background: T.bg1,
+                display: 'flex', flexDirection: 'column', minHeight: 0,
+              }}>
+                <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                  <AIChatPanel />
+                </div>
+                <NewsStream />
+              </div>
             </div>
-            <NewsStream />
-          </div>
-        </div>
 
-        <FunctionFooter />
+            <FunctionFooter />
+          </>
+        ) : (
+          <ModernBody />
+        )}
       </div>
     </>
   )
