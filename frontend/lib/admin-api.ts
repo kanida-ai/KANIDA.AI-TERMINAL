@@ -42,6 +42,7 @@ export type PipelineStatus = {
   running:     boolean
   last_run:    string | null
   last_result: string | null
+  next_run:    string | null
 }
 
 export type DataFreshness = {
@@ -197,6 +198,43 @@ export async function triggerPipeline(secret: string): Promise<{ status: string;
   if (!r.ok) {
     const err = await r.json().catch(() => ({ detail: r.statusText }))
     throw new Error(err.detail || 'Pipeline trigger failed')
+  }
+  return r.json()
+}
+
+// ── Index membership endpoints ─────────────────────────────────────────────────
+
+export type IndexMembership = {
+  index_name:    string
+  members:       number
+  last_updated:  string
+}
+
+export async function fetchIndices(): Promise<{ indices: IndexMembership[] }> {
+  const r = await fetch(`${API}/api/universe/indices`)
+  if (!r.ok) throw new Error('Indices unavailable')
+  return r.json()
+}
+
+export type RefreshIndicesResult = {
+  dry_run:           boolean
+  indices_attempted: number
+  indices_failed:    number
+  rows_inserted?:    number
+  rows_deleted?:     number
+  total_tickers:     number
+  results:           { index: string; members: number; status: string }[]
+}
+
+export async function refreshIndices(secret: string): Promise<RefreshIndicesResult> {
+  const r = await fetch(`${API}/api/universe/refresh-indices`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ secret }),
+  })
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }))
+    throw new Error(err.detail || 'Refresh indices failed')
   }
   return r.json()
 }

@@ -44,9 +44,20 @@ ROOT = os.path.normpath(os.path.join(_HERE, ".."))
 
 # ── Pipeline state (shared) ───────────────────────────────────────────────────
 _pipeline_lock   = threading.Lock()
-_pipeline_status = {"running": False, "last_run": None, "last_result": None}
+_pipeline_status = {"running": False, "last_run": None, "last_result": None, "next_run": None}
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _compute_next_run(hour: int = 16, minute: int = 5) -> str:
+    """Next HH:MM IST on a weekday (Mon–Fri), as ISO-8601 string."""
+    now = datetime.now(IST)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    while target.weekday() >= 5:
+        target += timedelta(days=1)
+    return target.isoformat()
 
 PIPELINE_STEPS = [
     {"name": "OHLCV Fetch",        "cmd": [sys.executable, "data/ingest/fetch_fno_kite.py"]},
@@ -110,6 +121,7 @@ def _schedule_daily_pipeline():
             target += timedelta(days=1)
         while target.weekday() >= 5:
             target += timedelta(days=1)
+        _pipeline_status["next_run"] = target.isoformat()
         wait = (target - datetime.now(IST)).total_seconds()
         log.info("Scheduler: next pipeline run at %s IST (%.0f min)",
                  target.strftime("%Y-%m-%d %H:%M"), wait / 60)

@@ -6,6 +6,7 @@ import {
   fetchUniverse, fetchUniverseStats, fetchDataAudit,
   fetchPipelineStatus, fetchDataFreshness, fetchKiteStatus,
   triggerPipeline, refreshKiteToken, seedUniverse, bulkImport,
+  fetchIndices, refreshIndices, type IndexMembership,
   addStock, updateStock, deactivateStock, purgeYfinanceData,
   fetchStrategies, createStrategy, computeStrategyResults,
   promoteStrategy, deleteStrategy,
@@ -216,6 +217,9 @@ function OverviewTab({ secret }: { secret: string }) {
                 <div style={{ fontSize: 12, color: C.t3, marginTop: 8 }}>
                   Last: {pipe?.last_run ? new Date(pipe.last_run).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—'}
                 </div>
+                <div style={{ fontSize: 12, color: C.t3 }}>
+                  Next: {pipe?.next_run ? new Date(pipe.next_run).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—'}
+                </div>
               </div>
           }
         </Card>
@@ -319,6 +323,36 @@ function UniverseTab({ secret }: { secret: string }) {
   const [showImport, setShowImport] = useState(false)
   const [csvText, setCsvText]       = useState('')
   const [importLoading, setImportLoading] = useState(false)
+
+  // Index membership
+  const [indices, setIndices]                 = useState<IndexMembership[]>([])
+  const [refreshIdxLoading, setRefreshIdx]    = useState(false)
+  const loadIndices = useCallback(async () => {
+    try { const r = await fetchIndices(); setIndices(r.indices) } catch { /* silent */ }
+  }, [])
+  useEffect(() => { loadIndices() }, [loadIndices])
+
+  async function doRefreshIndices() {
+    if (!secret) { setMsg({ type: 'err', text: 'Enter admin secret first (Auth tab).' }); return }
+    if (!confirm('Fetch all NSE index constituent lists from nsearchives.nseindia.com? Takes 10–30s.')) return
+    setRefreshIdx(true)
+    setMsg(null)
+    try {
+      const r = await refreshIndices(secret)
+      const failed = r.indices_failed
+      setMsg({
+        type: failed === 0 ? 'ok' : 'err',
+        text: failed === 0
+          ? `✓ ${r.indices_attempted} indices, ${r.total_tickers} memberships loaded.`
+          : `Refreshed with ${failed} failures — see admin logs.`,
+      })
+      loadIndices()
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e.message })
+    } finally {
+      setRefreshIdx(false)
+    }
+  }
 
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -452,7 +486,30 @@ function UniverseTab({ secret }: { secret: string }) {
         <Btn onClick={doSeed} variant="ghost">
           Seed F&O list
         </Btn>
+        <Btn onClick={doRefreshIndices} variant="ghost" disabled={refreshIdxLoading}>
+          {refreshIdxLoading ? '⟳ Refreshing…' : '↻ Refresh NSE indices'}
+        </Btn>
       </div>
+
+      {/* Index membership status */}
+      {indices.length > 0 && (
+        <Card style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, color: C.t3, marginBottom: 8 }}>
+            INDEX MEMBERSHIP — {indices.length} indices loaded ({indices.reduce((a, b) => a + b.members, 0)} total memberships)
+          </div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {indices.map(i => (
+              <span key={i.index_name} style={{
+                fontSize: 11, padding: '3px 8px', borderRadius: 4,
+                background: `${C.indigo}18`, color: C.indigo,
+                border: `1px solid ${C.indigo}33`,
+              }}>
+                {i.index_name} <span style={{ color: C.t3 }}>· {i.members}</span>
+              </span>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {/* Message */}
       {msg && (
@@ -649,6 +706,11 @@ function PipelineTab({ secret }: { secret: string }) {
           {pipe?.last_run && (
             <div style={{ fontSize: 12, color: C.t3, marginTop: 6 }}>
               Last run: {new Date(pipe.last_run).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST
+            </div>
+          )}
+          {pipe?.next_run && (
+            <div style={{ fontSize: 12, color: C.t3, marginTop: 2 }}>
+              Next run: {new Date(pipe.next_run).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST
             </div>
           )}
         </div>

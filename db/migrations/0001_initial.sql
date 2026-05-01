@@ -441,6 +441,17 @@ CREATE TABLE IF NOT EXISTS pattern_roster (
     UNIQUE (market, ticker, direction, target_move, forward_window, behavior_pattern)
 );
 
+-- ── Index membership (NSE index constituents — Nifty 50, 100, 500, etc.) ─────
+
+CREATE TABLE IF NOT EXISTS stock_index_membership (
+    ticker      TEXT NOT NULL,
+    index_name  TEXT NOT NULL,
+    added_on    TEXT NOT NULL DEFAULT (CURRENT_DATE),
+    PRIMARY KEY (ticker, index_name)
+);
+CREATE INDEX IF NOT EXISTS idx_membership_index  ON stock_index_membership (index_name);
+CREATE INDEX IF NOT EXISTS idx_membership_ticker ON stock_index_membership (ticker);
+
 -- ── schema_migrations (track applied migrations) ──────────────────────────────
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
