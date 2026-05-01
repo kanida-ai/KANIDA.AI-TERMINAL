@@ -500,6 +500,73 @@ def purge_yfinance(body: SeedRequest):
     }
 
 
+def _ensure_membership_table(conn) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS stock_index_membership (
+            ticker      TEXT NOT NULL,
+            index_name  TEXT NOT NULL,
+            added_on    TEXT NOT NULL DEFAULT (CURRENT_DATE),
+            PRIMARY KEY (ticker, index_name)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_membership_index  ON stock_index_membership (index_name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_membership_ticker ON stock_index_membership (ticker)")
+    conn.commit()
+
+
+@router.get("/universe/indices")
+def list_indices():
+    """
+    Return all known NSE indices and their member counts.
+    Empty list until /universe/refresh-indices has been run at least once.
+    """
+    with _conn() as conn:
+        _ensure_membership_table(conn)
+        rows = conn.execute("""
+            SELECT index_name, COUNT(*) AS members, MAX(added_on) AS last_updated
+            FROM stock_index_membership
+            GROUP BY index_name
+            ORDER BY index_name
+        """).fetchall()
+    return {"indices": [dict(r) for r in rows]}
+
+
+@router.get("/universe/index-members/{index_name}")
+def list_index_members(index_name: str):
+    """Return the tickers in one index."""
+    with _conn() as conn:
+        _ensure_membership_table(conn)
+        rows = conn.execute(
+            "SELECT ticker, added_on FROM stock_index_membership WHERE index_name = ? ORDER BY ticker",
+            (index_name,),
+        ).fetchall()
+    return {"index": index_name, "members": [dict(r) for r in rows]}
+
+
+@router.post("/universe/refresh-indices")
+def refresh_indices(body: SeedRequest):
+    """
+    Fetch NSE index constituent CSVs and replace membership rows.
+    Requires ADMIN_SECRET. Network-bound — typically takes 10–30s for ~25 indices.
+    """
+    admin_secret = os.getenv("ADMIN_SECRET", "")
+    if not admin_secret or body.secret != admin_secret:
+        raise HTTPException(status_code=403, detail="Invalid admin secret.")
+
+    sys.path.insert(0, str(_HERE.parent.parent))
+    try:
+        from data.ingest.fetch_nse_indices import refresh_indices as _refresh
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Ingester import failed: {exc}")
+
+    try:
+        summary = _refresh(dry_run=False)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Refresh failed: {exc}")
+
+    return summary
+
+
 @router.post("/universe/bulk-import")
 def bulk_import(body: BulkImportRequest):
     """

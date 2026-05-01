@@ -6,11 +6,13 @@ import {
   getMpiRecommendations, getLivePositions, getLiveHistory,
   getExecSummary, getExecTrades, getExecComparison,
   getSwingOverview, getSwingTrades, getSwingTickers,
+  getActiveSignals, getIndices,
   type Combination,
   type MpiTrade, type MpiRecommendation,
   type LivePosition, type LivePositionsResponse, type LiveHistoryResponse,
   type ExecSummaryResponse, type ExecTrade, type ExecComparisonResponse,
-  type SwingOverviewResponse, type SwingTrade, type ActiveSignal,
+  type SwingOverviewResponse, type SwingTrade,
+  type ActiveSignalRow, type IndexInfo,
 } from '@/lib/backtest-api'
 
 const C = {
@@ -98,37 +100,303 @@ function DataNote() {
   )
 }
 
+// ── Reusable per-tab filter row ───────────────────────────────────────────────
+type FilterRowProps = {
+  ticker?:    string
+  setTicker?: (t: string) => void
+  tickers?:   string[]
+
+  year?:      string
+  setYear?:   (y: string) => void
+
+  index?:     string
+  setIndex?:  (i: string) => void
+  indices?:   IndexInfo[]
+}
+
+function TabFilters(props: FilterRowProps) {
+  const [tickerSearch, setTickerSearch] = useState('')
+  const filteredTickers = useMemo(() => {
+    if (!props.tickers) return []
+    const q = tickerSearch.trim().toUpperCase()
+    return q ? props.tickers.filter(t => t === 'ALL' || t.includes(q)) : props.tickers
+  }, [props.tickers, tickerSearch])
+
+  return (
+    <div style={{
+      display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'center',
+      padding: '10px 14px', marginBottom: 16,
+      background: C.card, border: `1px solid ${C.border}`, borderRadius: 8,
+    }}>
+      {props.setTicker && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span style={{ color: C.t3, fontSize: 10 }}>STOCK</span>
+          <div style={{ position: 'relative' }}>
+            <input
+              type="text"
+              placeholder={props.ticker === 'ALL' ? 'ALL stocks' : props.ticker}
+              value={tickerSearch}
+              onChange={e => setTickerSearch(e.target.value)}
+              onFocus={e => (e.target as HTMLInputElement).select()}
+              style={{
+                background: C.bg, border: `1px solid ${props.ticker !== 'ALL' ? C.violet + '88' : C.border}`,
+                borderRadius: 6, padding: '5px 10px', color: props.ticker !== 'ALL' ? C.violet : C.t2,
+                fontSize: 12, fontWeight: 600, width: 140, outline: 'none',
+              }}
+            />
+            {tickerSearch && (
+              <div style={{
+                position: 'absolute', top: '100%', left: 0, zIndex: 200,
+                background: '#12121e', border: `1px solid ${C.border}`,
+                borderRadius: 8, marginTop: 4, maxHeight: 260, overflowY: 'auto',
+                minWidth: 160, boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+              }}>
+                {filteredTickers.slice(0, 50).map(t => (
+                  <div
+                    key={t}
+                    onClick={() => { props.setTicker!(t); setTickerSearch('') }}
+                    style={{
+                      padding: '7px 12px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                      color: t === props.ticker ? C.violet : C.t2,
+                      background: t === props.ticker ? `${C.violet}18` : 'transparent',
+                    }}
+                  >{t}</div>
+                ))}
+                {filteredTickers.length === 0 && (
+                  <div style={{ padding: '8px 12px', color: C.t3, fontSize: 11 }}>No match</div>
+                )}
+              </div>
+            )}
+          </div>
+          {props.ticker !== 'ALL' && (
+            <button
+              onClick={() => { props.setTicker!('ALL'); setTickerSearch('') }}
+              style={{
+                background: `${C.violet}22`, border: `1px solid ${C.violet}44`,
+                borderRadius: 5, color: C.violet, fontSize: 11, fontWeight: 700,
+                padding: '4px 8px', cursor: 'pointer',
+              }}
+            >{props.ticker} ✕</button>
+          )}
+        </div>
+      )}
+
+      {props.setIndex && (
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={{ color: C.t3, fontSize: 10 }}>INDEX</span>
+          <select
+            value={props.index || 'ALL'}
+            onChange={e => props.setIndex!(e.target.value)}
+            disabled={props.ticker !== 'ALL'}
+            title={props.ticker !== 'ALL' ? 'Stock filter takes precedence over index' : ''}
+            style={{
+              background: C.bg, border: `1px solid ${(props.index && props.index !== 'ALL') ? C.violet + '88' : C.border}`,
+              borderRadius: 6, padding: '5px 10px',
+              color: (props.index && props.index !== 'ALL' && props.ticker === 'ALL') ? C.violet : C.t2,
+              opacity: props.ticker !== 'ALL' ? 0.45 : 1,
+              fontSize: 12, fontWeight: 600, outline: 'none', cursor: props.ticker !== 'ALL' ? 'not-allowed' : 'pointer',
+              minWidth: 170,
+            }}
+          >
+            <option value="ALL">ALL indices</option>
+            {(props.indices || []).map(i => (
+              <option key={i.index_name} value={i.index_name}>{i.index_name} · {i.members}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {props.setYear && (
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={{ color: C.t3, fontSize: 10, marginRight: 2 }}>YEAR</span>
+          {YEARS.map(y => (
+            <button key={y} onClick={() => props.setYear!(y)} style={{
+              padding: '5px 12px', borderRadius: 5, cursor: 'pointer', fontSize: 11, fontWeight: 600,
+              background: props.year === y ? `${C.amber}22` : 'transparent',
+              color: props.year === y ? C.amber : C.t3,
+              border: `1px solid ${props.year === y ? C.amber + '55' : C.border}`,
+            }}>{y}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+// ── Active Signals (own section, own filters) ────────────────────────────────
+function ActiveSignalsSection({ indices }: { indices: IndexInfo[] }) {
+  const [engine,      setEngine]      = useState('ALL')
+  const [indexFilter, setIndexFilter] = useState('ALL')
+  const [search,      setSearch]      = useState('')
+  const [data,        setData]        = useState<{ count: number; signals: ActiveSignalRow[] } | null>(null)
+  const [loading,     setLoading]     = useState(true)
+
+  const engineColor: Record<string, string> = {
+    turbo: C.violet, super: C.green, standard: C.sky,
+  }
+
+  useEffect(() => {
+    setLoading(true)
+    getActiveSignals({
+      engine: engine === 'ALL' ? undefined : engine,
+      index:  indexFilter === 'ALL' ? undefined : indexFilter,
+      search: search || undefined,
+    }).then(d => { setData(d); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [engine, indexFilter, search])
+
+  const ENGINES = ['ALL', 'turbo', 'super', 'standard']
+
+  return (
+    <div>
+      <div style={{ color: C.t3, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 10 }}>
+        Active Signals (Live Opportunities) — independent filters
+      </div>
+
+      {/* Filter row */}
+      <div style={{
+        display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center',
+        padding: '10px 14px', marginBottom: 12,
+        background: C.card, border: `1px solid ${C.amber}22`, borderRadius: 8,
+      }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={{ color: C.t3, fontSize: 10 }}>ENGINE</span>
+          {ENGINES.map(e => (
+            <button key={e} onClick={() => setEngine(e)} style={{
+              padding: '4px 10px', borderRadius: 5, cursor: 'pointer', fontSize: 11, fontWeight: 600,
+              background: engine === e ? `${C.amber}22` : 'transparent',
+              color: engine === e ? C.amber : C.t3,
+              border: `1px solid ${engine === e ? C.amber + '55' : C.border}`,
+              textTransform: 'uppercase',
+            }}>{e}</button>
+          ))}
+        </div>
+
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={{ color: C.t3, fontSize: 10 }}>INDEX</span>
+          <select
+            value={indexFilter}
+            onChange={e => setIndexFilter(e.target.value)}
+            style={{
+              background: C.bg, border: `1px solid ${indexFilter !== 'ALL' ? C.amber + '88' : C.border}`,
+              borderRadius: 6, padding: '4px 10px',
+              color: indexFilter !== 'ALL' ? C.amber : C.t2,
+              fontSize: 12, fontWeight: 600, outline: 'none', minWidth: 170,
+            }}
+          >
+            <option value="ALL">ALL indices</option>
+            {indices.map(i => <option key={i.index_name} value={i.index_name}>{i.index_name} · {i.members}</option>)}
+          </select>
+        </div>
+
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={{ color: C.t3, fontSize: 10 }}>SEARCH</span>
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value.toUpperCase())}
+            placeholder="ticker"
+            style={{
+              background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6,
+              padding: '4px 10px', color: C.t, fontSize: 12, fontWeight: 600,
+              width: 110, outline: 'none',
+            }}
+          />
+        </div>
+
+        <span style={{ color: C.t3, fontSize: 10, marginLeft: 'auto' }}>
+          {loading ? 'loading…' : `${data?.count ?? 0} signals`}
+        </span>
+      </div>
+
+      {/* Table */}
+      <div style={{ background: C.card, border: `1px solid ${C.amber}22`, borderRadius: 10, overflow: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+              {['Ticker','Engine','Tier','Score','Credibility','Sector','Date','Setup'].map(h => (
+                <th key={h} style={{ padding: '9px 14px', color: C.t3, fontWeight: 600, textAlign: 'left', fontSize: 10 }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {(data?.signals ?? []).map((sig, i) => (
+              <tr key={`${sig.ticker}-${sig.latest_date}-${i}`} style={{ borderBottom: `1px solid ${C.border}22` }}>
+                <td style={{ padding: '9px 14px', color: C.amber, fontWeight: 700 }}>{sig.ticker}</td>
+                <td style={{ padding: '9px 14px' }}>
+                  <Chip val={sig.engine.toUpperCase()} color={engineColor[sig.engine] || C.t3} small />
+                </td>
+                <td style={{ padding: '9px 14px' }}>
+                  <Chip val={(sig.tier || '—').replace(/_/g,' ').toUpperCase()} color={C.violet} small />
+                </td>
+                <td style={{ padding: '9px 14px', color: C.violet, fontWeight: 700 }}>
+                  {sig.opportunity_score.toFixed(3)}
+                </td>
+                <td style={{ padding: '9px 14px', color: C.sky }}>{sig.credibility ?? '—'}</td>
+                <td style={{ padding: '9px 14px', color: C.t3, fontSize: 11 }}>{sig.sector ?? '—'}</td>
+                <td style={{ padding: '9px 14px', color: C.t3, fontSize: 11 }}>{sig.latest_date ?? '—'}</td>
+                <td style={{ padding: '9px 14px', color: C.t2, fontSize: 11 }}>{sig.setup_summary}</td>
+              </tr>
+            ))}
+            {!loading && (data?.signals?.length ?? 0) === 0 && (
+              <tr><td colSpan={8} style={{ padding: 24, color: C.t3, textAlign: 'center', fontSize: 12 }}>No signals match these filters.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+
 // ── Swing Overview ────────────────────────────────────────────────────────────
-function SwingOverviewTab({ data, onTickerClick, year = 'ALL' }: {
-  data: SwingOverviewResponse
+function SwingOverviewTab(props: {
+  data:        SwingOverviewResponse
   onTickerClick: (t: string) => void
-  year?: string
+  ticker:      string
+  setTicker:   (t: string) => void
+  year:        string
+  setYear:     (y: string) => void
+  index:       string
+  setIndex:    (i: string) => void
+  tickers:     string[]
+  indices:     IndexInfo[]
 }) {
+  const { data, onTickerClick, ticker, setTicker, year, setYear, index, setIndex, tickers, indices } = props
   const s = data.summary
 
   const engineColor: Record<string, string> = {
     turbo: C.violet, super: C.green, standard: C.sky, trap: C.red,
   }
 
+  const scopeLabel =
+    ticker !== 'ALL' ? `· ${ticker}` :
+    (index && index !== 'ALL') ? `· ${index}` : ''
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
 
-      {/* ── Summary strip ── */}
-      {/* Hero: High-Conviction (Turbo + Super) */}
+      {/* Per-tab filter row */}
+      <TabFilters
+        ticker={ticker}   setTicker={setTicker}   tickers={tickers}
+        year={year}       setYear={setYear}
+        index={index}     setIndex={setIndex}     indices={indices}
+      />
+
+      {/* Hero: High-Conviction (Turbo + Super) — ticker/year/index aware */}
       <div style={{
         background: `${C.violet}0a`, border: `1px solid ${C.violet}33`,
         borderRadius: 12, padding: '16px 20px',
       }}>
         <div style={{ color: C.violet, fontSize: 10, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 12 }}>
-          🚀 High Conviction Engines — Turbo + Super
+          🚀 High Conviction Engines — Turbo + Super {scopeLabel}
         </div>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
           <StatBox label="Win Rate"        value={pct(s.hc_win_rate)}   color={s.hc_win_rate >= 90 ? C.green : C.amber} sub="Turbo + Super only" />
           <StatBox label="Avg P&L / Trade" value={pctS(s.hc_avg_pnl)}  color={s.hc_avg_pnl >= 0 ? C.green : C.red}    sub="smart entry effective" />
           <StatBox label="Cumulative P&L"  value={pctS(s.hc_total_pnl)} color={s.hc_total_pnl >= 0 ? C.green : C.red} sub={`sum of all ${year !== 'ALL' ? year + ' ' : ''}returns`} />
           <StatBox label="HC Trades"       value={String(s.hc_trades)}  color={C.violet} sub="Turbo + Super signals" />
-          <StatBox label="Active Signals"  value={String(s.active_signals)} color={C.amber} sub="live opportunities" />
-          <StatBox label="Avg Hold"        value={`${s.avg_days_held.toFixed(1)}d`} color={C.sky} sub="all engines" />
+          <StatBox label="Avg Hold"        value={`${s.avg_days_held.toFixed(1)}d`} color={C.sky} sub="Turbo + Super" />
         </div>
       </div>
 
@@ -269,49 +537,8 @@ function SwingOverviewTab({ data, onTickerClick, year = 'ALL' }: {
         </div>
       </div>
 
-      {/* ── Active signals ── */}
-      {data.active_signals.length > 0 && (
-        <div>
-          <div style={{ color: C.t3, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 10 }}>
-            Active Signals Today — {data.active_signals.length} opportunities
-          </div>
-          <div style={{ background: C.card, border: `1px solid ${C.amber}33`, borderRadius: 10, overflow: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-              <thead>
-                <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                  {['Ticker','Engine','Tier','Score','Credibility','Date','Setup'].map(h => (
-                    <th key={h} style={{ padding: '9px 14px', color: C.t3, fontWeight: 600, textAlign: 'left', fontSize: 10 }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {data.active_signals.map((sig, i) => (
-                  <tr key={`${sig.ticker}-${sig.latest_date}-${i}`} style={{ borderBottom: `1px solid ${C.border}22` }}>
-                    <td style={{ padding: '9px 14px' }}>
-                      <button onClick={() => onTickerClick(sig.ticker)} style={{
-                        background: 'none', border: 'none', cursor: 'pointer',
-                        color: C.amber, fontWeight: 700, fontSize: 13, padding: 0,
-                      }}>{sig.ticker}</button>
-                    </td>
-                    <td style={{ padding: '9px 14px' }}>
-                      <Chip val={(sig.bucket || 'standard').toUpperCase()} color={engineColor[(sig.bucket || 'standard').toLowerCase()] || C.t3} small />
-                    </td>
-                    <td style={{ padding: '9px 14px' }}>
-                      <Chip val={sig.tier.replace(/_/g,' ').toUpperCase()} color={C.violet} small />
-                    </td>
-                    <td style={{ padding: '9px 14px', color: C.violet, fontWeight: 700 }}>
-                      {sig.opportunity_score.toFixed(3)}
-                    </td>
-                    <td style={{ padding: '9px 14px', color: C.sky }}>{sig.credibility}</td>
-                    <td style={{ padding: '9px 14px', color: C.t3, fontSize: 11 }}>{sig.latest_date}</td>
-                    <td style={{ padding: '9px 14px', color: C.t2, fontSize: 11 }}>{sig.setup_summary}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {/* ── Active Signals — its own section, independent filters ── */}
+      <ActiveSignalsSection indices={indices} />
 
       <div style={{ color: C.t3, fontSize: 10, paddingTop: 4 }}>
         Data as of {data.as_of} · Long-only cash equity · Smart P&L uses execution filter (smart entry where taken, blind otherwise)
@@ -1680,8 +1907,9 @@ export default function AnalysisPage() {
   const [activeTab,     setActiveTab]     = useState(0)
   const [ticker,        setTicker]        = useState('ALL')
   const [year,          setYear]          = useState('ALL')
+  const [indexFilter,   setIndexFilter]   = useState('ALL')
   const [tickers,       setTickers]       = useState<string[]>(['ALL'])
-  const [tickerSearch,  setTickerSearch]  = useState('')
+  const [indices,       setIndices]       = useState<IndexInfo[]>([])
   const [swingOverview, setSwingOverview] = useState<SwingOverviewResponse | null>(null)
   const [loading,       setLoading]       = useState(true)
   const [error,         setError]         = useState<string | null>(null)
@@ -1689,38 +1917,30 @@ export default function AnalysisPage() {
   const load = useCallback(() => {
     setLoading(true)
     Promise.all([
-      getSwingOverview(year !== 'ALL' ? year : undefined),
+      getSwingOverview(
+        year   !== 'ALL' ? year   : undefined,
+        ticker !== 'ALL' ? ticker : undefined,
+        indexFilter !== 'ALL' ? indexFilter : undefined,
+      ),
       getSwingTickers(),
+      getIndices().catch(() => ({ indices: [] as IndexInfo[] })),
     ])
-      .then(([overview, tkrs]) => {
+      .then(([overview, tkrs, idx]) => {
         setSwingOverview(overview)
         setTickers(['ALL', ...tkrs.tickers])
+        setIndices(idx.indices || [])
         setLoading(false)
       })
       .catch(e => { setError(String(e)); setLoading(false) })
-  }, [year])
+  }, [year, ticker, indexFilter])
 
   useEffect(() => { load() }, [load])
-
-  // filtered ticker list for the search dropdown
-  const filteredTickers = useMemo(() => {
-    const q = tickerSearch.trim().toUpperCase()
-    if (!q) return tickers
-    return tickers.filter(t => t === 'ALL' || t.includes(q))
-  }, [tickers, tickerSearch])
 
   const tabBtn = (i: number) => ({
     padding: '8px 18px', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600,
     background: activeTab === i ? `${C.violet}22` : 'transparent',
     color: activeTab === i ? C.violet : C.t3,
     border: `1px solid ${activeTab === i ? C.violet + '55' : 'transparent'}`,
-  })
-
-  const filterBtn = (val: string, active: string, set: (v: string) => void, color = C.violet) => ({
-    padding: '5px 12px', borderRadius: 5, cursor: 'pointer', fontSize: 11, fontWeight: 600,
-    background: active === val ? `${color}22` : 'transparent',
-    color: active === val ? color : C.t3,
-    border: `1px solid ${active === val ? color + '55' : C.border}`,
   })
 
   return (
@@ -1736,79 +1956,12 @@ export default function AnalysisPage() {
           </div>
           <div style={{ color: C.t3, fontSize: 11, marginTop: 3 }}>
             Long-only · Cash Equity · NSE · 1D Daily · Smart Entry via Execution IQ ·
-            2024 / 2025 / 2026 Backtest · scalable to 200+ stocks
+            Per-tab filters · scalable to 200+ stocks
           </div>
-        </div>
-
-        {/* Filters */}
-        <div style={{ display: 'flex', gap: 20, padding: '14px 0', flexWrap: 'wrap', alignItems: 'center' }}>
-          {/* Stock filter — searchable dropdown for 200+ tickers */}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span style={{ color: C.t3, fontSize: 10 }}>STOCK</span>
-            <div style={{ position: 'relative' }}>
-              <input
-                type="text"
-                placeholder={ticker === 'ALL' ? 'ALL stocks' : ticker}
-                value={tickerSearch}
-                onChange={e => setTickerSearch(e.target.value)}
-                onFocus={e => (e.target as HTMLInputElement).select()}
-                style={{
-                  background: C.card, border: `1px solid ${ticker !== 'ALL' ? C.violet + '88' : C.border}`,
-                  borderRadius: 6, padding: '5px 10px', color: ticker !== 'ALL' ? C.violet : C.t2,
-                  fontSize: 12, fontWeight: 600, width: 130, outline: 'none',
-                }}
-              />
-              {tickerSearch && (
-                <div style={{
-                  position: 'absolute', top: '100%', left: 0, zIndex: 200,
-                  background: '#12121e', border: `1px solid ${C.border}`,
-                  borderRadius: 8, marginTop: 4, maxHeight: 260, overflowY: 'auto',
-                  minWidth: 150, boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
-                }}>
-                  {filteredTickers.slice(0, 50).map(t => (
-                    <div
-                      key={t}
-                      onClick={() => { setTicker(t); setTickerSearch('') }}
-                      style={{
-                        padding: '7px 12px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
-                        color: t === ticker ? C.violet : C.t2,
-                        background: t === ticker ? `${C.violet}18` : 'transparent',
-                      }}
-                      onMouseEnter={e => (e.currentTarget.style.background = `${C.violet}10`)}
-                      onMouseLeave={e => (e.currentTarget.style.background = t === ticker ? `${C.violet}18` : 'transparent')}
-                    >{t}</div>
-                  ))}
-                  {filteredTickers.length === 0 && (
-                    <div style={{ padding: '8px 12px', color: C.t3, fontSize: 11 }}>No match</div>
-                  )}
-                </div>
-              )}
-            </div>
-            {/* Quick-clear button when a specific stock is selected */}
-            {ticker !== 'ALL' && (
-              <button
-                onClick={() => { setTicker('ALL'); setTickerSearch('') }}
-                style={{
-                  background: `${C.violet}22`, border: `1px solid ${C.violet}44`,
-                  borderRadius: 5, color: C.violet, fontSize: 11, fontWeight: 700,
-                  padding: '4px 8px', cursor: 'pointer',
-                }}
-              >{ticker} ✕</button>
-            )}
-            <span style={{ color: C.t3, fontSize: 10 }}>
-              {tickers.length > 1 ? `${tickers.length - 1} stocks` : 'loading...'}
-            </span>
-          </div>
-          {activeTab !== 4 && activeTab !== 5 && (
-            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-              <span style={{ color: C.t3, fontSize: 10, marginRight: 2 }}>YEAR</span>
-              {YEARS.map(y => <button key={y} onClick={() => setYear(y)} style={filterBtn(y, year, setYear, C.amber)}>{y}</button>)}
-            </div>
-          )}
         </div>
 
         {/* Tab bar */}
-        <div style={{ display: 'flex', gap: 6, marginBottom: 24 }}>
+        <div style={{ display: 'flex', gap: 6, margin: '14px 0 18px' }}>
           {TABS.map((t, i) => <button key={t} onClick={() => setActiveTab(i)} style={tabBtn(i)}>{t}</button>)}
         </div>
 
@@ -1827,13 +1980,46 @@ export default function AnalysisPage() {
         ) : (
           <>
             {activeTab === 0 && swingOverview && (
-              <SwingOverviewTab data={swingOverview} onTickerClick={setTicker} year={year} />
+              <SwingOverviewTab
+                data={swingOverview}
+                onTickerClick={setTicker}
+                ticker={ticker}     setTicker={setTicker}
+                year={year}         setYear={setYear}
+                index={indexFilter} setIndex={setIndexFilter}
+                tickers={tickers}
+                indices={indices}
+              />
             )}
-            {activeTab === 1 && <TradeLogTab ticker={ticker} year={year} />}
-            {activeTab === 2 && <CombinationsTab ticker={ticker} />}
-            {activeTab === 3 && <MpiTab ticker={ticker} />}
-            {activeTab === 4 && <LiveTradesTab ticker={ticker} />}
-            {activeTab === 5 && <ExecutionIQTab ticker={ticker} />}
+            {activeTab === 1 && (
+              <>
+                <TabFilters ticker={ticker} setTicker={setTicker} tickers={tickers} year={year} setYear={setYear} />
+                <TradeLogTab ticker={ticker} year={year} />
+              </>
+            )}
+            {activeTab === 2 && (
+              <>
+                <TabFilters ticker={ticker} setTicker={setTicker} tickers={tickers} />
+                <CombinationsTab ticker={ticker} />
+              </>
+            )}
+            {activeTab === 3 && (
+              <>
+                <TabFilters ticker={ticker} setTicker={setTicker} tickers={tickers} />
+                <MpiTab ticker={ticker} />
+              </>
+            )}
+            {activeTab === 4 && (
+              <>
+                <TabFilters ticker={ticker} setTicker={setTicker} tickers={tickers} />
+                <LiveTradesTab ticker={ticker} />
+              </>
+            )}
+            {activeTab === 5 && (
+              <>
+                <TabFilters ticker={ticker} setTicker={setTicker} tickers={tickers} />
+                <ExecutionIQTab ticker={ticker} />
+              </>
+            )}
           </>
         )}
       </div>

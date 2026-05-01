@@ -61,23 +61,82 @@ def _date_offset(days: int) -> str:
     return str(date.today() - timedelta(days=days))
 
 
+def _ticker_index_filter(ticker: Optional[str], index: Optional[str]) -> tuple[str, list]:
+    """
+    Build a SQL fragment + params to filter by ticker and/or index membership.
+    Stock wins over category: if ticker is set, the index filter is ignored.
+    Returns ('', []) when neither filter is set.
+    """
+    if ticker:
+        return (" AND t.ticker = ? ", [ticker.upper()])
+    if index:
+        return (
+            " AND t.ticker IN (SELECT ticker FROM stock_index_membership WHERE index_name = ?) ",
+            [index],
+        )
+    return ("", [])
+
+
+def _ensure_membership_table_exists(con) -> None:
+    """Create membership table if missing — keeps swing endpoints safe before first refresh."""
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS stock_index_membership (
+            ticker      TEXT NOT NULL,
+            index_name  TEXT NOT NULL,
+            added_on    TEXT NOT NULL DEFAULT (CURRENT_DATE),
+            PRIMARY KEY (ticker, index_name)
+        )
+    """)
+
+
+def _ensure_universe_stub(con) -> None:
+    """Make sector LEFT JOIN safe even if universe table is absent (older DB snapshots)."""
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS universe (
+            symbol          TEXT NOT NULL,
+            exchange        TEXT NOT NULL DEFAULT 'NSE',
+            sector          TEXT,
+            is_active       INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (symbol, exchange)
+        )
+    """)
+
+
 # ── /api/swing/overview ───────────────────────────────────────────────────────
 
 @router.get("/swing/overview")
-def swing_overview(year: Optional[str] = Query(None)):
+def swing_overview(
+    year:   Optional[str] = Query(None),
+    ticker: Optional[str] = Query(None),
+    index:  Optional[str] = Query(None, description="NSE index name, e.g. 'NIFTY 50'"),
+):
     """
     Full overview for the Swing Trading Terminal.
     Returns top-level summary, engine bucket cards, and top-ranked stocks per engine.
     Long-only: direction IN ('rally', 'long').
     Uses smart entry P&L where execution_log has trade_taken=1.
-    Optional year filter applies to all historical stats (not rolling 90d/180d).
+
+    Filters:
+      - year:   filters historical stats by entry_date year (rolling 90/180d unaffected)
+      - ticker: restricts every aggregate to one ticker
+      - index:  restricts to members of an NSE index (e.g. 'NIFTY 50')
+                Stock wins: if ticker is set, index is ignored.
+
+    Hero ('hc_*') scope is unified: all five hero numbers share the same
+    Turbo+Super filter — including avg_days_held, which used to come from
+    the broader 'all non-trap' scope.
     """
     con = _conn()
+    _ensure_membership_table_exists(con)
 
     yr_cond   = "AND strftime('%Y', t.entry_date) = ?" if year else ""
     yr_params = [year] if year else []
 
+    tk_cond, tk_params = _ticker_index_filter(ticker, index)
+
     # ── Active signals from live_opportunities (long/rally only) ──────────────
+    # Active-signal count is left global for legacy callers; the new
+    # /swing/active-signals endpoint owns this surface going forward.
     active_rows = con.execute("""
         SELECT ticker, direction, tier, opportunity_score, credibility,
                latest_date, setup_summary
@@ -90,7 +149,7 @@ def swing_overview(year: Optional[str] = Query(None)):
 
     NO_TRAP = "COALESCE(json_extract(t.notes,'$.bucket'),'standard') != 'trap'"
 
-    # ── Overall summary (trap excluded, optional year filter) ─────────────────
+    # ── Overall summary (trap excluded, optional year/ticker/index filter) ────
     summary_row = con.execute(f"""
         SELECT
             COUNT(*)                                                AS total,
@@ -101,34 +160,37 @@ def swing_overview(year: Optional[str] = Query(None)):
             MAX(t.entry_date)                                      AS last_trade
         FROM trade_log t
         LEFT JOIN execution_log e ON e.trade_log_id = t.id
-        WHERE t.direction IN ('rally','long') AND {NO_TRAP} {yr_cond}
-    """, yr_params).fetchone()
+        WHERE t.direction IN ('rally','long') AND {NO_TRAP} {yr_cond} {tk_cond}
+    """, yr_params + tk_params).fetchone()
 
-    # ── High-conviction summary (turbo + super only, optional year filter) ────
+    # ── High-conviction summary (turbo + super only) ─────────────────────────
+    # avg_days NOW lives here so the hero box has one consistent scope.
     hc_row = con.execute(f"""
         SELECT
             COUNT(*)                                                AS total,
             SUM(CASE WHEN {_smart_pnl_expr('e')} > 0 THEN 1 ELSE 0 END) AS wins,
             ROUND(AVG({_smart_pnl_expr('e')}), 2)                  AS avg_pnl,
-            ROUND(SUM({_smart_pnl_expr('e')}), 1)                  AS total_pnl
+            ROUND(SUM({_smart_pnl_expr('e')}), 1)                  AS total_pnl,
+            ROUND(AVG(t.days_held), 1)                             AS avg_days
         FROM trade_log t
         LEFT JOIN execution_log e ON e.trade_log_id = t.id
         WHERE t.direction IN ('rally','long')
           AND json_extract(t.notes,'$.bucket') IN ('turbo','super')
-          {yr_cond}
-    """, yr_params).fetchone()
+          {yr_cond} {tk_cond}
+    """, yr_params + tk_params).fetchone()
 
     total    = summary_row["total"] or 1
     hc_total = hc_row["total"] or 1
     summary = {
-        "total_long_trades":  total,
+        "total_long_trades":  summary_row["total"] or 0,
         "smart_win_rate":     round((summary_row["smart_wins"] or 0) / total * 100, 1),
         "smart_avg_pnl":      summary_row["smart_avg"] or 0,
-        "avg_days_held":      summary_row["avg_days"] or 0,
+        # avg_days_held is now hero-scoped (Turbo+Super, with same filters).
+        "avg_days_held":      hc_row["avg_days"] or 0,
         "active_signals":     active_count,
         "first_trade":        summary_row["first_trade"],
         "last_trade":         summary_row["last_trade"],
-        # High-conviction (Turbo + Super) hero metrics
+        # High-conviction (Turbo + Super) hero metrics — all share same scope
         "hc_trades":          hc_row["total"] or 0,
         "hc_win_rate":        round((hc_row["wins"] or 0) / hc_total * 100, 1),
         "hc_avg_pnl":         hc_row["avg_pnl"] or 0,
@@ -140,7 +202,7 @@ def swing_overview(year: Optional[str] = Query(None)):
     for bucket in BUCKETS:
         meta = BUCKET_META[bucket]
 
-        # Overall stats for this bucket (year-filtered when year param is set)
+        # Overall stats for this bucket (year + ticker/index filters when set)
         stats = con.execute(f"""
             SELECT
                 COUNT(*)                                                    AS total,
@@ -154,8 +216,8 @@ def swing_overview(year: Optional[str] = Query(None)):
             LEFT JOIN execution_log e ON e.trade_log_id = t.id
             WHERE t.direction IN ('rally','long')
               AND json_extract(t.notes,'$.bucket') = ?
-              {yr_cond}
-        """, [bucket] + yr_params).fetchone()
+              {yr_cond} {tk_cond}
+        """, [bucket] + yr_params + tk_params).fetchone()
 
         # 90-day rolling P&L (always trailing 90d from today, unaffected by year filter)
         pnl_90 = con.execute(f"""
@@ -215,11 +277,11 @@ def swing_overview(year: Optional[str] = Query(None)):
             LEFT JOIN execution_log e ON e.trade_log_id = t.id
             WHERE t.direction IN ('rally','long')
               AND json_extract(t.notes,'$.bucket') = ?
-              {yr_cond}
+              {yr_cond} {tk_cond}
             GROUP BY t.ticker
             ORDER BY avg_pnl DESC
             LIMIT 10
-        """, [_date_offset(90), _date_offset(90), bucket] + yr_params).fetchall()
+        """, [_date_offset(90), _date_offset(90), bucket] + yr_params + tk_params).fetchall()
 
         top_stocks = []
         for rank, row in enumerate(top_rows, 1):
@@ -285,6 +347,83 @@ def swing_overview(year: Optional[str] = Query(None)):
         "engines":        engines,
         "active_signals": active_signals,
     }
+
+
+# ── /api/swing/active-signals ─────────────────────────────────────────────────
+
+@router.get("/swing/active-signals")
+def swing_active_signals(
+    engine:      Optional[str] = Query(None, description="bucket label inferred from score: turbo|super|standard"),
+    index:       Optional[str] = Query(None, description="NSE index, e.g. 'NIFTY 50'"),
+    sector:      Optional[str] = Query(None),
+    credibility: Optional[str] = Query(None),
+    search:      Optional[str] = Query(None, description="ticker substring (case-insensitive)"),
+    ticker:      Optional[str] = Query(None),
+):
+    """
+    Long-only (rally) live opportunities with independent filters.
+    Decoupled from /swing/overview so its own filter row in the UI doesn't
+    affect the engine performance hero.
+    Engine bucket here is derived from opportunity_score thresholds:
+      turbo >= 0.90, super >= 0.80, standard < 0.80.
+    """
+    con = _conn()
+    _ensure_membership_table_exists(con)
+    _ensure_universe_stub(con)
+
+    clauses = ["lo.direction = 'rally'"]
+    params: list = []
+
+    if ticker:
+        clauses.append("lo.ticker = ?")
+        params.append(ticker.upper())
+    elif index:
+        clauses.append("lo.ticker IN (SELECT ticker FROM stock_index_membership WHERE index_name = ?)")
+        params.append(index)
+    if sector:
+        clauses.append("lo.ticker IN (SELECT symbol FROM universe WHERE sector = ?)")
+        params.append(sector)
+    if credibility:
+        clauses.append("lo.credibility = ?")
+        params.append(credibility)
+    if search:
+        clauses.append("UPPER(lo.ticker) LIKE ?")
+        params.append(f"%{search.upper()}%")
+
+    rows = con.execute(f"""
+        SELECT lo.ticker, lo.direction, lo.tier, lo.opportunity_score,
+               lo.credibility, lo.latest_date, lo.setup_summary,
+               lo.current_close, u.sector
+        FROM live_opportunities lo
+        LEFT JOIN universe u ON u.symbol = lo.ticker
+        WHERE {' AND '.join(clauses)}
+        ORDER BY lo.opportunity_score DESC
+    """, params).fetchall()
+
+    def _score_to_bucket(score: float) -> str:
+        if score >= 0.90: return "turbo"
+        if score >= 0.80: return "super"
+        return "standard"
+
+    out = []
+    for r in rows:
+        b = _score_to_bucket(r["opportunity_score"] or 0)
+        if engine and engine.lower() != b:
+            continue
+        out.append({
+            "ticker":            r["ticker"],
+            "engine":            b,
+            "tier":              r["tier"],
+            "opportunity_score": round(r["opportunity_score"] or 0, 4),
+            "credibility":       r["credibility"],
+            "latest_date":       r["latest_date"],
+            "current_close":     r["current_close"],
+            "sector":            r["sector"],
+            "setup_summary":     (r["setup_summary"] or "")[:240],
+        })
+
+    con.close()
+    return {"count": len(out), "signals": out}
 
 
 # ── /api/swing/trades ─────────────────────────────────────────────────────────

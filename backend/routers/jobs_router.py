@@ -46,9 +46,12 @@ def pipeline_state():
     """Return current pipeline run state without triggering a run."""
     try:
         import main as m
-        return m._pipeline_status
+        state = dict(m._pipeline_status)
+        if not state.get("next_run"):
+            state["next_run"] = m._compute_next_run()
+        return state
     except Exception:
-        return {"running": False, "last_run": None, "last_result": None}
+        return {"running": False, "last_run": None, "last_result": None, "next_run": None}
 
 
 class RunRequest(BaseModel):

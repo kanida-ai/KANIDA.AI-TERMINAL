@@ -496,8 +496,45 @@ export type LeaderboardEntry = {
   active:       boolean
 }
 
-export const getSwingOverview   = (year?: string) =>
-  req<SwingOverviewResponse>(`/api/swing/overview${year ? '?year=' + year : ''}`)
+export const getSwingOverview = (
+  year?: string,
+  ticker?: string,
+  index?: string,
+) => {
+  const qs = new URLSearchParams()
+  if (year)   qs.set('year', year)
+  if (ticker) qs.set('ticker', ticker)
+  if (index)  qs.set('index', index)
+  const tail = qs.toString()
+  return req<SwingOverviewResponse>(`/api/swing/overview${tail ? '?' + tail : ''}`)
+}
+
+export type ActiveSignalRow = {
+  ticker:            string
+  engine:            'turbo' | 'super' | 'standard'
+  tier:              string | null
+  opportunity_score: number
+  credibility:       string | null
+  latest_date:       string | null
+  current_close:     number | null
+  sector:            string | null
+  setup_summary:     string
+}
+export type ActiveSignalsResponse = { count: number; signals: ActiveSignalRow[] }
+
+export const getActiveSignals = (params: {
+  engine?: string; index?: string; sector?: string;
+  credibility?: string; search?: string; ticker?: string;
+} = {}) => {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v)
+  const tail = qs.toString()
+  return req<ActiveSignalsResponse>(`/api/swing/active-signals${tail ? '?' + tail : ''}`)
+}
+
+export type IndexInfo = { index_name: string; members: number; last_updated: string }
+export const getIndices = () =>
+  req<{ indices: IndexInfo[] }>(`/api/universe/indices`)
 
 export const getSwingTickers    = () =>
   req<{ tickers: string[] }>('/api/swing/tickers')

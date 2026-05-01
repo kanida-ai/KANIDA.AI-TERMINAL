@@ -1,0 +1,32 @@
+{
+  "_comment": "NSE index constituent CSV sources. Add a new entry to track another index. URLs follow the nsearchives.nseindia.com/content/indices/<filename> pattern.",
+  "base_url": "https://nsearchives.nseindia.com/content/indices/",
+  "indices": [
+    { "name": "NIFTY 50",                  "file": "ind_nifty50list.csv" },
+    { "name": "NIFTY NEXT 50",             "file": "ind_niftynext50list.csv" },
+    { "name": "NIFTY 100",                 "file": "ind_nifty100list.csv" },
+    { "name": "NIFTY 200",                 "file": "ind_nifty200list.csv" },
+    { "name": "NIFTY 500",                 "file": "ind_nifty500list.csv" },
+    { "name": "NIFTY MIDCAP 50",           "file": "ind_niftymidcap50list.csv" },
+    { "name": "NIFTY MIDCAP 100",          "file": "ind_niftymidcap100list.csv" },
+    { "name": "NIFTY MIDCAP 150",          "file": "ind_niftymidcap150list.csv" },
+    { "name": "NIFTY SMALLCAP 50",         "file": "ind_niftysmallcap50list.csv" },
+    { "name": "NIFTY SMALLCAP 100",        "file": "ind_niftysmallcap100list.csv" },
+    { "name": "NIFTY SMALLCAP 250",        "file": "ind_niftysmallcap250list.csv" },
+    { "name": "NIFTY MICROCAP 250",        "file": "ind_niftymicrocap250list.csv" },
+    { "name": "NIFTY BANK",                "file": "ind_niftybanklist.csv" },
+    { "name": "NIFTY FINANCIAL SERVICES",  "file": "ind_niftyfinancelist.csv" },
+    { "name": "NIFTY IT",                  "file": "ind_niftyitlist.csv" },
+    { "name": "NIFTY AUTO",                "file": "ind_niftyautolist.csv" },
+    { "name": "NIFTY FMCG",                "file": "ind_niftyfmcglist.csv" },
+    { "name": "NIFTY PHARMA",              "file": "ind_niftypharmalist.csv" },
+    { "name": "NIFTY METAL",               "file": "ind_niftymetallist.csv" },
+    { "name": "NIFTY ENERGY",              "file": "ind_niftyenergylist.csv" },
+    { "name": "NIFTY MEDIA",               "file": "ind_niftymedialist.csv" },
+    { "name": "NIFTY REALTY",              "file": "ind_niftyrealtylist.csv" },
+    { "name": "NIFTY PSU BANK",            "file": "ind_niftypsubanklist.csv" },
+    { "name": "NIFTY PRIVATE BANK",        "file": "ind_nifty_privatebanklist.csv" },
+    { "name": "NIFTY HEALTHCARE",          "file": "ind_niftyhealthcarelist.csv" },
+    { "name": "NIFTY CONSUMER DURABLES",   "file": "ind_niftyconsumerdurableslist.csv" }
+  ]
+}
