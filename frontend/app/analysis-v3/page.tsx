@@ -196,6 +196,70 @@ const kbd: React.CSSProperties = {
   padding: '1px 4px', background: T.bg2, color: T.dim2, marginLeft: 4,
 }
 
+// ── Brand bar (prominent, top of page) ────────────────────────────────────────
+function BrandBar() {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center',
+      borderBottom: `1px solid ${T.border}`,
+      background: `linear-gradient(180deg, ${T.bg1} 0%, ${T.bg0} 100%)`,
+      height: 56, padding: '0 22px',
+    }}>
+      {/* Brand mark */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 0 }}>
+        <span style={{
+          color: T.data, fontFamily: 'Inter Tight, sans-serif',
+          fontWeight: 800, fontSize: 26, letterSpacing: '-0.04em',
+        }}>KANIDA</span>
+        <span style={{
+          color: T.label, fontFamily: 'Inter Tight, sans-serif',
+          fontWeight: 800, fontSize: 26, letterSpacing: '-0.04em',
+        }}>.AI</span>
+        <span style={{
+          color: T.dim, fontFamily: 'IBM Plex Mono, monospace',
+          fontSize: 11, marginLeft: 14, letterSpacing: '0.18em', textTransform: 'uppercase',
+          fontWeight: 500,
+        }}>Quant Intelligence Terminal</span>
+      </div>
+
+      {/* Tagline */}
+      <div style={{ marginLeft: 28, paddingLeft: 18, borderLeft: `1px solid ${T.border}`,
+                    display: 'flex', alignItems: 'baseline', gap: 14 }}>
+        <span style={{ color: T.dim2, fontSize: 11, fontFamily: 'IBM Plex Mono', letterSpacing: '0.05em' }}>
+          NSE  ·  Long-only  ·  Smart Entry via Execution IQ
+        </span>
+        <span style={{ color: T.label, fontSize: 10, fontFamily: 'IBM Plex Mono',
+                       border: `1px solid ${T.label}55`, padding: '2px 8px',
+                       background: `${T.label}11`, letterSpacing: '0.08em' }}>
+          v3.1 · MOCK
+        </span>
+      </div>
+
+      {/* Right side: workspace + actions */}
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14 }}>
+        <span style={{ color: T.dim, fontSize: 10, fontFamily: 'IBM Plex Mono', letterSpacing: '0.06em' }}>
+          WORKSPACE
+        </span>
+        <span style={{ color: T.data, fontSize: 12, fontFamily: 'Inter Tight', fontWeight: 600, letterSpacing: '0.06em' }}>
+          OVERVIEW
+        </span>
+        <span style={{ color: T.dim, fontFamily: 'IBM Plex Mono', fontSize: 11 }}>·</span>
+        <button style={{
+          fontFamily: 'IBM Plex Mono', fontSize: 11, padding: '5px 10px',
+          background: 'transparent', border: `1px solid ${T.border}`, color: T.dim2,
+          cursor: 'pointer', letterSpacing: '0.04em',
+        }}>SAVE LAYOUT</button>
+        <button style={{
+          fontFamily: 'IBM Plex Mono', fontSize: 11, padding: '5px 10px',
+          background: T.label, border: 'none', color: T.bg0, fontWeight: 600,
+          cursor: 'pointer', letterSpacing: '0.04em',
+        }}>+ ADD WIDGET</button>
+      </div>
+    </div>
+  )
+}
+
+
 // ── Top status bar ────────────────────────────────────────────────────────────
 function StatusBar() {
   const [now, setNow] = useState<Date | null>(null)
@@ -223,11 +287,6 @@ function StatusBar() {
       borderBottom: `1px solid ${T.border}`, background: T.bg1,
       fontFamily: 'IBM Plex Mono, monospace', fontSize: 11, height: 28,
     }}>
-      <div style={{
-        padding: '0 14px', height: '100%', display: 'flex', alignItems: 'center',
-        background: T.label, color: T.bg0, fontWeight: 700, letterSpacing: '0.08em',
-        fontFamily: 'Inter Tight, sans-serif',
-      }}>KANIDA<span style={{ fontSize: 9, marginLeft: 6, opacity: 0.7 }}>TERMINAL v3</span></div>
       {cells.map((c, i) => (
         <div key={c.label} style={{
           padding: '0 14px', height: '100%', display: 'flex', alignItems: 'center', gap: 6,
@@ -426,69 +485,186 @@ function SectorHeatmap() {
   )
 }
 
-// ── Top movers + engines side-by-side ────────────────────────────────────────
-function MoversAndEngines() {
+// ── Hero engines (the headline of the page) ──────────────────────────────────
+function HeroEngines() {
+  const ENGINE_DETAIL = [
+    { name: 'TURBO',    icon: 'T', color: T.label, n: 824,  wr: 99.39, avg: 5.07, cum: 4178.0, hold: 1.8, p90: 5.12, p180: 5.04,
+      desc: 'Fast momentum exits · 1-3 day resolution',
+      spark: [4.6, 4.9, 5.1, 4.8, 5.2, 5.0, 5.07] },
+    { name: 'SUPER',    icon: 'S', color: T.green, n: 1069, wr: 99.81, avg: 5.28, cum: 5644.3, hold: 2.4, p90: 5.41, p180: 5.21,
+      desc: 'Trend continuation · highest avg per trade',
+      spark: [5.0, 5.1, 5.4, 5.2, 5.5, 5.3, 5.28] },
+    { name: 'STANDARD', icon: 'ST', color: T.blue, n: 6722, wr: 30.04, avg: 0.21, cum: 1411.6, hold: 8.1, p90: 0.38, p180: 0.29,
+      desc: 'High volume · selective entry required',
+      spark: [0.1, 0.3, 0.2, 0.4, 0.0, 0.3, 0.21] },
+  ]
+  const sumTrades = ENGINE_DETAIL.reduce((s, e) => s + e.n, 0)
+
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 1, background: T.border, borderBottom: `1px solid ${T.border}` }}>
-      {/* Movers */}
-      <div style={{ background: T.bg0, padding: '12px 16px' }}>
-        <div style={{ color: T.label, fontSize: 11, fontWeight: 600, letterSpacing: '0.12em', fontFamily: 'Inter Tight', marginBottom: 10 }}>
-          TOP MOVERS · INTRADAY
+    <div style={{ borderBottom: `1px solid ${T.border}`, background: T.bg0 }}>
+      {/* Section header */}
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+        padding: '18px 22px 8px',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 14 }}>
+          <span style={{
+            color: T.data, fontFamily: 'Inter Tight', fontWeight: 700,
+            fontSize: 22, letterSpacing: '-0.02em',
+          }}>Engine Performance</span>
+          <span style={{
+            color: T.label, fontFamily: 'IBM Plex Mono', fontSize: 10,
+            border: `1px solid ${T.label}55`, padding: '2px 8px',
+            background: `${T.label}11`, letterSpacing: '0.08em',
+          }}>HIGH CONVICTION</span>
+          <span style={{ color: T.dim, fontSize: 11, fontFamily: 'IBM Plex Mono', letterSpacing: '0.04em' }}>
+            {sumTrades.toLocaleString()} trades  ·  smart entry effective  ·  ALL · ALL years
+          </span>
         </div>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, fontFamily: 'IBM Plex Mono' }}>
-          <thead>
-            <tr style={{ borderBottom: `1px solid ${T.border}` }}>
-              {['TICKER', 'SECTOR', 'CHG', 'VOL', 'SIG'].map(h => (
-                <th key={h} style={{ padding: '6px 8px', textAlign: 'left', color: T.dim, fontSize: 10, fontWeight: 500 }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {MOVERS.map((m, i) => (
-              <tr key={m.tk} style={{ borderBottom: `1px solid ${T.border}` }}>
-                <td style={{ padding: '7px 8px', color: T.blue, fontWeight: 600 }}>{m.tk}</td>
-                <td style={{ padding: '7px 8px', color: T.dim2, fontFamily: 'Inter Tight' }}>{m.sec}</td>
-                <td style={{ padding: '7px 8px', color: m.chg >= 0 ? T.green : T.red, fontFeatureSettings: '"tnum" 1', textAlign: 'right' }}>
-                  {m.chg >= 0 ? '+' : ''}{m.chg.toFixed(2)}%
-                </td>
-                <td style={{ padding: '7px 8px', color: T.data, textAlign: 'right' }}>{m.vol}</td>
-                <td style={{ padding: '7px 8px', color: m.sig === 'TURBO' ? T.label : m.sig === 'SUPER' ? T.green : T.dim }}>
-                  {m.sig}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {['ALL', '2024', '2025', '2026'].map(y => (
+            <button key={y} style={{
+              ...chipBtn(y === 'ALL'),
+              padding: '4px 12px', fontSize: 11,
+            }}>{y}</button>
+          ))}
+        </div>
       </div>
 
-      {/* Engines */}
-      <div style={{ background: T.bg0, padding: '12px 16px' }}>
-        <div style={{ color: T.label, fontSize: 11, fontWeight: 600, letterSpacing: '0.12em', fontFamily: 'Inter Tight', marginBottom: 10 }}>
-          ENGINES · ALL TIME
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {ENGINES.map(e => {
-            const wc = e.wr >= 90 ? T.green : e.wr >= 50 ? T.yellow : T.red
-            return (
-              <div key={e.name} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 0', borderBottom: `1px solid ${T.border}` }}>
-                <span style={{ color: T.label, fontSize: 10, fontFamily: 'IBM Plex Mono', width: 28 }}>[{e.name[0]}]</span>
-                <span style={{ color: T.data, fontFamily: 'Inter Tight', fontWeight: 600, fontSize: 11, flex: 1 }}>{e.name}</span>
-                <div style={{ display: 'grid', gridTemplateColumns: '50px 60px 40px', gap: 8, fontFamily: 'IBM Plex Mono', fontSize: 11, fontFeatureSettings: '"tnum" 1' }}>
-                  <span style={{ color: wc, textAlign: 'right' }}>{e.wr.toFixed(1)}%</span>
-                  <span style={{ color: e.avg >= 0 ? T.green : T.red, textAlign: 'right' }}>
-                    {e.avg >= 0 ? '+' : ''}{e.avg.toFixed(2)}%
-                  </span>
-                  <span style={{ color: T.dim2, textAlign: 'right' }}>{e.hold.toFixed(1)}d</span>
-                </div>
-                <Spark pts={[e.avg-0.4, e.avg-0.1, e.avg+0.2, e.avg, e.avg+0.1, e.avg-0.05, e.avg]} color={e.avg >= 0 ? T.green : T.red} />
+      {/* Hero grid — 3 huge cards */}
+      <div style={{
+        display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 1,
+        background: T.border, padding: '0 1px 1px',
+      }}>
+        {ENGINE_DETAIL.map(e => {
+          const wrColor  = e.wr >= 90 ? T.green : e.wr >= 50 ? T.yellow : T.red
+          const avgColor = e.avg >= 0 ? T.green : T.red
+          return (
+            <div key={e.name} style={{
+              background: T.bg0, padding: '20px 22px 22px',
+              position: 'relative', minHeight: 240,
+            }}>
+              {/* Engine identity row */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18 }}>
+                <span style={{
+                  fontFamily: 'IBM Plex Mono', fontSize: 12, fontWeight: 700,
+                  color: e.color, padding: '3px 8px',
+                  border: `1px solid ${e.color}66`, background: `${e.color}11`,
+                  letterSpacing: '0.06em',
+                }}>[{e.icon}]</span>
+                <span style={{
+                  color: e.color, fontFamily: 'Inter Tight', fontWeight: 700,
+                  fontSize: 18, letterSpacing: '0.04em',
+                }}>{e.name}</span>
+                <span style={{ marginLeft: 'auto', color: T.dim, fontFamily: 'IBM Plex Mono', fontSize: 11 }}>
+                  n = {e.n.toLocaleString()}
+                </span>
               </div>
-            )
-          })}
-        </div>
-        <div style={{ marginTop: 10, color: T.dim, fontSize: 10, fontFamily: 'IBM Plex Mono', textAlign: 'right' }}>
-          → ENGINE DEEP DIVE
-        </div>
+
+              {/* The two giant numbers — WR + AVG P&L */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 16 }}>
+                <div>
+                  <div style={{ color: T.dim, fontSize: 10, letterSpacing: '0.10em', marginBottom: 4 }}>WIN RATE</div>
+                  <div style={{
+                    color: wrColor, fontFamily: 'IBM Plex Mono',
+                    fontSize: 44, fontWeight: 500, lineHeight: 1,
+                    fontFeatureSettings: '"tnum" 1', letterSpacing: '-0.03em',
+                  }}>
+                    {e.wr.toFixed(2)}<span style={{ color: T.dim2, fontSize: 22, marginLeft: 2 }}>%</span>
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: T.dim, fontSize: 10, letterSpacing: '0.10em', marginBottom: 4 }}>AVG P&L / TRADE</div>
+                  <div style={{
+                    color: avgColor, fontFamily: 'IBM Plex Mono',
+                    fontSize: 44, fontWeight: 500, lineHeight: 1,
+                    fontFeatureSettings: '"tnum" 1', letterSpacing: '-0.03em',
+                  }}>
+                    {e.avg >= 0 ? '+' : ''}{e.avg.toFixed(2)}<span style={{ color: T.dim2, fontSize: 22, marginLeft: 2 }}>%</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Secondary stats row */}
+              <div style={{
+                display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12,
+                paddingTop: 12, borderTop: `1px solid ${T.border}`,
+              }}>
+                {[
+                  { k: 'CUM',  v: (e.cum >= 0 ? '+' : '') + e.cum.toFixed(0) + '%', c: avgColor },
+                  { k: 'HOLD', v: e.hold.toFixed(1) + 'd',                          c: T.data },
+                  { k: '90D',  v: (e.p90 >= 0 ? '+' : '') + e.p90.toFixed(2) + '%', c: e.p90 >= 0 ? T.green : T.red },
+                  { k: '180D', v: (e.p180 >= 0 ? '+' : '') + e.p180.toFixed(2)+ '%',c: e.p180 >= 0 ? T.green : T.red },
+                ].map(s => (
+                  <div key={s.k}>
+                    <div style={{ color: T.dim, fontSize: 9, letterSpacing: '0.10em' }}>{s.k}</div>
+                    <div style={{
+                      color: s.c, fontFamily: 'IBM Plex Mono',
+                      fontSize: 13, fontWeight: 500, marginTop: 2,
+                      fontFeatureSettings: '"tnum" 1',
+                    }}>{s.v}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Sparkline + description */}
+              <div style={{
+                marginTop: 14, display: 'flex',
+                justifyContent: 'space-between', alignItems: 'flex-end',
+              }}>
+                <span style={{ color: T.dim2, fontSize: 11, fontFamily: 'Inter Tight', maxWidth: '60%' }}>
+                  {e.desc}
+                </span>
+                <Spark pts={e.spark} color={avgColor} />
+              </div>
+
+              {/* Drill-in CTA */}
+              <button style={{
+                position: 'absolute', top: 18, right: 18,
+                background: 'transparent', border: `1px solid ${T.border}`,
+                color: T.dim2, fontSize: 10, fontFamily: 'IBM Plex Mono',
+                padding: '4px 8px', cursor: 'pointer', letterSpacing: '0.06em',
+              }}>VIEW &nbsp;›</button>
+            </div>
+          )
+        })}
       </div>
+    </div>
+  )
+}
+
+
+// ── Top movers (own panel, below the fold) ───────────────────────────────────
+function TopMoversPanel() {
+  return (
+    <div style={{ borderBottom: `1px solid ${T.border}`, background: T.bg0, padding: '14px 22px' }}>
+      <div style={{ color: T.label, fontSize: 11, fontWeight: 600, letterSpacing: '0.12em', fontFamily: 'Inter Tight', marginBottom: 10 }}>
+        TOP MOVERS · INTRADAY
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, fontFamily: 'IBM Plex Mono' }}>
+        <thead>
+          <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+            {['TICKER', 'SECTOR', 'CHG', 'VOL', 'SIG'].map(h => (
+              <th key={h} style={{ padding: '6px 8px', textAlign: 'left', color: T.dim, fontSize: 10, fontWeight: 500 }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {MOVERS.map(m => (
+            <tr key={m.tk} style={{ borderBottom: `1px solid ${T.border}` }}>
+              <td style={{ padding: '7px 8px', color: T.blue, fontWeight: 600 }}>{m.tk}</td>
+              <td style={{ padding: '7px 8px', color: T.dim2, fontFamily: 'Inter Tight' }}>{m.sec}</td>
+              <td style={{ padding: '7px 8px', color: m.chg >= 0 ? T.green : T.red, fontFeatureSettings: '"tnum" 1', textAlign: 'right' }}>
+                {m.chg >= 0 ? '+' : ''}{m.chg.toFixed(2)}%
+              </td>
+              <td style={{ padding: '7px 8px', color: T.data, textAlign: 'right' }}>{m.vol}</td>
+              <td style={{ padding: '7px 8px', color: m.sig === 'TURBO' ? T.label : m.sig === 'SUPER' ? T.green : T.dim }}>
+                {m.sig}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
@@ -734,6 +910,7 @@ export default function AnalysisV3Mock() {
         fontFamily: 'Inter Tight, sans-serif', paddingBottom: 56,
         display: 'flex', flexDirection: 'column',
       }}>
+        <BrandBar />
         <StatusBar />
         <MacroStrip />
         <WorkspaceTabs active={tab} onChange={setTab} />
@@ -744,9 +921,13 @@ export default function AnalysisV3Mock() {
 
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
             <Breadcrumb />
-            <SectorHeatmap />
-            <MoversAndEngines />
+            {/* Hero: engines first, big and bold — the headline */}
+            <HeroEngines />
+            {/* Active signals second — the call to action */}
             <ActiveSignalsPanel />
+            {/* Supporting context below the fold */}
+            <SectorHeatmap />
+            <TopMoversPanel />
           </div>
 
           <div style={{
