@@ -19,6 +19,11 @@ import {
   type BreadthResponse, type TopMoversResponse, type SectorStat,
   type ActivityItem, type AIHealth,
 } from '@/lib/backtest-api'
+import { TradeLogWorkspace }     from './_workspaces/trade-log'
+import { CombinationsWorkspace } from './_workspaces/combinations'
+import { MpiWorkspace }          from './_workspaces/mpi'
+import { LiveTradesWorkspace }   from './_workspaces/live-trades'
+import { ExecutionIQWorkspace }  from './_workspaces/execution-iq'
 
 // ── Live data hook ────────────────────────────────────────────────────────────
 // Fetches /swing/overview and /swing/active-signals when filters change.
@@ -106,10 +111,14 @@ const T = {
   ai:       '#34d399',
 }
 
-// Workspace tabs collapsed to one for now (Sprint 1 = ship one polished view).
-// Multi-workspace shell will return in Sprint 2 when each tab has unique content.
+// Workspace tabs — each maps to a fully-functional view with real data.
 const WORKSPACES = [
   { k: 'OVERVIEW', label: 'Overview' },
+  { k: 'TRADES',   label: 'Trade Log' },
+  { k: 'COMBOS',   label: 'Combinations' },
+  { k: 'MPI',      label: 'MPI Analysis' },
+  { k: 'LIVE',     label: 'Live Trades' },
+  { k: 'EXECIQ',   label: 'Execution IQ' },
 ]
 
 const NAV = [
@@ -1608,19 +1617,26 @@ export default function AnalysisV3Mock() {
 
               <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
                 <Breadcrumb />
-                <HeroEngines
-                  overview={live.overview}
-                  year={year} setYear={setYear}
-                  ticker={ticker} indexFilter={idx}
-                  loading={live.loading}
-                />
-                <ActiveSignalsPanel
-                  signals={live.signals}
-                  engine={engine} setEngine={setEngine}
-                  loading={live.loading}
-                />
-                <SectorHeatmap sectors={live.sectors} asOf={live.breadth?.as_of ?? null} />
-                <TopMoversPanel movers={live.movers} />
+                {tab === 'OVERVIEW' && <>
+                  <HeroEngines
+                    overview={live.overview}
+                    year={year} setYear={setYear}
+                    ticker={ticker} indexFilter={idx}
+                    loading={live.loading}
+                  />
+                  <ActiveSignalsPanel
+                    signals={live.signals}
+                    engine={engine} setEngine={setEngine}
+                    loading={live.loading}
+                  />
+                  <SectorHeatmap sectors={live.sectors} asOf={live.breadth?.as_of ?? null} />
+                  <TopMoversPanel movers={live.movers} />
+                </>}
+                {tab === 'TRADES' && <TradeLogWorkspace     ticker={ticker} year={year} />}
+                {tab === 'COMBOS' && <CombinationsWorkspace ticker={ticker} />}
+                {tab === 'MPI'    && <MpiWorkspace          ticker={ticker} />}
+                {tab === 'LIVE'   && <LiveTradesWorkspace   ticker={ticker} />}
+                {tab === 'EXECIQ' && <ExecutionIQWorkspace  ticker={ticker} />}
               </div>
 
               <div style={{
