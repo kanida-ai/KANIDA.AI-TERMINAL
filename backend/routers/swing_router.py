@@ -686,3 +686,284 @@ def swing_leaderboard(
 
     con.close()
     return {"period": period, "count": len(leaderboard), "leaderboard": leaderboard}
+
+
+# ── /api/swing/breadth ────────────────────────────────────────────────────────
+
+@router.get("/swing/breadth")
+def swing_breadth():
+    """Universe-wide breadth & momentum snapshot for the macro strip.
+    All numbers come from our own ohlc_daily — no third-party feed."""
+    con = _conn()
+    _ensure_universe_stub(con)
+
+    latest_row = con.execute(
+        "SELECT MAX(trade_date) AS dt FROM ohlc_daily WHERE market='NSE'"
+    ).fetchone()
+    latest = latest_row["dt"]
+    if not latest:
+        con.close()
+        return {"as_of": None, "total_stocks": 0, "advancers": 0, "decliners": 0,
+                "unchanged": 0, "avg_pct": 0, "best_stock": None, "worst_stock": None,
+                "best_sector": None, "worst_sector": None,
+                "signals_total": 0, "signals_hc": 0, "last_pipeline_run": None}
+
+    prior = con.execute(
+        "SELECT MAX(trade_date) AS dt FROM ohlc_daily WHERE market='NSE' AND trade_date < ?",
+        (latest,),
+    ).fetchone()["dt"]
+
+    rows = con.execute("""
+        SELECT t.ticker, t.close AS today_close, p.close AS prior_close, u.sector
+        FROM ohlc_daily t
+        LEFT JOIN ohlc_daily p ON p.ticker = t.ticker AND p.trade_date = ? AND p.market = 'NSE'
+        LEFT JOIN universe u ON u.symbol = t.ticker AND u.exchange = 'NSE'
+        WHERE t.trade_date = ? AND t.market = 'NSE'
+    """, (prior, latest)).fetchall()
+
+    movers: list = []
+    sectors: dict = {}
+    advancers = decliners = unchanged = 0
+    pct_sum = 0.0
+    for r in rows:
+        tc, pc = r["today_close"], r["prior_close"]
+        if tc is None or pc is None or pc == 0:
+            continue
+        pct = (tc - pc) / pc * 100.0
+        movers.append((r["ticker"], pct, r["sector"]))
+        pct_sum += pct
+        if   pct > 0.05: advancers += 1
+        elif pct < -0.05: decliners += 1
+        else: unchanged += 1
+        if r["sector"]:
+            sectors.setdefault(r["sector"], []).append(pct)
+
+    n = len(movers)
+    sorted_movers = sorted(movers, key=lambda x: x[1], reverse=True)
+    best_s  = sorted_movers[0]  if sorted_movers else None
+    worst_s = sorted_movers[-1] if sorted_movers else None
+
+    sector_avg = [(sec, sum(vs) / len(vs), len(vs)) for sec, vs in sectors.items() if vs]
+    sector_sorted = sorted(sector_avg, key=lambda x: x[1], reverse=True)
+    best_sec  = sector_sorted[0]  if sector_sorted else None
+    worst_sec = sector_sorted[-1] if sector_sorted else None
+
+    sig_total = con.execute(
+        "SELECT COUNT(*) FROM live_opportunities WHERE direction = 'rally'"
+    ).fetchone()[0]
+    sig_hc = con.execute(
+        "SELECT COUNT(*) FROM live_opportunities WHERE direction = 'rally' AND opportunity_score >= 0.90"
+    ).fetchone()[0]
+
+    last_pipeline_run = None
+    try:
+        import main as m
+        last_pipeline_run = m._pipeline_status.get("last_run")
+    except Exception:
+        pass
+
+    con.close()
+    return {
+        "as_of":        latest,
+        "total_stocks": n,
+        "advancers":    advancers,
+        "decliners":    decliners,
+        "unchanged":    unchanged,
+        "avg_pct":      round(pct_sum / n, 2) if n else 0,
+        "best_stock":   {"ticker": best_s[0],  "pct": round(best_s[1],  2), "sector": best_s[2]}  if best_s  else None,
+        "worst_stock":  {"ticker": worst_s[0], "pct": round(worst_s[1], 2), "sector": worst_s[2]} if worst_s else None,
+        "best_sector":  {"sector": best_sec[0],  "avg_pct": round(best_sec[1],  2), "members": best_sec[2]}  if best_sec  else None,
+        "worst_sector": {"sector": worst_sec[0], "avg_pct": round(worst_sec[1], 2), "members": worst_sec[2]} if worst_sec else None,
+        "signals_total":     sig_total,
+        "signals_hc":        sig_hc,
+        "last_pipeline_run": last_pipeline_run,
+    }
+
+
+# ── /api/swing/top-movers ─────────────────────────────────────────────────────
+
+@router.get("/swing/top-movers")
+def swing_top_movers(limit: int = Query(10, ge=1, le=50)):
+    """Top gainers and losers from the latest trading day."""
+    con = _conn()
+    _ensure_universe_stub(con)
+
+    latest = con.execute(
+        "SELECT MAX(trade_date) AS dt FROM ohlc_daily WHERE market='NSE'"
+    ).fetchone()["dt"]
+    if not latest:
+        con.close()
+        return {"as_of": None, "gainers": [], "losers": []}
+    prior = con.execute(
+        "SELECT MAX(trade_date) AS dt FROM ohlc_daily WHERE market='NSE' AND trade_date < ?",
+        (latest,),
+    ).fetchone()["dt"]
+
+    active_tickers = {
+        r[0] for r in con.execute(
+            "SELECT ticker FROM live_opportunities WHERE direction='rally'"
+        ).fetchall()
+    }
+
+    rows = con.execute("""
+        SELECT t.ticker, t.close, t.volume, p.close AS prior_close, u.sector
+        FROM ohlc_daily t
+        LEFT JOIN ohlc_daily p ON p.ticker = t.ticker AND p.trade_date = ? AND p.market = 'NSE'
+        LEFT JOIN universe u ON u.symbol = t.ticker AND u.exchange = 'NSE'
+        WHERE t.trade_date = ? AND t.market = 'NSE'
+    """, (prior, latest)).fetchall()
+
+    movers = []
+    for r in rows:
+        if r["close"] is None or r["prior_close"] is None or r["prior_close"] == 0:
+            continue
+        pct = (r["close"] - r["prior_close"]) / r["prior_close"] * 100.0
+        movers.append({
+            "ticker":  r["ticker"],
+            "sector":  r["sector"] or "—",
+            "close":   round(r["close"], 2),
+            "pct":     round(pct, 2),
+            "volume":  r["volume"],
+            "active_signal": r["ticker"] in active_tickers,
+        })
+    movers.sort(key=lambda x: x["pct"], reverse=True)
+
+    con.close()
+    return {
+        "as_of":   latest,
+        "gainers": movers[:limit],
+        "losers":  list(reversed(movers[-limit:])) if movers else [],
+    }
+
+
+# ── /api/swing/sector-stats ───────────────────────────────────────────────────
+
+@router.get("/swing/sector-stats")
+def swing_sector_stats():
+    """Per-sector aggregated move for latest day. Drives the sector heatmap."""
+    con = _conn()
+    _ensure_universe_stub(con)
+
+    latest = con.execute(
+        "SELECT MAX(trade_date) AS dt FROM ohlc_daily WHERE market='NSE'"
+    ).fetchone()["dt"]
+    if not latest:
+        con.close()
+        return {"as_of": None, "sectors": []}
+    prior = con.execute(
+        "SELECT MAX(trade_date) AS dt FROM ohlc_daily WHERE market='NSE' AND trade_date < ?",
+        (latest,),
+    ).fetchone()["dt"]
+
+    rows = con.execute("""
+        SELECT u.sector AS sector, t.ticker, t.close, p.close AS prior_close
+        FROM ohlc_daily t
+        LEFT JOIN ohlc_daily p ON p.ticker = t.ticker AND p.trade_date = ? AND p.market = 'NSE'
+        LEFT JOIN universe u ON u.symbol = t.ticker AND u.exchange = 'NSE'
+        WHERE t.trade_date = ? AND t.market = 'NSE'
+    """, (prior, latest)).fetchall()
+
+    by_sector: dict = {}
+    for r in rows:
+        sec = r["sector"] or "Unknown"
+        if r["close"] is None or r["prior_close"] is None or r["prior_close"] == 0:
+            continue
+        pct = (r["close"] - r["prior_close"]) / r["prior_close"] * 100.0
+        s = by_sector.setdefault(sec, {"sector": sec, "members": 0, "advancers": 0,
+                                       "decliners": 0, "pct_sum": 0.0,
+                                       "best_ticker": None, "best_pct": -1e9})
+        s["members"]   += 1
+        s["pct_sum"]   += pct
+        s["advancers"] += (1 if pct > 0.05  else 0)
+        s["decliners"] += (1 if pct < -0.05 else 0)
+        if pct > s["best_pct"]:
+            s["best_pct"] = pct
+            s["best_ticker"] = r["ticker"]
+
+    sectors = []
+    for s in by_sector.values():
+        n = s["members"] or 1
+        sectors.append({
+            "sector":      s["sector"],
+            "members":     s["members"],
+            "advancers":   s["advancers"],
+            "decliners":   s["decliners"],
+            "avg_pct":     round(s["pct_sum"] / n, 2),
+            "best_ticker": s["best_ticker"],
+            "best_pct":    round(s["best_pct"], 2),
+        })
+    sectors.sort(key=lambda x: x["avg_pct"], reverse=True)
+    con.close()
+    return {"as_of": latest, "sectors": sectors}
+
+
+# ── /api/swing/activity-feed ──────────────────────────────────────────────────
+
+@router.get("/swing/activity-feed")
+def swing_activity_feed(limit: int = Query(20, ge=1, le=100)):
+    """Recent engine-driven events for the right-rail feed."""
+    con = _conn()
+    items: list = []
+
+    # Latest exited trades
+    exits = con.execute("""
+        SELECT t.ticker, t.exit_date, t.exit_reason, t.pnl_pct,
+               json_extract(t.notes,'$.bucket') AS bucket
+        FROM trade_log t
+        WHERE t.exit_date IS NOT NULL AND t.direction IN ('rally','long')
+        ORDER BY t.exit_date DESC, t.id DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    for r in exits:
+        items.append({
+            "kind":    "trade_exit",
+            "when":    r["exit_date"],
+            "ticker":  r["ticker"],
+            "engine":  (r["bucket"] or "standard").lower(),
+            "outcome": r["exit_reason"],
+            "pnl":     r["pnl_pct"],
+            "title":   r["ticker"] + " closed " + (r["exit_reason"] or ""),
+            "detail":  ("{:+.2f}%".format(r["pnl_pct"])) if r["pnl_pct"] is not None else None,
+        })
+
+    # Fresh signals
+    sigs = con.execute("""
+        SELECT ticker, opportunity_score, tier, latest_date, created_at, setup_summary
+        FROM live_opportunities
+        WHERE direction = 'rally'
+        ORDER BY created_at DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    for r in sigs:
+        sc = r["opportunity_score"] or 0
+        engine = "turbo" if sc >= 0.90 else ("super" if sc >= 0.80 else "standard")
+        items.append({
+            "kind":   "signal_fired",
+            "when":   r["created_at"] or r["latest_date"],
+            "ticker": r["ticker"],
+            "engine": engine,
+            "score":  round(sc, 3),
+            "tier":   r["tier"],
+            "title":  r["ticker"] + " fired " + engine.upper(),
+            "detail": (r["setup_summary"] or "")[:140],
+        })
+
+    # Pipeline status
+    try:
+        import main as m
+        st = m._pipeline_status
+        if st.get("last_run"):
+            items.append({
+                "kind":   "pipeline",
+                "when":   st["last_run"],
+                "ticker": None,
+                "engine": None,
+                "title":  "Pipeline " + (st.get("last_result") or "ran"),
+                "detail": st.get("last_result") or "",
+            })
+    except Exception:
+        pass
+
+    items.sort(key=lambda x: (x["when"] or ""), reverse=True)
+    con.close()
+    return {"count": len(items[:limit]), "items": items[:limit]}
