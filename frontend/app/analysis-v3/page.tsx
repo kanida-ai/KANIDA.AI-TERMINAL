@@ -10,7 +10,73 @@
  * Live at: /analysis-v3
  */
 
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  getSwingOverview, getActiveSignals, getSwingTickers, getIndices,
+  type SwingOverviewResponse, type ActiveSignalRow, type IndexInfo,
+} from '@/lib/backtest-api'
+
+// ── Live data hook ────────────────────────────────────────────────────────────
+// Fetches /swing/overview and /swing/active-signals when filters change.
+// Falls back gracefully when API is unreachable so the mock still renders.
+type LiveState = {
+  overview:    SwingOverviewResponse | null
+  signals:     ActiveSignalRow[]
+  signalCount: number
+  indices:     IndexInfo[]
+  tickers:     string[]
+  loading:     boolean
+  liveOK:      boolean   // true once any successful API response has come back
+  error:       string | null
+}
+function useLiveData(ticker: string, year: string, indexFilter: string, engine: string) {
+  const [s, setS] = useState<LiveState>({
+    overview: null, signals: [], signalCount: 0,
+    indices: [], tickers: [], loading: true, liveOK: false, error: null,
+  })
+
+  const refetch = useCallback(() => {
+    setS(p => ({ ...p, loading: true, error: null }))
+    const yr = year && year !== 'ALL' ? year : undefined
+    const tk = ticker && ticker !== 'ALL' ? ticker : undefined
+    const ix = indexFilter && indexFilter !== 'ALL' ? indexFilter : undefined
+    const en = engine && engine !== 'ALL' ? engine.toLowerCase() : undefined
+
+    Promise.allSettled([
+      getSwingOverview(yr, tk, ix),
+      getActiveSignals({ engine: en, index: ix, ticker: tk }),
+      getSwingTickers(),
+      getIndices(),
+    ]).then(([ov, sig, tk2, idx2]) => {
+      setS({
+        overview:    ov.status   === 'fulfilled' ? ov.value : null,
+        signals:     sig.status  === 'fulfilled' ? sig.value.signals : [],
+        signalCount: sig.status  === 'fulfilled' ? sig.value.count   : 0,
+        tickers:     tk2.status  === 'fulfilled' ? ['ALL', ...tk2.value.tickers] : ['ALL'],
+        indices:     idx2.status === 'fulfilled' ? idx2.value.indices : [],
+        loading:     false,
+        liveOK:      ov.status === 'fulfilled',
+        error:       ov.status === 'rejected' ? String((ov as PromiseRejectedResult).reason) : null,
+      })
+    })
+  }, [ticker, year, indexFilter, engine])
+
+  useEffect(() => { refetch() }, [refetch])
+  return s
+}
+
+// Small pill: "LIVE" or "DEMO" depending on whether real data backed this panel
+function LiveBadge({ live }: { live: boolean }) {
+  return (
+    <span style={{
+      fontFamily: 'IBM Plex Mono, monospace', fontSize: 9, fontWeight: 600,
+      padding: '2px 6px', letterSpacing: '0.10em',
+      color: live ? '#34d399' : '#f59e0b',
+      border: `1px solid ${live ? '#34d39955' : '#f59e0b55'}`,
+      background: live ? '#34d39911' : '#f59e0b11',
+    }}>{live ? 'LIVE' : 'DEMO'}</span>
+  )
+}
 
 // ── Tokens (extends V2) ──────────────────────────────────────────────────────
 const T = {
@@ -505,8 +571,18 @@ function SectorHeatmap() {
 }
 
 // ── Hero engines (the headline of the page) ──────────────────────────────────
-function HeroEngines() {
-  const ENGINE_DETAIL = [
+function HeroEngines({
+  overview, year, setYear, ticker, indexFilter, liveOK,
+}: {
+  overview:    SwingOverviewResponse | null
+  year:        string
+  setYear:     (y: string) => void
+  ticker:      string
+  indexFilter: string
+  liveOK:      boolean
+}) {
+  // Map live engine response → display rows. Falls back to static demo data.
+  const STATIC_ENGINES = [
     { name: 'TURBO',    icon: 'T', color: T.label, n: 824,  wr: 99.39, avg: 5.07, cum: 4178.0, hold: 1.8, p90: 5.12, p180: 5.04,
       desc: 'Fast momentum exits · 1-3 day resolution',
       spark: [4.6, 4.9, 5.1, 4.8, 5.2, 5.0, 5.07] },
@@ -517,7 +593,45 @@ function HeroEngines() {
       desc: 'High volume · selective entry required',
       spark: [0.1, 0.3, 0.2, 0.4, 0.0, 0.3, 0.21] },
   ]
+  const ICONS:  Record<string, string> = { turbo: 'T', super: 'S', standard: 'ST' }
+  const COLORS: Record<string, string> = { turbo: T.label, super: T.green, standard: T.blue }
+  const DESCS:  Record<string, string> = {
+    turbo:    'Fast momentum exits · 1-3 day resolution',
+    super:    'Trend continuation · highest avg per trade',
+    standard: 'High volume · selective entry required',
+  }
+
+  const ENGINE_DETAIL = (overview?.engines && overview.engines.length > 0)
+    ? overview.engines.map(e => ({
+        name: e.bucket.toUpperCase(),
+        icon: ICONS[e.bucket] || e.bucket[0]?.toUpperCase() || '·',
+        color: COLORS[e.bucket] || T.dim2,
+        n: e.total_trades,
+        wr: e.smart_win_rate,
+        avg: e.smart_avg_pnl,
+        cum: e.total_pnl_all,
+        hold: e.avg_days,
+        p90: e.pnl_90d_avg ?? 0,
+        p180: e.pnl_180d_avg ?? 0,
+        desc: e.description || DESCS[e.bucket] || '',
+        // Sparkline approximation: build a smooth line around avg using 90d/180d
+        spark: [
+          (e.pnl_180d_avg ?? e.smart_avg_pnl) * 0.9,
+          (e.pnl_180d_avg ?? e.smart_avg_pnl),
+          (e.pnl_90d_avg  ?? e.smart_avg_pnl) * 1.05,
+          e.smart_avg_pnl * 0.95,
+          e.smart_avg_pnl * 1.05,
+          e.smart_avg_pnl,
+          e.smart_avg_pnl,
+        ],
+      }))
+    : STATIC_ENGINES
+
   const sumTrades = ENGINE_DETAIL.reduce((s, e) => s + e.n, 0)
+  const scopeLabel =
+    ticker !== 'ALL'      ? `· ${ticker}` :
+    indexFilter !== 'ALL' ? `· ${indexFilter}` :
+                            ''
 
   return (
     <div style={{ borderBottom: `1px solid ${T.border}`, background: T.bg0 }}>
@@ -536,14 +650,15 @@ function HeroEngines() {
             border: `1px solid ${T.label}55`, padding: '2px 8px',
             background: `${T.label}11`, letterSpacing: '0.08em',
           }}>HIGH CONVICTION</span>
+          <LiveBadge live={liveOK} />
           <span style={{ color: T.dim, fontSize: 11, fontFamily: 'IBM Plex Mono', letterSpacing: '0.04em' }}>
-            {sumTrades.toLocaleString()} trades  ·  smart entry effective  ·  ALL · ALL years
+            {sumTrades.toLocaleString()} trades  ·  smart entry effective  ·  {year === 'ALL' ? 'ALL years' : year} {scopeLabel}
           </span>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           {['ALL', '2024', '2025', '2026'].map(y => (
-            <button key={y} style={{
-              ...chipBtn(y === 'ALL'),
+            <button key={y} onClick={() => setYear(y)} style={{
+              ...chipBtn(y === year),
               padding: '4px 12px', fontSize: 11,
             }}>{y}</button>
           ))}
@@ -689,16 +804,38 @@ function TopMoversPanel() {
 }
 
 // ── Active signals (compressed) ───────────────────────────────────────────────
-function ActiveSignalsPanel() {
+function ActiveSignalsPanel({
+  signals, engine, setEngine, liveOK,
+}: {
+  signals: ActiveSignalRow[]
+  engine:  string
+  setEngine: (e: string) => void
+  liveOK: boolean
+}) {
+  const STATIC_ACTIVE = [
+    { tk: 'ADANIENT',  eng: 'turbo',    score: 0.943, sec: 'Conglomerate' },
+    { tk: 'POWERGRID', eng: 'turbo',    score: 0.917, sec: 'Power'        },
+    { tk: 'BPCL',      eng: 'super',    score: 0.878, sec: 'Energy'       },
+    { tk: 'NTPC',      eng: 'super',    score: 0.852, sec: 'Power'        },
+    { tk: 'ZOMATO',    eng: 'super',    score: 0.831, sec: 'Internet'     },
+  ]
+  const rows = (liveOK && signals.length > 0)
+    ? signals.map(s => ({ tk: s.ticker, eng: s.engine, score: s.opportunity_score, sec: s.sector || '—' }))
+    : STATIC_ACTIVE
   return (
     <div style={{ padding: '12px 16px', borderBottom: `1px solid ${T.border}`, background: T.bg0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
-        <span style={{ color: T.label, fontSize: 11, fontWeight: 600, letterSpacing: '0.12em', fontFamily: 'Inter Tight' }}>
-          ACTIVE SIGNALS · TODAY · {ACTIVE.length}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+          <span style={{ color: T.label, fontSize: 11, fontWeight: 600, letterSpacing: '0.12em', fontFamily: 'Inter Tight' }}>
+            ACTIVE SIGNALS · TODAY · {rows.length}
+          </span>
+          <LiveBadge live={liveOK} />
+        </div>
         <div style={{ display: 'flex', gap: 6 }}>
-          {['ALL', 'TURBO', 'SUPER', 'STD'].map(b => (
-            <button key={b} style={chipBtn(b === 'ALL')}>{b}</button>
+          {['ALL', 'TURBO', 'SUPER', 'STANDARD'].map(b => (
+            <button key={b} onClick={() => setEngine(b)} style={chipBtn(b === engine)}>
+              {b === 'STANDARD' ? 'STD' : b}
+            </button>
           ))}
         </div>
       </div>
@@ -711,17 +848,24 @@ function ActiveSignalsPanel() {
           </tr>
         </thead>
         <tbody>
-          {ACTIVE.map((a, i) => (
-            <tr key={a.tk} style={{ borderBottom: `1px solid ${T.border}` }}>
-              <td style={{ padding: '7px 10px', color: T.dim, width: 24 }}>{i + 1}</td>
-              <td style={{ padding: '7px 10px', color: T.blue, fontWeight: 600 }}>{a.tk}</td>
-              <td style={{ padding: '7px 10px', color: a.eng === 'TURBO' ? T.label : T.green, fontWeight: 500 }}>{a.eng}</td>
-              <td style={{ padding: '7px 10px', color: T.data, textAlign: 'right', width: 60, fontFeatureSettings: '"tnum" 1' }}>{a.score.toFixed(3)}</td>
-              <td style={{ padding: '7px 10px', color: T.dim2, fontFamily: 'Inter Tight' }}>{a.sec}</td>
-              <td style={{ padding: '7px 10px', color: T.dim2, fontSize: 11 }}>+ pin</td>
-              <td style={{ padding: '7px 10px', color: T.ai, fontSize: 11 }}>ask</td>
-            </tr>
-          ))}
+          {rows.map((a, i) => {
+            const engUpper = (a.eng || '').toUpperCase()
+            const engColor = engUpper === 'TURBO' ? T.label : engUpper === 'SUPER' ? T.green : T.blue
+            return (
+              <tr key={`${a.tk}-${i}`} style={{ borderBottom: `1px solid ${T.border}` }}>
+                <td style={{ padding: '7px 10px', color: T.dim, width: 24 }}>{i + 1}</td>
+                <td style={{ padding: '7px 10px', color: T.blue, fontWeight: 600 }}>{a.tk}</td>
+                <td style={{ padding: '7px 10px', color: engColor, fontWeight: 500 }}>{engUpper}</td>
+                <td style={{ padding: '7px 10px', color: T.data, textAlign: 'right', width: 60, fontFeatureSettings: '"tnum" 1' }}>{a.score.toFixed(3)}</td>
+                <td style={{ padding: '7px 10px', color: T.dim2, fontFamily: 'Inter Tight' }}>{a.sec}</td>
+                <td style={{ padding: '7px 10px', color: T.dim2, fontSize: 11, cursor: 'pointer' }}>+ pin</td>
+                <td style={{ padding: '7px 10px', color: T.ai, fontSize: 11, cursor: 'pointer' }}>ask</td>
+              </tr>
+            )
+          })}
+          {rows.length === 0 && (
+            <tr><td colSpan={7} style={{ padding: 24, color: T.dim, textAlign: 'center' }}>No signals match these filters.</td></tr>
+          )}
         </tbody>
       </table>
     </div>
@@ -918,13 +1062,14 @@ function FunctionFooter() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ── Modern: filter bar (compact, friendly) ───────────────────────────────────
-function ModernFilterBar({
-  ticker, setTicker, year, setYear, idx, setIdx,
-}: {
+function ModernFilterBar(props: {
   ticker: string; setTicker: (v: string) => void
   year: string;   setYear:   (v: string) => void
   idx: string;    setIdx:    (v: string) => void
+  tickers?: string[]
+  indices?: IndexInfo[]
 }) {
+  const { ticker, setTicker, year, setYear, idx, setIdx } = props
   const labelStyle: React.CSSProperties = { color: T.dim, fontSize: 11, fontWeight: 500, letterSpacing: '0.04em' }
   const dropStyle: React.CSSProperties = {
     background: T.bg2, border: `1px solid ${T.borderHi}`,
@@ -948,17 +1093,16 @@ function ModernFilterBar({
       <span style={labelStyle}>Showing</span>
       <select value={ticker} onChange={e => setTicker(e.target.value)} style={dropStyle}>
         <option value="ALL">All stocks</option>
-        <option>HDFCBANK</option><option>TCS</option><option>POWERGRID</option>
-        <option>ADANIENT</option><option>BPCL</option><option>DRREDDY</option>
+        {(props.tickers || []).filter(t => t !== 'ALL').slice(0, 200).map(t => (
+          <option key={t} value={t}>{t}</option>
+        ))}
       </select>
       <span style={labelStyle}>in</span>
       <select value={idx} onChange={e => setIdx(e.target.value)} style={dropStyle}>
         <option value="ALL">All indices</option>
-        <option>NIFTY 50</option>
-        <option>NIFTY 100</option>
-        <option>NIFTY 500</option>
-        <option>NIFTY MIDCAP 150</option>
-        <option>NIFTY BANK</option>
+        {(props.indices || []).map(i => (
+          <option key={i.index_name} value={i.index_name}>{i.index_name} · {i.members}</option>
+        ))}
       </select>
       <span style={labelStyle}>·</span>
       <div style={{ display: 'flex', gap: 6 }}>
@@ -974,7 +1118,7 @@ function ModernFilterBar({
 }
 
 // ── Modern: greeting hero ────────────────────────────────────────────────────
-function ModernGreeting() {
+function ModernGreeting({ opportunityCount, liveOK }: { opportunityCount: number; liveOK: boolean }) {
   const [now, setNow] = useState<Date | null>(null)
   useEffect(() => { setNow(new Date()) }, [])
   const hour = now?.getHours() ?? 9
@@ -985,8 +1129,10 @@ function ModernGreeting() {
       <div style={{
         color: T.dim, fontSize: 13, letterSpacing: '0.06em',
         textTransform: 'uppercase', fontWeight: 500, marginBottom: 8,
+        display: 'flex', alignItems: 'center', gap: 12,
       }}>
         {greeting}
+        <LiveBadge live={liveOK} />
       </div>
       <h1 style={{
         color: T.data, fontFamily: 'Inter Tight, sans-serif',
@@ -999,10 +1145,11 @@ function ModernGreeting() {
         color: T.dim2, fontFamily: 'Inter Tight', fontSize: 16,
         lineHeight: 1.55, margin: 0, maxWidth: 720,
       }}>
+        {/* Macro line is still demo (no API yet) */}
         Markets are up. <span style={{ color: T.green, fontWeight: 600 }}>Power +1.83%</span> is leading,
         <span style={{ color: T.red, fontWeight: 600 }}> Metals -1.30%</span> are weak.
-        Our engine flagged <span style={{ color: T.label, fontWeight: 600 }}>5 long opportunities</span> overnight —
-        the top three are below.
+        Our engine has flagged <span style={{ color: T.label, fontWeight: 600 }}>{opportunityCount} long opportunit{opportunityCount === 1 ? 'y' : 'ies'}</span>
+        {opportunityCount > 0 ? <> — the top {Math.min(3, opportunityCount)} are below.</> : <> — none match your current filters.</>}
       </p>
     </div>
   )
@@ -1186,7 +1333,27 @@ function ModernAIPanel() {
 }
 
 // ── Modern: engine summary ribbon (collapsed) ────────────────────────────────
-function ModernEngineRibbon() {
+function ModernEngineRibbon({ overview, liveOK }: { overview: SwingOverviewResponse | null; liveOK: boolean }) {
+  const fmtPct = (v: number) => (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
+  const fmtN   = (v: number) => v.toLocaleString()
+  const summary = overview?.summary
+  const engines = overview?.engines || []
+  const findEng = (b: string) => engines.find(e => e.bucket === b)
+  const turbo    = findEng('turbo')
+  const sup      = findEng('super')
+  const std      = findEng('standard')
+
+  // Hero summary line — uses HC stats when live, falls back to demo numbers
+  const wr      = summary ? summary.hc_win_rate : 99.4
+  const trades  = summary ? summary.hc_trades   : 1893
+  const avg     = summary ? summary.hc_avg_pnl  : 5.19
+
+  const cards = [
+    { k: 'Turbo',    wr: turbo ? turbo.smart_win_rate.toFixed(1) + '%' : '99.4%',  n: turbo ? fmtN(turbo.total_trades) : '824' },
+    { k: 'Super',    wr: sup   ? sup.smart_win_rate.toFixed(1)   + '%' : '99.8%',  n: sup   ? fmtN(sup.total_trades)   : '1,069' },
+    { k: 'Standard', wr: std   ? std.smart_win_rate.toFixed(1)   + '%' : '30.0%',  n: std   ? fmtN(std.total_trades)   : '6,722' },
+  ]
+
   return (
     <div style={{
       background: T.bg1, border: `1px solid ${T.border}`, borderRadius: 12,
@@ -1194,21 +1361,18 @@ function ModernEngineRibbon() {
       display: 'flex', alignItems: 'center', gap: 30, flexWrap: 'wrap',
     }}>
       <div>
-        <div style={{ color: T.dim, fontSize: 12, marginBottom: 4, fontFamily: 'Inter Tight' }}>
+        <div style={{ color: T.dim, fontSize: 12, marginBottom: 4, fontFamily: 'Inter Tight', display: 'flex', alignItems: 'center', gap: 8 }}>
           Engine performance · all time
+          <LiveBadge live={liveOK} />
         </div>
         <div style={{ color: T.data, fontSize: 16, fontFamily: 'Inter Tight', lineHeight: 1.5 }}>
-          <span style={{ color: T.green, fontWeight: 700 }}>99.4%</span> win rate across
-          <span style={{ color: T.data, fontWeight: 600 }}> 1,893</span> high-conviction trades · average
-          <span style={{ color: T.green, fontWeight: 700 }}> +5.19%</span> per trade
+          <span style={{ color: T.green, fontWeight: 700 }}>{wr.toFixed(1)}%</span> win rate across
+          <span style={{ color: T.data, fontWeight: 600 }}> {fmtN(trades)}</span> high-conviction trades · average
+          <span style={{ color: avg >= 0 ? T.green : T.red, fontWeight: 700 }}> {fmtPct(avg)}</span> per trade
         </div>
       </div>
       <div style={{ display: 'flex', gap: 16, marginLeft: 'auto' }}>
-        {[
-          { k: 'Turbo',    wr: '99.4%', n: '824'  },
-          { k: 'Super',    wr: '99.8%', n: '1,069' },
-          { k: 'Standard', wr: '30.0%', n: '6,722' },
-        ].map(e => (
+        {cards.map(e => (
           <div key={e.k} style={{
             padding: '8px 14px', background: T.bg2, borderRadius: 8,
             border: `1px solid ${T.border}`, minWidth: 110,
@@ -1231,12 +1395,20 @@ function ModernEngineRibbon() {
 }
 
 // ── Modern body ──────────────────────────────────────────────────────────────
-function ModernBody() {
-  const [ticker, setTicker] = useState('ALL')
-  const [year, setYear]     = useState('ALL')
-  const [idx, setIdx]       = useState('ALL')
-
-  const TOP_CALLS = [
+function ModernBody({
+  ticker, setTicker, year, setYear, idx, setIdx,
+  signals, overview, liveOK, tickers, indices,
+}: {
+  ticker: string; setTicker: (v: string) => void
+  year:   string; setYear:   (v: string) => void
+  idx:    string; setIdx:    (v: string) => void
+  signals: ActiveSignalRow[]
+  overview: SwingOverviewResponse | null
+  liveOK: boolean
+  tickers: string[]
+  indices: IndexInfo[]
+}) {
+  const STATIC_CALLS = [
     { tk: 'ADANIENT',  eng: 'TURBO', score: 0.943, sec: 'Conglomerate',
       setup: 'Breakout above 60-day range with volume divergence. Pattern matched 14× historically — 13 reached the +5% target within 3 days.' },
     { tk: 'POWERGRID', eng: 'TURBO', score: 0.917, sec: 'Power',
@@ -1244,6 +1416,14 @@ function ModernBody() {
     { tk: 'BPCL',      eng: 'SUPER', score: 0.878, sec: 'Energy',
       setup: 'Rejection wick at the lower boundary with rising volume — classic setup that has produced reversals in 11 of 14 historical matches.' },
   ]
+  const top = (liveOK && signals.length > 0)
+    ? signals.slice(0, 3).map(s => ({
+        tk: s.ticker, eng: (s.engine || 'standard').toUpperCase(),
+        score: s.opportunity_score, sec: s.sector || '—',
+        setup: s.setup_summary || 'Pattern matched historically. Click for full setup analysis.',
+      }))
+    : STATIC_CALLS
+  const remaining = Math.max(0, signals.length - top.length)
 
   return (
     <div style={{
@@ -1251,11 +1431,12 @@ function ModernBody() {
       padding: '36px 48px 80px',
     }}>
       <div style={{ maxWidth: 1280, margin: '0 auto' }}>
-        <ModernGreeting />
+        <ModernGreeting opportunityCount={liveOK ? signals.length : 5} liveOK={liveOK} />
         <ModernFilterBar
           ticker={ticker} setTicker={setTicker}
           year={year}     setYear={setYear}
           idx={idx}       setIdx={setIdx}
+          tickers={tickers} indices={indices}
         />
 
         {/* Two-column: signals + AI */}
@@ -1264,17 +1445,27 @@ function ModernBody() {
             <h2 style={{
               color: T.data, fontSize: 18, fontWeight: 600, margin: '0 0 16px',
               fontFamily: 'Inter Tight', letterSpacing: '-0.01em',
+              display: 'flex', alignItems: 'center', gap: 10,
             }}>
               Top calls today
+              <LiveBadge live={liveOK} />
             </h2>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {TOP_CALLS.map((c, i) => (
-                <ModernSignalCard key={c.tk} rank={i + 1} sig={c} />
+              {top.map((c, i) => (
+                <ModernSignalCard key={`${c.tk}-${i}`} rank={i + 1} sig={c} />
               ))}
+              {top.length === 0 && (
+                <div style={{
+                  background: T.bg1, border: `1px solid ${T.border}`, borderRadius: 12,
+                  padding: 20, color: T.dim, textAlign: 'center', fontFamily: 'Inter Tight',
+                }}>No signals match these filters.</div>
+              )}
             </div>
-            <button style={{ ...modernBtnGhost, marginTop: 14, width: '100%' }}>
-              Show 2 more signals  ↓
-            </button>
+            {remaining > 0 && (
+              <button style={{ ...modernBtnGhost, marginTop: 14, width: '100%' }}>
+                Show {remaining} more signal{remaining === 1 ? '' : 's'}  ↓
+              </button>
+            )}
           </div>
 
           <div>
@@ -1288,7 +1479,7 @@ function ModernBody() {
           </div>
         </div>
 
-        <ModernEngineRibbon />
+        <ModernEngineRibbon overview={overview} liveOK={liveOK} />
 
         <div style={{
           color: T.dim, fontSize: 12, textAlign: 'center', marginTop: 24,
@@ -1308,6 +1499,15 @@ function ModernBody() {
 export default function AnalysisV3Mock() {
   const [tab, setTab]   = useState('MACRO')
   const [mode, setMode] = useState<Mode>('TERMINAL')
+
+  // Filters — shared across modes (memory across tab/mode switches)
+  const [ticker,  setTicker]  = useState('ALL')
+  const [year,    setYear]    = useState('ALL')
+  const [idx,     setIdx]     = useState('ALL')
+  const [engine,  setEngine]  = useState('ALL')   // active-signals engine filter
+
+  // Live data — fetches whenever filters change. Falls back to demo if API down.
+  const live = useLiveData(ticker, year, idx, engine)
 
   // Persist mode across reloads (UX nicety)
   useEffect(() => {
@@ -1346,8 +1546,17 @@ export default function AnalysisV3Mock() {
 
               <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
                 <Breadcrumb />
-                <HeroEngines />
-                <ActiveSignalsPanel />
+                <HeroEngines
+                  overview={live.overview}
+                  year={year} setYear={setYear}
+                  ticker={ticker} indexFilter={idx}
+                  liveOK={live.liveOK}
+                />
+                <ActiveSignalsPanel
+                  signals={live.signals}
+                  engine={engine} setEngine={setEngine}
+                  liveOK={live.liveOK}
+                />
                 <SectorHeatmap />
                 <TopMoversPanel />
               </div>
@@ -1366,7 +1575,16 @@ export default function AnalysisV3Mock() {
             <FunctionFooter />
           </>
         ) : (
-          <ModernBody />
+          <ModernBody
+            ticker={ticker} setTicker={setTicker}
+            year={year}     setYear={setYear}
+            idx={idx}       setIdx={setIdx}
+            signals={live.signals}
+            overview={live.overview}
+            liveOK={live.liveOK}
+            tickers={live.tickers}
+            indices={live.indices}
+          />
         )}
       </div>
     </>
