@@ -13,7 +13,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   getSwingOverview, getActiveSignals, getSwingTickers, getIndices,
+  getBreadth, getTopMovers, getSectorStats, getActivityFeed,
+  getAIHealth, postAIChat,
   type SwingOverviewResponse, type ActiveSignalRow, type IndexInfo,
+  type BreadthResponse, type TopMoversResponse, type SectorStat,
+  type ActivityItem, type AIHealth,
 } from '@/lib/backtest-api'
 
 // ── Live data hook ────────────────────────────────────────────────────────────
@@ -25,14 +29,20 @@ type LiveState = {
   signalCount: number
   indices:     IndexInfo[]
   tickers:     string[]
+  breadth:     BreadthResponse | null
+  movers:      TopMoversResponse | null
+  sectors:     SectorStat[]
+  activity:    ActivityItem[]
+  aiHealth:    AIHealth | null
   loading:     boolean
-  liveOK:      boolean   // true once any successful API response has come back
   error:       string | null
 }
 function useLiveData(ticker: string, year: string, indexFilter: string, engine: string) {
   const [s, setS] = useState<LiveState>({
     overview: null, signals: [], signalCount: 0,
-    indices: [], tickers: [], loading: true, liveOK: false, error: null,
+    indices: [], tickers: [],
+    breadth: null, movers: null, sectors: [], activity: [],
+    aiHealth: null, loading: true, error: null,
   })
 
   const refetch = useCallback(() => {
@@ -47,15 +57,24 @@ function useLiveData(ticker: string, year: string, indexFilter: string, engine: 
       getActiveSignals({ engine: en, index: ix, ticker: tk }),
       getSwingTickers(),
       getIndices(),
-    ]).then(([ov, sig, tk2, idx2]) => {
+      getBreadth(),
+      getTopMovers(10),
+      getSectorStats(),
+      getActivityFeed(20),
+      getAIHealth(),
+    ]).then(([ov, sig, tk2, idx2, br, mv, sec, act, ai]) => {
       setS({
         overview:    ov.status   === 'fulfilled' ? ov.value : null,
         signals:     sig.status  === 'fulfilled' ? sig.value.signals : [],
         signalCount: sig.status  === 'fulfilled' ? sig.value.count   : 0,
         tickers:     tk2.status  === 'fulfilled' ? ['ALL', ...tk2.value.tickers] : ['ALL'],
         indices:     idx2.status === 'fulfilled' ? idx2.value.indices : [],
+        breadth:     br.status   === 'fulfilled' ? br.value  : null,
+        movers:      mv.status   === 'fulfilled' ? mv.value  : null,
+        sectors:     sec.status  === 'fulfilled' ? sec.value.sectors : [],
+        activity:    act.status  === 'fulfilled' ? act.value.items   : [],
+        aiHealth:    ai.status   === 'fulfilled' ? ai.value  : null,
         loading:     false,
-        liveOK:      ov.status === 'fulfilled',
         error:       ov.status === 'rejected' ? String((ov as PromiseRejectedResult).reason) : null,
       })
     })
@@ -63,19 +82,6 @@ function useLiveData(ticker: string, year: string, indexFilter: string, engine: 
 
   useEffect(() => { refetch() }, [refetch])
   return s
-}
-
-// Small pill: "LIVE" or "DEMO" depending on whether real data backed this panel
-function LiveBadge({ live }: { live: boolean }) {
-  return (
-    <span style={{
-      fontFamily: 'IBM Plex Mono, monospace', fontSize: 9, fontWeight: 600,
-      padding: '2px 6px', letterSpacing: '0.10em',
-      color: live ? '#34d399' : '#f59e0b',
-      border: `1px solid ${live ? '#34d39955' : '#f59e0b55'}`,
-      background: live ? '#34d39911' : '#f59e0b11',
-    }}>{live ? 'LIVE' : 'DEMO'}</span>
-  )
 }
 
 // ── Tokens (extends V2) ──────────────────────────────────────────────────────
@@ -100,24 +106,10 @@ const T = {
   ai:       '#34d399',
 }
 
-// ── Static data ───────────────────────────────────────────────────────────────
-const MACRO = [
-  { sym: 'NIFTY 50',     val: '24,328.95', chg: '+0.42%',  pos: true  },
-  { sym: 'BANKNIFTY',    val: '52,108.30', chg: '-0.18%',  pos: false },
-  { sym: 'USD/INR',      val: '83.42',     chg: '-0.06%',  pos: true  },
-  { sym: 'BRENT',        val: '$84.12',    chg: '+1.30%',  pos: true  },
-  { sym: 'US 10Y',       val: '4.21%',     chg: '+3 bps',  pos: false },
-  { sym: 'INDIA VIX',    val: '13.84',     chg: '-2.10%',  pos: true  },
-  { sym: 'GOLD',         val: '$2,318',    chg: '+0.80%',  pos: true  },
-  { sym: 'BTC/USD',      val: '$67,420',   chg: '+1.20%',  pos: true  },
-]
-
+// Workspace tabs collapsed to one for now (Sprint 1 = ship one polished view).
+// Multi-workspace shell will return in Sprint 2 when each tab has unique content.
 const WORKSPACES = [
-  { k: 'MACRO',   label: 'Morning Macro' },
-  { k: 'SECTOR',  label: 'Sector Lens' },
-  { k: 'STOCK',   label: 'Stock Deep' },
-  { k: 'RISK',    label: 'Risk Review' },
-  { k: 'CUSTOM',  label: 'Custom' },
+  { k: 'OVERVIEW', label: 'Overview' },
 ]
 
 const NAV = [
@@ -158,90 +150,7 @@ const NAV = [
   },
 ]
 
-const SECTORS = [
-  { name: 'BANKS',          chg: -0.42, n: 17 },
-  { name: 'IT',             chg: +1.18, n: 11 },
-  { name: 'PHARMA',         chg: +0.84, n: 14 },
-  { name: 'AUTO',           chg: +2.10, n: 13 },
-  { name: 'METALS',         chg: -1.30, n: 8  },
-  { name: 'FMCG',           chg: +0.21, n: 13 },
-  { name: 'ENERGY',         chg: -0.61, n: 10 },
-  { name: 'NBFC',           chg: -0.18, n: 12 },
-  { name: 'CAP GOODS',      chg: +0.92, n: 7  },
-  { name: 'CONSUMER',       chg: +0.34, n: 9  },
-  { name: 'TELECOM',        chg: +1.41, n: 4  },
-  { name: 'INSURANCE',      chg: -0.05, n: 5  },
-  { name: 'CHEMICALS',      chg: -0.71, n: 8  },
-  { name: 'CEMENT',         chg: +0.62, n: 6  },
-  { name: 'POWER',          chg: +1.83, n: 7  },
-  { name: 'REAL ESTATE',    chg: +0.41, n: 4  },
-]
-
-const MOVERS = [
-  { tk: 'POWERGRID', sec: 'Power',     chg: +4.21, vol: '12.4M', sig: 'TURBO' },
-  { tk: 'TVSMOTOR',  sec: 'Auto',      chg: +3.84, vol: '6.1M',  sig: 'SUPER' },
-  { tk: 'TATAPOWER', sec: 'Power',     chg: +2.91, vol: '18.2M', sig: 'TURBO' },
-  { tk: 'EICHERMOT', sec: 'Auto',      chg: +2.42, vol: '0.9M',  sig: 'SUPER' },
-  { tk: 'DRREDDY',   sec: 'Pharma',    chg: +2.18, vol: '1.4M',  sig: '—'     },
-  { tk: 'JSWSTEEL',  sec: 'Metals',    chg: -1.82, vol: '8.7M',  sig: '—'     },
-  { tk: 'TATASTEEL', sec: 'Metals',    chg: -1.71, vol: '14.3M', sig: '—'     },
-  { tk: 'AXISBANK',  sec: 'Banks',     chg: -0.84, vol: '9.4M',  sig: '—'     },
-]
-
-const ENGINES = [
-  { name: 'TURBO',    n: 824,  wr: 99.39, avg: 5.07, hold: 1.8 },
-  { name: 'SUPER',    n: 1069, wr: 99.81, avg: 5.28, hold: 2.4 },
-  { name: 'STANDARD', n: 6722, wr: 30.04, avg: 0.21, hold: 8.1 },
-]
-
-const ACTIVE = [
-  { tk: 'ADANIENT',  eng: 'TURBO', score: 0.943, sec: 'Conglomerate' },
-  { tk: 'POWERGRID', eng: 'TURBO', score: 0.917, sec: 'Power'        },
-  { tk: 'BPCL',      eng: 'SUPER', score: 0.878, sec: 'Energy'       },
-  { tk: 'NTPC',      eng: 'SUPER', score: 0.852, sec: 'Power'        },
-  { tk: 'ZOMATO',    eng: 'SUPER', score: 0.831, sec: 'Internet'     },
-]
-
-const NEWS = [
-  { t: '08:42', tag: 'EARN',  src: 'Bloomberg', headline: 'HDFC Bank Q4 NII beats by 3.2%, asset quality stable',  senti: 'pos', tk: 'HDFCBANK' },
-  { t: '08:31', tag: 'POL',   src: 'Reuters',   headline: 'RBI keeps repo rate unchanged at 6.50%, MPC vote 5-1',    senti: 'neu', tk: null     },
-  { t: '08:14', tag: 'M&A',   src: 'Mint',      headline: 'Tata Group in talks to acquire 26% stake in Vistara II',  senti: 'pos', tk: 'TATAMOTORS' },
-  { t: '07:52', tag: 'GLOB',  src: 'WSJ',       headline: 'Brent crude tests $84 as OPEC+ extends voluntary cuts',   senti: 'neu', tk: null     },
-  { t: '07:31', tag: 'TECH',  src: 'BS',        headline: 'Infosys announces $250M GenAI fund, partners with NVIDIA','senti': 'pos', tk: 'INFY'  },
-]
-
-const AI_CONVERSATION: { who: 'user' | 'ai'; body: string | React.ReactNode }[] = [
-  { who: 'user', body: '/morning India' },
-  {
-    who: 'ai',
-    body: (
-      <>
-        <div style={{ marginBottom: 8 }}>India open — three things:</div>
-        <ol style={{ paddingLeft: 18, margin: 0, lineHeight: 1.6 }}>
-          <li><span style={{ color: T.label }}>Power sector</span> leading +1.83% — POWERGRID and TATAPOWER both flagged TURBO this morning. Volume 2.1× 20-day avg.</li>
-          <li><span style={{ color: T.red }}>Metals -1.30%</span> on China demand softness; JSWSTEEL and TATASTEEL fading on no fresh signals.</li>
-          <li>RBI unchanged → bank stocks neutral; HDFC Q4 beat is doing the lifting alone.</li>
-        </ol>
-        <div style={{ marginTop: 10, color: T.dim2 }}>5 active signals, all rally. Worth a look: <span style={{ color: T.blue }}>ADANIENT</span> (0.943) and <span style={{ color: T.blue }}>POWERGRID</span> (0.917).</div>
-      </>
-    ),
-  },
-  { who: 'user', body: '/explain POWERGRID' },
-  {
-    who: 'ai',
-    body: (
-      <>
-        POWERGRID — TURBO, score <span style={{ color: T.data, fontFamily: 'IBM Plex Mono' }}>0.917</span>:
-        <ul style={{ margin: '6px 0 0 18px', padding: 0, lineHeight: 1.6 }}>
-          <li>Short-term slope turning up inside contracting range</li>
-          <li>Volume rising for 4 sessions</li>
-          <li>Pattern matched 14× historically · 13 reached +5% target within 3 days</li>
-          <li>Smart entry: <span style={{ color: T.label, fontFamily: 'IBM Plex Mono' }}>09:18 IST · ₹308.5 → ₹312.7</span></li>
-        </ul>
-      </>
-    ),
-  },
-]
+// Static demo constants removed — every panel now gets data from the live hooks.
 
 // ── Tiny helpers ──────────────────────────────────────────────────────────────
 function Spark({ pts, color }: { pts: number[]; color: string }) {
@@ -388,22 +297,44 @@ function StatusBar() {
   )
 }
 
-// ── Macro strip ──────────────────────────────────────────────────────────────
-function MacroStrip() {
+// ── Breadth strip (replaces MacroStrip — universe-wide breadth from our data)
+function BreadthStrip({ breadth }: { breadth: BreadthResponse | null }) {
+  const fmtPct = (v: number | undefined | null) =>
+    v === undefined || v === null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
+
+  const cells: { label: string; value: string; sub?: string; color: string }[] =
+    breadth ? [
+      { label: 'AS OF',      value: breadth.as_of || '—',                   color: T.dim2 },
+      { label: 'UNIVERSE',   value: String(breadth.total_stocks),
+        sub: `${breadth.advancers}↑ ${breadth.decliners}↓`,                color: T.data },
+      { label: 'AVG MOVE',   value: fmtPct(breadth.avg_pct),                color: (breadth.avg_pct >= 0 ? T.green : T.red) },
+      { label: 'BEST',       value: breadth.best_stock?.ticker || '—',
+        sub: fmtPct(breadth.best_stock?.pct),                              color: T.green },
+      { label: 'WORST',      value: breadth.worst_stock?.ticker || '—',
+        sub: fmtPct(breadth.worst_stock?.pct),                             color: T.red },
+      { label: 'TOP SECTOR', value: breadth.best_sector?.sector || '—',
+        sub: fmtPct(breadth.best_sector?.avg_pct),                         color: T.green },
+      { label: 'WEAK SECTOR',value: breadth.worst_sector?.sector || '—',
+        sub: fmtPct(breadth.worst_sector?.avg_pct),                        color: T.red },
+      { label: 'SIGNALS',    value: String(breadth.signals_total),
+        sub: `${breadth.signals_hc} HC`,                                    color: T.label },
+    ]
+    : Array.from({ length: 8 }, (_, i) => ({ label: '—', value: '—', color: T.dim }))
+
   return (
     <div style={{
-      display: 'grid', gridTemplateColumns: `repeat(${MACRO.length}, 1fr)`, gap: 1,
+      display: 'grid', gridTemplateColumns: `repeat(${cells.length}, 1fr)`, gap: 1,
       background: T.border, borderBottom: `1px solid ${T.border}`,
     }}>
-      {MACRO.map(m => (
-        <div key={m.sym} style={{
+      {cells.map((c, i) => (
+        <div key={`${c.label}-${i}`} style={{
           background: T.bg0, padding: '10px 14px',
           fontFamily: 'IBM Plex Mono, monospace',
         }}>
-          <div style={{ color: T.dim, fontSize: 10, letterSpacing: '0.06em' }}>{m.sym}</div>
+          <div style={{ color: T.dim, fontSize: 10, letterSpacing: '0.06em' }}>{c.label}</div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 2 }}>
-            <span style={{ color: T.data, fontSize: 14, fontWeight: 500, fontFeatureSettings: '"tnum" 1' }}>{m.val}</span>
-            <span style={{ color: m.pos ? T.green : T.red, fontSize: 11, fontWeight: 500 }}>{m.chg}</span>
+            <span style={{ color: c.color, fontSize: 14, fontWeight: 500, fontFeatureSettings: '"tnum" 1' }}>{c.value}</span>
+            {c.sub && <span style={{ color: T.dim2, fontSize: 11, fontWeight: 500 }}>{c.sub}</span>}
           </div>
         </div>
       ))}
@@ -527,7 +458,7 @@ function chipBtn(active: boolean): React.CSSProperties {
 }
 
 // ── Sector heatmap ────────────────────────────────────────────────────────────
-function SectorHeatmap() {
+function SectorHeatmap({ sectors, asOf }: { sectors: SectorStat[]; asOf: string | null }) {
   const cellColor = (c: number) => {
     const intensity = Math.min(Math.abs(c) / 2.5, 1)
     if (c >= 0) return `rgba(34, 197, 94, ${0.10 + intensity * 0.5})`
@@ -537,62 +468,56 @@ function SectorHeatmap() {
     <div style={{ padding: '12px 16px', borderBottom: `1px solid ${T.border}` }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
         <span style={{ color: T.label, fontSize: 11, fontWeight: 600, letterSpacing: '0.12em', fontFamily: 'Inter Tight' }}>
-          NSE SECTOR HEATMAP
+          NSE SECTOR HEATMAP · {sectors.length} SECTORS
         </span>
         <span style={{ color: T.dim, fontSize: 10, fontFamily: 'IBM Plex Mono' }}>
-          intraday · 11:42 IST
+          as of {asOf || '—'}
         </span>
       </div>
-      <div style={{
-        display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 1,
-        background: T.border, border: `1px solid ${T.border}`,
-      }}>
-        {SECTORS.map(s => (
-          <div key={s.name} style={{
-            background: cellColor(s.chg), padding: '14px 10px',
-            display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
-            minHeight: 64, cursor: 'pointer',
-          }}>
-            <span style={{ color: T.data, fontSize: 10, fontFamily: 'Inter Tight', fontWeight: 600, letterSpacing: '0.04em' }}>{s.name}</span>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-              <span style={{
-                color: s.chg >= 0 ? T.green : T.red, fontSize: 14,
-                fontFamily: 'IBM Plex Mono', fontWeight: 500, fontFeatureSettings: '"tnum" 1',
-              }}>
-                {s.chg >= 0 ? '+' : ''}{s.chg.toFixed(2)}%
-              </span>
-              <span style={{ color: T.dim, fontSize: 9, fontFamily: 'IBM Plex Mono' }}>n={s.n}</span>
+      {sectors.length === 0 ? (
+        <div style={{ color: T.dim, fontSize: 11, padding: 18, textAlign: 'center', fontFamily: 'IBM Plex Mono' }}>
+          No sector data — admin may need to seed the universe table.
+        </div>
+      ) : (
+        <div style={{
+          display: 'grid', gridTemplateColumns: `repeat(${Math.min(sectors.length, 8)}, 1fr)`, gap: 1,
+          background: T.border, border: `1px solid ${T.border}`,
+        }}>
+          {sectors.slice(0, 32).map(s => (
+            <div key={s.sector} style={{
+              background: cellColor(s.avg_pct), padding: '14px 10px',
+              display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+              minHeight: 64, cursor: 'pointer',
+            }} title={`${s.advancers}↑ ${s.decliners}↓ · best: ${s.best_ticker || '—'}`}>
+              <span style={{ color: T.data, fontSize: 10, fontFamily: 'Inter Tight', fontWeight: 600, letterSpacing: '0.04em' }}>{s.sector}</span>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                <span style={{
+                  color: s.avg_pct >= 0 ? T.green : T.red, fontSize: 14,
+                  fontFamily: 'IBM Plex Mono', fontWeight: 500, fontFeatureSettings: '"tnum" 1',
+                }}>
+                  {s.avg_pct >= 0 ? '+' : ''}{s.avg_pct.toFixed(2)}%
+                </span>
+                <span style={{ color: T.dim, fontSize: 9, fontFamily: 'IBM Plex Mono' }}>n={s.members}</span>
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
 
 // ── Hero engines (the headline of the page) ──────────────────────────────────
 function HeroEngines({
-  overview, year, setYear, ticker, indexFilter, liveOK,
+  overview, year, setYear, ticker, indexFilter, loading,
 }: {
   overview:    SwingOverviewResponse | null
   year:        string
   setYear:     (y: string) => void
   ticker:      string
   indexFilter: string
-  liveOK:      boolean
+  loading:     boolean
 }) {
-  // Map live engine response → display rows. Falls back to static demo data.
-  const STATIC_ENGINES = [
-    { name: 'TURBO',    icon: 'T', color: T.label, n: 824,  wr: 99.39, avg: 5.07, cum: 4178.0, hold: 1.8, p90: 5.12, p180: 5.04,
-      desc: 'Fast momentum exits · 1-3 day resolution',
-      spark: [4.6, 4.9, 5.1, 4.8, 5.2, 5.0, 5.07] },
-    { name: 'SUPER',    icon: 'S', color: T.green, n: 1069, wr: 99.81, avg: 5.28, cum: 5644.3, hold: 2.4, p90: 5.41, p180: 5.21,
-      desc: 'Trend continuation · highest avg per trade',
-      spark: [5.0, 5.1, 5.4, 5.2, 5.5, 5.3, 5.28] },
-    { name: 'STANDARD', icon: 'ST', color: T.blue, n: 6722, wr: 30.04, avg: 0.21, cum: 1411.6, hold: 8.1, p90: 0.38, p180: 0.29,
-      desc: 'High volume · selective entry required',
-      spark: [0.1, 0.3, 0.2, 0.4, 0.0, 0.3, 0.21] },
-  ]
   const ICONS:  Record<string, string> = { turbo: 'T', super: 'S', standard: 'ST' }
   const COLORS: Record<string, string> = { turbo: T.label, super: T.green, standard: T.blue }
   const DESCS:  Record<string, string> = {
@@ -601,8 +526,8 @@ function HeroEngines({
     standard: 'High volume · selective entry required',
   }
 
-  const ENGINE_DETAIL = (overview?.engines && overview.engines.length > 0)
-    ? overview.engines.map(e => ({
+  const ENGINE_DETAIL = overview?.engines
+    ? overview.engines.filter(e => ['turbo','super','standard'].includes(e.bucket)).map(e => ({
         name: e.bucket.toUpperCase(),
         icon: ICONS[e.bucket] || e.bucket[0]?.toUpperCase() || '·',
         color: COLORS[e.bucket] || T.dim2,
@@ -614,7 +539,6 @@ function HeroEngines({
         p90: e.pnl_90d_avg ?? 0,
         p180: e.pnl_180d_avg ?? 0,
         desc: e.description || DESCS[e.bucket] || '',
-        // Sparkline approximation: build a smooth line around avg using 90d/180d
         spark: [
           (e.pnl_180d_avg ?? e.smart_avg_pnl) * 0.9,
           (e.pnl_180d_avg ?? e.smart_avg_pnl),
@@ -625,7 +549,7 @@ function HeroEngines({
           e.smart_avg_pnl,
         ],
       }))
-    : STATIC_ENGINES
+    : []
 
   const sumTrades = ENGINE_DETAIL.reduce((s, e) => s + e.n, 0)
   const scopeLabel =
@@ -650,9 +574,8 @@ function HeroEngines({
             border: `1px solid ${T.label}55`, padding: '2px 8px',
             background: `${T.label}11`, letterSpacing: '0.08em',
           }}>HIGH CONVICTION</span>
-          <LiveBadge live={liveOK} />
           <span style={{ color: T.dim, fontSize: 11, fontFamily: 'IBM Plex Mono', letterSpacing: '0.04em' }}>
-            {sumTrades.toLocaleString()} trades  ·  smart entry effective  ·  {year === 'ALL' ? 'ALL years' : year} {scopeLabel}
+            {loading ? 'loading…' : `${sumTrades.toLocaleString()} trades  ·  smart entry effective  ·  ${year === 'ALL' ? 'ALL years' : year} ${scopeLabel}`}
           </span>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
@@ -665,7 +588,22 @@ function HeroEngines({
         </div>
       </div>
 
-      {/* Hero grid — 3 huge cards */}
+      {/* Hero grid — loading skeleton, empty state, or 3 huge cards */}
+      {loading && ENGINE_DETAIL.length === 0 ? (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 1, background: T.border, padding: '0 1px 1px' }}>
+          {[0, 1, 2].map(i => (
+            <div key={i} style={{ background: T.bg0, padding: '20px 22px', minHeight: 240 }}>
+              <div style={{ height: 18, width: 80, background: T.bg2, marginBottom: 18 }} />
+              <div style={{ height: 44, width: '70%', background: T.bg2, marginBottom: 12 }} />
+              <div style={{ height: 14, width: '50%', background: T.bg2 }} />
+            </div>
+          ))}
+        </div>
+      ) : ENGINE_DETAIL.length === 0 ? (
+        <div style={{ padding: 36, color: T.dim, textAlign: 'center', fontFamily: 'IBM Plex Mono', fontSize: 12 }}>
+          No trades match these filters. Try widening the year or removing the stock/index filter.
+        </div>
+      ) : (
       <div style={{
         display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 1,
         background: T.border, padding: '0 1px 1px',
@@ -763,73 +701,87 @@ function HeroEngines({
           )
         })}
       </div>
+      )}
     </div>
   )
 }
 
 
 // ── Top movers (own panel, below the fold) ───────────────────────────────────
-function TopMoversPanel() {
+function TopMoversPanel({ movers }: { movers: TopMoversResponse | null }) {
+  const [side, setSide] = useState<'gainers' | 'losers'>('gainers')
+  const rows = movers ? movers[side] : []
+
+  const fmtVol = (v: number) =>
+    v >= 1e7 ? (v / 1e7).toFixed(1) + 'Cr' :
+    v >= 1e5 ? (v / 1e5).toFixed(1) + 'L'  :
+    v.toLocaleString()
+
   return (
     <div style={{ borderBottom: `1px solid ${T.border}`, background: T.bg0, padding: '14px 22px' }}>
-      <div style={{ color: T.label, fontSize: 11, fontWeight: 600, letterSpacing: '0.12em', fontFamily: 'Inter Tight', marginBottom: 10 }}>
-        TOP MOVERS · INTRADAY
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'baseline' }}>
+          <span style={{ color: T.label, fontSize: 11, fontWeight: 600, letterSpacing: '0.12em', fontFamily: 'Inter Tight' }}>
+            TOP MOVERS · {movers?.as_of || '—'}
+          </span>
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button onClick={() => setSide('gainers')} style={chipBtn(side === 'gainers')}>GAINERS</button>
+          <button onClick={() => setSide('losers')}  style={chipBtn(side === 'losers')}>LOSERS</button>
+        </div>
       </div>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, fontFamily: 'IBM Plex Mono' }}>
-        <thead>
-          <tr style={{ borderBottom: `1px solid ${T.border}` }}>
-            {['TICKER', 'SECTOR', 'CHG', 'VOL', 'SIG'].map(h => (
-              <th key={h} style={{ padding: '6px 8px', textAlign: 'left', color: T.dim, fontSize: 10, fontWeight: 500 }}>{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {MOVERS.map(m => (
-            <tr key={m.tk} style={{ borderBottom: `1px solid ${T.border}` }}>
-              <td style={{ padding: '7px 8px', color: T.blue, fontWeight: 600 }}>{m.tk}</td>
-              <td style={{ padding: '7px 8px', color: T.dim2, fontFamily: 'Inter Tight' }}>{m.sec}</td>
-              <td style={{ padding: '7px 8px', color: m.chg >= 0 ? T.green : T.red, fontFeatureSettings: '"tnum" 1', textAlign: 'right' }}>
-                {m.chg >= 0 ? '+' : ''}{m.chg.toFixed(2)}%
-              </td>
-              <td style={{ padding: '7px 8px', color: T.data, textAlign: 'right' }}>{m.vol}</td>
-              <td style={{ padding: '7px 8px', color: m.sig === 'TURBO' ? T.label : m.sig === 'SUPER' ? T.green : T.dim }}>
-                {m.sig}
-              </td>
+      {rows.length === 0 ? (
+        <div style={{ color: T.dim, fontSize: 11, padding: 18, textAlign: 'center', fontFamily: 'IBM Plex Mono' }}>
+          No data available.
+        </div>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, fontFamily: 'IBM Plex Mono' }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+              {['TICKER', 'SECTOR', 'CLOSE', 'CHG', 'VOL', 'SIG'].map(h => (
+                <th key={h} style={{ padding: '6px 8px', textAlign: 'left', color: T.dim, fontSize: 10, fontWeight: 500 }}>{h}</th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map(m => (
+              <tr key={m.ticker} style={{ borderBottom: `1px solid ${T.border}` }}>
+                <td style={{ padding: '7px 8px', color: T.blue, fontWeight: 600 }}>{m.ticker}</td>
+                <td style={{ padding: '7px 8px', color: T.dim2, fontFamily: 'Inter Tight' }}>{m.sector}</td>
+                <td style={{ padding: '7px 8px', color: T.data, textAlign: 'right', fontFeatureSettings: '"tnum" 1' }}>{m.close.toLocaleString()}</td>
+                <td style={{ padding: '7px 8px', color: m.pct >= 0 ? T.green : T.red, fontFeatureSettings: '"tnum" 1', textAlign: 'right' }}>
+                  {m.pct >= 0 ? '+' : ''}{m.pct.toFixed(2)}%
+                </td>
+                <td style={{ padding: '7px 8px', color: T.dim2, textAlign: 'right' }}>{fmtVol(m.volume)}</td>
+                <td style={{ padding: '7px 8px', color: m.active_signal ? T.label : T.dim }}>
+                  {m.active_signal ? '★' : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   )
 }
 
 // ── Active signals (compressed) ───────────────────────────────────────────────
 function ActiveSignalsPanel({
-  signals, engine, setEngine, liveOK,
+  signals, engine, setEngine, loading,
 }: {
   signals: ActiveSignalRow[]
   engine:  string
   setEngine: (e: string) => void
-  liveOK: boolean
+  loading: boolean
 }) {
-  const STATIC_ACTIVE = [
-    { tk: 'ADANIENT',  eng: 'turbo',    score: 0.943, sec: 'Conglomerate' },
-    { tk: 'POWERGRID', eng: 'turbo',    score: 0.917, sec: 'Power'        },
-    { tk: 'BPCL',      eng: 'super',    score: 0.878, sec: 'Energy'       },
-    { tk: 'NTPC',      eng: 'super',    score: 0.852, sec: 'Power'        },
-    { tk: 'ZOMATO',    eng: 'super',    score: 0.831, sec: 'Internet'     },
-  ]
-  const rows = (liveOK && signals.length > 0)
-    ? signals.map(s => ({ tk: s.ticker, eng: s.engine, score: s.opportunity_score, sec: s.sector || '—' }))
-    : STATIC_ACTIVE
+  const rows = signals.map(s => ({ tk: s.ticker, eng: s.engine, score: s.opportunity_score, sec: s.sector || '—' }))
   return (
     <div style={{ padding: '12px 16px', borderBottom: `1px solid ${T.border}`, background: T.bg0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
           <span style={{ color: T.label, fontSize: 11, fontWeight: 600, letterSpacing: '0.12em', fontFamily: 'Inter Tight' }}>
-            ACTIVE SIGNALS · TODAY · {rows.length}
+            ACTIVE SIGNALS · TODAY · {loading ? '…' : rows.length}
           </span>
-          <LiveBadge live={liveOK} />
         </div>
         <div style={{ display: 'flex', gap: 6 }}>
           {['ALL', 'TURBO', 'SUPER', 'STANDARD'].map(b => (
@@ -872,23 +824,40 @@ function ActiveSignalsPanel({
   )
 }
 
-// ── Right rail: AI chat + News ───────────────────────────────────────────────
-function AIChatPanel() {
+// ── Right rail: AI chat (wired to /api/ai/chat) ──────────────────────────────
+type ChatMsg = { who: 'user' | 'ai'; body: string; isError?: boolean }
+function AIChatPanel({ aiHealth, ctx }: { aiHealth: AIHealth | null; ctx: Record<string, unknown> }) {
   const [input, setInput] = useState('')
-  const [convo, setConvo] = useState(AI_CONVERSATION)
+  const [convo, setConvo] = useState<ChatMsg[]>([
+    { who: 'ai', body: aiHealth?.configured
+      ? "I have your current view in context — engine performance, active signals, and your filters. Ask me anything about a setup, a stock, or what's worth watching."
+      : "AI chat will activate once the admin sets ANTHROPIC_API_KEY in Railway. Until then, you can still browse all the live data on the page."
+    },
+  ])
   const [thinking, setThinking] = useState(false)
   const endRef = useRef<HTMLDivElement>(null)
 
-  function send() {
-    if (!input.trim()) return
-    setConvo(c => [...c, { who: 'user', body: input }])
-    setThinking(true)
+  async function send(messageOverride?: string) {
+    const text = (messageOverride ?? input).trim()
+    if (!text || thinking) return
+    setConvo(c => [...c, { who: 'user', body: text }])
     setInput('')
-    setTimeout(() => {
-      setConvo(c => [...c, { who: 'ai', body: <em style={{ color: T.dim2 }}>Mock — wire me to /api/ai/chat. Real AI will see the current ticker, filter scope, and active signals.</em> }])
+    setThinking(true)
+    setTimeout(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
+
+    try {
+      const history = convo
+        .filter(m => !m.isError)
+        .map(m => ({ role: (m.who === 'ai' ? 'assistant' : 'user') as 'user' | 'assistant', content: m.body }))
+      const r = await postAIChat({ message: text, history, context: ctx, model: 'haiku' })
+      setConvo(c => [...c, { who: 'ai', body: r.message }])
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'AI request failed.'
+      setConvo(c => [...c, { who: 'ai', body: msg, isError: true }])
+    } finally {
       setThinking(false)
       setTimeout(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
-    }, 700)
+    }
   }
 
   return (
@@ -900,9 +869,13 @@ function AIChatPanel() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ width: 6, height: 6, borderRadius: 6, background: T.ai, boxShadow: `0 0 6px ${T.ai}` }} />
           <span style={{ color: T.ai, fontSize: 10, letterSpacing: '0.12em', fontWeight: 600, fontFamily: 'Inter Tight' }}>KANIDA AI</span>
-          <span style={{ color: T.dim, fontSize: 10, fontFamily: 'IBM Plex Mono' }}>· context-aware</span>
+          <span style={{ color: T.dim, fontSize: 10, fontFamily: 'IBM Plex Mono' }}>
+            {aiHealth?.configured ? '· context-aware' : '· not configured'}
+          </span>
         </div>
-        <span style={{ color: T.dim, fontSize: 10, fontFamily: 'IBM Plex Mono' }}>opus-4.7</span>
+        <span style={{ color: T.dim, fontSize: 10, fontFamily: 'IBM Plex Mono' }}>
+          {aiHealth?.configured ? aiHealth.model.replace('claude-', '').slice(0, 16) : '—'}
+        </span>
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -915,11 +888,12 @@ function AIChatPanel() {
               {m.who === 'ai' ? 'KANIDA' : 'YOU'}
             </div>
             <div style={{
-              color: T.data, fontSize: 12, lineHeight: 1.55,
+              color: m.isError ? T.red : T.data, fontSize: 12, lineHeight: 1.55,
               fontFamily: m.who === 'user' ? 'IBM Plex Mono' : 'Inter Tight',
               background: m.who === 'user' ? T.bg2 : 'transparent',
               padding: m.who === 'user' ? '6px 10px' : 0,
               borderLeft: m.who === 'user' ? `2px solid ${T.label}` : 'none',
+              whiteSpace: 'pre-wrap',
             }}>
               {m.body}
             </div>
@@ -967,33 +941,66 @@ function AIChatPanel() {
   )
 }
 
-function NewsStream() {
+// ── Activity feed (replaces News — engine events from our pipeline) ──────────
+function ActivityFeed({ items }: { items: ActivityItem[] }) {
+  const tagColor = (kind: string) =>
+    kind === 'trade_exit'  ? T.green :
+    kind === 'signal_fired'? T.label :
+    kind === 'pipeline'    ? T.ai    : T.dim
+  const tagShort = (kind: string) =>
+    kind === 'trade_exit'  ? 'EXIT' :
+    kind === 'signal_fired'? 'SIG'  :
+    kind === 'pipeline'    ? 'PIPE' : '·'
+  const fmtTime = (when: string | null) => {
+    if (!when) return '—'
+    // Try to parse to a short HH:mm or YYYY-MM-DD
+    const d = new Date(when)
+    if (isNaN(d.getTime())) return when.slice(0, 10)
+    const today = new Date()
+    if (d.toDateString() === today.toDateString()) {
+      return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })
+    }
+    return d.toISOString().slice(5, 10)  // MM-DD
+  }
+
   return (
     <div style={{
       borderTop: `1px solid ${T.border}`, background: T.bg0,
-      maxHeight: 220, overflowY: 'auto',
+      maxHeight: 240, overflowY: 'auto',
     }}>
       <div style={{
         position: 'sticky', top: 0, background: T.bg1, padding: '8px 14px',
         borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between',
+        zIndex: 1,
       }}>
-        <span style={{ color: T.label, fontSize: 10, letterSpacing: '0.12em', fontWeight: 600, fontFamily: 'Inter Tight' }}>NEWS · LIVE</span>
-        <span style={{ color: T.dim, fontSize: 10, fontFamily: 'IBM Plex Mono' }}>5 today</span>
+        <span style={{ color: T.label, fontSize: 10, letterSpacing: '0.12em', fontWeight: 600, fontFamily: 'Inter Tight' }}>
+          ENGINE ACTIVITY
+        </span>
+        <span style={{ color: T.dim, fontSize: 10, fontFamily: 'IBM Plex Mono' }}>{items.length} events</span>
       </div>
-      {NEWS.map((n, i) => {
-        const sc = n.senti === 'pos' ? T.green : n.senti === 'neg' ? T.red : T.yellow
+      {items.length === 0 ? (
+        <div style={{ padding: 18, color: T.dim, textAlign: 'center', fontSize: 11, fontFamily: 'IBM Plex Mono' }}>
+          No recent activity.
+        </div>
+      ) : items.map((n, i) => {
+        const sc = tagColor(n.kind)
         return (
-          <div key={i} style={{
+          <div key={`${n.kind}-${n.ticker}-${i}`} style={{
             padding: '8px 14px', borderBottom: `1px solid ${T.border}`,
-            display: 'grid', gridTemplateColumns: '40px 38px 50px 1fr', gap: 8, alignItems: 'baseline',
+            display: 'grid', gridTemplateColumns: '50px 46px 1fr', gap: 10, alignItems: 'baseline',
           }}>
-            <span style={{ color: T.dim, fontSize: 10, fontFamily: 'IBM Plex Mono' }}>{n.t}</span>
-            <span style={{ color: sc, fontSize: 9, fontFamily: 'IBM Plex Mono', fontWeight: 600 }}>● {n.tag}</span>
-            <span style={{ color: T.dim2, fontSize: 9, fontFamily: 'IBM Plex Mono' }}>{n.src}</span>
-            <span style={{ color: T.data, fontSize: 11, fontFamily: 'Inter Tight', lineHeight: 1.4 }}>
-              {n.headline}
-              {n.tk && <span style={{ color: T.blue, marginLeft: 6, fontFamily: 'IBM Plex Mono' }}>· {n.tk}</span>}
-            </span>
+            <span style={{ color: T.dim, fontSize: 10, fontFamily: 'IBM Plex Mono' }}>{fmtTime(n.when)}</span>
+            <span style={{ color: sc, fontSize: 9, fontFamily: 'IBM Plex Mono', fontWeight: 600 }}>● {tagShort(n.kind)}</span>
+            <div style={{ minWidth: 0 }}>
+              <span style={{ color: T.data, fontSize: 11, fontFamily: 'Inter Tight', lineHeight: 1.4 }}>
+                {n.title}
+                {n.detail && (
+                  <span style={{ color: n.kind === 'trade_exit' && (n.pnl ?? 0) < 0 ? T.red : T.dim2, marginLeft: 6, fontFamily: 'IBM Plex Mono', fontSize: 10 }}>
+                    {n.detail.length > 80 ? n.detail.slice(0, 80) + '…' : n.detail}
+                  </span>
+                )}
+              </span>
+            </div>
           </div>
         )
       })}
@@ -1002,7 +1009,11 @@ function NewsStream() {
 }
 
 // ── Bottom: function strip + ticker tape ─────────────────────────────────────
-function FunctionFooter() {
+function FunctionFooter({ movers }: { movers: TopMoversResponse | null }) {
+  // Build a ticker tape from real top gainers + losers, repeated for scroll
+  const tape = movers
+    ? [...movers.gainers, ...movers.losers, ...movers.gainers]
+    : []
   return (
     <div style={{
       position: 'fixed', bottom: 0, left: 0, right: 0,
@@ -1019,12 +1030,14 @@ function FunctionFooter() {
           fontFamily: 'IBM Plex Mono, monospace', fontSize: 11,
           padding: '0 14px', alignItems: 'center', height: '100%',
         }}>
-          {[...MACRO, ...MOVERS, ...MACRO].map((m: any, i) => (
-            <span key={i} style={{ display: 'flex', gap: 6 }}>
-              <span style={{ color: T.dim2 }}>{m.sym || m.tk}</span>
-              <span style={{ color: T.data }}>{m.val || (m.chg + '%')}</span>
-              <span style={{ color: (m.pos || m.chg >= 0) ? T.green : T.red }}>
-                {m.chg ?? ''}
+          {tape.length === 0 ? (
+            <span style={{ color: T.dim }}>Loading market tape…</span>
+          ) : tape.map((m, i) => (
+            <span key={`${m.ticker}-${i}`} style={{ display: 'flex', gap: 6 }}>
+              <span style={{ color: T.dim2 }}>{m.ticker}</span>
+              <span style={{ color: T.data }}>{m.close.toLocaleString()}</span>
+              <span style={{ color: m.pct >= 0 ? T.green : T.red }}>
+                {m.pct >= 0 ? '+' : ''}{m.pct.toFixed(2)}%
               </span>
             </span>
           ))}
@@ -1118,7 +1131,7 @@ function ModernFilterBar(props: {
 }
 
 // ── Modern: greeting hero ────────────────────────────────────────────────────
-function ModernGreeting({ opportunityCount, liveOK }: { opportunityCount: number; liveOK: boolean }) {
+function ModernGreeting({ opportunityCount, breadth }: { opportunityCount: number; breadth: BreadthResponse | null }) {
   const [now, setNow] = useState<Date | null>(null)
   useEffect(() => { setNow(new Date()) }, [])
   const hour = now?.getHours() ?? 9
@@ -1129,10 +1142,8 @@ function ModernGreeting({ opportunityCount, liveOK }: { opportunityCount: number
       <div style={{
         color: T.dim, fontSize: 13, letterSpacing: '0.06em',
         textTransform: 'uppercase', fontWeight: 500, marginBottom: 8,
-        display: 'flex', alignItems: 'center', gap: 12,
       }}>
         {greeting}
-        <LiveBadge live={liveOK} />
       </div>
       <h1 style={{
         color: T.data, fontFamily: 'Inter Tight, sans-serif',
@@ -1145,11 +1156,25 @@ function ModernGreeting({ opportunityCount, liveOK }: { opportunityCount: number
         color: T.dim2, fontFamily: 'Inter Tight', fontSize: 16,
         lineHeight: 1.55, margin: 0, maxWidth: 720,
       }}>
-        {/* Macro line is still demo (no API yet) */}
-        Markets are up. <span style={{ color: T.green, fontWeight: 600 }}>Power +1.83%</span> is leading,
-        <span style={{ color: T.red, fontWeight: 600 }}> Metals -1.30%</span> are weak.
-        Our engine has flagged <span style={{ color: T.label, fontWeight: 600 }}>{opportunityCount} long opportunit{opportunityCount === 1 ? 'y' : 'ies'}</span>
-        {opportunityCount > 0 ? <> — the top {Math.min(3, opportunityCount)} are below.</> : <> — none match your current filters.</>}
+        {breadth ? (
+          <>
+            Across <span style={{ color: T.data, fontWeight: 600 }}>{breadth.total_stocks} stocks</span>{' '}
+            in your universe today: <span style={{ color: T.green, fontWeight: 600 }}>{breadth.advancers} up</span>,{' '}
+            <span style={{ color: T.red, fontWeight: 600 }}>{breadth.decliners} down</span>, average
+            move <span style={{ color: breadth.avg_pct >= 0 ? T.green : T.red, fontWeight: 600 }}>
+              {breadth.avg_pct >= 0 ? '+' : ''}{breadth.avg_pct.toFixed(2)}%
+            </span>.
+            {breadth.best_sector && <> <span style={{ color: T.green, fontWeight: 600 }}>{breadth.best_sector.sector}</span> leading,</>}
+            {breadth.worst_sector && <> <span style={{ color: T.red, fontWeight: 600 }}>{breadth.worst_sector.sector}</span> weakest.</>}
+            {' '}Our engine has flagged{' '}
+            <span style={{ color: T.label, fontWeight: 600 }}>
+              {opportunityCount} long opportunit{opportunityCount === 1 ? 'y' : 'ies'}
+            </span>
+            {opportunityCount > 0 ? <> — top {Math.min(3, opportunityCount)} below.</> : <> — none match your current filters.</>}
+          </>
+        ) : (
+          <>Loading market context…</>
+        )}
       </p>
     </div>
   )
@@ -1236,24 +1261,48 @@ const modernBtnGhost: React.CSSProperties = {
   fontFamily: 'Inter Tight, sans-serif', cursor: 'pointer',
 }
 
-// ── Modern: AI panel (front-and-center, not side-rail) ──────────────────────
-function ModernAIPanel() {
+// ── Modern: AI panel (wired to /api/ai/chat) ─────────────────────────────────
+function ModernAIPanel({
+  aiHealth, ctx, signalCount,
+}: {
+  aiHealth: AIHealth | null
+  ctx: Record<string, unknown>
+  signalCount: number
+}) {
   const [input, setInput] = useState('')
-  const messages = [
-    { who: 'ai', body: (
-      <>
-        Hi — I've reviewed the 149 stocks in your universe overnight. There are
-        <span style={{ color: T.label, fontWeight: 600 }}> 3 high-conviction setups</span> today.
-        I can:
-      </>
-    )},
-  ]
+  const [convo, setConvo] = useState<ChatMsg[]>([])
+  const [thinking, setThinking] = useState(false)
+  const endRef = useRef<HTMLDivElement>(null)
+  const intro = aiHealth?.configured
+    ? `I've reviewed your universe — ${signalCount} live opportunit${signalCount === 1 ? 'y' : 'ies'} flagged. Ask me anything below, or pick a suggestion.`
+    : `AI chat is being set up — admin needs to configure ANTHROPIC_API_KEY in Railway. Once it's set, I'll be able to walk you through any setup.`
+
   const suggestions = [
-    'Walk me through #1 (ADANIENT)',
-    'Compare ADANIENT vs POWERGRID',
-    'How would I size a position in BPCL?',
-    'What changed since yesterday?',
+    'Walk me through the #1 signal',
+    'Which signal has the strongest historical track record?',
+    'What sectors should I avoid right now?',
+    'Compare Turbo and Super engine performance',
   ]
+
+  async function send(messageOverride?: string) {
+    const text = (messageOverride ?? input).trim()
+    if (!text || thinking || !aiHealth?.configured) return
+    setConvo(c => [...c, { who: 'user', body: text }])
+    setInput('')
+    setThinking(true)
+    try {
+      const history = convo.filter(m => !m.isError)
+        .map(m => ({ role: (m.who === 'ai' ? 'assistant' : 'user') as 'user' | 'assistant', content: m.body }))
+      const r = await postAIChat({ message: text, history, context: ctx, model: 'haiku' })
+      setConvo(c => [...c, { who: 'ai', body: r.message }])
+    } catch (e) {
+      setConvo(c => [...c, { who: 'ai', body: e instanceof Error ? e.message : 'AI request failed.', isError: true }])
+    } finally {
+      setThinking(false)
+      setTimeout(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
+    }
+  }
+
   return (
     <div style={{
       background: T.bg1, border: `1px solid ${T.border}`, borderRadius: 12,
@@ -1272,60 +1321,81 @@ function ModernAIPanel() {
             Kanida AI
           </div>
           <div style={{ color: T.dim, fontSize: 12, fontFamily: 'Inter Tight' }}>
-            <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: 6,
-                           background: T.ai, marginRight: 6, verticalAlign: 'middle' }} />
-            Connected · context-aware
+            <span style={{
+              display: 'inline-block', width: 6, height: 6, borderRadius: 6,
+              background: aiHealth?.configured ? T.ai : T.dim, marginRight: 6, verticalAlign: 'middle',
+            }} />
+            {aiHealth?.configured ? `Connected · ${aiHealth.model.replace('claude-', '').slice(0, 18)}` : 'Not configured'}
           </div>
         </div>
       </div>
 
       {/* Conversation */}
-      <div style={{ flex: 1 }}>
-        {messages.map((m, i) => (
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto', maxHeight: 360 }}>
+        <div style={{ color: T.data, fontSize: 15, lineHeight: 1.6, fontFamily: 'Inter Tight' }}>
+          {intro}
+        </div>
+        {convo.map((m, i) => (
           <div key={i} style={{
-            color: T.data, fontSize: 15, lineHeight: 1.6,
+            color: m.isError ? T.red : T.data,
+            fontSize: 15, lineHeight: 1.6,
             fontFamily: 'Inter Tight',
+            padding: m.who === 'user' ? '8px 12px' : 0,
+            background: m.who === 'user' ? T.bg2 : 'transparent',
+            borderLeft: m.who === 'user' ? `2px solid ${T.label}` : 'none',
+            borderRadius: m.who === 'user' ? 6 : 0,
+            whiteSpace: 'pre-wrap',
           }}>
             {m.body}
           </div>
         ))}
+        {thinking && (
+          <div style={{ color: T.dim2, fontSize: 13, fontFamily: 'Inter Tight' }}>thinking…</div>
+        )}
+        <div ref={endRef} />
       </div>
 
       {/* Suggestion chips */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {suggestions.map(s => (
-          <button key={s} onClick={() => setInput(s)} style={{
-            background: T.bg2, border: `1px solid ${T.border}`,
-            color: T.data, padding: '11px 14px', borderRadius: 8,
-            fontFamily: 'Inter Tight', fontSize: 14, textAlign: 'left',
-            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
-          }}>
-            <span style={{ color: T.ai, fontFamily: 'IBM Plex Mono', fontSize: 12 }}>→</span>
-            {s}
-          </button>
-        ))}
-      </div>
+      {convo.length === 0 && aiHealth?.configured && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {suggestions.map(s => (
+            <button key={s} onClick={() => send(s)} style={{
+              background: T.bg2, border: `1px solid ${T.border}`,
+              color: T.data, padding: '11px 14px', borderRadius: 8,
+              fontFamily: 'Inter Tight', fontSize: 14, textAlign: 'left',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
+            }}>
+              <span style={{ color: T.ai, fontFamily: 'IBM Plex Mono', fontSize: 12 }}>→</span>
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Input */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 10,
         background: T.bg2, border: `1px solid ${T.borderHi}`,
         padding: '12px 14px', borderRadius: 10,
+        opacity: aiHealth?.configured ? 1 : 0.5,
       }}>
         <span style={{ color: T.ai, fontFamily: 'IBM Plex Mono' }}>{'>'}</span>
         <input
           value={input}
           onChange={e => setInput(e.target.value)}
-          placeholder="Ask anything — try 'why is ADANIENT firing?'"
+          onKeyDown={e => e.key === 'Enter' && send()}
+          disabled={!aiHealth?.configured || thinking}
+          placeholder={aiHealth?.configured ? "Ask anything — try 'why is the top signal firing?'" : 'AI chat not configured'}
           style={{
             flex: 1, background: 'transparent', border: 'none', outline: 'none',
             color: T.data, fontFamily: 'Inter Tight', fontSize: 14,
           }}
         />
-        <button style={{
+        <button onClick={() => send()} disabled={!aiHealth?.configured || thinking} style={{
           background: T.ai, color: T.bg0, border: 'none',
           padding: '6px 12px', borderRadius: 6, fontWeight: 700, fontSize: 12,
-          fontFamily: 'IBM Plex Mono', cursor: 'pointer', letterSpacing: '0.06em',
+          fontFamily: 'IBM Plex Mono', cursor: aiHealth?.configured ? 'pointer' : 'not-allowed',
+          letterSpacing: '0.06em',
         }}>SEND</button>
       </div>
     </div>
@@ -1333,7 +1403,7 @@ function ModernAIPanel() {
 }
 
 // ── Modern: engine summary ribbon (collapsed) ────────────────────────────────
-function ModernEngineRibbon({ overview, liveOK }: { overview: SwingOverviewResponse | null; liveOK: boolean }) {
+function ModernEngineRibbon({ overview }: { overview: SwingOverviewResponse | null }) {
   const fmtPct = (v: number) => (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
   const fmtN   = (v: number) => v.toLocaleString()
   const summary = overview?.summary
@@ -1361,9 +1431,8 @@ function ModernEngineRibbon({ overview, liveOK }: { overview: SwingOverviewRespo
       display: 'flex', alignItems: 'center', gap: 30, flexWrap: 'wrap',
     }}>
       <div>
-        <div style={{ color: T.dim, fontSize: 12, marginBottom: 4, fontFamily: 'Inter Tight', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ color: T.dim, fontSize: 12, marginBottom: 4, fontFamily: 'Inter Tight' }}>
           Engine performance · all time
-          <LiveBadge live={liveOK} />
         </div>
         <div style={{ color: T.data, fontSize: 16, fontFamily: 'Inter Tight', lineHeight: 1.5 }}>
           <span style={{ color: T.green, fontWeight: 700 }}>{wr.toFixed(1)}%</span> win rate across
@@ -1397,32 +1466,23 @@ function ModernEngineRibbon({ overview, liveOK }: { overview: SwingOverviewRespo
 // ── Modern body ──────────────────────────────────────────────────────────────
 function ModernBody({
   ticker, setTicker, year, setYear, idx, setIdx,
-  signals, overview, liveOK, tickers, indices,
+  signals, overview, tickers, indices, aiHealth, breadth,
 }: {
   ticker: string; setTicker: (v: string) => void
   year:   string; setYear:   (v: string) => void
   idx:    string; setIdx:    (v: string) => void
   signals: ActiveSignalRow[]
   overview: SwingOverviewResponse | null
-  liveOK: boolean
   tickers: string[]
   indices: IndexInfo[]
+  aiHealth: AIHealth | null
+  breadth: BreadthResponse | null
 }) {
-  const STATIC_CALLS = [
-    { tk: 'ADANIENT',  eng: 'TURBO', score: 0.943, sec: 'Conglomerate',
-      setup: 'Breakout above 60-day range with volume divergence. Pattern matched 14× historically — 13 reached the +5% target within 3 days.' },
-    { tk: 'POWERGRID', eng: 'TURBO', score: 0.917, sec: 'Power',
-      setup: 'Short-term slope turning up inside a contracting range. Volume rising for 4 sessions. Smart entry suggests waiting for 09:18 IST.' },
-    { tk: 'BPCL',      eng: 'SUPER', score: 0.878, sec: 'Energy',
-      setup: 'Rejection wick at the lower boundary with rising volume — classic setup that has produced reversals in 11 of 14 historical matches.' },
-  ]
-  const top = (liveOK && signals.length > 0)
-    ? signals.slice(0, 3).map(s => ({
-        tk: s.ticker, eng: (s.engine || 'standard').toUpperCase(),
-        score: s.opportunity_score, sec: s.sector || '—',
-        setup: s.setup_summary || 'Pattern matched historically. Click for full setup analysis.',
-      }))
-    : STATIC_CALLS
+  const top = signals.slice(0, 3).map(s => ({
+    tk: s.ticker, eng: (s.engine || 'standard').toUpperCase(),
+    score: s.opportunity_score, sec: s.sector || '—',
+    setup: s.setup_summary || 'Pattern matched historically. Click for full setup analysis.',
+  }))
   const remaining = Math.max(0, signals.length - top.length)
 
   return (
@@ -1431,7 +1491,7 @@ function ModernBody({
       padding: '36px 48px 80px',
     }}>
       <div style={{ maxWidth: 1280, margin: '0 auto' }}>
-        <ModernGreeting opportunityCount={liveOK ? signals.length : 5} liveOK={liveOK} />
+        <ModernGreeting opportunityCount={signals.length} breadth={breadth} />
         <ModernFilterBar
           ticker={ticker} setTicker={setTicker}
           year={year}     setYear={setYear}
@@ -1445,10 +1505,8 @@ function ModernBody({
             <h2 style={{
               color: T.data, fontSize: 18, fontWeight: 600, margin: '0 0 16px',
               fontFamily: 'Inter Tight', letterSpacing: '-0.01em',
-              display: 'flex', alignItems: 'center', gap: 10,
             }}>
               Top calls today
-              <LiveBadge live={liveOK} />
             </h2>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               {top.map((c, i) => (
@@ -1475,11 +1533,15 @@ function ModernBody({
             }}>
               Ask Kanida
             </h2>
-            <ModernAIPanel />
+            <ModernAIPanel
+              aiHealth={aiHealth}
+              ctx={{ ticker, year, index: idx, mode: 'MODERN' }}
+              signalCount={signals.length}
+            />
           </div>
         </div>
 
-        <ModernEngineRibbon overview={overview} liveOK={liveOK} />
+        <ModernEngineRibbon overview={overview} />
 
         <div style={{
           color: T.dim, fontSize: 12, textAlign: 'center', marginTop: 24,
@@ -1497,7 +1559,7 @@ function ModernBody({
 // Page
 // ═════════════════════════════════════════════════════════════════════════════
 export default function AnalysisV3Mock() {
-  const [tab, setTab]   = useState('MACRO')
+  const [tab, setTab]   = useState('OVERVIEW')
   const [mode, setMode] = useState<Mode>('TERMINAL')
 
   // Filters — shared across modes (memory across tab/mode switches)
@@ -1538,7 +1600,7 @@ export default function AnalysisV3Mock() {
         {mode === 'TERMINAL' ? (
           <>
             <StatusBar />
-            <MacroStrip />
+            <BreadthStrip breadth={live.breadth} />
             <WorkspaceTabs active={tab} onChange={setTab} />
 
             <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
@@ -1550,15 +1612,15 @@ export default function AnalysisV3Mock() {
                   overview={live.overview}
                   year={year} setYear={setYear}
                   ticker={ticker} indexFilter={idx}
-                  liveOK={live.liveOK}
+                  loading={live.loading}
                 />
                 <ActiveSignalsPanel
                   signals={live.signals}
                   engine={engine} setEngine={setEngine}
-                  liveOK={live.liveOK}
+                  loading={live.loading}
                 />
-                <SectorHeatmap />
-                <TopMoversPanel />
+                <SectorHeatmap sectors={live.sectors} asOf={live.breadth?.as_of ?? null} />
+                <TopMoversPanel movers={live.movers} />
               </div>
 
               <div style={{
@@ -1566,13 +1628,13 @@ export default function AnalysisV3Mock() {
                 display: 'flex', flexDirection: 'column', minHeight: 0,
               }}>
                 <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-                  <AIChatPanel />
+                  <AIChatPanel aiHealth={live.aiHealth} ctx={{ ticker, year, index: idx, mode }} />
                 </div>
-                <NewsStream />
+                <ActivityFeed items={live.activity} />
               </div>
             </div>
 
-            <FunctionFooter />
+            <FunctionFooter movers={live.movers} />
           </>
         ) : (
           <ModernBody
@@ -1581,9 +1643,10 @@ export default function AnalysisV3Mock() {
             idx={idx}       setIdx={setIdx}
             signals={live.signals}
             overview={live.overview}
-            liveOK={live.liveOK}
             tickers={live.tickers}
             indices={live.indices}
+            aiHealth={live.aiHealth}
+            breadth={live.breadth}
           />
         )}
       </div>
