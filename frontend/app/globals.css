@@ -24,3 +24,18 @@ body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
+
+/* ── LED blink for the Pre-Market stage indicator ──────────────────────────
+   Stronger / more train-signal-like than Tailwind's gentle animate-pulse.
+   Used by .animate-[ledblink_1s_...] in components/falcon/premarket. */
+@keyframes ledblink {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 12px rgba(251, 191, 36, 0.95),
+                0 0 4px  rgba(251, 191, 36, 1);
+  }
+  50% {
+    opacity: 0.35;
+    box-shadow: 0 0 4px rgba(251, 191, 36, 0.3);
+  }
+}

@@ -341,7 +341,17 @@ export async function fetchKiteStatus(): Promise<KiteStatus> {
 export async function refreshKiteToken(
   requestToken: string,
   secret: string
-): Promise<{ status: string; token_preview: string; railway_updated: boolean; message: string }> {
+): Promise<{
+  status:          string
+  token_preview:   string
+  railway_updated: boolean
+  message:         string
+  ticker_restart?: boolean
+  pipeline?: {
+    kicked_off:     boolean
+    reason_skipped: string | null
+  }
+}> {
   const r = await fetch(`${API}/api/admin/kite/refresh-token`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
