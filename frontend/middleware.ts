@@ -1,30 +1,95 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-const PUBLIC_PATHS = ['/login', '/api/auth']
+/**
+ * HTTP Basic Auth — fully private gate before any HTML or branding is served.
+ *
+ * Visitors see only their browser's native auth dialog (no Kanida.ai branding,
+ * no login page, no info about what the site is). The dialog reads
+ * "Sign in — kanida.ai requires authentication".
+ *
+ * Credentials are stored in Vercel env vars:
+ *   SITE_USER  — your chosen username (any string)
+ *   SITE_PASS  — your chosen strong password
+ *
+ * SECURITY: if either env var is missing, the middleware FAILS CLOSED — every
+ * request gets 503. This prevents accidentally exposing the site if the env
+ * vars are deleted or renamed.
+ *
+ * Browsers cache Basic Auth credentials for the session, so you only see the
+ * dialog once per browser session.
+ */
+
+const BASIC_REALM = 'Restricted'
+
+function unauthorized(): NextResponse {
+  return new NextResponse(null, {
+    status: 401,
+    headers: {
+      'WWW-Authenticate': `Basic realm="${BASIC_REALM}", charset="UTF-8"`,
+      // Block search engines from indexing the 401 page itself
+      'X-Robots-Tag': 'noindex, nofollow, noarchive',
+      // Prevent any caching of the auth challenge
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+    },
+  })
+}
+
+function notConfigured(): NextResponse {
+  return new NextResponse(null, {
+    status: 503,
+    headers: {
+      'X-Robots-Tag': 'noindex, nofollow, noarchive',
+      'Cache-Control': 'no-store',
+    },
+  })
+}
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
 
-  // Allow public paths and static assets
-  if (
-    PUBLIC_PATHS.some(p => pathname.startsWith(p)) ||
-    pathname.startsWith('/_next') ||
-    pathname.startsWith('/favicon')
-  ) {
+  // Skip static asset paths that Next.js needs internally. The `matcher`
+  // below already excludes most of these, but being defensive here in case
+  // the matcher pattern changes.
+  if (pathname.startsWith('/_next') || pathname === '/favicon.ico') {
     return NextResponse.next()
   }
 
-  const token = req.cookies.get('kanida_auth')?.value
-  const expected = process.env.APP_PASSWORD
+  const expectedUser = process.env.SITE_USER || ''
+  const expectedPass = process.env.SITE_PASS || ''
 
-  if (!expected || token !== expected) {
-    const loginUrl = req.nextUrl.clone()
-    loginUrl.pathname = '/login'
-    loginUrl.searchParams.set('from', pathname)
-    return NextResponse.redirect(loginUrl)
+  // Fail closed: if creds aren't configured on the server, deny every request.
+  if (!expectedUser || !expectedPass) {
+    return notConfigured()
   }
 
-  return NextResponse.next()
+  const authHeader = req.headers.get('authorization') || ''
+  if (!authHeader.startsWith('Basic ')) {
+    return unauthorized()
+  }
+
+  let decoded = ''
+  try {
+    // atob is available in Next.js Edge Runtime
+    decoded = atob(authHeader.slice(6))
+  } catch {
+    return unauthorized()
+  }
+
+  // RFC 7617 — Basic Auth uses "user:pass" with the FIRST colon as separator
+  // (a password may itself contain colons).
+  const idx = decoded.indexOf(':')
+  if (idx < 0) return unauthorized()
+  const user = decoded.slice(0, idx)
+  const pass = decoded.slice(idx + 1)
+
+  if (user !== expectedUser || pass !== expectedPass) {
+    return unauthorized()
+  }
+
+  // Authenticated — let the request through. Add a noindex header just in case.
+  const res = NextResponse.next()
+  res.headers.set('X-Robots-Tag', 'noindex, nofollow, noarchive')
+  return res
 }
 
 export const config = {
