@@ -40,7 +40,12 @@ export async function POST(req: NextRequest) {
     httpOnly: true,
     secure:   process.env.NODE_ENV === 'production',
     sameSite: 'lax',
-    path:     '/power',
+    // Path=/ (NOT /power) so the cookie is sent on BOTH the SSR page
+    // requests (/power/*) AND the client-side API fetches (/api/power/*).
+    // Scoping to /power broke admin panels in prod — they fetch /api/power/admin/*,
+    // which doesn't fall under /power and so the cookie was never attached → 403.
+    // Cookie remains HttpOnly + Secure + SameSite=Lax → unchanged security posture.
+    path:     '/',
     maxAge:   COOKIE_MAX_AGE,
   })
   return NextResponse.json({ ok: true })
@@ -54,8 +59,8 @@ export async function DELETE() {
     httpOnly: true,
     secure:   process.env.NODE_ENV === 'production',
     sameSite: 'lax',
-    path:     '/power',
-    maxAge:   0,        // expire immediately
+    path:     '/',        // must match the POST handler's path to actually clear
+    maxAge:   0,          // expire immediately
   })
   return NextResponse.json({ ok: true })
 }
