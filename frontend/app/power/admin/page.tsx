@@ -72,6 +72,7 @@ export default function AdminPage() {
       <ZerodhaAuthPanel />
       <DailyJobsPanel />
       <MetricsPanel />
+      <WaitlistPanel />
       <InviteIssuancePanel />
       <InviteListPanel />
     </div>
@@ -707,6 +708,142 @@ function MetricsPanel() {
             </tbody>
           </table>
         </div>
+      )}
+    </section>
+  )
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// Waitlist panel — surfaces /api/power/admin/waitlist + per-row "Issue invite"
+//
+// MVP: shows the list, one-click issues a code with note=email, displays
+// the code inline with a copy button. We do NOT mark waitlist.invite_issued
+// because the backend has no update endpoint yet — the freshly-issued code
+// stays visible until reload. Future enhancement: POST /waitlist/{email}/mark.
+// ─────────────────────────────────────────────────────────────────────────
+
+type WaitlistRow = {
+  email:           string
+  joined_at:       string
+  source:          string | null
+  invite_issued:   number    // 0 or 1
+}
+
+function WaitlistPanel() {
+  const [rows, setRows]   = useState<WaitlistRow[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy]   = useState<string | null>(null)            // email being issued
+  const [codes, setCodes] = useState<Record<string, string>>({})     // email → freshly-issued code
+
+  const refresh = async () => {
+    try {
+      const r = await fetch(`${apiBase()}/api/power/admin/waitlist`, adminFetchInit())
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}))
+        throw new Error(b.detail?.message || `HTTP ${r.status}`)
+      }
+      const d = await r.json()
+      setRows(d.waitlist || [])
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Waitlist fetch failed.')
+    }
+  }
+
+  useEffect(() => { void refresh() }, [])
+
+  const onIssue = async (email: string) => {
+    setBusy(email); setError(null)
+    try {
+      const r = await fetch(`${apiBase()}/api/power/admin/invites/issue`, adminFetchInit({
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ n: 1, expires_in_days: null, note: email }),
+      }))
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}))
+        throw new Error(b.detail?.message || `HTTP ${r.status}`)
+      }
+      const body = await r.json()
+      const code = body.codes?.[0]
+      if (!code) throw new Error('Backend returned no code')
+      setCodes(prev => ({ ...prev, [email]: code }))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Issue failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (error && !rows) return <ErrorBox text={`Waitlist: ${error}`} />
+  if (!rows)          return <SkeletonBox lines={3} />
+
+  return (
+    <section className="bg-neutral-900 border border-neutral-800 rounded p-4">
+      <header className="flex items-baseline justify-between mb-3 gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-neutral-300">Waitlist ({rows.length})</h2>
+          <p className="text-xs text-neutral-500 mt-0.5">
+            People who submitted their email at /power/waitlist. Click &quot;Issue invite&quot; to mint a code with their email as the note — copy the code and send via WhatsApp/email.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={refresh}
+          className="text-xs text-neutral-400 underline hover:text-neutral-200 shrink-0"
+        >
+          reload
+        </button>
+      </header>
+
+      {error && <ErrorBox text={error} />}
+
+      {rows.length === 0 ? (
+        <p className="text-sm text-neutral-500">Nobody on the waitlist yet.</p>
+      ) : (
+        <table className="w-full text-xs">
+          <thead className="text-neutral-500">
+            <tr>
+              <th className="text-left py-1">Email</th>
+              <th className="text-left">Joined (IST)</th>
+              <th className="text-left">Source</th>
+              <th className="text-right">Invite</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.email} className="border-t border-neutral-800 align-top">
+                <td className="font-mono py-1 text-neutral-100 select-all">{r.email}</td>
+                <td className="text-neutral-400 font-mono">{fmtIst(r.joined_at)}</td>
+                <td className="text-neutral-500">{r.source ?? '—'}</td>
+                <td className="text-right">
+                  {codes[r.email] ? (
+                    <span className="inline-flex items-center gap-2">
+                      <span className="font-mono text-mint-300 select-all">{codes[r.email]}</span>
+                      <button
+                        type="button"
+                        onClick={() => navigator.clipboard?.writeText(codes[r.email])}
+                        className="text-mint-400 underline hover:text-mint-300"
+                      >
+                        copy
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => onIssue(r.email)}
+                      disabled={busy === r.email}
+                      className="px-2 py-1 bg-mint-500/20 text-mint-300 border border-mint-500/40 rounded hover:bg-mint-500/30 disabled:opacity-50"
+                    >
+                      {busy === r.email ? 'issuing…' : 'Issue invite'}
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </section>
   )
