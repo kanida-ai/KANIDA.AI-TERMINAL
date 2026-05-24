@@ -755,7 +755,7 @@ function NewEntriesTable({ items, onCancel }: {
         </tbody>
         <tfoot className="text-[10px] text-neutral-500">
           <tr><td colSpan={7} className="py-2">
-            Per-trade ₹{inr((items[0]?.payload as Record<string, number>)?.config?.['per_trade'] as number) || '50,000'}
+            Per-trade ₹{inr((items[0]?.payload as Record<string, Record<string, number>>)?.config?.per_trade) || '50,000'}
             {' '}· SL {((items[0]?.payload as Record<string, Record<string, number>>)?.config?.sl_pct as unknown as number) ?? -7}%
             {' '}· hold {((items[0]?.payload as Record<string, Record<string, number>>)?.config?.hold_days as unknown as number) ?? 7}d
             {' '}· trail trigger +{((items[0]?.payload as Record<string, Record<string, number>>)?.config?.trail_trigger_pct as unknown as number) ?? 12}%
