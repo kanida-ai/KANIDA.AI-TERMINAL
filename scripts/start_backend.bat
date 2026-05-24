@@ -15,8 +15,14 @@ REM Logs go to logs\backend.log (appended on each start).
 REM ============================================================
 
 set "PROJECT_DIR=C:\Users\SPS\Desktop\Kanida.ai Terminal Quant Intelligence Engine"
-set "UVICORN=C:\Users\SPS\anaconda3\Scripts\uvicorn.exe"
+set "ANACONDA=C:\Users\SPS\anaconda3"
+set "UVICORN=%ANACONDA%\Scripts\uvicorn.exe"
 set "LOG_FILE=%PROJECT_DIR%\logs\backend.log"
+
+REM Activate the base anaconda environment so PATH includes Library\bin,
+REM mingw-w64\bin, etc. Required for Playwright's Node.js driver to launch
+REM Chromium correctly (the bundled .exe needs DLLs on this PATH).
+call "%ANACONDA%\Scripts\activate.bat" "%ANACONDA%"
 
 echo. >> "%LOG_FILE%"
 echo ============================================================ >> "%LOG_FILE%"
