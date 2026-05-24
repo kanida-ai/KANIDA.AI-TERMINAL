@@ -45,9 +45,20 @@ ROOT = os.path.normpath(os.path.join(_HERE, ".."))
 
 # ── Pipeline state (shared) ───────────────────────────────────────────────────
 _pipeline_lock   = threading.Lock()
-_pipeline_status = {"running": False, "last_run": None, "last_result": None}
+_pipeline_status = {"running": False, "last_run": None, "last_result": None, "next_run": None}
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _compute_next_run(hour: int = 16, minute: int = 5) -> str:
+    """Next HH:MM IST on a weekday (Mon–Fri), as ISO-8601 string."""
+    now = datetime.now(IST)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    while target.weekday() >= 5:
+        target += timedelta(days=1)
+    return target.isoformat()
 
 PIPELINE_STEPS = [
     {"name": "OHLCV Fetch",        "cmd": [sys.executable, "data/ingest/fetch_fno_kite.py"]},
@@ -148,6 +159,7 @@ def _schedule_daily_pipeline():
             target += timedelta(days=1)
         while target.weekday() >= 5:
             target += timedelta(days=1)
+        _pipeline_status["next_run"] = target.isoformat()
         wait = (target - datetime.now(IST)).total_seconds()
         log.info("Scheduler: next pipeline run at %s IST (%.0f min)",
                  target.strftime("%Y-%m-%d %H:%M"), wait / 60)
@@ -155,9 +167,30 @@ def _schedule_daily_pipeline():
         _run_pipeline_sync()
 
 
+def _apply_postgres_schema():
+    """Create all tables in Postgres if they don't exist yet (idempotent)."""
+    import pathlib
+    sql_path = pathlib.Path(_HERE).parent / "db" / "migrations" / "0001_initial.sql"
+    if not sql_path.exists():
+        log.warning("Schema migration not found at %s — skipping", sql_path)
+        return
+    sql = sql_path.read_text()
+    try:
+        from db import get_conn
+        with get_conn() as conn:
+            conn.executescript(sql)
+        log.info("Postgres schema applied from %s", sql_path)
+    except Exception as exc:
+        log.error("Failed to apply Postgres schema: %s", exc)
+
+
 # ── FastAPI lifespan: start scheduler thread on startup ──────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from db import IS_POSTGRES
+    if IS_POSTGRES:
+        _apply_postgres_schema()
+
     t = threading.Thread(target=_schedule_daily_pipeline, daemon=True, name="pipeline-scheduler")
     t.start()
     log.info("Daily pipeline scheduler started (16:05 IST weekdays).")
@@ -255,6 +288,7 @@ from routers.jobs_router       import router as jobs_router
 from routers.orders_router     import router as orders_router
 from routers.universe_router   import router as universe_router
 from routers.strategy_router   import router as strategy_router
+from routers.ai_router         import router as ai_router
 
 # Falcon V7.1 production routers (coexists with legacy)
 from falcon.routers.signals_router    import router as falcon_signals_router
@@ -291,6 +325,7 @@ app.include_router(jobs_router,      prefix="/api", tags=["Jobs"])
 app.include_router(orders_router,    prefix="/api", tags=["Orders"])
 app.include_router(universe_router,  prefix="/api", tags=["Universe"])
 app.include_router(strategy_router,  prefix="/api", tags=["Strategy"])
+app.include_router(ai_router,        prefix="/api", tags=["AI"])
 
 # Falcon mounted under /api — endpoints live under /api/falcon/*
 app.include_router(falcon_signals_router,   prefix="/api", tags=["Falcon"])

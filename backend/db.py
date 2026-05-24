@@ -30,7 +30,19 @@ _SQLITE_PATH = os.environ.get(
 )
 _PG_URL = os.environ.get("DATABASE_URL", "")
 
-IS_POSTGRES = bool(_PG_URL)
+# ── Production DB mode decision ────────────────────────────────────────────────
+# CURRENT INTENDED MODE: SQLite (bundled in Docker image via entrypoint.sh).
+# The 83 MB kanida_quant.db is baked into the Railway image at build time.
+# Data persists between restarts but resets on a full Railway redeploy.
+#
+# TO SWITCH TO POSTGRES/SUPABASE (Sprint 2):
+#   1. Set DATABASE_URL=postgresql://user:pass@host:5432/dbname in Railway env vars
+#   2. Run scripts/migrate_to_supabase.py once to copy SQLite data → Postgres
+#   3. IS_POSTGRES will activate automatically on next deploy
+#
+# Guard: only activates for valid postgres:// or postgresql:// URIs.
+# Rejects unresolved Railway template refs like "${{Postgres.DATABASE_URL}}".
+IS_POSTGRES = _PG_URL.startswith(("postgres://", "postgresql://"))
 
 
 # ── Public interface ───────────────────────────────────────────────────────────
@@ -170,8 +182,8 @@ class _PgConn:
 
     # Internal helpers
     def _pg_cursor(self) -> Any:
-        from psycopg2.extras import RealDictCursor
-        return self._conn.cursor(cursor_factory=RealDictCursor)
+        from psycopg2.extras import DictCursor
+        return self._conn.cursor(cursor_factory=DictCursor)
 
     @staticmethod
     def _adapt(sql: str) -> str:
@@ -208,7 +220,7 @@ class _PgConn:
         # json_extract(col, '$.key') → col::jsonb->>'key'
         s = re.sub(
             r"json_extract\(([^,]+),\s*'\$\.(\w+)'\)",
-            r"\1::jsonb->>'\\2'",
+            r"\1::jsonb->>'\2'",
             s,
         )
 

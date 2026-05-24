@@ -496,8 +496,123 @@ export type LeaderboardEntry = {
   active:       boolean
 }
 
-export const getSwingOverview   = (year?: string) =>
-  req<SwingOverviewResponse>(`/api/swing/overview${year ? '?year=' + year : ''}`)
+export const getSwingOverview = (
+  year?: string,
+  ticker?: string,
+  index?: string,
+) => {
+  const qs = new URLSearchParams()
+  if (year)   qs.set('year', year)
+  if (ticker) qs.set('ticker', ticker)
+  if (index)  qs.set('index', index)
+  const tail = qs.toString()
+  return req<SwingOverviewResponse>(`/api/swing/overview${tail ? '?' + tail : ''}`)
+}
+
+export type ActiveSignalRow = {
+  ticker:            string
+  engine:            'turbo' | 'super' | 'standard'
+  tier:              string | null
+  opportunity_score: number
+  credibility:       string | null
+  latest_date:       string | null
+  current_close:     number | null
+  sector:            string | null
+  setup_summary:     string
+}
+export type ActiveSignalsResponse = { count: number; signals: ActiveSignalRow[] }
+
+export const getActiveSignals = (params: {
+  engine?: string; index?: string; sector?: string;
+  credibility?: string; search?: string; ticker?: string;
+} = {}) => {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v)
+  const tail = qs.toString()
+  return req<ActiveSignalsResponse>(`/api/swing/active-signals${tail ? '?' + tail : ''}`)
+}
+
+export type IndexInfo = { index_name: string; members: number; last_updated: string }
+export const getIndices = () =>
+  req<{ indices: IndexInfo[] }>(`/api/universe/indices`)
+
+
+// ── Breadth / movers / sectors / activity / AI ────────────────────────────────
+
+export type BreadthResponse = {
+  as_of:        string | null
+  total_stocks: number
+  advancers:    number
+  decliners:    number
+  unchanged:    number
+  avg_pct:      number
+  best_stock:   { ticker: string; pct: number; sector: string | null } | null
+  worst_stock:  { ticker: string; pct: number; sector: string | null } | null
+  best_sector:  { sector: string; avg_pct: number; members: number } | null
+  worst_sector: { sector: string; avg_pct: number; members: number } | null
+  signals_total:     number
+  signals_hc:        number
+  last_pipeline_run: string | null
+}
+export const getBreadth = () => req<BreadthResponse>(`/api/swing/breadth`)
+
+export type MoverRow = {
+  ticker: string; sector: string; close: number; pct: number; volume: number
+  active_signal: boolean
+}
+export type TopMoversResponse = { as_of: string | null; gainers: MoverRow[]; losers: MoverRow[] }
+export const getTopMovers = (limit = 10) =>
+  req<TopMoversResponse>(`/api/swing/top-movers?limit=${limit}`)
+
+export type SectorStat = {
+  sector: string; members: number; advancers: number; decliners: number
+  avg_pct: number; best_ticker: string | null; best_pct: number
+}
+export const getSectorStats = () =>
+  req<{ as_of: string | null; sectors: SectorStat[] }>(`/api/swing/sector-stats`)
+
+export type ActivityItem = {
+  kind:    'trade_exit' | 'signal_fired' | 'pipeline'
+  when:    string | null
+  ticker:  string | null
+  engine:  string | null
+  outcome?: string
+  pnl?:     number | null
+  score?:   number
+  tier?:    string | null
+  title:    string
+  detail:   string | null
+}
+export const getActivityFeed = (limit = 20) =>
+  req<{ count: number; items: ActivityItem[] }>(`/api/swing/activity-feed?limit=${limit}`)
+
+export type AIHealth = { configured: boolean; model: string }
+export const getAIHealth = () => req<AIHealth>(`/api/ai/health`)
+
+export type AIChatRequest = {
+  message: string
+  history: { role: 'user' | 'assistant'; content: string }[]
+  context: Record<string, unknown>
+  model?:  'haiku' | 'opus'
+}
+export type AIChatResponse = {
+  message: string
+  model: string
+  input_tokens: number
+  output_tokens: number
+}
+export const postAIChat = async (body: AIChatRequest): Promise<AIChatResponse> => {
+  const r = await fetch(`${API}/api/ai/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }))
+    throw new Error(err.detail || 'AI chat failed')
+  }
+  return r.json()
+}
 
 export const getSwingTickers    = () =>
   req<{ tickers: string[] }>('/api/swing/tickers')
