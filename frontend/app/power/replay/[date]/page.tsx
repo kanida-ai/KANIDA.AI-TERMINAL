@@ -61,7 +61,7 @@ export default async function ReplayPage({ params }: Props) {
       <div className="max-w-md mx-auto py-12 text-center">
         <h1 className="text-2xl font-bold mb-2">Replay unavailable</h1>
         <p className="text-sm text-neutral-400 mb-6">{fetchError}</p>
-        <Link href="/power" className="text-amber-400 hover:text-amber-300 underline">
+        <Link href="/power" className="text-mint-400 hover:text-mint-300 underline">
           ← Back to home
         </Link>
       </div>
@@ -81,7 +81,7 @@ export default async function ReplayPage({ params }: Props) {
         <div className="flex items-baseline justify-between flex-wrap gap-2">
           <div>
             {is_featured && title && (
-              <p className="text-sm text-amber-400 font-semibold uppercase tracking-wide">
+              <p className="text-sm text-mint-400 font-semibold uppercase tracking-wide">
                 Featured replay
               </p>
             )}

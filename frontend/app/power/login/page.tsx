@@ -1,51 +1,51 @@
 'use client'
 
 /**
- * /power/login — Google sign-in entry.
+ * /power/login — Phase 1b email + invite-code sign-in.
  *
- * Two outcomes after Google authenticates:
- *   - status='ok'             → store JWT cookie, redirect to /power/today
- *   - status='needs_invite'   → stash Google id_token in sessionStorage,
- *                                redirect to /power/redeem
+ * Three accepted shapes (server distinguishes; UI just collects both fields):
+ *   1. NEW USER       email + valid unused invite code (kn-2026-xxxxxx)
+ *   2. RETURNING USER email only (code field can be left blank)
+ *   3. ADMIN          admin email + POWER_ADMIN_SECRET
  *
- * The id_token is short-lived (Google: 1h). sessionStorage is acceptable —
- * it persists only for the tab/session and is cleared on tab close. The
- * redeem flow uses it once then deletes it.
+ * The backend's GENERIC_LOGIN_FAIL contract intentionally collapses every
+ * failure mode (email unknown, code unused, code expired, wrong admin secret)
+ * into the same response body. The UI mirrors that — never tell the user
+ * "email unknown" vs "code wrong"; both look like one generic error message.
  */
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useState } from 'react'
 import Link from 'next/link'
-import { GoogleSignInButton } from '@/components/power/GoogleSignInButton'
 import { PowerAPIError } from '@/lib/power-api'
-import { exchangeGoogleIdToken, storeSessionJWT } from '@/lib/power-auth-client'
-
-const STASH_KEY = 'power_pending_id_token'
+import { loginWithInviteCode, storeSessionJWT } from '@/lib/power-auth-client'
 
 export default function LoginPage() {
   const router       = useRouter()
   const search       = useSearchParams()
-  const [busy, setBusy]     = useState(false)
-  const [error, setError]   = useState<string | null>(null)
-  const expired      = search.get('expired') === '1'
+  const [email, setEmail] = useState('')
+  const [code,  setCode]  = useState('')
+  const [busy,  setBusy]  = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const expired = search.get('expired') === '1'
 
-  const onCredential = async (idToken: string) => {
+  const onSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
     setError(null)
+    const cleanEmail = email.trim().toLowerCase()
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setError('Enter a valid email address.')
+      return
+    }
     setBusy(true)
     try {
-      const result = await exchangeGoogleIdToken(idToken)
-      if (result.status === 'ok') {
-        await storeSessionJWT(result.jwt)
-        router.push('/power/today')
-        router.refresh()
-      } else {
-        // NEEDS_INVITE — stash the id_token + email so redeem page can finish the flow
-        sessionStorage.setItem(STASH_KEY, idToken)
-        sessionStorage.setItem('power_pending_email', result.email)
-        if (result.display_name) {
-          sessionStorage.setItem('power_pending_name', result.display_name)
-        }
-        router.push('/power/redeem')
-      }
+      const result = await loginWithInviteCode(cleanEmail, code.trim())
+      await storeSessionJWT(result.jwt)
+      // After-login destination: admins go to /power/admin (their landing),
+      // everyone else to /power/today. The router.push will hit the server
+      // and the layout will re-render with the new auth cookie.
+      const dest = result.user.role === 'admin' ? '/power/admin' : '/power/today'
+      router.push(dest)
+      router.refresh()
     } catch (e) {
       if (e instanceof PowerAPIError) {
         setError(e.message || 'Sign-in failed. Try again.')
@@ -60,41 +60,76 @@ export default function LoginPage() {
     <div className="max-w-md mx-auto py-12 md:py-20">
       <h1 className="text-2xl md:text-3xl font-bold mb-2">Sign in</h1>
       <p className="text-sm text-neutral-400 mb-6">
-        Power User beta — invite only. Sign in with Google to enter your invite code,
-        or join the waitlist below.
+        Power User beta {'—'} invite only. Enter your email and the invite code your admin shared.
+        Returning users can leave the code field blank.
       </p>
 
       {expired && (
         <div role="alert"
-              className="mb-4 px-3 py-2 rounded bg-yellow-500/10 text-yellow-200
-                          border border-yellow-500/40 text-sm">
+              className="mb-4 px-3 py-2 rounded bg-yellow-500/10 text-yellow-200 border border-yellow-500/40 text-sm">
           Your session expired. Sign in again.
         </div>
       )}
 
-      <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 flex justify-center">
-        {busy
-          ? <p className="text-sm text-neutral-400">Verifying…</p>
-          : <GoogleSignInButton
-              onCredential={onCredential}
-              onError={msg => setError(msg)}
-            />}
-      </div>
+      <form onSubmit={onSubmit} className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 space-y-4">
+        <Field label="Email">
+          <input
+            type="email"
+            inputMode="email"
+            autoComplete="email"
+            autoFocus
+            required
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            placeholder="you@example.com"
+            className="w-full bg-neutral-950 border border-neutral-700 rounded px-3 py-2 text-neutral-100 focus:outline-none focus:border-mint-500/60"
+          />
+        </Field>
 
-      {error && (
-        <p role="alert" className="mt-3 px-3 py-2 rounded bg-red-500/10
-                                     text-red-200 border border-red-500/40 text-sm">
-          {error}
-        </p>
-      )}
+        <Field label="Invite code" hint="kn-2026-xxxxxx (leave blank if you're a returning user)">
+          <input
+            type="text"
+            inputMode="text"
+            autoComplete="off"
+            value={code}
+            onChange={e => setCode(e.target.value)}
+            placeholder="kn-2026-xxxxxx"
+            className="w-full bg-neutral-950 border border-neutral-700 rounded px-3 py-2 text-neutral-100 font-mono focus:outline-none focus:border-mint-500/60"
+          />
+        </Field>
+
+        <button
+          type="submit"
+          disabled={busy}
+          className="w-full px-4 py-2 bg-mint-400 text-neutral-950 rounded font-semibold hover:bg-mint-300 disabled:opacity-50"
+        >
+          {busy ? 'Signing in…' : 'Sign in'}
+        </button>
+
+        {error && (
+          <p role="alert" className="px-3 py-2 rounded bg-red-500/10 text-red-200 border border-red-500/40 text-sm">
+            {error}
+          </p>
+        )}
+      </form>
 
       <div className="mt-6 text-center text-sm text-neutral-500 space-y-2">
         <p>No invite yet?</p>
         <Link href="/power/waitlist"
-              className="inline-block px-4 py-2 text-amber-400 hover:text-amber-300 underline">
-          Join the waitlist →
+              className="inline-block px-4 py-2 text-mint-400 hover:text-mint-300 underline">
+          Join the waitlist {'→'}
         </Link>
       </div>
     </div>
+  )
+}
+
+function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <label className="block">
+      <span className="block text-xs uppercase tracking-wider text-neutral-400 mb-1">{label}</span>
+      {children}
+      {hint && <span className="block text-[11px] text-neutral-500 mt-1">{hint}</span>}
+    </label>
   )
 }

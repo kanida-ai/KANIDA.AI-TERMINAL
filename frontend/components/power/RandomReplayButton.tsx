@@ -18,6 +18,10 @@ import { useState } from 'react'
 import Link from 'next/link'
 import { PowerAPI, PowerAPIError } from '@/lib/power-api'
 
+// Must match the key /power/replay/proof reads from. Kept here as a string
+// (not imported) so this client bundle doesn't pull the proof page module.
+const RANDOM_REPLAY_KEY = 'kanida_random_replay_v1'
+
 export function RandomReplayButton() {
   const router = useRouter()
   const [loading, setLoading] = useState(false)
@@ -28,7 +32,19 @@ export function RandomReplayButton() {
     setLoading(true)
     try {
       const payload = await PowerAPI.replayRandom()
-      router.push(`/power/replay/${encodeURIComponent(payload.replay_date)}`)
+      // Sprint 5c re-test: the random-replay destination must stay PUBLIC,
+      // but /power/replay/[date] now auth-gates non-featured dates. We
+      // sidestep that by handing the already-fetched payload to a dedicated
+      // client-only viewer via sessionStorage.
+      try {
+        sessionStorage.setItem(RANDOM_REPLAY_KEY, JSON.stringify(payload))
+      } catch {
+        // Private mode / storage disabled — fall back to the legacy route;
+        // anon users will see the sign-in gate. Better than a silent no-op.
+        router.push(`/power/replay/${encodeURIComponent(payload.replay_date)}`)
+        return
+      }
+      router.push('/power/replay/proof')
     } catch (e) {
       if (e instanceof PowerAPIError) {
         if (e.isRateLimited()) {
@@ -44,6 +60,9 @@ export function RandomReplayButton() {
         setError({ msg: 'Network error — check your connection.', isRateLimited: false })
       }
       setLoading(false)
+    } finally {
+      // success path: navigation unmounts us; loading stays true until then.
+      // failure path handled in catch.
     }
   }
 
@@ -55,7 +74,7 @@ export function RandomReplayButton() {
         disabled={loading}
         className={[
           'inline-flex items-center gap-2 px-4 py-2.5 rounded-md font-semibold',
-          'bg-amber-500 text-neutral-950 hover:bg-amber-400',
+          'bg-mint-400 text-neutral-950 hover:bg-mint-300',
           'disabled:opacity-50 disabled:cursor-wait transition-colors',
         ].join(' ')}
       >
@@ -78,7 +97,7 @@ export function RandomReplayButton() {
           {error.isRateLimited && (
             <>
               {' '}
-              <Link href="/power/login" className="underline font-semibold text-amber-300">
+              <Link href="/power/login" className="underline font-semibold text-mint-300">
                 Sign in for unlimited →
               </Link>
             </>

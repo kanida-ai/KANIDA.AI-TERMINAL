@@ -4,12 +4,19 @@
  * Never reads the JWT directly (it's HTTPOnly). Only triggers state changes
  * via Route Handlers and API calls.
  */
-import { PowerAPI, type GoogleSignInResponse, type GoogleSignInOK } from './power-api'
+import { PowerAPI, type GoogleSignInResponse, type GoogleSignInOK, type InviteLoginOK } from './power-api'
 
 
 /** Send Google id_token to backend, return {status:'ok',jwt,user} or {status:'needs_invite',...} */
 export async function exchangeGoogleIdToken(idToken: string): Promise<GoogleSignInResponse> {
   return await PowerAPI.signInWithGoogle(idToken)
+}
+
+
+/** Phase 1b: email + invite-code login. Throws PowerAPIError(400, 'LOGIN_INVALID')
+ *  on any failure mode (intentionally indistinguishable to block enumeration). */
+export async function loginWithInviteCode(email: string, code: string): Promise<InviteLoginOK> {
+  return await PowerAPI.signInWithInviteCode({ email, code })
 }
 
 

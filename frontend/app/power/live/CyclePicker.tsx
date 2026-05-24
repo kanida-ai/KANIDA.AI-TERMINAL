@@ -37,7 +37,7 @@ export function CyclePicker({ available, current, activeCycle, computedAt }: Pro
             className={[
               'px-3 py-1.5 text-xs font-mono border-r border-neutral-800 last:border-r-0',
               current === c
-                ? 'bg-amber-500/20 text-amber-200'
+                ? 'bg-mint-500/20 text-mint-200'
                 : 'text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200',
             ].join(' ')}
           >

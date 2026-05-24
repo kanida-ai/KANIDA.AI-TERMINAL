@@ -290,6 +290,117 @@ def redeem_atomic(con: sqlite3.Connection,
 
 
 # ──────────────────────────────────────────────────────────────────────────
+#  Phase 1b: email-only atomic redemption (no Google id_token)
+# ──────────────────────────────────────────────────────────────────────────
+
+def redeem_with_email(
+    con: sqlite3.Connection,
+    email: str,
+    code: str,
+    display_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Atomic email + code → user + JWT (Phase 1b invite-only auth).
+
+    Same transactional safety as `redeem_atomic` but takes a raw email
+    instead of a verified GoogleUser. Used by the new POST
+    /api/power/auth/invite-login endpoint.
+
+    For schema compat, persists a synthetic google_sub of form
+    'email:{email}' so the NOT-NULL UNIQUE google_sub column is satisfied.
+    If the user later signs in via Google with the same email, the existing
+    google_sub-rotation path in sign_in_with_google() updates that column.
+
+    Raises InviteError on every failure mode (same uniform-failure contract
+    as `redeem_atomic`).
+    """
+    from .auth import issue_jwt, touch_last_seen, _synthetic_sub_for_email
+
+    if not CODE_RE.match(code or ""):
+        raise InviteError("CODE_FORMAT_INVALID", f"bad shape: {code!r}")
+
+    email = (email or "").lower().strip()
+    if "@" not in email or len(email) < 5:
+        raise InviteError("EMAIL_INVALID", f"bad email: {email!r}")
+    google_sub = _synthetic_sub_for_email(email)
+
+    con.isolation_level = None
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        # 1. Lock + check the code row
+        row = con.execute(
+            "SELECT code, expires_at, used_by_user_id FROM power_user_invite_codes "
+            "WHERE code = ?", (code,)
+        ).fetchone()
+        if not row:
+            raise InviteError("CODE_NOT_FOUND", "no such code")
+        _code, expires_at, used_by = row
+        if used_by is not None:
+            raise InviteError("CODE_ALREADY_USED", f"used_by_user_id={used_by}")
+        if _is_expired(expires_at):
+            raise InviteError("CODE_EXPIRED", f"expires_at={expires_at}")
+
+        # 2. Reject if a user with this email already exists. Re-login goes
+        #    through sign_in_with_email_and_code's existing-user branch, not
+        #    through here. If they're here, they're brand new.
+        existing = con.execute(
+            "SELECT id, email FROM power_user_users WHERE email = ? OR google_sub = ?",
+            (email, google_sub),
+        ).fetchone()
+        if existing:
+            raise InviteError("USER_ALREADY_EXISTS", f"user_id={existing[0]}")
+
+        # 3. Insert the new user row
+        now_iso = datetime.now(IST).isoformat()
+        cur = con.execute("""
+            INSERT INTO power_user_users
+              (email, google_sub, display_name, picture_url,
+               invite_code, role, is_active, created_at)
+            VALUES (?, ?, ?, NULL, ?, 'user', 1, ?)
+        """, (email, google_sub, display_name, code, now_iso))
+        user_id = cur.lastrowid
+
+        # 4. Atomic code-consume
+        cur = con.execute(
+            "UPDATE power_user_invite_codes SET used_by_user_id = ?, used_at = ? "
+            "WHERE code = ? AND used_by_user_id IS NULL",
+            (user_id, now_iso, code),
+        )
+        if cur.rowcount != 1:
+            raise InviteError("RACE_DETECTED",
+                              f"expected 1 row updated, got {cur.rowcount}")
+
+        con.execute("COMMIT")
+    except InviteError:
+        con.execute("ROLLBACK")
+        raise
+    except Exception as e:
+        con.execute("ROLLBACK")
+        log.exception("invites: redeem_with_email crashed for code=%s", code)
+        raise InviteError("INTERNAL_ERROR", str(e))
+    finally:
+        con.isolation_level = ""
+
+    token = issue_jwt(user_id=user_id, email=email,
+                      google_sub=google_sub, role="user")
+    touch_last_seen(con, user_id)
+
+    log.info("invites: code %s redeemed (email-only) by %s (user_id=%d)",
+             code, redact_email(email), user_id)
+
+    return {
+        "status": "ok",
+        "jwt":    token,
+        "user": {
+            "id":           user_id,
+            "email":        email,
+            "display_name": display_name,
+            "picture_url":  None,
+            "role":         "user",
+        },
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────
 #  Waitlist (no auth required — captured when redeem fails or no invite)
 # ──────────────────────────────────────────────────────────────────────────
 

@@ -240,20 +240,26 @@ class TestRandomReplay:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Custom-date replay requires auth (non-featured)
+# Custom-date replay (Sprint 5d Fix 8): anonymous users can hit any date,
+# rate-limited 20/hr per IP — it's the operator's transparency surface.
 # ──────────────────────────────────────────────────────────────────────────
 
 class TestCustomReplay:
 
-    def test_non_featured_date_requires_auth(self, client):
-        """A random historical date that isn't featured → 401 for anon."""
+    def test_non_featured_date_is_public(self, client):
+        """A random historical date is publicly readable (Sprint 5d Fix 8 lock).
+        Either succeeds (200) or returns REPLAY_UNAVAILABLE (404) for a date
+        without data — both are public-side responses, no 401 wall."""
         r = client.get("/api/power/picks/replay/2025-08-19")
-        assert r.status_code == 401
-        assert r.json()["detail"]["code"] == "AUTH_REQUIRED"
+        assert r.status_code in (200, 404), (
+            f"non-featured date should be public per Fix 8; got {r.status_code}"
+        )
+        if r.status_code == 200:
+            for p in r.json()["picks"]:
+                _assert_pick_v1(p)
 
     def test_non_featured_date_works_for_authed(self, client, auth_header):
         r = client.get("/api/power/picks/replay/2025-08-19", headers=auth_header)
-        # Could be 200 or 404 depending on whether 2025-08-19 has data
         assert r.status_code in (200, 404)
         if r.status_code == 200:
             body = r.json()

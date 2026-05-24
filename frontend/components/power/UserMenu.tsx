@@ -32,7 +32,7 @@ export function UserMenu({ email, displayName, pictureUrl, isAdmin }: Props) {
           // eslint-disable-next-line @next/next/no-img-element
           <img src={pictureUrl} alt="" width={28} height={28} className="rounded-full" />
         ) : (
-          <span className="w-7 h-7 rounded-full bg-amber-500 text-neutral-950 grid place-items-center font-bold">
+          <span className="w-7 h-7 rounded-full bg-mint-500 text-neutral-950 grid place-items-center font-bold">
             {initial}
           </span>
         )}

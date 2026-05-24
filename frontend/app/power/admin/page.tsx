@@ -1,93 +1,289 @@
 /**
  * /power/admin — operator-only dashboard.
  *
- * Two surfaces:
- *   1. Invite issuance — mint N codes, optional expiry, copy to clipboard
- *   2. Metrics — DAU, WAU, codes used vs unused, top routes (per request log)
+ * Phase 1b (2026-05-23): authentication moved to JWT cookie.
+ *   - SSR layout (/power/admin/layout.tsx) verifies role=admin via the
+ *     `power_jwt` HTTPOnly cookie before this page ever renders.
+ *   - All backend calls below use credentials:'include' so the same cookie
+ *     is automatically attached. Backend's require_admin_or_jwt reads the
+ *     cookie and authorises.
+ *   - The legacy localStorage-based ADMIN_SECRET flow is preserved as a
+ *     fallback (`?secret=…` URL param) so ops scripts and emergency access
+ *     still work, but it's no longer the default UX.
  *
- * Authentication: X-Admin-Secret header from a one-time-pasted secret stored
- * in localStorage. Not pretty, but matches the operator's existing /falcon/admin
- * pattern and keeps this surface out of the regular user flow.
+ * Panels:
+ *   1. Zerodha auto-auth status
+ *   2. Cohort metrics (DAU, WAU, codes used vs unused, top routes)
+ *   3. Invite issuance — mint N codes, optional expiry
+ *   4. Invite history
  */
 'use client'
 
 import { useEffect, useState } from 'react'
-import Link from 'next/link'
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
+// API base — same-origin in the browser (Next.js rewrites proxy /api/power/* to the backend).
+// NEXT_PUBLIC_API_URL overrides on Vercel. Resolved per-call so Turbopack
+// doesn't static-evaluate `window` at build time.
+function apiBase(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL
+  if (typeof window !== 'undefined')   return ''
+  return 'http://127.0.0.1:8001'
+}
 const STORAGE_KEY = 'kanida_admin_secret'
+
+/**
+ * Build the headers + credentials for an admin API call.
+ *
+ * Same-origin model: Next.js rewrites send /api/power/* to localhost:8001,
+ * so the browser sees these as same-origin and fetch()'s default
+ * credentials='same-origin' auto-attaches the power_jwt cookie. We do NOT
+ * pass credentials:'include' — that escalates to a CORS preflight which the
+ * backend isn't configured for, and the browser then surfaces it as
+ * "Failed to fetch" with no useful error in the panel UI.
+ *
+ * Fallback: if a legacy admin secret is in localStorage, send it as
+ * X-Admin-Secret too. require_admin_or_jwt on the backend accepts either.
+ */
+export function adminFetchInit(extra?: RequestInit): RequestInit {
+  const init: RequestInit = { ...extra }
+  if (typeof window !== 'undefined') {
+    const legacy = localStorage.getItem(STORAGE_KEY)
+    if (legacy) {
+      init.headers = { ...(init.headers || {}), 'X-Admin-Secret': legacy }
+    }
+  }
+  return init
+}
 
 
 export default function AdminPage() {
-  const [secret, setSecret] = useState('')
-  const [unlocked, setUnlocked] = useState(false)
-
-  // Load saved secret from localStorage
-  useEffect(() => {
-    const s = localStorage.getItem(STORAGE_KEY)
-    if (s) { setSecret(s); setUnlocked(true) }
-  }, [])
-
-  if (!unlocked) {
-    return <SecretGate
-      onUnlock={(s) => { setSecret(s); setUnlocked(true); localStorage.setItem(STORAGE_KEY, s) }}
-    />
-  }
-
   return (
     <div className="space-y-6">
       <header className="flex items-baseline justify-between">
         <div>
           <h1 className="text-2xl font-bold">Power User — Admin</h1>
-          <p className="text-sm text-neutral-400 mt-1">Invite issuance + cohort metrics</p>
+          <p className="text-sm text-neutral-400 mt-1">
+            Invite issuance + cohort metrics. Authenticated as admin via session cookie.
+          </p>
         </div>
-        <button
-          type="button"
-          onClick={() => { localStorage.removeItem(STORAGE_KEY); setUnlocked(false); setSecret('') }}
-          className="text-xs text-red-400 underline hover:text-red-300"
-        >
-          Clear secret
-        </button>
+        <LegacySecretToggle />
       </header>
 
-      <ZerodhaAuthPanel secret={secret} />
-      <MetricsPanel secret={secret} />
-      <InviteIssuancePanel secret={secret} />
-      <InviteListPanel secret={secret} />
+      <ZerodhaAuthPanel />
+      <DailyJobsPanel />
+      <MetricsPanel />
+      <InviteIssuancePanel />
+      <InviteListPanel />
     </div>
   )
 }
 
 
 // ─────────────────────────────────────────────────────────────────────────
-// Secret gate
+// Daily Jobs panel (Phase 1b — surfaces existing /api/jobs/* infra +
+// the roster from /api/power/admin/jobs/scheduled). No new pipeline logic
+// is implemented here — this panel only DRIVES the canonical engine.
 // ─────────────────────────────────────────────────────────────────────────
 
-function SecretGate({ onUnlock }: { onUnlock: (s: string) => void }) {
-  const [val, setVal] = useState('')
+type PipelineStatus = {
+  running:     boolean
+  last_run:    string | null
+  last_result: string | null
+}
+
+type ScheduledJob = {
+  name:         string
+  cadence:      string
+  description:  string
+  status:       string
+  next_run?:    string | null
+  last_run?:    string | null
+  last_result?: string | null
+  implemented:  boolean
+  trigger?:     { method: string; path: string }
+}
+
+type FreshnessResp = {
+  last_trading_day: string
+  ohlcv:    { latest_date: Record<string, string>; nse_fresh_tickers: number; nse_stale_tickers: number; is_fresh: boolean }
+  signals?: { latest_snapshot_date: string | null; signal_count: number; is_fresh: boolean }
+  overall_healthy: boolean
+}
+
+
+function DailyJobsPanel() {
+  const [jobs,      setJobs]      = useState<ScheduledJob[] | null>(null)
+  const [pipeline,  setPipeline]  = useState<PipelineStatus | null>(null)
+  const [freshness, setFreshness] = useState<FreshnessResp | null>(null)
+  const [error,     setError]     = useState<string | null>(null)
+  const [busy,      setBusy]      = useState(false)
+  const [flash,     setFlash]     = useState<string | null>(null)
+
+  const refresh = async () => {
+    try {
+      const [j, p, f] = await Promise.all([
+        fetch(`${apiBase()}/api/power/admin/jobs/scheduled`, adminFetchInit()),
+        fetch(`${apiBase()}/api/power/admin/jobs/pipeline`,  adminFetchInit()),
+        fetch(`${apiBase()}/api/power/admin/jobs/status`,    adminFetchInit()),
+      ])
+      if (!j.ok) throw new Error(`scheduled: HTTP ${j.status}`)
+      if (!p.ok) throw new Error(`pipeline: HTTP ${p.status}`)
+      if (!f.ok) throw new Error(`freshness: HTTP ${f.status}`)
+      const jj = await j.json()
+      setJobs(jj.jobs || [])
+      setPipeline(await p.json())
+      setFreshness(await f.json())
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Jobs fetch failed.')
+    }
+  }
+
+  useEffect(() => {
+    void refresh()
+    const id = setInterval(refresh, 15_000)
+    return () => clearInterval(id)
+  }, [])
+
+  const onTrigger = async () => {
+    setBusy(true); setFlash(null); setError(null)
+    try {
+      const r = await fetch(`${apiBase()}/api/power/admin/jobs/run`,
+                            adminFetchInit({ method: 'POST' }))
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}))
+        throw new Error(b.detail?.message || `HTTP ${r.status}`)
+      }
+      const body = await r.json()
+      setFlash(body.message || 'Pipeline triggered.')
+      setTimeout(refresh, 2_000)
+      setTimeout(refresh, 8_000)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Pipeline trigger failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (error && !jobs) return <ErrorBox text={`Jobs: ${error}`} />
+  if (!jobs)          return <SkeletonBox lines={4} />
+
+  const running = pipeline?.running === true
+
   return (
-    <div className="max-w-sm mx-auto py-20">
-      <h1 className="text-xl font-bold mb-3">Admin secret required</h1>
-      <input
-        type="password"
-        value={val}
-        onChange={e => setVal(e.target.value)}
-        placeholder="ADMIN_SECRET"
-        autoFocus
-        className="w-full bg-neutral-950 border border-neutral-700 rounded px-3 py-2
-                    text-neutral-100 font-mono focus:outline-none focus:border-amber-500/60"
-      />
-      <button
-        type="button"
-        onClick={() => val && onUnlock(val)}
-        className="w-full mt-3 px-4 py-2 bg-amber-500 text-neutral-950 rounded font-semibold
-                    hover:bg-amber-400"
-      >
-        Unlock
+    <section className="bg-neutral-900 border border-neutral-800 rounded p-4 space-y-4">
+      <header className="flex items-baseline justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-neutral-300">Daily jobs</h2>
+          <p className="text-xs text-neutral-500 mt-0.5">
+            Existing engine pipeline + supporting schedulers. Manual trigger drives the same code path the 16:05 IST scheduler runs.
+          </p>
+        </div>
+        <button
+          type="button" onClick={onTrigger} disabled={busy || running}
+          className={['px-3 py-1.5 rounded text-sm font-semibold transition-colors', running ? 'bg-amber-400/20 text-amber-200 cursor-not-allowed' : 'bg-mint-400 text-neutral-950 hover:bg-mint-300 disabled:opacity-50'].join(' ')}
+        >
+          {running ? 'Pipeline running…' : busy ? 'Triggering…' : 'Run pipeline now'}
+        </button>
+      </header>
+
+      {/* Pipeline status strip */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+        <KV label="Pipeline"
+            value={running ? 'RUNNING' : (pipeline?.last_result ?? 'idle')}
+            mono />
+        <KV label="Last run"  value={fmtIst(pipeline?.last_run ?? null)} mono />
+        <KV label="OHLC fresh"
+            value={freshness?.ohlcv?.is_fresh ? `yes (${freshness.ohlcv.latest_date?.NSE ?? '—'})` : 'STALE'}
+            mono />
+        <KV label="Last trading day"
+            value={freshness?.last_trading_day ?? '—'} mono />
+      </div>
+
+      {flash && (
+        <p role="status" className="px-3 py-2 rounded bg-green-500/10 text-green-200 border border-green-500/40 text-xs">
+          {flash}
+        </p>
+      )}
+      {error && <ErrorBox text={error} />}
+
+      {/* Scheduled jobs roster */}
+      <div className="space-y-2">
+        {jobs.map(j => (
+          <div key={j.name}
+               className={['bg-neutral-950/60 border rounded p-3', j.implemented ? 'border-neutral-800' : 'border-amber-400/30 bg-amber-400/[0.03]'].join(' ')}>
+            <div className="flex items-baseline justify-between gap-3 flex-wrap">
+              <div className="flex items-baseline gap-2 flex-wrap">
+                <span className="font-semibold text-sm text-neutral-100">{j.name}</span>
+                <span className="text-[11px] text-neutral-500 font-mono">{j.cadence}</span>
+              </div>
+              <JobStatusBadge status={j.status} implemented={j.implemented} />
+            </div>
+            <p className="mt-1 text-xs text-neutral-400 leading-relaxed">{j.description}</p>
+            {(j.last_run || j.next_run) && (
+              <div className="mt-2 text-[11px] text-neutral-500 flex gap-4 flex-wrap font-mono">
+                {j.last_run && <span>last: {fmtIst(j.last_run)}</span>}
+                {j.next_run && <span>next: {fmtIst(j.next_run)}</span>}
+                {j.last_result && <span className="text-neutral-400">→ {j.last_result}</span>}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function JobStatusBadge({ status, implemented }: { status: string; implemented: boolean }) {
+  const palette = !implemented
+    ? 'bg-amber-400/[0.12] text-amber-200 border-amber-400/40'
+    : status === 'running'        ? 'bg-amber-400/[0.12] text-amber-200 border-amber-400/40'
+    : status === 'token_invalid'  ? 'bg-red-500/15 text-red-200 border-red-500/40'
+    : status === 'token_valid'    ? 'bg-green-500/15 text-green-200 border-green-500/40'
+    : status === 'idle' || status === 'implemented' || status === 'manual'
+                                  ? 'bg-neutral-800 text-neutral-300 border-neutral-700'
+                                  : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+  const label = !implemented ? 'NOT YET LIVE' : status.replace('_', ' ').toUpperCase()
+  return (
+    <span className={['inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide border font-mono', palette].join(' ')}>
+      {label}
+    </span>
+  )
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// Optional: surface a legacy ADMIN_SECRET if the admin needs to layer one
+// on top (e.g. transient JWT verification issue). Hidden in a dropdown by
+// default so it doesn't clutter the page.
+// ─────────────────────────────────────────────────────────────────────────
+
+function LegacySecretToggle() {
+  const [open, setOpen] = useState(false)
+  const [val, setVal]   = useState('')
+  const [hasStored, setHasStored] = useState(false)
+  useEffect(() => {
+    setHasStored(!!localStorage.getItem(STORAGE_KEY))
+  }, [])
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)}
+              className="text-[11px] text-neutral-500 hover:text-neutral-300">
+        {hasStored ? 'legacy admin secret set ▾' : 'set legacy admin secret ▾'}
       </button>
-      <p className="text-xs text-neutral-500 mt-2">
-        Stored in localStorage. Same secret used for <code>/falcon/admin</code>.
-      </p>
+    )
+  }
+  return (
+    <div className="flex items-center gap-2">
+      <input type="password" value={val} onChange={e => setVal(e.target.value)}
+             placeholder="X-Admin-Secret (fallback)"
+             className="bg-neutral-950 border border-neutral-700 rounded px-2 py-1 text-xs font-mono w-56" />
+      <button type="button"
+              onClick={() => { if (val) localStorage.setItem(STORAGE_KEY, val); setHasStored(true); setOpen(false); setVal('') }}
+              className="text-xs px-2 py-1 bg-mint-500 text-neutral-950 rounded">save</button>
+      <button type="button"
+              onClick={() => { localStorage.removeItem(STORAGE_KEY); setHasStored(false); setOpen(false) }}
+              className="text-xs text-red-400 underline hover:text-red-300">clear</button>
     </div>
   )
 }
@@ -133,7 +329,7 @@ type AuthLogEntry = {
   elapsed_ms:     number | null
 }
 
-function ZerodhaAuthPanel({ secret }: { secret: string }) {
+function ZerodhaAuthPanel() {
   const [status, setStatus] = useState<AuthStatus | null>(null)
   const [log,    setLog]    = useState<AuthLogEntry[] | null>(null)
   const [error,  setError]  = useState<string | null>(null)
@@ -143,8 +339,8 @@ function ZerodhaAuthPanel({ secret }: { secret: string }) {
   const refresh = async () => {
     try {
       const [s, l] = await Promise.all([
-        fetch(`${API}/api/power/admin/auth/status`, { headers: { 'X-Admin-Secret': secret } }),
-        fetch(`${API}/api/power/admin/auth/log?limit=10`, { headers: { 'X-Admin-Secret': secret } }),
+        fetch(`${apiBase()}/api/power/admin/auth/status`, adminFetchInit()),
+        fetch(`${apiBase()}/api/power/admin/auth/log?limit=10`, adminFetchInit()),
       ])
       if (!s.ok) throw new Error(`status: HTTP ${s.status}`)
       if (!l.ok) throw new Error(`log: HTTP ${l.status}`)
@@ -161,15 +357,13 @@ function ZerodhaAuthPanel({ secret }: { secret: string }) {
     void refresh()
     const id = setInterval(refresh, 15_000)      // light polling — admin widget only
     return () => clearInterval(id)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [secret])
+  }, [])
 
   const onManualRefresh = async () => {
     setBusy(true); setFlash(null)
     try {
-      const r = await fetch(`${API}/api/power/admin/auth/refresh-now`, {
-        method: 'POST', headers: { 'X-Admin-Secret': secret },
-      })
+      const r = await fetch(`${apiBase()}/api/power/admin/auth/refresh-now`,
+                            adminFetchInit({ method: 'POST' }))
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       setFlash('Manual attempt queued — refresh status in ~30s')
       // Eagerly re-poll once
@@ -206,8 +400,8 @@ function ZerodhaAuthPanel({ secret }: { secret: string }) {
       </header>
 
       {status.degraded && (
-        <div role="status" className="px-3 py-2 rounded border border-amber-500/40 bg-amber-500/10
-                                       text-amber-100 text-xs">
+        <div role="status" className="px-3 py-2 rounded border border-mint-500/40 bg-mint-500/10
+                                       text-mint-100 text-xs">
           ⚠ <span className="font-semibold">Degraded mode</span> — token down past 09:30 IST.
           The /power/live overlay is hidden. EOD picks remain valid.
         </div>
@@ -245,12 +439,12 @@ function ZerodhaAuthPanel({ secret }: { secret: string }) {
       <div className="flex flex-wrap items-center gap-3">
         <button
           type="button" onClick={onManualRefresh} disabled={busy}
-          className="px-3 py-1.5 bg-amber-500 text-neutral-950 rounded text-sm font-semibold
-                      hover:bg-amber-400 disabled:opacity-50"
+          className="px-3 py-1.5 bg-mint-500 text-neutral-950 rounded text-sm font-semibold
+                      hover:bg-mint-400 disabled:opacity-50"
         >
           {busy ? 'Triggering…' : 'Refresh token now'}
         </button>
-        <PushSubscribeButton secret={secret} onFlash={setFlash} onError={setError} />
+        <PushSubscribeButton onFlash={setFlash} onError={setError} />
         <button
           type="button" onClick={refresh}
           className="text-xs text-neutral-400 underline hover:text-neutral-200"
@@ -328,8 +522,8 @@ function KV({ label, value, mono }: { label: string; value: string; mono?: boole
 // ─────────────────────────────────────────────────────────────────────────
 
 function PushSubscribeButton({
-  secret, onFlash, onError,
-}: { secret: string; onFlash: (m: string) => void; onError: (m: string) => void }) {
+  onFlash, onError,
+}: { onFlash: (m: string) => void; onError: (m: string) => void }) {
   const [state, setState] = useState<'idle' | 'subscribing' | 'subscribed' | 'unsupported' | 'blocked'>('idle')
 
   useEffect(() => {
@@ -366,8 +560,8 @@ function PushSubscribeButton({
       const reg = await navigator.serviceWorker.register('/sw-push.js', { scope: '/' })
       await navigator.serviceWorker.ready
       // 3. Fetch VAPID public key
-      const r = await fetch(`${API}/api/power/admin/push/vapid-public-key`,
-                            { headers: { 'X-Admin-Secret': secret } })
+      const r = await fetch(`${apiBase()}/api/power/admin/push/vapid-public-key`,
+                            adminFetchInit())
       if (!r.ok) throw new Error(`vapid: HTTP ${r.status}`)
       const { key, configured } = await r.json()
       if (configured !== 'true' || !key) {
@@ -383,16 +577,16 @@ function PushSubscribeButton({
       if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) {
         throw new Error('Browser returned an incomplete PushSubscription.')
       }
-      const post = await fetch(`${API}/api/power/admin/push/subscribe`, {
+      const post = await fetch(`${apiBase()}/api/power/admin/push/subscribe`, adminFetchInit({
         method:  'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': secret },
+        headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           endpoint:    json.endpoint,
           p256dh:      json.keys.p256dh,
           auth:        json.keys.auth,
           user_agent:  navigator.userAgent.slice(0, 200),
         }),
-      })
+      }))
       if (!post.ok) throw new Error(`subscribe: HTTP ${post.status}`)
       setState('subscribed')
       onFlash('Push notifications enabled — you\'ll get a tap-to-refresh link if auto-auth fails 4× tomorrow.')
@@ -415,8 +609,8 @@ function PushSubscribeButton({
   return (
     <button
       type="button" onClick={onSubscribe} disabled={state === 'subscribing' || state === 'blocked'}
-      className="px-3 py-1.5 border border-amber-500/40 text-amber-300 rounded text-sm font-semibold
-                  hover:bg-amber-500/10 disabled:opacity-50"
+      className="px-3 py-1.5 border border-mint-500/40 text-mint-300 rounded text-sm font-semibold
+                  hover:bg-mint-500/10 disabled:opacity-50"
     >
       {state === 'subscribing' ? 'Subscribing…'
         : state === 'blocked' ? 'Push blocked — re-enable in site settings'
@@ -464,12 +658,12 @@ type Metrics = {
   top_routes_7d: Array<{ route: string; n: number; avg_ms: number }>
 }
 
-function MetricsPanel({ secret }: { secret: string }) {
+function MetricsPanel() {
   const [data, setData]   = useState<Metrics | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch(`${API}/api/power/admin/metrics`, { headers: { 'X-Admin-Secret': secret } })
+    fetch(`${apiBase()}/api/power/admin/metrics`, adminFetchInit())
       .then(async r => {
         if (!r.ok) {
           const b = await r.json().catch(() => ({}))
@@ -479,7 +673,7 @@ function MetricsPanel({ secret }: { secret: string }) {
       })
       .then((m: Metrics) => setData(m))
       .catch((e: Error) => setError(e.message))
-  }, [secret])
+  }, [])
 
   if (error) return <ErrorBox text={`Metrics: ${error}`} />
   if (!data) return <SkeletonBox lines={3} />
@@ -523,7 +717,7 @@ function MetricsPanel({ secret }: { secret: string }) {
 // Invite issuance
 // ─────────────────────────────────────────────────────────────────────────
 
-function InviteIssuancePanel({ secret }: { secret: string }) {
+function InviteIssuancePanel() {
   const [n, setN] = useState(5)
   const [days, setDays] = useState<number | ''>('')
   const [note, setNote] = useState('')
@@ -534,15 +728,15 @@ function InviteIssuancePanel({ secret }: { secret: string }) {
   const onIssue = async () => {
     setBusy(true); setError(null); setResult(null)
     try {
-      const r = await fetch(`${API}/api/power/admin/invites/issue`, {
+      const r = await fetch(`${apiBase()}/api/power/admin/invites/issue`, adminFetchInit({
         method:  'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': secret },
+        headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           n,
           expires_in_days: days === '' ? null : days,
           note:            note || null,
         }),
-      })
+      }))
       if (!r.ok) {
         const b = await r.json().catch(() => ({}))
         throw new Error(b.detail?.message || `HTTP ${r.status}`)
@@ -579,7 +773,7 @@ function InviteIssuancePanel({ secret }: { secret: string }) {
         </Field>
         <button
           type="button" onClick={onIssue} disabled={busy}
-          className="px-4 py-2 bg-amber-500 text-neutral-950 rounded font-semibold hover:bg-amber-400 disabled:opacity-50"
+          className="px-4 py-2 bg-mint-400 text-neutral-950 rounded font-semibold hover:bg-mint-300 disabled:opacity-50"
         >
           {busy ? 'Issuing…' : `Issue ${n}`}
         </button>
@@ -592,7 +786,7 @@ function InviteIssuancePanel({ secret }: { secret: string }) {
             <button
               type="button"
               onClick={() => navigator.clipboard?.writeText(result.codes.join('\n'))}
-              className="text-xs text-amber-400 underline hover:text-amber-300"
+              className="text-xs text-mint-400 underline hover:text-mint-300"
             >
               copy all
             </button>
@@ -622,14 +816,14 @@ type InviteRow = {
   note: string | null
 }
 
-function InviteListPanel({ secret }: { secret: string }) {
+function InviteListPanel() {
   const [rows, setRows]   = useState<InviteRow[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [onlyUnused, setOnlyUnused] = useState(false)
 
   useEffect(() => {
-    fetch(`${API}/api/power/admin/invites/list?only_unused=${onlyUnused}`,
-          { headers: { 'X-Admin-Secret': secret } })
+    fetch(`${apiBase()}/api/power/admin/invites/list?only_unused=${onlyUnused}`,
+          adminFetchInit())
       .then(async r => {
         if (!r.ok) {
           const b = await r.json().catch(() => ({}))
@@ -639,7 +833,7 @@ function InviteListPanel({ secret }: { secret: string }) {
       })
       .then(d => setRows(d.codes))
       .catch((e: Error) => setError(e.message))
-  }, [secret, onlyUnused])
+  }, [onlyUnused])
 
   if (error) return <ErrorBox text={`List: ${error}`} />
   if (!rows) return <SkeletonBox lines={3} />
@@ -694,11 +888,11 @@ function InviteListPanel({ secret }: { secret: string }) {
 function Cell({ label, value, accent }: { label: string; value: number; accent?: 'amber' }) {
   return (
     <div className={`bg-neutral-950/60 border rounded p-2 ${
-      accent === 'amber' ? 'border-amber-500/30' : 'border-neutral-800'
+      accent === 'amber' ? 'border-mint-500/30' : 'border-neutral-800'
     }`}>
       <div className="text-[10px] uppercase tracking-wider text-neutral-500">{label}</div>
       <div className={`text-xl font-bold font-mono ${
-        accent === 'amber' ? 'text-amber-300' : 'text-neutral-100'
+        accent === 'amber' ? 'text-mint-300' : 'text-neutral-100'
       }`}>
         {value}
       </div>

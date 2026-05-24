@@ -13,7 +13,13 @@
 
 import { useEffect, useState } from 'react'
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
+// Same-origin in the browser — see lib/power-api.ts for the full rationale.
+// Function (not const) so the value resolves at call time, not build time.
+function apiBase(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL
+  if (typeof window !== 'undefined')   return ''
+  return 'http://127.0.0.1:8001'
+}
 
 type Result =
   | { kind: 'idle' }
@@ -37,7 +43,7 @@ export default function RefreshTokenPage() {
     setResult({ kind: 'consuming' })
     void (async () => {
       try {
-        const r = await fetch(`${API}/api/power/auth-refresh/consume`, {
+        const r = await fetch(`${apiBase()}/api/power/auth-refresh/consume`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify({ token: t }),
@@ -67,8 +73,8 @@ export default function RefreshTokenPage() {
       </p>
 
       {result.kind === 'consuming' && (
-        <div className="flex items-center gap-3 text-amber-200">
-          <span className="inline-block w-4 h-4 border-2 border-amber-300 border-t-transparent rounded-full animate-spin" />
+        <div className="flex items-center gap-3 text-mint-200">
+          <span className="inline-block w-4 h-4 border-2 border-mint-300 border-t-transparent rounded-full animate-spin" />
           <span>Validating link and triggering refresh…</span>
         </div>
       )}

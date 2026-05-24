@@ -23,7 +23,7 @@ export function DateNavigator({ currentDate, authed }: Props) {
     return (
       <div className="text-xs text-neutral-500">
         Want to replay any date?{' '}
-        <Link href="/power/login" className="text-amber-400 underline">
+        <Link href="/power/login" className="text-mint-400 underline">
           Sign in for custom replays →
         </Link>
       </div>
@@ -53,8 +53,8 @@ export function DateNavigator({ currentDate, authed }: Props) {
       <button
         type="submit"
         disabled={date === currentDate}
-        className="px-3 py-1 bg-amber-500 text-neutral-950 rounded text-sm font-medium
-                    hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed"
+        className="px-3 py-1 bg-mint-500 text-neutral-950 rounded text-sm font-medium
+                    hover:bg-mint-400 disabled:opacity-40 disabled:cursor-not-allowed"
       >
         Replay
       </button>

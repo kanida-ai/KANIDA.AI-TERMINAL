@@ -29,7 +29,7 @@ type Props = {
 export function FeaturedReplayCard({ replay, emphasis = 'standard' }: Props) {
   const accent =
     emphasis === 'showcase'
-      ? 'border-amber-500/50 shadow-lg shadow-amber-500/5'
+      ? 'border-mint-500/50 shadow-lg shadow-mint-500/5'
       : 'border-neutral-800 hover:border-neutral-700'
   return (
     <Link
@@ -41,7 +41,7 @@ export function FeaturedReplayCard({ replay, emphasis = 'standard' }: Props) {
       ].join(' ')}
     >
       <header className="flex items-baseline justify-between mb-1">
-        <h3 className="text-base md:text-lg font-bold text-amber-300 group-hover:text-amber-200">
+        <h3 className="text-base md:text-lg font-bold text-mint-300 group-hover:text-mint-200">
           {replay.title ?? replay.replay_date}
         </h3>
         <time className="text-xs text-neutral-500 font-mono">{replay.replay_date}</time>
@@ -71,7 +71,7 @@ export function FeaturedReplayCard({ replay, emphasis = 'standard' }: Props) {
 
       <footer className="mt-3 text-xs text-neutral-500 flex justify-between">
         <span>{replay.n_picks} picks</span>
-        <span className="text-amber-400 group-hover:text-amber-300">See full replay →</span>
+        <span className="text-mint-400 group-hover:text-mint-300">See full replay →</span>
       </footer>
     </Link>
   )

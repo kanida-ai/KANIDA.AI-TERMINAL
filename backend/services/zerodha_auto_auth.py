@@ -150,15 +150,28 @@ async def _capture_request_token(context: Any, login_url: str,
     page = await context.new_page()
 
     # Intercept the post-auth redirect — that's where ?request_token=... lands.
+    # We listen for BOTH `request` and `response` events because the configured
+    # Kite Connect redirect_uri may be unreachable from the headless browser
+    # (e.g. http://localhost:3000/admin?... — only the operator's dev frontend
+    # would normally answer that). In that case the browser blows up with
+    # `chrome-error://chromewebdata/` and `response` never fires, but the
+    # `request` event captures the URL BEFORE the navigation is attempted,
+    # which is all we need — the request_token is already in the URL.
     redirect_event = asyncio.Event()
     captured_url:   Dict[str, str] = {}
 
     def _on_response(resp):
         url = resp.url
-        if "request_token=" in url:
+        if "request_token=" in url and "url" not in captured_url:
+            captured_url["url"] = url
+            redirect_event.set()
+    def _on_request(req):
+        url = req.url
+        if "request_token=" in url and "url" not in captured_url:
             captured_url["url"] = url
             redirect_event.set()
     page.on("response", _on_response)
+    page.on("request", _on_request)
 
     await page.goto(login_url, wait_until="domcontentloaded", timeout=LOGIN_TIMEOUT_MS)
 
@@ -399,17 +412,29 @@ def log_attempt(db_path: str, attempt_of_day: int, trigger_kind: str,
 
 def today_already_succeeded(db_path: str) -> bool:
     """True if a successful attempt has been logged today (IST). Used to
-    skip later attempts in the 4-cycle morning sequence."""
-    today_iso = datetime.now(IST).date().isoformat()
+    skip later attempts in the 4-cycle morning sequence.
+
+    Implementation note: we compare ISO timestamp strings (`attempt_at` is
+    stored as `datetime.now(IST).isoformat()`, e.g. `2026-05-17T03:58:06+05:30`).
+    Earlier versions used `date(attempt_at)` which SQLite interprets as a UTC
+    conversion when the string carries a ±HH:MM offset — that broke the
+    check whenever IST was past midnight but UTC was still on the prior date
+    (e.g., between 00:00 IST and 05:30 IST). Comparing full ISO strings with
+    < / >= sidesteps SQLite's timezone interpretation entirely.
+    """
+    now_ist   = datetime.now(IST)
+    day_start = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end   = day_start + timedelta(days=1)
     try:
         con = sqlite3.connect(db_path, timeout=5.0, check_same_thread=False)
         try:
             row = con.execute("""
                 SELECT 1 FROM falcon_auth_log
                  WHERE status = 'success'
-                   AND date(attempt_at) = ?
+                   AND attempt_at >= ?
+                   AND attempt_at <  ?
                  LIMIT 1
-            """, (today_iso,)).fetchone()
+            """, (day_start.isoformat(), day_end.isoformat())).fetchone()
             return row is not None
         finally:
             con.close()

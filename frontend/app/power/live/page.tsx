@@ -45,7 +45,7 @@ export default async function LivePage({ searchParams }: { searchParams: SearchP
             Pre-computed at <span className="font-mono text-neutral-300">09:30:30</span>,{' '}
             <span className="font-mono text-neutral-300">09:45:00</span>, and{' '}
             <span className="font-mono text-neutral-300">10:00:00 IST</span>.
-            9:30 ENTER/SKIP decisions are <span className="text-amber-300 font-semibold">locked</span> —
+            9:30 ENTER/SKIP decisions are <span className="text-mint-300 font-semibold">locked</span> —
             later cycles only re-evaluate WAITs.
           </p>
         </div>
@@ -97,14 +97,14 @@ export default async function LivePage({ searchParams }: { searchParams: SearchP
 function DegradedBanner() {
   return (
     <div role="status"
-         className="px-4 py-3 rounded border border-amber-500/40 bg-amber-500/10
-                    text-amber-100 text-sm flex items-start gap-3">
-      <span aria-hidden className="text-amber-300 mt-0.5">⚠</span>
+         className="px-4 py-3 rounded border border-mint-500/40 bg-mint-500/10
+                    text-mint-100 text-sm flex items-start gap-3">
+      <span aria-hidden className="text-mint-300 mt-0.5">⚠</span>
       <div className="space-y-1">
-        <p className="font-semibold text-amber-200">
+        <p className="font-semibold text-mint-200">
           Intraday decisions unavailable today
         </p>
-        <p className="text-amber-100/90 leading-snug">
+        <p className="text-mint-100/90 leading-snug">
           Live broker connection is offline since this morning, so the 9:30 /
           9:45 / 10:00 IST ENTER/WAIT/SKIP overlay can't be computed for today.
           <span className="font-semibold"> Your EOD picks remain valid</span> —
@@ -143,7 +143,7 @@ function Stat({ label, value, color, tooltip }: {
     green:  'text-green-300 border-green-500/30',
     yellow: 'text-yellow-300 border-yellow-500/30',
     gray:   'text-neutral-300 border-neutral-700',
-    amber:  'text-amber-300 border-amber-500/30',
+    amber:  'text-mint-300 border-mint-500/30',
   }[color]
   return (
     <div title={tooltip} className={`bg-neutral-900 border rounded p-3 ${cls}`}>

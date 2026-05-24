@@ -58,13 +58,13 @@ export default function WaitlistPage() {
             autoFocus
             className="w-full bg-neutral-950 border border-neutral-700 rounded
                         px-3 py-2 text-neutral-100 placeholder-neutral-600
-                        focus:outline-none focus:border-amber-500/60"
+                        focus:outline-none focus:border-mint-500/60"
           />
           <button
             type="submit"
             disabled={busy || !email.includes('@')}
-            className="w-full px-4 py-2.5 bg-amber-500 text-neutral-950 rounded-md
-                        font-semibold hover:bg-amber-400 transition-colors
+            className="w-full px-4 py-2.5 bg-mint-500 text-neutral-950 rounded-md
+                        font-semibold hover:bg-mint-400 transition-colors
                         disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {busy ? 'Adding…' : 'Add me to the waitlist'}

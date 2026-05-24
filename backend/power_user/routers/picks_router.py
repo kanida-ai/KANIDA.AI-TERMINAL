@@ -151,6 +151,9 @@ def featured_replays(
 # /picks/replay/{date}  — featured (public) / random (rate-limited) / authed
 # ──────────────────────────────────────────────────────────────────────────
 
+SELECT_DATE_LIMIT_PER_HOUR = 20   # Sprint 5d Fix 8: rate-limit anon "Select Date"
+
+
 @router.get("/picks/replay/{replay_date}")
 def replay_for_date(
     replay_date: str,
@@ -160,22 +163,23 @@ def replay_for_date(
 ) -> Dict[str, Any]:
     """Replay for any date.
 
+    Sprint 5d Fix 8 (2026-05-16): "Select Date" is the operator's flagship
+    transparency feature — anyone can audit any historical day end-to-end.
+    Public, but rate-limited per IP-hash so anonymous users can't grind every
+    date in the backtest window.
+
     Access policy:
-      - Featured date → public (always allowed)
-      - Authed user   → any date (no rate limit)
-      - Anonymous + non-featured → 401 (must redeem random via POST /random)
+      - Featured date          → public, unlimited
+      - Any other date + anon  → public, rate-limited to 20/hr per IP-hash
+      - Authed user            → any date, no rate limit
     """
     ip_hash = hash_ip_ua(request)
     is_featured = replay_date in FEATURED_DATES
 
     if not is_featured and user is None:
-        log_request(con, user_id=None, route="/api/power/picks/replay/{date}",
-                    status_code=401, latency_ms=0, ip_hash=ip_hash)
-        raise HTTPException(401, {
-            "code":    "AUTH_REQUIRED",
-            "message": f"Sign in to view custom replay dates. "
-                       f"Try one of our 3 featured replays or 🎲 Random Replay.",
-        })
+        check_anon_rate_limit(con, ip_hash,
+                              "/api/power/picks/replay/select-date",
+                              SELECT_DATE_LIMIT_PER_HOUR)
 
     payload = get_or_compute(con, replay_date)
     if payload.get("error"):

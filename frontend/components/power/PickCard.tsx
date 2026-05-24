@@ -18,7 +18,6 @@
  *   - liveDecision overlay (decided_at_cycle badge) when passed
  */
 import type { Pick, LiveDecision, PickPattern, PickActual } from '@/lib/power-api'
-import { TierBadge } from './TierBadge'
 
 const inr = (n: number) =>
   '₹' + Math.round(n).toLocaleString('en-IN')
@@ -28,6 +27,19 @@ const fmtPct = (n: number | null | undefined, opts: { sign?: boolean } = {}) => 
   const s = n.toFixed(2)
   return opts.sign && n > 0 ? `+${s}%` : `${s}%`
 }
+
+/**
+ * Sprint 5c (Bug 4): Always show the SL/trail in plain English. Stop showing
+ * raw `entry × 0.9299999999999999 (-7%)` which is a floating-point precision
+ * leak that scares users. Display as "Entry − 7%" or, when a multiplier helps
+ * the trader translate to a Kite limit price, "Entry × 0.93".
+ */
+const fmtPctSigned = (pct: number) => {
+  const sign = pct >= 0 ? '+' : '−'
+  return `${sign}${Math.abs(pct)}%`
+}
+const fmtEntryMultiplier = (pct: number) =>
+  (1 + pct / 100).toFixed(2)       // -7 → "0.93"; +10 → "1.10"
 
 type Props = {
   pick:           Pick
@@ -81,13 +93,16 @@ function PickCardExpanded({ pick, liveDecision, className = '' }: {
 // COMPACT — one row, summarized
 // ─────────────────────────────────────────────────────────────
 
-function PickCardCompact({ pick, liveDecision, hideScore, className = '' }: {
+function PickCardCompact({ pick, liveDecision, className = '' }: {
   pick: Pick; liveDecision?: LiveDecision; hideScore?: boolean; className?: string
 }) {
+  // Sprint 5c design changes 1+2: tier + score no longer render on the card;
+  // rank is the only ordering cue users need. Both fields stay in the Pick
+  // contract — live-tier rules + score are still used internally.
   return (
     <div
       className={[
-        'grid grid-cols-[2rem_minmax(0,1fr)_auto_auto] md:grid-cols-[2rem_minmax(0,1fr)_8rem_6rem_6rem] gap-3 items-center',
+        'grid grid-cols-[2rem_minmax(0,1fr)_auto] md:grid-cols-[2rem_minmax(0,1fr)_auto] gap-3 items-center',
         'bg-neutral-900 border border-neutral-800 rounded px-3 py-2 hover:bg-neutral-850 transition-colors',
         className,
       ].join(' ')}
@@ -100,13 +115,6 @@ function PickCardCompact({ pick, liveDecision, hideScore, className = '' }: {
         </div>
         <p className="text-xs text-neutral-400 truncate">{pick.story}</p>
       </div>
-      <TierBadge tier={pick.tier} tierColor={pick.tier_color} tierIcon={pick.tier_icon}
-                  size="sm" title={pick.tier_desc} />
-      {!hideScore && (
-        <span className="text-xs text-neutral-500 font-mono text-right hidden md:block">
-          {Math.round(pick.score)}
-        </span>
-      )}
       {liveDecision && (
         <LiveActionBadge action={liveDecision.action}
                           decidedAt={liveDecision.decided_at_cycle} />
@@ -120,6 +128,9 @@ function PickCardCompact({ pick, liveDecision, hideScore, className = '' }: {
 // ─────────────────────────────────────────────────────────────
 
 export function PickHeader({ pick, liveDecision }: { pick: Pick; liveDecision?: LiveDecision }) {
+  // Sprint 5c design changes 1+2: tier badge + score number removed from
+  // the header. Rank is the sole ordering signal we show. Live action badge
+  // stays — it's the ENTER/WAIT/SKIP decision, not a generic ordering cue.
   return (
     <header className="flex items-start justify-between gap-3 flex-wrap">
       <div className="flex items-baseline gap-2 flex-wrap min-w-0">
@@ -129,18 +140,12 @@ export function PickHeader({ pick, liveDecision }: { pick: Pick; liveDecision?: 
           <span className="text-sm text-neutral-400 truncate">{pick.sector}</span>
         )}
       </div>
-      <div className="flex items-center gap-2 flex-wrap shrink-0">
-        <TierBadge tier={pick.tier} tierColor={pick.tier_color} tierIcon={pick.tier_icon}
-                    size="md" title={pick.tier_desc} />
-        <span className="text-xs text-neutral-500 font-mono"
-              title={`${pick.n_fires} patterns firing`}>
-          Score {Math.round(pick.score)}
-        </span>
-        {liveDecision && (
+      {liveDecision && (
+        <div className="shrink-0">
           <LiveActionBadge action={liveDecision.action}
                             decidedAt={liveDecision.decided_at_cycle} />
-        )}
-      </div>
+        </div>
+      )}
     </header>
   )
 }
@@ -164,7 +169,7 @@ export function PickPatterns({ patterns }: { patterns: PickPattern[] }) {
               <span className="text-neutral-200">{p.trader_phrase}</span>
             </div>
             <div className="ml-5 mt-0.5 text-xs text-neutral-400">
-              <span className="text-amber-300/90">{p.hit_phrase}</span>
+              <span className="text-mint-300/90">{p.hit_phrase}</span>
               <span className="text-neutral-500 ml-2 hidden md:inline">
                 (validated {p.mined_year}, OOS +{p.oos_lift_pp.toFixed(1)}pp)
               </span>
@@ -197,7 +202,7 @@ export function PickExpected({ expected, tierActionHint }: {
         </div>
         <div className="flex justify-between">
           <dt className="text-neutral-400">D+15 avg return</dt>
-          <dd className="text-amber-300 font-mono">{rng(expected.d15_avg_range)}</dd>
+          <dd className="text-mint-300 font-mono">{rng(expected.d15_avg_range)}</dd>
         </div>
       </dl>
       {tierActionHint && (
@@ -251,11 +256,18 @@ export function PickActuals({ actual }: { actual: PickActual }) {
 export function PickRiskControl({ risk, compact = false }: {
   risk: Pick['risk']; compact?: boolean
 }) {
+  // Sprint 5c Bug 4: format SL/trail in plain English, not raw float math.
+  // The 2-decimal multiplier (e.g. "0.93") helps traders set a Kite limit
+  // price; the percentage gives the intent. We never print "0.9299999..."
+  const slPctText      = fmtPctSigned(risk.stop_loss_pct)            // "−7%"
+  const slMultiplier   = fmtEntryMultiplier(risk.stop_loss_pct)      // "0.93"
+  const trailPctText   = fmtPctSigned(risk.trail_trigger_pct)        // "+10%"
+
   if (compact) {
     return (
       <p className="text-[11px] text-neutral-500">
-        Risk: SL {risk.stop_loss_pct}%
-        {' · '}trail at +{risk.trail_trigger_pct}%
+        Risk: SL {slPctText}
+        {' · '}trail at {trailPctText}
         {' · '}exit by day {risk.time_exit_days}
       </p>
     )
@@ -268,11 +280,13 @@ export function PickRiskControl({ risk, compact = false }: {
       <dl className="text-sm space-y-1">
         <div className="flex justify-between">
           <dt className="text-neutral-400">Stop loss</dt>
-          <dd className="text-red-300 font-mono">entry × {1 + risk.stop_loss_pct / 100} ({risk.stop_loss_pct}%)</dd>
+          <dd className="text-red-300 font-mono">
+            Entry {slPctText} <span className="text-neutral-500">(× {slMultiplier})</span>
+          </dd>
         </div>
         <div className="flex justify-between">
           <dt className="text-neutral-400">Trail trigger</dt>
-          <dd className="text-amber-300 font-mono">activates at +{risk.trail_trigger_pct}%</dd>
+          <dd className="text-mint-300 font-mono">activates at {trailPctText}</dd>
         </div>
         <div className="flex justify-between">
           <dt className="text-neutral-400">Time exit</dt>

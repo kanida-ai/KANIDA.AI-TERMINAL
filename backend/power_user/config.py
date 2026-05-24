@@ -43,6 +43,15 @@ def _resolve_power_db_path() -> str:
 
 POWER_DB_PATH = _resolve_power_db_path()
 
+# RND DB — holds falcon_outcomes (827k historical rows) used by the Falcon
+# Top 20 "Historical evidence" bucket. Read-only access; PROD stays primary.
+# RND DB also has the 87.8M-row ohlc_1min table (not used yet at runtime;
+# the continuous 1-min fetcher comes in a follow-up).
+POWER_RND_DB_PATH = os.environ.get(
+    "POWER_RND_DB_PATH",
+    str(_REPO_ROOT / "universe_engine" / "data" / "db" / "kanida_universe.db"),
+)
+
 # ── JWT ──────────────────────────────────────────────────────────────────
 # In dev, a process-stable random key is generated each boot so tests work
 # without setup. In prod, the env var MUST be set or auth tokens won't survive
@@ -58,8 +67,24 @@ POWER_ADMIN_SECRET = os.environ.get(
     os.environ.get("ADMIN_SECRET", ""),
 )
 
+# Phase 1b: invite-code auth (replaces Google OAuth).
+# The admin's email is operator-locked at the config layer — public knowledge
+# is fine because logging in AS admin still requires POWER_ADMIN_SECRET as the
+# login code. The pair (email, code) is what authenticates, not either alone.
+POWER_ADMIN_EMAIL = os.environ.get(
+    "POWER_ADMIN_EMAIL",
+    "p.sundar.shyam@gmail.com",
+).lower().strip()
+
 POWER_RATE_LIMIT_ANON_PER_HOUR = int(
     os.environ.get("POWER_RATE_LIMIT_ANON_PER_HOUR", "3")
+)
+
+# Phase 1b: rate limit for the new email+code login endpoint. Same budget
+# as the legacy Google-based redeem (5/hr/IP) — invite codes are 24-bit
+# random hex, brute-forcing within rate limit is mathematically infeasible.
+POWER_INVITE_LOGIN_LIMIT_PER_HOUR = int(
+    os.environ.get("POWER_INVITE_LOGIN_LIMIT_PER_HOUR", "5")
 )
 
 # ── Featured replay dates (locked 2026-05-14) ────────────────────────────

@@ -24,7 +24,7 @@ export function ExpandablePickRow({ pick, liveDecision }: Props) {
   return (
     <details
       className="group bg-neutral-900 border border-neutral-800 rounded
-                  hover:border-neutral-700 [&[open]]:border-amber-500/30
+                  hover:border-neutral-700 [&[open]]:border-mint-500/30
                   transition-colors"
       style={{
         // skip layout/paint when off-screen — big win for 100-row lists
@@ -35,8 +35,11 @@ export function ExpandablePickRow({ pick, liveDecision }: Props) {
     >
       <summary
         className="cursor-pointer list-none px-3 py-2 select-none
-                    grid grid-cols-[2rem_minmax(0,1fr)_auto_auto_auto] md:grid-cols-[2rem_minmax(0,1fr)_8rem_6rem_5rem_auto] gap-3 items-center"
+                    grid grid-cols-[2rem_minmax(0,1fr)_auto_auto] md:grid-cols-[2rem_minmax(0,1fr)_auto_auto] gap-3 items-center"
       >
+        {/* Sprint 5c design changes 1+2: tier badge + score number removed.
+            Rank is the only ordering cue. Live decision (when present) is
+            still shown — it's an actionable label, not an ordering cue. */}
         <span className="text-xs text-neutral-500 font-mono">#{pick.rank}</span>
         <div className="min-w-0">
           <div className="flex items-baseline gap-2">
@@ -49,15 +52,6 @@ export function ExpandablePickRow({ pick, liveDecision }: Props) {
             {pick.story}
           </p>
         </div>
-        <span className={[
-          'inline-flex items-center text-[10px] px-1.5 py-0.5 rounded border font-mono font-semibold',
-          tierColorClasses(pick.tier_color),
-        ].join(' ')}>
-          {pick.tier_icon} {pick.tier}
-        </span>
-        <span className="text-xs text-neutral-500 font-mono text-right hidden md:block">
-          {Math.round(pick.score)}
-        </span>
         {liveDecision && (
           <span className={[
             'inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-semibold border',
@@ -80,17 +74,6 @@ export function ExpandablePickRow({ pick, liveDecision }: Props) {
       </div>
     </details>
   )
-}
-
-
-function tierColorClasses(c: Pick['tier_color']): string {
-  switch (c) {
-    case 'amber':  return 'bg-amber-500/15 text-amber-300 border-amber-500/40'
-    case 'green':  return 'bg-green-500/15 text-green-300 border-green-500/40'
-    case 'yellow': return 'bg-yellow-500/15 text-yellow-300 border-yellow-500/40'
-    case 'orange': return 'bg-orange-500/15 text-orange-300 border-orange-500/40'
-    default:       return 'bg-neutral-700/40 text-neutral-300 border-neutral-600'
-  }
 }
 
 

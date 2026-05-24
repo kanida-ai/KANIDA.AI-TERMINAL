@@ -1,5 +1,6 @@
 import logging
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -105,6 +106,26 @@ def _run_pipeline_sync():
                      summary.get("total_staged", 0), summary.get("target_date"))
         except Exception as e:
             log.exception("EOD pre-market staging crashed (pipeline still SUCCESS): %s", e)
+
+        # Sprint 5d (Co-Trader Phase 1): run the 5 virtual portfolios for today.
+        # Reuses the same signal date the pipeline just populated, so the
+        # public dashboards are always one EOD-step behind the operator's
+        # /falcon/premarket workflow.
+        try:
+            from power_user.services import portfolio_engine
+            from power_user.config import POWER_DB_PATH as _PDB
+            _pcon = sqlite3.connect(_PDB, timeout=60.0)
+            _pcon.row_factory = sqlite3.Row
+            try:
+                today_iso = datetime.now(IST).date().isoformat()
+                psum = portfolio_engine.run_eod_for_date(_pcon, today_iso)
+                ok = sum(1 for r in psum["portfolios"] if "error" not in r)
+                log.info("Co-Trader EOD: %d/%d portfolios ok for %s",
+                          ok, len(psum["portfolios"]), today_iso)
+            finally:
+                _pcon.close()
+        except Exception as e:
+            log.exception("Co-Trader EOD crashed (pipeline still SUCCESS): %s", e)
 
         _pipeline_status["last_result"] = "SUCCESS"
         log.info("Pipeline complete.")
@@ -250,6 +271,13 @@ from power_user.routers.invites_router      import router as power_invites_route
 from power_user.routers.admin_router        import router as power_admin_router
 from power_user.routers.picks_router        import router as power_picks_router
 from power_user.routers.auth_refresh_router import router as power_auth_refresh_router
+from power_user.routers.portfolios_router   import router as power_portfolios_router
+# Persona backtest refactor (2026-05-16): replaces Excel-upload flow with a
+# live simulator. /api/power/personas/* is the new single source of truth.
+from power_user.routers.persona_backtest_router import router as power_persona_router
+# Falcon Top 20 (2026-05-23): institutional 3-bucket explainability for the
+# /power/today page. /api/power/today/falcon-top-20.
+from power_user.routers.falcon_top20_router       import router as power_top20_router
 
 app = FastAPI(title="KANIDA.AI Swing Trading Terminal", version="3.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -277,6 +305,9 @@ app.include_router(power_invites_router,      tags=["Power-User"])
 app.include_router(power_admin_router,        tags=["Power-User"])
 app.include_router(power_picks_router,        tags=["Power-User"])
 app.include_router(power_auth_refresh_router, tags=["Power-User"])
+app.include_router(power_portfolios_router,   tags=["Power-User"])
+app.include_router(power_persona_router,      tags=["Power-User"])    # new persona simulator endpoints
+app.include_router(power_top20_router,         tags=["Power-User"])    # Falcon Top 20 + 3-bucket explainability
 
 # Power User schema init — idempotent, creates tables on first boot.
 # Uses POWER_DB_PATH resolver — same DB as the engine read-only tables
@@ -293,6 +324,55 @@ try:
     else:
         log.warning("Power User schema INCOMPLETE: missing tables=%s indices=%s",
                      _power_manifest["tables_missing"], _power_manifest["indices_missing"])
+
+    # Sprint 5d: keep the 5 portfolio_definitions rows in sync with the locked
+    # Python constants in portfolio_defs.py on every boot. Cheap + idempotent.
+    try:
+        from power_user.services.portfolio_engine import seed_portfolio_definitions
+        _seed_con = sqlite3.connect(_power_db, timeout=10.0)
+        try:
+            n = seed_portfolio_definitions(_seed_con)
+            log.info("Co-Trader portfolio definitions: %d portfolios upserted.", n)
+        finally:
+            _seed_con.close()
+    except Exception as _e:
+        log.warning("Co-Trader portfolio seed skipped: %s", _e)
+
+    # Phase 1b (2026-05-23): ensure the admin row exists for the operator's
+    # email. Idempotent — promotes an existing row to 'admin' if needed, or
+    # inserts a fresh admin row. Required for the new invite-code login flow
+    # since admin auth bypasses the invite_codes table (admin uses
+    # POWER_ADMIN_SECRET as their login code).
+    try:
+        from power_user.services.auth import bootstrap_admin_user
+        _admin_con = sqlite3.connect(_power_db, timeout=10.0)
+        _admin_con.row_factory = sqlite3.Row
+        try:
+            _admin = bootstrap_admin_user(_admin_con)
+            if _admin:
+                log.info("Power User admin bootstrapped: id=%s email=%s role=%s",
+                         _admin.get("id"), _admin.get("email"), _admin.get("role"))
+        finally:
+            _admin_con.close()
+    except Exception as _e:
+        log.warning("Power User admin bootstrap skipped: %s", _e)
+
+    # Sprint 5d Fix 4 (2026-05-16): import the operator's V3 audit Excel files
+    # → year-by-year + month-by-month performance tables. Idempotent. Soft-fail
+    # if Excels aren't accessible (e.g. cloud deploy with no Desktop access);
+    # the previously imported rows stay in place.
+    try:
+        import sys as _sys
+        _scripts = os.path.join(_HERE, "..", "scripts")
+        if _scripts not in _sys.path:
+            _sys.path.insert(0, _scripts)
+        from import_persona_excels import import_all as _import_excels
+        _excel_summary = _import_excels(_power_db)
+        _n_ok = sum(1 for r in _excel_summary["personas"] if not r.get("skipped"))
+        log.info("Co-Trader performance import: %d/%d personas synced from Excel files.",
+                 _n_ok, len(_excel_summary["personas"]))
+    except Exception as _e:
+        log.warning("Co-Trader Excel import skipped (will use last-loaded rows): %s", _e)
 except Exception as _e:
     log.warning("Power User schema init skipped: %s", _e)
 

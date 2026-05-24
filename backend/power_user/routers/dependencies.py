@@ -122,6 +122,57 @@ def require_admin(
     return True
 
 
+def require_admin_or_jwt(
+    request:        Request,
+    x_admin_secret: Optional[str] = Header(default=None),
+    authorization:  Optional[str] = Header(default=None),
+) -> bool:
+    """Phase 1b: accept ANY of three admin auth modes. 403 otherwise.
+
+      1. Authorization: Bearer <JWT>          with role='admin' (typical CLI)
+      2. Cookie: power_jwt=<JWT>              with role='admin' (browser session)
+      3. X-Admin-Secret: <secret>             (legacy ops-script path)
+
+    Use this on admin endpoints that should be reachable from the admin's
+    browser session AND from ops scripts. The cookie path is what unlocks
+    the /power/admin frontend without re-typing the secret — once the user
+    has a session via /auth/invite-login, fetch() with credentials:'include'
+    auto-sends the cookie and this dep validates it.
+    """
+    # Path A — Bearer JWT with admin role
+    token = _extract_bearer(authorization)
+    if token:
+        try:
+            payload = verify_jwt(token)
+            if payload.role == "admin":
+                return True
+        except AuthError:
+            pass
+
+    # Path B — Cookie JWT (browser session, HTTPOnly so the cookie name
+    # matches what frontend/lib/power-auth.ts sets via the /api/power/session
+    # route handler).
+    cookie_token = request.cookies.get("power_jwt")
+    if cookie_token:
+        try:
+            payload = verify_jwt(cookie_token)
+            if payload.role == "admin":
+                return True
+        except AuthError:
+            pass
+
+    # Path C — legacy X-Admin-Secret
+    expected = config.POWER_ADMIN_SECRET
+    if expected and x_admin_secret and x_admin_secret == expected:
+        return True
+
+    if not expected and not token and not cookie_token:
+        raise HTTPException(503, {"code": "ADMIN_NOT_CONFIGURED",
+                                    "message": "Neither admin JWT nor POWER_ADMIN_SECRET available"})
+    raise HTTPException(403, {"code": "ADMIN_FORBIDDEN",
+                                "message": "Admin role required"})
+
+
 # ──────────────────────────────────────────────────────────────────────────
 #  IP-hash rate limit (anonymous random replay; brute-force invite)
 # ──────────────────────────────────────────────────────────────────────────

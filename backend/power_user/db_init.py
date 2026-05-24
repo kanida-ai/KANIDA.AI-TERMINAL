@@ -17,7 +17,8 @@ from typing import Any, Dict, List
 log = logging.getLogger("kanida.power_user.db_init")
 
 _HERE = Path(__file__).parent
-SCHEMA_SQL_PATH = _HERE / "db_schema.sql"
+SCHEMA_SQL_PATH            = _HERE / "db_schema.sql"
+SCHEMA_PORTFOLIOS_SQL_PATH = _HERE / "db_schema_portfolios.sql"   # Sprint 5d Co-Trader
 
 EXPECTED_TABLES = [
     "power_user_users",
@@ -31,6 +32,15 @@ EXPECTED_TABLES = [
     "falcon_auth_log",
     "power_user_push_subscriptions",
     "power_user_magic_links",
+    # Sprint 5d: Co-Trader virtual portfolios
+    "portfolio_definitions",
+    "portfolio_positions",
+    "portfolio_equity_history",
+    "portfolio_event_log",
+    # Sprint 5d UX revision (2026-05-16): year+month backtest performance from
+    # operator's V3 audit Excel files.
+    "portfolio_yearly_performance",
+    "portfolio_monthly_performance",
 ]
 
 EXPECTED_INDICES = [
@@ -49,6 +59,16 @@ EXPECTED_INDICES = [
     "ix_auth_log_status",
     "ix_push_subs_active",
     "ix_magic_links_expires",
+    # Sprint 5d: Co-Trader portfolios
+    "ix_portfolio_def_active",
+    "ix_port_pos_open",
+    "ix_port_pos_entry",
+    "ix_port_pos_exit",
+    "ix_port_eq_recent",
+    "ix_port_event_recent",
+    "ix_port_event_type",
+    "ix_port_yearly",
+    "ix_port_monthly",
 ]
 
 
@@ -71,10 +91,24 @@ def init_power_user_schema(db_path: str) -> Dict[str, Any]:
     if not SCHEMA_SQL_PATH.exists():
         raise FileNotFoundError(f"Schema SQL not found at {SCHEMA_SQL_PATH}")
 
-    sql = SCHEMA_SQL_PATH.read_text(encoding="utf-8")
+    sql_parts = [SCHEMA_SQL_PATH.read_text(encoding="utf-8")]
+    # Sprint 5d: Co-Trader portfolio tables live in a separate file so the
+    # schema is feature-grouped. Both files are CREATE-IF-NOT-EXISTS so order
+    # doesn't matter.
+    if SCHEMA_PORTFOLIOS_SQL_PATH.exists():
+        sql_parts.append(SCHEMA_PORTFOLIOS_SQL_PATH.read_text(encoding="utf-8"))
+    sql = "\n".join(sql_parts)
 
     with sqlite3.connect(db_path, timeout=30.0) as con:
         con.executescript(sql)
+        # Idempotent ALTER for the narrative_json column added 2026-05-16.
+        # Older portfolio_definitions rows are kept as-is; new seed will fill in.
+        try:
+            con.execute("ALTER TABLE portfolio_definitions ADD COLUMN narrative_json TEXT")
+            log.info("portfolio_definitions: added narrative_json column")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
         con.commit()
 
         # Verify by querying sqlite_master

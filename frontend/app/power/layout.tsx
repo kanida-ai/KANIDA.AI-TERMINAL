@@ -9,6 +9,7 @@ import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
 import { getCurrentUser } from '@/lib/power-auth'
 import { UserMenu } from '@/components/power/UserMenu'
+import { CompassLogo } from '@/components/power/CompassLogo'
 
 export const metadata: Metadata = {
   title: 'KANIDA.AI — Engineered Edge for Indian Equities',
@@ -19,7 +20,7 @@ export const metadata: Metadata = {
 export default async function PowerLayout({ children }: { children: ReactNode }) {
   const user = await getCurrentUser()
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100">
+    <div className="min-h-screen bg-black text-neutral-100">
       <TopBar
         signedIn={user !== null}
         email={user?.email}
@@ -27,7 +28,7 @@ export default async function PowerLayout({ children }: { children: ReactNode })
         pictureUrl={user?.picture_url ?? null}
         isAdmin={user?.role === 'admin'}
       />
-      <main className="max-w-6xl mx-auto px-4 md:px-6 py-6 md:py-10">
+      <main className="max-w-7xl mx-auto px-4 md:px-6 py-6 md:py-10">
         {children}
       </main>
       <Footer />
@@ -43,11 +44,14 @@ function TopBar({ signedIn, email, displayName, pictureUrl, isAdmin }: {
   isAdmin?:    boolean
 }) {
   return (
-    <header className="border-b border-neutral-900 bg-neutral-950/95 backdrop-blur sticky top-0 z-10">
-      <div className="max-w-6xl mx-auto px-4 md:px-6 h-14 flex items-center justify-between">
-        <Link href="/power" className="flex items-center gap-2 font-bold text-lg">
-          <span className="text-neutral-100">KANIDA</span>
-          <span className="text-amber-400">.AI</span>
+    <header className="border-b border-neutral-900 bg-black/95 backdrop-blur sticky top-0 z-10">
+      <div className="max-w-7xl mx-auto px-4 md:px-6 h-14 flex items-center justify-between">
+        <Link href="/power" className="flex items-center gap-2.5 font-bold text-lg group">
+          <CompassLogo size={24} />
+          <span className="flex items-baseline tracking-wide">
+            <span className="text-neutral-100">KANIDA</span>
+            <span className="text-mint-400">.AI</span>
+          </span>
         </Link>
         <nav className="flex items-center gap-2 md:gap-4 text-sm">
           {signedIn ? (
@@ -72,7 +76,7 @@ function TopBar({ signedIn, email, displayName, pictureUrl, isAdmin }: {
               </Link>
               <Link
                 href="/power/login"
-                className="px-3.5 py-1.5 bg-amber-500 text-neutral-950 rounded font-semibold hover:bg-amber-400 transition-colors"
+                className="px-3.5 py-1.5 bg-mint-400 text-neutral-950 rounded font-semibold hover:bg-mint-300 transition-colors"
               >
                 Sign in
               </Link>
@@ -87,7 +91,7 @@ function TopBar({ signedIn, email, displayName, pictureUrl, isAdmin }: {
 function Footer() {
   return (
     <footer className="border-t border-neutral-900 mt-16 py-6">
-      <div className="max-w-6xl mx-auto px-4 md:px-6 text-xs text-neutral-500 flex flex-col md:flex-row gap-2 md:gap-6 justify-between">
+      <div className="max-w-7xl mx-auto px-4 md:px-6 text-xs text-neutral-500 flex flex-col md:flex-row gap-2 md:gap-6 justify-between">
         <span>
           Engineered patterns from a 9-year mining + walk-forward validation pipeline.
           Not financial advice. You own your trades.

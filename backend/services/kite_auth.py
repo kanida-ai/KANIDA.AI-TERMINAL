@@ -49,11 +49,18 @@ if socket.getaddrinfo is not _ipv4_only_getaddrinfo:
     socket.getaddrinfo = _ipv4_only_getaddrinfo
     log.info("kite_auth: forcing IPv4-only DNS resolution for Kite endpoints")
 
-_HERE   = Path(__file__).parent
+_HERE         = Path(__file__).parent
+_PROJECT_ROOT = _HERE.parent.parent
 DB_PATH = os.environ.get(
     "KANIDA_DB_PATH",
-    str(_HERE.parent.parent / "data" / "db" / "kanida_quant.db"),
+    str(_PROJECT_ROOT / "data" / "db" / "kanida_quant.db"),
 )
+# Make the path CWD-independent. If the env var (or default) is relative,
+# anchor it at the project root — NOT the caller's current directory —
+# because SQLite happily auto-creates missing DBs which silently produces
+# orphan empty DBs in whatever subdirectory a one-off script was run from.
+if not os.path.isabs(DB_PATH):
+    DB_PATH = str(_PROJECT_ROOT / DB_PATH)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 

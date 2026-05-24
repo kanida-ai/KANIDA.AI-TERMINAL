@@ -10,7 +10,7 @@
 import type { Tier, TierColor } from '@/lib/power-api'
 
 const TIER_COLOR_CLASSES: Record<TierColor, string> = {
-  amber:  'bg-amber-500/15  text-amber-300  border-amber-500/40',
+  amber:  'bg-mint-500/15  text-mint-300  border-mint-500/40',
   green:  'bg-green-500/15  text-green-300  border-green-500/40',
   yellow: 'bg-yellow-500/15 text-yellow-300 border-yellow-500/40',
   orange: 'bg-orange-500/15 text-orange-300 border-orange-500/40',
