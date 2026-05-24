@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import sqlite3
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
@@ -21,11 +22,45 @@ from typing import Optional
 
 log = logging.getLogger("kanida.kite_auth")
 
-_HERE   = Path(__file__).parent
+
+# ── IPv4-only override for Kite egress ───────────────────────────────────────
+# 2026-05-13: Windows IPv6 privacy extensions rotate the last 64 bits of the
+# laptop's egress IPv6 every ~24h. If the Kite app's "Allowed IPs" allowlist
+# contains a specific IPv6, it stops matching after rotation → every
+# kite.place_order() rejects with "IP is not allowed to place orders".
+#
+# Fix: force getaddrinfo() to return ONLY IPv4 records for any kite.zerodha.com
+# / kite.trade hostname. The IPv4 (Comcast in the operator's case) is stable
+# for months; whitelist it once and never break again. Token auth is the real
+# security boundary anyway — IP allowlist is optional on Kite Connect.
+_KITE_HOST_SUFFIXES = ("zerodha.com", "kite.trade", "kiteconnect.com")
+_orig_getaddrinfo = socket.getaddrinfo
+
+def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    """For Kite hostnames, force AF_INET. For everything else, pass through.
+
+    Signature must match socket.getaddrinfo exactly — both positional and keyword
+    callers use this same arg layout (host, port, family, type, proto, flags)."""
+    if isinstance(host, str) and any(host.endswith(s) for s in _KITE_HOST_SUFFIXES):
+        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
+
+if socket.getaddrinfo is not _ipv4_only_getaddrinfo:
+    socket.getaddrinfo = _ipv4_only_getaddrinfo
+    log.info("kite_auth: forcing IPv4-only DNS resolution for Kite endpoints")
+
+_HERE         = Path(__file__).parent
+_PROJECT_ROOT = _HERE.parent.parent
 DB_PATH = os.environ.get(
     "KANIDA_DB_PATH",
-    str(_HERE.parent.parent / "data" / "db" / "kanida_quant.db"),
+    str(_PROJECT_ROOT / "data" / "db" / "kanida_quant.db"),
 )
+# Make the path CWD-independent. If the env var (or default) is relative,
+# anchor it at the project root — NOT the caller's current directory —
+# because SQLite happily auto-creates missing DBs which silently produces
+# orphan empty DBs in whatever subdirectory a one-off script was run from.
+if not os.path.isabs(DB_PATH):
+    DB_PATH = str(_PROJECT_ROOT / DB_PATH)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 

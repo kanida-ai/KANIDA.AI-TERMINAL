@@ -5,6 +5,7 @@ All Kite credential logic is delegated to services.kite_auth.
 GET  /api/admin/kite/login-url     — returns Zerodha OAuth login URL
 POST /api/admin/kite/refresh-token — exchanges request_token, saves to DB
 GET  /api/admin/kite/status        — token validity (safe fields only, no full token)
+GET  /api/admin/kite/export        — returns full token for trusted local sync (requires secret)
 """
 from __future__ import annotations
 
@@ -51,10 +52,59 @@ async def refresh_token(body: TokenRequest):
     # Optionally persist to Railway env vars so it survives restarts
     railway_updated = await _push_to_railway(access_token)
 
+    # Phase 3: KiteTicker can't swap creds mid-session, so a stale connection
+    # from before the refresh will keep failing 403. Force-reconnect with the
+    # new token now. Soft-fail — refresh itself stays successful regardless.
+    ticker_restart = False
+    try:
+        from falcon.trade.services import kite_ticker
+        ticker_restart = kite_ticker.start(force=True)
+    except Exception:
+        pass
+
+    # Phase 2.2: margin lookups are bound to the previous session's auth state;
+    # clear the day-cache so the next /preview re-fetches with fresh creds.
+    try:
+        from falcon.trade.services import margin_calc
+        margin_calc.invalidate()
+    except Exception:
+        pass
+
+    # 2026-05-10: Token refresh is the operator's "go" signal. If today's
+    # daily_signals (V7 pipeline tail) hasn't completed yet, kick off the
+    # full A2 -> A3 -> A4 pipeline async. This replaces the silent 16:05
+    # cron abort-on-bad-token failure mode (Bug #1 from the Friday-skipped
+    # diagnosis). Operator polls /falcon/admin/runs for progress.
+    pipeline = {"kicked_off": False, "reason_skipped": "exception"}
+    try:
+        from falcon.jobs._pipeline import kick_off_v7_pipeline_if_stale
+        pipeline = kick_off_v7_pipeline_if_stale(reason="token_refresh")
+    except Exception:
+        pass
+
+    # GTM Phase: re-run preflight with the new token. The token check is the
+    # most likely RED→GREEN flip after a refresh; updating the cache here means
+    # the UI banner refreshes instantly and downstream auto-trade gates unblock.
+    preflight_summary = {"ok": False, "red": ["unknown"], "ran": False}
+    try:
+        from falcon import preflight
+        r = preflight.run(force=True)
+        preflight_summary = {
+            "ok":     r.ok,
+            "red":    [c.name for c in r.checks if c.status == preflight.RED],
+            "yellow": [c.name for c in r.checks if c.status == preflight.YELLOW],
+            "ran":    True,
+        }
+    except Exception:
+        pass
+
     return {
         "status":          "ok",
         "token_preview":   access_token[:8] + "...",
         "railway_updated": railway_updated,
+        "ticker_restart":  ticker_restart,
+        "pipeline":        pipeline,           # {kicked_off, reason_skipped}
+        "preflight":       preflight_summary,  # {ok, red:[], yellow:[], ran}
         "message":         "Token refreshed and saved to DB. Railway env updated." if railway_updated
                            else "Token refreshed and saved to DB (Railway env not updated — set RAILWAY_TOKEN to enable).",
     }

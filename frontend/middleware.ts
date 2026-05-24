@@ -21,6 +21,13 @@ import { NextRequest, NextResponse } from 'next/server'
 
 const BASIC_REALM = 'Restricted'
 
+// Power User Portal paths — public-facing surface with its own invite-code
+// auth (backend/power_user/services/invites.py + JWT cookie at
+// /api/power/session). These MUST bypass the site-wide HTTP Basic Auth
+// gate so invitees can reach /power/login with just their invite code.
+// Operator surfaces (/falcon, /admin, /analysis, /) stay behind Basic Auth.
+const POWER_PORTAL_PATHS = ['/power', '/api/power', '/api/power-auth']
+
 function unauthorized(): NextResponse {
   return new NextResponse(null, {
     status: 401,
@@ -52,6 +59,17 @@ export function middleware(req: NextRequest) {
   // the matcher pattern changes.
   if (pathname.startsWith('/_next') || pathname === '/favicon.ico') {
     return NextResponse.next()
+  }
+
+  // Power User Portal bypass — handled by its own invite-code auth layer.
+  // Without this, invitees would see a browser Basic Auth dialog before
+  // ever reaching the Kanida.AI login page (defeats the purpose of the
+  // public-facing portal).
+  if (POWER_PORTAL_PATHS.some(p => pathname === p || pathname.startsWith(p + '/'))) {
+    const res = NextResponse.next()
+    // Still keep search engines out — invite-only beta.
+    res.headers.set('X-Robots-Tag', 'noindex, nofollow, noarchive')
+    return res
   }
 
   const expectedUser = process.env.SITE_USER || ''

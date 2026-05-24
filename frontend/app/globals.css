@@ -12,6 +12,32 @@
   --font-mono: var(--font-geist-mono);
 }
 
+/* ── KANIDA.AI brand palette — mint green (Sprint 5d v3, 2026-05-17) ──
+   Operator-locked accent. "Green = profit in every trading interface ever.
+   Distinctive in Indian fintech (where every other broker uses orange).
+   Cool tones easier on dark backgrounds." Replaces gold/amber across the
+   entire power-portal surface; falcon/* operator pages keep amber.
+
+   The 300/400 pair is operator-specified:
+     --color-mint-400: #3FE3A4   main accent (text + button bg)
+     --color-mint-300: #5AECB5   brighter, used on hover
+   100/200/500 derived from the 400 hue (HSL ~158/74/57) to give a clean
+   Tailwind-style scale for badges, hover backgrounds, and the rare
+   darker-mint variant.
+
+   NOTE: declared in its own `@theme` block (NOT `@theme inline`). New color
+   tokens added INSIDE the existing `@theme inline` block in Tailwind v4 do
+   not generate utilities — that modifier is only for inlining values of
+   variables already defined elsewhere. A separate plain `@theme` block is
+   the canonical way to register fresh palette entries. */
+@theme {
+  --color-mint-100: #d2f8e6;
+  --color-mint-200: #a6f0cd;
+  --color-mint-300: #5aecb5;
+  --color-mint-400: #3fe3a4;
+  --color-mint-500: #2bd392;
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
@@ -23,4 +49,19 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+/* ── LED blink for the Pre-Market stage indicator ──────────────────────────
+   Stronger / more train-signal-like than Tailwind's gentle animate-pulse.
+   Used by .animate-[ledblink_1s_...] in components/falcon/premarket. */
+@keyframes ledblink {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 12px rgba(251, 191, 36, 0.95),
+                0 0 4px  rgba(251, 191, 36, 1);
+  }
+  50% {
+    opacity: 0.35;
+    box-shadow: 0 0 4px rgba(251, 191, 36, 0.3);
+  }
 }

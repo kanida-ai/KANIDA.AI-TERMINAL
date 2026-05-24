@@ -1,0 +1,20 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "./Dockerfile"
+  },
+  "deploy": {
+    "startCommand": "/entrypoint_cron.sh",
+    "restartPolicyType": "NEVER"
+  },
+  "_comment": [
+    "Use this config for the Falcon cron service in Railway.",
+    "Create FOUR cron services with schedules below; each sets FALCON_JOB:",
+    "  daily_data_refresh : 30 11 * * 1-5  (Mon-Fri 16:30 IST)",
+    "  daily_features     : 32 11 * * 1-5  (Mon-Fri 16:32 IST)",
+    "  daily_signals      : 35 11 * * 1-5  (Mon-Fri 16:35 IST)",
+    "  weekly_remine      : 30 12 * * 0    (Sun 18:00 IST)",
+    "All times are UTC in Railway cron syntax (subtract 5h30m from IST)."
+  ]
+}
