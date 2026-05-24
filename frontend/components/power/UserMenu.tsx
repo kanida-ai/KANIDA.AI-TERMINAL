@@ -4,9 +4,21 @@
  * UserMenu — top-bar avatar + logout for authed pages.
  *
  * Just an avatar (or initials) + dropdown with logout. Keeps the chrome clean.
+ *
+ * Dropdown close semantics — three triggers, all needed:
+ *   1. Click on the overlay (outside-click)  → setOpen(false) inline
+ *   2. Click on any link/button inside menu  → onClose prop passed down
+ *   3. URL changes (next/prev, programmatic) → useEffect on usePathname()
+ * Without (2) the menu stays open after clicking a link because the layout
+ * (which hosts this component) persists across route transitions.
+ * Without (3) the menu stays open after a same-route click or browser back.
+ *
+ * z-index — overlay is z-40 and menu is z-50, both above the sticky header
+ * (z-10) so the outside-click overlay reliably catches every viewport click.
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import { usePathname } from 'next/navigation'
 import { logout } from '@/lib/power-auth-client'
 
 type Props = {
@@ -18,6 +30,13 @@ type Props = {
 
 export function UserMenu({ email, displayName, pictureUrl, isAdmin }: Props) {
   const [open, setOpen] = useState(false)
+  const pathname        = usePathname()
+
+  // Trigger 3: any URL change closes the menu (covers back/forward, programmatic
+  // navigation, and same-pathname clicks that the click handler missed).
+  useEffect(() => { setOpen(false) }, [pathname])
+
+  const close   = () => setOpen(false)
   const initial = (displayName || email).slice(0, 1).toUpperCase()
 
   return (
@@ -26,6 +45,7 @@ export function UserMenu({ email, displayName, pictureUrl, isAdmin }: Props) {
         type="button"
         onClick={() => setOpen(v => !v)}
         aria-label="Account menu"
+        aria-expanded={open}
         className="flex items-center gap-2 text-sm rounded hover:bg-neutral-900 px-2 py-1"
       >
         {pictureUrl ? (
@@ -44,20 +64,22 @@ export function UserMenu({ email, displayName, pictureUrl, isAdmin }: Props) {
 
       {open && (
         <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          {/* Overlay: z-40 places it above the sticky header (z-10) so
+              clicks anywhere outside the menu are reliably captured. */}
+          <div className="fixed inset-0 z-40" onClick={close} />
           <div className="absolute right-0 mt-1 w-56 bg-neutral-900 border border-neutral-800
-                          rounded shadow-lg z-20 py-1 text-sm">
+                          rounded shadow-lg z-50 py-1 text-sm">
             <div className="px-3 py-2 border-b border-neutral-800">
               <div className="text-neutral-200 truncate">{displayName || 'Account'}</div>
               <div className="text-xs text-neutral-500 truncate">{email}</div>
             </div>
-            <MenuLink href="/power/today">Today's picks</MenuLink>
-            <MenuLink href="/power/live">Live decisions</MenuLink>
-            <MenuLink href="/power">Replays</MenuLink>
-            {isAdmin && <MenuLink href="/power/admin">Admin</MenuLink>}
+            <MenuLink href="/power/today"  onClose={close}>Today&apos;s picks</MenuLink>
+            <MenuLink href="/power/live"   onClose={close}>Live decisions</MenuLink>
+            <MenuLink href="/power"        onClose={close}>Replays</MenuLink>
+            {isAdmin && <MenuLink href="/power/admin" onClose={close}>Admin</MenuLink>}
             <button
               type="button"
-              onClick={() => { setOpen(false); logout() }}
+              onClick={() => { close(); logout() }}
               className="block w-full text-left px-3 py-2 text-red-300 hover:bg-neutral-800"
             >
               Sign out
@@ -69,10 +91,15 @@ export function UserMenu({ email, displayName, pictureUrl, isAdmin }: Props) {
   )
 }
 
-function MenuLink({ href, children }: { href: string; children: React.ReactNode }) {
+function MenuLink({ href, onClose, children }: {
+  href:     string
+  onClose:  () => void
+  children: React.ReactNode
+}) {
   return (
     <Link
       href={href}
+      onClick={onClose}
       className="block px-3 py-2 text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
     >
       {children}
