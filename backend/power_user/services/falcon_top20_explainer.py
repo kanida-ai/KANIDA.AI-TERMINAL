@@ -349,11 +349,20 @@ def _fetch_raw_picks(
     """Top-N picks for the day, ranked by avg_lift = score / n_fires.
 
     Falcon Top 20 ranker is avg_lift (quality-per-fire), NOT raw sum_lift.
-    Filters by universe membership + sector name when given.
+    Filters by universe membership + sector name when given, AND by the
+    persona's min_fires threshold (F1, 2026-05-24).
     """
     where_universe = _UNIVERSE_WHERE_CLAUSE.get(universe, "")
     where_sector = ""
-    params: List[Any] = [signal_date]
+    # F1 — read min_fires from PERSONA_CONFIGS so the live endpoint enforces
+    # the same gate the backtest does. Previously only n_fires > 0 was checked,
+    # which silently allowed weak-confluence picks on thin-signal days where
+    # the live endpoint diverged from the persona simulator's parity tests.
+    # Lazy import to match the pattern used by _locked_rules() / _per_stock_persona_stats.
+    from .persona_simulator import PERSONA_CONFIGS
+    min_fires = int(PERSONA_CONFIGS["falcon-top-10"]["run_cfg"].min_fires)
+
+    params: List[Any] = [signal_date, min_fires]
     if sector:
         where_sector = "AND s.sector = ?"
         params.append(sector)
@@ -365,7 +374,7 @@ def _fetch_raw_picks(
                s.fired_pattern_ids, s.sample_rules
         FROM falcon_signals_live s
         WHERE s.signal_date = ?
-          AND s.n_fires > 0
+          AND s.n_fires >= ?
           {where_universe}
           {where_sector}
         ORDER BY (s.score * 1.0 / s.n_fires) DESC
@@ -1262,16 +1271,12 @@ def _build_bucket3(
     else:
         rotation_dir = "neutral"
 
-    # Verdict tag (kept for the Excel export / legacy consumers; the new
-    # UX renders narrative text instead, but the tag is still useful in
-    # downstream filters).
-    if sector_rank == 0:                       verdict = "unranked"
-    elif sector_rank <= 7:                     verdict = "tailwind"
-    elif sector_rank <= 13:                    verdict = "neutral"
-    else:                                      verdict = "headwind"
-
     # Plain-English narrative — same string the UX renders verbatim under
     # "What the sector is doing". No "rotation", "verdict", "tailwind" jargon.
+    # F6 (2026-05-24): removed the tailwind/neutral/headwind `verdict` tag —
+    # frontend never rendered it after the 2026-05-24 UX rewrite, and the
+    # narrative paragraph already conveys the same information in plain
+    # English. No downstream consumers (grep'd backend + frontend clean).
     narrative = _plain_sector_narrative(
         sector_name=sector,
         rank_today=sector_rank,
@@ -1293,8 +1298,7 @@ def _build_bucket3(
         "sector_20d_return_pct":   round(sector_20d, 2),
         "rotation_direction":      rotation_dir,
         "rotation_sessions_of_10": 7 if rotation_dir == "inflow" else (3 if rotation_dir == "outflow" else 5),
-        "verdict":                 verdict,
-        # NEW — plain-English narrative the UX renders directly
+        # Plain-English narrative the UX renders directly
         "narrative":               narrative,
     }
 

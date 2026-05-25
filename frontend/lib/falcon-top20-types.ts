@@ -131,8 +131,6 @@ export type Top20Bucket2Evidence = {
   lookback_start:        string
 }
 
-export type SectorVerdict = 'tailwind' | 'neutral' | 'headwind' | 'unranked'
-
 export type Top20Bucket3Sector = {
   sector_name:               string
   sector_rank:               number
@@ -148,10 +146,9 @@ export type Top20Bucket3Sector = {
   rotation_direction:        RotationDirection
   /** Legacy field — derived from rotation_direction for back-compat. */
   rotation_sessions_of_10:   number
-  /** Locked spec verdict: tailwind (rank<=7), neutral (8-13), headwind (>=14).
-   *  UI no longer renders this directly — use `narrative` instead. */
-  verdict:                   SectorVerdict
-  /** NEW — plain-English paragraph the UI renders verbatim. */
+  /** Plain-English paragraph the UI renders verbatim. Source of truth for the
+   *  "What the sector is doing" section. (F6, 2026-05-24: tailwind/neutral/
+   *  headwind verdict tag removed — narrative conveys the same info in prose.) */
   narrative:                 string
 }
 
