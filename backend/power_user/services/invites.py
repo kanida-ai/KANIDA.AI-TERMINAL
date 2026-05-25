@@ -140,6 +140,71 @@ def _is_expired(expires_at: Optional[str]) -> bool:
     return datetime.now(IST) >= exp
 
 
+def revoke_code(con: sqlite3.Connection, code: str) -> Dict[str, Any]:
+    """Manually deactivate an unused invite code so it can no longer be
+    redeemed. Reuses the existing _is_expired() check in the redeem path —
+    revoking == setting expires_at to "now" (IST). No schema change, no new
+    rejection logic; the next attempt to redeem the code rejects with
+    CODE_EXPIRED. (2026-05-25 operator request: codes never auto-expire by
+    default; only manual deactivation invalidates them.)
+
+    Already-used codes are NEVER modified — they're consumed history, not
+    revocable. Already-revoked codes are idempotent no-ops.
+
+    Returns: {
+      ok:                  True,
+      code:                str,
+      was_used:            bool,   # True if code is already consumed (no-op)
+      was_already_revoked: bool,   # True if expires_at was already in the past
+      expires_at:          str | None,
+    }
+    Raises InviteError("NOT_FOUND") if the code doesn't exist.
+    """
+    row = con.execute(
+        "SELECT expires_at, used_by_user_id FROM power_user_invite_codes WHERE code = ?",
+        (code,),
+    ).fetchone()
+    if not row:
+        raise InviteError("NOT_FOUND", f"no invite code: {code}")
+    old_expires_at, used_by = row[0], row[1]
+
+    if used_by is not None:
+        # Already consumed — don't touch the row. Caller decides whether to
+        # surface a different message ("already used" vs "revoked").
+        return {
+            "ok":                  True,
+            "code":                code,
+            "was_used":            True,
+            "was_already_revoked": False,
+            "expires_at":          old_expires_at,
+        }
+
+    was_already_revoked = old_expires_at is not None and _is_expired(old_expires_at)
+    if was_already_revoked:
+        return {
+            "ok":                  True,
+            "code":                code,
+            "was_used":            False,
+            "was_already_revoked": True,
+            "expires_at":          old_expires_at,
+        }
+
+    now_iso = datetime.now(IST).isoformat()
+    con.execute(
+        "UPDATE power_user_invite_codes SET expires_at = ? "
+        "WHERE code = ? AND used_by_user_id IS NULL",
+        (now_iso, code),
+    )
+    con.commit()
+    return {
+        "ok":                  True,
+        "code":                code,
+        "was_used":            False,
+        "was_already_revoked": False,
+        "expires_at":          now_iso,
+    }
+
+
 def validate_code(con: sqlite3.Connection, code: str) -> CodeStatus:
     """Read-only check. Does NOT mark the code as used. Returns CodeStatus.
 
