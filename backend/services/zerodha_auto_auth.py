@@ -411,20 +411,39 @@ def log_attempt(db_path: str, attempt_of_day: int, trigger_kind: str,
 
 
 def today_already_succeeded(db_path: str) -> bool:
-    """True if a successful attempt has been logged today (IST). Used to
-    skip later attempts in the 4-cycle morning sequence.
+    """True if a successful attempt has been logged in the CURRENT Kite-token
+    lifecycle window. Used to skip later attempts in the 4-cycle morning
+    sequence.
+
+    Bug #2 fix (2026-05-25): the window boundary must be 06:00 IST, NOT
+    midnight. Kite invalidates ALL access tokens at 06:00 IST daily, so any
+    success BEFORE 06:00 IST is already expired by the time the morning
+    sequence (06:30 / 07:30 / 08:30 / 09:00 IST) fires. Previously a 04:55
+    IST manual refresh caused all 4 scheduled attempts to skip with
+    ALREADY_OK, leaving the system tokenless from 06:00 IST onward — which
+    is exactly what happened on 2026-05-25 and silently broke the V7
+    pipeline for the day (Monday EOD signals never generated).
+
+    Window definition:
+      - If now >= 06:00 IST today → window_start = today 06:00 IST
+      - If now <  06:00 IST today → window_start = yesterday 06:00 IST
+    window_end is always +24h (the next 06:00 IST cutoff).
 
     Implementation note: we compare ISO timestamp strings (`attempt_at` is
-    stored as `datetime.now(IST).isoformat()`, e.g. `2026-05-17T03:58:06+05:30`).
-    Earlier versions used `date(attempt_at)` which SQLite interprets as a UTC
-    conversion when the string carries a ±HH:MM offset — that broke the
-    check whenever IST was past midnight but UTC was still on the prior date
-    (e.g., between 00:00 IST and 05:30 IST). Comparing full ISO strings with
-    < / >= sidesteps SQLite's timezone interpretation entirely.
+    stored as `datetime.now(IST).isoformat()`). SQLite's `date()` function
+    interprets these as UTC when the string carries a ±HH:MM offset, which
+    broke an earlier version of this check. Direct ISO string comparison
+    with < / >= sidesteps that.
     """
-    now_ist   = datetime.now(IST)
-    day_start = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end   = day_start + timedelta(days=1)
+    now_ist      = datetime.now(IST)
+    six_am_today = now_ist.replace(hour=6, minute=0, second=0, microsecond=0)
+    if now_ist >= six_am_today:
+        window_start = six_am_today
+    else:
+        window_start = six_am_today - timedelta(days=1)
+    window_end = window_start + timedelta(days=1)
+    # Variable names kept compatible with the SQL below.
+    day_start, day_end = window_start, window_end
     try:
         con = sqlite3.connect(db_path, timeout=5.0, check_same_thread=False)
         try:

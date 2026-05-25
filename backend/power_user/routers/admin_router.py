@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ..services.invites import generate_codes, list_codes
+from ..services.invites import InviteError, generate_codes, list_codes, revoke_code
 from .dependencies import get_db, require_admin_or_jwt as require_admin
 
 log = logging.getLogger("kanida.power_user.admin_router")
@@ -65,6 +65,35 @@ def list_invites(
         "n":     len(rows),
         "codes": rows,
     }
+
+
+@router.post("/invites/{code}/revoke")
+def revoke_invite(
+    code:   str,
+    _admin: bool = Depends(require_admin),
+    con:    sqlite3.Connection = Depends(get_db),
+) -> Dict[str, Any]:
+    """Manually deactivate an unused invite code (2026-05-25 operator request).
+
+    Codes do NOT auto-expire by default — they remain redeemable until the
+    admin explicitly revokes them. This endpoint sets expires_at to "now"
+    so the existing _is_expired() check in the redeem path rejects the next
+    attempt as CODE_EXPIRED. Already-used codes are NEVER modified
+    (consumed history is immutable). Already-revoked codes are no-op.
+
+    Returns: {ok, code, was_used, was_already_revoked, expires_at}
+      - was_used=True       → caller may want to surface "already redeemed"
+      - was_already_revoked → idempotent no-op
+    """
+    try:
+        result = revoke_code(con, code)
+    except InviteError as e:
+        if e.code == "NOT_FOUND":
+            raise HTTPException(404, {"code": e.code, "message": "Invite code not found."})
+        raise HTTPException(400, {"code": e.code, "message": str(e)})
+    log.info("admin: revoked invite %s (was_used=%s was_already_revoked=%s)",
+             code, result["was_used"], result["was_already_revoked"])
+    return result
 
 
 @router.get("/users")

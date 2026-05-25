@@ -957,8 +957,18 @@ function InviteListPanel() {
   const [rows, setRows]   = useState<InviteRow[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [onlyUnused, setOnlyUnused] = useState(false)
+  const [busy, setBusy]   = useState<string | null>(null)        // code being revoked
 
-  useEffect(() => {
+  // Codes never auto-expire by default (2026-05-25). Treat any row whose
+  // expires_at is in the past as "revoked" — that's how the backend marks
+  // a manually-deactivated invite.
+  const isRevoked = (r: InviteRow): boolean => {
+    if (!r.expires_at) return false
+    const exp = new Date(r.expires_at).getTime()
+    return Number.isFinite(exp) && exp <= Date.now()
+  }
+
+  const fetchRows = () => {
     fetch(`${apiBase()}/api/power/admin/invites/list?only_unused=${onlyUnused}`,
           adminFetchInit())
       .then(async r => {
@@ -970,21 +980,47 @@ function InviteListPanel() {
       })
       .then(d => setRows(d.codes))
       .catch((e: Error) => setError(e.message))
-  }, [onlyUnused])
+  }
 
-  if (error) return <ErrorBox text={`List: ${error}`} />
-  if (!rows) return <SkeletonBox lines={3} />
+  useEffect(fetchRows, [onlyUnused])
+
+  const onRevoke = async (code: string) => {
+    if (!confirm(`Revoke ${code}? The invitee will no longer be able to use this code.`)) return
+    setBusy(code); setError(null)
+    try {
+      const r = await fetch(`${apiBase()}/api/power/admin/invites/${encodeURIComponent(code)}/revoke`,
+        adminFetchInit({ method: 'POST' }))
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}))
+        throw new Error(b.detail?.message || `HTTP ${r.status}`)
+      }
+      fetchRows()                                              // re-read so the UI flips to "revoked"
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Revoke failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (error && !rows) return <ErrorBox text={`List: ${error}`} />
+  if (!rows)          return <SkeletonBox lines={3} />
 
   return (
     <section className="bg-neutral-900 border border-neutral-800 rounded p-4">
-      <div className="flex items-baseline justify-between mb-3">
-        <h2 className="text-sm font-semibold text-neutral-300">Invite history ({rows.length})</h2>
-        <label className="text-xs text-neutral-400 flex items-center gap-1">
+      <div className="flex items-baseline justify-between mb-3 gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-neutral-300">Invite history ({rows.length})</h2>
+          <p className="text-xs text-neutral-500 mt-0.5">
+            Codes never auto-expire. Click <span className="font-mono">revoke</span> to deactivate any unused code.
+          </p>
+        </div>
+        <label className="text-xs text-neutral-400 flex items-center gap-1 shrink-0">
           <input type="checkbox" checked={onlyUnused}
                   onChange={e => setOnlyUnused(e.target.checked)} />
           unused only
         </label>
       </div>
+      {error && <ErrorBox text={error} />}
       {rows.length === 0 ? (
         <p className="text-sm text-neutral-500">No codes yet.</p>
       ) : (
@@ -994,22 +1030,39 @@ function InviteListPanel() {
               <th className="text-left py-1">Code</th>
               <th className="text-left">Issued</th>
               <th className="text-left">Note</th>
-              <th className="text-left">Used by</th>
+              <th className="text-left">Status</th>
+              <th className="text-right">Action</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map(r => (
-              <tr key={r.code} className="border-t border-neutral-800">
-                <td className="font-mono py-1 text-neutral-200">{r.code}</td>
-                <td className="text-neutral-500">{r.issued_at?.slice(0, 16).replace('T', ' ')}</td>
-                <td className="text-neutral-400 truncate max-w-[12rem]">{r.note ?? '—'}</td>
-                <td className="font-mono">
-                  {r.used_by_user_id == null
-                    ? <span className="text-green-300">unused</span>
-                    : <span className="text-neutral-500">user #{r.used_by_user_id}</span>}
-                </td>
-              </tr>
-            ))}
+            {rows.map(r => {
+              const used    = r.used_by_user_id != null
+              const revoked = !used && isRevoked(r)
+              return (
+                <tr key={r.code} className="border-t border-neutral-800">
+                  <td className="font-mono py-1 text-neutral-200">{r.code}</td>
+                  <td className="text-neutral-500">{r.issued_at?.slice(0, 16).replace('T', ' ')}</td>
+                  <td className="text-neutral-400 truncate max-w-[12rem]">{r.note ?? '—'}</td>
+                  <td className="font-mono">
+                    {used    ? <span className="text-neutral-500">user #{r.used_by_user_id}</span>
+                     : revoked ? <span className="text-red-300">revoked</span>
+                               : <span className="text-green-300">unused</span>}
+                  </td>
+                  <td className="text-right">
+                    {!used && !revoked && (
+                      <button
+                        type="button"
+                        onClick={() => onRevoke(r.code)}
+                        disabled={busy === r.code}
+                        className="px-2 py-0.5 text-[11px] text-red-300 hover:text-red-200 hover:bg-red-500/10 border border-red-500/30 rounded disabled:opacity-50"
+                      >
+                        {busy === r.code ? 'revoking…' : 'revoke'}
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       )}
