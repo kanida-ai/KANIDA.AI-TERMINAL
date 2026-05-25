@@ -300,6 +300,9 @@ def build_falcon_top20(
     # every card) — pulled once from the locked falcon-top-10 persona.
     strategy_wr, strategy_n_trades = _strategy_win_rate()
 
+    # Locked rules — one source of truth, read from PERSONA_CONFIGS via _locked_rules().
+    lr = _locked_rules()
+
     return {
         "signal_date":      signal_date,
         "entry_date":       entry_date,
@@ -315,9 +318,9 @@ def build_falcon_top20(
         # NEW: strategy-level metrics (same on every card)
         "strategy_win_rate_pct":  round(strategy_wr, 1),
         "strategy_n_trades":      strategy_n_trades,
-        "hold_days":              _TIME_HORIZON_D,
-        "standard_position_rs":   _STANDARD_POSITION_RS,
-        "smaller_position_rs":    _SMALLER_POSITION_RS,
+        "hold_days":              lr["time_horizon_d"],
+        "standard_position_rs":   lr["position_rs"],
+        "smaller_position_rs":    lr["smaller_rs"],
     }
 
 
@@ -346,11 +349,20 @@ def _fetch_raw_picks(
     """Top-N picks for the day, ranked by avg_lift = score / n_fires.
 
     Falcon Top 20 ranker is avg_lift (quality-per-fire), NOT raw sum_lift.
-    Filters by universe membership + sector name when given.
+    Filters by universe membership + sector name when given, AND by the
+    persona's min_fires threshold (F1, 2026-05-24).
     """
     where_universe = _UNIVERSE_WHERE_CLAUSE.get(universe, "")
     where_sector = ""
-    params: List[Any] = [signal_date]
+    # F1 — read min_fires from PERSONA_CONFIGS so the live endpoint enforces
+    # the same gate the backtest does. Previously only n_fires > 0 was checked,
+    # which silently allowed weak-confluence picks on thin-signal days where
+    # the live endpoint diverged from the persona simulator's parity tests.
+    # Lazy import to match the pattern used by _locked_rules() / _per_stock_persona_stats.
+    from .persona_simulator import PERSONA_CONFIGS
+    min_fires = int(PERSONA_CONFIGS["falcon-top-10"]["run_cfg"].min_fires)
+
+    params: List[Any] = [signal_date, min_fires]
     if sector:
         where_sector = "AND s.sector = ?"
         params.append(sector)
@@ -362,7 +374,7 @@ def _fetch_raw_picks(
                s.fired_pattern_ids, s.sample_rules
         FROM falcon_signals_live s
         WHERE s.signal_date = ?
-          AND s.n_fires > 0
+          AND s.n_fires >= ?
           {where_universe}
           {where_sector}
         ORDER BY (s.score * 1.0 / s.n_fires) DESC
@@ -719,12 +731,12 @@ def _build_pick(
     )
 
     # Action block uses the persona-locked 7-day hold + position size from rp.
+    # hold_days omitted → _derive_action reads it from _locked_rules() itself.
     action = _derive_action(
         close_at_signal=raw.get("close_at_signal"),
         position_size_rs=rp["position_size_rs"],
         shares_recommended=rp["shares_recommended"],
         smaller_position=rp["smaller_position"],
-        hold_days=_TIME_HORIZON_D,
     )
 
     # Flags retained (consumed by some downstream surfaces + the Excel export).
@@ -887,59 +899,20 @@ def _build_bucket1(
     """
     today_hr = _today_weighted_hit_rate(pid_list, taxonomy)
 
-    # ── 1. Build a per-regime aggregate over ALL firing patterns ─────────
-    regime_groups: Dict[str, Dict[str, Any]] = {}
+    # ── 1. Dominant regime — by total positive-lift contribution ─────────
+    # F5 (2026-05-24): previously computed a full per-regime breakdown
+    # (count, sum_lift_pp, avg_lift_pp, weighted_hit_rate, headline blurb)
+    # and shipped it on the response. The 2026-05-24 UX rewrite stopped
+    # rendering it but the ~50ms/stock compute kept running. The synthesis
+    # narrator only needs dominant_regime, so collapse to that one number.
+    regime_lift: Dict[str, float] = {}
     for pid in pid_list:
         tax = taxonomy.get(pid)
         if not tax:
             continue
         regime = (tax.get("regime") or "other").lower()
-        lift = float(tax.get("lift_pp") or 0)
-        hr   = tax.get("oos_hit_rate")
-        g = regime_groups.setdefault(regime, {
-            "regime":      regime,
-            "count":       0,
-            "sum_lift_pp": 0.0,
-            "sum_lhr":     0.0,    # for lift-weighted HR
-            "sum_lift_for_hr": 0.0,
-            "_hrs":        [],
-            "_blurbs":     [],
-        })
-        g["count"]       += 1
-        g["sum_lift_pp"] += max(lift, 0)
-        if hr is not None:
-            g["_hrs"].append(float(hr))
-            if lift > 0:
-                g["sum_lhr"]        += float(hr) * lift
-                g["sum_lift_for_hr"]+= lift
-        blurb = tax.get("blurb")
-        if blurb:
-            g["_blurbs"].append(blurb)
-
-    # Finalise per-group metrics and sort by total lift contribution
-    breakdown: List[Dict[str, Any]] = []
-    for g in regime_groups.values():
-        n = g["count"] or 1
-        avg_lift = g["sum_lift_pp"] / n
-        avg_hr   = (sum(g["_hrs"]) / len(g["_hrs"])) if g["_hrs"] else None
-        weighted_hr = (g["sum_lhr"] / g["sum_lift_for_hr"]) if g["sum_lift_for_hr"] > 0 else None
-        # Most common blurb in this regime — the "headline" for the group
-        from collections import Counter
-        headline = Counter(g["_blurbs"]).most_common(1)
-        headline_str = headline[0][0] if headline else _REGIME_HUMAN.get(g["regime"], g["regime"].title())
-        breakdown.append({
-            "regime":          g["regime"],
-            "headline":        headline_str,
-            "count":           g["count"],
-            "sum_lift_pp":     round(g["sum_lift_pp"], 2),
-            "avg_lift_pp":     round(avg_lift, 2),
-            "avg_oos_hit_rate":   round(avg_hr, 2)      if avg_hr      is not None else None,
-            "weighted_hit_rate":  round(weighted_hr, 2) if weighted_hr is not None else None,
-        })
-    breakdown.sort(key=lambda x: x["sum_lift_pp"], reverse=True)
-
-    # ── 2. Dominant regime — for the headline framing of the synthesis ───
-    dominant_regime = breakdown[0]["regime"] if breakdown else "other"
+        regime_lift[regime] = regime_lift.get(regime, 0.0) + max(float(tax.get("lift_pp") or 0), 0)
+    dominant_regime = max(regime_lift.items(), key=lambda x: x[1])[0] if regime_lift else "other"
 
     # ── 3. Deduplicate conditions across ALL firing patterns ─────────────
     # For each column, keep the strongest threshold the stock cleared.
@@ -991,15 +964,11 @@ def _build_bucket1(
         target="hit_10pc_20d",
     )
 
-    # ── 5. Combined lift across firing patterns ──────────────────────────
-    combined_lift_pp = sum(g["sum_lift_pp"] for g in breakdown)
-
-    # Bucket 1 payload — only fields the new UX renders. `regime_breakdown`
-    # and `combined_lift_pp` are dropped from the response (they were
-    # consumed by the older "confluence breakdown" UI which the 2026-05-24
-    # rewrite removed). `dominant_regime` is internal-only — used by
-    # _derive_signal_type_from_regime + the synthesis closer — and stays
-    # because it's a single short word, not jargon-y.
+    # Bucket 1 payload — only fields the new UX renders. The per-regime
+    # `breakdown` array and `combined_lift_pp` aggregate that the older
+    # "confluence breakdown" UI consumed have been removed entirely (F5,
+    # 2026-05-24). `dominant_regime` stays — it's used internally by
+    # _derive_signal_type_from_regime + the synthesis closer.
     return {
         "total_fires_today":       int(n_fires_total),
         "pattern_count":           int(n_fires_total),
@@ -1007,18 +976,6 @@ def _build_bucket1(
         "dominant_regime":         dominant_regime,
         "synthesis":               synthesis,
     }
-
-
-# Human-friendly fallback names for regimes (used when no blurb is available)
-_REGIME_HUMAN: Dict[str, str] = {
-    "breakout":       "Breakout signature",
-    "momentum":       "Momentum continuation",
-    "compression":    "Coiled compression",
-    "reversal":       "Reversal setup",
-    "mean_reversion": "Mean-reversion setup",
-    "capitulation":   "Late-stage capitulation",
-    "other":          "Multi-factor confluence",
-}
 
 
 def _build_bucket2(
@@ -1314,16 +1271,12 @@ def _build_bucket3(
     else:
         rotation_dir = "neutral"
 
-    # Verdict tag (kept for the Excel export / legacy consumers; the new
-    # UX renders narrative text instead, but the tag is still useful in
-    # downstream filters).
-    if sector_rank == 0:                       verdict = "unranked"
-    elif sector_rank <= 7:                     verdict = "tailwind"
-    elif sector_rank <= 13:                    verdict = "neutral"
-    else:                                      verdict = "headwind"
-
     # Plain-English narrative — same string the UX renders verbatim under
     # "What the sector is doing". No "rotation", "verdict", "tailwind" jargon.
+    # F6 (2026-05-24): removed the tailwind/neutral/headwind `verdict` tag —
+    # frontend never rendered it after the 2026-05-24 UX rewrite, and the
+    # narrative paragraph already conveys the same information in plain
+    # English. No downstream consumers (grep'd backend + frontend clean).
     narrative = _plain_sector_narrative(
         sector_name=sector,
         rank_today=sector_rank,
@@ -1345,8 +1298,7 @@ def _build_bucket3(
         "sector_20d_return_pct":   round(sector_20d, 2),
         "rotation_direction":      rotation_dir,
         "rotation_sessions_of_10": 7 if rotation_dir == "inflow" else (3 if rotation_dir == "outflow" else 5),
-        "verdict":                 verdict,
-        # NEW — plain-English narrative the UX renders directly
+        # Plain-English narrative the UX renders directly
         "narrative":               narrative,
     }
 
@@ -1419,11 +1371,28 @@ def _plain_sector_narrative(
 # Helpers: signal type + risk + action
 # ════════════════════════════════════════════════════════════════════════
 
-# Falcon Top 10 LOCKED exit rules (matches persona_simulator's falcon-top-10).
-# Hold horizon dropped from 20 → 7 per the 2026-05-24 UX spec — was a leftover
-# from the legacy Top 20 daily-trader persona.
-_STOP_LOSS_PCT  = -7
-_TIME_HORIZON_D = 7
+# Falcon Top 10 LOCKED exit rules — read from persona_simulator.PERSONA_CONFIGS
+# at request time so the explainer never has its own copy of init_stop /
+# hold_days / position size that could silently diverge from the backtest.
+#
+# F2 (2026-05-24): eliminates the duplicate source-of-truth that previously
+# lived as _STOP_LOSS_PCT, _TIME_HORIZON_D, _STANDARD_POSITION_RS, and
+# _SMALLER_POSITION_RS module constants. Edit PERSONA_CONFIGS["falcon-top-10"]
+# ["run_cfg"] and the UX picks up new values on the next request — no second
+# place to remember to update.
+def _locked_rules() -> Dict[str, Any]:
+    """Lazy read of locked Falcon Top 10 rules. Lookup is one dict access
+    well under 1µs; not worth caching at this scale."""
+    from .persona_simulator import PERSONA_CONFIGS
+    cfg = PERSONA_CONFIGS["falcon-top-10"]["run_cfg"]
+    return {
+        "stop_loss_pct":   round(cfg.init_stop * 100),     # -0.07 → -7
+        "time_horizon_d":  int(cfg.hold_days),              # 7
+        "position_rs":     int(cfg.fixed_per_trade),        # 50000
+        # Smaller-position is a UX-side rule (half-size), NOT a persona knob.
+        # Derived here so it stays in lockstep with position_rs.
+        "smaller_rs":      int(cfg.fixed_per_trade / 2),    # 25000
+    }
 
 
 def _derive_signal_type(patterns: List[Dict[str, Any]]) -> str:
@@ -1448,9 +1417,6 @@ def _derive_signal_type_from_regime(regime: Optional[str]) -> str:
         "capitulation":   "Capitulation",
     }.get(regime.lower(), "Compression")
 
-
-_STANDARD_POSITION_RS = 50_000   # locked per falcon-top-10 spec (₹5L / 10)
-_SMALLER_POSITION_RS  = 25_000   # half-size when conviction is qualified
 
 # Thresholds for the smaller-position flag (NOT a filter — the validated
 # top 10 is never re-ranked; weaker picks stay at their engine rank with
@@ -1517,8 +1483,9 @@ def _derive_rating_and_position(
     if has_oversold:
         reasons.append("oversold")
 
+    lr = _locked_rules()
     smaller = bool(reasons)
-    pos_rs = _SMALLER_POSITION_RS if smaller else _STANDARD_POSITION_RS
+    pos_rs = lr["smaller_rs"] if smaller else lr["position_rs"]
     shares = int(pos_rs // entry_price) if entry_price and entry_price > 0 else 0
 
     # Edge case: high-priced stock (e.g. POWERINDIA at ₹35,555) where the
@@ -1526,7 +1493,7 @@ def _derive_rating_and_position(
     # size in that case — better to have 1 share at full size than zero.
     # The heads-up message still renders so the user sees the caution.
     if smaller and shares == 0 and entry_price and entry_price > 0:
-        pos_rs = _STANDARD_POSITION_RS
+        pos_rs = lr["position_rs"]
         shares = int(pos_rs // entry_price)
 
     # Compose the user-facing weaker-history line. Recent-loss takes priority
@@ -1571,18 +1538,20 @@ def _derive_action(
     position_size_rs: int,
     shares_recommended: int,
     smaller_position: bool,
-    hold_days: int = 7,
+    hold_days: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Plain-English action block. Falcon Top 10 locked rules:
-      - Entry: tomorrow's open (close-at-signal is the proxy until we have
-               09:15 IST live tick data — Phase 2c).
-      - Stop:  -7% from entry (locked falcon-top-10 spec).
-      - Hold:  up to 7 trading days (locked, NOT 20).
+    """Plain-English action block. All locked Falcon Top 10 rules
+    (-7% stop, 7-day hold) come from PERSONA_CONFIGS via _locked_rules().
 
     Output strings are user-ready — no jargon, no "watch above", no "MAE".
     """
+    lr = _locked_rules()
+    stop_pct = lr["stop_loss_pct"]
+    if hold_days is None:
+        hold_days = lr["time_horizon_d"]
+
     px = float(close_at_signal) if close_at_signal else 0.0
-    stop = round(px * (1 + _STOP_LOSS_PCT / 100), 2) if px else 0.0
+    stop = round(px * (1 + stop_pct / 100), 2) if px else 0.0
 
     if px:
         entry_text = f"Buy at tomorrow's open (~₹{px:,.2f})"
@@ -1598,8 +1567,8 @@ def _derive_action(
     else:
         position_text = f"Position size: ₹{position_size_rs:,}"
 
-    stop_text = f"Exit if it drops to ₹{stop:,.2f} ({_STOP_LOSS_PCT}% stop)" if px \
-                 else f"{_STOP_LOSS_PCT}% stop from entry"
+    stop_text = f"Exit if it drops to ₹{stop:,.2f} ({stop_pct}% stop)" if px \
+                 else f"{stop_pct}% stop from entry"
 
     hold_text = f"We'll hold for up to {hold_days} trading days"
 
@@ -1612,7 +1581,7 @@ def _derive_action(
         # Raw fields kept for downstream consumers + the per-trade calculator
         "entry_price_rs":     px if px else None,
         "stop_loss_rs":       stop,
-        "stop_loss_pct":      _STOP_LOSS_PCT,
+        "stop_loss_pct":      stop_pct,
         "time_horizon_days":  hold_days,
         # Back-compat — old field that some legacy renderers may still read
         "entry_label":        entry_text,

@@ -51,6 +51,36 @@ CREATE TABLE IF NOT EXISTS falcon_notifications_out (
 );
 CREATE INDEX IF NOT EXISTS idx_notifs_status ON falcon_notifications_out(status, created_at DESC);
 
+-- F4 (2026-05-24): Falcon Top 10 live-audit trail.
+-- Internal only — populated by V7 pipeline step 4 (top10_audit.run).
+-- Records every Top 10 pick emitted live, plus its realised exit when the
+-- close-job walks the position forward through the same exit logic the
+-- persona simulator uses (init_stop / trail / time_stop). Lets ops monitor
+-- live-vs-backtest drift on the locked rules without touching the user-
+-- facing card.
+CREATE TABLE IF NOT EXISTS falcon_top10_audit (
+    signal_date          TEXT NOT NULL,
+    entry_date           TEXT NOT NULL,
+    rank                 INTEGER NOT NULL,         -- user-facing rank (avg_lift order)
+    symbol               TEXT NOT NULL,
+    sector               TEXT,
+    avg_lift             REAL,                     -- score / n_fires at signal time
+    n_fires              INTEGER,
+    close_at_signal      REAL,
+    -- Filled by close-job once entry_date + hold_days has passed:
+    exit_date            TEXT,
+    exit_price           REAL,
+    net_return_pct       REAL,                     -- (exit/entry - 1) * 100, after fee + slip
+    exit_reason          TEXT,                     -- INIT_STOP | TRAIL_GIVEBACK | TIME_STOP
+    inserted_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at            TEXT,                     -- when close-job filled exit_* fields
+    PRIMARY KEY (signal_date, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_top10_audit_open
+    ON falcon_top10_audit(entry_date) WHERE exit_date IS NULL;
+CREATE INDEX IF NOT EXISTS idx_top10_audit_signal_date
+    ON falcon_top10_audit(signal_date DESC);
+
 -- Trade module: batch run + per-order audit (Phase 1 auto-trade panel).
 CREATE TABLE IF NOT EXISTS falcon_trade_runs (
     batch_id            TEXT PRIMARY KEY,

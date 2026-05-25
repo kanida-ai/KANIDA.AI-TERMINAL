@@ -152,17 +152,33 @@ def generate_signals_for_date(
                 ed_obj += _td(days=1)
             entry_date = ed_obj.isoformat()
 
+        # F3 (2026-05-24): store the user-facing rank (avg_lift order, =
+        # score/n_fires desc) instead of the pipeline's sum_lift order.
+        # Selection of the top-100 stays sum_lift (cands.sort above), so
+        # the SET of stored stocks is unchanged. Only the rank column's
+        # meaning changes — it now matches what /power/today actually
+        # displays, so anyone querying ORDER BY rank sees the same order
+        # as the UI.
+        ranked_by_avglift = sorted(
+            enumerate(top),
+            key=lambda kv: -(kv[1]["score"] / max(kv[1]["n_fires"], 1))
+        )
+        user_rank_by_orig_idx = {
+            orig_idx: pos + 1 for pos, (orig_idx, _) in enumerate(ranked_by_avglift)
+        }
+
         # Persist
         con.execute("DELETE FROM falcon_signals_live WHERE signal_date = ? AND engine_version = ?",
                      (signal_date, FALCON_VERSION))
-        for rank, c in enumerate(top, 1):
+        for orig_idx, c in enumerate(top):
+            user_rank = user_rank_by_orig_idx[orig_idx]
             con.execute("""
                 INSERT INTO falcon_signals_live
                   (signal_date, entry_date, rank, symbol, sector, n_fires, score,
                    close_at_signal, avg_value_60d, fired_pattern_ids, sample_rules,
                    engine_version)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (signal_date, entry_date, rank, c["symbol"], c["sector"],
+            """, (signal_date, entry_date, user_rank, c["symbol"], c["sector"],
                    c["n_fires"], c["score"], c["close_at_signal"], c["avg_value_60d"],
                    json.dumps(c["fired_pattern_ids"]),
                    json.dumps(c["sample_rules"]),

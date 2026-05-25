@@ -83,6 +83,19 @@ export default async function TodayPage({
         <EmptyState universe={universe} sector={sector} signalDate={data?.signal_date ?? null} />
       )}
 
+      {/* Low-signal day banner: persona's min_fires gate yielded fewer than 10 picks.
+          Showing fewer-but-stronger is the CORRECT behavior per the locked spec —
+          better than padding the list with weak-confluence picks. F1 (2026-05-24). */}
+      {picks.length > 0 && picks.length < 10 && (
+        <div role="status" className="px-4 py-3 rounded-lg bg-amber-400/[0.08] border border-amber-400/30 text-sm">
+          <p className="text-amber-200">
+            <span className="font-semibold">Low-signal day —</span>{' '}
+            only <span className="font-mono">{picks.length}</span> stock{picks.length === 1 ? '' : 's'} passed today&apos;s
+            high-confluence gate (normally 10). The engine is choosing not to dilute the list with weaker setups.
+          </p>
+        </div>
+      )}
+
       {picks.length > 0 && (
         <div className="space-y-3 md:space-y-4">
           {picks.map(p => (
