@@ -951,6 +951,11 @@ type InviteRow = {
   used_by_user_id: number | null
   used_at: string | null
   note: string | null
+  /** NEW (2026-05-25): when used_by_user_id is set, this reflects the
+   *  power_user_users.is_active flag for that user. NULL when the code
+   *  is unused (no joined user row). Drives the "deactivate / reactivate"
+   *  button rendering on consumed rows. */
+  used_by_is_active: number | null     // SQLite stores bool as 0/1
 }
 
 function InviteListPanel() {
@@ -1002,6 +1007,33 @@ function InviteListPanel() {
     }
   }
 
+  // Deactivate / reactivate the user account that consumed this code.
+  // The backend blocks deactivating admin users (HTTP 400 CANNOT_TOUCH_ADMIN),
+  // so we don't need to gate the button — just let the API return the message.
+  const onToggleUserActive = async (userId: number, code: string, currentlyActive: boolean) => {
+    const verb = currentlyActive ? 'deactivate' : 'reactivate'
+    const msg  = currentlyActive
+      ? `Deactivate user #${userId}? They will be blocked from logging in.`
+      : `Reactivate user #${userId}? They will be able to log in again.`
+    if (!confirm(msg)) return
+    setBusy(code); setError(null)
+    try {
+      const r = await fetch(
+        `${apiBase()}/api/power/admin/users/${userId}/${verb}`,
+        adminFetchInit({ method: 'POST' }),
+      )
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}))
+        throw new Error(b.detail?.message || `HTTP ${r.status}`)
+      }
+      fetchRows()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : `${verb} failed.`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   if (error && !rows) return <ErrorBox text={`List: ${error}`} />
   if (!rows)          return <SkeletonBox lines={3} />
 
@@ -1036,17 +1068,20 @@ function InviteListPanel() {
           </thead>
           <tbody>
             {rows.map(r => {
-              const used    = r.used_by_user_id != null
-              const revoked = !used && isRevoked(r)
+              const used        = r.used_by_user_id != null
+              const userActive  = used && r.used_by_is_active === 1
+              const userOff     = used && r.used_by_is_active === 0
+              const revoked     = !used && isRevoked(r)
               return (
                 <tr key={r.code} className="border-t border-neutral-800">
                   <td className="font-mono py-1 text-neutral-200">{r.code}</td>
                   <td className="text-neutral-500">{r.issued_at?.slice(0, 16).replace('T', ' ')}</td>
                   <td className="text-neutral-400 truncate max-w-[12rem]">{r.note ?? '—'}</td>
                   <td className="font-mono">
-                    {used    ? <span className="text-neutral-500">user #{r.used_by_user_id}</span>
-                     : revoked ? <span className="text-red-300">revoked</span>
-                               : <span className="text-green-300">unused</span>}
+                    {userActive ? <span className="text-neutral-300">user #{r.used_by_user_id}</span>
+                     : userOff   ? <span className="text-red-300">user #{r.used_by_user_id} · deactivated</span>
+                     : revoked   ? <span className="text-red-300">revoked</span>
+                                 : <span className="text-green-300">unused</span>}
                   </td>
                   <td className="text-right">
                     {!used && !revoked && (
@@ -1057,6 +1092,26 @@ function InviteListPanel() {
                         className="px-2 py-0.5 text-[11px] text-red-300 hover:text-red-200 hover:bg-red-500/10 border border-red-500/30 rounded disabled:opacity-50"
                       >
                         {busy === r.code ? 'revoking…' : 'revoke'}
+                      </button>
+                    )}
+                    {userActive && (
+                      <button
+                        type="button"
+                        onClick={() => onToggleUserActive(r.used_by_user_id!, r.code, true)}
+                        disabled={busy === r.code}
+                        className="px-2 py-0.5 text-[11px] text-red-300 hover:text-red-200 hover:bg-red-500/10 border border-red-500/30 rounded disabled:opacity-50"
+                      >
+                        {busy === r.code ? 'deactivating…' : 'deactivate'}
+                      </button>
+                    )}
+                    {userOff && (
+                      <button
+                        type="button"
+                        onClick={() => onToggleUserActive(r.used_by_user_id!, r.code, false)}
+                        disabled={busy === r.code}
+                        className="px-2 py-0.5 text-[11px] text-mint-300 hover:text-mint-200 hover:bg-mint-500/10 border border-mint-500/30 rounded disabled:opacity-50"
+                      >
+                        {busy === r.code ? 'reactivating…' : 'reactivate'}
                       </button>
                     )}
                   </td>

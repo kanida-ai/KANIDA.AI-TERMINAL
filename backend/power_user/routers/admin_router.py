@@ -112,6 +112,94 @@ def list_users(
     return {"n": len(rows), "users": [dict(r) for r in rows]}
 
 
+def _set_user_active(
+    con: sqlite3.Connection, user_id: int, active: bool
+) -> Dict[str, Any]:
+    """Flip power_user_users.is_active for a single user.
+
+    Safety rails (2026-05-25):
+      - Can't touch admin role users (lock-out protection — there is no
+        bootstrap-back mechanism if the only admin is deactivated by hand)
+      - 404 if user doesn't exist
+      - Idempotent: returns the current state with `changed=False` if the
+        user is already in the requested state
+
+    Returns: {ok, user_id, email, role, is_active, changed}
+    """
+    row = con.execute(
+        "SELECT id, email, role, is_active FROM power_user_users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, {"code": "USER_NOT_FOUND",
+                                    "message": f"No user with id={user_id}."})
+    if row["role"] == "admin":
+        raise HTTPException(400, {
+            "code":    "CANNOT_TOUCH_ADMIN",
+            "message": "Admin users cannot be deactivated/reactivated from "
+                        "this endpoint (lock-out protection). Use SQL if you "
+                        "really mean it.",
+        })
+
+    target = 1 if active else 0
+    if int(row["is_active"]) == target:
+        return {
+            "ok":         True,
+            "user_id":    row["id"],
+            "email":      row["email"],
+            "role":       row["role"],
+            "is_active":  bool(target),
+            "changed":    False,
+        }
+    con.execute(
+        "UPDATE power_user_users SET is_active = ? WHERE id = ?",
+        (target, user_id),
+    )
+    con.commit()
+    log.info("admin: set is_active=%d on user_id=%s (%s)",
+             target, user_id, row["email"])
+    return {
+        "ok":         True,
+        "user_id":    row["id"],
+        "email":      row["email"],
+        "role":       row["role"],
+        "is_active":  bool(target),
+        "changed":    True,
+    }
+
+
+@router.post("/users/{user_id}/deactivate")
+def deactivate_user(
+    user_id: int,
+    _admin:  bool = Depends(require_admin),
+    con:     sqlite3.Connection = Depends(get_db),
+) -> Dict[str, Any]:
+    """Block a registered user from logging in (sets is_active=0).
+
+    The existing auth flow's `/me` endpoint already returns 403 for
+    inactive users (auth_router.py line ~102), so no client-side
+    enforcement needed — the next API call from this user's session
+    rejects automatically. JWT cookie remains technically valid until
+    its 24h TTL, but every protected route checks is_active.
+
+    Cannot deactivate admin users. Idempotent (no-op if already inactive).
+    """
+    return _set_user_active(con, user_id, active=False)
+
+
+@router.post("/users/{user_id}/reactivate")
+def reactivate_user(
+    user_id: int,
+    _admin:  bool = Depends(require_admin),
+    con:     sqlite3.Connection = Depends(get_db),
+) -> Dict[str, Any]:
+    """Restore login access for a previously-deactivated user (is_active=1).
+
+    Idempotent (no-op if already active). Cannot affect admin users.
+    """
+    return _set_user_active(con, user_id, active=True)
+
+
 @router.get("/waitlist")
 def list_waitlist(
     limit: int    = Query(500, ge=1, le=2000),

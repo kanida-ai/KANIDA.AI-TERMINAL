@@ -116,11 +116,21 @@ def list_codes(con: sqlite3.Connection,
                 limit: int = 100,
                 only_unused: bool = False,
                 ) -> List[Dict[str, Any]]:
-    """For the admin UI. Returns code rows ordered by most recent."""
-    sql = "SELECT * FROM power_user_invite_codes"
+    """For the admin UI. Returns code rows ordered by most recent.
+
+    LEFT JOINs power_user_users so the admin UI can show per-user
+    activation state on consumed rows (added 2026-05-25 for the
+    "deactivate user" admin button — let the operator block a
+    misregistered account from logging in further).
+    """
+    sql = """
+        SELECT c.*, u.is_active AS used_by_is_active
+        FROM power_user_invite_codes c
+        LEFT JOIN power_user_users u ON c.used_by_user_id = u.id
+    """
     if only_unused:
-        sql += " WHERE used_by_user_id IS NULL"
-    sql += " ORDER BY issued_at DESC LIMIT ?"
+        sql += " WHERE c.used_by_user_id IS NULL"
+    sql += " ORDER BY c.issued_at DESC LIMIT ?"
     con.row_factory = sqlite3.Row
     rows = con.execute(sql, (limit,)).fetchall()
     return [dict(r) for r in rows]
