@@ -113,14 +113,35 @@ def _run_v7_pipeline_holding_lock(reason: str) -> None:
                 t0 = datetime.now(IST)
                 result = fn() or {}
                 dt = (datetime.now(IST) - t0).total_seconds()
-                log.info("V7 pipeline: %s OK in %.1fs (status=%s)",
-                          name, dt, result.get("status", "ok"))
-                # If a step reports partial/failed, halt the chain — the operator
-                # should see a partial outcome rather than cascading bad state into
-                # signal generation.
-                if result.get("status") and result["status"] not in ("success", "ok"):
-                    log.warning("V7 pipeline: %s returned status=%s — halting chain",
-                                 name, result["status"])
+                status = result.get("status", "ok")
+                log.info("V7 pipeline: %s OK in %.1fs (status=%s)", name, dt, status)
+
+                # Fix #6 (2026-05-25): differentiate 'failed' (hard halt) from
+                # 'partial' (soft warn + continue). Previously the chain halted
+                # on ANY non-success/non-ok status, which meant daily_features
+                # returning 'partial' for a historical gap (e.g. 2026-05-08 has
+                # 0/500 features due to a long-past ProcessPool crash) would
+                # block today's signals from generating — even though today's
+                # data was 100% fine. The user-facing impact: empty /power/today
+                # for an entire day because of an old unrelated catch-up gap.
+                #
+                # New rules:
+                #   - status='failed' → halt (step itself decided things are
+                #     too broken to proceed)
+                #   - status='partial' → warn + continue (today's data may be
+                #     fine; let the next step decide based on what it sees)
+                #   - any other unknown status → halt defensively
+                if status == "failed":
+                    log.warning("V7 pipeline: %s status=failed — halting chain", name)
+                    return
+                elif status == "partial":
+                    log.warning("V7 pipeline: %s status=partial — continuing chain "
+                                 "(today's data may still be usable; downstream step "
+                                 "will fail loudly if not). notes=%s",
+                                 name, str(result.get("notes", ""))[:200])
+                elif status not in ("success", "ok"):
+                    log.warning("V7 pipeline: %s returned unknown status=%s — "
+                                 "halting chain (defensive)", name, status)
                     return
             except Exception as e:
                 log.exception("V7 pipeline: %s CRASHED (chain halted): %s", name, e)

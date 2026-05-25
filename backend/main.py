@@ -178,56 +178,136 @@ _PIPELINE_RETRY_CUTOFF_HOUR    = 19              # IST. After this, give up for 
 _PIPELINE_RETRY_INTERVAL_SEC   = 15 * 60         # 15 minutes between retries.
 
 
+def _v7_succeeded_today() -> bool:
+    """Fix #4 (2026-05-25): the legacy `_pipeline_status` dict only reflects
+    the legacy 5-step pipeline. V7 runs as a piggy-back inside the same lock
+    (see `_run_pipeline_sync` line ~145), but its failure is swallowed —
+    `_pipeline_status["last_result"]` stays "SUCCESS" even when V7 crashed.
+
+    For retry-correctness we need the AUTHORITATIVE V7 status. Read
+    `falcon_signal_runs` directly: the V7 chain writes one row per step
+    (`daily_data_refresh`, `daily_features`, `daily_signals`). If all three
+    of today's rows are status='success', V7 is done. Otherwise, V7 needs a
+    retry — even if the legacy pipeline reported SUCCESS.
+    """
+    try:
+        from falcon.db import falcon_conn
+        today_iso = datetime.now(IST).date().isoformat()
+        with falcon_conn() as con:
+            rows = con.execute("""
+                SELECT job_name, status FROM falcon_signal_runs
+                WHERE date(started_at) = ?
+                ORDER BY started_at DESC
+            """, (today_iso,)).fetchall()
+        # Need at least one success row for each of the 3 V7 steps today.
+        required = {"daily_data_refresh", "daily_features", "daily_signals"}
+        succeeded_today: set[str] = set()
+        for r in rows:
+            job, status = r[0], r[1]
+            if status == "success" and job in required:
+                succeeded_today.add(job)
+        return required.issubset(succeeded_today)
+    except Exception as e:
+        log.warning("v7_succeeded_today: falcon_signal_runs unreadable (%s) — assume fail", e)
+        return False     # fail-open to triggering a retry; safer than skipping
+
+
 def _schedule_daily_pipeline():
     """Block until 16:05 IST on a weekday, then run the pipeline. On failure,
     retry every 15 min until 19:00 IST. After 19:00 IST or on success, wait
-    for tomorrow's 16:05 IST. Loops forever."""
+    for tomorrow's 16:05 IST. Loops forever.
+
+    Fix #5 (2026-05-25): wrap each loop iteration in try/except so an unexpected
+    exception can't silently kill the scheduler thread. Previously, any uncaught
+    raise (clock skew, DB lock, import error after hot-reload, etc.) would exit
+    `_schedule_daily_pipeline()` permanently — the thread was `daemon=True` and
+    never restarted. Daily signals would silently stop firing until manual
+    backend restart.
+
+    Fix #4 (2026-05-25): a "successful" run for retry purposes now requires
+    BOTH the legacy pipeline AND all 3 V7 steps to succeed today. Previously
+    V7-only failure was invisible because `_pipeline_status["last_result"]`
+    only tracked legacy; the scheduler skipped to tomorrow even though
+    today's user-facing V7 signals never landed.
+    """
     import time
     while True:
-        now           = datetime.now(IST)
-        last_result   = (_pipeline_status.get("last_result") or "")
-        last_run_iso  = (_pipeline_status.get("last_run") or "")
-        today_iso     = now.date().isoformat()
+        try:
+            now           = datetime.now(IST)
+            last_result   = (_pipeline_status.get("last_result") or "")
+            last_run_iso  = (_pipeline_status.get("last_run") or "")
+            today_iso     = now.date().isoformat()
 
-        today_succeeded = (
-            last_run_iso.startswith(today_iso) and last_result == "SUCCESS"
-        )
-        today_failed_recently = (
-            last_run_iso.startswith(today_iso)
-            and bool(last_result)
-            and last_result != "SUCCESS"
-        )
-        is_weekday    = now.weekday() < 5
-        past_1605     = (now.hour, now.minute) >= (16, 5)
-        # Prospective retry target — used to gate the retry window so we
-        # never schedule a retry that would land past the cutoff.
-        prospective_retry = now + timedelta(seconds=_PIPELINE_RETRY_INTERVAL_SEC)
-        in_retry_window = (is_weekday and past_1605
-                            and prospective_retry.hour < _PIPELINE_RETRY_CUTOFF_HOUR
-                            and prospective_retry.date() == now.date())
-
-        if today_failed_recently and in_retry_window:
-            # Retry slot — schedule another attempt 15 min from now.
-            target = prospective_retry
-            reason = (f"retry-after-{last_result.split(':')[0][:20]}"
-                       if ':' in last_result else "retry-after-fail")
-        else:
-            # Default: next 16:05 IST weekday.
-            target = now.replace(hour=16, minute=5, second=0, microsecond=0)
-            if target <= now:
-                target += timedelta(days=1)
-            while target.weekday() >= 5:
-                target += timedelta(days=1)
-            reason = "next-day" if today_succeeded else (
-                "post-cutoff-wait-tomorrow" if today_failed_recently else "scheduled"
+            # Legacy-side: did today's run finish with SUCCESS in the dict?
+            legacy_succeeded_today = (
+                last_run_iso.startswith(today_iso) and last_result == "SUCCESS"
+            )
+            legacy_failed_today = (
+                last_run_iso.startswith(today_iso)
+                and bool(last_result)
+                and last_result != "SUCCESS"
             )
 
-        _pipeline_status["next_run"] = target.isoformat()
-        wait = max((target - datetime.now(IST)).total_seconds(), 1.0)
-        log.info("Scheduler: next pipeline run at %s IST (%.0f min) — %s",
-                  target.strftime("%Y-%m-%d %H:%M"), wait / 60, reason)
-        time.sleep(wait)
-        _run_pipeline_sync()
+            # Fix #4: combine with V7's authoritative state from falcon_signal_runs.
+            # Today is "done" only if BOTH legacy + V7 succeeded.
+            v7_done_today    = _v7_succeeded_today()
+            today_succeeded  = legacy_succeeded_today and v7_done_today
+            # Treat as "needs retry" if legacy failed OR (legacy succeeded but V7 didn't).
+            today_failed_recently = (
+                legacy_failed_today
+                or (last_run_iso.startswith(today_iso) and not v7_done_today)
+            )
+
+            is_weekday    = now.weekday() < 5
+            past_1605     = (now.hour, now.minute) >= (16, 5)
+            # Prospective retry target — used to gate the retry window so we
+            # never schedule a retry that would land past the cutoff.
+            prospective_retry = now + timedelta(seconds=_PIPELINE_RETRY_INTERVAL_SEC)
+            in_retry_window = (is_weekday and past_1605
+                                and prospective_retry.hour < _PIPELINE_RETRY_CUTOFF_HOUR
+                                and prospective_retry.date() == now.date())
+
+            if today_failed_recently and in_retry_window:
+                # Retry slot — schedule another attempt 15 min from now.
+                target = prospective_retry
+                if not v7_done_today and legacy_succeeded_today:
+                    reason = "retry-v7-only-failed"
+                elif ":" in last_result:
+                    reason = f"retry-after-{last_result.split(':')[0][:20]}"
+                else:
+                    reason = "retry-after-fail"
+            else:
+                # Default: next 16:05 IST weekday.
+                target = now.replace(hour=16, minute=5, second=0, microsecond=0)
+                if target <= now:
+                    target += timedelta(days=1)
+                while target.weekday() >= 5:
+                    target += timedelta(days=1)
+                reason = "next-day" if today_succeeded else (
+                    "post-cutoff-wait-tomorrow" if today_failed_recently else "scheduled"
+                )
+
+            _pipeline_status["next_run"] = target.isoformat()
+            _pipeline_status["v7_succeeded_today"] = v7_done_today
+            wait = max((target - datetime.now(IST)).total_seconds(), 1.0)
+            log.info("Scheduler: next pipeline run at %s IST (%.0f min) — %s "
+                      "(legacy_ok=%s v7_ok=%s)",
+                      target.strftime("%Y-%m-%d %H:%M"), wait / 60, reason,
+                      legacy_succeeded_today, v7_done_today)
+            time.sleep(wait)
+            _run_pipeline_sync()
+        except Exception as e:
+            # Fix #5: defensive outer guard. Never let an unexpected exception
+            # kill the scheduler thread silently. Record the error for admin
+            # observability and sleep 60s before re-attempting the loop body.
+            _pipeline_status["last_scheduler_error"] = (
+                f"{type(e).__name__}: {str(e)[:200]} @ {datetime.now(IST).isoformat()}"
+            )
+            log.exception("Pipeline scheduler iteration crashed (retrying in 60s): %s", e)
+            try:
+                time.sleep(60)
+            except Exception:
+                pass
 
 
 def _apply_postgres_schema():
