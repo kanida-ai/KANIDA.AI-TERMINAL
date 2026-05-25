@@ -890,59 +890,20 @@ def _build_bucket1(
     """
     today_hr = _today_weighted_hit_rate(pid_list, taxonomy)
 
-    # ── 1. Build a per-regime aggregate over ALL firing patterns ─────────
-    regime_groups: Dict[str, Dict[str, Any]] = {}
+    # ── 1. Dominant regime — by total positive-lift contribution ─────────
+    # F5 (2026-05-24): previously computed a full per-regime breakdown
+    # (count, sum_lift_pp, avg_lift_pp, weighted_hit_rate, headline blurb)
+    # and shipped it on the response. The 2026-05-24 UX rewrite stopped
+    # rendering it but the ~50ms/stock compute kept running. The synthesis
+    # narrator only needs dominant_regime, so collapse to that one number.
+    regime_lift: Dict[str, float] = {}
     for pid in pid_list:
         tax = taxonomy.get(pid)
         if not tax:
             continue
         regime = (tax.get("regime") or "other").lower()
-        lift = float(tax.get("lift_pp") or 0)
-        hr   = tax.get("oos_hit_rate")
-        g = regime_groups.setdefault(regime, {
-            "regime":      regime,
-            "count":       0,
-            "sum_lift_pp": 0.0,
-            "sum_lhr":     0.0,    # for lift-weighted HR
-            "sum_lift_for_hr": 0.0,
-            "_hrs":        [],
-            "_blurbs":     [],
-        })
-        g["count"]       += 1
-        g["sum_lift_pp"] += max(lift, 0)
-        if hr is not None:
-            g["_hrs"].append(float(hr))
-            if lift > 0:
-                g["sum_lhr"]        += float(hr) * lift
-                g["sum_lift_for_hr"]+= lift
-        blurb = tax.get("blurb")
-        if blurb:
-            g["_blurbs"].append(blurb)
-
-    # Finalise per-group metrics and sort by total lift contribution
-    breakdown: List[Dict[str, Any]] = []
-    for g in regime_groups.values():
-        n = g["count"] or 1
-        avg_lift = g["sum_lift_pp"] / n
-        avg_hr   = (sum(g["_hrs"]) / len(g["_hrs"])) if g["_hrs"] else None
-        weighted_hr = (g["sum_lhr"] / g["sum_lift_for_hr"]) if g["sum_lift_for_hr"] > 0 else None
-        # Most common blurb in this regime — the "headline" for the group
-        from collections import Counter
-        headline = Counter(g["_blurbs"]).most_common(1)
-        headline_str = headline[0][0] if headline else _REGIME_HUMAN.get(g["regime"], g["regime"].title())
-        breakdown.append({
-            "regime":          g["regime"],
-            "headline":        headline_str,
-            "count":           g["count"],
-            "sum_lift_pp":     round(g["sum_lift_pp"], 2),
-            "avg_lift_pp":     round(avg_lift, 2),
-            "avg_oos_hit_rate":   round(avg_hr, 2)      if avg_hr      is not None else None,
-            "weighted_hit_rate":  round(weighted_hr, 2) if weighted_hr is not None else None,
-        })
-    breakdown.sort(key=lambda x: x["sum_lift_pp"], reverse=True)
-
-    # ── 2. Dominant regime — for the headline framing of the synthesis ───
-    dominant_regime = breakdown[0]["regime"] if breakdown else "other"
+        regime_lift[regime] = regime_lift.get(regime, 0.0) + max(float(tax.get("lift_pp") or 0), 0)
+    dominant_regime = max(regime_lift.items(), key=lambda x: x[1])[0] if regime_lift else "other"
 
     # ── 3. Deduplicate conditions across ALL firing patterns ─────────────
     # For each column, keep the strongest threshold the stock cleared.
@@ -994,15 +955,11 @@ def _build_bucket1(
         target="hit_10pc_20d",
     )
 
-    # ── 5. Combined lift across firing patterns ──────────────────────────
-    combined_lift_pp = sum(g["sum_lift_pp"] for g in breakdown)
-
-    # Bucket 1 payload — only fields the new UX renders. `regime_breakdown`
-    # and `combined_lift_pp` are dropped from the response (they were
-    # consumed by the older "confluence breakdown" UI which the 2026-05-24
-    # rewrite removed). `dominant_regime` is internal-only — used by
-    # _derive_signal_type_from_regime + the synthesis closer — and stays
-    # because it's a single short word, not jargon-y.
+    # Bucket 1 payload — only fields the new UX renders. The per-regime
+    # `breakdown` array and `combined_lift_pp` aggregate that the older
+    # "confluence breakdown" UI consumed have been removed entirely (F5,
+    # 2026-05-24). `dominant_regime` stays — it's used internally by
+    # _derive_signal_type_from_regime + the synthesis closer.
     return {
         "total_fires_today":       int(n_fires_total),
         "pattern_count":           int(n_fires_total),
@@ -1010,18 +967,6 @@ def _build_bucket1(
         "dominant_regime":         dominant_regime,
         "synthesis":               synthesis,
     }
-
-
-# Human-friendly fallback names for regimes (used when no blurb is available)
-_REGIME_HUMAN: Dict[str, str] = {
-    "breakout":       "Breakout signature",
-    "momentum":       "Momentum continuation",
-    "compression":    "Coiled compression",
-    "reversal":       "Reversal setup",
-    "mean_reversion": "Mean-reversion setup",
-    "capitulation":   "Late-stage capitulation",
-    "other":          "Multi-factor confluence",
-}
 
 
 def _build_bucket2(
