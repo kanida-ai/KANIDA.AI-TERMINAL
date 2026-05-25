@@ -67,9 +67,23 @@ def falcon_top_20(
     """Falcon Top 20 with 3-bucket explainability for the chosen universe/sector.
 
     Reads PROD (via get_db) + RND (opened per-request below). Cached for
-    10 min per (date, universe, sector) tuple.
+    10 min per (resolved_date, universe, sector) tuple.
     """
-    key = (signal_date or "latest", universe, sector or "*")
+    # Resolve "latest" to the actual newest signal_date in the DB BEFORE the
+    # cache lookup. Previously the cache key used the literal string "latest",
+    # which meant a freshly-emitted signal_date would NOT cause a cache miss
+    # for up to 10 min — users kept seeing yesterday's picks even after the
+    # EOD pipeline finished. By keying on the resolved date, any new signal
+    # date is automatically a different cache key → fresh build.
+    if signal_date is None:
+        latest_row = prod_con.execute(
+            "SELECT MAX(signal_date) FROM falcon_signals_live WHERE signal_date IS NOT NULL"
+        ).fetchone()
+        resolved_date = latest_row[0] if latest_row else None
+    else:
+        resolved_date = signal_date
+
+    key = (resolved_date or "empty", universe, sector or "*")
     cached = _cache_get(key)
     if cached is not None:
         return cached
