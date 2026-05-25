@@ -152,17 +152,22 @@ def generate_signals_for_date(
                 ed_obj += _td(days=1)
             entry_date = ed_obj.isoformat()
 
-        # Persist
+        # Persist. F3 (2026-05-24): no longer writes to `rank` column — it
+        # would record the pipeline's sum_lift order, but the live endpoint
+        # re-ranks the top-100 by avg_lift (score/n_fires) before returning
+        # 10 picks. Anyone querying the DB ORDER BY rank would see a
+        # different order than the UI shows. Leaving rank NULL on new rows
+        # forces consumers to compute the user-facing rank at read time.
         con.execute("DELETE FROM falcon_signals_live WHERE signal_date = ? AND engine_version = ?",
                      (signal_date, FALCON_VERSION))
-        for rank, c in enumerate(top, 1):
+        for c in top:
             con.execute("""
                 INSERT INTO falcon_signals_live
-                  (signal_date, entry_date, rank, symbol, sector, n_fires, score,
+                  (signal_date, entry_date, symbol, sector, n_fires, score,
                    close_at_signal, avg_value_60d, fired_pattern_ids, sample_rules,
                    engine_version)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (signal_date, entry_date, rank, c["symbol"], c["sector"],
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """, (signal_date, entry_date, c["symbol"], c["sector"],
                    c["n_fires"], c["score"], c["close_at_signal"], c["avg_value_60d"],
                    json.dumps(c["fired_pattern_ids"]),
                    json.dumps(c["sample_rules"]),
