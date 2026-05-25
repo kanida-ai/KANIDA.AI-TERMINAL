@@ -92,8 +92,9 @@ def kick_off_v7_pipeline_if_stale(reason: str = "manual") -> dict:
 
 
 def _run_v7_pipeline_holding_lock(reason: str) -> None:
-    """Sequential A2 -> A3 -> A4 with logging. Lock MUST be already held by caller.
-    Releases lock in finally — never blocks future kick-offs on a crash."""
+    """Sequential A2 -> A3 -> A4 -> top10_audit with logging. Lock MUST be
+    already held by caller. Releases lock in finally — never blocks future
+    kick-offs on a crash."""
     try:
         # Lazy imports — avoids circular at module load time and keeps this
         # module cheap to import for callers who only check is_pipeline_running().
@@ -124,6 +125,25 @@ def _run_v7_pipeline_holding_lock(reason: str) -> None:
             except Exception as e:
                 log.exception("V7 pipeline: %s CRASHED (chain halted): %s", name, e)
                 return
+
+        # F4 (2026-05-24): step 4 — Falcon Top 10 audit-trail population + close-job.
+        # ISOLATED from the chain's halt semantics: any failure here is logged
+        # but does NOT roll back the user-visible daily_signals success. Audit
+        # is an internal drift-monitor; users see picks via daily_signals,
+        # not via this table. Run AFTER daily_signals so today's emissions
+        # are visible to the populate step + AFTER daily_data_refresh so
+        # ohlc_daily has fresh bars for the close-job exit walk.
+        try:
+            from .top10_audit import run as run_audit
+            t0 = datetime.now(IST)
+            audit_result = run_audit() or {}
+            dt = (datetime.now(IST) - t0).total_seconds()
+            log.info("V7 pipeline: top10_audit OK in %.1fs (status=%s n_inserted=%s n_closed=%s)",
+                      dt, audit_result.get("status"),
+                      audit_result.get("n_inserted"), audit_result.get("n_closed"))
+        except Exception as e:
+            log.exception("V7 pipeline: top10_audit CRASHED (NON-fatal, chain continues): %s", e)
+
         log.info("V7 pipeline COMPLETE (reason=%s)", reason)
     finally:
         _v7_pipeline_lock.release()
