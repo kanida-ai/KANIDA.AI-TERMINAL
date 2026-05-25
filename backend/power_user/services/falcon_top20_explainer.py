@@ -300,6 +300,9 @@ def build_falcon_top20(
     # every card) — pulled once from the locked falcon-top-10 persona.
     strategy_wr, strategy_n_trades = _strategy_win_rate()
 
+    # Locked rules — one source of truth, read from PERSONA_CONFIGS via _locked_rules().
+    lr = _locked_rules()
+
     return {
         "signal_date":      signal_date,
         "entry_date":       entry_date,
@@ -315,9 +318,9 @@ def build_falcon_top20(
         # NEW: strategy-level metrics (same on every card)
         "strategy_win_rate_pct":  round(strategy_wr, 1),
         "strategy_n_trades":      strategy_n_trades,
-        "hold_days":              _TIME_HORIZON_D,
-        "standard_position_rs":   _STANDARD_POSITION_RS,
-        "smaller_position_rs":    _SMALLER_POSITION_RS,
+        "hold_days":              lr["time_horizon_d"],
+        "standard_position_rs":   lr["position_rs"],
+        "smaller_position_rs":    lr["smaller_rs"],
     }
 
 
@@ -719,12 +722,12 @@ def _build_pick(
     )
 
     # Action block uses the persona-locked 7-day hold + position size from rp.
+    # hold_days omitted → _derive_action reads it from _locked_rules() itself.
     action = _derive_action(
         close_at_signal=raw.get("close_at_signal"),
         position_size_rs=rp["position_size_rs"],
         shares_recommended=rp["shares_recommended"],
         smaller_position=rp["smaller_position"],
-        hold_days=_TIME_HORIZON_D,
     )
 
     # Flags retained (consumed by some downstream surfaces + the Excel export).
@@ -1419,11 +1422,28 @@ def _plain_sector_narrative(
 # Helpers: signal type + risk + action
 # ════════════════════════════════════════════════════════════════════════
 
-# Falcon Top 10 LOCKED exit rules (matches persona_simulator's falcon-top-10).
-# Hold horizon dropped from 20 → 7 per the 2026-05-24 UX spec — was a leftover
-# from the legacy Top 20 daily-trader persona.
-_STOP_LOSS_PCT  = -7
-_TIME_HORIZON_D = 7
+# Falcon Top 10 LOCKED exit rules — read from persona_simulator.PERSONA_CONFIGS
+# at request time so the explainer never has its own copy of init_stop /
+# hold_days / position size that could silently diverge from the backtest.
+#
+# F2 (2026-05-24): eliminates the duplicate source-of-truth that previously
+# lived as _STOP_LOSS_PCT, _TIME_HORIZON_D, _STANDARD_POSITION_RS, and
+# _SMALLER_POSITION_RS module constants. Edit PERSONA_CONFIGS["falcon-top-10"]
+# ["run_cfg"] and the UX picks up new values on the next request — no second
+# place to remember to update.
+def _locked_rules() -> Dict[str, Any]:
+    """Lazy read of locked Falcon Top 10 rules. Lookup is one dict access
+    well under 1µs; not worth caching at this scale."""
+    from .persona_simulator import PERSONA_CONFIGS
+    cfg = PERSONA_CONFIGS["falcon-top-10"]["run_cfg"]
+    return {
+        "stop_loss_pct":   round(cfg.init_stop * 100),     # -0.07 → -7
+        "time_horizon_d":  int(cfg.hold_days),              # 7
+        "position_rs":     int(cfg.fixed_per_trade),        # 50000
+        # Smaller-position is a UX-side rule (half-size), NOT a persona knob.
+        # Derived here so it stays in lockstep with position_rs.
+        "smaller_rs":      int(cfg.fixed_per_trade / 2),    # 25000
+    }
 
 
 def _derive_signal_type(patterns: List[Dict[str, Any]]) -> str:
@@ -1448,9 +1468,6 @@ def _derive_signal_type_from_regime(regime: Optional[str]) -> str:
         "capitulation":   "Capitulation",
     }.get(regime.lower(), "Compression")
 
-
-_STANDARD_POSITION_RS = 50_000   # locked per falcon-top-10 spec (₹5L / 10)
-_SMALLER_POSITION_RS  = 25_000   # half-size when conviction is qualified
 
 # Thresholds for the smaller-position flag (NOT a filter — the validated
 # top 10 is never re-ranked; weaker picks stay at their engine rank with
@@ -1517,8 +1534,9 @@ def _derive_rating_and_position(
     if has_oversold:
         reasons.append("oversold")
 
+    lr = _locked_rules()
     smaller = bool(reasons)
-    pos_rs = _SMALLER_POSITION_RS if smaller else _STANDARD_POSITION_RS
+    pos_rs = lr["smaller_rs"] if smaller else lr["position_rs"]
     shares = int(pos_rs // entry_price) if entry_price and entry_price > 0 else 0
 
     # Edge case: high-priced stock (e.g. POWERINDIA at ₹35,555) where the
@@ -1526,7 +1544,7 @@ def _derive_rating_and_position(
     # size in that case — better to have 1 share at full size than zero.
     # The heads-up message still renders so the user sees the caution.
     if smaller and shares == 0 and entry_price and entry_price > 0:
-        pos_rs = _STANDARD_POSITION_RS
+        pos_rs = lr["position_rs"]
         shares = int(pos_rs // entry_price)
 
     # Compose the user-facing weaker-history line. Recent-loss takes priority
@@ -1571,18 +1589,20 @@ def _derive_action(
     position_size_rs: int,
     shares_recommended: int,
     smaller_position: bool,
-    hold_days: int = 7,
+    hold_days: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Plain-English action block. Falcon Top 10 locked rules:
-      - Entry: tomorrow's open (close-at-signal is the proxy until we have
-               09:15 IST live tick data — Phase 2c).
-      - Stop:  -7% from entry (locked falcon-top-10 spec).
-      - Hold:  up to 7 trading days (locked, NOT 20).
+    """Plain-English action block. All locked Falcon Top 10 rules
+    (-7% stop, 7-day hold) come from PERSONA_CONFIGS via _locked_rules().
 
     Output strings are user-ready — no jargon, no "watch above", no "MAE".
     """
+    lr = _locked_rules()
+    stop_pct = lr["stop_loss_pct"]
+    if hold_days is None:
+        hold_days = lr["time_horizon_d"]
+
     px = float(close_at_signal) if close_at_signal else 0.0
-    stop = round(px * (1 + _STOP_LOSS_PCT / 100), 2) if px else 0.0
+    stop = round(px * (1 + stop_pct / 100), 2) if px else 0.0
 
     if px:
         entry_text = f"Buy at tomorrow's open (~₹{px:,.2f})"
@@ -1598,8 +1618,8 @@ def _derive_action(
     else:
         position_text = f"Position size: ₹{position_size_rs:,}"
 
-    stop_text = f"Exit if it drops to ₹{stop:,.2f} ({_STOP_LOSS_PCT}% stop)" if px \
-                 else f"{_STOP_LOSS_PCT}% stop from entry"
+    stop_text = f"Exit if it drops to ₹{stop:,.2f} ({stop_pct}% stop)" if px \
+                 else f"{stop_pct}% stop from entry"
 
     hold_text = f"We'll hold for up to {hold_days} trading days"
 
@@ -1612,7 +1632,7 @@ def _derive_action(
         # Raw fields kept for downstream consumers + the per-trade calculator
         "entry_price_rs":     px if px else None,
         "stop_loss_rs":       stop,
-        "stop_loss_pct":      _STOP_LOSS_PCT,
+        "stop_loss_pct":      stop_pct,
         "time_horizon_days":  hold_days,
         # Back-compat — old field that some legacy renderers may still read
         "entry_label":        entry_text,
