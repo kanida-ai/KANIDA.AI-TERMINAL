@@ -320,7 +320,13 @@ PERSONA_CONFIGS: Dict[str, Dict[str, Any]] = {
 # Cache TTL: 1 hour. Force-refresh via `simulate_persona(slug, force=True)`.
 
 _CACHE: Dict[str, Dict[str, Any]] = {}
-_CACHE_TTL_SECONDS = 3600
+# 2026-05-26: bumped from 1h to 24h. Persona output only changes when
+# PERSONA_CONFIGS is edited (rare — operator action). Backend auto-restarts
+# daily at 03:00 IST via Task Scheduler; warm_cache.bat absorbs the 149s
+# rebuild during that restart window. With 24h TTL, the persona sim NEVER
+# rebuilds during user-facing hours → no more 2-minute hangs on /power/today
+# when the previous 1h TTL expired mid-day.
+_CACHE_TTL_SECONDS = 86400
 
 
 def _cache_valid(slug: str) -> bool:

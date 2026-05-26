@@ -39,7 +39,12 @@ from .pattern_narrator import narrate_synthesis as _narrate_synthesis
 # rules. Source: persona_simulator's `falcon-top-10` backtest. Same value
 # on every card by design. Cached for 1 hour.
 _STRAT_WR_CACHE: Dict[str, Any] = {"win_rate_pct": None, "n_trades": 0, "ts": 0.0}
-_STRAT_WR_TTL_SECONDS = 3600
+# 2026-05-26: TTL extended 1h → 24h to match persona_simulator's new TTL.
+# Both caches feed off the same underlying backtest; mismatched TTLs would
+# cause the explainer's per-stock stats to lazily re-trigger a 149s persona
+# rebuild every hour. With matching 24h TTL, both refresh only at the daily
+# 03:00 IST restart via warm_cache.bat — invisible to users.
+_STRAT_WR_TTL_SECONDS = 86400
 _FALLBACK_WIN_RATE_PCT = 69.25   # from falcon_top10_5yr_walkforward_CORRECTED.xlsx
 _FALLBACK_TRADES_N     = 2843    # 6-yr backtest total (approximate)
 
