@@ -128,14 +128,15 @@ CREATE INDEX IF NOT EXISTS ix_replay_featured ON falcon_replay_cache(is_featured
 -- ─── ZERODHA AUTO-AUTH (production hardening, Sprint 5c-1) ────────────
 
 -- falcon_auth_log: one row per Zerodha auth attempt (auto OR manual).
--- The bot fires 4 morning cycles (6:30/7:30/8:30/9:00 IST). Each attempt
--- writes a row whether it succeeded, failed at login, failed at exchange,
--- or threw. Read by the admin widget and used to gate later attempts
--- (skip if a previous attempt the same day already wrote a token).
+-- The bot fires every 30 min from 06:30 to 16:30 IST on weekdays (21 cycles
+-- after the 2026-05-27 expansion; was 4 morning cycles originally). Each
+-- attempt writes a row whether it succeeded, failed at login, failed at
+-- exchange, or threw. Read by the admin widget and used to gate later
+-- attempts (skip if today's log success + the live token still works).
 CREATE TABLE IF NOT EXISTS falcon_auth_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     attempt_at      TEXT NOT NULL,                 -- IST ISO
-    attempt_of_day  INTEGER NOT NULL,              -- 1..4 (which morning cycle)
+    attempt_of_day  INTEGER NOT NULL,              -- 1..21 (cycle index, post 2026-05-27)
     trigger_kind    TEXT NOT NULL                  -- 'scheduled' | 'manual' | 'magic_link'
                     CHECK (trigger_kind IN ('scheduled','manual','magic_link')),
     status          TEXT NOT NULL                  -- success | failed | skipped

@@ -1,24 +1,38 @@
 """Zerodha auto-auth scheduler — Layer 1 daemon.
 
-Runs on a single background thread. Wakes at 06:30 / 07:30 / 08:30 / 09:00 IST
-weekdays. Each attempt:
-  1. Check falcon_auth_log: is there a success entry for today already? → skip
-  2. Run zerodha_auto_auth.run_auth_attempt() (async, in its own loop)
+Runs on a single background thread. Wakes every 30 min from 06:30 to 16:30 IST
+on weekdays (21 cycles). Each attempt:
+  1. Skip gate — proceed past it only if BOTH conditions fail:
+       (a) falcon_auth_log records a success for today, AND
+       (b) live Kite profile() call confirms the stored token actually works.
+     This dual check (added 2026-05-27) catches mid-day token invalidations
+     that the audit-log-only check used to mask.
+  2. If we proceed: run zerodha_auto_auth.run_auth_attempt() (Playwright,
+     async, in its own loop)
   3. Write result to falcon_auth_log
-  4. On final attempt failure (4/4) → fire Web Push notification (Layer 2)
+  4. On scheduled failure at/after 09:00 IST → fire Web Push (Layer 2).
+     notify_auth_needed dedupes by date, so multiple cycle failures in one
+     day produce ONE push, not 12.
 
 Boot catch-up:
   On startup, if today is a weekday and any cycle time has passed but no
-  successful attempt is recorded, run the latest-passed cycle's attempt
-  immediately. Same structural fix as the 16:05 IST pipeline catch-up
+  valid token is established, run the latest-passed cycle's attempt
+  immediately. Same defensive pattern as the 16:05 IST pipeline catch-up
   (falcon_gtm_reliability.md).
 
 Production target: 99% of trading days, attempt #1 succeeds at 06:30 IST.
+Remaining 1%: mid-day token invalidations recoverable within 30 min.
 
-Why 4 morning cycles instead of "every 6 hours":
-  Zerodha tokens are issued for the calendar day in IST and expire at the
-  next 06:00 IST. We MUST land a token between 06:00 and 09:15 IST. Spacing
-  attempts hourly inside that window covers transient Zerodha outages.
+Schedule history:
+  2026-05-12  initial 06:30/07:30/08:30/09:00 IST four-slot morning sequence
+  2026-05-27  expanded to every-30-min 06:30–16:30 IST after a mid-day
+              token invalidation between 09:00 and 16:05 IST left the EOD
+              pipeline tokenless with no in-system recovery path.
+
+Why 30-min cadence not every 5 min:
+  Each cycle's skip path costs ~one Kite profile() call (200-500ms). 30-min
+  cadence × 21 slots = ~10 seconds total profile() time per day, comfortably
+  under Kite's quota AND fast enough to recover before the 16:05 EOD run.
 """
 from __future__ import annotations
 
@@ -32,12 +46,37 @@ log = logging.getLogger("kanida.services.auth_scheduler")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # (cycle_name, (hour, minute, second)) IST.
-CYCLES: List[Tuple[str, Tuple[int, int, int]]] = [
-    ("0630", (6, 30, 0)),
-    ("0730", (7, 30, 0)),
-    ("0830", (8, 30, 0)),
-    ("0900", (9,  0, 0)),
-]
+#
+# 2026-05-27 expansion: the original 4-slot morning sequence (06:30/07:30/
+# 08:30/09:00 IST) left a 21-hour blind spot covering the entire trading
+# day. If Zerodha invalidated the access_token mid-session (which they do,
+# unpredictably, on suspected anomalies / IP changes / security events),
+# nothing in the system could recover the token until 06:30 next morning —
+# and the 16:05 IST EOD pipeline ran into a brick wall.
+#
+# New schedule: every 30 min from 06:30 IST to 16:30 IST = 21 cycles.
+# Cost: after the first success of the day, all subsequent cycles either
+#   (a) skip cheaply (~one Kite profile() call, <500ms) if today_already_
+#       succeeded AND the live token health check passes, OR
+#   (b) actually run an auth attempt if either gate fails (i.e. mid-day
+#       token invalidation detected).
+# This bounds mid-day token-breakage recovery to ≤30 min — comfortably
+# before the 16:05 EOD pipeline tries to use it.
+def _build_cycles() -> List[Tuple[str, Tuple[int, int, int]]]:
+    out: List[Tuple[str, Tuple[int, int, int]]] = []
+    for total_min in range(6 * 60 + 30, 16 * 60 + 31, 30):  # 06:30 → 16:30 step 30
+        h, m = divmod(total_min, 60)
+        out.append((f"{h:02d}{m:02d}", (h, m, 0)))
+    return out
+
+CYCLES: List[Tuple[str, Tuple[int, int, int]]] = _build_cycles()
+
+# Push-notification trigger boundary: cycles at/after this time that fail
+# (either initially OR because a previously-OK token went bad) trigger the
+# Layer 2 admin push. Before this boundary, we silently let the morning
+# sequence keep trying — push spam is worse than morning quiet.
+# notify_auth_needed is internally idempotent (one magic-link per day).
+_PUSH_TRIGGER_TIME = (9, 0)  # 09:00 IST
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -117,8 +156,37 @@ def _next_cycle(now: datetime) -> Optional[Tuple[str, datetime]]:
     return None
 
 
+def _live_token_is_healthy() -> bool:
+    """Live Kite API check — calls KiteConnect.profile() with the currently
+    stored access_token. Returns True iff Kite accepts the token RIGHT NOW.
+
+    Why this matters (2026-05-27 incident): falcon_auth_log can have a
+    'success' row for today's morning attempt, but Kite can invalidate the
+    token mid-session for reasons we can't predict (anomaly detection, IP
+    change, security event). The auth_log says "we got a token", but the
+    token is dead. Without a live check, every subsequent cycle SKIPs with
+    ALREADY_OK and the system stays broken until tomorrow morning.
+
+    Cost: one Kite profile() call per skip path (~200-500ms). At 21 cycles
+    /day with 20 skips, that's ≤10s of total profile() time per day — well
+    under Kite's 200K req/day quota and the 3 req/sec rate limit.
+
+    Errors are conservative: any exception or non-valid response → False
+    (treat as "needs refresh"). Better to refresh once unnecessarily than
+    miss a real invalidation.
+    """
+    try:
+        from services.kite_auth import get_token_status     # noqa: WPS433
+        s = get_token_status()
+        return bool(s.get("valid"))
+    except Exception as e:
+        log.warning("auth_scheduler: live token health check failed (%s) — "
+                    "treating as unhealthy", e)
+        return False
+
+
 async def _run_attempt_async(cycle_name: str, trigger_kind: str = "scheduled") -> None:
-    """Execute one auth attempt, log it, fire push on final failure."""
+    """Execute one auth attempt, log it, fire push on failure (post-09:00)."""
     from .zerodha_auto_auth import (
         run_auth_attempt, log_attempt, today_already_succeeded
     )
@@ -126,18 +194,27 @@ async def _run_attempt_async(cycle_name: str, trigger_kind: str = "scheduled") -
 
     attempt_n = _attempt_number(cycle_name) if trigger_kind == "scheduled" else 0
 
+    # Skip gate — must satisfy BOTH:
+    #   (1) audit log says today already succeeded, AND
+    #   (2) the stored token actually works against Kite RIGHT NOW.
+    # Splitting these catches mid-day invalidations that the log alone would
+    # have masked (2026-05-27 incident).
     if trigger_kind == "scheduled" and today_already_succeeded(POWER_DB_PATH):
-        log.info("auth_scheduler[%s]: today already succeeded — skipping", cycle_name)
-        # We still log the skip so the audit trail is complete
-        from .zerodha_auto_auth import AuthAttemptResult
-        skip = AuthAttemptResult(
-            status="skipped", stage=None,
-            error_code="ALREADY_OK",
-            error_detail="today's token already refreshed; later attempt unnecessary",
-            token_preview=None, elapsed_ms=0,
-        )
-        log_attempt(POWER_DB_PATH, attempt_n, trigger_kind, skip)
-        return
+        if _live_token_is_healthy():
+            log.info("auth_scheduler[%s]: today already succeeded AND token "
+                      "healthy — skipping", cycle_name)
+            from .zerodha_auto_auth import AuthAttemptResult
+            skip = AuthAttemptResult(
+                status="skipped", stage=None,
+                error_code="ALREADY_OK",
+                error_detail="today's token already refreshed and live check passed",
+                token_preview=None, elapsed_ms=0,
+            )
+            log_attempt(POWER_DB_PATH, attempt_n, trigger_kind, skip)
+            return
+        log.warning("auth_scheduler[%s]: log says success today but live token "
+                     "FAILED Kite profile() — refreshing", cycle_name)
+        # Fall through and run a real refresh.
 
     result = await run_auth_attempt(
         attempt_of_day=attempt_n,
@@ -159,15 +236,20 @@ async def _run_attempt_async(cycle_name: str, trigger_kind: str = "scheduled") -
               cycle_name, result.status, result.stage,
               result.error_code, result.elapsed_ms)
 
-    # Layer 2 trigger: if this is the LAST scheduled attempt and we failed,
-    # fire a Web Push to the admin.
-    if (trigger_kind == "scheduled" and result.status == "failed"
-            and cycle_name == CYCLES[-1][0]):
-        try:
-            from power_user.services.web_push import notify_auth_needed
-            await asyncio.to_thread(notify_auth_needed)
-        except Exception as e:
-            log.exception("auth_scheduler: web_push notify failed (non-fatal): %s", e)
+    # Layer 2 push trigger: with 21 cycles spanning the trading day, firing
+    # only on the LAST attempt (16:30) would push AFTER the 16:05 EOD pipeline
+    # has already failed. Instead, fire on ANY scheduled failure at/after
+    # 09:00 IST. notify_auth_needed dedupes per-day so we won't spam.
+    if trigger_kind == "scheduled" and result.status == "failed":
+        cycle_hh_mm = next(((hh, mm) for name, (hh, mm, _ss) in CYCLES
+                             if name == cycle_name), None)
+        if cycle_hh_mm is not None and cycle_hh_mm >= _PUSH_TRIGGER_TIME:
+            try:
+                from power_user.services.web_push import notify_auth_needed
+                await asyncio.to_thread(notify_auth_needed)
+            except Exception as e:
+                log.exception("auth_scheduler: web_push notify failed "
+                              "(non-fatal): %s", e)
 
 
 def _run_attempt_sync(cycle_name: str, trigger_kind: str = "scheduled") -> None:

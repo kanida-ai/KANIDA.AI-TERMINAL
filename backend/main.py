@@ -171,37 +171,32 @@ _PIPELINE_RETRY_INTERVAL_SEC   = 15 * 60         # 15 minutes between retries.
 
 
 def _v7_succeeded_today() -> bool:
-    """Fix #4 (2026-05-25): the legacy `_pipeline_status` dict only reflects
-    the legacy 5-step pipeline. V7 runs as a piggy-back inside the same lock
-    (see `_run_pipeline_sync` line ~145), but its failure is swallowed —
-    `_pipeline_status["last_result"]` stays "SUCCESS" even when V7 crashed.
+    """Has V7 produced FRESH signals for today's IST EOD window?
 
-    For retry-correctness we need the AUTHORITATIVE V7 status. Read
-    `falcon_signal_runs` directly: the V7 chain writes one row per step
-    (`daily_data_refresh`, `daily_features`, `daily_signals`). If all three
-    of today's rows are status='success', V7 is done. Otherwise, V7 needs a
-    retry — even if the legacy pipeline reported SUCCESS.
+    History:
+      Fix #4 (2026-05-25): original implementation read falcon_signal_runs
+      and counted "success" rows by date(started_at). That was wrong in two
+      ways:
+        1. A "success" run-log row doesn't prove the run emitted today's
+           data — it just proves no exception was raised. daily_data_refresh
+           can succeed-with-no-new-bars (bad token, market open, etc.) and
+           daily_signals can upsert yesterday's date again.
+        2. A 13:46 IST manual run on 2026-05-27 set all 3 success rows with
+           started_at=today but emitted signal_date=2026-05-26. The function
+           returned True → retry loop concluded "today is done" → 16:05 IST
+           EOD cron was suppressed → signals frozen at yesterday all day.
+
+    Fix 2026-05-27: replaced the run-log scan with the single source of
+    truth used by the V7 kick-off gate — falcon_signals_live.MAX(signal_date)
+    vs expected. Both functions agree on "is today done?", eliminating the
+    legacy/V7 divergence that caused the 2026-05-27 stale-frozen incident.
     """
     try:
-        from falcon.db import falcon_conn
-        today_iso = datetime.now(IST).date().isoformat()
-        with falcon_conn() as con:
-            rows = con.execute("""
-                SELECT job_name, status FROM falcon_signal_runs
-                WHERE date(started_at) = ?
-                ORDER BY started_at DESC
-            """, (today_iso,)).fetchall()
-        # Need at least one success row for each of the 3 V7 steps today.
-        required = {"daily_data_refresh", "daily_features", "daily_signals"}
-        succeeded_today: set[str] = set()
-        for r in rows:
-            job, status = r[0], r[1]
-            if status == "success" and job in required:
-                succeeded_today.add(job)
-        return required.issubset(succeeded_today)
+        from falcon.jobs._pipeline import _signals_fresh_for_now
+        return _signals_fresh_for_now()
     except Exception as e:
-        log.warning("v7_succeeded_today: falcon_signal_runs unreadable (%s) — assume fail", e)
-        return False     # fail-open to triggering a retry; safer than skipping
+        log.warning("v7_succeeded_today: freshness check failed (%s) — fail-open", e)
+        return False     # fail-open → retry triggered; safer than skipping
 
 
 def _schedule_daily_pipeline():
@@ -361,9 +356,11 @@ async def lifespan(app: FastAPI):
         log.exception("Pre-market deployer failed to start: %s", e)
 
     # Sprint 5c-1: Zerodha auto-auth scheduler (Layer 1 = Playwright bot).
-    # Wakes at 06:30/07:30/08:30/09:00 IST weekdays, runs a Playwright login,
-    # writes the token to kanida_quant.db.kite_tokens. On 4th-attempt failure,
-    # fires Web Push (Layer 2) to admin with a magic-link CTA.
+    # Wakes every 30 min from 06:30 to 16:30 IST weekdays (21 cycles, 2026-05-27
+    # expansion). Each cycle runs a Playwright login if either (a) no success
+    # logged today or (b) the stored token fails a live Kite profile() check.
+    # On scheduled failure at/after 09:00 IST, fires Web Push (Layer 2) to
+    # admin with a magic-link CTA. notify_auth_needed dedupes per-day.
     try:
         from services.auth_scheduler import start as _start_auth_scheduler, status as _auth_sched_status
         if _start_auth_scheduler():

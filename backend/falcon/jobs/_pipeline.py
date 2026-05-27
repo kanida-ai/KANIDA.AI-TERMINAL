@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from ..db import falcon_conn
 
@@ -40,22 +40,86 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 _v7_pipeline_lock = threading.Lock()
 
+# 16:05 IST is the canonical "today's bars are final, EOD pipeline window opens"
+# moment. Before this on a weekday we have NO expectation of today's signals
+# existing — so freshness checks short-circuit to "fresh enough". After this
+# on a weekday, MAX(signal_date) MUST equal today.
+EOD_WINDOW_HOUR   = 16
+EOD_WINDOW_MINUTE = 5
 
+
+def expected_signal_date_iso(now_ist: Optional[datetime] = None) -> Optional[str]:
+    """The signal_date that SHOULD exist in falcon_signals_live for the current
+    IST window, or None if no expectation has been triggered yet.
+
+    Rules:
+      - Weekend → None (market closed, no expectation)
+      - Weekday before 16:05 IST → None (today's bars not final yet; the
+        latest signal_date will legitimately still be the previous trading day)
+      - Weekday on/after 16:05 IST → today's ISO date
+
+    NSE holidays are not modelled here. On a holiday this still returns today,
+    so freshness checks fail until tomorrow's EOD window opens (when the
+    previous-trading-day date satisfies the check). The retry loop's 19:00 IST
+    cutoff caps wasted retries to ~10 × 15 min, all short-circuiting at
+    daily_data_refresh (no new bars to fetch). Acceptable.
+    """
+    n = now_ist or datetime.now(IST)
+    if n.weekday() >= 5:
+        return None
+    if (n.hour, n.minute) < (EOD_WINDOW_HOUR, EOD_WINDOW_MINUTE):
+        return None
+    return n.date().isoformat()
+
+
+def _latest_emitted_signal_date_iso() -> Optional[str]:
+    """MAX(signal_date) from falcon_signals_live, or None on empty/error.
+    Errors fail open (return None) → _signals_fresh_for_now() returns False
+    → kick-off fires. Safer than masking real staleness."""
+    try:
+        with falcon_conn() as con:
+            row = con.execute(
+                "SELECT MAX(signal_date) FROM falcon_signals_live"
+            ).fetchone()
+        return row[0] if row and row[0] else None
+    except Exception as e:
+        log.warning("_latest_emitted_signal_date_iso: query failed (%s) — fail-open", e)
+        return None
+
+
+def _signals_fresh_for_now() -> bool:
+    """Replaces _today_signals_completed_ist (renamed 2026-05-27 fix).
+
+    OLD gate (broken): 'did a daily_signals job that STARTED today succeed?'
+      Bug: a manual or boot-catchup run firing BEFORE 16:05 IST emits
+      yesterday's signal_date (market still open, today's bars not final),
+      writes started_at=today, falsely marks the day "complete" — blocking
+      the legitimate 16:05 IST EOD cron from ever firing. Real impact on
+      2026-05-27: stale 2026-05-26 picks frozen on /power/today all day
+      because a 13:46 IST manual run set the "completed" flag.
+
+    NEW gate: 'is the EMITTED signal_date as fresh as it should be?'
+      Source of truth: falcon_signals_live.MAX(signal_date) vs the date
+      expected for the current IST window. Independent of WHEN runs fired,
+      WHAT their started_at was, or whether the legacy pipeline status dict
+      thinks today is done. Catches stale-success silently.
+    """
+    expected = expected_signal_date_iso()
+    if expected is None:
+        # Weekend or pre-16:05 weekday — no expectation. Treat as fresh so
+        # callers short-circuit. Re-evaluates when the next EOD window opens.
+        return True
+    latest = _latest_emitted_signal_date_iso()
+    return bool(latest) and latest >= expected
+
+
+# Backwards-compat alias — test_known_failures.py imports this name to assert
+# it's callable (regression guard for the 2026-05-13 boot-catchup contract).
+# The semantically-meaningful callers (kick_off_v7_pipeline_if_stale) use the
+# new function directly.
 def _today_signals_completed_ist() -> bool:
-    """True if today's IST daily_signals job has a 'success' audit row.
-    Uses date(started_at) match — assumes started_at is stored as ISO string
-    that lex-compares correctly (which falcon_signal_runs does)."""
-    today_ist = datetime.now(IST).date().isoformat()
-    with falcon_conn() as con:
-        row = con.execute(
-            """SELECT 1 FROM falcon_signal_runs
-                WHERE job_name = 'daily_signals'
-                  AND status   = 'success'
-                  AND date(started_at) = ?
-                LIMIT 1""",
-            (today_ist,)
-        ).fetchone()
-    return row is not None
+    """Deprecated alias for _signals_fresh_for_now(). Kept callable for tests."""
+    return _signals_fresh_for_now()
 
 
 def is_pipeline_running() -> bool:
@@ -64,9 +128,8 @@ def is_pipeline_running() -> bool:
 
 
 def kick_off_v7_pipeline_if_stale(reason: str = "manual") -> dict:
-    """Non-blocking. If today's daily_signals hasn't succeeded AND no other
-    pipeline run is in flight, spawn a daemon thread that runs the 3-step
-    V7 pipeline. Returns dict describing the decision.
+    """Non-blocking. If today's signals aren't fresh AND no other pipeline run
+    is in flight, spawn a daemon thread that runs the 3-step V7 pipeline.
 
     Args:
       reason — short string for the audit log (e.g. 'token_refresh', '16:05_cron')
@@ -74,8 +137,8 @@ def kick_off_v7_pipeline_if_stale(reason: str = "manual") -> dict:
     Returns:
       {kicked_off: bool, reason_skipped: str | None}
     """
-    if _today_signals_completed_ist():
-        return {"kicked_off": False, "reason_skipped": "ALREADY_COMPLETED_TODAY"}
+    if _signals_fresh_for_now():
+        return {"kicked_off": False, "reason_skipped": "ALREADY_FRESH"}
     if not _v7_pipeline_lock.acquire(blocking=False):
         return {"kicked_off": False, "reason_skipped": "ALREADY_RUNNING"}
 

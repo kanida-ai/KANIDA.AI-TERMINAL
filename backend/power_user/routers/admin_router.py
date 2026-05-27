@@ -445,15 +445,19 @@ def jobs_scheduled(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # Zerodha auto-auth (Layer 1 — Playwright bot at 06:30 / 07:30 / 08:30 / 09:00 IST)
+    # Zerodha auto-auth (Layer 1 — Playwright bot, every 30 min 06:30–16:30 IST)
     try:
         from power_user.services.auth_status import get_status
         from power_user.config import POWER_DB_PATH
         st = get_status(POWER_DB_PATH)
         jobs.append({
             "name":        "Zerodha auto-auth",
-            "cadence":     "06:30 / 07:30 / 08:30 / 09:00 IST",
-            "description": "Playwright bot refreshes the Kite access token before market open. Layer-2 push fallback if all 4 attempts fail.",
+            "cadence":     "every 30 min · 06:30–16:30 IST",
+            "description": ("Playwright bot refreshes the Kite access token. "
+                            "Each cycle skips cheaply if today's token is logged AND "
+                            "passes a live Kite profile() check — so mid-day "
+                            "invalidations recover within 30 min. Push fallback if "
+                            "a scheduled cycle at/after 09:00 IST fails."),
             "status":      "token_valid" if st.get("token_valid") else "token_invalid",
             "next_run":    st.get("next_scheduled_at"),
             "last_run":    (st.get("last_auto_attempt") or {}).get("attempt_at"),
