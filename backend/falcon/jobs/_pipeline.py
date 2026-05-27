@@ -165,6 +165,36 @@ def _run_v7_pipeline_holding_lock(reason: str) -> None:
         except Exception as e:
             log.exception("V7 pipeline: top10_audit CRASHED (NON-fatal, chain continues): %s", e)
 
+        # 2026-05-27: step 5 — Co-Trader portfolio EOD update. Previously this
+        # ran ONLY inside _run_pipeline_sync (legacy chain) which aborted on
+        # any bad-token preflight. Result: Co-Trading tab data stayed frozen
+        # at the last legacy-success date — May 18 — even though V7 kept
+        # writing fresh signals. Moving it into the V7 chain means it runs on:
+        #   - 16:05 IST scheduled cron
+        #   - admin "Run pipeline now" manual trigger
+        #   - boot catch-up via kick_off_v7_pipeline_if_stale
+        # Same isolation rule as audit step: NON-fatal failures here do not
+        # block the V7 chain's success.
+        try:
+            from power_user.services import portfolio_engine
+            from power_user.config import POWER_DB_PATH as _PDB
+            import sqlite3 as _sq3
+            today_iso = datetime.now(IST).date().isoformat()
+            _pcon = _sq3.connect(_PDB, timeout=60.0)
+            _pcon.row_factory = _sq3.Row
+            try:
+                t0 = datetime.now(IST)
+                psum = portfolio_engine.run_eod_for_date(_pcon, today_iso)
+                dt = (datetime.now(IST) - t0).total_seconds()
+                ok = sum(1 for r in psum.get("portfolios", []) if "error" not in r)
+                tot = len(psum.get("portfolios", []))
+                log.info("V7 pipeline: portfolio_engine EOD OK in %.1fs (%d/%d portfolios for %s)",
+                          dt, ok, tot, today_iso)
+            finally:
+                _pcon.close()
+        except Exception as e:
+            log.exception("V7 pipeline: portfolio_engine EOD CRASHED (NON-fatal, chain continues): %s", e)
+
         log.info("V7 pipeline COMPLETE (reason=%s)", reason)
     finally:
         _v7_pipeline_lock.release()
