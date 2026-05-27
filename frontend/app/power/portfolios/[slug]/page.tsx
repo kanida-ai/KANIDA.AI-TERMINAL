@@ -23,6 +23,7 @@ import {
   type PortfolioTrade,
 } from '@/lib/power-api'
 import { PortfolioDashboardClient } from './DashboardClient'
+import { requireSession } from '@/lib/power-auth'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -31,6 +32,10 @@ type Props = { params: Promise<{ slug: string }> }
 
 
 export default async function PortfolioDashboard({ params }: Props) {
+  // 2026-05-27: Co-Trading is auth-gated. Same requireSession() call as the
+  // listing page (/power/portfolios) — unauthed users get redirected to login
+  // before any deep-link to a portfolio resolves.
+  await requireSession()
   const { slug } = await params
 
   let summary:     PortfolioSummary       | null = null

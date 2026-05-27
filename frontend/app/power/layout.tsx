@@ -59,6 +59,14 @@ function TopBar({ signedIn, email, displayName, pictureUrl, isAdmin }: {
               <Link href="/power/today" className="text-neutral-300 hover:text-neutral-100 hidden md:block">
                 Today
               </Link>
+              {/* 2026-05-27: Co-Trading is now an auth-gated dashboard tab.
+                  Homepage CTA "KANIDA.AI Co-Trading" still links to /power/portfolios
+                  but requireSession() inside that page redirects unauthed users
+                  to /power/login → after login they land on /power/today and see
+                  this tab waiting for them. */}
+              <Link href="/power/portfolios" className="text-neutral-300 hover:text-neutral-100 hidden md:block">
+                Co-Trading
+              </Link>
               <Link href="/power/live" className="text-neutral-300 hover:text-neutral-100 hidden md:block">
                 Live
               </Link>

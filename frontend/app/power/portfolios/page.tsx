@@ -1,19 +1,31 @@
 /**
  * /power/portfolios — Co-Trader listing (Sprint 5d).
  *
- * Public, no sign-in required. 5 cards, each showing the live cumulative
- * return + a sparkline of the equity curve. Server-rendered (no client JS
- * other than Link). Sparkline data is fetched per-portfolio in parallel.
+ * 2026-05-27: NOW AUTH-GATED. Previously public; the operator spec moved
+ * Co-Trading inside the invite-only Power User surface. Unauthed visitors
+ * who click "KANIDA.AI Co-Trading" on the homepage now bounce to /power/login
+ * (via requireSession), enter their invite code, and land on /power/today —
+ * with the new "Co-Trading" tab in the top nav waiting for them.
+ *
+ * 5 cards, each showing the live cumulative return + a sparkline of the
+ * equity curve. Server-rendered (no client JS other than Link). Sparkline
+ * data is fetched per-portfolio in parallel.
  */
 import Link from 'next/link'
 import { PowerAPI, type PortfolioSummary, type PortfolioEquityPoint } from '@/lib/power-api'
 import { PortfolioCard } from '@/components/power/PortfolioCard'
+import { requireSession } from '@/lib/power-auth'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 
 export default async function PortfoliosPage() {
+  // Auth gate. Unauthed → redirect to /power/login. JWT-invalid → /power/login?expired=1.
+  // Backend down → throws BackendUnavailableError (page error boundary handles it
+  // — session cookie stays intact so the user isn't mass-logged-out on a hiccup).
+  await requireSession()
+
   let portfolios: PortfolioSummary[] = []
   let fetchError: string | null = null
 
