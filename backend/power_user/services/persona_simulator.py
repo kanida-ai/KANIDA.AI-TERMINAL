@@ -142,6 +142,23 @@ def _make_p2_intraday_filter(lookup: Dict[tuple, tuple]) -> Any:
 # Numbers in production refresh immediately on next API call.
 # ════════════════════════════════════════════════════════════════════════
 
+# 2026-05-27: Dynamic sim_end so every backend restart advances the backtest
+# horizon to "today" (IST). Previously sim_end was a hardcoded date that froze
+# behind real time — the Falcon Top 10 detail page showed 2026 YTD = +91.34%
+# (sim through May 19) while the listing card showed +100.5% (live data through
+# today via portfolio_engine.run_eod_for_date). Same engine, same data, two
+# different cutoff dates → user-visible mismatch.
+#
+# Now: at module import time, compute _SIM_END_TODAY = today's IST date. Daily
+# backend restart at 03:00 IST advances this to the new day. The persona cache
+# (24h TTL) naturally rebuilds with the new horizon during the restart-window
+# warm-up. Both the simulator's yearly aggregate and the live portfolio data
+# now end on the same date.
+#
+# Personas with intraday filter (patient-trader) keep their data-availability-
+# bounded sim_end since intraday data may lag (re-evaluated below).
+_SIM_END_TODAY = datetime.now(IST).date().isoformat()
+
 PERSONA_CONFIGS: Dict[str, Dict[str, Any]] = {
 
     "daily-trader": {
@@ -291,7 +308,11 @@ PERSONA_CONFIGS: Dict[str, Dict[str, Any]] = {
         "tagline":       "Engine's 10 highest-quality daily picks. Full ₹5L deployed, 7-day hold.",
         "risk_tier":     "MEDIUM",
         "sim_start":     "2021-01-01",
-        "sim_end":       "2026-05-19",
+        # 2026-05-27: dynamic — advances daily via the 03:00 IST backend restart.
+        # Persona cache (24h TTL) rebuilds during the warm-up window after each
+        # restart, so the simulator's 2026 yearly aggregate now ends on the
+        # same date as the live portfolio_engine output → both views agree.
+        "sim_end":       _SIM_END_TODAY,
         "yearly_reset":  True,
         "cash_per_year": 5_00_000.0,
         "run_cfg": PersonaRunConfig(
