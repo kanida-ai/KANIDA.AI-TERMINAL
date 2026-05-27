@@ -20,6 +20,7 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { logout } from '@/lib/power-auth-client'
+import { FULL_MODE_KEY, FULL_MODE_EVENT } from './FalconNavLinks'
 
 type Props = {
   email:        string
@@ -77,10 +78,11 @@ export function UserMenu({ email, displayName, pictureUrl, isAdmin }: Props) {
             <MenuLink href="/power/live"   onClose={close}>Live decisions</MenuLink>
             <MenuLink href="/power"        onClose={close}>Replays</MenuLink>
             {isAdmin && <MenuLink href="/power/admin" onClose={close}>Admin</MenuLink>}
+            {isAdmin && <FullModeToggleItem />}
             <button
               type="button"
               onClick={() => { close(); logout() }}
-              className="block w-full text-left px-3 py-2 text-red-300 hover:bg-neutral-800"
+              className="block w-full text-left px-3 py-2 text-red-300 hover:bg-neutral-800 border-t border-neutral-800 mt-1"
             >
               Sign out
             </button>
@@ -104,5 +106,55 @@ function MenuLink({ href, onClose, children }: {
     >
       {children}
     </Link>
+  )
+}
+
+/**
+ * FullModeToggleItem — admin-only menu item that flips localStorage
+ * 'kanida.fullMode' and broadcasts a custom event so FalconNavLinks
+ * (rendered in the top nav) re-reads its state without a page reload.
+ *
+ * Intentionally does NOT close the dropdown on click — admin can see the
+ * ON/OFF state flip in place and the nav above the menu update live.
+ */
+function FullModeToggleItem() {
+  const [enabled, setEnabled] = useState(false)
+
+  useEffect(() => {
+    try {
+      setEnabled(window.localStorage.getItem(FULL_MODE_KEY) === '1')
+    } catch {
+      // localStorage blocked (private mode / CSP) — stay disabled.
+    }
+  }, [])
+
+  const flip = () => {
+    const next = !enabled
+    setEnabled(next)
+    try {
+      if (next) window.localStorage.setItem(FULL_MODE_KEY, '1')
+      else      window.localStorage.removeItem(FULL_MODE_KEY)
+      window.dispatchEvent(new Event(FULL_MODE_EVENT))
+    } catch {
+      // localStorage write failed — revert UI state so it stays honest.
+      setEnabled(!next)
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={flip}
+      className="w-full text-left px-3 py-2 text-neutral-300 hover:bg-neutral-800 flex items-center justify-between"
+      aria-pressed={enabled}
+    >
+      <span>Full Kanida.AI mode</span>
+      <span className={`text-[11px] font-mono px-1.5 py-0.5 rounded
+                        ${enabled
+                          ? 'text-amber-200 bg-amber-500/15 border border-amber-500/40'
+                          : 'text-neutral-500 bg-neutral-800 border border-neutral-700'}`}>
+        {enabled ? 'ON' : 'OFF'}
+      </span>
+    </button>
   )
 }
