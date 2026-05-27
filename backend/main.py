@@ -124,45 +124,17 @@ def _run_pipeline_sync():
         except Exception as e:
             log.exception("EOD pre-market staging crashed (pipeline still SUCCESS): %s", e)
 
-        # Sprint 5d (Co-Trader Phase 1): run the 5 virtual portfolios for today.
-        # Reuses the same signal date the pipeline just populated, so the
-        # public dashboards are always one EOD-step behind the operator's
-        # /falcon/premarket workflow.
-        try:
-            from power_user.services import portfolio_engine
-            from power_user.config import POWER_DB_PATH as _PDB
-            _pcon = sqlite3.connect(_PDB, timeout=60.0)
-            _pcon.row_factory = sqlite3.Row
-            try:
-                today_iso = datetime.now(IST).date().isoformat()
-                psum = portfolio_engine.run_eod_for_date(_pcon, today_iso)
-                ok = sum(1 for r in psum["portfolios"] if "error" not in r)
-                log.info("Co-Trader EOD: %d/%d portfolios ok for %s",
-                          ok, len(psum["portfolios"]), today_iso)
-            finally:
-                _pcon.close()
-        except Exception as e:
-            log.exception("Co-Trader EOD crashed (pipeline still SUCCESS): %s", e)
-
-        # Falcon V7 daily pipeline (THE one /power/today reads). Previously
-        # had no daily scheduler of its own — only ran via boot catch-up or
-        # manual click. That's why the 2026-05-25 outage left Monday signals
-        # empty even after the token was fixed manually. Chaining it onto
-        # the daily scheduler means a single retry loop covers BOTH pipelines.
+        # 2026-05-27: REMOVED the Co-Trader EOD call that used to live here.
+        # Co-Trader is now Step 5 of the V7 pipeline (see falcon/jobs/_pipeline.py).
+        # Keeping it here as well meant two writers updating portfolio_positions
+        # in the same EOD window — idempotent today (INSERT OR IGNORE) but the
+        # exact kind of "legacy + new code mixed in the same path" the operator
+        # explicitly flagged for cleanup. V7's step 5 is the sole owner now.
         #
-        # kick_off_v7_pipeline_if_stale runs in a background thread and is
-        # safe to call when V7 already succeeded today (returns kicked_off=
-        # False with reason_skipped). Failures are NEVER propagated up —
-        # legacy pipeline's SUCCESS status stands regardless of V7 outcome.
-        try:
-            from falcon.jobs._pipeline import kick_off_v7_pipeline_if_stale
-            v7_decision = kick_off_v7_pipeline_if_stale(reason="daily_scheduler")
-            if v7_decision.get("kicked_off"):
-                log.info("V7 pipeline kicked off after legacy completion (background)")
-            else:
-                log.info("V7 pipeline skipped: %s", v7_decision.get("reason_skipped"))
-        except Exception as e:
-            log.exception("V7 kickoff failed (legacy still SUCCESS): %s", e)
+        # The success-path V7 kickoff below is ALSO removed (was redundant with
+        # the unconditional kickoff in `finally`). Single source of truth for V7
+        # invocation: the finally block. Same kick_off_v7_pipeline_if_stale call,
+        # but it now runs on EVERY pipeline iteration regardless of legacy outcome.
 
         _pipeline_status["last_result"] = "SUCCESS"
         log.info("Pipeline complete.")
