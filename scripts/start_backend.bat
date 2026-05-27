@@ -19,10 +19,24 @@ set "ANACONDA=C:\Users\SPS\anaconda3"
 set "UVICORN=%ANACONDA%\Scripts\uvicorn.exe"
 set "LOG_FILE=%PROJECT_DIR%\logs\backend.log"
 
-REM Activate the base anaconda environment so PATH includes Library\bin,
-REM mingw-w64\bin, etc. Required for Playwright's Node.js driver to launch
-REM Chromium correctly (the bundled .exe needs DLLs on this PATH).
-call "%ANACONDA%\Scripts\activate.bat" "%ANACONDA%"
+REM 2026-05-27: REMOVED the `call activate.bat` line that lived here.
+REM
+REM My 2026-05-24 commit message claimed conda activation was REQUIRED for
+REM Playwright. That was WRONG. Investigation today proved the opposite:
+REM conda activate prepends anaconda3\Library\mingw-w64\bin to PATH, which
+REM conflicts with Visual C++ runtime DLLs that Playwright's bundled
+REM chrome-headless-shell.exe loads. Result: Playwright fails with the
+REM misleading "Executable doesn't exist" error, even though the binary
+REM is right there on disk.
+REM
+REM A direct uvicorn invocation WITHOUT conda activate works perfectly
+REM (verified by spawning the same backend via raw `uvicorn main:app`
+REM from a non-conda bash shell). uvicorn.exe in anaconda3\Scripts is a
+REM self-contained shebang that doesn't need its env activated — it
+REM resolves its bundled Python automatically.
+REM
+REM Keeping the `set ANACONDA=...` and `%UVICORN%` references below as-is.
+REM Just removing the activate call.
 
 echo. >> "%LOG_FILE%"
 echo ============================================================ >> "%LOG_FILE%"

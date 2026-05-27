@@ -87,6 +87,12 @@ def _run_pipeline_sync():
         if not status.get("valid"):
             log.error("Pipeline aborted — Kite token invalid: %s", status.get("reason"))
             _pipeline_status["last_result"] = f"ABORTED: token invalid — {status.get('reason')}"
+            # 2026-05-27: legacy aborted, but V7 still gets a shot via the
+            # unconditional kickoff in `finally`. V7's own preflight inside
+            # daily_data_refresh will surface the same token issue if it's
+            # still bad — but if the admin manually refreshes the token
+            # between this call and the V7 retry 15 min later, today's
+            # signals will land.
             return
 
         for step in PIPELINE_STEPS:
@@ -164,6 +170,20 @@ def _run_pipeline_sync():
         _pipeline_status["last_result"] = f"ERROR: {e}"
         log.exception("Pipeline error")
     finally:
+        # 2026-05-27 (V7 decoupling): unconditionally call V7 from `finally` so
+        # legacy aborts (bad token, step crash) no longer block today's V7 run.
+        # `kick_off_v7_pipeline_if_stale` is idempotent — if V7 already ran
+        # earlier in this _run_pipeline_sync (success path line 159), it
+        # returns kicked_off=False here and does nothing. The retry loop in
+        # `_schedule_daily_pipeline` will retry every 15 min until 19:00 IST
+        # if V7 itself fails (e.g. token still bad on this attempt).
+        try:
+            from falcon.jobs._pipeline import kick_off_v7_pipeline_if_stale
+            v7d = kick_off_v7_pipeline_if_stale(reason="unconditional_post_legacy")
+            log.info("V7 unconditional kickoff: kicked_off=%s reason=%s",
+                      v7d.get("kicked_off"), v7d.get("reason_skipped") or v7d.get("reason_kicked"))
+        except Exception as ee:
+            log.exception("V7 unconditional kickoff crashed (non-fatal): %s", ee)
         _pipeline_status["running"] = False
         _pipeline_lock.release()
 
@@ -267,7 +287,29 @@ def _schedule_daily_pipeline():
                                 and prospective_retry.hour < _PIPELINE_RETRY_CUTOFF_HOUR
                                 and prospective_retry.date() == now.date())
 
-            if today_failed_recently and in_retry_window:
+            # 2026-05-27 boot catch-up: if backend booted AFTER 16:05 IST on a
+            # weekday with no prior pipeline attempt today AND V7 didn't
+            # succeed today either, fire NOW instead of sleeping until tomorrow.
+            # This is the bug that left Tuesday 2026-05-26 with zero signals:
+            # the previous backend died sometime between Mon 17:27 PDT and
+            # Tue 03:35 PDT (16:05 IST Tue). When a fresh process eventually
+            # came up, `_pipeline_status` was empty (in-memory state lost),
+            # `last_run_iso` didn't start with today, today_failed_recently
+            # was False, and the default branch scheduled tomorrow's 16:05 IST
+            # — skipping today entirely.
+            today_attempted_legacy = last_run_iso.startswith(today_iso)
+            boot_catchup_needed = (
+                is_weekday
+                and past_1605
+                and not today_attempted_legacy
+                and not v7_done_today
+            )
+
+            if boot_catchup_needed:
+                # Fire in 10 seconds so the rest of `_run` finishes setting up
+                target = now + timedelta(seconds=10)
+                reason = "boot-catchup-missed-1605"
+            elif today_failed_recently and in_retry_window:
                 # Retry slot — schedule another attempt 15 min from now.
                 target = prospective_retry
                 if not v7_done_today and legacy_succeeded_today:
