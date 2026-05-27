@@ -9,6 +9,7 @@ import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
 import { getCurrentUser } from '@/lib/power-auth'
 import { UserMenu } from '@/components/power/UserMenu'
+import { FalconNavLinks } from '@/components/power/FalconNavLinks'
 import { CompassLogo } from '@/components/power/CompassLogo'
 
 export const metadata: Metadata = {
@@ -70,6 +71,12 @@ function TopBar({ signedIn, email, displayName, pictureUrl, isAdmin }: {
               <Link href="/power/live" className="text-neutral-300 hover:text-neutral-100 hidden md:block">
                 Live
               </Link>
+              {/* 2026-05-27: "Full Kanida.AI mode" — admin-only operator nav
+                  links, hidden by default. Toggle lives in UserMenu dropdown
+                  and flips localStorage. middleware.ts Basic Auth still gates
+                  /falcon/* + /analysis access independently — this only
+                  controls link VISIBILITY in the nav. */}
+              <FalconNavLinks isAdmin={!!isAdmin} />
               <UserMenu
                 email={email ?? ''}
                 displayName={displayName}
