@@ -230,6 +230,74 @@ def _send_one(subscription: Dict[str, Any], payload: Dict[str, Any]) -> tuple[bo
 # Entry points used by the auth scheduler
 # ──────────────────────────────────────────────────────────────────────────
 
+def notify_playwright_broken(*, failure_class: str = "UNKNOWN",
+                              hint: str = "") -> Dict[str, Any]:
+    """Fire IMMEDIATELY when playwright_preflight detects a broken browser
+    (2026-05-29 fix). Previously the only Layer-2 trigger was 'all morning
+    attempts failed', which on 5/29 meant 21 cycles × 30 sec = 10 min of
+    quiet failures before the operator got any signal.
+
+    This variant fires on the boot preflight OR on the first scheduled
+    cycle that hits BROWSER_LAUNCH_FAILED — within seconds of breakage.
+
+    Idempotency: relies on the magic_link table — only ONE active 15-min
+    token per (kind, day) effectively. Tap-spamming the notification still
+    funnels to the same auth-refresh page.
+    """
+    if not is_configured():
+        log.warning("web_push: VAPID not configured — Playwright-broken Layer 2 disabled")
+        return {"sent": 0, "failed": 0, "skipped": True,
+                "reason": "VAPID_NOT_CONFIGURED"}
+    from ..config import POWER_DB_PATH
+    con = sqlite3.connect(POWER_DB_PATH, timeout=10.0, check_same_thread=False)
+    try:
+        subs = list_active_subscriptions(con)
+        if not subs:
+            log.warning("web_push: no active subscriptions — "
+                          "Playwright-broken push dropped")
+            return {"sent": 0, "failed": 0, "skipped": True,
+                    "reason": "NO_SUBSCRIPTIONS"}
+        token = mint_magic_link(con, kind="admin_auth_refresh", issued_for="admin")
+        magic_url = f"/power/admin/refresh-token?t={token}"
+        # Different copy from the normal auth_needed push — operator needs to
+        # see this is a DIFFERENT failure mode (browser, not Zerodha).
+        payload = {
+            "title": "Kanida.AI — browser broken, manual refresh needed",
+            "body":  (f"Playwright Chromium can't launch ({failure_class}). "
+                       f"Tap to refresh Kite token via your real browser. "
+                       f"{hint[:120] if hint else ''}").strip(),
+            "url":    magic_url,
+            "tag":    "kanida-auth",   # same tag → replaces any pending push
+        }
+        sent = 0
+        failed = 0
+        for sub in subs:
+            ok, err = _send_one(sub, payload)
+            if ok:
+                sent += 1
+                con.execute(
+                    "UPDATE power_user_push_subscriptions SET last_sent_at = ?, "
+                    "last_send_error = NULL WHERE endpoint = ?",
+                    (datetime.now(IST).isoformat(), sub["endpoint"]),
+                )
+            else:
+                failed += 1
+                if "404" in err or "410" in err:
+                    deactivate_subscription(con, sub["endpoint"], err)
+                else:
+                    con.execute(
+                        "UPDATE power_user_push_subscriptions SET last_send_error = ? "
+                        "WHERE endpoint = ?", (err[:200], sub["endpoint"]),
+                    )
+        con.commit()
+        log.info("web_push: notify_playwright_broken sent=%d failed=%d class=%s",
+                  sent, failed, failure_class)
+        return {"sent": sent, "failed": failed, "magic_link": magic_url,
+                "failure_class": failure_class}
+    finally:
+        con.close()
+
+
 def notify_auth_needed() -> Dict[str, Any]:
     """All 4 morning attempts failed → notify every active admin subscription
     with a magic link. Run from auth_scheduler after Layer 1 exhausts.

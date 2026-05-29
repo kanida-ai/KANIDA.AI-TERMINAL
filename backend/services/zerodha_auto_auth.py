@@ -344,6 +344,38 @@ async def run_auth_attempt(
             elapsed_ms=int((time.time() - t0) * 1000),
         )
     except Exception as e:
+        # 2026-05-29 fix: classify the "Playwright can't launch browser"
+        # pattern as BROWSER_LAUNCH_FAILED instead of the catch-all UNEXPECTED.
+        # The auth_scheduler keys off this code to skip future cycles and
+        # trigger an immediate Web Push (instead of running 21 doomed cycles
+        # and pushing only after the last one). Pattern matches both the
+        # genuinely-missing-binary case AND the misleading "doesn't exist"
+        # error that Playwright shows on DLL-load failures.
+        err_str = str(e)
+        is_browser_launch_failure = (
+            "BrowserType.launch" in err_str and "doesn't exist" in err_str
+        ) or "Looks like Playwright was just installed" in err_str
+        if is_browser_launch_failure:
+            log.warning(
+                "zerodha_auto_auth: BROWSER_LAUNCH_FAILED at stage=%s — "
+                "Playwright can't start Chromium. Diagnostics in playwright_"
+                "preflight.get_health(). Skipping further auto-cycles until "
+                "preflight self-heals or operator runs scripts\\repair_"
+                "playwright.bat.", stage,
+            )
+            # Trigger an immediate preflight + push (best-effort, non-fatal).
+            try:
+                from services.playwright_preflight import check_now    # noqa: WPS433
+                await asyncio.to_thread(check_now, fire_push_on_break=True)
+            except Exception as _e:
+                log.warning("zerodha_auto_auth: preflight refresh failed: %s", _e)
+            return AuthAttemptResult(
+                status="failed", stage=stage,
+                error_code="BROWSER_LAUNCH_FAILED",
+                error_detail=_redact_for_log(f"{type(e).__name__}: {err_str}"),
+                token_preview=None,
+                elapsed_ms=int((time.time() - t0) * 1000),
+            )
         log.exception("zerodha_auto_auth: unexpected failure at stage=%s", stage)
         return AuthAttemptResult(
             status="failed", stage=stage,

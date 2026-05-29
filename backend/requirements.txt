@@ -2,3 +2,11 @@ fastapi==0.115.6
 uvicorn==0.32.1
 pydantic==2.10.3
 psycopg2-binary==2.9.10
+
+# Auth bot drives Zerodha OAuth via headless Chromium. The Chromium
+# revision is bound to the playwright python package version — bumping
+# this line WITHOUT also running `scripts\repair_playwright.bat` will
+# silently break the auth bot at the next backend restart (we've hit this
+# 8+ times — see playwright_preflight.py docstring for the 2026-05-29
+# postmortem). Treat this pin as load-bearing.
+playwright==1.59.0

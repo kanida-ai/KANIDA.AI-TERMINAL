@@ -194,6 +194,41 @@ async def _run_attempt_async(cycle_name: str, trigger_kind: str = "scheduled") -
 
     attempt_n = _attempt_number(cycle_name) if trigger_kind == "scheduled" else 0
 
+    # ── PRE-FLIGHT GATE (2026-05-29 fix) ─────────────────────────────────
+    # If Playwright is known-broken, REFUSE to run a doomed cycle. The
+    # 2026-05-29 incident burned 21 consecutive 30-sec failures because
+    # each cycle blindly tried Playwright. With preflight, the first failure
+    # transitions us to BROKEN state and fires immediate Web Push; further
+    # cycles skip until preflight self-heals or the operator runs
+    # scripts\repair_playwright.bat. We still re-check preflight hourly
+    # in case the env recovers on its own.
+    if trigger_kind == "scheduled":
+        try:
+            from .playwright_preflight import is_broken, check_now, get_health
+            health = get_health()
+            recheck_due = (not health.checked_at) or (
+                health.next_recheck_at and _now_ist().isoformat() >= health.next_recheck_at
+            )
+            if recheck_due:
+                # Run check inline (subprocess capped at 20s)
+                health = await asyncio.to_thread(check_now, fire_push_on_break=True)
+            if not health.is_healthy:
+                log.warning("auth_scheduler[%s]: SKIPPING — Playwright broken "
+                              "(class=%s, next recheck %s)",
+                              cycle_name, health.failure_class, health.next_recheck_at)
+                from .zerodha_auto_auth import AuthAttemptResult
+                skip = AuthAttemptResult(
+                    status="skipped", stage=None,
+                    error_code=f"PLAYWRIGHT_{health.failure_class}",
+                    error_detail=(health.error_summary or "")[:300],
+                    token_preview=None, elapsed_ms=0,
+                )
+                log_attempt(POWER_DB_PATH, attempt_n, trigger_kind, skip)
+                return
+        except Exception as e:
+            log.warning("auth_scheduler[%s]: preflight check itself failed "
+                          "(%s) — proceeding optimistically", cycle_name, e)
+
     # Skip gate — must satisfy BOTH:
     #   (1) audit log says today already succeeded, AND
     #   (2) the stored token actually works against Kite RIGHT NOW.

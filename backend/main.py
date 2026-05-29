@@ -355,12 +355,35 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.exception("Pre-market deployer failed to start: %s", e)
 
+    # 2026-05-29: Playwright preflight at boot. Detects browser-unlaunchable
+    # state ON STARTUP (before any cycle runs and wastes 30 sec/attempt). If
+    # broken at boot, fires Web Push to admin immediately so they can use the
+    # manual Zerodha OAuth path. Subprocess-isolated, ≤20 sec wall time. Never
+    # blocks boot — wrapped in try/except, runs in a daemon thread so even a
+    # hung Playwright doesn't delay the rest of startup.
+    def _boot_preflight():
+        try:
+            from services.playwright_preflight import check_now
+            h = check_now(fire_push_on_break=True)
+            if h.is_healthy:
+                log.info("Playwright preflight: HEALTHY (elapsed=%dms)", h.elapsed_ms)
+            else:
+                log.warning("Playwright preflight: BROKEN class=%s — pushed "
+                              "notification to admin; auth cycles will SKIP "
+                              "until recovery", h.failure_class)
+        except Exception as e:
+            log.exception("Playwright boot preflight crashed (non-fatal): %s", e)
+    threading.Thread(target=_boot_preflight, daemon=True,
+                     name="playwright-boot-preflight").start()
+
     # Sprint 5c-1: Zerodha auto-auth scheduler (Layer 1 = Playwright bot).
     # Wakes every 30 min from 06:30 to 16:30 IST weekdays (21 cycles, 2026-05-27
     # expansion). Each cycle runs a Playwright login if either (a) no success
     # logged today or (b) the stored token fails a live Kite profile() check.
     # On scheduled failure at/after 09:00 IST, fires Web Push (Layer 2) to
     # admin with a magic-link CTA. notify_auth_needed dedupes per-day.
+    # 2026-05-29 addition: scheduler also reads playwright_preflight.is_broken()
+    # and SKIPS doomed cycles — no more 21× wasted 30-sec failures.
     try:
         from services.auth_scheduler import start as _start_auth_scheduler, status as _auth_sched_status
         if _start_auth_scheduler():

@@ -99,18 +99,60 @@ def get_status(db_path: str) -> Dict[str, Any]:
     is_weekday  = now.weekday() < 5
     degraded    = (not valid) and is_weekday and now >= nine_thirty
 
+    # 2026-05-29: surface Playwright preflight health so the operator can
+    # see at a glance whether the bot can even start a browser. Without
+    # this the admin panel only shows "INVALID" + an opaque "UNEXPECTED"
+    # error — last incident took 30 min of forensics. Now it's one field.
+    browser_health: Dict[str, Any] = {
+        "available":          None,
+        "failure_class":      "UNCHECKED",
+        "error_summary":      "",
+        "checked_at":         "",
+        "next_recheck_at":    "",
+        "remediation_hint":   "",
+        "expected_binary":    "",
+        "binary_exists":      None,
+    }
+    try:
+        from services.playwright_preflight import get_health, remediation_hint   # noqa: WPS433
+        h = get_health()
+        browser_health = {
+            "available":         bool(h.is_healthy),
+            "failure_class":     h.failure_class,
+            "error_summary":     (h.error_summary or "")[:300],
+            "checked_at":        h.checked_at,
+            "next_recheck_at":   h.next_recheck_at,
+            "remediation_hint":  remediation_hint(h.failure_class),
+            "expected_binary":   h.expected_binary,
+            "binary_exists":     h.binary_exists,
+            # env intentionally NOT exposed (would leak USERPROFILE etc).
+            # Full env diagnostic lives in backend logs for forensics.
+        }
+    except Exception:
+        # preflight module may not be importable during early boot —
+        # keep the default UNCHECKED state. Non-fatal.
+        pass
+
+    # manual_refresh_required: collapse the multi-axis status into a single
+    # boolean the frontend keys off to show a prominent "Refresh manually"
+    # CTA. Either auth is dead OR the browser can't even launch → operator
+    # has to do it themselves via the Zerodha OAuth path.
+    manual_refresh_required = (not valid) and (browser_health.get("available") is False)
+
     return {
-        "computed_at":         now.isoformat(),
-        "token_valid":         valid,
-        "token_user":          token.get("user"),
-        "token_set_by":        token.get("set_by"),
-        "token_date":          token.get("token_date"),
-        "active_until":        _next_expiry_iso() if valid else None,
-        "last_auto_attempt":   last_attempt,
-        "next_scheduled_at":   next_at,
-        "today_attempts":      today_count,
-        "degraded":            degraded,
-        "fallbacks_pending":   _has_pending_push_fallback(db_path) if not valid else False,
+        "computed_at":              now.isoformat(),
+        "token_valid":              valid,
+        "token_user":               token.get("user"),
+        "token_set_by":             token.get("set_by"),
+        "token_date":               token.get("token_date"),
+        "active_until":             _next_expiry_iso() if valid else None,
+        "last_auto_attempt":        last_attempt,
+        "next_scheduled_at":        next_at,
+        "today_attempts":           today_count,
+        "degraded":                 degraded,
+        "fallbacks_pending":        _has_pending_push_fallback(db_path) if not valid else False,
+        "browser_health":           browser_health,
+        "manual_refresh_required":  manual_refresh_required,
     }
 
 
