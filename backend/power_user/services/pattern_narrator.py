@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger("kanida.power_user.pattern_narrator")
@@ -81,6 +82,7 @@ def narrate_synthesis(
     stock_baseline_pct: Optional[float],
     n_patterns:         int,
     target:             Optional[str] = "hit_10pc_20d",
+    feat_vals:          Optional[Dict[str, float]] = None,
 ) -> str:
     """Produce ONE plain-English narrative across all firing patterns.
 
@@ -98,7 +100,7 @@ def narrate_synthesis(
     # rendering (FIX the "approaching X high / well off X high" bug — these
     # came from one pattern with "> -5" and another with "<= -15" on the
     # SAME column. Keep only the more-recent / tighter-band reading.)
-    observations = _conditions_to_observations(deduped_conditions)
+    observations = _conditions_to_observations(deduped_conditions, feat_vals=feat_vals)
     observations = _drop_contradictions(observations)
     if not observations:
         return _synthesis_fallback_plain(dominant_regime, n_patterns)
@@ -308,10 +310,21 @@ _THEME_COMPRESSION = "compression"
 _THEME_OTHER       = "other"
 
 
-def _conditions_to_observations(rules: List[List[Any]]) -> List[Dict[str, Any]]:
+def _conditions_to_observations(
+    rules: List[List[Any]],
+    feat_vals: Optional[Dict[str, float]] = None,
+) -> List[Dict[str, Any]]:
     # Fuse opposing conditions on the same column FIRST (e.g. 9 < range <= 14
     # becomes "trading in a moderate weekly range" — one clause, not two
     # contradictory ones). Then phrase the remaining individual conditions.
+    #
+    # feat_vals (2026-06-02): the STOCK'S ACTUAL feature values for this
+    # signal_date. When present, location/distance phrasings are grounded in
+    # the stock's real position rather than the pattern's THRESHOLD. The
+    # threshold is just the loosest bar the stock cleared and badly
+    # misrepresents reality for drawdown-bounce patterns — the JKCEMENT bug
+    # where a stock 31% below its 1-yr high was narrated as "approaching its
+    # one-year high" because a matched pattern's rule was `dist_high_252 > -35`.
     fused: List[Dict[str, Any]] = []
     individual: List[Tuple[str, str, float]] = []
 
@@ -340,7 +353,17 @@ def _conditions_to_observations(rules: List[List[Any]]) -> List[Dict[str, Any]]:
             individual.append((col, op, t))
 
     for col, op, t in individual:
-        obs = _phrase_for(col, op, t)
+        actual = None
+        if feat_vals is not None:
+            av = feat_vals.get(col)
+            if av is not None:
+                try:
+                    fav = float(av)
+                    if not math.isnan(fav):
+                        actual = fav
+                except (TypeError, ValueError):
+                    actual = None
+        obs = _phrase_for(col, op, t, actual=actual)
         if obs:
             fused.append(obs)
     return fused
@@ -368,12 +391,21 @@ def _phrase_for_between(col: str, lo: float, hi: float) -> Optional[Dict[str, An
     return None
 
 
-def _phrase_for(col: str, op: str, t: float) -> Optional[Dict[str, Any]]:
+def _phrase_for(col: str, op: str, t: float,
+                actual: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """One [col, op, threshold] → one observation dict or None.
 
     For 34 distinct columns. The thresholds are summarised into 2-3 magnitude
     bands (e.g. 'mildly elevated' / 'sharply elevated') so the narrative
     reads like analyst commentary, not a regression printout.
+
+    actual (2026-06-02): the stock's REAL value for this column on this date.
+    For location/distance features ('where price sits') we use `actual` rather
+    than the pattern threshold `t` to choose the wording — the threshold is
+    the loosest bar the stock cleared and can be wildly off (JKCEMENT bug: a
+    stock 31% below its 1-yr high described as "approaching its one-year high"
+    because a matched pattern's rule was `dist_high_252 > -35`). When `actual`
+    is None we fall back to the threshold (legacy behaviour).
     """
     is_gt = op in (">", ">=")
 
@@ -461,12 +493,13 @@ def _phrase_for(col: str, op: str, t: float) -> Optional[Dict[str, Any]]:
 
     if col in ("dist_sma_20", "dist_sma_50", "dist_sma_200"):
         n = col.split("_")[-1]
+        val = actual if actual is not None else t
         if is_gt:
-            tier = "extended above" if t >= 10 else "above"
+            tier = "extended above" if val >= 10 else "above"
             return _obs(_THEME_LOCATION,
                          f"sitting {tier} its {n}-day moving average", weight=3)
         else:
-            tier = "deeply below" if t <= -10 else "below"
+            tier = "deeply below" if val <= -10 else "below"
             return _obs(_THEME_LOCATION,
                          f"sitting {tier} its {n}-day moving average", weight=3)
 
@@ -478,16 +511,35 @@ def _phrase_for(col: str, op: str, t: float) -> Optional[Dict[str, Any]]:
             "60":  "quarter",   "120": "six-month",
             "252": "one-year",
         }.get(n, f"{n}-day")
+        # dist_high_X is the % distance from the window high; <= 0 in practice.
+        # Use the stock's ACTUAL distance when available (the threshold lies for
+        # drawdown-bounce patterns — JKCEMENT bug 2026-06-02). Floor the
+        # "approaching" language at -12%: beyond that the stock is genuinely in
+        # a pullback, NOT approaching its high, so describe it honestly (or drop
+        # it, never claim proximity it doesn't have).
+        val = actual if actual is not None else t
         if is_gt:
-            # dist_high_X is always <= 0 in practice (distance from a high)
-            # so "> -3" means within 3% of the high.
-            if t >= -2:    tier = "trading right at"
-            elif t >= -5:  tier = "trading near"
-            else:          tier = "approaching"
-            return _obs(_THEME_LOCATION,
-                         f"{tier} its {window} high", weight=1)
+            if val >= -2:
+                return _obs(_THEME_LOCATION, f"trading right at its {window} high", weight=1)
+            elif val >= -6:
+                return _obs(_THEME_LOCATION, f"trading near its {window} high", weight=1)
+            elif val >= -12:
+                return _obs(_THEME_LOCATION, f"approaching its {window} high", weight=1)
+            elif val >= -25:
+                # 12-25% below: a real pullback. State it honestly WITHOUT
+                # asserting a bounce ("recovering" would overclaim a reversal
+                # that may not exist). Keep the "(drawdown setup)" marker so
+                # _drop_contradictions still recognises it as a negative read.
+                return _obs(_THEME_LOCATION,
+                             f"trading below its {window} high (drawdown setup)",
+                             weight=1)
+            else:
+                # Deeper than 25% below: far from the high. Saying anything about
+                # the high here is misleading on a buy card — drop it entirely
+                # and let the momentum/compression signals carry the thesis.
+                return None
         else:
-            tier = "sitting deep below" if t <= -15 else "sitting well off"
+            tier = "sitting deep below" if val <= -15 else "sitting well off"
             return _obs(_THEME_LOCATION,
                          f"{tier} its {window} high (drawdown setup)", weight=1)
 

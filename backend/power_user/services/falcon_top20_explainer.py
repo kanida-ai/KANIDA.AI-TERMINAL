@@ -415,10 +415,16 @@ def _evaluate_all_patterns_for_stock(
     symbol: str,
     signal_date: str,
     taxonomy: Dict[int, Dict[str, Any]],
-) -> List[int]:
+) -> Tuple[List[int], Dict[str, float]]:
     """Evaluate all 865 patterns against this stock's feature row for
-    signal_date. Returns the full list of pattern IDs that fire (NOT
-    capped at 5 like falcon_signals_live.fired_pattern_ids).
+    signal_date. Returns (firing_pattern_ids, feat_vals).
+
+    firing_pattern_ids: full list of pattern IDs that fire (NOT capped at 5
+      like falcon_signals_live.fired_pattern_ids).
+    feat_vals: {col: value} the stock's ACTUAL feature values for signal_date
+      (NaN for nulls). 2026-06-02: surfaced so the narrator can describe the
+      stock's real position instead of a pattern's loose threshold (the
+      JKCEMENT "approaching its one-year high" bug).
     """
     # Pull this stock's single feature row for signal_date
     feat_cols = sorted(_FEATURE_COLS_NUMERIC)
@@ -429,7 +435,7 @@ def _evaluate_all_patterns_for_stock(
         (symbol, signal_date),
     ).fetchone()
     if not row:
-        return []
+        return [], {}
 
     # Convert to a dict {col: value} with NaN for None
     feat_vals: Dict[str, float] = {}
@@ -468,7 +474,7 @@ def _evaluate_all_patterns_for_stock(
                 ok = False; break
         if ok:
             firing.append(pid)
-    return firing
+    return firing, feat_vals
 
 
 def _load_taxonomy(
@@ -703,7 +709,7 @@ def _build_pick(
     # feature row for signal_date. The persisted fired_pattern_ids in
     # falcon_signals_live is capped at 5, so we can't trust it for the
     # regime breakdown / synthesis. Cost ~5-10ms per stock.
-    pid_list = _evaluate_all_patterns_for_stock(prod_con, sym, signal_date, taxonomy)
+    pid_list, feat_vals = _evaluate_all_patterns_for_stock(prod_con, sym, signal_date, taxonomy)
 
     # Sanity: if the re-evaluation comes back empty (e.g. missing features),
     # fall back to whatever IDs were persisted so the card still renders.
@@ -717,7 +723,8 @@ def _build_pick(
     # synthesised "X pp above lifetime" framing.
     bucket2 = _build_bucket2(prod_con, rnd_con, sym, pid_list, signal_date, taxonomy)
     bucket1 = _build_bucket1(pid_list, sample_rules, taxonomy, raw["n_fires"], raw["score"],
-                              stock_baseline_pct=bucket2.get("lifetime_baseline_pct"))
+                              stock_baseline_pct=bucket2.get("lifetime_baseline_pct"),
+                              feat_vals=feat_vals)
     bucket3 = _build_bucket3(prod_con, sym, sec, signal_date, sector_stats)
     # Bucket 1 v3 returns dominant_regime instead of a patterns array.
     signal_type = _derive_signal_type_from_regime(bucket1.get("dominant_regime"))
@@ -890,6 +897,7 @@ def _build_bucket1(
     n_fires_total: int,
     score_total: float,
     stock_baseline_pct: Optional[float] = None,
+    feat_vals: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """Bucket 1 v3 — ONE synthesised paragraph + regime breakdown.
 
@@ -967,6 +975,7 @@ def _build_bucket1(
         stock_baseline_pct=stock_baseline_pct,
         n_patterns=int(n_fires_total),
         target="hit_10pc_20d",
+        feat_vals=feat_vals,
     )
 
     # Bucket 1 payload — only fields the new UX renders. The per-regime
