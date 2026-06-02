@@ -376,23 +376,31 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=_boot_preflight, daemon=True,
                      name="playwright-boot-preflight").start()
 
-    # Sprint 5c-1: Zerodha auto-auth scheduler (Layer 1 = Playwright bot).
-    # Wakes every 30 min from 06:30 to 16:30 IST weekdays (21 cycles, 2026-05-27
-    # expansion). Each cycle runs a Playwright login if either (a) no success
-    # logged today or (b) the stored token fails a live Kite profile() check.
-    # On scheduled failure at/after 09:00 IST, fires Web Push (Layer 2) to
-    # admin with a magic-link CTA. notify_auth_needed dedupes per-day.
-    # 2026-05-29 addition: scheduler also reads playwright_preflight.is_broken()
-    # and SKIPS doomed cycles — no more 21× wasted 30-sec failures.
-    try:
-        from services.auth_scheduler import start as _start_auth_scheduler, status as _auth_sched_status
-        if _start_auth_scheduler():
-            nxt = _auth_sched_status().get("next_attempt_at")
-            log.info("Zerodha auto-auth scheduler started (next: %s IST).", nxt)
-        else:
-            log.info("Zerodha auto-auth scheduler already running.")
-    except Exception as e:
-        log.exception("Zerodha auto-auth scheduler failed to start (non-fatal): %s", e)
+    # Zerodha auto-auth — MOVED OUT of the backend (Fix 1, 2026-06-02).
+    #
+    # The auth bot used to run here, inside the long-lived backend process.
+    # That was the root cause of 9 "token failed / EOD didn't fire" incidents:
+    # a process that survives for days on a sleeping laptop loses the ability
+    # to spawn Playwright's Chromium subprocess (proven empirically — a fresh
+    # process on the same machine always works; the aged one fails with a
+    # phantom "Executable doesn't exist"). No in-process code change can fix a
+    # degraded process.
+    #
+    # Auth now runs as a STANDALONE Windows Scheduled Task ("KanidaZerodhaAuth")
+    # that invokes scripts/run_auth_worker.bat -> scripts/auth_worker.py every
+    # 30 min. Each invocation is a brand-new short-lived process that cannot
+    # age, writes the token to the DB, and exits. The backend just READS the
+    # token from the DB (services.kite_auth.get_token_status / get_kite_client).
+    #
+    # Register the task once with:  scripts/register_auth_task.ps1
+    #
+    # The in-backend services.auth_scheduler is intentionally NOT started here
+    # anymore. It remains importable (admin status reads, the manual
+    # /admin/auth/refresh-now path still works for on-demand refresh), but the
+    # recurring 30-min loop is owned by the Scheduled Task.
+    log.info("Zerodha auto-auth scheduler NOT started in-process — owned by "
+              "standalone Scheduled Task 'KanidaZerodhaAuth' (Fix 1, 2026-06-02). "
+              "Backend reads token from DB only.")
 
     # Sprint 5c-2: Featured replay pre-warmer. 6h daemon that keeps the 3
     # landing-page replay cache rows hot — kills the 2.26s cold-load that
