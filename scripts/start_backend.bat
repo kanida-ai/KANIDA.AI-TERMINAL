@@ -19,6 +19,14 @@ set "ANACONDA=C:\Users\SPS\anaconda3"
 set "UVICORN=%ANACONDA%\Scripts\uvicorn.exe"
 set "LOG_FILE=%PROJECT_DIR%\logs\backend.log"
 
+REM 2026-06-02: point Playwright at the machine-wide browser path so the
+REM backend's boot preflight (and any in-process Playwright use) resolves the
+REM Chromium binary regardless of how the backend was launched. The default
+REM %LOCALAPPDATA%\ms-playwright is invisible to non-interactive logon
+REM sessions (Task Scheduler auto-start) — the true root cause of the
+REM recurring BROWSER_LAUNCH_FAILED. C:\ProgramData is visible to all sessions.
+set "PLAYWRIGHT_BROWSERS_PATH=C:\ProgramData\ms-playwright"
+
 REM 2026-05-27: REMOVED the `call activate.bat` line that lived here.
 REM
 REM My 2026-05-24 commit message claimed conda activation was REQUIRED for

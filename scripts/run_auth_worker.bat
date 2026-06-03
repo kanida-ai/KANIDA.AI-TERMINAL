@@ -16,6 +16,16 @@ set "PYTHON=C:\Users\SPS\anaconda3\python.exe"
 set "WORKER=%PROJECT_DIR%\scripts\auth_worker.py"
 set "LOG_FILE=%PROJECT_DIR%\logs\auth_worker.log"
 
+REM CRITICAL (2026-06-02): Playwright browsers MUST live in a machine-wide
+REM path, NOT the user-profile default (%LOCALAPPDATA%\ms-playwright). The
+REM user-profile AppData is INVISIBLE to the non-interactive Task Scheduler
+REM logon session — proven: os.path.exists() on the user-profile binary
+REM returns False from the task context but True interactively, same user,
+REM same env. This was the true root cause of every "BROWSER_LAUNCH_FAILED /
+REM EOD didn't fire" incident. C:\ProgramData is visible to ALL sessions.
+REM Browsers installed there via: scripts\repair_playwright.bat
+set "PLAYWRIGHT_BROWSERS_PATH=C:\ProgramData\ms-playwright"
+
 echo.>> "%LOG_FILE%"
 echo ============================================================>> "%LOG_FILE%"
 echo auth_worker run at %DATE% %TIME%>> "%LOG_FILE%"

@@ -20,6 +20,12 @@ set "ANACONDA=C:\Users\SPS\anaconda3"
 set "PYTHON=%ANACONDA%\python.exe"
 set "PIP=%ANACONDA%\Scripts\pip.exe"
 
+REM 2026-06-02: install browsers to the MACHINE-WIDE path, not the user
+REM profile. %LOCALAPPDATA%\ms-playwright is invisible to the non-interactive
+REM Task Scheduler logon session (proven root cause of recurring
+REM BROWSER_LAUNCH_FAILED). C:\ProgramData is visible to all sessions.
+set "PLAYWRIGHT_BROWSERS_PATH=C:\ProgramData\ms-playwright"
+
 echo.
 echo ============================================================
 echo  Playwright repair  --  %DATE% %TIME%
