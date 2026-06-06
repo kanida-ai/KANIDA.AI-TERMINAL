@@ -5,6 +5,21 @@ root-cause fixes are recorded here so we don't relearn them.
 
 ## 2026-06-02
 
+- **Phase 2/3 cleanup — removed verified-dead code (usage-audited first).**
+  A read-only usage audit grepped every legacy route/router/module for live
+  consumers before touching anything. Results:
+  - **Backend:** unmounted `orders_router` + `strategy_router` (zero consumers);
+    archived `backend/scheduler.py`, the two routers, and the top-level `engine/`
+    research package to `backend/_archive/`; deleted empty `agents/`+`signals/`.
+    Verified post-restart: dead routes 404, all active routers 200.
+  - **Frontend:** relocated the self-referential legacy cluster (welcome, engine,
+    login, terminal, dashboard, analysis-v2/v3, `.legacy-backup` files) to the
+    unrouted `app/_legacy/`. tsc passes; nothing active links in.
+  - **Kept (load-bearing):** `/admin` + `/analysis` pages (operator links to
+    them) and the legacy routers consumed by active Falcon pages via
+    `lib/admin-api.ts` + `lib/backtest-api.ts`.
+  `app/` now holds only active routes: `power/`, `falcon/`, `admin/`, `analysis/`,
+  `api/` (+ `_legacy/`).
 - **Docs + folder cleanup (Phase 1).** Added `docs/` (architecture, api-map,
   setup-guide, folder-structure, audit-report, this changelog) and a top-level
   `README.md`. Moved root audit memos → `docs/audit-history/`, research CSVs +

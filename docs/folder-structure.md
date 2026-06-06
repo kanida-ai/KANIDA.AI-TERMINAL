@@ -76,14 +76,18 @@ the **root** `scripts/`.
 `logs/`, `outputs/`, `*.log`, `archive/`, `.claude/`, `.railway/` are gitignored.
 Don't commit run logs or generated artifacts.
 
-## Deferred restructure (NOT yet done — needs usage audit + backend restart)
+## Restructure status (2026-06-02 — usage-audited + executed)
 
-These were identified in the audit but intentionally **not** executed yet
-because the backend is live and they carry real risk:
-- Rename `backend/routers/` → `backend/legacy/routers/` (one import in main.py;
-  requires a backend restart).
-- Move legacy `frontend/app/{terminal,dashboard,engine,welcome,login}/` →
-  `app/_legacy/` (Next.js routes — must verify nothing links to them first).
-- Unmount dead legacy routers (audit each for live consumers).
+Done after a read-only usage audit confirmed safety:
+- ✅ Legacy frontend cluster (welcome, engine, login, terminal, dashboard,
+  analysis-v2/v3, `.legacy-backup`) → `app/_legacy/` (unrouted).
+- ✅ Unmounted dead routers `orders` + `strategy`; archived to `backend/_archive/`.
+- ✅ Archived `backend/scheduler.py` + top-level `engine/` (zero imports).
+- ✅ Deleted empty `backend/agents/`, `backend/signals/`.
 
-Do these as a separate, gated step. See `docs/audit-report.md` §13.
+**Intentionally NOT done** (the audit found these are load-bearing):
+- `backend/routers/` is **not** renamed to `legacy/` — the active Falcon
+  operator pages consume those routers via `lib/admin-api.ts` +
+  `lib/backtest-api.ts`. Renaming would churn live imports for no gain.
+- `/admin` and `/analysis` pages stay put — active Falcon pages link to `/admin`
+  (token refresh) and the "Full Kanida.AI mode" toggle links to `/analysis`.
