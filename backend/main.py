@@ -470,10 +470,12 @@ from routers.execution_router  import router as execution_router
 from routers.swing_router      import router as swing_router
 from routers.admin_router      import router as admin_router
 from routers.jobs_router       import router as jobs_router
-from routers.orders_router     import router as orders_router
 from routers.universe_router   import router as universe_router
-from routers.strategy_router   import router as strategy_router
 from routers.ai_router         import router as ai_router
+# 2026-06-02: orders_router + strategy_router UNMOUNTED — usage audit confirmed
+# zero frontend consumers. Source archived to backend/_archive/routers/.
+# The remaining legacy routers above are still consumed by the active Falcon
+# operator pages (via lib/admin-api.ts + lib/backtest-api.ts) — do NOT remove.
 
 # Falcon V7.1 production routers (coexists with legacy)
 from falcon.routers.signals_router    import router as falcon_signals_router
@@ -507,10 +509,9 @@ app.include_router(execution_router, prefix="/api", tags=["Execution"])
 app.include_router(swing_router,     prefix="/api", tags=["Swing"])
 app.include_router(admin_router,     prefix="/api", tags=["Admin"])
 app.include_router(jobs_router,      prefix="/api", tags=["Jobs"])
-app.include_router(orders_router,    prefix="/api", tags=["Orders"])
 app.include_router(universe_router,  prefix="/api", tags=["Universe"])
-app.include_router(strategy_router,  prefix="/api", tags=["Strategy"])
 app.include_router(ai_router,        prefix="/api", tags=["AI"])
+# orders_router + strategy_router intentionally NOT mounted (2026-06-02 audit).
 
 # Falcon mounted under /api — endpoints live under /api/falcon/*
 app.include_router(falcon_signals_router,   prefix="/api", tags=["Falcon"])
