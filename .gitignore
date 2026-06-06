@@ -38,3 +38,15 @@ outputs/fno_fetch.log
 outputs/pipeline_*.log
 outputs/fetch_*.log
 outputs/refresh_*.log
+
+# Runtime logs (regenerable — never source)
+logs/
+
+# Local archive — stale research artifacts, CSVs, old data kept for reference
+# but NOT version-worthy (multi-MB data would bloat the repo). Organised on
+# disk for tidiness; reconstructable from the pipeline. See docs/folder-structure.md.
+archive/
+
+# Claude Code session state + agent worktrees (tooling, not source)
+.claude/
+.railway/
