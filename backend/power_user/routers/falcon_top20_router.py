@@ -12,10 +12,10 @@ In-process LRU cache: keyed by (signal_date, universe, sector). Once a
 day is computed, repeats are sub-ms. The signal date itself rolls over
 when the nightly engine emits a new row, so cache invalidates naturally.
 
-Paywall-gated (M4 / CONTRACT §4): requires a logged-in user whose billing
-plan allows product access (founding / comp / admin / active paid). Anon →
-401, unpaid → 402 PAYMENT_REQUIRED. The /power/today page additionally
-gates at the UI layer, but the API is now the enforcement point.
+Public endpoint (NOT auth-gated). The page that calls it (/power/today)
+gates access at the UI layer per Phase 1b invite-only login. Direct API
+access is fine — it's read-only data and the engine output isn't a
+secret; the moat is the explainability rendering.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from .dependencies import current_paid_user_required, get_db, hash_ip_ua
+from .dependencies import get_db, hash_ip_ua
 from ..config import POWER_RND_DB_PATH
 from ..services.falcon_top20_explainer import build_falcon_top20
 
@@ -62,7 +62,6 @@ def falcon_top_20(
     universe:     str            = Query("all500", regex="^(all500|nifty50|nifty100|nifty200|fno)$"),
     sector:       Optional[str]  = Query(None,    max_length=64),
     signal_date:  Optional[str]  = Query(None,    regex=r"^\d{4}-\d{2}-\d{2}$"),
-    _paid=Depends(current_paid_user_required),
     prod_con:     sqlite3.Connection = Depends(get_db),
 ) -> Dict[str, Any]:
     """Falcon Top 20 with 3-bucket explainability for the chosen universe/sector.
