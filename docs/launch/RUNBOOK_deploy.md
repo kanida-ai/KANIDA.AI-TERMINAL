@@ -64,11 +64,46 @@ Set these in the host's environment (never in git). Full manifest: [ENV.md](ENV.
 
 ## 3. Put the DB on the volume (once)
 
-Get `data/db/kanida_universe.db` (with `falcon_outcomes` merged in, §0) onto the volume at `POWER_DB_PATH`:
-- **Railway:** upload via the volume's shell/one-off, or seed-on-first-boot: have `entrypoint.sh` copy the image-baked DB to the volume **only if the volume copy is absent** (so redeploys never overwrite live data). Confirm the seed-if-absent guard before first deploy.
-- **VPS:** `scp` the file to the mounted volume path.
+### 3a. Build the volume contents (one command, local)
 
-After this, the volume holds the live DB; the app reads/writes it there and it **survives redeploys/restarts**.
+Produce the exact files the volume needs with **`scripts/build_cloud_bundle.py`** — it
+encapsulates every §0 requirement (verified against source) so you don't hand-merge tables:
+
+```bash
+# dry-run first to see what it WOULD produce (writes nothing):
+python3 scripts/build_cloud_bundle.py --dry-run
+
+# build the bundle (default output: deploy/cloud-bundle/):
+python3 scripts/build_cloud_bundle.py
+
+# (optional) include the intraday DB for full P2 accuracy — needs the §9 code change:
+python3 scripts/build_cloud_bundle.py --with-intraday
+
+# verify the produced bundle (asserts each required table exists + has >0 rows):
+python3 scripts/build_cloud_bundle.py --verify
+```
+
+What it produces in `deploy/cloud-bundle/`:
+- **`kanida_universe.db`** — a copy of the app DB with the **FULL** `falcon_outcomes` merged in
+  from the R&D DB (the app DB's own copy is sparse and gets DROPped/replaced). This is BOTH the
+  app DB **and** the `/power/today` evidence source (`POWER_RND_DB_PATH` = this file on the host).
+- **`kanida_universe_rnd.db`** — the small persona sidecar (only `falcon_promoted_patterns` +
+  `falcon_pattern_candidates`, verbatim from R&D). Personas resolve this filename **next to** the
+  app DB and **ignore `POWER_RND_DB_PATH`** (§0).
+- **`intraday_mining.db`** — only when `--with-intraday` is passed (P2 needs the §9 code change
+  before the host actually reads it).
+
+The script never mutates the source DBs (copies the app DB first, reads R&D read-only), is
+idempotent/re-runnable, prints a per-table row-count manifest, and prints exact host-placement
+instructions at the end.
+
+### 3b. Get the bundle onto the volume
+
+Place the bundle files on the volume at `POWER_DB_PATH` and **next to it**:
+- **Railway:** upload via the volume's shell/one-off, or seed-on-first-boot: have `entrypoint.sh` copy the image-baked DB to the volume **only if the volume copy is absent** (so redeploys never overwrite live data). Confirm the seed-if-absent guard before first deploy. The sidecar `kanida_universe_rnd.db` must land in the SAME directory as the app DB.
+- **VPS:** `scp` `kanida_universe.db` **and** `kanida_universe_rnd.db` to the mounted volume path (same directory).
+
+After this, the volume holds the live DB + persona sidecar; the app reads/writes the app DB there and it **survives redeploys/restarts**.
 
 ---
 
