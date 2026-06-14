@@ -1,278 +1,152 @@
-# Kanida.AI — M1 Infra Deploy Runbook
+# Kanida.AI — Phase 1 Deploy Runbook (Path A: SQLite on a cloud volume)
 
-**Goal:** move the backend off the laptop onto always-on host (Railway/VPS) with
-**Supabase Postgres** as the App DB; port the PROD `kanida_universe.db` into it;
-fold in `kite_tokens` + `falcon_auth_log`; retire `kanida_quant.db`; confirm the
-daily pipeline and headless Zerodha token refresh fire on the host.
+**Goal:** get the product **off the laptop** and **charging**, with the **least code risk**.
+App + the whole 573M SQLite DB move to an always-on host with a **persistent volume**.
+**No Supabase / no Postgres in Phase 1** — that's Phase 4 (see CLOUD_ARCHITECTURE.md).
 
-This runbook is written for the **operator** (Pudhuraja). Steps that need live
-credentials are flagged **🔑 OPERATOR**. Everything else is already in the repo.
+This is written for the **operator**. Steps needing live credentials/accounts are flagged **🔑 OPERATOR**.
 
-> Invariants in force: INV2 (never touch `backend/falcon/*` logic), INV5 (no
-> secrets in any file — all via host env), INV7 (additive migrations only).
-
----
-
-## 0. Pre-flight (one-time, before you touch any cloud)
-
-- [ ] Confirm the PROD App DB exists locally: `data/db/kanida_universe.db` (~573M).
-- [ ] Confirm the legacy DB exists: `data/db/kanida_quant.db` (~83M) — source of
-      `kite_tokens` + `falcon_auth_log` fold-in.
-- [ ] Confirm the 14G R&D warehouse stays put: `universe_engine/data/db/kanida_universe.db`.
-      **It is never ported and `POWER_RND_DB_PATH` is never set on the host.**
-- [ ] `pip install psycopg2-binary playwright pyotp` locally if you'll run the
-      porting script from the laptop (the script needs `psycopg2`).
+> Source of truth: [CLOUD_ARCHITECTURE.md](CLOUD_ARCHITECTURE.md). Invariants: INV2 (never touch
+> `backend/falcon/*` execution), INV5 (no secrets in files — host env only).
+>
+> **Why SQLite, not Supabase, now:** the code talks to SQLite directly everywhere; switching to
+> Postgres is a multi-module refactor (Phase 4), not a deploy step. Supabase account is ready for
+> when that scale trigger hits (multiple instances OR managed PITR backups). The Postgres-first
+> version of this runbook is preserved in git history (commit `af5dc38`) + `builds/M1-build-log.md`.
 
 ---
 
-## 1. 🔑 OPERATOR — Provision Supabase
+## 0. Pre-flight (local, one-time)
 
-1. Create a Supabase project (region closest to your users — `ap-south-1`/Mumbai
-   for India). Choose a strong DB password.
-2. Project → **Settings → Database → Connection string → URI**. Copy it. It looks
-   like `postgresql://postgres:<PW>@db.<ref>.supabase.co:5432/postgres`.
-   - For pooled/serverless use the **Session pooler** URI (port 6543) if the host
-     opens many short connections; the migration script and backend both work
-     with either. Prefer the direct 5432 URI for the one-time bulk port.
-3. Hold this as `DATABASE_URL` for the next steps. **Do not commit it.**
+- [ ] Confirm the app DB exists: `data/db/kanida_universe.db` (~573M). **This whole file ships — no pruning in Phase 1.** It already holds the multi-year `falcon_features` (back to 2021) the Historical Evidence panel needs, so shipping it whole keeps every request path working.
+- [ ] **Make the app DB self-sufficient** so no request reaches the 14G research DB:
+  - Copy `falcon_outcomes` (~827k rows) from `universe_engine/data/db/kanida_universe.db` **into** `data/db/kanida_universe.db` (the evidence panel reads it). This is the only known large request-time read living outside the app DB.
+  - On the host you will set `POWER_RND_DB_PATH` = the **app DB path** (not the 14G), so the evidence/persona reads resolve against the shipped DB.
+- [ ] The 14G research warehouse **stays on the laptop**. It is never uploaded.
 
 ---
 
-## 2. 🔑 OPERATOR — Generate / collect the other secrets
+## 1. 🔑 OPERATOR — Pick a host with a persistent volume
 
-Gather every value in [`docs/launch/ENV.md`](ENV.md). Minimum for M1:
+You need a compute host (Supabase does NOT run your Python app). Recommended, in order of least friction:
 
-| Var | How to get it |
+| Host | Why |
 |---|---|
-| `DATABASE_URL` | from §1 |
-| `POWER_JWT_SECRET` | `openssl rand -hex 32` — **CRITICAL**, currently random per boot (`backend/power_user/config.py:59`); must be fixed in prod or every restart logs all users out |
+| **Railway** (recommended) | Matches the existing `railway.json` + `Dockerfile`. Has **volumes**. Cron services for the daily jobs. Easiest path. |
+| Fly.io | Volumes + always-on; a bit more ops. |
+| VPS (Hetzner/DigitalOcean) | Cheapest for always-on + big disk; you manage everything (`deploy/Procfile` + systemd + cron). |
+
+Create the host project and **attach a persistent volume** (≥2 GB; the DB is ~0.6 GB and grows slowly). Mount it at a stable path, e.g. `/data`.
+
+---
+
+## 2. 🔑 OPERATOR — Collect secrets (host env)
+
+Set these in the host's environment (never in git). Full manifest: [ENV.md](ENV.md).
+
+| Var | Value |
+|---|---|
+| `POWER_DB_PATH` | the volume path to the app DB, e.g. `/data/kanida_universe.db` |
+| `FALCON_DB_PATH` | same as `POWER_DB_PATH` (one file is the app DB) |
+| `POWER_RND_DB_PATH` | **same app DB path** (so evidence/persona reads stay local — no 14G on host) |
+| `POWER_JWT_SECRET` | `openssl rand -hex 32` — **CRITICAL**; if unset, every restart logs all users out |
 | `KITE_API_KEY` / `KITE_API_SECRET` | Zerodha Kite Connect app |
 | `ZERODHA_USERNAME` / `ZERODHA_PASSWORD` / `ZERODHA_TOTP_SECRET` | broker login + TOTP seed (headless auth) |
-| `SITE_USER` / `SITE_PASS` | choose — HTTP Basic gate on `/falcon/*` operator routes |
+| `SITE_USER` / `SITE_PASS` | HTTP Basic gate on `/falcon/*` operator routes |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` / `RAZORPAY_WEBHOOK_SECRET` / `RAZORPAY_PLAN_MONTHLY` | billing (₹999/mo) |
+| `EMAIL_PROVIDER` / `RESEND_API_KEY` / `EMAIL_FROM` | transactional email |
+| `FALCON_PUBLISH_SECRET` | the laptop→cloud publish secret (set the SAME value on the laptop) |
 
-Billing/email vars (`RAZORPAY_*`, `EMAIL_*`) are M3/M8 — not required to bring
-the backend up, but set them now if available.
-
-> Note: `zerodha_auto_auth.py` reads `ZERODHA_TOTP_SECRET` (the seed), not a live
-> code. ENV.md lists `ZERODHA_PIN` for completeness; the headless bot path uses
-> the TOTP seed.
+> **DO NOT set `DATABASE_URL`** — that flips the app to Postgres mode. Phase 1 is SQLite.
 
 ---
 
-## 3. Create the App-DB schema in Postgres
+## 3. Put the DB on the volume (once)
 
-The schema is created by the app's own idempotent initialisers — you do **not**
-hand-write DDL. Two options:
+Get `data/db/kanida_universe.db` (with `falcon_outcomes` merged in, §0) onto the volume at `POWER_DB_PATH`:
+- **Railway:** upload via the volume's shell/one-off, or seed-on-first-boot: have `entrypoint.sh` copy the image-baked DB to the volume **only if the volume copy is absent** (so redeploys never overwrite live data). Confirm the seed-if-absent guard before first deploy.
+- **VPS:** `scp` the file to the mounted volume path.
 
-**Option A (recommended): boot the backend once against the empty Supabase DB.**
-At boot, `main.py` lifespan runs `power_user.db_init.init_power_user_schema()`,
-`falcon.db_init.apply_extensions()`, and the M2 billing migration — all
-`CREATE IF NOT EXISTS`, so they build the full App-DB schema on Postgres.
-Do this in §5 right after setting `DATABASE_URL`; it is safe on an empty DB.
-
-**Option B (offline): run the M2 migration via the porting script.**
-```
-DATABASE_URL=postgresql://... python scripts/migrate_to_supabase.py --apply-schema --dry-run
-```
-`--apply-schema` runs `backend/power_user/migrations/0001_billing.sql`. This only
-covers the billing tables; the engine + falcon tables still need the app's
-db_init (Option A) to exist. Prefer A.
-
-> The engine read-tables (`falcon_signals_live`, `falcon_features`, `ohlc_daily`,
-> …) are **created by the offline pipeline / app boot**, not by a checked-in
-> Postgres DDL file. Booting the app once (Option A) is the reliable way to get
-> every table to exist before the data port.
+After this, the volume holds the live DB; the app reads/writes it there and it **survives redeploys/restarts**.
 
 ---
 
-## 4. Port the data (SQLite → Postgres)
+## 4. 🔑 OPERATOR — Deploy the app + daily jobs
 
-Run from the repo root, with `DATABASE_URL` pointing at Supabase.
-
-1. **Dry run** — see counts on both sides, write nothing:
-   ```
-   DATABASE_URL=postgresql://... python scripts/migrate_to_supabase.py --dry-run
-   ```
-2. **Real port:**
-   ```
-   DATABASE_URL=postgresql://... python scripts/migrate_to_supabase.py
-   ```
-   - It loads, in order: engine read-tables → `power_user_*` → `falcon_trade_*`,
-     all from `data/db/kanida_universe.db`; then folds in `kite_tokens` +
-     `falcon_auth_log` from `data/db/kanida_quant.db`.
-   - Chunked (1000 rows/batch by default) so the 573M PROD DB won't blow memory.
-   - Idempotent: every INSERT is `ON CONFLICT DO NOTHING`. Re-running after a
-     partial port resumes safely. For a guaranteed-clean reload: add `--truncate`.
-   - Column-intersection: extra columns on either side are skipped, so the M2
-     billing columns being present on PG (and absent on SQLite) does not break
-     the load.
-3. Confirm the printed Postgres counts match SQLite. Spot-check in the Supabase
-   table editor: `power_user_users`, `falcon_signals_live`, `kite_tokens`.
-
-> If `kanida_quant.db` is missing at port time, the fold-in is skipped with a
-> warning and `kite_tokens` stays empty — the first host token refresh (§6)
-> repopulates it. Not a failure, but verify §7 before retiring the legacy file.
-
----
-
-## 5. 🔑 OPERATOR — Deploy the backend to the host
-
-**Railway path (matches existing `railway.json` + `Dockerfile`):**
-
-1. Push the branch / connect the repo to a Railway project.
-2. In the **web service** env, set every var from §2 (especially `DATABASE_URL`
-   and `POWER_JWT_SECRET`). **Do NOT set `POWER_RND_DB_PATH`** on the host — the
-   R&D warehouse stays on the laptop.
-3. The build runs the root `Dockerfile`, which now also runs
-   `playwright install --with-deps chromium` (needed for §6). First build is
-   slower because of the browser download — expected.
-4. Deploy. `entrypoint.sh` starts uvicorn. With `DATABASE_URL` set,
-   `backend/db.py` flips `IS_POSTGRES=True` automatically and the app uses
-   Supabase. (On first boot it also creates any missing schema — Option A in §3.)
-5. Add the **cron services** (daily pipeline) — one per job, each with
-   `FALCON_JOB` set and the start command `/entrypoint_cron.sh`:
+**Railway (matches `railway.json` + `Dockerfile`):**
+1. Connect the repo/branch. Set all §2 env vars on the **web service**.
+2. Build runs the root `Dockerfile` (incl. `playwright install --with-deps chromium` for headless auth — first build is slower, expected).
+3. Deploy. `entrypoint.sh` starts uvicorn. With no `DATABASE_URL`, `backend/db.py` stays SQLite, pointed at `POWER_DB_PATH` on the volume.
+4. Add **cron services** (one per job, `/entrypoint_cron.sh` with `FALCON_JOB` set) — times in UTC = the IST schedule in `deploy/README.md`:
    - `daily_data_refresh` `30 11 * * 1-5`
    - `daily_features` `32 11 * * 1-5`
    - `daily_signals` `35 11 * * 1-5`
-   - `weekly_remine` `30 12 * * 0`
-   (times are UTC = the IST schedule in `deploy/README.md`.)
+   - (weekly mining stays on the **laptop**, not here)
 
-**VPS path:** use `deploy/Procfile` with a process manager (systemd/supervisor)
-for `web`, and system cron for the pipeline jobs + auth refresh.
+**VPS:** `deploy/Procfile` + systemd for `web`; system cron for the daily jobs.
 
 ---
 
-## 6. 🔑 OPERATOR — Configure the Zerodha token refresh as a host job
+## 5. 🔑 OPERATOR — Zerodha token refresh as a host job
 
-On the laptop this was a Windows Scheduled Task running
-`scripts/auth_worker.py`. On the host it becomes a scheduled job running the
-**same** script (a fresh short-lived process every fire — the design that fixed
-the aged-process Playwright failure; see `scripts/auth_worker.py` header).
-
-- **Command:** `cd /app/backend && python3 ../scripts/auth_worker.py`
-  (or `python3 /app/scripts/auth_worker.py` — it self-adds `backend/` to path).
-- **Schedule:** every 30 min during the IST trading window. The worker
-  **self-gates** to weekday 06:00–16:30 IST and exits in <1s outside it, so a
-  dumb UTC interval is fine. Simplest: run it every 30 min `*/30 * * * *` and let
-  the worker decide; or restrict to `*/30 0-11 * * 1-5` UTC (≈05:30–17:00 IST).
-- **Env:** the same `KITE_*` + `ZERODHA_*` + `DATABASE_URL` + `POWER_DB_PATH`
-  as the web service. On the host, `POWER_DB_PATH`/`DATABASE_URL` decide where
-  `kite_tokens` + `falcon_auth_log` are written — set `DATABASE_URL` so both the
-  worker and the web service share the same Supabase token row.
-- **Force a proof run** (bypasses the skip gate) to validate the headless path
-  end-to-end before trusting the schedule:
-  ```
-  python3 scripts/auth_worker.py --force
-  ```
-  Exit 0 + a `success` row in `falcon_auth_log` = headless auth works on Linux.
-
-> **Alternative:** the web service already starts an in-process
-> `auth_scheduler` thread. On a stable always-on host (no sleep/wake) that thread
-> can carry auth without a separate cron. The standalone worker is more robust
-> (fresh process) and lets you `--force`-prove it; prefer the cron job. Running
-> BOTH is harmless — the skip gate + `ON CONFLICT` dedupe prevents double work.
-
-> ⚠️ `auth_worker.py` currently writes `kite_tokens` via
-> `services/kite_auth.py`, which uses a **raw `sqlite3`** connection keyed off
-> `KANIDA_DB_PATH` — it does NOT go through `backend/db.py` / `DATABASE_URL`.
-> See §9 Risk R1: on a Postgres-only host this write path needs the token row to
-> land in Postgres. Verify §7.4 explicitly; if the token does not appear in the
-> Supabase `kite_tokens` table, escalate to the audit/DB agent before go-live.
+The daily jobs need a valid Kite token. On the host, run the SAME `scripts/auth_worker.py` as a scheduled job (fresh process each fire — the design that fixed the aged-Playwright failure).
+- **Command:** `python3 /app/scripts/auth_worker.py`
+- **Schedule:** `*/30 * * * *` — the worker self-gates to the IST trading window and exits in <1s outside it.
+- **Env:** same as the web service. On SQLite, the token is written to the volume DB at `POWER_DB_PATH` — **no Postgres token-path fix needed** (that's why Path A avoids the R1/C2 work entirely).
+- **Prove it:** `python3 /app/scripts/auth_worker.py --force` → exit 0 + a `success` row in `falcon_auth_log` + a fresh `kite_tokens` row = headless auth works on Linux.
 
 ---
 
-## 7. VERIFICATION checklist (the acceptance gate)
+## 6. 🔑 OPERATOR — Wire the laptop → cloud weekly publish
 
-Run these AFTER §5 + §6. All must pass before retiring `kanida_quant.db`.
-
-1. **Backend reachable off-laptop.** Close the laptop. `curl https://<host>/healthz`
-   (or the app root) returns 200 from the hosted URL. No 503.
-2. **`/power/today` loads from Postgres.** Hit `GET /api/power/picks/today`
-   (authenticated) — returns today's picks. Cross-check the same rows exist in
-   the Supabase `falcon_signals_live` table. Backend log shows
-   `db_url()` = `postgres://…` (not a local SQLite path).
-3. **Daily pipeline writes to Postgres.** Trigger `daily_signals` (run the cron
-   service once, or `python3 -m falcon.jobs.daily_signals` on the host). Confirm
-   new rows land in Supabase `falcon_signals_live` / `falcon_signal_runs` for
-   today's date.
-4. **Token refresh works HEADLESS on Linux.** Run `auth_worker.py --force` on the
-   host (§6). Confirm: exit 0, a `success` row in `falcon_auth_log` **in
-   Postgres**, AND a fresh row in `kite_tokens` **in Postgres** with today's
-   `token_date`. Then hit the admin auth-status endpoint — `token_valid: true`.
-   (This is the highest-risk check — see R1.)
-5. **No code still reads `kanida_quant.db` in a request path.** With the host on
-   Postgres, exercise `/power/*` and the live-tier routes; grep the host logs for
-   any open of a `kanida_quant.db` path. Expected: none from `/power/*`. (The
-   legacy `/api/quant`, `/api/live`, `/api/backtest`, `/api/universe`,
-   `/api/swing` routes still reference it — see the coupling map; they are
-   out-of-product legacy and are addressed by retiring the file, not by M1 code
-   changes.)
-6. **Laptop can be closed without a 503.** Leave the host running, laptop shut,
-   for one full trading day. Daily pipeline + token refresh both fire on the host.
+So the cloud keeps getting fresh patterns after the move:
+1. On the **host**: `FALCON_PUBLISH_SECRET` is set (§2). The endpoint `POST /api/falcon/publish/intelligence` is live and **fails closed** until it is.
+2. On the **laptop**: set `FALCON_PUBLISH_SECRET` (same value) + `FALCON_PUBLISH_URL=https://<host>`.
+3. After the weekly mining, run: `python3 scripts/publish_to_cloud.py` (use `--dry-run` first to see the bundle). It POSTs the promoted patterns + candidates + taxonomy up; the cloud imports them atomically.
+4. (Optional) schedule it weekly on the laptop after `weekly_remine`.
 
 ---
 
-## 8. Retire `kanida_quant.db`
+## 7. VERIFICATION — Phase 1 is DONE only when ALL pass (with the laptop OFF)
 
-Only after §7.4 + §7.5 pass:
-
-- [ ] `kite_tokens` + `falcon_auth_log` confirmed present and updating in Postgres.
-- [ ] No `/power/*` request opens `kanida_quant.db` in host logs.
-- [ ] Remove the legacy DB from the deploy image (drop the bundle copy in the
-      `Dockerfile` + the `entrypoint.sh` seed of `kanida_quant.db`). **This is a
-      follow-up edit gated on the audit — do not do it until verification is
-      green**, because `entrypoint.sh` still defaults `DB_PATH` to it.
-- [ ] Delete the 5 stale worktree copies under `.claude/worktrees/**/kanida_quant.db`.
-
-> The legacy `/api/quant|live|backtest|execution|swing|universe` routers still
-> open `kanida_quant.db`. They are NOT part of the Stage-1 product and are not
-> gated by the paywall. Retiring the file means those endpoints return empty /
-> error — acceptable per MASTER_SPEC §1.5 (`live_opportunities` is dropped).
-> If any must survive, that is a separate decision, not an M1 deliverable.
+1. **Boots from the volume.** Restart the host service → data survives; no fresh empty DB created. Logs show the DB path = the volume, SQLite (not Postgres).
+2. **Daily jobs run in cloud.** Trigger `daily_signals` on the host → new rows for today in `falcon_signals_live` / `falcon_signal_runs` (in the volume DB).
+3. **Billing works end-to-end.** Test-mode Razorpay → webhook → a user flips to `billing_plan='paid'`.
+4. **Auth/session/token work.** Login persists across a restart; `auth_worker.py --force` succeeds headless; admin auth-status shows `token_valid: true`.
+5. **`/power/today` is laptop-independent.** **Power the laptop OFF.** Page still loads signals AND Historical Evidence; nothing tries to open the 14G research DB (grep host logs — no `universe_engine/...` DB opens). **Also check `/power/personas`** — if it errors with the laptop off, copy the catalog table(s) it reads into the app DB too (same as the `falcon_outcomes` step) and re-test.
+6. **Backups + restore tested.** Take a volume snapshot; restore it to a scratch instance; app boots from it.
+7. **Publish is authenticated + atomic.** From the laptop, `publish_to_cloud.py` succeeds with the secret and is rejected without it; a forced-failure mid-import leaves the cloud DB unchanged.
 
 ---
 
-## 9. Risks carried into audit
+## 8. Backups (don't skip — you're holding paying-user + token data)
 
-- **R1 (HIGH) — token write path bypasses `DATABASE_URL`.**
-  `services/kite_auth.py` + `services/auth_status.py` + `zerodha_auto_auth.py`
-  use raw `sqlite3` against `KANIDA_DB_PATH`/`POWER_DB_PATH`, not the
-  Postgres-aware `backend/db.py`. On a Postgres-only host these writes/reads need
-  to target Postgres. **`falcon_auth_log` already works** because the scheduler
-  passes `POWER_DB_PATH` and the app sets that to the App DB — but on the host
-  `POWER_DB_PATH` is a SQLite path unless overridden, while the product reads via
-  `DATABASE_URL`. **The token + auth-log read/write code is `kite_auth` /
-  `auth_status` (NOT `backend/falcon/*`), so M1 may modify it** to route through
-  `backend/db.py`. This was left as a flagged change for the audit/DB agent
-  rather than done blind, because it touches the live token path that Auto-Trade
-  depends on. **§7.4 is the gate that catches it.**
-- **R2 (MED) — Playwright headless on the host.** New `requirements.txt` +
-  `Dockerfile` lines add Chromium, but this has never run on the target Linux
-  image. First `--force` run (§7.4) is the proof. If it fails with
-  `BROWSER_LAUNCH_FAILED`, the `--with-deps` install or a missing font/lib is the
-  cause.
-- **R3 (MED) — SQLite→PG dialect on big tables.** `ohlc_daily` is large and has a
-  `source` CHECK; the porting script filters `yfinance` rows. Other tables may
-  carry SQLite-only types; the port adapts `bytes→text` only. Watch the port log
-  for the first failing batch (it stops on error, by design).
-- **R4 (LOW) — schema must pre-exist.** The porting script loads data only; it
-  skips any table not present in Postgres. If §3 Option A wasn't done, tables
-  silently skip. Always run §4 step 1 (dry-run) and confirm the table list.
-- **R5 (LOW) — `POWER_JWT_SECRET` not set.** If the operator forgets it, the app
-  boots with a random per-process key and every restart logs users out. Make it
-  a required env in the host service config.
+SQLite-on-volume means **you** own backups (the trade-off vs managed Postgres):
+- Schedule a **daily volume snapshot** (Railway/Fly/VPS provider feature), retain ≥7.
+- Additionally, a nightly `sqlite3 .backup` copy of `kanida_universe.db` to object storage (S3/R2) is cheap insurance.
+- **Test a restore** (verification §6) — an untested backup is not a backup.
 
 ---
 
-## Appendix — env var quick reference (host web service)
+## 9. What Phase 1 deliberately does NOT do (later phases)
+- **No pruning** of OHLC/features (Phase 3) — ship the DB whole.
+- **No precomputed evidence/persona summary tables** (Phase 2) — the shipped multi-year DB serves them directly.
+- **No Postgres / Supabase** (Phase 4) — revisit when you need multiple app instances or managed PITR backups. Account is ready; the porting script + migration are on the shelf.
 
-Required to come up on Postgres:
+---
+
+## Appendix — host web-service env quick reference (Phase 1 / SQLite)
 ```
-DATABASE_URL=postgresql://…           # Supabase
+POWER_DB_PATH=/data/kanida_universe.db
+FALCON_DB_PATH=/data/kanida_universe.db
+POWER_RND_DB_PATH=/data/kanida_universe.db        # local; NOT the 14G research DB
 POWER_JWT_SECRET=<openssl rand -hex 32>
 KITE_API_KEY=…  KITE_API_SECRET=…
 ZERODHA_USERNAME=…  ZERODHA_PASSWORD=…  ZERODHA_TOTP_SECRET=…
 SITE_USER=…  SITE_PASS=…
-# DO NOT SET on host:  POWER_RND_DB_PATH  (R&D warehouse is laptop-only)
+RAZORPAY_KEY_ID=…  RAZORPAY_KEY_SECRET=…  RAZORPAY_WEBHOOK_SECRET=…  RAZORPAY_PLAN_MONTHLY=…
+EMAIL_PROVIDER=resend  RESEND_API_KEY=…  EMAIL_FROM=…
+FALCON_PUBLISH_SECRET=<shared with laptop>
+# DO NOT SET:  DATABASE_URL  (would switch to Postgres — that's Phase 4)
 ```
-Full manifest + secret/non-secret flags: [`docs/launch/ENV.md`](ENV.md).
+Full manifest + secret flags: [ENV.md](ENV.md).
