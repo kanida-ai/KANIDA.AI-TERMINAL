@@ -19,10 +19,11 @@ This is written for the **operator**. Steps needing live credentials/accounts ar
 ## 0. Pre-flight (local, one-time)
 
 - [ ] Confirm the app DB exists: `data/db/kanida_universe.db` (~573M). **This whole file ships — no pruning in Phase 1.** It already holds the multi-year `falcon_features` (back to 2021) the Historical Evidence panel needs, so shipping it whole keeps every request path working.
-- [ ] **Make the app DB self-sufficient** so no request reaches the 14G research DB:
-  - Copy `falcon_outcomes` (~827k rows) from `universe_engine/data/db/kanida_universe.db` **into** `data/db/kanida_universe.db` (the evidence panel reads it). This is the only known large request-time read living outside the app DB.
-  - On the host you will set `POWER_RND_DB_PATH` = the **app DB path** (not the 14G), so the evidence/persona reads resolve against the shipped DB.
-- [ ] The 14G research warehouse **stays on the laptop**. It is never uploaded.
+- [ ] **Make all request paths self-sufficient on the host** — three DISTINCT mechanisms, verified against source:
+  - **`/power/today` Historical Evidence** reads `falcon_outcomes` from **`POWER_RND_DB_PATH`** ([falcon_top20_router.py:94](../../backend/power_user/routers/falcon_top20_router.py)). → merge `falcon_outcomes` (~827k) into the app DB **and** set `POWER_RND_DB_PATH` = the app DB path.
+  - **`/power/personas/*` (ALL personas)** call `load_full_patterns()` which reads **`falcon_promoted_patterns` + `falcon_pattern_candidates`** ([persona_engine_core.py:69-74](../../backend/power_user/services/persona_engine_core.py:69)). The path resolver **IGNORES `POWER_RND_DB_PATH`** — it builds its own and falls back to **`kanida_universe_rnd.db` next to the app DB** ([persona_simulator.py:62-71](../../backend/power_user/services/persona_simulator.py:62)). Missing → **every persona endpoint fails** (uncaught, [persona_simulator.py:408](../../backend/power_user/services/persona_simulator.py:408)). → ship a **SMALL sidecar `kanida_universe_rnd.db`** next to the app DB containing just those 2 pattern tables (KB-MB, NOT the 14G; copying the tables into the app DB does NOT work — the code won't look there).
+  - **patient-trader (P2) intraday filter** reads `intraday_mining.db` via a **hardcoded relative path with no env and no fallback** ([persona_simulator.py:74-79](../../backend/power_user/services/persona_simulator.py:74)). Its call is **caught** ([persona_simulator.py:433-434](../../backend/power_user/services/persona_simulator.py:433)), so on the host **P2 runs DEGRADED (no intraday gate), it does NOT crash.** Full P2 accuracy needs a small code change (add an env/fallback for the intraday path) — **decide consciously**: accept degraded P2 for Phase 1, or do the code change. (`§9`)
+- [ ] The 14G research warehouse **stays on the laptop**. It is never uploaded. The persona sidecar is a *small extract*, not the warehouse.
 
 ---
 
@@ -48,7 +49,7 @@ Set these in the host's environment (never in git). Full manifest: [ENV.md](ENV.
 |---|---|
 | `POWER_DB_PATH` | the volume path to the app DB, e.g. `/data/kanida_universe.db` |
 | `FALCON_DB_PATH` | same as `POWER_DB_PATH` (one file is the app DB) |
-| `POWER_RND_DB_PATH` | **same app DB path** (so evidence/persona reads stay local — no 14G on host) |
+| `POWER_RND_DB_PATH` | **same app DB path** — used ONLY by `/power/today` Historical Evidence (`falcon_outcomes`). **Personas IGNORE this var** (they need the `kanida_universe_rnd.db` sidecar — see §0). |
 | `POWER_JWT_SECRET` | `openssl rand -hex 32` — **CRITICAL**; if unset, every restart logs all users out |
 | `KITE_API_KEY` / `KITE_API_SECRET` | Zerodha Kite Connect app |
 | `ZERODHA_USERNAME` / `ZERODHA_PASSWORD` / `ZERODHA_TOTP_SECRET` | broker login + TOTP seed (headless auth) |
@@ -113,7 +114,7 @@ So the cloud keeps getting fresh patterns after the move:
 2. **Daily jobs run in cloud.** Trigger `daily_signals` on the host → new rows for today in `falcon_signals_live` / `falcon_signal_runs` (in the volume DB).
 3. **Billing works end-to-end.** Test-mode Razorpay → webhook → a user flips to `billing_plan='paid'`.
 4. **Auth/session/token work.** Login persists across a restart; `auth_worker.py --force` succeeds headless; admin auth-status shows `token_valid: true`.
-5. **`/power/today` is laptop-independent.** **Power the laptop OFF.** Page still loads signals AND Historical Evidence; nothing tries to open the 14G research DB (grep host logs — no `universe_engine/...` DB opens). **Also check `/power/personas`** — if it errors with the laptop off, copy the catalog table(s) it reads into the app DB too (same as the `falcon_outcomes` step) and re-test.
+5. **`/power/today` AND `/power/personas/*` are laptop-independent.** **Power the laptop OFF.** (a) `/power/today` loads signals + Historical Evidence (needs `falcon_outcomes` in the app DB + `POWER_RND_DB_PATH` set to it). (b) **Every** persona at `/power/personas/{slug}` loads (needs the `kanida_universe_rnd.db` sidecar — §0). (c) patient-trader loads but may log "P2 intraday filter NOT wired" — expected/degraded unless the §9 code change is done. Grep host logs: no successful open of a path under `universe_engine/` (the 14G).
 6. **Backups + restore tested.** Take a volume snapshot; restore it to a scratch instance; app boots from it.
 7. **Publish is authenticated + atomic.** From the laptop, `publish_to_cloud.py` succeeds with the secret and is rejected without it; a forced-failure mid-import leaves the cloud DB unchanged.
 
@@ -128,7 +129,8 @@ SQLite-on-volume means **you** own backups (the trade-off vs managed Postgres):
 
 ---
 
-## 9. What Phase 1 deliberately does NOT do (later phases)
+## 9. Conscious Phase-1 decisions / what it does NOT do
+- **P2 (patient-trader) intraday filter:** OFF on the host by default — `intraday_mining.db` resolves via a hardcoded relative path with no env/fallback ([persona_simulator.py:74-79](../../backend/power_user/services/persona_simulator.py:74)) and is caught when absent ([:433-434](../../backend/power_user/services/persona_simulator.py:433)), so P2 runs *degraded but stable*. **To enable it:** a small code change to give `_resolve_intraday_db_path()` an env (`POWER_INTRADAY_DB_PATH`) + a next-to-app-DB fallback, then ship the 30M `intraday_mining.db` sidecar. Decide before launch; not a crash risk either way.
 - **No pruning** of OHLC/features (Phase 3) — ship the DB whole.
 - **No precomputed evidence/persona summary tables** (Phase 2) — the shipped multi-year DB serves them directly.
 - **No Postgres / Supabase** (Phase 4) — revisit when you need multiple app instances or managed PITR backups. Account is ready; the porting script + migration are on the shelf.
@@ -139,7 +141,9 @@ SQLite-on-volume means **you** own backups (the trade-off vs managed Postgres):
 ```
 POWER_DB_PATH=/data/kanida_universe.db
 FALCON_DB_PATH=/data/kanida_universe.db
-POWER_RND_DB_PATH=/data/kanida_universe.db        # local; NOT the 14G research DB
+POWER_RND_DB_PATH=/data/kanida_universe.db        # /power/today evidence ONLY; personas ignore this
+# Personas also need a small sidecar:  /data/kanida_universe_rnd.db  (2 pattern tables — see §0)
+# Optional for full P2 accuracy:        /data/.../intraday_mining.db  (needs §9 code change)
 POWER_JWT_SECRET=<openssl rand -hex 32>
 KITE_API_KEY=…  KITE_API_SECRET=…
 ZERODHA_USERNAME=…  ZERODHA_PASSWORD=…  ZERODHA_TOTP_SECRET=…
