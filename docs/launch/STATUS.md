@@ -1,6 +1,7 @@
 # Kanida.AI Launch — STATUS BOARD
 
-Updated: 2026-06-13 IST · Branch: `feat/power-user-portal`
+Updated: 2026-06-14 IST · Branch: `feat/power-user-portal`
+**Source of truth for the deploy/cloud plan: [CLOUD_ARCHITECTURE.md](CLOUD_ARCHITECTURE.md).** (`DB_DEPENDENCY_MAP.md` is a supporting, code-traced reference — not the plan.)
 
 Legend: ⬜ queued · 🔨 building · 🔎 auditing · 🟥 RED (fix needed) · 🟩 GREEN (done)
 
@@ -15,15 +16,12 @@ Legend: ⬜ queued · 🔨 building · 🔎 auditing · 🟥 RED (fix needed) ·
 | M7 | Frontend — pricing/signup/billing pages | 🟩 | GREEN |
 | M8 | Email — welcome/receipt/cancel | 🟩 | GREEN |
 
-**BUILD PHASE COMPLETE — all 8 modules built + audited GREEN. Next phase: deploy (operator credentials + punch list).**
+**BUILD PHASE COMPLETE — all 8 modules built + audited GREEN. Next: deploy via the 4-phase plan below (Phase 1 = off-laptop + launch on SQLite-volume).**
 
-## Dependency order
+## Dependency order (build phase)
 M1 + M2 → (M3, M4, M5) → M7 · M6 + M8 independent leaves.
 
-## Carry-forward items (tracked, not blocking the GREEN above)
-- **R1 (HIGH):** `kite_tokens` is read/written via raw `sqlite3` in `backend/services/kite_auth.py` (bypasses `DATABASE_URL`). On a Postgres-only host the Kite token never reaches Supabase → live tier breaks. Gated by RUNBOOK §7.4 (a broken deploy cannot pass), but the real fix (route `kite_auth` through `db.py` Postgres path) must be done before go-live. **Touches the token path SHARED with Auto-Trade (7 files) — must preserve `kite_auth` public API (INV2).** Own carefully-audited sub-task before deploy.
-- **Handoff:** M1 porting must land `power_user_users.id` as BIGINT in Supabase so M2's `BIGINT user_id` FKs type-match.
-- Doc hygiene: stale docstrings calling `falcon_auth_log` a legacy-DB table (it's in the App DB).
+> **Note on the build-phase carry-forwards (R1, BIGINT FK typing, webhook dedupe):** these were all *Postgres-portability* concerns. Under the re-scoped plan they are **Phase 4**, NOT pre-launch — Phase 1 runs on SQLite, where they don't apply. See "Carry-forwards (re-scoped)" below. The only genuinely pre-launch code item is **C3 (tests)**.
 
 ## Round log
 - 2026-06-13: spec approved; CONTRACT/ENV/STATUS written; dispatched M1 + M2 build agents.
@@ -32,16 +30,33 @@ M1 + M2 → (M3, M4, M5) → M7 · M6 + M8 independent leaves.
 - 2026-06-13: M6 GREEN, M7 GREEN, M8 GREEN. **ALL 8 MODULES DONE.** Build phase complete; entering deploy phase.
   - M6 added `/legal` to the middleware Basic-Auth public bypass (audited: does NOT expose operator routes). Legal pages are DRAFT — need lawyer review + placeholder fill ([LEGAL ENTITY NAME], CIN, address, support email, grievance officer).
 
-## Deploy phase (operator-gated — nothing here is auto-done)
-1. Close C2 (R1 kite_tokens → Postgres path) as its own audited sub-task — INV2-preserving.
-2. Close C1 (webhook dedupe Postgres error type) at the cutover.
-3. Add C3 acceptance tests; run them.
-4. Operator credential steps (RUNBOOK_deploy.md): provision Supabase, set POWER_JWT_SECRET + Razorpay keys + Resend key, run porting script, deploy off-laptop, verify checklist.
-5. Lawyer review of legal pages + fill placeholders.
-6. Razorpay ₹999/mo plan created in dashboard.
+## Deploy phase — RE-SCOPED to 4-phase SQLite-volume-first (see CLOUD_ARCHITECTURE.md)
 
-## Pre-go-live punch list (close before deploy, NOT blocking GREEN)
-- **C1 (from M3+M1):** webhook dedupe catches `sqlite3.IntegrityError` only — broaden to Postgres `IntegrityError` (or pre-check) at the M1/M2 Postgres runtime cutover. Latent until cutover; worst case is a Razorpay retry, no data corruption / no false grant.
-- **C2 (R1 from M1):** route `kite_auth` (`kite_tokens`) through the Postgres `db.py` path — touches shared Auto-Trade token path, own audited sub-task, INV2-preserving.
-- **C3 (tests):** M3/M4/M5 shipped without unit tests (no Python in build env). Add acceptance tests before go-live: webhook forged-sig→400 / dup→single-apply / charged→paid / cancelled→blocked; paywall 8 allow/deny cases; signup comp/blocked/duplicate-409.
-- **C4 (cosmetic):** stale docstrings — `falcon_auth_log` "legacy DB" (it's App DB); `persona_backtest_router:14` "all public except /refresh".
+**Decision 2026-06-13:** do NOT lead with Supabase/Postgres. The codebase uses direct `sqlite3`
+everywhere, so Postgres is a code refactor, not a data move. Lift-and-shift on SQLite-on-a-volume
+first → gets off the laptop + launches billing with minimal risk. Postgres = Phase 4 (scale trigger).
+This DEFERS C1/C2/C6 (the Postgres-portability snags) to Phase 4 — they don't block launch.
+
+### PHASE 1 — off the laptop + LAUNCH (SQLite on cloud volume)
+1. Deploy backend + **whole 573M production DB (as-is, no pruning)** + daily jobs to a cloud host with a **persistent volume**. 14G research DB stays on the laptop.
+2. Copy `falcon_outcomes` (827k) into the cloud DB + repoint the evidence read → no request hits the 14G research DB.
+3. Daily jobs (OHLC fetch → features → signals → portfolio EOD) run in cloud; verify Playwright headless + Kite token (stays in the SQLite volume file — NO C2 fix needed on SQLite).
+4. Build the laptop→cloud **publish transport** (CLOUD_ARCHITECTURE §6: a `POST /api/admin/publish-intelligence` ingest endpoint, or object-storage drop + import).
+5. Operator: stand up host + volume, set `POWER_JWT_SECRET` + Razorpay keys + Resend key, point DNS.
+6. Lawyer review of legal pages + fill placeholders. Razorpay ₹999/mo plan created.
+**→ Billing/paywall/signup (already built, SQLite-ready) go live here. Laptop loss ≠ product down.**
+
+### PHASE 2 — materialize request-time reads (post-launch optimization)
+7. Build summary tables (`pattern_stock_evidence`, `stock_signal_evidence`, `persona_backtest_*`); switch `/power/today` evidence (L1+L2) and `/api/power/personas/*` (L3) to read them.
+
+### PHASE 3 — prune production DB (cost optimization)
+8. After Phase 2 proves no request needs deep history: prune cloud `ohlc_daily`/`falcon_features` to ~300 days.
+
+### PHASE 4 — optional Postgres/Supabase (scale trigger only)
+9. Trigger = need multiple backend instances OR managed PITR backups. Then refactor DB-access layer to Postgres; use the already-built `scripts/migrate_to_supabase.py` + `migrations/0001_billing.sql`. Close C1 (webhook dedupe PG error type), C2 (kite_tokens → PG), C6 (publish → PG) HERE.
+
+## Carry-forwards (re-scoped)
+- **C1 / C2 / C6** → moved to **Phase 4** (Postgres-only concerns; irrelevant on SQLite-volume). Kept on record in CLOUD_ARCHITECTURE.
+- **C3 (tests):** still pre-launch — add acceptance tests (webhook forged-sig→400 / dup→single-apply / charged→paid / cancelled→blocked; paywall 8 allow/deny; signup comp/blocked/409).
+- **C4 (cosmetic):** stale docstrings.
+- **Built Postgres artifacts** (`migrate_to_supabase.py`, `0001_billing.sql`) = Phase-4 shelf items, not wasted. Billing runs on SQLite today via `db_init.py`.

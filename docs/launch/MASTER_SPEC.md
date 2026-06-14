@@ -21,7 +21,9 @@
 
 **No trial machinery** — this removes the trial columns, the trial-expiry scheduler, and the trial emails. The existing `power_user_invite_codes` system *is* the free lever; Razorpay is the only new payment path.
 
-## 0.1 Infra targets (LOCKED 2026-06-13)
+## 0.1 Infra targets
+
+> ⚠️ **SUPERSEDED (2026-06-14).** The DB/infra approach below (Supabase/Postgres-first) is replaced by **[CLOUD_ARCHITECTURE.md](CLOUD_ARCHITECTURE.md)** — SQLite-on-a-volume first, Postgres only at Phase 4 (scale trigger). Read CLOUD_ARCHITECTURE for the live plan; the rows below are kept for history.
 
 | Item | Decision |
 |---|---|
@@ -54,6 +56,8 @@ The product **already exists and works**. We are NOT building product features. 
 ---
 
 ## 1.5 DB end-state architecture (the consolidation)
+
+> ⚠️ **SUPERSEDED (2026-06-14) by [CLOUD_ARCHITECTURE.md](CLOUD_ARCHITECTURE.md).** The two-DB end-state is still correct, but the *sequencing* below (porting to Supabase up front) is replaced by the 4-phase, SQLite-volume-first plan. Use CLOUD_ARCHITECTURE.
 
 **Principle: two databases separated by workload, with a one-way publish wall. NOT one common DB.**
 
