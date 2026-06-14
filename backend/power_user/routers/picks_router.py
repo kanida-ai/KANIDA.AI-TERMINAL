@@ -34,6 +34,7 @@ from ..services.replay_cache import (
 )
 from .dependencies import (
     check_anon_rate_limit,
+    current_paid_user_required,
     current_user_optional,
     current_user_required,
     get_db,
@@ -120,10 +121,10 @@ def today_preview(
 @router.get("/picks/today")
 def today_full(
     request: Request,
-    user = Depends(current_user_required),
+    user = Depends(current_paid_user_required),
     con: sqlite3.Connection = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Authed: full top-100 with stories. The power-user core view."""
+    """Authed + paid: full top-100 with stories. The power-user core view."""
     ip_hash = hash_ip_ua(request)
     result = _build_today_picks(con, top_n=AUTHED_TOP_N)
     log_request(con, user_id=user.user_id, route="/api/power/picks/today",
@@ -244,7 +245,7 @@ def live_decisions(
     request: Request,
     cycle: str = "latest",
     entry_date: Optional[str] = None,
-    user = Depends(current_user_required),
+    user = Depends(current_paid_user_required),
     con: sqlite3.Connection = Depends(get_db),
 ) -> Dict[str, Any]:
     """Read pre-computed ENTER/WAIT/SKIP decisions. No Kite call per request.

@@ -1,0 +1,13 @@
+Payment received
+
+Thank you — your Kanida.AI subscription payment has gone through.
+
+  Amount             : {amount}
+  Access valid until : {period_end}
+  Account            : {email}
+
+Your subscription renews automatically. You can manage or cancel it any
+time from your billing page.
+
+--
+Kanida.AI is a research & analytics tool, not investment advice.

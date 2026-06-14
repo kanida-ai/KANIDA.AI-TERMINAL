@@ -27,6 +27,7 @@ from ..services.persona_simulator import (
     list_personas,
     simulate_persona,
 )
+from .dependencies import current_paid_user_required
 from .. import config
 
 log = logging.getLogger("kanida.power_user.persona_backtest_router")
@@ -38,7 +39,9 @@ router = APIRouter(prefix="/api/power/personas", tags=["power_user_personas"])
 # ════════════════════════════════════════════════════════════════════════
 
 @router.get("")
-def get_persona_list() -> List[Dict[str, Optional[str]]]:
+def get_persona_list(
+    _paid=Depends(current_paid_user_required),
+) -> List[Dict[str, Optional[str]]]:
     """Lightweight list for the persona-selector UI on the landing page.
     Does NOT trigger a sim — just returns metadata from PERSONA_CONFIGS.
     `warning` is None for 4 of 5 personas (only P5 BTST carries one), so the
@@ -48,7 +51,10 @@ def get_persona_list() -> List[Dict[str, Optional[str]]]:
 
 
 @router.get("/{slug}")
-def get_persona_backtest(slug: str) -> Dict[str, Any]:
+def get_persona_backtest(
+    slug: str,
+    _paid=Depends(current_paid_user_required),
+) -> Dict[str, Any]:
     """Full backtest result for one persona. Cached 1 hour.
 
     Returns the same shape as `simulate_persona()`:
@@ -75,7 +81,10 @@ def get_persona_backtest(slug: str) -> Dict[str, Any]:
 
 
 @router.get("/{slug}/yearly")
-def get_persona_yearly(slug: str) -> Dict[str, Any]:
+def get_persona_yearly(
+    slug: str,
+    _paid=Depends(current_paid_user_required),
+) -> Dict[str, Any]:
     """Just the year-by-year table — for the detail-page yearly grid."""
     full = get_persona_backtest(slug)
     return {
@@ -87,7 +96,11 @@ def get_persona_yearly(slug: str) -> Dict[str, Any]:
 
 
 @router.get("/{slug}/monthly/{year}")
-def get_persona_monthly_for_year(slug: str, year: int) -> Dict[str, Any]:
+def get_persona_monthly_for_year(
+    slug: str,
+    year: int,
+    _paid=Depends(current_paid_user_required),
+) -> Dict[str, Any]:
     """Month-by-month drill for a specific year. Used when user expands a year row."""
     full = get_persona_backtest(slug)
     months = [m for m in full["monthly"] if m["year"] == year]
@@ -108,6 +121,7 @@ def get_persona_trades(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     year: Optional[int] = None,
+    _paid=Depends(current_paid_user_required),
 ) -> Dict[str, Any]:
     """Paginated trade log. Optionally filter by year."""
     full = get_persona_backtest(slug)
@@ -128,7 +142,10 @@ def get_persona_trades(
 
 
 @router.get("/{slug}/reconciliation")
-def get_persona_reconciliation(slug: str) -> Dict[str, Any]:
+def get_persona_reconciliation(
+    slug: str,
+    _paid=Depends(current_paid_user_required),
+) -> Dict[str, Any]:
     """Year-by-year P&L reconciliation. For QA / audit pages — should always
     show 0 gap, otherwise there's a bug."""
     full = get_persona_backtest(slug)

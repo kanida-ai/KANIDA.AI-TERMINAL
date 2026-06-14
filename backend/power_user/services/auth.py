@@ -26,6 +26,7 @@ Security invariants:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import sqlite3
 import time
@@ -313,6 +314,26 @@ def _synthetic_sub_for_email(email: str) -> str:
     return f"email:{email.lower().strip()}"
 
 
+# Launch M5 (open email signup): the CONTRACT §3.1 mandates a HASHED synthetic
+# sub of form  'email:' + sha256(lowercased email)  for users created via the
+# open signup endpoint. This keeps the (dev) google_sub NOT-NULL + UNIQUE
+# constraint satisfied without exposing the raw email inside the sub column.
+#
+# NOTE — two synthetic-sub forms now coexist, deliberately:
+#   * _synthetic_sub_for_email()        → 'email:<raw>'    (legacy invite-login,
+#                                          redeem_with_email; unchanged)
+#   * _synthetic_sub_for_email_hashed() → 'email:<sha256>' (open signup, M5)
+# Both are stable functions of the (lowercased) email, so each email maps to
+# exactly ONE sub within each scheme — no collision risk inside a scheme. A
+# given email is only ever created through ONE path (signup OR invite redeem),
+# so a single user never needs both. If such a user later signs in via Google
+# with the same email, sign_in_with_google()'s email-fallback rotates google_sub
+# to the real Google sub regardless of which synthetic form was stored.
+def _synthetic_sub_for_email_hashed(email: str) -> str:
+    digest = hashlib.sha256(email.lower().strip().encode("utf-8")).hexdigest()
+    return f"email:{digest}"
+
+
 def _normalize_email(email: str) -> str:
     """Lowercase + strip. Raises AuthError if structurally invalid."""
     e = (email or "").lower().strip()
@@ -472,3 +493,170 @@ def sign_in_with_email_and_code(
     except InviteError as e:
         # Re-raise as AuthError so the router can map uniformly
         raise AuthError("INVITE_INVALID", e.code)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Launch M5: OPEN email signup (no invite required) — billing-aware
+# ──────────────────────────────────────────────────────────────────────────
+
+class SignupError(Exception):
+    """Raised by signup_user for the duplicate-email case (and other hard
+    failures the router maps to a specific HTTP status). Distinct from
+    AuthError so the router can map EMAIL_EXISTS → 409 precisely while every
+    other failure mode keeps the existing AuthError → 400/401 mapping.
+
+    code values:
+        EMAIL_EXISTS   → 409 {code:'EMAIL_EXISTS'}
+    """
+    def __init__(self, code: str, detail: str = ""):
+        self.code   = code
+        self.detail = detail
+        super().__init__(f"{code}: {detail}")
+
+
+def signup_user(
+    con: sqlite3.Connection,
+    email: str,
+    invite_code: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Open email signup (CONTRACT §3.1 / MASTER_SPEC M5).
+
+    Two branches, by whether a VALID, unused, unexpired invite code is supplied:
+
+      (a) VALID invite_code  → create user with billing_plan='comp', redeem the
+          code atomically via the EXISTING invites.py path (redeem_with_email),
+          issue JWT, return access='full', checkout_url=None.
+
+      (b) NO / INVALID code  → create user with billing_plan='blocked', issue
+          JWT, return access='payment_required', checkout_url='/power/billing'.
+          (User flips to 'paid' later when the Razorpay webhook lands — M3.)
+
+    Duplicate email (a row already exists for this email) → SignupError(
+    'EMAIL_EXISTS'); the router maps that to HTTP 409. We do NOT leak whether
+    the existing account is founding/comp/paid/blocked — just "exists".
+
+    Returns (shape consumed by the router, which adds nothing further):
+        {
+          "token":        str,          # the JWT
+          "user_id":      int,
+          "billing_plan": "comp"|"blocked",
+          "access":       "full"|"payment_required",
+          "checkout_url": str | None,
+        }
+
+    Raises:
+        AuthError("EMAIL_INVALID")  — structurally bad email (router → 400)
+        SignupError("EMAIL_EXISTS") — duplicate (router → 409)
+
+    Reuse map (no logic duplicated):
+        * invites.redeem_with_email  — atomic code validate + consume + user
+          insert for the comp branch. We do NOT reimplement code redemption.
+        * issue_jwt / touch_last_seen — JWT minting + last_seen bump (shared
+          with every other auth path).
+        * _synthetic_sub_for_email_hashed — google_sub NOT-NULL satisfier.
+
+    TODO(Stage 2): email verification. v1 trusts the supplied email without a
+    confirmation round-trip — there is no verify-link / email_verified column
+    yet. When Stage 2 adds it, gate JWT issuance (or product access) on
+    verification. Out of scope for v1 per MASTER_SPEC M5.
+    """
+    from .invites import InviteError, redeem_with_email
+
+    # M8 email hook — best-effort welcome on a NEW signup. Wrapped so ANY email
+    # failure (unconfigured provider, SDK absent, provider error) is swallowed +
+    # logged and NEVER affects the signup response. Defined once, called at each
+    # of the two signup-success return sites (comp-via-code + blocked/paywall).
+    # No welcome is sent to founding members — this path only runs for fresh
+    # open signups.
+    def _send_welcome_best_effort(addr: str) -> None:
+        try:
+            from .email_service import send_welcome
+            send_welcome(addr)
+        except Exception as _e:  # noqa: BLE001 — email is best-effort, never breaks signup
+            log.warning("auth: welcome email hook failed for %s — %s",
+                        redact_email(addr), _e)
+
+    email = _normalize_email(email)
+    code = (invite_code or "").strip()
+
+    # ── Duplicate-email guard (both branches share it) ───────────────────
+    # Open signup creates a BRAND-NEW account only. An existing email — no
+    # matter its plan or how it was created — is a 409. Re-login for existing
+    # users goes through /auth/invite-login, not here.
+    if find_user_by_email(con, email) is not None:
+        log.info("auth: signup rejected — email exists for %s", redact_email(email))
+        raise SignupError("EMAIL_EXISTS", "An account with this email already exists")
+
+    # ── Branch (a): valid invite code → comp account ─────────────────────
+    if code:
+        try:
+            result = redeem_with_email(con, email=email, code=code)
+        except InviteError as e:
+            # Code present but not valid (not found / used / expired / bad
+            # shape). Per CONTRACT §3.1 an INVALID code is NOT an error — it
+            # falls through to the blocked/paywall branch. We log the internal
+            # reason but treat the user as code-less.
+            log.info("auth: signup code invalid (%s) for %s — falling back to "
+                     "blocked branch", e.code, redact_email(email))
+        else:
+            # redeem_with_email already created the user (role='user', synthetic
+            # sub 'email:<raw>') and consumed the code atomically. Flip the new
+            # row to billing_plan='comp' (free-forever via code). subscription_
+            # status stays at its column default ('active'); comp is never
+            # gated by sub status (CONTRACT §2).
+            user_id = int(result["user"]["id"])
+            con.execute(
+                "UPDATE power_user_users SET billing_plan='comp' WHERE id = ?",
+                (user_id,),
+            )
+            con.commit()
+            log.info("auth: signup OK (comp via code) for %s (user_id=%d)",
+                     redact_email(email), user_id)
+            _send_welcome_best_effort(email)   # M8 hook — best-effort, post-success
+            return {
+                "token":        result["jwt"],
+                "user_id":      user_id,
+                "billing_plan": "comp",
+                "access":       "full",
+                "checkout_url": None,
+            }
+
+    # ── Branch (b): no / invalid code → blocked account + paywall ────────
+    # Create the user ourselves (no invite code to consume). Synthetic HASHED
+    # google_sub per CONTRACT §3.1 satisfies the dev NOT-NULL/UNIQUE constraint.
+    google_sub = _synthetic_sub_for_email_hashed(email)
+    now_iso = datetime.now(IST).isoformat()
+    try:
+        cur = con.execute(
+            """
+            INSERT INTO power_user_users
+              (email, google_sub, display_name, picture_url,
+               invite_code, role, is_active, created_at,
+               billing_plan, subscription_status)
+            VALUES (?, ?, NULL, NULL, NULL, 'user', 1, ?, 'blocked', 'active')
+            """,
+            (email, google_sub, now_iso),
+        )
+        con.commit()
+    except sqlite3.IntegrityError as e:
+        # Lost a race on the UNIQUE(email)/UNIQUE(google_sub) constraint between
+        # the find_user_by_email check above and this insert. Treat as duplicate.
+        con.rollback()
+        log.info("auth: signup race → EMAIL_EXISTS for %s (%s)",
+                 redact_email(email), e)
+        raise SignupError("EMAIL_EXISTS", "An account with this email already exists")
+
+    user_id = int(cur.lastrowid)
+    token = issue_jwt(user_id=user_id, email=email,
+                      google_sub=google_sub, role="user")
+    touch_last_seen(con, user_id)
+    log.info("auth: signup OK (blocked / payment_required) for %s (user_id=%d)",
+             redact_email(email), user_id)
+    _send_welcome_best_effort(email)   # M8 hook — best-effort, post-success
+    return {
+        "token":        token,
+        "user_id":      user_id,
+        "billing_plan": "blocked",
+        "access":       "payment_required",
+        "checkout_url": "/power/billing",
+    }

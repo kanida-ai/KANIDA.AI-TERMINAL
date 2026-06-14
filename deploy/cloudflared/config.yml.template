@@ -1,0 +1,52 @@
+# ════════════════════════════════════════════════════════════════════════
+#  cloudflared — kanida-api named tunnel
+# ════════════════════════════════════════════════════════════════════════
+#
+#  USE:
+#   1. After `cloudflared tunnel create kanida-api`, copy this file to
+#      `config.yml` (drop the .template suffix) in the SAME directory.
+#   2. Replace BOTH occurrences of `<TUNNEL_UUID_HERE>` with the UUID
+#      printed by `tunnel create`.
+#   3. Copy the final config.yml to `C:\Users\SPS\.cloudflared\config.yml`
+#      (Cloudflared reads from there by default on Windows).
+#   4. The install-tunnel.ps1 script handles steps 3-5 if you let it.
+#
+#  WHAT THIS DOES:
+#   - Exposes the FastAPI backend (localhost:8001) at api.kanida.ai
+#   - All other traffic to the tunnel → 404 (no leaky catch-all)
+#   - TLS terminated at Cloudflare edge; backend stays plain HTTP locally
+#   - HTTP/2 between Cloudflare edge ↔ your laptop (`http2Origin: true`)
+#   - Tunnel ID + credentials file pinned (no ambient auth)
+#
+# ════════════════════════════════════════════════════════════════════════
+
+tunnel: <TUNNEL_UUID_HERE>
+credentials-file: C:\Users\SPS\.cloudflared\<TUNNEL_UUID_HERE>.json
+
+# Logging — useful for first few weeks of operation
+loglevel: info
+logfile:  C:\Users\SPS\.cloudflared\cloudflared.log
+
+# Origin connection tuning
+# - keep these defaults unless backend is slow
+originRequest:
+  connectTimeout: 30s
+  tlsTimeout:     30s
+  tcpKeepAlive:   30s
+  noTLSVerify:    true        # backend is plain HTTP; no cert to verify
+  http2Origin:    true        # speeds up multiplexed requests
+
+
+# Ingress rules — first match wins
+ingress:
+  # API surface — what Vercel calls
+  - hostname: api.kanida.ai
+    service:  http://localhost:8001
+    originRequest:
+      # The public API path matches /api/power/* (FastAPI server has those routes)
+      # No path filtering here — backend's own router handles unknown paths.
+      disableChunkedEncoding: false
+
+  # Catch-all — every other request returns 404 from the edge
+  # (prevents the tunnel from being used as an open proxy)
+  - service: http_status:404

@@ -1,0 +1,11 @@
+Welcome to Kanida.AI
+
+Your account is live. You now have access to the Kanida.AI terminal —
+daily Top-10 picks, the Co-Trader portfolios, and the explainability
+behind every signal.
+
+Sign in any time with the email you used to register: {email}
+
+--
+Kanida.AI is a research & analytics tool, not investment advice.
+Markets carry risk; do your own diligence.

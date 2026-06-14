@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -22,9 +22,11 @@ from pydantic import BaseModel
 from ..services.auth import (
     AuthError,
     JWTPayload,
+    SignupError,
     redact_email,
     sign_in_with_email_and_code,
     sign_in_with_google,
+    signup_user,
     touch_last_seen,
 )
 from .. import config
@@ -47,6 +49,17 @@ class GoogleSignInRequest(BaseModel):
 class InviteLoginRequest(BaseModel):
     email: str
     code:  str = ""        # blank allowed only for existing-user re-login
+
+
+class SignupRequest(BaseModel):
+    """Launch M5 open-signup body (CONTRACT §3.1).
+
+    `invite_code` is optional: present → comp account; absent/invalid → blocked
+    account routed to the paywall. `Optional[str]` (not `str = ""`) so the
+    frontend may send `{"email": "..."}` with the key omitted entirely.
+    """
+    email:       str
+    invite_code: Optional[str] = None
 
 
 class LogoutResponse(BaseModel):
@@ -166,4 +179,63 @@ def invite_login(
                 status_code=200, latency_ms=0, ip_hash=ip_hash)
     log.info("auth: invite-login OK for %s (role=%s)",
              redact_email(result["user"]["email"]), result["user"]["role"])
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Launch M5: open email signup (billing-aware) — NEW funnel entry point
+# ──────────────────────────────────────────────────────────────────────────
+
+@router.post("/signup")
+def signup(
+    body: SignupRequest,
+    request: Request,
+    con: sqlite3.Connection = Depends(get_db),
+) -> Dict[str, Any]:
+    """Open email signup (CONTRACT §3.1). Distinct from /invite-login:
+
+      * /invite-login  — EXISTING founding/comp members re-login (email-only),
+                          or invite redemption for the legacy invite-only flow.
+                          Behaviourally UNCHANGED by this endpoint.
+      * /signup        — NEW public funnel. Email + optional invite_code:
+          - valid code → billing_plan='comp', access='full'
+          - no/invalid → billing_plan='blocked', access='payment_required',
+                         checkout_url='/power/billing' (pay to unlock)
+
+    Response 200:
+        { token, user_id, billing_plan, access, checkout_url }
+    Errors:
+        409 {code:'EMAIL_EXISTS'}   — account already exists for this email
+        400 {code:'EMAIL_INVALID'}  — structurally invalid email
+
+    Rate-limited per IP-hash (same budget as invite-login) so the open funnel
+    can't be used to mass-create rows.
+    """
+    ip_hash   = hash_ip_ua(request)
+    route_key = "/api/power/auth/signup"
+
+    check_anon_rate_limit(con, ip_hash, route_key,
+                          config.POWER_INVITE_LOGIN_LIMIT_PER_HOUR)
+
+    try:
+        result = signup_user(con, body.email, body.invite_code)
+    except SignupError as e:
+        # Only EMAIL_EXISTS today → 409 with the exact contract body.
+        log.info("auth: signup conflict (%s) for %s",
+                 e.code, redact_email(body.email))
+        log_request(con, user_id=None, route=route_key, status_code=409,
+                    latency_ms=0, ip_hash=ip_hash)
+        raise HTTPException(409, {"code": e.code})
+    except AuthError as e:
+        # Structural email failure (EMAIL_INVALID) → 400.
+        log.warning("auth: signup failed for %s — %s",
+                    redact_email(body.email), e.code)
+        log_request(con, user_id=None, route=route_key, status_code=400,
+                    latency_ms=0, ip_hash=ip_hash)
+        raise HTTPException(400, {"code": e.code, "message": e.detail})
+
+    log_request(con, user_id=result["user_id"], route=route_key,
+                status_code=200, latency_ms=0, ip_hash=ip_hash)
+    log.info("auth: signup OK for %s (plan=%s, access=%s)",
+             redact_email(body.email), result["billing_plan"], result["access"])
     return result

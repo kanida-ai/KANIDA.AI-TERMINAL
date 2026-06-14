@@ -13,10 +13,11 @@
  * which is a separate task — the page contract here doesn't depend on the
  * auth method, only that a session exists.
  */
-import { PowerAPI } from '@/lib/power-api'
+import { PowerAPI, PowerAPIError } from '@/lib/power-api'
 import { requireSession } from '@/lib/power-auth'
 import { Top20Card } from '@/components/power/Top20Card'
 import { Top20Filters } from '@/components/power/Top20Filters'
+import { PaywallNotice } from '@/components/power/PaywallNotice'
 import type { Top20Universe, Top20Response } from '@/lib/falcon-top20-types'
 
 export const dynamic   = 'force-dynamic'
@@ -42,11 +43,21 @@ export default async function TodayPage({
 
   let data: Top20Response | null = null
   let fetchError: string | null = null
+  let paywallCheckoutUrl: string | null | undefined = undefined  // undefined = not paywalled
   try {
     data = await PowerAPI.falconTop20(universe, sector, reqDate)
   } catch (e) {
-    fetchError = e instanceof Error ? e.message : 'Failed to load Top 20.'
-    console.error('[/power/today] falconTop20 failed:', e)
+    // 402 → render the paywall "Subscribe to continue" state, not a red error.
+    if (e instanceof PowerAPIError && e.isPaymentRequired()) {
+      paywallCheckoutUrl = e.checkoutUrl()
+    } else {
+      fetchError = e instanceof Error ? e.message : 'Failed to load Top 20.'
+      console.error('[/power/today] falconTop20 failed:', e)
+    }
+  }
+
+  if (paywallCheckoutUrl !== undefined) {
+    return <PaywallNotice feature="today's picks" checkoutUrl={paywallCheckoutUrl} />
   }
 
   const picks = data?.picks ?? []

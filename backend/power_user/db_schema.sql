@@ -207,3 +207,81 @@ CREATE TABLE IF NOT EXISTS power_user_request_log (
 CREATE INDEX IF NOT EXISTS ix_pulog_created   ON power_user_request_log(created_at);
 CREATE INDEX IF NOT EXISTS ix_pulog_iphash_t  ON power_user_request_log(ip_hash, created_at);
 CREATE INDEX IF NOT EXISTS ix_pulog_user      ON power_user_request_log(user_id, created_at);
+
+-- ─── BILLING (Razorpay) — Migration 0001, DEV (SQLite) mirror ─────────────
+--
+-- DIALECT NOTE: This file boots LOCAL DEV (SQLite). The canonical PRODUCTION
+-- migration is backend/power_user/migrations/0001_billing.sql, written for
+-- PostgreSQL (Supabase, the App DB). The two MUST stay logically equivalent;
+-- only the dialect differs:
+--     Postgres            -> SQLite (dev)
+--     BIGSERIAL PRIMARY KEY  -> INTEGER PRIMARY KEY AUTOINCREMENT
+--     BIGINT                 -> INTEGER
+--     TIMESTAMPTZ            -> TEXT (IST ISO 8601, same convention as rest of file)
+--     JSONB                  -> TEXT (JSON stored as text in dev)
+--     now()                  -> handled in app code (no DEFAULT now() in SQLite)
+--
+-- google_sub NOT NULL RELAXATION — DEV STRATEGY:
+--   The Postgres migration does `ALTER COLUMN google_sub DROP NOT NULL` so open
+--   email signup (M5) can create users with no Google account. SQLite CANNOT
+--   drop a NOT NULL constraint without a full table rebuild (create-new ->
+--   copy -> drop -> rename), which is risky against a live dev DB and is
+--   explicitly avoided here. Instead, in DEV the open-signup path writes a
+--   SYNTHETIC non-null value:  google_sub = 'email:' || sha256(lower(email))
+--   so the existing NOT NULL is never violated. The REAL relaxation (true NULL
+--   google_sub) happens only in the Postgres migration in production. This
+--   keeps dev and prod behaviourally aligned at the application layer while
+--   respecting SQLite's ALTER limitations.
+
+-- power_user_users billing columns (additive; INV7).
+--
+-- IMPORTANT — these ADD COLUMN statements are DELIBERATELY NOT in this file.
+-- This file is run via sqlite3.executescript() at EVERY boot (see db_init.py).
+-- SQLite has no "ADD COLUMN IF NOT EXISTS", so a bare ALTER here would raise
+-- "duplicate column name" on the second boot and, inside executescript(), would
+-- abort the ENTIRE schema init and crash dev startup.
+--
+-- They are therefore applied by db_init.py as guarded, per-statement ALTERs
+-- wrapped in try/except OperationalError("duplicate column") — exactly the same
+-- pattern already used for portfolio_definitions.narrative_json. The intended
+-- DDL (for reference / parity with the Postgres migration) is:
+--   ALTER TABLE power_user_users ADD COLUMN billing_plan TEXT DEFAULT 'founding';
+--   ALTER TABLE power_user_users ADD COLUMN razorpay_customer_id TEXT;
+--   ALTER TABLE power_user_users ADD COLUMN subscription_status TEXT DEFAULT 'active';
+-- followed by the founding/active backfill (UPDATE ... WHERE billing_plan IS NULL).
+--
+-- SQLite ADD COLUMN also cannot carry a CHECK against the new column's domain
+-- the way the Postgres migration does; the billing_plan domain
+-- (founding/comp/paid/blocked) is enforced at the application layer in dev.
+-- Pre-existing rows come out 'founding'/'active' (INV1) via the db_init backfill.
+
+-- power_user_subscriptions (NEW) — SQLite mirror of CONTRACT §1.2.
+CREATE TABLE IF NOT EXISTS power_user_subscriptions (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id                   INTEGER NOT NULL,
+    razorpay_subscription_id  TEXT UNIQUE,
+    plan_code                 TEXT NOT NULL,             -- 'monthly_999' at launch
+    status                    TEXT NOT NULL,             -- Razorpay sub states
+    current_start             TEXT,                      -- IST ISO 8601 (TIMESTAMPTZ in prod)
+    current_end               TEXT,                      -- access valid until this
+    created_at                TEXT NOT NULL,             -- IST ISO; app sets (no now() default)
+    updated_at                TEXT NOT NULL,             -- IST ISO; app sets
+    FOREIGN KEY (user_id) REFERENCES power_user_users(id)
+);
+CREATE INDEX IF NOT EXISTS ix_pu_subs_user    ON power_user_subscriptions(user_id);
+CREATE INDEX IF NOT EXISTS ix_pu_subs_rzp_sub ON power_user_subscriptions(razorpay_subscription_id);
+
+-- power_user_billing_events (NEW) — SQLite mirror of CONTRACT §1.3.
+-- razorpay_event_id UNIQUE NOT NULL = idempotency key (dedupe duplicate webhooks).
+-- payload is JSON stored as TEXT in dev (JSONB in prod).
+CREATE TABLE IF NOT EXISTS power_user_billing_events (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id             INTEGER,                          -- nullable: event may arrive pre-link
+    razorpay_event_id   TEXT UNIQUE NOT NULL,             -- idempotency key
+    event_type          TEXT NOT NULL,                    -- e.g. subscription.activated
+    payload             TEXT NOT NULL,                    -- raw event JSON (JSONB in prod)
+    received_at         TEXT NOT NULL,                    -- IST ISO; app sets (no now() default)
+    FOREIGN KEY (user_id) REFERENCES power_user_users(id)
+);
+CREATE INDEX IF NOT EXISTS ix_pu_bill_events_user ON power_user_billing_events(user_id);
+CREATE INDEX IF NOT EXISTS ix_pu_bill_events_type ON power_user_billing_events(event_type, received_at);

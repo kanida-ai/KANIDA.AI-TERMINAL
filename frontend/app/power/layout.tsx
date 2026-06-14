@@ -106,12 +106,22 @@ function TopBar({ signedIn, email, displayName, pictureUrl, isAdmin }: {
 function Footer() {
   return (
     <footer className="border-t border-neutral-900 mt-16 py-6">
-      <div className="max-w-7xl mx-auto px-4 md:px-6 text-xs text-neutral-500 flex flex-col md:flex-row gap-2 md:gap-6 justify-between">
-        <span>
-          Engineered patterns from a 9-year mining + walk-forward validation pipeline.
-          Not financial advice. You own your trades.
-        </span>
-        <span className="font-mono">v1.0 · 2026</span>
+      <div className="max-w-7xl mx-auto px-4 md:px-6 text-xs text-neutral-500 space-y-3">
+        {/* M6: legal links — Power (public) surface only. The operator /falcon/*
+            surface uses a separate layout and is unaffected (INV2). */}
+        <nav className="flex flex-wrap gap-x-5 gap-y-2">
+          <Link href="/legal/terms" className="hover:text-neutral-200">Terms</Link>
+          <Link href="/legal/privacy" className="hover:text-neutral-200">Privacy</Link>
+          <Link href="/legal/refund" className="hover:text-neutral-200">Refund</Link>
+          <Link href="/legal/risk" className="hover:text-neutral-200">Risk Disclosure</Link>
+        </nav>
+        <div className="flex flex-col md:flex-row gap-2 md:gap-6 justify-between">
+          <span>
+            Engineered patterns from a 9-year mining + walk-forward validation pipeline.
+            Not financial advice. You own your trades.
+          </span>
+          <span className="font-mono">v1.0 · 2026</span>
+        </div>
       </div>
     </footer>
   )

@@ -1,0 +1,13 @@
+Your subscription needs attention
+
+We weren't able to keep your Kanida.AI subscription active — a recent
+payment didn't go through, or the subscription was cancelled. As a result,
+access to the terminal is currently paused.
+
+To restore access, head to your billing page and re-subscribe. It only
+takes a moment.
+
+Account: {email}
+
+--
+Kanida.AI is a research & analytics tool, not investment advice.

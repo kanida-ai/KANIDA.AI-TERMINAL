@@ -12,6 +12,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Headless Chromium for Zerodha token refresh (scripts/auth_worker.py).
+# --with-deps pulls the Linux shared libraries Chromium needs. Without this the
+# host auth refresh fails with BROWSER_LAUNCH_FAILED. See docs/launch/RUNBOOK_deploy.md §6.
+RUN playwright install --with-deps chromium
+
 # Copy app
 COPY . .
 

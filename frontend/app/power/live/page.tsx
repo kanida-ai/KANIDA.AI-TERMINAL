@@ -9,8 +9,9 @@
  *   If a row in cycle='0945' has decided_at_cycle='0930', the UI shows the
  *   decision was LOCKED at 9:30 — the trader can trust it didn't flip.
  */
-import { PowerAPI, type LiveCycle, type LiveDecision } from '@/lib/power-api'
+import { PowerAPI, PowerAPIError, type LiveCycle, type LiveDecision } from '@/lib/power-api'
 import { requireSession } from '@/lib/power-auth'
+import { PaywallNotice } from '@/components/power/PaywallNotice'
 import { CyclePicker } from './CyclePicker'
 
 export const dynamic = 'force-dynamic'
@@ -29,11 +30,20 @@ export default async function LivePage({ searchParams }: { searchParams: SearchP
 
   let data: Awaited<ReturnType<typeof PowerAPI.liveDecisions>> | null = null
   let fetchError: string | null = null
+  let paywallCheckoutUrl: string | null | undefined = undefined  // undefined = not paywalled
 
   try {
     data = await PowerAPI.liveDecisions(jwt, validCycle)
   } catch (e) {
-    fetchError = e instanceof Error ? e.message : 'Failed to load live decisions.'
+    if (e instanceof PowerAPIError && e.isPaymentRequired()) {
+      paywallCheckoutUrl = e.checkoutUrl()
+    } else {
+      fetchError = e instanceof Error ? e.message : 'Failed to load live decisions.'
+    }
+  }
+
+  if (paywallCheckoutUrl !== undefined) {
+    return <PaywallNotice feature="the live overlay" checkoutUrl={paywallCheckoutUrl} />
   }
 
   return (

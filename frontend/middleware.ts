@@ -26,7 +26,12 @@ const BASIC_REALM = 'Restricted'
 // /api/power/session). These MUST bypass the site-wide HTTP Basic Auth
 // gate so invitees can reach /power/login with just their invite code.
 // Operator surfaces (/falcon, /admin, /analysis, /) stay behind Basic Auth.
-const POWER_PORTAL_PATHS = ['/power', '/api/power', '/api/power-auth']
+// `/legal` (M6) is the public Terms/Privacy/Refund/Risk surface. It is linked
+// from the Power footer + the signup flow and must be reachable WITHOUT the
+// site-wide Basic Auth dialog (otherwise prospects hit a browser auth prompt
+// before they can read the legal docs). It exposes no operator data — static
+// content only.
+const POWER_PORTAL_PATHS = ['/power', '/api/power', '/api/power-auth', '/legal']
 
 function unauthorized(): NextResponse {
   return new NextResponse(null, {

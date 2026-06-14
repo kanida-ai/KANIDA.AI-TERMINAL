@@ -41,6 +41,10 @@ EXPECTED_TABLES = [
     # operator's V3 audit Excel files.
     "portfolio_yearly_performance",
     "portfolio_monthly_performance",
+    # Launch M2 (2026-06-13): billing (Razorpay). Postgres canonical migration
+    # is migrations/0001_billing.sql; these are the SQLite dev mirrors.
+    "power_user_subscriptions",
+    "power_user_billing_events",
 ]
 
 EXPECTED_INDICES = [
@@ -69,6 +73,11 @@ EXPECTED_INDICES = [
     "ix_port_event_type",
     "ix_port_yearly",
     "ix_port_monthly",
+    # Launch M2 (2026-06-13): billing
+    "ix_pu_subs_user",
+    "ix_pu_subs_rzp_sub",
+    "ix_pu_bill_events_user",
+    "ix_pu_bill_events_type",
 ]
 
 
@@ -109,6 +118,39 @@ def init_power_user_schema(db_path: str) -> Dict[str, Any]:
         except sqlite3.OperationalError as e:
             if "duplicate column" not in str(e).lower():
                 raise
+
+        # ─── Launch M2: billing columns on power_user_users (DEV/SQLite) ─────
+        # SQLite has no "ADD COLUMN IF NOT EXISTS"; these cannot live in
+        # db_schema.sql (executescript would abort the whole init on the second
+        # boot). Applied here as guarded per-statement ALTERs, mirroring the
+        # narrative_json pattern. Canonical prod DDL: migrations/0001_billing.sql.
+        # See CONTRACT §1.1. Additive only (INV7).
+        _billing_alters = [
+            "ALTER TABLE power_user_users ADD COLUMN billing_plan TEXT DEFAULT 'founding'",
+            "ALTER TABLE power_user_users ADD COLUMN razorpay_customer_id TEXT",
+            "ALTER TABLE power_user_users ADD COLUMN subscription_status TEXT DEFAULT 'active'",
+        ]
+        for _stmt in _billing_alters:
+            try:
+                con.execute(_stmt)
+                log.info("power_user_users: applied billing ALTER (%s)", _stmt.split("ADD COLUMN ")[1])
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+
+        # Backfill existing users → founding/active (INV1). Idempotent: only
+        # touches rows where the column is NULL (i.e. pre-existing rows inserted
+        # before the ADD COLUMN, which SQLite leaves NULL when no value was set).
+        # Mirrors §3 of the Postgres migration. Scoped so real comp/paid/blocked
+        # users (created post-launch) are never reverted to founding.
+        con.execute(
+            "UPDATE power_user_users SET billing_plan='founding' "
+            "WHERE billing_plan IS NULL"
+        )
+        con.execute(
+            "UPDATE power_user_users SET subscription_status='active' "
+            "WHERE subscription_status IS NULL"
+        )
         con.commit()
 
         # Verify by querying sqlite_master

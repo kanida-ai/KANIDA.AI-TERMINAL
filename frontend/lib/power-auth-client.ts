@@ -4,7 +4,8 @@
  * Never reads the JWT directly (it's HTTPOnly). Only triggers state changes
  * via Route Handlers and API calls.
  */
-import { PowerAPI, type GoogleSignInResponse, type GoogleSignInOK, type InviteLoginOK } from './power-api'
+import { PowerAPI, type GoogleSignInResponse, type GoogleSignInOK, type InviteLoginOK,
+          type SignupRequest, type SignupResponse } from './power-api'
 
 
 /** Send Google id_token to backend, return {status:'ok',jwt,user} or {status:'needs_invite',...} */
@@ -17,6 +18,21 @@ export async function exchangeGoogleIdToken(idToken: string): Promise<GoogleSign
  *  on any failure mode (intentionally indistinguishable to block enumeration). */
 export async function loginWithInviteCode(email: string, code: string): Promise<InviteLoginOK> {
   return await PowerAPI.signInWithInviteCode({ email, code })
+}
+
+
+/** M7 open signup: email + optional invite code → backend creates the account
+ *  and returns {token, access, billing_plan, checkout_url}. Throws
+ *  PowerAPIError(409,'EMAIL_EXISTS') on a duplicate email. The caller stores
+ *  the token via storeSessionJWT and routes on `access`. */
+export async function signupWithEmail(
+  email: string,
+  inviteCode: string,
+): Promise<SignupResponse> {
+  const req: SignupRequest = { email }
+  const code = inviteCode.trim()
+  if (code) req.invite_code = code
+  return await PowerAPI.signup(req)
 }
 
 

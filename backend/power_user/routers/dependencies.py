@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -96,6 +97,89 @@ def current_user_optional(
         return verify_jwt(token)
     except AuthError:
         return None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Paywall gate — billing-aware (M4)
+# ──────────────────────────────────────────────────────────────────────────
+
+# Frontend billing page. Override via env (e.g. point at a Razorpay-hosted
+# short-url) without touching code. CONTRACT §3.3 default = "/power/billing".
+def _checkout_url() -> str:
+    return os.environ.get("POWER_CHECKOUT_URL", "/power/billing")
+
+
+def _is_allowed_billing(role: Optional[str],
+                         billing_plan: Optional[str],
+                         subscription_status: Optional[str]) -> bool:
+    """The exact allow predicate from CONTRACT §2:
+
+        role == 'admin'
+        OR billing_plan IN ('founding', 'comp')
+        OR (billing_plan == 'paid' AND subscription_status == 'active')
+
+    Kept as a pure function so it's trivially unit-testable without a DB or
+    a request context. Any caller passing the three raw column values gets
+    the same verdict the dependency enforces.
+    """
+    if role == "admin":
+        return True
+    if billing_plan in ("founding", "comp"):
+        return True
+    if billing_plan == "paid" and subscription_status == "active":
+        return True
+    return False
+
+
+def current_paid_user_required(
+    user: JWTPayload = Depends(current_user_required),
+    con: sqlite3.Connection = Depends(get_db),
+) -> JWTPayload:
+    """Gate product-data endpoints behind billing.
+
+    Pipeline:
+      1. `current_user_required` runs first → 401 if not logged in (unchanged
+         behaviour; we only depend on it, never modify it).
+      2. Read billing columns for THIS user from power_user_users. The JWT
+         may not carry billing_plan / subscription_status (and even if it
+         did, a cancelled sub must take effect on the next request, not at
+         the next 24h token refresh) — so we always read the DB as the
+         source of truth.
+      3. Apply the CONTRACT §2 allow predicate.
+      4. On deny → HTTP 402 with the CONTRACT §3.3 body.
+
+    Returns the same JWTPayload on success, so handlers can keep using
+    `user.user_id` exactly as they do with `current_user_required`.
+    """
+    con.row_factory = sqlite3.Row
+    row = con.execute(
+        "SELECT role, billing_plan, subscription_status "
+        "FROM power_user_users WHERE id = ?",
+        (user.user_id,),
+    ).fetchone()
+
+    if row is None:
+        # JWT references a user row that no longer exists (deleted/migrated).
+        # Treat as unauthenticated rather than payment-required.
+        raise HTTPException(401, {"code": "USER_NOT_FOUND",
+                                   "message": "Account no longer exists; sign in again"})
+
+    # Prefer the live DB role; fall back to the JWT's role only if the column
+    # is somehow NULL (defence in depth — admins must never be paywalled).
+    role                = row["role"] or user.role
+    billing_plan        = row["billing_plan"]
+    subscription_status = row["subscription_status"]
+
+    if _is_allowed_billing(role, billing_plan, subscription_status):
+        return user
+
+    log.info("paywall: deny user_id=%s plan=%s status=%s",
+             user.user_id, billing_plan, subscription_status)
+    raise HTTPException(402, {
+        "code":         "PAYMENT_REQUIRED",
+        "message":      "An active subscription is required to access this resource.",
+        "checkout_url": _checkout_url(),
+    })
 
 
 # ──────────────────────────────────────────────────────────────────────────

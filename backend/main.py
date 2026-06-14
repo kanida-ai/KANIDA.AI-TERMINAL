@@ -499,6 +499,9 @@ from power_user.routers.persona_backtest_router import router as power_persona_r
 # Falcon Top 20 (2026-05-23): institutional 3-bucket explainability for the
 # /power/today page. /api/power/today/falcon-top-20.
 from power_user.routers.falcon_top20_router       import router as power_top20_router
+# Billing (M3, 2026-06-13): Razorpay subscription lifecycle + webhook.
+# /api/power/billing/*. PUBLIC surface (no paywall) — webhook is HMAC-verified.
+from power_user.routers.billing_router            import router as power_billing_router
 
 app = FastAPI(title="KANIDA.AI Swing Trading Terminal", version="3.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -529,6 +532,7 @@ app.include_router(power_auth_refresh_router, tags=["Power-User"])
 app.include_router(power_portfolios_router,   tags=["Power-User"])
 app.include_router(power_persona_router,      tags=["Power-User"])    # new persona simulator endpoints
 app.include_router(power_top20_router,         tags=["Power-User"])    # Falcon Top 20 + 3-bucket explainability
+app.include_router(power_billing_router,       tags=["Power-User"])    # Razorpay billing + webhook (M3)
 
 # Power User schema init — idempotent, creates tables on first boot.
 # Uses POWER_DB_PATH resolver — same DB as the engine read-only tables

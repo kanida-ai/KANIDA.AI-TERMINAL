@@ -12,8 +12,9 @@
  * data is fetched per-portfolio in parallel.
  */
 import Link from 'next/link'
-import { PowerAPI, type PortfolioSummary, type PortfolioEquityPoint } from '@/lib/power-api'
+import { PowerAPI, PowerAPIError, type PortfolioSummary, type PortfolioEquityPoint } from '@/lib/power-api'
 import { PortfolioCard } from '@/components/power/PortfolioCard'
+import { PaywallNotice } from '@/components/power/PaywallNotice'
 import { requireSession } from '@/lib/power-auth'
 
 export const dynamic = 'force-dynamic'
@@ -28,13 +29,22 @@ export default async function PortfoliosPage() {
 
   let portfolios: PortfolioSummary[] = []
   let fetchError: string | null = null
+  let paywallCheckoutUrl: string | null | undefined = undefined  // undefined = not paywalled
 
   try {
     const r = await PowerAPI.portfolios()
     portfolios = r.portfolios
   } catch (e) {
-    console.error('[/power/portfolios] fetch failed:', e)
-    fetchError = e instanceof Error ? e.message : 'Co-Trader is warming up. Refresh in a moment.'
+    if (e instanceof PowerAPIError && e.isPaymentRequired()) {
+      paywallCheckoutUrl = e.checkoutUrl()
+    } else {
+      console.error('[/power/portfolios] fetch failed:', e)
+      fetchError = e instanceof Error ? e.message : 'Co-Trader is warming up. Refresh in a moment.'
+    }
+  }
+
+  if (paywallCheckoutUrl !== undefined) {
+    return <PaywallNotice feature="Co-Trading" checkoutUrl={paywallCheckoutUrl} />
   }
 
   // Fetch sparklines in parallel — degrades gracefully if any one fails

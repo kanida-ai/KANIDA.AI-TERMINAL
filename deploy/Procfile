@@ -1,0 +1,20 @@
+# Kanida.AI — process definitions for VPS / Heroku-style hosts.
+# Railway uses the root railway.json + entrypoint.sh instead of this file.
+#
+# DATABASE_URL must be set in the host environment so the app uses Supabase
+# Postgres (backend/db.py → IS_POSTGRES). See docs/launch/ENV.md.
+
+# Web API — the always-on backend every user request hits.
+web: cd backend && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
+
+# Daily V7 pipeline (one process per job; host scheduler invokes with FALCON_JOB).
+# On a VPS, wire these to system cron at the IST→UTC times in deploy/README.md.
+cron_data_refresh: cd backend && FALCON_JOB=daily_data_refresh python3 -m falcon.jobs.daily_data_refresh
+cron_features:     cd backend && FALCON_JOB=daily_features     python3 -m falcon.jobs.daily_features
+cron_signals:      cd backend && FALCON_JOB=daily_signals      python3 -m falcon.jobs.daily_signals
+cron_weekly:       cd backend && FALCON_JOB=weekly_remine      python3 -m falcon.jobs.weekly_remine
+
+# Zerodha access-token refresh — HEADLESS Playwright. Host scheduler runs this
+# every ~30 min during 06:30-16:30 IST on weekdays (see RUNBOOK §6).
+# Requires: playwright + chromium + pyotp in the image.
+auth_refresh: cd backend && python3 ../scripts/auth_worker.py

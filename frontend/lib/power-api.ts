@@ -211,6 +211,19 @@ export class PowerAPIError extends Error {
   isRateLimited(): boolean { return this.status === 429 }
   isUnauthorized(): boolean { return this.status === 401 }
   isForbidden(): boolean { return this.status === 403 }
+  /** M7 paywall: backend gated this call because the user is unpaid/blocked.
+   *  Carries CONTRACT §3.3 shape `{code:'PAYMENT_REQUIRED', message, checkout_url}`
+   *  in `detail`. Product pages branch on this to render a "Subscribe to
+   *  continue" state instead of a hard error. */
+  isPaymentRequired(): boolean {
+    return this.status === 402 || this.code === 'PAYMENT_REQUIRED'
+  }
+  /** The Razorpay hosted-checkout / billing URL the backend attached to a 402,
+   *  if any. Card data never touches our frontend — we only follow this link. */
+  checkoutUrl(): string | null {
+    const u = this.detail.checkout_url
+    return typeof u === 'string' && u.length > 0 ? u : null
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -266,7 +279,16 @@ async function apiFetch<T>(path: string, opts: FetchOpts = {}): Promise<T> {
   }
 
   if (!r.ok) {
-    const detail = (body as { detail?: Record<string, unknown> })?.detail ?? {}
+    // FastAPI HTTPException nests the body under `detail`; some endpoints
+    // (notably the 402 paywall, CONTRACT §3.3) return a FLAT object
+    // `{code, message, checkout_url}`. Accept either: prefer `detail` when
+    // present, else fall back to the top-level body so `checkout_url` and
+    // `code` survive for the paywall handler.
+    const raw = body as Record<string, unknown>
+    const detail =
+      (raw?.detail && typeof raw.detail === 'object')
+        ? (raw.detail as Record<string, unknown>)
+        : (raw ?? {})
     const code    = (detail.code   as string) ?? `HTTP_${r.status}`
     const message = (detail.message as string) ?? `Request failed: ${r.status}`
     throw new PowerAPIError(r.status, code, message, detail)
@@ -600,6 +622,55 @@ export type SizingResult = {
 }
 
 
+// ──────────────────────────────────────────────────────────────────────────
+// M7 — Signup + Billing (commercial surface). Shapes mirror CONTRACT §3.1/§3.2.
+// ──────────────────────────────────────────────────────────────────────────
+
+/** CONTRACT §2 plan values. `founding`/`comp`/admin = always allowed;
+ *  `paid` = allowed only when `subscription_status==='active'`; `blocked` = 402. */
+export type BillingPlan = 'founding' | 'comp' | 'paid' | 'blocked'
+
+/** Signup outcome — `full` = account usable immediately (valid invite code →
+ *  `comp`); `payment_required` = account created `blocked`, must subscribe. */
+export type SignupAccess = 'full' | 'payment_required'
+
+/** Request: CONTRACT §3.1 — `{email, invite_code?}`. */
+export type SignupRequest = {
+  email:        string
+  /** Optional. Valid code → free `comp` account. Omit/blank → `blocked` + checkout. */
+  invite_code?: string | null
+}
+
+/** Response: CONTRACT §3.1. On `payment_required`, `checkout_url` points at the
+ *  Razorpay hosted page (or our /power/billing fallback). */
+export type SignupResponse = {
+  token:        string
+  user_id:      number
+  billing_plan: BillingPlan
+  access:       SignupAccess
+  checkout_url: string | null
+}
+
+/** Response: CONTRACT §3.2 create-subscription. `short_url` is the Razorpay
+ *  hosted-checkout link — the ONLY place card data is ever entered. */
+export type CreateSubscriptionResponse = {
+  razorpay_subscription_id: string
+  short_url:                string
+}
+
+/** Response: CONTRACT §3.2 status. Mirrors the gate columns the paywall reads. */
+export type BillingStatusResponse = {
+  billing_plan:        BillingPlan
+  subscription_status: string
+  current_end:         string | null
+}
+
+/** Response: CONTRACT §3.2 cancel. */
+export type CancelSubscriptionResponse = {
+  status: string
+}
+
+
 export const PowerAPI = {
   // ── Public (no JWT) ───────────────────────────────────────────────────
   todayPreview: (signal?: AbortSignal) =>
@@ -669,7 +740,31 @@ export const PowerAPI = {
                 picture_url: string | null; role: string; created_at: string }>(
       '/api/power/auth/me', { jwt }),
 
+  /** M7 open signup (public, no JWT). CONTRACT §3.1. Throws PowerAPIError(409,
+   *  'EMAIL_EXISTS') if the email already has an account. */
+  signup: (req: SignupRequest) =>
+    apiFetch<SignupResponse>('/api/power/auth/signup',
+                              { method: 'POST', body: req }),
+
   logout: () => apiFetch<{ status: string }>('/api/power/auth/logout', { method: 'POST' }),
+
+  // ── Billing (JWT) — M7. CONTRACT §3.2. ────────────────────────────────
+  /** Create (or re-create) the user's Razorpay subscription. Returns the
+   *  hosted-checkout `short_url` the caller redirects the browser to. No card
+   *  data ever touches our frontend. */
+  billingCreateSubscription: (jwt: string) =>
+    apiFetch<CreateSubscriptionResponse>('/api/power/billing/create-subscription',
+                                          { method: 'POST', jwt }),
+
+  /** Current plan + subscription status for the billing dashboard. */
+  billingStatus: (jwt: string, signal?: AbortSignal) =>
+    apiFetch<BillingStatusResponse>('/api/power/billing/status', { jwt, signal }),
+
+  /** Cancel the active subscription. Backend flips plan → `blocked` on the
+   *  Razorpay `subscription.cancelled` webhook; this returns the request ack. */
+  billingCancel: (jwt: string) =>
+    apiFetch<CancelSubscriptionResponse>('/api/power/billing/cancel',
+                                          { method: 'POST', jwt }),
 
   // ── Invites ───────────────────────────────────────────────────────────
   redeemInvite: (id_token: string, code: string) =>

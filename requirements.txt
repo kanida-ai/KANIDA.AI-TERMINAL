@@ -13,6 +13,25 @@ anthropic>=0.28.0
 kiteconnect>=5.0.1          # Zerodha Kite Connect (NSE + F&O)
 polygon-api-client>=1.13.0  # Polygon.io (US equities + options)
 
+# ── Billing (Razorpay subscriptions — M3) ──────────────────
+# Lazily imported in power_user/services/billing_service.py; webhook signature
+# verification uses stdlib hmac so the absence of this package never blocks boot.
+razorpay>=1.4.1             # Razorpay subscription lifecycle + customer API
+
+# ── Zerodha headless auto-auth (host-side token refresh) ───
+# Required by backend/services/zerodha_auto_auth.py + scripts/auth_worker.py.
+# Without these the hosted token refresh fails with BROWSER_LAUNCH_FAILED.
+# After install the image MUST also run: playwright install --with-deps chromium
+playwright>=1.44.0          # headless Chromium login automation
+pyotp>=2.9.0                # TOTP 2FA code generation
+
+# ── Transactional email (M8) ───────────────────────────────
+# Lazily imported in power_user/services/email_service.py; every send is
+# best-effort, so the absence of this package never blocks boot or any host
+# flow (signup / webhook). EMAIL_PROVIDER=resend uses this; EMAIL_PROVIDER=ses
+# uses boto3 instead (install separately if SES is chosen).
+resend>=2.0.0              # Resend transactional email API
+
 # ── Data Processing ────────────────────────────────────────
 pandas>=2.2.0
 numpy>=1.26.0

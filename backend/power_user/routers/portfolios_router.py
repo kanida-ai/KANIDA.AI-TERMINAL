@@ -24,11 +24,22 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import Field
 
+from fastapi import Depends as _Depends
+
 from ..services.portfolio_sizing import compute_sizing
-from .dependencies import get_db, hash_ip_ua, log_request
+from .dependencies import current_paid_user_required, get_db, hash_ip_ua, log_request
 
 log = logging.getLogger("kanida.power_user.portfolios_router")
-router = APIRouter(prefix="/api/power/portfolios", tags=["power_user_portfolios"])
+
+# Paywall (M4 / CONTRACT §4): EVERY route in this router is product data
+# (portfolio summaries, positions, closed trades, equity curves, sizing).
+# There are no health/meta routes here, so a router-level dependency gates
+# them all uniformly — login required (401) then billing checked (402).
+router = APIRouter(
+    prefix="/api/power/portfolios",
+    tags=["power_user_portfolios"],
+    dependencies=[_Depends(current_paid_user_required)],
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────
