@@ -14,6 +14,7 @@ REM cache-hit path (about 8ms).
 REM ============================================================
 
 set "PROJECT_DIR=C:\Users\SPS\Desktop\Kanida.ai Terminal Quant Intelligence Engine"
+set "ANACONDA=C:\Users\SPS\anaconda3"
 REM Separate log file from backend.log — uvicorn holds backend.log locked
 REM in append mode while running, so a second writer fails with sharing
 REM violation on Windows.
@@ -37,11 +38,16 @@ echo [warm] %DATE% %TIME% backend never came up after 60s, bailing >> "%LOG_FILE
 exit /b 1
 
 :ready
-echo [warm] %DATE% %TIME% backend up after %count%s, firing cache pre-warm... >> "%LOG_FILE%"
-curl -s -m 120 -o nul "%WARM_URL%"
+echo [warm] %DATE% %TIME% backend up after %count%s, firing AUTHENTICATED cache pre-warm... >> "%LOG_FILE%"
+REM warm_cache.py logs in as admin (config\.env) and warms every universe.
+REM The OLD bare unauthenticated curl below got an instant 401 and warmed
+REM NOTHING — but `-s` (no -f) made curl exit 0, so it logged a FALSE
+REM "cache warmed successfully" in 0.06s, leaving the first real visitor to
+REM pay the 100-200s cold persona-sim (and hit Cloudflare's ~100s timeout).
+"%ANACONDA%\python.exe" "%PROJECT_DIR%\scripts\warm_cache.py" >> "%LOG_FILE%" 2>&1
 if errorlevel 1 (
-    echo [warm] %DATE% %TIME% curl FAILED, cache NOT warmed >> "%LOG_FILE%"
+    echo [warm] %DATE% %TIME% warm FAILED (login or primary universe) — cache NOT warmed >> "%LOG_FILE%"
     exit /b 1
 ) else (
-    echo [warm] %DATE% %TIME% cache warmed successfully >> "%LOG_FILE%"
+    echo [warm] %DATE% %TIME% cache warmed successfully (authenticated) >> "%LOG_FILE%"
 )
