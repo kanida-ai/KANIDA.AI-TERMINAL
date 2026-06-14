@@ -483,6 +483,9 @@ from falcon.routers.portfolio_router  import router as falcon_portfolio_router
 from falcon.routers.patterns_router   import router as falcon_patterns_router
 from falcon.routers.admin_router      import router as falcon_admin_router
 from falcon.trade.routers.trade_router import router as falcon_trade_router
+# P1PUB (2026-06-14): laptop → cloud "publish intelligence" ingest. Self-auth
+# (X-Publish-Secret), atomic full-replace. See CLOUD_ARCHITECTURE.md §6.
+from falcon.routers.publish_router     import router as falcon_publish_router
 
 # Power User Portal (Phase 1 — invite-only beta).
 # Public surface namespaced under /api/power/* — strict separation from
@@ -522,6 +525,7 @@ app.include_router(falcon_portfolio_router, prefix="/api", tags=["Falcon"])
 app.include_router(falcon_patterns_router,  prefix="/api", tags=["Falcon"])
 app.include_router(falcon_admin_router,     prefix="/api", tags=["Falcon"])
 app.include_router(falcon_trade_router,     prefix="/api", tags=["Falcon-Trade"])
+app.include_router(falcon_publish_router,   prefix="/api", tags=["Falcon-Publish"])  # P1PUB laptop→cloud ingest
 
 # Power User Portal — endpoints already self-prefix with /api/power/*
 app.include_router(power_auth_router,         tags=["Power-User"])

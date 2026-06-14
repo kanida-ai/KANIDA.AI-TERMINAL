@@ -100,6 +100,7 @@ HTTP 402: `{ "code": "PAYMENT_REQUIRED", "message": str, "checkout_url": str }`
 `DATABASE_URL` · `POWER_JWT_SECRET` · `POWER_DB_PATH` · `POWER_RND_DB_PATH` ·
 `RAZORPAY_KEY_ID` · `RAZORPAY_KEY_SECRET` · `RAZORPAY_WEBHOOK_SECRET` · `RAZORPAY_PLAN_MONTHLY` ·
 `EMAIL_PROVIDER` · `RESEND_API_KEY` · `EMAIL_FROM` ·
+`FALCON_PUBLISH_SECRET` (secret — laptop→cloud publish auth header `X-Publish-Secret`; server fails closed if unset) · `FALCON_PUBLISH_URL` (laptop-side cloud base URL) ·
 `SITE_USER` · `SITE_PASS` · `KITE_API_KEY` · `KITE_API_SECRET` · `ZERODHA_USERNAME` · `ZERODHA_PASSWORD` · `ZERODHA_PIN`
 
 ---

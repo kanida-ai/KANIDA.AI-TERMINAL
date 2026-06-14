@@ -42,6 +42,11 @@ psycopg2-binary>=2.9.9          # Postgres / Supabase (Railway production)
 # ── Config / Env ───────────────────────────────────────────
 python-dotenv>=1.0.1
 
+# ── Laptop → cloud publish transport (P1PUB) ───────────────
+# Used by scripts/publish_to_cloud.py to POST the weekly intelligence bundle
+# to the cloud ingest endpoint. Laptop-side only; the server uses stdlib.
+requests>=2.31.0
+
 # ── Scheduling ─────────────────────────────────────────────
 apscheduler>=3.10.4
 

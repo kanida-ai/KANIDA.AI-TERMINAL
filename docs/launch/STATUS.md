@@ -41,7 +41,7 @@ This DEFERS C1/C2/C6 (the Postgres-portability snags) to Phase 4 — they don't 
 1. Deploy backend + **whole 573M production DB (as-is, no pruning)** + daily jobs to a cloud host with a **persistent volume**. 14G research DB stays on the laptop.
 2. Copy `falcon_outcomes` (827k) into the cloud DB + repoint the evidence read → no request hits the 14G research DB.
 3. Daily jobs (OHLC fetch → features → signals → portfolio EOD) run in cloud; verify Playwright headless + Kite token (stays in the SQLite volume file — NO C2 fix needed on SQLite).
-4. Build the laptop→cloud **publish transport** (CLOUD_ARCHITECTURE §6: a `POST /api/admin/publish-intelligence` ingest endpoint, or object-storage drop + import).
+4. ✅ **DONE (P1PUB, audited GREEN 2026-06-14).** Laptop→cloud publish transport built: `POST /api/falcon/publish/intelligence` (self-contained auth via `X-Publish-Secret`, fail-closed; atomic single-txn full-replace; allowlisted tables; empty-guard) + `scripts/publish_to_cloud.py` (mirrors publish_patterns cutoff/selection, `--dry-run`). Build log + audit in `docs/launch/`. Pre-go-live: run `backend/falcon/tests/test_publish_router.py`; set `FALCON_PUBLISH_SECRET` on the cloud host (else endpoint 503s by design).
 5. Operator: stand up host + volume, set `POWER_JWT_SECRET` + Razorpay keys + Resend key, point DNS.
 6. Lawyer review of legal pages + fill placeholders. Razorpay ₹999/mo plan created.
 **→ Billing/paywall/signup (already built, SQLite-ready) go live here. Laptop loss ≠ product down.**

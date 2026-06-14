@@ -31,6 +31,13 @@
 | `RESEND_API_KEY` | ✅ | You | if provider=resend |
 | `EMAIL_FROM` | ❌ | You | sender address (e.g. `team@kanida.ai`) |
 
+## Laptop → cloud publish transport (P1PUB)
+
+| Var | Secret | Set by | Purpose |
+|---|---|---|---|
+| `FALCON_PUBLISH_SECRET` | ✅ | **You (CRITICAL)** | Shared secret for the publish-intelligence channel. The cloud endpoint requires header `X-Publish-Secret` == this (constant-time compare). If UNSET on the server, the endpoint fails CLOSED (503 `PUBLISH_NOT_CONFIGURED`). Set the SAME value on the cloud host (so the endpoint accepts) AND on the research laptop (so `publish_to_cloud.py` can send it). The laptop is reached server-to-server (api host), bypassing the Next.js Basic-Auth gate — so this is the ONLY thing protecting the ingest endpoint. |
+| `FALCON_PUBLISH_URL` | ❌ | You (laptop) | Base URL of the cloud backend, e.g. `https://api.kanida.ai`. Used by `scripts/publish_to_cloud.py` to POST the weekly bundle to `<url>/api/falcon/publish/intelligence`. Override per-run with `--cloud-url`. Laptop-side only (the server never reads it). |
+
 ## Operator surface + broker (unchanged, already in use)
 
 | Var | Secret | Purpose |
