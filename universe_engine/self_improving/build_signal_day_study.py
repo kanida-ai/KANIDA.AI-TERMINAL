@@ -61,6 +61,20 @@ POST-EXIT "what happened next" (the key addition), D+8..D+60:
   1 if post_hold_high_ret > 15% (the stock kept running after we exited).
   kept_running_d30 = 1 if d30_close_ret > net_ret_pct (NULL if either is NULL).
 
+POST-HOLD INTRADAY HIGH/LOW + CIRCUIT (S2C addition — additive, close-based cols
+  above UNCHANGED for continuity): the close-only columns hide intraday spikes
+  (IFCI: the 06-15 bar's +12.7% intraday high vs the +9.8% close), and upper-
+  circuit days aren't flagged at all. So we ALSO store, per offset k, d{k}_high_ret
+  / d{k}_low_ret (high/entry_px-1, low/entry_px-1); post_hold_peak_high_ret /
+  _day = MAX(high/entry_px-1) over the AVAILABLE D+8..D+60 bars (the TRUE intraday
+  post-exit peak, generally >= post_hold_high_ret); post_hold_trough_low_ret =
+  MIN(low/entry_px-1) over that window; and max_up_day_move_pct / _date /
+  hit_circuit_flag = the largest single-day close/prev_close-1 (%) over the FULL
+  path entry->last available bar (captures circuit days during BOTH the hold and
+  the post-hold), its date, and a 1/0 flag for >= 19.5% (~20% upper circuit). All
+  NULL when the bar / move is unavailable (never imputed). These DO NOT affect
+  entry/exit/net_ret_pct or the parity cross-check.
+
 CLI:
   python build_signal_day_study.py --rnd-db <path>             # apply (rebuild)
   python build_signal_day_study.py --rnd-db <path> --dry-run   # compute, no write
@@ -130,6 +144,7 @@ PEAK_SUSTAINED_FRAC = 0.9
 # Post-exit "what happened next" — D offsets relative to the entry bar.
 POST_OFFSETS = [8, 10, 15, 20, 30, 45, 60]
 EARLY_EXIT_THRESHOLD_PCT = 15.0   # post_hold_high_ret > 15% => stock kept running
+CIRCUIT_MOVE_PCT = 19.5           # single-day close/prev_close move >= 19.5% (~20% upper circuit)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -380,14 +395,36 @@ def compute_post_exit(
     bars_sym: List[Dict],
     net_ret_pct: Optional[float],
 ) -> Dict[str, Any]:
-    """All returns are close/entry_px-1 (in %), base = entry bar's RAW open
-    (same base as the intra-hold journey). A D+k value is NULL when that future
-    bar does not exist (never imputed)."""
+    """All returns are vs entry_px (in %), base = entry bar's RAW open (same base
+    as the intra-hold journey). A D+k value is NULL when that future bar does not
+    exist (never imputed).
+
+    S2C addition (additive — the close-based columns below are UNCHANGED):
+      - per offset k: d{k}_high_ret / d{k}_low_ret  (high/entry_px−1, low/entry_px−1)
+      - post_hold_peak_high_ret / _day : MAX(high/entry_px−1) over the AVAILABLE
+        D+8..D+60 bars and the D it occurred — the TRUE intraday post-exit peak
+        (close-based post_hold_high_ret understates it; IFCI's intraday +12.7% on
+        06-15 vs the +9.8% close is exactly this gap).
+      - post_hold_trough_low_ret : MIN(low/entry_px−1) over the same window.
+      - max_up_day_move_pct / _date / hit_circuit_flag : the largest single-day
+        close/prev_close−1 (%) over the FULL path entry→last available bar
+        (captures upper-circuit days during BOTH the hold and the post-hold), the
+        date it occurred, and a 1/0 flag for >= 19.5% (~20% upper circuit)."""
     out: Dict[str, Any] = {f"d{k}_close_ret": None for k in POST_OFFSETS}
     out["post_hold_high_ret"] = None
     out["post_hold_peak_day"] = None
     out["early_exit_flag"] = None
     out["kept_running_d30"] = None
+    # S2C additive defaults — NULL until a bar / move is available.
+    for k in POST_OFFSETS:
+        out[f"d{k}_high_ret"] = None
+        out[f"d{k}_low_ret"] = None
+    out["post_hold_peak_high_ret"] = None
+    out["post_hold_peak_high_day"] = None
+    out["post_hold_trough_low_ret"] = None
+    out["max_up_day_move_pct"] = None
+    out["max_up_day_date"] = None
+    out["hit_circuit_flag"] = None
 
     eidx = trade["entry_bar_idx"]
     if eidx is None or eidx >= len(bars_sym):
@@ -396,28 +433,70 @@ def compute_post_exit(
     if not entry_open or entry_open <= 0:
         return out
 
-    # Individual D+k close returns (NULL where the bar hasn't arrived).
+    # Individual D+k close/high/low returns (NULL where the bar hasn't arrived).
     for k in POST_OFFSETS:
         j = eidx + (k - 1)
         if j < len(bars_sym):
-            out[f"d{k}_close_ret"] = (bars_sym[j]["close"] / entry_open - 1.0) * 100.0
+            bar = bars_sym[j]
+            out[f"d{k}_close_ret"] = (bar["close"] / entry_open - 1.0) * 100.0
+            out[f"d{k}_high_ret"] = (bar["high"] / entry_open - 1.0) * 100.0
+            out[f"d{k}_low_ret"] = (bar["low"] / entry_open - 1.0) * 100.0
 
     # post_hold_high_ret = max close_ret over EVERY available bar in D+8..D+60
     # (not just the 7 sampled offsets — the full window, so a peak between the
     # sampled days isn't missed). post_hold_peak_day = the D at which it occurred.
+    # post_hold_peak_high_ret / _day = the same scan but on the bar HIGH (the true
+    # intraday post-exit peak). post_hold_trough_low_ret = min bar LOW over the
+    # window. All three scan the identical available-bar set, in one pass.
     hi_ret = None
     hi_day = None
+    peak_hi_ret = None
+    peak_hi_day = None
+    trough_lo_ret = None
     for k in range(8, 61):
         j = eidx + (k - 1)
         if j >= len(bars_sym):
             break
-        c_ret = (bars_sym[j]["close"] / entry_open - 1.0) * 100.0
+        bar = bars_sym[j]
+        c_ret = (bar["close"] / entry_open - 1.0) * 100.0
         if hi_ret is None or c_ret > hi_ret:
             hi_ret, hi_day = c_ret, k
+        h_ret = (bar["high"] / entry_open - 1.0) * 100.0
+        if peak_hi_ret is None or h_ret > peak_hi_ret:
+            peak_hi_ret, peak_hi_day = h_ret, k
+        l_ret = (bar["low"] / entry_open - 1.0) * 100.0
+        if trough_lo_ret is None or l_ret < trough_lo_ret:
+            trough_lo_ret = l_ret
     out["post_hold_high_ret"] = hi_ret
     out["post_hold_peak_day"] = hi_day
+    out["post_hold_peak_high_ret"] = peak_hi_ret
+    out["post_hold_peak_high_day"] = peak_hi_day
+    out["post_hold_trough_low_ret"] = trough_lo_ret
     if hi_ret is not None:
         out["early_exit_flag"] = 1 if hi_ret > EARLY_EXIT_THRESHOLD_PCT else 0
+
+    # max single-day up move over the FULL path entry→last available bar. We scan
+    # close/prev_close−1 starting at the entry bar (compared to the bar just
+    # before entry) through the last loaded bar — covering circuit days during the
+    # hold AND post-hold. The previous-bar reference for the very first iteration
+    # is bars_sym[eidx-1] when eidx>0; if eidx==0 (entry is the first loaded bar,
+    # which the trail-padding load makes effectively impossible) we start the scan
+    # at eidx+1 so prev_close always exists. Circuit flag = move >= 19.5%.
+    mu_pct = None
+    mu_date = None
+    start = max(eidx, 1)  # need a prev bar at start-1
+    last_idx = len(bars_sym) - 1
+    for j in range(start, last_idx + 1):
+        prev_close = bars_sym[j - 1]["close"]
+        if not prev_close or prev_close <= 0:
+            continue
+        move = (bars_sym[j]["close"] / prev_close - 1.0) * 100.0
+        if mu_pct is None or move > mu_pct:
+            mu_pct, mu_date = move, bars_sym[j]["date"]
+    out["max_up_day_move_pct"] = mu_pct
+    out["max_up_day_date"] = mu_date
+    if mu_pct is not None:
+        out["hit_circuit_flag"] = 1 if mu_pct >= CIRCUIT_MOVE_PCT else 0
 
     d30 = out["d30_close_ret"]
     if d30 is not None and net_ret_pct is not None:
@@ -519,6 +598,14 @@ def build_row(
     for k in (["post_hold_high_ret", "post_hold_peak_day", "early_exit_flag",
                "kept_running_d30"] + [f"d{o}_close_ret" for o in POST_OFFSETS]):
         row[k] = post.get(k)
+    # S2C post-hold intraday high/low + circuit columns (additive).
+    for o in POST_OFFSETS:
+        row[f"d{o}_high_ret"] = post.get(f"d{o}_high_ret")
+        row[f"d{o}_low_ret"] = post.get(f"d{o}_low_ret")
+    for k in ("post_hold_peak_high_ret", "post_hold_peak_high_day",
+              "post_hold_trough_low_ret", "max_up_day_move_pct",
+              "max_up_day_date", "hit_circuit_flag"):
+        row[k] = post.get(k)
     return row
 
 
@@ -543,6 +630,15 @@ _COLS = [
     "d30_close_ret", "d45_close_ret", "d60_close_ret",
     "post_hold_high_ret", "post_hold_peak_day", "early_exit_flag",
     "kept_running_d30",
+    # S2C post-hold intraday high/low + circuit (additive; close-based cols above
+    # unchanged for continuity).
+    "d8_high_ret", "d8_low_ret", "d10_high_ret", "d10_low_ret",
+    "d15_high_ret", "d15_low_ret", "d20_high_ret", "d20_low_ret",
+    "d30_high_ret", "d30_low_ret", "d45_high_ret", "d45_low_ret",
+    "d60_high_ret", "d60_low_ret",
+    "post_hold_peak_high_ret", "post_hold_peak_high_day",
+    "post_hold_trough_low_ret", "max_up_day_move_pct", "max_up_day_date",
+    "hit_circuit_flag",
     "prior_appearances_30d",
 ]
 
@@ -681,6 +777,11 @@ def compute_efficacy(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     phh = [r["post_hold_high_ret"] for r in closed if r.get("post_hold_high_ret") is not None]
     n_ee_den = sum(1 for r in closed if r.get("early_exit_flag") is not None)
     n_ee = sum(1 for r in closed if r.get("early_exit_flag") == 1)
+    # S2C: intraday post-hold peak (>= the close-based avg) + circuit hit rate.
+    phph = [r["post_hold_peak_high_ret"] for r in closed
+            if r.get("post_hold_peak_high_ret") is not None]
+    n_circ_den = sum(1 for r in closed if r.get("hit_circuit_flag") is not None)
+    n_circ = sum(1 for r in closed if r.get("hit_circuit_flag") == 1)
     return {
         "n_picks": n,
         "win_rate": _rate(n_win, n),
@@ -690,6 +791,8 @@ def compute_efficacy(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "big_loser_rate": _rate(n_bl, n),
         "avg_post_hold_high_ret": (sum(phh) / len(phh)) if phh else None,
         "early_exit_rate": _rate(n_ee, n_ee_den) if n_ee_den else None,
+        "avg_post_hold_peak_high_ret": (sum(phph) / len(phph)) if phph else None,
+        "circuit_hit_rate": _rate(n_circ, n_circ_den) if n_circ_den else None,
     }
 
 
@@ -726,7 +829,7 @@ def write_excel(
     ws2 = wb.create_sheet("Per-Year Efficacy")
     py_cols = ["year", "n_picks", "win_rate", "avg_ret", "median_ret",
                "big_winner_rate", "big_loser_rate", "avg_post_hold_high_ret",
-               "early_exit_rate"]
+               "early_exit_rate", "avg_post_hold_peak_high_ret", "circuit_hit_rate"]
     ws2.append(py_cols)
     for c in ws2[1]:
         c.font = Font(bold=True)
@@ -739,7 +842,8 @@ def write_excel(
     for c in ws3[1]:
         c.font = Font(bold=True)
     for k in ["n_picks", "win_rate", "avg_ret", "median_ret", "big_winner_rate",
-              "big_loser_rate", "avg_post_hold_high_ret", "early_exit_rate"]:
+              "big_loser_rate", "avg_post_hold_high_ret", "early_exit_rate",
+              "avg_post_hold_peak_high_ret", "circuit_hit_rate"]:
         ws3.append([k, overall.get(k)])
 
     wb.save(xlsx_path)
@@ -762,7 +866,7 @@ def _write_csv_fallback(
     py_path = out_dir / "falcon_signal_day_study_per_year.csv"
     py_cols = ["year", "n_picks", "win_rate", "avg_ret", "median_ret",
                "big_winner_rate", "big_loser_rate", "avg_post_hold_high_ret",
-               "early_exit_rate"]
+               "early_exit_rate", "avg_post_hold_peak_high_ret", "circuit_hit_rate"]
     with open(py_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(py_cols)
@@ -774,7 +878,8 @@ def _write_csv_fallback(
         w.writerow(["metric", "value"])
         for k in ["n_picks", "win_rate", "avg_ret", "median_ret",
                   "big_winner_rate", "big_loser_rate", "avg_post_hold_high_ret",
-                  "early_exit_rate"]:
+                  "early_exit_rate", "avg_post_hold_peak_high_ret",
+                  "circuit_hit_rate"]:
             w.writerow([k, overall.get(k)])
     print(f"[signal_day_study] openpyxl missing — wrote CSV fallback: "
           f"{trades_path.name}, {py_path.name}, {overall_path.name}")
@@ -785,12 +890,91 @@ def _write_csv_fallback(
 # 10. SCHEMA APPLY (CREATE IF NOT EXISTS, before any write)
 # ════════════════════════════════════════════════════════════════════════════
 
+import re  # noqa: E402  (used by the guarded-ALTER parser below)
+
+# Columns added by the S2C ALTER block, kept in lock-step with the ALTER
+# statements at the tail of schema_signal_day_study.sql. The applier derives the
+# column name from each ALTER, so this constant is only a sanity reference.
+_S2C_ALTER_COLS = [
+    "d8_high_ret", "d8_low_ret", "d10_high_ret", "d10_low_ret",
+    "d15_high_ret", "d15_low_ret", "d20_high_ret", "d20_low_ret",
+    "d30_high_ret", "d30_low_ret", "d45_high_ret", "d45_low_ret",
+    "d60_high_ret", "d60_low_ret",
+    "post_hold_peak_high_ret", "post_hold_peak_high_day",
+    "post_hold_trough_low_ret", "max_up_day_move_pct", "max_up_day_date",
+    "hit_circuit_flag",
+]
+
+
+def _existing_columns(con: sqlite3.Connection, table: str) -> List[str]:
+    """Current column names of `table` (empty if absent). Mirrors apply_schema.py."""
+    rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+    return [r[1] for r in rows]  # r[1] == column name
+
+
+def _split_schema_sql(ddl: str) -> Tuple[str, List[Tuple[str, str]]]:
+    """Split schema_signal_day_study.sql into (create_index_block, alter_cols).
+
+    `create_index_block` = everything EXCEPT the ALTER statements — the CREATE
+    TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS — run as-is via executescript
+    (idempotent). `alter_cols` = list of (column_name, single_alter_statement) for
+    each `ALTER TABLE falcon_signal_day_study ADD COLUMN <name> ...;`, applied
+    GUARDED (skip columns already present). This mirrors apply_schema.py's
+    parse_taxonomy_columns + guarded-apply pattern so an existing S2B table gains
+    the new columns without a duplicate-column crash, and a fresh DB (cols already
+    created by the CREATE TABLE) simply skips every ALTER.
+
+    Line comments are stripped before parsing so inline `-- ...` notes don't leak
+    into executed statements (same as apply_schema._strip_line_comments)."""
+    # Strip `-- ...` comments line-by-line (schema uses only `--`, never inside
+    # string literals).
+    clean_lines = []
+    for line in ddl.splitlines():
+        idx = line.find("--")
+        clean_lines.append(line if idx < 0 else line[:idx])
+    clean = "\n".join(clean_lines)
+
+    keep_stmts: List[str] = []
+    alter_cols: List[Tuple[str, str]] = []
+    for raw in clean.split(";"):
+        stmt = raw.strip()
+        if not stmt:
+            continue
+        m = re.match(
+            r"ALTER\s+TABLE\s+falcon_signal_day_study\s+ADD\s+COLUMN\s+([A-Za-z_]\w*)\b",
+            stmt, flags=re.IGNORECASE,
+        )
+        if m:
+            alter_cols.append((m.group(1), stmt + ";"))
+        else:
+            keep_stmts.append(stmt + ";")
+    return ("\n".join(keep_stmts), alter_cols)
+
+
 def apply_schema(rnd_db: str) -> None:
+    """Apply the schema idempotently:
+      1. CREATE TABLE / CREATE INDEX IF NOT EXISTS (executescript — safe re-run).
+      2. PRAGMA-guarded ALTER ADD COLUMN for the S2C post-hold high/low + circuit
+         columns: only columns missing from the existing table are added, each in
+         its own try/except (duplicate-column tolerated). Additive only — never
+         drops/renames/retypes. No-op when re-run or on a fresh DB.
+    """
     sql_path = _HERE / "schema_signal_day_study.sql"
     ddl = sql_path.read_text(encoding="utf-8")
+    create_block, alter_cols = _split_schema_sql(ddl)
     con = sqlite3.connect(rnd_db, timeout=120.0)
     try:
-        con.executescript(ddl)
+        con.executescript(create_block)
+        existing = set(_existing_columns(con, "falcon_signal_day_study"))
+        for col, stmt in alter_cols:
+            if col in existing:
+                continue
+            try:
+                con.execute(stmt)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" in str(e).lower():
+                    continue  # already present (race / re-run) — tolerate
+                raise
         con.commit()
     finally:
         con.close()
@@ -926,9 +1110,10 @@ def run(
 
     print("\n[signal_day_study] ── OVERALL (headline every-day efficacy) ──")
     for k in ["n_picks", "win_rate", "avg_ret", "median_ret", "big_winner_rate",
-              "big_loser_rate", "avg_post_hold_high_ret", "early_exit_rate"]:
+              "big_loser_rate", "avg_post_hold_high_ret", "early_exit_rate",
+              "avg_post_hold_peak_high_ret", "circuit_hit_rate"]:
         v = overall.get(k)
-        print(f"    {k:>24}: {v if v is not None else '—'}")
+        print(f"    {k:>28}: {v if v is not None else '—'}")
 
     # ── PARITY CROSS-CHECK ──
     baseline = _load_baseline_trades(rnd_db)

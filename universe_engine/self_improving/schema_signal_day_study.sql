@@ -82,6 +82,26 @@ CREATE TABLE IF NOT EXISTS falcon_signal_day_study (
   post_hold_peak_day            INTEGER,   -- the D (8..60) at which post_hold_high_ret occurred
   early_exit_flag               INTEGER,   -- BOOLEAN: 1 if post_hold_high_ret > 15% (stock kept running after exit)
   kept_running_d30              INTEGER,   -- BOOLEAN: 1 if d30_close_ret > net_ret_pct
+  -- POST-HOLD INTRADAY HIGH/LOW + CIRCUIT (S2C addition). High/low vs entry_price
+  -- at each post-hold offset; the TRUE intraday post-exit peak/trough scanning the
+  -- full D+8..D+60 window; and the largest single-day close-over-prev-close move
+  -- across the FULL path (entry→last available bar) with circuit-day flag. The
+  -- close-based cols above are KEPT UNCHANGED for continuity — these are additive.
+  -- All vs entry_price (high/entry_px−1, low/entry_px−1, in %). NULL where the bar
+  -- has not arrived (NEVER imputed).
+  d8_high_ret                   REAL,  d8_low_ret  REAL,
+  d10_high_ret                  REAL,  d10_low_ret REAL,
+  d15_high_ret                  REAL,  d15_low_ret REAL,
+  d20_high_ret                  REAL,  d20_low_ret REAL,
+  d30_high_ret                  REAL,  d30_low_ret REAL,
+  d45_high_ret                  REAL,  d45_low_ret REAL,
+  d60_high_ret                  REAL,  d60_low_ret REAL,
+  post_hold_peak_high_ret       REAL,      -- MAX(high/entry_px−1) over D+8..D+60 available bars (TRUE intraday post-exit peak)
+  post_hold_peak_high_day       INTEGER,   -- the D (8..60) at which post_hold_peak_high_ret occurred
+  post_hold_trough_low_ret      REAL,      -- MIN(low/entry_px−1) over D+8..D+60 available bars (intraday post-exit trough)
+  max_up_day_move_pct           REAL,      -- largest single-day close/prev_close−1 (%) over FULL path entry→last bar (captures circuit days in hold AND post-hold)
+  max_up_day_date               TEXT,      -- date of that max single-day up move
+  hit_circuit_flag              INTEGER,   -- BOOLEAN: 1 if max_up_day_move_pct >= 19.5 (~20% upper circuit)
   -- dup context
   prior_appearances_30d         INTEGER,   -- # times this symbol was a pick in the prior 30 calendar days
   created_at                    TEXT DEFAULT (datetime('now'))
@@ -93,3 +113,38 @@ CREATE INDEX IF NOT EXISTS idx_fsds_persona_sd_sym
   ON falcon_signal_day_study (persona, signal_date, symbol);
 CREATE INDEX IF NOT EXISTS idx_fsds_symbol
   ON falcon_signal_day_study (symbol);
+
+-- ============================================================================
+-- S2C ADDITIVE ALTERs — post-hold intraday high/low + circuit detection.
+--
+-- CREATE TABLE IF NOT EXISTS (above) only creates these columns on a FRESH DB;
+-- it will NOT add them to a falcon_signal_day_study table that already exists
+-- from a prior S2B build. SQLite has no "ADD COLUMN IF NOT EXISTS", so the
+-- builder parses the ALTER statements below and applies them GUARDED (skipping
+-- columns already present via PRAGMA table_info), mirroring apply_schema.py's
+-- taxonomy-column applier. Re-running is a no-op. Never drops/retypes a column.
+--
+-- These mirror, 1:1, the new columns in the CREATE TABLE above, so a fresh DB
+-- (cols already created) and an existing DB (cols added here) converge to the
+-- same schema. The close-based post-hold columns are NOT touched (continuity).
+-- ============================================================================
+ALTER TABLE falcon_signal_day_study ADD COLUMN d8_high_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN d8_low_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN d10_high_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN d10_low_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN d15_high_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN d15_low_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN d20_high_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN d20_low_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN d30_high_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN d30_low_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN d45_high_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN d45_low_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN d60_high_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN d60_low_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN post_hold_peak_high_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN post_hold_peak_high_day INTEGER;
+ALTER TABLE falcon_signal_day_study ADD COLUMN post_hold_trough_low_ret REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN max_up_day_move_pct REAL;
+ALTER TABLE falcon_signal_day_study ADD COLUMN max_up_day_date TEXT;
+ALTER TABLE falcon_signal_day_study ADD COLUMN hit_circuit_flag INTEGER;
