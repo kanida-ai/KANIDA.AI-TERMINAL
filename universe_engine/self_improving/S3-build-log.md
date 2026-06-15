@@ -57,7 +57,7 @@ Patterns classified = every `pattern_id` present in `falcon_pattern_contribution
 | `big_winner_rate_by_persona` | JSON `{"falcon_top10": rate}` (only persona with data) |
 | `big_loser_rate_by_persona` | JSON `{"falcon_top10": rate}` |
 | `big_loser_risk` | HFCL-gated (see above): `1`/`0` only at n≥18 with EV check; else NULL |
-| `quality_flag` | spec Phase-2 Update-1 (see thresholds); n<18 → INSUFFICIENT_DATA; no clean signature → NULL |
+| `quality_flag` | spec Phase-2 Update-1 (see thresholds); n<18 → INSUFFICIENT_DATA; n≥18 & no clean signature → **NEUTRAL** (review fix — was NULL, which left ~257 patterns / a third of the library unclassified) |
 | `pattern_maturity` | n cutoffs (see thresholds) |
 | `swing_suitable` | n≥18 & EV>0 → 1, n≥18 & EV≤0 → 0, else NULL (falcon_top10 = the 7-day EOD swing data) |
 | `last_classification_date` | today (IST, computed via explicit Asia/Kolkata tz — per always-use-IST rule) |
@@ -70,7 +70,7 @@ Patterns classified = every `pattern_id` present in `falcon_pattern_contribution
   - `STOCK_SPECIFIC_ALPHA` ⟸ `win_rate_sector_headwind >= 50%` **AND** `n_headwind >= 10`.
   - `SECTOR_FOLLOWER` ⟸ `win_rate_sector_tailwind >= 60%` **AND** `win_rate_sector_headwind < 40%`.
   - `INSUFFICIENT_DATA` ⟸ `n < 18`.
-  - else (n≥18, no clean signature) ⟸ `NULL` (REGIME_SPECIFIC **not** emitted — see deferred).
+  - `NEUTRAL` ⟸ n≥18, no clean stock-specific / sector-follower signature (review fix — previously NULL, which left ~257 patterns unclassified; REGIME_SPECIFIC still **not** emitted — see deferred — so those patterns fall into NEUTRAL).
 - **big_loser_risk:** `1` ⟸ `n>=18` AND `big_loser_rate >= 0.30` AND `EV <= 0`; `0` ⟸ n≥18 but condition unmet; `NULL` ⟸ n<18.
 - **peak buckets:** early `peak_day<=2`, late `peak_day>=5`.
 - **sector index thin guard:** `SECTOR_MIN_PEERS = 3`. **60-day window:** `RECENT_WINDOW_DAYS = 60` calendar days.
@@ -86,13 +86,13 @@ Patterns classified = every `pattern_id` present in `falcon_pattern_contribution
 | `positional/longterm/btst/intraday/short/index_suitable`, `fo_only` | **No trades for those personas** (only `falcon_top10` exists). Cannot assess suitability without ≥18 resolved trades for THAT persona → NULL ("no data for persona"). |
 
 ## Part C — `falcon_pattern_health_report.xlsx`
-One row per classified pattern, columns: `pattern_id, mined_years, quality_flag, pattern_maturity, n_resolved, n_resolved_60d, win_rate_pct, expected_value_pct, big_winner_rate, big_loser_rate, big_loser_risk, typical_peak_day, peak_sustained_rate, early_peak_rate, late_peak_rate, win_rate_sector_tailwind, win_rate_sector_headwind, win_rate_sector_neutral, swing_suitable`. Uses **openpyxl**; if the import fails it writes `falcon_pattern_health_report.csv` instead and prints a note. Output dir via `--out` (default `universe_engine/self_improving/out/`).
+One row per classified pattern, columns: `pattern_id, mined_years, quality_flag, pattern_maturity, n_resolved, n_resolved_60d, win_rate_pct, expected_value_pct, big_winner_rate, big_loser_rate, big_loser_risk, typical_peak_day, peak_sustained_rate, early_peak_rate, late_peak_rate, win_rate_sector_tailwind, win_rate_sector_headwind, win_rate_sector_neutral, swing_suitable`. Uses **openpyxl**; if the import fails it writes `falcon_pattern_health_report.csv` instead and prints a note. Output dir via `--out` (default `universe_engine/self_improving/out/`). A trailing **Notes line** is appended (review fix): "*n_resolved_60d is ~0 for most patterns in this backtest because there is no forward 60-day window at the backtest tail — the weekly multiplier logic only becomes active in live running. This is a backtest-tail artifact, not a data gap.*"
 
 ## Bucket counts (maturity / quality)
 **Computed at runtime, not hardcoded.** The run prints `maturity_buckets`, `quality_flag buckets`, `n_big_loser_risk`, `n_swing_suitable`. Exact counts cannot be produced in this env (no Python). The audit agent should capture them from a `--dry-run`. *Expectation* given the Step-2 totals (3,008 baseline trades / 214,916 contributions over ~5.4 years): contributions are dense, so many patterns will clear n≥18 — but per-pattern n varies widely, so a substantial tail will be `insufficient_data`. Verify at dry-run.
 
 ## Idempotency & safety
-- **RND only.** Part A `UPDATE falcon_baseline_trades`; Part B `UPDATE falcon_pattern_taxonomy WHERE pattern_id = ?`. **No PROD write.** PROD DB opened read-only (OHLC + falcon_sectors for the index).
+- **RND only.** Part A `UPDATE falcon_baseline_trades`; Part B `UPDATE falcon_pattern_taxonomy WHERE pattern_id = ?`. **No PROD write.** PROD DB opened read-only for **OHLC only** (`ohlc_daily`). **falcon_sectors is now read from the RND DB** (review fix — PROD's falcon_sectors is missing GUJGASLTD/LTIM/ZOMATO; backfilled in RND by `fix_sector_backfill.py`).
 - **Single transaction** (`BEGIN` … `commit`/`rollback`). Both parts in one txn; on exception → rollback, nothing applied.
 - **Additive / re-runnable.** Every run recomputes and **overwrites** only this step's owned columns in place (`_TAXONOMY_WRITE_COLS`). No DROP/rename/retype; no new rows; other personas' baseline rows untouched; taxonomy rows for patterns we don't classify are untouched.
 - **Column-presence guard.** Writes only taxonomy columns that actually exist (`PRAGMA table_info`), so a RND DB where the Step-1 ALTERs weren't applied degrades gracefully (warns, skips the absent columns / Part B). Missing `falcon_pattern_taxonomy` → Part B skipped, Part A + report still run.
@@ -103,7 +103,7 @@ One row per classified pattern, columns: `pattern_id, mined_years, quality_flag,
 1. **Not executed** (no Python). Run `--dry-run` first; confirm: Part A NULL buckets are sane (most closed trades attributed; open-at-end + thin-sector counts explained), maturity/quality buckets look reasonable, and `big_loser_risk=1` count is small (HFCL should make it rare).
 2. **`win_rate_sector_*` are PERCENTS (0–100)** to match the spec's quality thresholds (50/60/40). The big_winner/loser/peak *rates* are **fractions (0–1)** as in the report. Keep this in mind when reading the columns.
 3. **`win_rate_sector_neutral` = unattributed**, not "flat sector". The binary tailwind split has no flat bucket. If a true neutral band is wanted later, define it on `|sector_ret| < ε` — left out deliberately so the STOCK_SPECIFIC_ALPHA / SECTOR_FOLLOWER tests use a clean up/down split.
-4. **Sector index = current `falcon_sectors` membership applied retroactively** (same known caveat the spec flags for the universe). Equal-weight, no survivorship correction beyond what `falcon_sectors` carries.
+4. **Sector index = current `falcon_sectors` membership applied retroactively** (same known caveat the spec flags for the universe). Equal-weight, no survivorship correction beyond what `falcon_sectors` carries. **falcon_sectors is read from the RND DB** (review fix), where GUJGASLTD/LTIM/ZOMATO are backfilled by `fix_sector_backfill.py`; OHLC still comes from PROD.
 5. **`oos_lift_at_mining` comparison NOT done here** — that drives Phase-2 multipliers (Step 6), out of scope. `realized_lift_60d` left NULL.
 6. **`swing_suitable` semantics:** treated as "is this pattern profitable on the Falcon Top-10 7-day EOD swing horizon" (EV>0 over ≥18 resolved). If the auditor prefers `swing_suitable` to stay NULL until a *dedicated* swing persona runs, flip the one block in `classify_one_pattern`. Documented as a judgement call.
 7. **PROD-DB choice:** the index uses `--prod-db` (default persona `PROD_DB`). Confirm it's the same DB Step 2 used for OHLC, so entry/exit dates resolve to index levels (they share `ohlc_daily.trade_date`).

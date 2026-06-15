@@ -40,8 +40,10 @@ PARTS:
      available, else a .csv fallback (+ a printed note).
 
 REUSE (read-only; no shared/engine code modified — INV2):
-  - persona_simulator.PROD_DB — the same PROD OHLC/falcon_sectors source Step 2 /
-    the persona sim use (imported via the backend import root, like build_baseline).
+  - persona_simulator.PROD_DB — the same PROD OHLC source Step 2 / the persona sim
+    use (imported via the backend import root, like build_baseline). NOTE: sector
+    membership (falcon_sectors) is read from the RND DB, not PROD (review fix —
+    PROD is missing GUJGASLTD/LTIM/ZOMATO); only OHLC comes from PROD.
   - sim_sweep.build_sector_indices — its exact equal-weight chained-index math is
     re-implemented here (sim_sweep lives in an engine worktree NOT on this branch;
     copying its ~20-line pure function is safer than importing across worktrees
@@ -53,8 +55,8 @@ CLI:
   python classify_patterns.py --rnd-db <path> [--prod-db <path>] [--dry-run] [--out <dir>]
     --rnd-db   REQUIRED. Research DB holding baseline_trades / contributions /
                falcon_pattern_taxonomy. All writes go here.
-    --prod-db  OHLC + falcon_sectors source for the sector index (default: the
-               persona resolver's PROD_DB). READ-ONLY.
+    --prod-db  OHLC source for the sector index (default: the persona resolver's
+               PROD_DB). READ-ONLY. (falcon_sectors is read from --rnd-db, not here.)
     --dry-run  Compute Part A + Part B + the report contents and print a full
                bucket summary; write NOTHING (no DB UPDATE, no Excel file).
     --out      Output dir for the Excel report (default:
@@ -118,6 +120,9 @@ MATURITY_STABLE_MIN = 150
 # quality_flag thresholds (spec "Phase 2 Update 1" sector-quality override):
 #   STOCK_SPECIFIC_ALPHA: win_rate in SECTOR_HEADWIND >= 50% AND n_headwind >= 10
 #   SECTOR_FOLLOWER:      win_rate tailwind >= 60% AND win_rate headwind < 40%
+#   NEUTRAL:              n >= 18 but neither signature earned (has data, no
+#                         special sector signature — a real outcome, not a gap)
+#   INSUFFICIENT_DATA:    n < 18 (cannot conclude anything)
 QUALITY_HEADWIND_WR_MIN = 50.0       # percent
 QUALITY_HEADWIND_N_MIN = 10          # spec uses n_headwind >= 10 (a sub-gate < HFCL_MIN_N)
 QUALITY_TAILWIND_WR_MIN = 60.0       # percent
@@ -151,7 +156,7 @@ def _ist_today() -> str:
 # ════════════════════════════════════════════════════════════════════════════
 
 def _build_sector_indices(
-    prod_db: str, start: str, end: str
+    prod_db: str, rnd_db: str, start: str, end: str
 ) -> Tuple[Dict[str, Dict[str, float]], Dict[str, str], Dict[str, int]]:
     """Equal-weight, daily-rebalanced chained index per sector — ported VERBATIM
     from sim_sweep.build_sector_indices (engine worktree). Base 100.0 on the
@@ -165,12 +170,25 @@ def _build_sector_indices(
                    (used to drop too-thin sectors — sim_sweep has no such guard;
                    we add it per the Step-3 instruction "if a trade's sector has
                    too few peers for an index, leave its sector fields NULL").
+
+    SECTOR SOURCE = RND DB (review fix): falcon_sectors is read from the RND DB,
+    not PROD. PROD's falcon_sectors is missing GUJGASLTD/LTIM/ZOMATO (null sector
+    -> null move_type); the RND copy is where those mappings are backfilled
+    (fix_sector_backfill.py). OHLC (ohlc_daily) still comes from PROD — only the
+    sector membership read was switched.
     """
+    # Sector membership: RND DB (backfilled mappings live here).
+    con_sec = sqlite3.connect(rnd_db, timeout=120.0)
+    try:
+        rows = con_sec.execute("SELECT symbol, sector FROM falcon_sectors").fetchall()
+    finally:
+        con_sec.close()
+    sym_to_sec = {s: sec for s, sec in rows if sec is not None}
+    sectors = sorted(set(sym_to_sec.values()))
+
+    # OHLC: PROD DB (unchanged source of price history).
     con = sqlite3.connect(prod_db, timeout=120.0)
     try:
-        rows = con.execute("SELECT symbol, sector FROM falcon_sectors").fetchall()
-        sym_to_sec = {s: sec for s, sec in rows if sec is not None}
-        sectors = sorted(set(sym_to_sec.values()))
         ohlc = con.execute(
             "SELECT trade_date, symbol, close FROM ohlc_daily "
             "WHERE trade_date BETWEEN ? AND ?",
@@ -298,7 +316,7 @@ def compute_part_a(
     start = min(all_dates)
     end = max(all_dates)
 
-    indices, sym_to_sec, peer_count = _build_sector_indices(prod_db, start, end)
+    indices, sym_to_sec, peer_count = _build_sector_indices(prod_db, rnd_db, start, end)
 
     updates: List[Dict[str, Any]] = []
     stats = {"n_trades": len(trades), "n_attributed": 0, "n_null_open": 0,
@@ -562,18 +580,23 @@ def _quality_flag(
     wr_tail_pct: Optional[float],
 ) -> str:
     """quality_flag per spec Phase-2 Update 1, HFCL-gated. Returns one of:
-    'INSUFFICIENT_DATA' / 'STOCK_SPECIFIC_ALPHA' / 'SECTOR_FOLLOWER' / '' (->NULL).
+    'INSUFFICIENT_DATA' / 'STOCK_SPECIFIC_ALPHA' / 'SECTOR_FOLLOWER' / 'NEUTRAL'.
 
     - INSUFFICIENT_DATA    : n < HFCL_MIN_N (18) — cannot conclude anything.
     - STOCK_SPECIFIC_ALPHA : sector-headwind win-rate >= 50% AND n_headwind >= 10
                              (the pattern wins even when its sector is falling).
     - SECTOR_FOLLOWER      : tailwind win-rate >= 60% AND headwind win-rate < 40%
                              (rides the sector; weak when the sector turns).
-    - '' (writer maps to NULL): n >= 18 but neither sector signature is earned.
-      The spec lists REGIME_SPECIFIC as the next fallback, but market/sector
+    - NEUTRAL              : n >= 18 but neither sector signature is earned.
+      Previously this returned '' (writer mapped to NULL), which left ~a third of
+      the library (257 patterns) unclassified. A pattern that HAS enough data
+      (n >= 18) but shows no clean stock-specific / sector-follower signature is a
+      genuine classification outcome — 'NEUTRAL' — not a data gap. INSUFFICIENT_DATA
+      is reserved for n < 18 only.
+      Note: the spec lists REGIME_SPECIFIC as a possible fallback, but market/sector
       regime tags do NOT exist on these trades (Step-2 left them NULL; see the
       build log "Deferred"). We never INVENT a regime, so REGIME_SPECIFIC is not
-      emitted here. The honest value is NULL = 'classified, no special flag'.
+      emitted here — such patterns fall into NEUTRAL.
     """
     if n < HFCL_MIN_N:
         return "INSUFFICIENT_DATA"
@@ -584,9 +607,8 @@ def _quality_flag(
             and (wr_headwind_pct is None or wr_headwind_pct < QUALITY_TAILWIND_HEADWIND_WR_MAX)):
         return "SECTOR_FOLLOWER"
     # n>=18 but no clean sector signature, and no regime tags to test
-    # REGIME_SPECIFIC -> honest NULL (classified, no special flag). Returned as a
-    # sentinel the writer maps to NULL.
-    return ""   # writer maps '' -> NULL
+    # REGIME_SPECIFIC -> NEUTRAL (classified, has data, no special sector signature).
+    return "NEUTRAL"
 
 
 # Taxonomy columns this step OWNS (writes). Everything else on the table is left
@@ -694,6 +716,16 @@ def _round(v: Optional[float], nd: int = 4) -> Any:
     return round(v, nd) if isinstance(v, (int, float)) else v
 
 
+# Visible note on the n_resolved_60d column (review fix) — shown in the report so
+# readers don't misread the near-zero column as a data gap.
+_N60D_NOTE = (
+    "NOTE: n_resolved_60d is ~0 for most patterns in this backtest because there "
+    "is no forward 60-day window at the backtest tail — the weekly multiplier "
+    "logic only becomes active in live running. This is a backtest-tail artifact, "
+    "not a data gap."
+)
+
+
 def write_report(rows: List[Dict[str, Any]], out_dir: Path) -> Tuple[Path, str]:
     """Write falcon_pattern_health_report.xlsx (or .csv fallback). Returns
     (path, mode) where mode is 'xlsx' or 'csv'."""
@@ -707,6 +739,9 @@ def write_report(rows: List[Dict[str, Any]], out_dir: Path) -> Tuple[Path, str]:
         ws.append(_REPORT_HEADERS)
         for dr in data_rows:
             ws.append(dr)
+        # n_resolved_60d note (review fix): a blank spacer row then the note.
+        ws.append([])
+        ws.append([_N60D_NOTE])
         path = out_dir / "falcon_pattern_health_report.xlsx"
         wb.save(str(path))
         return path, "xlsx"
@@ -717,6 +752,9 @@ def write_report(rows: List[Dict[str, Any]], out_dir: Path) -> Tuple[Path, str]:
             w = csv.writer(fh)
             w.writerow(_REPORT_HEADERS)
             w.writerows(data_rows)
+            # n_resolved_60d note (review fix): blank spacer row then the note.
+            w.writerow([])
+            w.writerow([_N60D_NOTE])
         return path, "csv"
 
 
@@ -790,7 +828,9 @@ def _write(
 
 def run(rnd_db: str, prod_db: str, out_dir: Path, dry_run: bool) -> int:
     print(f"[classify_patterns] RND DB:  {rnd_db}")
-    print(f"[classify_patterns] PROD DB: {prod_db}  (read-only: OHLC + falcon_sectors)")
+    print(f"[classify_patterns] PROD DB: {prod_db}  (read-only: OHLC only)")
+    print(f"[classify_patterns] sectors: falcon_sectors read from RND DB "
+          f"(backfilled mappings) — review fix")
     print(f"[classify_patterns] mode: {'DRY-RUN (no writes)' if dry_run else 'APPLY'}")
     print(f"[classify_patterns] classification_version={CLASSIFICATION_VERSION}  "
           f"IST date={_ist_today()}")
@@ -875,8 +915,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="REQUIRED. RND research DB (baseline_trades / contributions "
                         "/ falcon_pattern_taxonomy). All writes go here.")
     p.add_argument("--prod-db", default=None,
-                   help="OHLC + falcon_sectors source for the sector index "
-                        "(default: persona PROD_DB). READ-ONLY.")
+                   help="OHLC source for the sector index (default: persona "
+                        "PROD_DB). READ-ONLY. falcon_sectors is read from --rnd-db.")
     p.add_argument("--out", default=None,
                    help="Output dir for falcon_pattern_health_report.xlsx "
                         "(default: universe_engine/self_improving/out/).")

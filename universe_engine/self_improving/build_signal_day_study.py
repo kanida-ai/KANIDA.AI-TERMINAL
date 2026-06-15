@@ -146,7 +146,11 @@ def _build_run_context(rnd_db: str, prod_db: str) -> Dict[str, Any]:
     all_pats = load_full_patterns(rnd_db)                 # core:61 (RND patterns)
     X, sym, dt = load_panel(prod_db, sim_start, sim_end)  # core:86 (PROD features)
     bars = load_all_bars(prod_db, "2020-12-01", sim_end)  # core:109 (pad for trail)
-    sector_map = build_sector_map(prod_db)                # core:140
+    # SECTOR SOURCE = RND DB (review fix): falcon_sectors read from RND, not PROD.
+    # PROD's falcon_sectors is missing GUJGASLTD/LTIM/ZOMATO (-> null sector ->
+    # null move_type); the RND copy holds the backfilled mappings
+    # (fix_sector_backfill.py). OHLC/features/bars above still come from PROD.
+    sector_map = build_sector_map(rnd_db)                 # core:140 (sectors from RND)
     all_td = trading_days(prod_db, sim_start, sim_end)    # core:127
 
     years_arr = np.array([int(d[:4]) for d in dt], dtype=np.int32)
