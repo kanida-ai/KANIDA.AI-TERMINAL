@@ -71,6 +71,7 @@ export default function AdminPage() {
 
       <ZerodhaAuthPanel />
       <DailyJobsPanel />
+      <TierReviewPanel />
       <MetricsPanel />
       <WaitlistPanel />
       <InviteIssuancePanel />
@@ -1169,6 +1170,142 @@ function SkeletonBox({ lines }: { lines: number }) {
       {Array.from({ length: lines }).map((_, i) =>
         <div key={i} className="h-4 bg-neutral-800 rounded" style={{ width: `${100 - i * 15}%` }} />
       )}
+    </section>
+  )
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// Tier rulebook review/approve — "what the AI learned this week" (Phase 2).
+// Surfaces the weekly shadow learner's champion-vs-challenger snapshot and
+// lets an admin promote a challenger to active (gated server-side: N>=50).
+// ─────────────────────────────────────────────────────────────────────────
+
+type TierReviewRule = {
+  rule_id: string
+  tier: string
+  champion: { wr: number | null; ret: number | null; n: number | null }
+  challenger: { wr: number | null; ret: number | null; n: number | null; as_of: string | null } | null
+  wr_delta: number | null
+  conditions_changed: boolean
+}
+type TierReviewResp = {
+  rules: TierReviewRule[]
+  has_divergence: boolean
+  challenger_as_of: string | null
+  n_active: number
+  n_challenger: number
+  note?: string
+}
+
+function TierReviewPanel() {
+  const [data,  setData]  = useState<TierReviewResp | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy,  setBusy]  = useState(false)
+  const [flash, setFlash] = useState<string | null>(null)
+
+  const refresh = async () => {
+    try {
+      const r = await fetch(`${apiBase()}/api/power/admin/tier-review`, adminFetchInit())
+      if (!r.ok) throw new Error('HTTP ' + r.status)
+      setData(await r.json()); setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Tier-review fetch failed.')
+    }
+  }
+  useEffect(() => { refresh() }, [])
+
+  const promote = async (rid: string) => {
+    if (typeof window !== 'undefined' &&
+        !window.confirm(`Promote "${rid}" challenger → active?\nThe live classifier picks it up within ~5 min.`)) return
+    setBusy(true); setFlash(null)
+    try {
+      const r = await fetch(`${apiBase()}/api/power/admin/tier-promote`,
+        adminFetchInit({ method: 'POST', headers: { 'Content-Type': 'application/json' },
+                         body: JSON.stringify({ rule_id: rid }) }))
+      const j = await r.json()
+      if (!r.ok) throw new Error(j?.detail?.message || j?.message || ('HTTP ' + r.status))
+      setFlash(`Promoted ${rid} (N=${j.challenger_n}, WR=${j.challenger_wr}%).`)
+      await refresh()
+    } catch (e) {
+      setFlash(e instanceof Error ? e.message : 'Promote failed.')
+    } finally { setBusy(false) }
+  }
+
+  const pct = (n: number | null | undefined) => n == null ? '—' : `${n}%`
+  const num = (n: number | null | undefined) => n == null ? '—' : `${n}`
+
+  return (
+    <section className="bg-neutral-900 border border-neutral-800 rounded-lg p-4">
+      <div className="flex items-baseline justify-between mb-1">
+        <h2 className="text-lg font-semibold">Tier rulebook — what the AI learned</h2>
+        <button onClick={refresh} className="text-xs text-neutral-400 hover:text-neutral-200">refresh</button>
+      </div>
+      <p className="text-sm text-neutral-400 mb-3">
+        Weekly shadow learner snapshot{data?.challenger_as_of ? ` · as of ${data.challenger_as_of}` : ''}.
+        {' '}Promotion is gated (challenger N≥50) and applies to the live classifier within ~5 min.
+      </p>
+
+      {error && <div className="text-red-300 text-sm mb-2">Error: {error}</div>}
+      {flash && <div className="text-mint-300 text-sm mb-2">{flash}</div>}
+      {data?.note && <div className="text-yellow-300 text-sm mb-2">{data.note}</div>}
+
+      {data && !data.has_divergence && (
+        <div className="text-sm text-neutral-300 bg-neutral-800/40 border border-neutral-700 rounded p-3 mb-3">
+          No divergence yet — champion and challenger match. The learner re-grades the live
+          rules every Sunday; rules to approve light up here once their metrics drift or the
+          learner proposes new thresholds.
+        </div>
+      )}
+
+      {data && data.rules.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-neutral-500 text-left text-xs">
+                <th className="py-1 pr-3">rule</th>
+                <th className="pr-3">tier</th>
+                <th className="pr-3">champion WR / N</th>
+                <th className="pr-3">challenger WR / N</th>
+                <th className="pr-3">ΔWR</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.rules.map(r => {
+                const d = r.wr_delta
+                const dcls = d == null ? 'text-neutral-500'
+                          : d > 0 ? 'text-green-300' : d < 0 ? 'text-red-300' : 'text-neutral-400'
+                const canPromote = !!r.challenger && (r.challenger.n ?? 0) >= 50 &&
+                                   (r.conditions_changed || (d != null && Math.abs(d) >= 1))
+                return (
+                  <tr key={r.rule_id} className="border-t border-neutral-800">
+                    <td className="py-1.5 pr-3 font-mono text-neutral-200">{r.rule_id}</td>
+                    <td className="pr-3 text-neutral-300">{r.tier}</td>
+                    <td className="pr-3 font-mono">{pct(r.champion.wr)} / {num(r.champion.n)}</td>
+                    <td className="pr-3 font-mono">
+                      {r.challenger ? `${pct(r.challenger.wr)} / ${num(r.challenger.n)}` : '—'}
+                    </td>
+                    <td className={`pr-3 font-mono ${dcls}`}>
+                      {d == null ? '—' : (d > 0 ? '+' : '') + d}
+                      {r.conditions_changed && <span className="text-yellow-300 ml-1" title="rule thresholds changed">*</span>}
+                    </td>
+                    <td>
+                      {canPromote && (
+                        <button disabled={busy} onClick={() => promote(r.rule_id)}
+                          className="text-xs px-2 py-0.5 rounded border border-mint-500/40 text-mint-300 hover:bg-mint-500/10 disabled:opacity-50">
+                          Approve
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {!data && !error && <div className="text-sm text-neutral-500">Loading…</div>}
     </section>
   )
 }
