@@ -22,8 +22,10 @@ Read-only: classification only; writes nothing.
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
+import time
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("kanida.power_user.signal_tier")
@@ -89,6 +91,58 @@ def classify_signal_tier(sret: Optional[float],
     if _ok(sret) and sret <= 10:
         return "STANDARD-weak"
     return "STANDARD-weak"   # sret unknown → conservative middle (never silently GOLD)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  DATA-DRIVEN RULEBOOK (Phase 0 of the self-learning loop)
+#  The active rulebook lives in falcon_tier_rules (status='active'); the
+#  classifier evaluates it priority-ordered. If the table is empty/unavailable
+#  the hardcoded classify_signal_tier above is the fallback — so the live
+#  system never depends on the DB being populated.
+# ──────────────────────────────────────────────────────────────────────────
+_OPS = {"<": lambda a, b: a < b, "<=": lambda a, b: a <= b,
+        ">": lambda a, b: a > b, ">=": lambda a, b: a >= b}
+_rb_cache: Dict[str, Any] = {"rules": None, "at": 0.0}
+_RB_TTL = 300.0   # 5 min — learner publishes infrequently; staleness is harmless
+
+
+def load_active_rulebook(con: sqlite3.Connection) -> List[Any]:
+    """Load status='active' tier rules, parsed + priority-sorted. Cached 5 min.
+    Returns [] on any error/empty so the caller falls back to the hardcoded rules."""
+    now = time.time()
+    if _rb_cache["rules"] is not None and (now - _rb_cache["at"]) < _RB_TTL:
+        return _rb_cache["rules"]
+    rules: List[Any] = []
+    try:
+        rows = con.execute(
+            "SELECT tier, conditions_json FROM falcon_tier_rules WHERE status='active'"
+        ).fetchall()
+        parsed = []
+        for tier, cj in rows:
+            spec = json.loads(cj)
+            parsed.append((int(spec.get("priority", 50)), tier, spec.get("all", [])))
+        parsed.sort(key=lambda r: r[0])
+        rules = parsed
+    except Exception as e:                                  # noqa: BLE001
+        log.warning("signal_tier.load_active_rulebook: %s", e)
+        rules = []
+    _rb_cache.update(rules=rules, at=now)
+    return rules
+
+
+def classify_from_rulebook(feat: Dict[str, Optional[float]], rules: List[Any]) -> str:
+    """Evaluate priority-ordered DB rules; first whose ALL conditions hold wins.
+    `feat` keys: sret, twoday, rng, avg_lift, trend3_20, turn_pct."""
+    for _prio, tier, conds in rules:
+        match = True
+        for field, op, val in conds:
+            v = feat.get(field)
+            if not _ok(v) or op not in _OPS or not _OPS[op](v, val):
+                match = False
+                break
+        if match:
+            return tier
+    return "STANDARD-weak"
 
 
 def _signal_day_features(bars: List[sqlite3.Row]) -> Dict[str, Optional[float]]:
@@ -157,6 +211,9 @@ def enrich_picks(con: sqlite3.Connection,
     for sym in by_sym:
         by_sym[sym] = by_sym[sym][-260:]
 
+    # Phase 0: prefer the data-driven rulebook; empty/unavailable → code fallback.
+    rules = load_active_rulebook(con)
+
     for p in picks:
         feats = _signal_day_features(by_sym.get(p["symbol"], []))
         sret  = feats.get("signal_day_ret_pct")
@@ -164,8 +221,14 @@ def enrich_picks(con: sqlite3.Connection,
         rng   = feats.get("range_pct")
         nf    = p.get("n_fires") or 0
         avg_lift = (p["score"] / nf) if nf else None
-        tier = classify_signal_tier(sret, twod, rng, avg_lift,
-                                     feats.get("trend3_20"), feats.get("turn_pct"))
+        if rules:
+            tier = classify_from_rulebook(
+                {"sret": sret, "twoday": twod, "rng": rng, "avg_lift": avg_lift,
+                 "trend3_20": feats.get("trend3_20"), "turn_pct": feats.get("turn_pct")},
+                rules)
+        else:
+            tier = classify_signal_tier(sret, twod, rng, avg_lift,
+                                        feats.get("trend3_20"), feats.get("turn_pct"))
         p["signal_tier"]        = tier
         p["signal_tier_reason"] = TIER_REASON.get(tier)
         p["signal_tier_color"]  = TIER_COLOR.get(tier, "gray")
