@@ -78,12 +78,51 @@ function HeaderStrip({ pick, open, onToggle }: { pick: Top20Pick; open: boolean;
         </span>
         <span className="mt-1 flex flex-wrap items-center gap-2">
           <RatingChip rating={pick.rating} />
+          <SignalTierChip pick={pick} />
+          <SignalDayMini pick={pick} />
         </span>
       </span>
       <span className="shrink-0 text-xs text-white/40 hidden md:block">
         {open ? '▴ collapse' : '▾ expand'}
       </span>
     </button>
+  )
+}
+
+const SIGNAL_TIER_CHIP: Record<string, string> = {
+  'PREMIUM-Pullback':    'bg-teal-400/15 text-teal-200 border-teal-400/40',
+  'PREMIUM-Compression': 'bg-teal-400/15 text-teal-200 border-teal-400/40',
+  'ENTERPRISE-Dryup':    'bg-green-400/15 text-green-300 border-green-400/40',
+  'GOLD':                'bg-amber-400/15 text-amber-200 border-amber-400/40',
+  'GOLD-baseline':       'bg-amber-400/15 text-amber-200 border-amber-400/40',
+  'STANDARD':            'bg-white/10 text-white/60 border-white/20',
+  'STANDARD-weak':       'bg-white/10 text-white/60 border-white/20',
+  'AVOID':               'bg-red-500/15 text-red-300 border-red-500/40',
+}
+
+function SignalTierChip({ pick }: { pick: Top20Pick }) {
+  const tier = pick.signal_tier
+  if (!tier) return null
+  const cls = SIGNAL_TIER_CHIP[tier] ?? SIGNAL_TIER_CHIP['STANDARD']
+  return (
+    <span title={pick.signal_tier_reason ?? undefined}
+          className={['inline-flex items-center px-2.5 py-0.5 rounded text-[11px] font-semibold font-mono border', cls].join(' ')}>
+      {tier.replace('-', ' ')}
+    </span>
+  )
+}
+
+function SignalDayMini({ pick }: { pick: Top20Pick }) {
+  const sig = pick.flags?.day_return_pct
+  const d2  = pick.two_day_ret_pct
+  if (sig == null && d2 == null) return null
+  const f = (n: number | null | undefined) =>
+    n == null ? '—' : (n > 0 ? '+' : '') + n.toFixed(2) + '%'
+  return (
+    <span className="text-[11px] font-mono text-white/45 whitespace-nowrap"
+          title="Signal-day return · trailing 2-day return (tier drivers)">
+      sig <span className="text-white/75">{f(sig)}</span> · 2d <span className="text-white/75">{f(d2)}</span>
+    </span>
   )
 }
 
