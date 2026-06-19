@@ -33,7 +33,13 @@ function apiBase(): string {
 // ──────────────────────────────────────────────────────────────────────────
 
 export type Tier      = 'ELITE' | 'HIGH' | 'MID' | 'LOWER' | 'TAIL'
-export type TierColor = 'amber' | 'green' | 'yellow' | 'orange' | 'gray'
+export type TierColor = 'amber' | 'green' | 'yellow' | 'orange' | 'gray' | 'red'
+
+// v2: signal-time tier (distinct axis from the rank `tier`). Derived from
+// signal-day price + volume (see backend signal_tier.py).
+export type SignalTier =
+  | 'PREMIUM-Pullback' | 'PREMIUM-Compression' | 'ENTERPRISE-Dryup'
+  | 'GOLD' | 'GOLD-baseline' | 'STANDARD' | 'STANDARD-weak' | 'AVOID'
 export type LiveAction = 'ENTER' | 'WAIT' | 'SKIP'
 export type LiveCycle  = '0930' | '0945' | '1000'
 
@@ -72,7 +78,7 @@ export type PickActual = {
 
 /** v1 Pick payload — the locked contract. Bumping requires updating every consumer. */
 export type Pick = {
-  _version:          1
+  _version:          1 | 2
   rank:              number
   symbol:            string
   sector:            string | null
@@ -90,6 +96,12 @@ export type Pick = {
   expected:          PickExpected
   risk:              PickRisk
   actual?:           PickActual
+  // v2 signal-time tiering (optional; present when the backend enriched the pick)
+  signal_tier?:        SignalTier | null
+  signal_tier_reason?: string | null
+  signal_tier_color?:  TierColor | null
+  signal_day_ret_pct?: number | null
+  two_day_ret_pct?:    number | null
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -155,6 +167,12 @@ export type LiveDecision = {
   close_loc:        number | null
   computed_at:      string
   signal_date:      string
+  // v2 signal-time tiering (best-effort on the live panel; no PREMIUM without n_fires)
+  signal_tier?:        SignalTier | null
+  signal_tier_reason?: string | null
+  signal_tier_color?:  TierColor | null
+  signal_day_ret_pct?: number | null
+  two_day_ret_pct?:    number | null
 }
 
 export type LiveDecisionsResponse = {

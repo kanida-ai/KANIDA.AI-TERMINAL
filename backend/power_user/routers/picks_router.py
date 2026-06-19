@@ -27,6 +27,7 @@ from ..services.explainer import (
     validate_pick_payload,
 )
 from ..services.live_tier import get_decisions
+from ..services.signal_tier import enrich_picks
 from ..services.replay_cache import (
     get_or_compute,
     list_featured,
@@ -79,6 +80,9 @@ def _build_today_picks(con: sqlite3.Connection, top_n: int) -> Dict[str, Any]:
     raw = compute_top_n(con, signal_date, top_n=AUTHED_TOP_N, patterns=patterns)
     total = len(raw)
     raw_slice = raw[:top_n]
+
+    # v2: attach signal-time tier + signal-day price numbers (in-place, never raises)
+    enrich_picks(con, raw_slice, signal_date)
 
     picks: List[Dict[str, Any]] = []
     for rank, p in enumerate(raw_slice, start=1):
@@ -262,6 +266,13 @@ def live_decisions(
     for d in result.get("decisions", []):
         if d.get("tier") == "DEEP-TAIL":
             d["tier"] = "TAIL"
+
+    # v2: attach signal-time tier + signal-day price numbers to live rows.
+    # Best-effort — live rows lack n_fires so avg_lift is unknown (no PREMIUM
+    # promotion on the live panel); GOLD/ENTERPRISE/STANDARD/AVOID still resolve.
+    _sd = result.get("signal_date")
+    if _sd and result.get("decisions"):
+        enrich_picks(con, result["decisions"], _sd)
 
     # Layer 3 (graceful degradation): if Zerodha auto-auth has failed and we're
     # past 09:30 IST, the scheduler couldn't compute live decisions today. The

@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 
 from ..config import FEATURED_REPLAYS
 from .explainer import (
+    PICK_SCHEMA_VERSION,
     aggregate_outcomes,
     build_pick_payload,
     compute_top_n,
@@ -36,6 +37,17 @@ from .explainer import (
     load_patterns,
     validate_pick_payload,
 )
+
+
+def _is_current_schema(payload: Dict[str, Any]) -> bool:
+    """True if a cached payload matches the current pick schema. A stale-version
+    cache entry (e.g. after a PICK_SCHEMA_VERSION bump) is treated as a miss so
+    get_or_compute recomputes it instead of serving a payload the validator
+    would later reject."""
+    picks = payload.get("picks") or []
+    if not picks:
+        return True   # empty/error payloads carry no version risk
+    return picks[0].get("_version") == PICK_SCHEMA_VERSION
 
 log = logging.getLogger("kanida.power_user.replay_cache")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -81,6 +93,10 @@ def build_replay_payload(con: sqlite3.Connection,
 
     patterns = load_patterns(con)
     raw_picks = compute_top_n(con, replay_date, top_n=top_n, patterns=patterns)
+
+    # v2: attach signal-time tier + signal-day price numbers (in-place, never raises)
+    from .signal_tier import enrich_picks
+    enrich_picks(con, raw_picks, replay_date)
 
     picks: List[Dict[str, Any]] = []
     picks_with_outcomes: List[Dict[str, Any]] = []
@@ -217,16 +233,20 @@ def get_or_compute(con: sqlite3.Connection, replay_date: str) -> Dict[str, Any]:
 
     if row:
         payload_json, is_featured, expires_at = row
-        if is_featured:
-            return json.loads(payload_json)
-        # Arbitrary cache hit — check TTL
-        if expires_at:
-            try:
-                exp_dt = datetime.fromisoformat(expires_at)
-                if datetime.now(IST) < exp_dt:
-                    return json.loads(payload_json)
-            except ValueError:
-                pass    # malformed expires_at → recompute
+        cached = json.loads(payload_json)
+        # Stale-schema guard: a cache entry from before a PICK_SCHEMA_VERSION
+        # bump must be recomputed, not served (the validator would reject it).
+        if _is_current_schema(cached):
+            if is_featured:
+                return cached
+            # Arbitrary cache hit — check TTL
+            if expires_at:
+                try:
+                    exp_dt = datetime.fromisoformat(expires_at)
+                    if datetime.now(IST) < exp_dt:
+                        return cached
+                except ValueError:
+                    pass    # malformed expires_at → recompute
 
     # Cache miss or expired → recompute
     payload = build_replay_payload(con, replay_date)

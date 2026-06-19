@@ -13,7 +13,7 @@
  * The expanded body reuses PickCard's expanded variant — single source of UI truth.
  */
 import type { LiveDecision, Pick } from '@/lib/power-api'
-import { PickCard } from './PickCard'
+import { PickCard, SignalTierBadge, SignalDayStrip } from './PickCard'
 
 type Props = {
   pick:          Pick
@@ -42,11 +42,14 @@ export function ExpandablePickRow({ pick, liveDecision }: Props) {
             still shown — it's an actionable label, not an ordering cue. */}
         <span className="text-xs text-neutral-500 font-mono">#{pick.rank}</span>
         <div className="min-w-0">
-          <div className="flex items-baseline gap-2">
+          <div className="flex items-baseline gap-2 flex-wrap">
             <span className="font-mono font-medium text-neutral-100">{pick.symbol}</span>
             {pick.sector && (
               <span className="text-xs text-neutral-500 truncate">{pick.sector}</span>
             )}
+            <SignalTierBadge tier={pick.signal_tier} color={pick.signal_tier_color}
+                             reason={pick.signal_tier_reason} />
+            <SignalDayStrip pick={pick} />
           </div>
           <p className="text-xs text-neutral-400 truncate group-[[open]]:hidden">
             {pick.story}

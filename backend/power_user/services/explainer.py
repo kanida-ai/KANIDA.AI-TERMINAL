@@ -594,11 +594,15 @@ def aggregate_outcomes(picks_with_outcomes: List[Dict[str, Any]]) -> Dict[str, A
 #  CANONICAL PICK PAYLOAD — single source of truth shape (Design.md §5)
 # ──────────────────────────────────────────────────────────────────────────
 
-PICK_SCHEMA_VERSION = 1
+PICK_SCHEMA_VERSION = 2
 """Bumped whenever the payload shape changes. Old clients can detect mismatch.
 
 Change log:
   v1 (2026-05-14): initial — locked after operator review with 10 fixes.
+  v2 (2026-06-18): additive — signal-time tiering. Adds optional keys
+    signal_tier, signal_tier_reason, signal_tier_color, signal_day_ret_pct,
+    two_day_ret_pct (populated by signal_tier.enrich_picks). All optional, so
+    callers that don't enrich still produce valid payloads.
 """
 
 # The exact key set every Pick payload MUST have. Validated by validate_pick_payload
@@ -610,7 +614,18 @@ PICK_REQUIRED_KEYS = frozenset({
     "tier", "tier_icon", "tier_color", "tier_desc", "tier_action_hint",
     "story", "top_patterns", "expected", "risk",
 })
-PICK_OPTIONAL_KEYS = frozenset({"actual"})
+PICK_OPTIONAL_KEYS = frozenset({
+    "actual",
+    # v2 signal-time tiering (additive; populated by signal_tier.enrich_picks)
+    "signal_tier", "signal_tier_reason", "signal_tier_color",
+    "signal_day_ret_pct", "two_day_ret_pct",
+})
+
+# Enum for the optional signal-time tier (distinct axis from the rank `tier`).
+PICK_SIGNAL_TIER_ENUM = frozenset({
+    "PREMIUM-Pullback", "PREMIUM-Compression", "ENTERPRISE-Dryup",
+    "GOLD", "GOLD-baseline", "STANDARD", "STANDARD-weak", "AVOID",
+})
 
 PICK_PATTERN_REQUIRED_KEYS = frozenset({
     "position", "pattern_id", "trader_phrase", "hit_phrase",
@@ -688,6 +703,11 @@ def validate_pick_payload(p: Dict[str, Any]) -> None:
         raise ValueError(f"tier {p['tier']!r} not in display set "
                          f"(internal DEEP-TAIL must be collapsed to TAIL)")
 
+    # 6b. Signal-time tier enum (optional, v2). Distinct from the rank `tier`.
+    if p.get("signal_tier") is not None and p["signal_tier"] not in PICK_SIGNAL_TIER_ENUM:
+        raise ValueError(f"signal_tier {p['signal_tier']!r} not in "
+                         f"{sorted(PICK_SIGNAL_TIER_ENUM)}")
+
     # 7. actual outcomes (optional) — keys must be lowercase d-prefixed
     if "actual" in p:
         actual = p["actual"]
@@ -749,6 +769,12 @@ def build_pick_payload(rank: int,
         "tier_color":       TIER_COLOR[tier],
         "tier_desc":        tier_desc,
         "tier_action_hint": TIER_ACTION_HINT[tier],
+        # v2 signal-time tiering (None unless signal_tier.enrich_picks ran)
+        "signal_tier":        pick.get("signal_tier"),
+        "signal_tier_reason": pick.get("signal_tier_reason"),
+        "signal_tier_color":  pick.get("signal_tier_color"),
+        "signal_day_ret_pct": pick.get("signal_day_ret_pct"),
+        "two_day_ret_pct":    pick.get("two_day_ret_pct"),
         "story":            generate_story(pick["symbol"], pick["sector"], fv),
         "top_patterns":     top_patterns,
         "expected": {

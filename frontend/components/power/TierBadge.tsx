@@ -15,6 +15,7 @@ const TIER_COLOR_CLASSES: Record<TierColor, string> = {
   yellow: 'bg-yellow-500/15 text-yellow-300 border-yellow-500/40',
   orange: 'bg-orange-500/15 text-orange-300 border-orange-500/40',
   gray:   'bg-neutral-700/40 text-neutral-300 border-neutral-600',
+  red:    'bg-red-500/15    text-red-300    border-red-500/40',
 }
 
 const SIZE_CLASSES = {
