@@ -41,9 +41,15 @@ def test_avoid_extended():
                                 avg_lift=16.0, trend3_20=1.0, turn_pct=0.9) == "AVOID"
 
 def test_avoid_froth():
-    # up 5-10% on heavy turnover = froth
+    # up >7% on heavy turnover = froth
     assert classify_signal_tier(sret=8.0, twoday=10.0, rng=5.0,
                                 avg_lift=16.0, trend3_20=1.0, turn_pct=0.9) == "AVOID"
+
+def test_5to7_high_turnover_not_avoided():
+    # 5<sret<=7 on heavy turnover is a POSITIVE-edge band (55.8% WR) -> NOT AVOID.
+    # Falls through to STANDARD-weak (5<sret<=10). [boundary fix 2026-06-19]
+    assert classify_signal_tier(sret=6.0, twoday=8.0, rng=4.0,
+                                avg_lift=16.0, trend3_20=1.0, turn_pct=0.9) == "STANDARD-weak"
 
 def test_all_tiers_in_enum():
     for t in ("PREMIUM-Pullback", "GOLD", "AVOID", "STANDARD"):

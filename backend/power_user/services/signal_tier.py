@@ -68,7 +68,11 @@ def classify_signal_tier(sret: Optional[float],
     """Layered best→worst classifier. Parity with scripts/export_tier_excel.classify."""
     if _ok(sret) and sret > 10:
         return "AVOID"
-    if _ok(sret) and sret > 5 and _ok(turn_pct) and turn_pct >= 0.75:
+    # Froth: only AVOID extended moves on heavy turnover from >+7% (the point
+    # where WR falls to ~53%). The 5-7% high-turnover band is N=586 @ 55.8% WR
+    # / +1.55% avg — a positive edge — so it must NOT be avoided (it falls
+    # through to STANDARD-weak). [validated 2026-06-19, scripts/validate_tier_feedback.py]
+    if _ok(sret) and sret > 7 and _ok(turn_pct) and turn_pct >= 0.75:
         return "AVOID"
     if _ok(sret) and sret <= 2 and _ok(twoday) and twoday < -5 and _ok(avg_lift) and avg_lift > 15:
         return "PREMIUM-Pullback"
