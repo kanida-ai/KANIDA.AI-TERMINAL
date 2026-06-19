@@ -394,10 +394,19 @@ class TestPickPayloadShape:
         missing = required - set(p.keys())
         assert not missing, f"Missing keys: {missing}"
 
-    def test_schema_version_is_1(self):
-        """Contract fix #7 — clients must be able to detect shape changes."""
+    def test_schema_version_is_current(self):
+        """Contract fix #7 — clients must be able to detect shape changes.
+        v2 (2026-06-18): additive signal-time tiering fields."""
         p = build_pick_payload(1, self._sample_pick())
-        assert p["_version"] == PICK_SCHEMA_VERSION == 1
+        assert p["_version"] == PICK_SCHEMA_VERSION == 2
+
+    def test_signal_tier_fields_present_and_optional(self):
+        """v2 keys exist on the payload; default None when not enriched."""
+        p = build_pick_payload(1, self._sample_pick())
+        for k in ("signal_tier", "signal_tier_reason", "signal_tier_color",
+                  "signal_day_ret_pct", "two_day_ret_pct"):
+            assert k in p
+            assert p[k] is None        # not enriched in this unit context
 
     def test_signal_date_and_entry_date_included(self):
         """Contract fix #2 — each pick carries its own temporal context."""

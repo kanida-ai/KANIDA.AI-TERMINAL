@@ -93,9 +93,10 @@ def auth_header(authed_token):
 # ──────────────────────────────────────────────────────────────────────────
 
 def _assert_pick_v1(p: Dict[str, Any]) -> None:
-    """Centralised assertion for the Pick contract — used in every test."""
+    """Centralised assertion for the Pick contract — used in every test.
+    (v2 2026-06-18: additive signal-time tiering; version bumped 1→2.)"""
     validate_pick_payload(p)
-    assert p["_version"] == 1
+    assert p["_version"] == 2
     assert PICK_REQUIRED_KEYS.issubset(p.keys())
 
 
@@ -412,4 +413,4 @@ class TestSchemaVersion:
     def test_schema_version_in_top_n_response(self, client):
         r = client.get("/api/power/picks/today/preview")
         body = r.json()
-        assert body.get("_schema_version") == 1
+        assert body.get("_schema_version") == 2

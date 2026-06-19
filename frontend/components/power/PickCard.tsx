@@ -17,10 +17,48 @@
  *   - actual outcomes shown only when present (historical)
  *   - liveDecision overlay (decided_at_cycle badge) when passed
  */
-import type { Pick, LiveDecision, PickPattern, PickActual } from '@/lib/power-api'
+import type { Pick, LiveDecision, PickPattern, PickActual, TierColor } from '@/lib/power-api'
 
 const inr = (n: number) =>
   '₹' + Math.round(n).toLocaleString('en-IN')
+
+// v2: signal-time tier badge (distinct from the rank/conviction tier).
+const SIGNAL_TIER_CLASSES: Record<string, string> = {
+  amber:  'bg-amber-500/15  text-amber-300  border-amber-500/40',
+  green:  'bg-green-500/15  text-green-300  border-green-500/40',
+  yellow: 'bg-yellow-500/15 text-yellow-300 border-yellow-500/40',
+  orange: 'bg-orange-500/15 text-orange-300 border-orange-500/40',
+  gray:   'bg-neutral-700/40 text-neutral-300 border-neutral-600',
+  red:    'bg-red-500/15    text-red-300    border-red-500/40',
+}
+
+export function SignalTierBadge({ tier, color, reason }: {
+  tier?: string | null; color?: TierColor | null; reason?: string | null
+}) {
+  if (!tier) return null
+  const cls = SIGNAL_TIER_CLASSES[color ?? 'gray'] ?? SIGNAL_TIER_CLASSES.gray
+  return (
+    <span
+      title={reason ?? undefined}
+      className={['inline-flex items-center font-semibold rounded border font-mono',
+                  'text-[10px] px-1.5 py-0.5', cls].join(' ')}
+    >
+      {tier.replace('-', ' ')}
+    </span>
+  )
+}
+
+// v2: the signal-day price numbers that drive the tier.
+export function SignalDayStrip({ pick }: { pick: Pick }) {
+  if (pick.signal_day_ret_pct == null && pick.two_day_ret_pct == null) return null
+  return (
+    <span className="text-[11px] text-neutral-400 font-mono whitespace-nowrap"
+          title="Signal-day return and trailing 2-day return (tier drivers)">
+      sig {fmtPct(pick.signal_day_ret_pct, { sign: true })}
+      {' · '}2d {fmtPct(pick.two_day_ret_pct, { sign: true })}
+    </span>
+  )
+}
 
 const fmtPct = (n: number | null | undefined, opts: { sign?: boolean } = {}) => {
   if (n == null) return '—'
@@ -139,6 +177,9 @@ export function PickHeader({ pick, liveDecision }: { pick: Pick; liveDecision?: 
         {pick.sector && (
           <span className="text-sm text-neutral-400 truncate">{pick.sector}</span>
         )}
+        <SignalTierBadge tier={pick.signal_tier} color={pick.signal_tier_color}
+                         reason={pick.signal_tier_reason} />
+        <SignalDayStrip pick={pick} />
       </div>
       {liveDecision && (
         <div className="shrink-0">
