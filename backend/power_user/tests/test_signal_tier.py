@@ -96,3 +96,51 @@ def test_enrich_missing_symbol_is_safe():
     enrich_picks(con, picks, sd)              # must not raise
     assert picks[0]["signal_tier"] in SIGNAL_TIER_ENUM
     assert picks[0]["signal_day_ret_pct"] is None
+
+
+# ── Phase 0: data-driven rulebook must match the hardcoded classifier ───────
+
+import os, importlib.util, sqlite3 as _sqlite3
+from backend.power_user.services.signal_tier import (
+    classify_from_rulebook, load_active_rulebook,
+)
+
+def _migrate_rules():
+    """Load the champion rules from the migrator, shaped like the loader output."""
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    spec = importlib.util.spec_from_file_location(
+        "mig", os.path.join(root, "scripts", "tier_rulebook_migrate.py"))
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    return sorted([(prio, tier, conds) for (rid, tier, prio, conds, *_) in m.RULES],
+                  key=lambda r: r[0])
+
+def test_rulebook_parity_with_code():
+    """classify_from_rulebook(champion rules) == classify_signal_tier over a grid."""
+    rules = _migrate_rules()
+    srets   = [-3, -1, 0, 1, 2, 3, 5, 6, 8, 11, 16, None]
+    twodays = [-6, -3, 0, None]
+    rngs    = [1.5, 3, None]
+    lifts   = [14, 16, None]
+    trends  = [0.8, 1.1, None]
+    turns   = [0.3, 0.8, 0.95, None]
+    checked = 0
+    for s in srets:
+        for td in twodays:
+            for rg in rngs:
+                for al in lifts:
+                    for tr in trends:
+                        for tp in turns:
+                            feat = {"sret": s, "twoday": td, "rng": rg,
+                                    "avg_lift": al, "trend3_20": tr, "turn_pct": tp}
+                            a = classify_from_rulebook(feat, rules)
+                            b = classify_signal_tier(s, td, rg, al, tr, tp)
+                            assert a == b, f"mismatch at {feat}: rulebook={a} code={b}"
+                            checked += 1
+    assert checked > 4000
+
+def test_load_rulebook_empty_returns_fallback_list():
+    con = _sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE falcon_tier_rules (tier TEXT, conditions_json TEXT, status TEXT)")
+    import backend.power_user.services.signal_tier as stmod
+    stmod._rb_cache.update(rules=None, at=0.0)   # bust cache
+    assert load_active_rulebook(con) == []        # empty table → [] → code fallback
