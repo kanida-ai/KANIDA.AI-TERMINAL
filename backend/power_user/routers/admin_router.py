@@ -11,6 +11,7 @@ Auth: ADMIN_SECRET via X-Admin-Secret header (reuses operator's gate).
 from __future__ import annotations
 
 import logging
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -566,3 +567,88 @@ def metrics(
             for r in top_routes
         ],
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Tier rulebook review/approve — "what the AI learned this week" (Phase 2)
+# The weekly shadow learner (KanidaTierWeeklyLearner) writes status='challenger'
+# snapshots to falcon_tier_rules; these endpoints surface champion-vs-challenger
+# and let an admin promote a challenger to 'active' (gated + audited).
+# ──────────────────────────────────────────────────────────────────────────
+
+def _tier_rows(con: sqlite3.Connection, status: str) -> Dict[str, Dict[str, Any]]:
+    cur = con.execute(
+        "SELECT rule_id, tier, conditions_json, is_wr, is_ret, is_n, "
+        "per_year_oos_json, reason, as_of FROM falcon_tier_rules WHERE status = ?",
+        (status,))
+    cols = [d[0] for d in cur.description]
+    return {r[0]: dict(zip(cols, r)) for r in cur.fetchall()}
+
+
+@router.get("/tier-review")
+def tier_review(_admin: bool = Depends(require_admin),
+                con: sqlite3.Connection = Depends(get_db)) -> Dict[str, Any]:
+    """Champion (active) vs latest challenger snapshot for every tier rule."""
+    try:
+        active = _tier_rows(con, "active")
+        chal   = _tier_rows(con, "challenger")
+    except sqlite3.OperationalError:
+        return {"rules": [], "has_divergence": False, "challenger_as_of": None,
+                "n_active": 0, "n_challenger": 0,
+                "note": "falcon_tier_rules not initialised — run tier_rulebook_migrate.py"}
+    out: List[Dict[str, Any]] = []
+    diverged = False
+    for rid, a in active.items():
+        c = chal.get(rid)
+        d_wr = (round(c["is_wr"] - a["is_wr"], 1)
+                if c and c.get("is_wr") is not None and a.get("is_wr") is not None else None)
+        cond_changed = bool(c) and c.get("conditions_json") != a.get("conditions_json")
+        if (d_wr is not None and abs(d_wr) >= 1.0) or cond_changed:
+            diverged = True
+        out.append({
+            "rule_id": rid, "tier": a["tier"],
+            "champion":   {"wr": a.get("is_wr"), "ret": a.get("is_ret"), "n": a.get("is_n")},
+            "challenger": ({"wr": c.get("is_wr"), "ret": c.get("is_ret"),
+                            "n": c.get("is_n"), "as_of": c.get("as_of")} if c else None),
+            "wr_delta": d_wr,
+            "conditions_changed": cond_changed,
+        })
+    challenger_as_of = next((c.get("as_of") for c in chal.values()), None)
+    return {"rules": out, "has_divergence": diverged,
+            "challenger_as_of": challenger_as_of,
+            "n_active": len(active), "n_challenger": len(chal)}
+
+
+class PromoteTierRequest(BaseModel):
+    rule_id: str = Field(min_length=1, max_length=64)
+
+
+@router.post("/tier-promote")
+def tier_promote(body: PromoteTierRequest,
+                 _admin: bool = Depends(require_admin),
+                 con: sqlite3.Connection = Depends(get_db)) -> Dict[str, Any]:
+    """Promote a challenger rule to 'active' (gated: challenger N>=50; audited).
+    Archives the current active row as 'retired_<as_of>'. The live classifier
+    picks up the change within its 5-min rulebook cache."""
+    cur = con.execute(
+        "SELECT is_n, is_wr, as_of FROM falcon_tier_rules "
+        "WHERE rule_id = ? AND status = 'challenger'", (body.rule_id,))
+    ch = cur.fetchone()
+    if not ch:
+        raise HTTPException(404, {"code": "NO_CHALLENGER",
+                                  "message": f"no challenger for {body.rule_id}"})
+    n, wr, as_of = ch[0], ch[1], ch[2]
+    if n is None or n < 50:
+        raise HTTPException(400, {"code": "GATE_FAILED",
+            "message": f"challenger N={n} < 50 — not enough evidence to promote"})
+    con.execute("UPDATE falcon_tier_rules SET status = ? "
+                "WHERE rule_id = ? AND status = 'active'",
+                (f"retired_{as_of}", body.rule_id))
+    con.execute("UPDATE falcon_tier_rules SET status = 'active', reason = ? "
+                "WHERE rule_id = ? AND status = 'challenger'",
+                (f"promoted {as_of} (N={n}, WR={wr})", body.rule_id))
+    con.commit()
+    log.info("admin: PROMOTED tier rule %s -> active (challenger as_of=%s N=%s WR=%s)",
+             body.rule_id, as_of, n, wr)
+    return {"ok": True, "rule_id": body.rule_id, "promoted_as_of": as_of,
+            "challenger_n": n, "challenger_wr": wr}
