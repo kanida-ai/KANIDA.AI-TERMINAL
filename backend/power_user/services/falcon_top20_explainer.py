@@ -296,6 +296,25 @@ def build_falcon_top20(
             log.exception("build_pick failed for %s: %s", p.get("symbol"), e)
             continue
 
+    # ── 4b. Signal-time tier + 2-day return (derived from signal-day price +
+    #         volume). Reuses the same classifier as the picks panel
+    #         (services/signal_tier). Overlay only — never break the page.
+    try:
+        from .signal_tier import enrich_picks as _enrich_tiers
+        _tin = [{"symbol": p.get("symbol"), "score": p.get("score") or 0,
+                 "n_fires": p.get("n_fires") or 0} for p in raw_picks]
+        _enrich_tiers(prod_con, _tin, signal_date)
+        _tmap = {t["symbol"]: t for t in _tin}
+        for _pk in picks_out:
+            _t = _tmap.get(_pk.get("symbol"))
+            if _t:
+                _pk["signal_tier"]        = _t.get("signal_tier")
+                _pk["signal_tier_color"]  = _t.get("signal_tier_color")
+                _pk["signal_tier_reason"] = _t.get("signal_tier_reason")
+                _pk["two_day_ret_pct"]    = _t.get("two_day_ret_pct")
+    except Exception as e:                                  # noqa: BLE001
+        log.warning("falcon_top20: signal-tier enrichment skipped: %s", e)
+
     # Latest available date — useful for the frontend to show "viewing
     # historical date" badges when the user has navigated to a past day.
     latest_signal_date = available_signal_dates[0] if available_signal_dates else None

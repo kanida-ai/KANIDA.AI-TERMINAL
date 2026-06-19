@@ -210,6 +210,11 @@ export type Top20Pick = {
   bucket3:                    Top20Bucket3Sector
   action:                     Top20Action
   flags:                      Top20Flags
+  /** v2 signal-time tiering (overlay; null when not enriched). */
+  signal_tier?:               string | null
+  signal_tier_color?:         string | null
+  signal_tier_reason?:        string | null
+  two_day_ret_pct?:           number | null
 }
 
 export type Top20Universe = 'all500' | 'nifty50' | 'nifty100' | 'nifty200' | 'fno'
