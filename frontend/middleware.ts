@@ -69,6 +69,11 @@ export function middleware(req: NextRequest) {
     const res = NextResponse.next()
     // Still keep search engines out — invite-only beta.
     res.headers.set('X-Robots-Tag', 'noindex, nofollow, noarchive')
+    // Expose the resolved pathname to Server Components (Falcon AI shell uses
+    // it to decide whether to render the public TopBar chrome or hand the page
+    // straight to the new left-nav AppShell). Additive — read-only, no auth
+    // behavior change.
+    res.headers.set('x-pathname', pathname)
     return res
   }
 
