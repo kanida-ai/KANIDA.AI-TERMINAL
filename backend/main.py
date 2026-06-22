@@ -508,6 +508,11 @@ from power_user.routers.billing_router            import router as power_billing
 # Ask-Falcon read-only API (2026-06-22): universe search, last-EOD-close quotes,
 # and per-stock analysis for any covered stock. /api/power/universe|quote|ask/*.
 from power_user.routers.ask_router               import router as power_ask_router
+# Co-Trading virtual-portfolio sim (2026-06-22): follow Falcon with virtual
+# capital. /api/power/cotrade/simulate|portfolio. Reuses the falcon-top-10
+# walk-forward engine (single continuous cash pool scaled to user capital).
+# Read-only on market data; NEVER touches the auto-trade execution path.
+from power_user.routers.cotrade_router           import router as power_cotrade_router
 
 app = FastAPI(title="KANIDA.AI Swing Trading Terminal", version="3.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -541,6 +546,7 @@ app.include_router(power_persona_router,      tags=["Power-User"])    # new pers
 app.include_router(power_top20_router,         tags=["Power-User"])    # Falcon Top 20 + 3-bucket explainability
 app.include_router(power_billing_router,       tags=["Power-User"])    # Razorpay billing + webhook (M3)
 app.include_router(power_ask_router,            tags=["Power-User"])    # Ask-Falcon: universe / quote / analyze-stock
+app.include_router(power_cotrade_router,         tags=["Power-User"])    # Co-Trading virtual-portfolio sim (falcon-top-10)
 
 # Power User schema init — idempotent, creates tables on first boot.
 # Uses POWER_DB_PATH resolver — same DB as the engine read-only tables
