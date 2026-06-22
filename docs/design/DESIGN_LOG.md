@@ -38,6 +38,104 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-06-22 — **AutoTrade page built (launch-pending UX) + shared PlanSwitcher +
+  Co-Trading /quote entry-reference wiring** (3 tasks; worktree feat/falcon-ai-shell).
+  DRY refactor: extracted the shared Co-Trading primitives into a new
+  `components/power/shared/cotrade-kit.tsx` (the F2 `C` palette, full `ICON` set,
+  `Gear`/`MechanismStrip` + `MECHANISM_CSS`, tier-band helpers `TIER_STYLE`/
+  `BAND_COLORKEY`/`tierBand`, formatters `fmtINR`/`signedINR`/`fmtNum`/`fmtCapital`/
+  `pctTone`/`fmtPct`/`istTodayISO`); CoTradingExperience now imports them instead of
+  its local duplicates (NO behaviour change to the clean 2-stage flow — all copy/
+  math/honesty 1:1). MechanismStrip gained a `variant` ('cotrade'|'autotrade'),
+  `onBridge`, and a `launching` badge prop. Backend untouched.
+  - **TASK 1 — AutoTrade** (`AutoTradeExperience.tsx` + rewired `autotrade/page.tsx`):
+    MIRRORS the Co-Trading 2-stage flow + the gear mechanism strip so it reads as the
+    same product family, but STRICT honesty — it places/simulates NOTHING.
+    • Mechanism strip variant "Falcon trades for you, automatically, with your real
+      broker" + a persistent amber **"Launching soon for your account"** badge.
+    • STAGE 1 SETUP mirrors Co-Trading: choose style (Swing live; others "soon") →
+      set capital (presets, REAL ₹50k@₹5L per-pick sizing line) → **Connect your
+      broker (Zerodha)** shown as the STRUCTURE, **disabled/"soon"** (per-user connect
+      not built, operator-only execution stated) → a 4-item **readiness checklist**
+      (broker connected=soon · funds=pending · risk config=pending · market hours=
+      pending) shown honestly as structure.
+    • Primary button is **NOT execute** — it's **"Join the AutoTrade waitlist"** → the
+      preview; copy states that once per-user automation is live Falcon auto-enters
+      the Top 10 at 9:15 IST, manages SL/trailing/exit and reports.
+    • STAGE 2 PREVIEW = **"What Falcon would trade today"** from the REAL
+      `PowerAPI.falconTop20('all500')` (seeded server-side), labelled **"preview —
+      not executing"**, per-card status pill **"Would auto-enter"**; REAL allocation
+      math (qty=floor(perTrade/entry), SL from action.stop_loss_pct else −7%, BAND-
+      derived tier colours). A **"Notify me when it's live"** waitlist card (local
+      state; persistence flagged as a Backend need) + a bridge to Co-Trading.
+    • Made the page **full-bleed** (added `/power/autotrade` to AppShell's fullBleed
+      check) for parity with Co-Trading; **nav kept `live:false`** ("Soon") because
+      the FEATURE is still launch-pending even though the page is built (honest).
+  - **TASK 2 — shared PlanSwitcher** (`components/power/shared/PlanSwitcher.tsx`):
+    compact, forward-looking, used at the top of BOTH Co-Trading (mint accent) and
+    AutoTrade (amber accent). A slim row of plan chips ("Swing · ₹5L ●") + an
+    **"All plans"** aggregate chip + **"+ Add a style"** popover (only Swing live;
+    others disabled "soon", already-added flagged). `AllPlansAggregate` shows combined
+    capital (REAL) + combined P&L/positions/return (honest "—/pending" until the
+    live-tracking backend supplies real per-plan P&L). Structural today (one live
+    plan) and SAYS so; designed to scale to N plans. Per-style chips only render the
+    extra row when >1 plan so the clean pages aren't re-cluttered; the switcher always
+    appears on the result/preview header.
+  - **TASK 3 — Co-Trading /quote entry reference** (CoTradingExperience.tsx): where a
+    pick's signal payload has no entry price, the LIVE result now fetches
+    `PowerAPI.quote()` (already live) for ONLY the missing symbols and uses
+    `last_close` as an entry **REFERENCE**, labelled **"ref: last close · {as_of}"**
+    (amber, Entry→"Entry (ref)") — explicitly NOT a live tick, NOT a fill. qty/capital
+    sized honestly off that reference. `AllocRow` gained `entrySource`
+    ('signal'|'quote'|null) + `quoteAsOf`; an honest banner explains the ref sizing;
+    the old "entry missing" banner now only fires when neither signal NOR quote has a
+    price. No fabrication; quote-fetch failure leaves entry "—".
+  - **Honesty held 1:1.** AutoTrade places/simulates nothing; quote ref is EOD not a
+    fill; multi-style others = "soon"; preview uses real picks only; all P&L stays
+    "—/pending" where unserved.
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npm run build` ✓ Compiled
+    successfully (`/power/autotrade` + `/power/co-trading` both built).
+- 2026-06-22 — **Ask-Falcon home WIRED to the 3 now-LIVE backend endpoints**
+  (AskFalconHome.tsx + power-api.ts only; layout / mechanism strip / composer /
+  3-column structure UNCHANGED — pure data-wiring). Replaced every "coming
+  soon"/"pending"/fallback stub with real data, honest states preserved.
+  - **power-api.ts — 3 typed fetchers added** under `PowerAPI`, using the existing
+    `apiFetch`/`apiBase` pattern: `universeSymbols()` → `UniverseSymbolsResponse
+    { as_of, count, symbols:[{symbol,name,sector}] }`; `quote(symbols[])` →
+    `QuoteResponse = Record<string, { last_close, prev_close, as_of }>` (filters
+    falsy + caps the list at 60 client-side); `analyzeStock(symbol)` →
+    `AnalyzeStockResponse` (all 11 prose/label fields + `risk_warnings[]`; a 404
+    surfaces as `PowerAPIError(404,'NOT_COVERED')` via the existing error mapper).
+  - **Universe search** — `StockSearch.ensureLoaded()` now calls
+    `PowerAPI.universeSymbols()` instead of a raw `fetch`; the full ~477-name list
+    loads once on first focus and filters client-side as before. REMOVED the
+    "full-universe search coming soon" note; the only remaining note is an honest
+    "couldn't load the full universe just now — searching today's Top 10 instead"
+    that shows ONLY on a real fetch failure (graceful fallback to Top-10 symbols).
+  - **Price row (right detail card)** — new `quotes: Record<string, Quote>` state
+    on the home, fetched in ONE batched `PowerAPI.quote(top10Symbols)` call
+    (≤60) keyed off `data.signal_date/universe/sector`. `PriceBreakdown` now takes
+    a `quote` prop: **Current LTP = `last_close`** (₹ formatted) labeled
+    **"last close · {as_of}"** (+ derived day-change `last_close/prev_close-1`,
+    mint/red) — explicitly NOT a live tick; **Prev-day LTP = `prev_close`**
+    ("prior EOD close"). On a missing quote the cells show "—" / "quote
+    unavailable" (no crash, nothing fabricated). Signal-day % stays REAL; **Entry
+    day kept as "market open pending"** (genuinely pending). Added `fmtRs()`.
+  - **Single-stock analysis** — `StockAnalysis` rewritten from the "analysis
+    coming soon" scaffold to call `PowerAPI.analyzeStock(symbol)` and render each
+    REAL field as its own section (explanation lead → current_trend / price /
+    volume / signal-day / sector / falcon_pattern_observations / entry_context →
+    `risk_warnings[]` bullets → "as of {as_of} · not financial advice"), plus a
+    tier chip (`tier` + `tier_reason` tooltip) coloured via the canonical
+    `BAND_COLORKEY`. **404 → honest "{SYM} isn't covered by Falcon yet"**; other
+    errors → honest "couldn't load … try again". Top-10 names still short-circuit
+    to the REAL DetailCard (never hit this path). New helpers `AnalysisSection`
+    (renders only when prose present), `AnalysisTierBadge`. Removed the
+    `ANALYSIS_SECTIONS` "soon"-tagged placeholder grid.
+  - **Honesty held 1:1.** EOD close never mislabeled as live; no fabricated
+    prices/analysis; graceful empty/"unavailable" on every failure path.
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npm run build` ✓ compiled
+    (`/power/ask` built).
 - 2026-06-21 — **Co-Trading SETUP polish round — fill the horizontal space, fit one
   viewport, fix the truncated mechanism step** (CoTradingExperience.tsx only;
   page.tsx / AppShell / globals.css untouched; 2-stage flow + mechanism strip +
