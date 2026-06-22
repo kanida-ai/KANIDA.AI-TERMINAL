@@ -39,7 +39,7 @@ export function AppShell({ children, displayName, email, isAdmin }: Props) {
   // The Ask-Falcon home is a full-bleed F2 master-detail (its own middle +
   // right panels fill the canvas). Every other mode keeps the centered,
   // padded reading column.
-  const fullBleed = pathname === '/power/ask' || pathname === '/power/co-trading'
+  const fullBleed = pathname === '/power/ask' || pathname === '/power/co-trading' || pathname === '/power/autotrade'
 
   return (
     <div className="min-h-screen bg-black text-neutral-100 flex">

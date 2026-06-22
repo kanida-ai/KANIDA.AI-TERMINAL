@@ -43,13 +43,18 @@
  *     (whole-window year grain; flagged where it isn't a per-date walk-forward).
  *   • Only "Falcon Top 10 Swing" is LIVE.
  */
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { PowerAPI } from '@/lib/power-api'
-import type { PersonaBacktestResponse } from '@/lib/power-api'
+import type { PersonaBacktestResponse, QuoteResponse } from '@/lib/power-api'
 import { CompassLogo } from '@/components/power/CompassLogo'
 import { EquityChart } from '@/components/power/EquitySparkline'
 import type { Top20Pick, Top20Response } from '@/lib/falcon-top20-types'
+import { PlanSwitcher, AllPlansAggregate, ALL_PLANS, type Plan } from '@/components/power/shared/PlanSwitcher'
+import {
+  C, ICON, TIER_STYLE, BAND_COLORKEY, tierBand, MechanismStrip,
+  fmtINR, signedINR, fmtNum, fmtCapital, pctTone, fmtPct, istTodayISO,
+} from '@/components/power/shared/cotrade-kit'
 
 // ── Top-10 persona slug — backtest performance source of truth ───────────────
 //   backend/power_user/services/persona_simulator.py PERSONA_CONFIGS
@@ -76,14 +81,6 @@ type PersonaYearly = {
   n_closed: number; n_open_at_year_end: number
 }
 type PersonaMonthly = { year: number; month: string; end_equity: number; return_pct: number }
-
-// ── F2 palette (tokens in globals.css :root — same helper as AskFalconHome) ──
-const C = {
-  canvas: 'var(--f2-canvas)', panel: 'var(--f2-panel)', card: 'var(--f2-card)', card2: 'var(--f2-card-2)',
-  mint: 'var(--f2-mint)', mintHi: 'var(--f2-mint-hi)', mintDim: 'var(--f2-mint-dim)',
-  ink: 'var(--f2-ink)', ink2: 'var(--f2-ink-2)', muted: 'var(--f2-muted)', faint: 'var(--f2-faint)',
-  line: 'var(--f2-line)', line2: 'var(--f2-line-2)', red: 'var(--f2-red)', amber: 'var(--f2-amber)',
-}
 
 // ── Trading styles — only Swing is LIVE (rest Launch-Pending) ────────────────
 type StyleId = 'swing' | 'btst' | 'intraday' | 'weekly' | 'longterm'
@@ -130,22 +127,6 @@ const TRADING_CYCLE: string[] = [
   'Freed cash returns to the book; already-held names are skipped on the next cycle.',
 ]
 
-// ── Tier band colouring — derive from the BAND name, NEVER signal_tier_color ─
-const TIER_STYLE: Record<string, { color: string; bg: string; ring: string }> = {
-  amber: { color: 'var(--f2-amber)',      bg: 'rgba(230,180,80,0.14)',  ring: 'rgba(230,180,80,0.45)' },
-  green: { color: 'var(--f2-tier-green)', bg: 'rgba(63,227,164,0.14)',  ring: 'rgba(63,227,164,0.45)' },
-  teal:  { color: 'var(--f2-teal)',       bg: 'rgba(75,203,224,0.14)',  ring: 'rgba(75,203,224,0.45)' },
-  red:   { color: 'var(--f2-red)',        bg: 'rgba(232,115,107,0.14)', ring: 'rgba(232,115,107,0.45)' },
-  gray:  { color: 'var(--f2-slate)',      bg: 'rgba(133,153,144,0.13)', ring: 'rgba(133,153,144,0.40)' },
-}
-const BAND_COLORKEY: Record<string, string> = {
-  GOLD: 'amber', PREMIUM: 'teal', ENTERPRISE: 'green', STANDARD: 'gray', AVOID: 'red',
-}
-function tierBand(raw: string | null | undefined): string | null {
-  if (!raw) return null
-  return raw.split('-')[0].toUpperCase()
-}
-
 // ── Entry price resolution — only ever a REAL number off the pick; else null. ─
 function entryPriceOf(p: Top20Pick): number | null {
   const fromAction = p.action?.entry_price_rs
@@ -154,13 +135,18 @@ function entryPriceOf(p: Top20Pick): number | null {
 }
 
 // ── Allocation math (REAL): FIXED ₹/trade scaled, qty = floor(alloc/entry). ──
+//   `entrySource` says where `entry` came from so the UI can be honest:
+//   'signal' = the real signal payload price; 'quote' = a REAL last EOD close
+//   used only as a REFERENCE (NOT a live tick, NOT a fill); null = no price.
 type AllocRow = {
-  pick:    Top20Pick
-  entry:   number | null
-  qty:     number
-  capital: number
-  slPrice: number | null
-  slPct:   number
+  pick:        Top20Pick
+  entry:       number | null
+  entrySource: 'signal' | 'quote' | null
+  quoteAsOf:   string | null
+  qty:         number
+  capital:     number
+  slPrice:     number | null
+  slPct:       number
 }
 
 type Props = {
@@ -209,19 +195,44 @@ export function CoTradingExperience({ data: seed, firstName }: Props) {
   // Fixed per-trade ₹, scaled proportionally from the ₹5 L base to user capital.
   const perTrade = Math.max(0, (capital / BASE_CAPITAL) * BASE_PER_TRADE)
 
+  // ── REAL EOD quotes (PowerAPI.quote — last close, NOT a live tick). Used ONLY
+  //   as an entry REFERENCE for picks whose signal payload has no entry price.
+  //   Fetched once we reach the LIVE result for the symbols actually missing one. ─
+  const [quotes, setQuotes] = useState<QuoteResponse>({})
+  const symbolsNeedingQuote = useMemo(() => {
+    if (!data || style.id !== 'swing' || isReplay || stage !== 'result') return []
+    return data.picks.slice(0, TOP_N).filter(p => entryPriceOf(p) == null).map(p => p.symbol)
+  }, [data, style.id, isReplay, stage])
+  useEffect(() => {
+    const missing = symbolsNeedingQuote.filter(s => !(s in quotes))
+    if (missing.length === 0) return
+    const ac = new AbortController()
+    PowerAPI.quote(missing, ac.signal)
+      .then(q => setQuotes(prev => ({ ...prev, ...q })))
+      .catch(() => { /* honest: leave entry "—" if the quote feed fails */ })
+    return () => ac.abort()
+  }, [symbolsNeedingQuote, quotes])
+
   // ── Build the allocation rows (REAL picks + FIXED ₹/trade math) ────────────
   const rows: AllocRow[] = useMemo(() => {
     if (!data || style.id !== 'swing') return []
     return data.picks.slice(0, TOP_N).map(p => {
-      const entry = entryPriceOf(p)
+      const signalEntry = entryPriceOf(p)
+      // Fall back to the REAL last EOD close as a reference (never a fill/tick).
+      const q = quotes[p.symbol]
+      const refEntry = signalEntry == null && q && q.last_close > 0 ? q.last_close : null
+      const entry = signalEntry ?? refEntry
+      const entrySource: 'signal' | 'quote' | null =
+        signalEntry != null ? 'signal' : refEntry != null ? 'quote' : null
+      const quoteAsOf = entrySource === 'quote' ? (q?.as_of ?? null) : null
       const qty = entry && entry > 0 && perTrade > 0 ? Math.floor(perTrade / entry) : 0
       const cap = entry && entry > 0 ? qty * entry : 0
       const slPctRaw = p.action?.stop_loss_pct
       const slPct = typeof slPctRaw === 'number' && slPctRaw !== 0 ? slPctRaw : STANDARD_SL_PCT
       const slPrice = entry ? +(entry * (1 + slPct / 100)).toFixed(2) : null
-      return { pick: p, entry, qty, capital: cap, slPrice, slPct }
+      return { pick: p, entry, entrySource, quoteAsOf, qty, capital: cap, slPrice, slPct }
     })
-  }, [data, style.id, perTrade])
+  }, [data, style.id, perTrade, quotes])
 
   const committed = rows.reduce((a, r) => a + r.capital, 0)
   const cashLeft  = Math.max(0, capital - committed)
@@ -229,6 +240,16 @@ export function CoTradingExperience({ data: seed, firstName }: Props) {
   const showReplayPending = isReplay && replayPending
 
   const canStart = style.live && !loading && capital > 0
+
+  // ── Multi-style PLAN switcher (Task 2). Today exactly one live plan = the
+  //   active style + capital; the switcher is structural and scales to N plans.
+  //   "All plans" → aggregate view (combined capital/P&L/positions). P&L stays
+  //   honest "—/pending" until the live-tracking backend supplies it per plan. ─
+  const [planView, setPlanView] = useState<string>('current')   // 'current' | ALL_PLANS
+  const plans: Plan[] = useMemo(() => [{
+    id: 'current', styleId: style.id, styleName: style.name, capital,
+    pnl: null, open: rows.length, live: style.live,
+  }], [style.id, style.name, capital, rows.length, style.live])
 
   // ── Start handler: live → straight to result; replay → fetch then result ───
   async function handleStart() {
@@ -265,6 +286,8 @@ export function CoTradingExperience({ data: seed, firstName }: Props) {
           canStart={canStart} loading={loading}
           onStart={handleStart} onOpenRules={() => setRulesOpen(true)}
           onAutoTrade={() => router.push('/power/autotrade')}
+          plans={plans}
+          onAddStyle={(sid) => { const s = STYLES.find(x => x.id === sid); if (s?.live) setStyleId(s.id) }}
         />
       ) : (
         <ResultStage
@@ -278,6 +301,8 @@ export function CoTradingExperience({ data: seed, firstName }: Props) {
           onOpenRules={() => setRulesOpen(true)}
           onAutoTrade={() => router.push('/power/autotrade')}
           onAnalyze={(sym) => router.push(`/power/ask?symbol=${encodeURIComponent(sym)}`)}
+          plans={plans} planView={planView} setPlanView={setPlanView}
+          onAddStyle={(sid) => { const s = STYLES.find(x => x.id === sid); if (s?.live) { setStyleId(s.id); setPlanView('current') } }}
         />
       )}
 
@@ -296,6 +321,7 @@ export function CoTradingExperience({ data: seed, firstName }: Props) {
 function SetupStage({
   firstName, styleId, setStyleId, capital, setCapital, mode, setMode,
   startDate, setStartDate, today, canStart, loading, onStart, onOpenRules, onAutoTrade,
+  plans, onAddStyle,
 }: {
   firstName: string
   styleId: StyleId; setStyleId: (s: StyleId) => void
@@ -304,10 +330,23 @@ function SetupStage({
   startDate: string; setStartDate: (s: string) => void; today: string
   canStart: boolean; loading: boolean
   onStart: () => void; onOpenRules: () => void; onAutoTrade: () => void
+  plans: Plan[]; onAddStyle: (styleId: string) => void
 }) {
   return (
     <div className="flex-1 min-h-0 md:overflow-y-auto [scrollbar-width:thin]">
       <div className="mx-auto w-full max-w-[1120px] px-5 md:px-8 py-5 md:py-6 flex flex-col gap-4 md:gap-5">
+
+        {/* multi-style plan switcher (structural today — one live plan) */}
+        {plans.length > 1 && (
+          <div className="flex justify-center">
+            <PlanSwitcher
+              plans={plans} activeId={plans.find(p => p.styleId === styleId)?.id ?? 'current'}
+              onSelect={(id) => { const p = plans.find(x => x.id === id); if (p) onAddStyle(p.styleId) }}
+              addable={STYLES.map(s => ({ id: s.id, name: s.name, live: s.live }))}
+              onAdd={onAddStyle} accent="mint"
+            />
+          </div>
+        )}
 
         {/* heading */}
         <div className="flex flex-col items-center text-center gap-1.5">
@@ -322,7 +361,7 @@ function SetupStage({
         </div>
 
         {/* "How Co-Trading works" — the running-machine mechanism strip (hook) */}
-        <MechanismStrip onAutoTrade={onAutoTrade} />
+        <MechanismStrip variant="cotrade" onBridge={onAutoTrade} />
 
         {/* STEP 1 — choose your trading style (visual cards, full-width 5-up) */}
         <Step n={1} title="Choose your trading style">
@@ -485,6 +524,7 @@ function ResultStage({
   style, capital, committed, cashLeft, rows, data, isReplay, startDate, today,
   perTrade, anyEntryMissing, showReplayPending, persona, personaLoading,
   personaErr, onChangePlan, onOpenRules, onAutoTrade, onAnalyze,
+  plans, planView, setPlanView, onAddStyle,
 }: {
   style: Style; firstName: string
   capital: number; committed: number; cashLeft: number
@@ -493,7 +533,9 @@ function ResultStage({
   persona: PersonaBacktestResponse | null; personaLoading: boolean; personaErr: boolean
   onChangePlan: () => void; onOpenRules: () => void; onAutoTrade: () => void
   onAnalyze: (s: string) => void
+  plans: Plan[]; planView: string; setPlanView: (v: string) => void; onAddStyle: (styleId: string) => void
 }) {
+  const showAggregate = planView === ALL_PLANS
   // REAL selected-period numbers for the summary strip on a replay (year grain).
   const yearly = personaYearly(persona)
   const periodYear = parseInt((isReplay ? startDate : today).slice(0, 4), 10)
@@ -530,8 +572,18 @@ function ResultStage({
           </button>
         </div>
 
+        {/* multi-style plan switcher — compact; structural today (one live plan) */}
+        <div className="mb-2.5">
+          <PlanSwitcher
+            plans={plans} activeId={planView === ALL_PLANS ? ALL_PLANS : 'current'}
+            onSelect={setPlanView}
+            addable={STYLES.map(s => ({ id: s.id, name: s.name, live: s.live }))}
+            onAdd={onAddStyle} accent="mint"
+          />
+        </div>
+
         {/* slim running-machine reminder (keeps the result uncluttered) */}
-        <div className="hidden sm:block mb-2"><MechanismStrip onAutoTrade={onAutoTrade} slim /></div>
+        <div className="hidden sm:block mb-2"><MechanismStrip variant="cotrade" slim /></div>
 
         <SummaryStrip
           starting={capital}
@@ -548,7 +600,13 @@ function ResultStage({
 
       {/* SCROLLABLE body */}
       <div className="flex-1 min-h-0 md:overflow-y-auto px-5 md:px-7 pt-4 pb-8 [scrollbar-width:thin]">
-        {!style.live ? (
+        {showAggregate ? (
+          // ── ALL PLANS — aggregate across styles (one live plan today) ──
+          <div className="flex flex-col gap-5 max-w-[1000px] mx-auto">
+            <AllPlansAggregate plans={plans} accent="mint" />
+            <AutoTradeBridge onAutoTrade={onAutoTrade} />
+          </div>
+        ) : !style.live ? (
           <StylePendingCard style={style} />
         ) : showReplayPending ? (
           <ReplayPendingCard startDate={startDate} />
@@ -647,6 +705,7 @@ function LivePortfolio({
   signalDate: string | null; entryDate: string | null; holdDays: number
   onAnalyze: (s: string) => void
 }) {
+  const anyQuoteRef = rows.some(r => r.entrySource === 'quote')
   return (
     <div className="rounded-2xl border overflow-hidden" style={{ borderColor: C.line2, background: C.panel }}>
       <div className="px-4 py-3 border-b flex items-center gap-2 flex-wrap" style={{ borderColor: C.line }}>
@@ -663,13 +722,24 @@ function LivePortfolio({
         Falcon will: enter at 9:15 ({entryDate ?? 'next open'}) · −7% stop · trail after +12% · exit by day {holdDays}.
       </div>
 
+      {anyQuoteRef && (
+        <div className="px-4 py-2 text-[11px] flex items-center gap-2 border-b"
+             style={{ borderColor: C.line, color: C.amber, background: 'rgba(230,180,80,0.06)' }}>
+          {ICON.info(13)}
+          <span style={{ color: C.ink2 }}>
+            Where the signal payload had no entry price, we size off the <b style={{ color: C.ink }}>last EOD close</b>{' '}
+            as a reference (marked &quot;ref&quot;) — not a live tick and not a real fill. The actual fill is the 9:15 open.
+          </span>
+        </div>
+      )}
+
       {anyEntryMissing && (
         <div className="px-4 py-2 text-[11px] flex items-center gap-2 border-b"
              style={{ borderColor: C.line, color: C.amber, background: 'rgba(230,180,80,0.06)' }}>
           {ICON.info(13)}
           <span style={{ color: C.ink2 }}>
-            Some entry prices aren&apos;t in the signal payload yet — those cards show &quot;—&quot;. A live quote
-            feed (Backend need) fills them in.
+            Some entry prices aren&apos;t available from the signal payload or the EOD quote feed yet — those cards
+            show &quot;—&quot;. A live quote feed (Backend need) fills them in.
           </span>
         </div>
       )}
@@ -708,7 +778,16 @@ function PositionCard({ r, holdDays, onAnalyze }: { r: AllocRow; holdDays: numbe
 
       <div className="grid grid-cols-3 gap-1.5">
         <Mini label="Capital" value={r.capital > 0 ? fmtINR(r.capital) : '—'} />
-        <Mini label="Entry" value={r.entry == null ? '—' : `₹${fmtNum(r.entry)}`} sub={r.qty > 0 ? `${r.qty} sh` : undefined} />
+        <Mini
+          label={r.entrySource === 'quote' ? 'Entry (ref)' : 'Entry'}
+          value={r.entry == null ? '—' : `₹${fmtNum(r.entry)}`}
+          sub={
+            r.entrySource === 'quote'
+              ? `ref: last close${r.quoteAsOf ? ` · ${r.quoteAsOf}` : ''}`
+              : r.qty > 0 ? `${r.qty} sh` : undefined
+          }
+          tone={r.entrySource === 'quote' ? C.amber : undefined}
+        />
         <Mini label="Stop" value={r.slPrice == null ? '—' : `₹${fmtNum(r.slPrice)}`} sub={`${r.slPct}%`} tone={C.red} />
       </div>
 
@@ -984,139 +1063,6 @@ function AutoTradeBridge({ onAutoTrade }: { onAutoTrade: () => void }) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// MECHANISM STRIP — "How Co-Trading works" gear-train banner. STATIC explanatory
-//   content (no numbers/P&L). Gently-rotating inline-SVG gears read as a running
-//   machine: you set it ONCE, Kanida.AI then runs continuously. Compact, mint/F2.
-//   `slim` renders a 1-line version for the RESULT header. Animation is disabled
-//   under prefers-reduced-motion (scoped <style>; globals.css untouched).
-// ════════════════════════════════════════════════════════════════════════════
-const MECHANISM_STEPS: { you?: boolean; title: string; body: string }[] = [
-  { you: true, title: 'You',       body: 'Choose your trading style + capital' },
-  {            title: 'Kanida.AI', body: 'Picks the daily Top 10 stocks' },
-  {            title: 'Kanida.AI', body: 'Decides entry, stop-loss & exit' },
-  {            title: 'Kanida.AI', body: 'Reports performance' },
-]
-
-/** A single gently-rotating inline-SVG cog. `dir` flips spin so meshing reads. */
-function Gear({ size = 22, dir = 1, color = C.mint, dim = false }: { size?: number; dir?: 1 | -1; color?: string; dim?: boolean }) {
-  // 8-tooth cog built from a rounded gear path + center hub.
-  const teeth = Array.from({ length: 8 }, (_, i) => i * 45)
-  return (
-    <span
-      className="ct-gear inline-grid place-items-center shrink-0"
-      style={{ width: size, height: size, animationDirection: dir === -1 ? 'reverse' : 'normal', opacity: dim ? 0.85 : 1 }}
-    >
-      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.5" aria-hidden>
-        {teeth.map(a => (
-          <rect key={a} x="10.7" y="0.7" width="2.6" height="4.4" rx="0.8" fill={color} stroke="none"
-                transform={`rotate(${a} 12 12)`} />
-        ))}
-        <circle cx="12" cy="12" r="7" fill="none" />
-        <circle cx="12" cy="12" r="2.5" fill={color} stroke="none" />
-      </svg>
-    </span>
-  )
-}
-
-const MECHANISM_CSS = `
-@keyframes ct-gear-spin { to { transform: rotate(360deg); } }
-.ct-gear { animation: ct-gear-spin 11s linear infinite; transform-origin: 50% 50%; }
-@media (prefers-reduced-motion: reduce) { .ct-gear { animation: none; } }
-`
-
-function MechanismStrip({ onAutoTrade, slim = false }: { onAutoTrade: () => void; slim?: boolean }) {
-  if (slim) {
-    // 1-line version for the RESULT header — one running cog + the loop sentence.
-    return (
-      <div className="flex items-center gap-2 text-[11px]" style={{ color: C.muted }}>
-        <style>{MECHANISM_CSS}</style>
-        <Gear size={15} dir={1} />
-        <Gear size={12} dir={-1} dim />
-        <span>
-          Set once · Falcon picks, enters, manages &amp; exits — <b style={{ color: C.mint }}>every trading day, automatically</b>.
-        </span>
-      </div>
-    )
-  }
-
-  return (
-    <div className="rounded-2xl border overflow-hidden"
-         style={{ borderColor: 'rgba(63,227,164,0.22)', background: 'linear-gradient(180deg, rgba(63,227,164,0.06), rgba(255,255,255,0.015))' }}>
-      <style>{MECHANISM_CSS}</style>
-
-      {/* headline row: gear cluster + copy */}
-      <div className="flex items-center gap-3 px-4 pt-3 pb-2.5">
-        <div className="flex items-center -space-x-1 shrink-0">
-          <Gear size={26} dir={1} />
-          <Gear size={18} dir={-1} dim />
-        </div>
-        <div className="min-w-0">
-          <div className="text-[13.5px] md:text-[14.5px] font-semibold leading-tight" style={{ color: C.ink }}>
-            Set it once. Falcon runs the machine.
-          </div>
-          <div className="text-[11px] md:text-[11.5px] leading-snug mt-0.5" style={{ color: C.muted }}>
-            You choose the style and capital — Kanida.AI handles the picks, entry, exits and reporting, every trading day.
-          </div>
-        </div>
-      </div>
-
-      {/* the 4-step gear-train — fills the full strip width responsively.
-          Cells size to fit (grid, equal columns); arrows sit BETWEEN cells.
-          The ↻ loop-back chip wraps to its own full-width line below so its
-          label is never truncated/clipped. */}
-      <div className="px-3 pb-3">
-        <div className="grid grid-cols-2 sm:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr] items-stretch gap-1.5">
-          {MECHANISM_STEPS.map((s, i) => (
-            <Fragment key={i}>
-              <div className="flex flex-col rounded-xl border px-2.5 py-2 justify-center min-w-0"
-                   style={{
-                     borderColor: s.you ? 'rgba(63,227,164,0.5)' : C.line2,
-                     background: s.you ? 'rgba(63,227,164,0.08)' : 'rgba(255,255,255,0.02)',
-                   }}>
-                <div className="flex items-center gap-1.5 mb-1">
-                  {s.you
-                    ? <span className="grid place-items-center w-4 h-4 rounded-md shrink-0" style={{ background: C.mint, color: '#06130c' }}>{ICON.user(10)}</span>
-                    : <Gear size={14} dir={i % 2 === 0 ? 1 : -1} />}
-                  <span className="text-[10px] font-semibold uppercase tracking-[0.05em]"
-                        style={{ color: s.you ? C.mint : C.ink }}>{s.title}</span>
-                  {s.you && (
-                    <span className="ml-auto text-[7.5px] font-mono uppercase tracking-[0.06em] shrink-0" style={{ color: C.mint }}>input</span>
-                  )}
-                </div>
-                <div className="text-[10.5px] leading-tight" style={{ color: s.you ? C.ink2 : C.muted }}>{s.body}</div>
-              </div>
-              {i < MECHANISM_STEPS.length - 1 && (
-                <span className="hidden sm:flex items-center justify-center shrink-0 px-0.5" style={{ color: C.faint }}>{ICON.arrow(13)}</span>
-              )}
-            </Fragment>
-          ))}
-        </div>
-
-        {/* loop-back: repeats continuously — own full-width line, never clipped */}
-        <div className="flex items-center justify-center gap-2 mt-1.5 rounded-full border px-3 py-1.5"
-             style={{ borderColor: 'rgba(63,227,164,0.32)', background: 'rgba(63,227,164,0.05)' }}>
-          <span className="shrink-0 grid place-items-center w-5 h-5 rounded-full" style={{ color: C.mint }}>
-            {ICON.loop(14)}
-          </span>
-          <span className="text-[10.5px] leading-tight text-center" style={{ color: C.muted }}>
-            Repeats every trading day — <b style={{ color: C.mint }}>automatically</b>
-          </span>
-        </div>
-      </div>
-
-      {/* AutoTrade bridge line (compact, secondary) */}
-      <button type="button" onClick={onAutoTrade}
-              className="w-full flex items-center gap-1.5 px-4 py-2 border-t text-[11px] transition-colors text-left"
-              style={{ borderColor: 'rgba(63,227,164,0.18)', color: C.muted, background: 'rgba(63,227,164,0.03)' }}>
-        <span style={{ color: C.mint }}>{ICON.bot(13)}</span>
-        AutoTrade does exactly this with your <b style={{ color: C.ink }}>real broker</b>
-        <span className="ml-auto shrink-0" style={{ color: C.mint }}>{ICON.arrow(12)}</span>
-      </button>
-    </div>
-  )
-}
-
-// ════════════════════════════════════════════════════════════════════════════
 // PERSONA (REAL BACKTEST) HELPERS — narrow the typed summary/yearly/monthly.
 // ════════════════════════════════════════════════════════════════════════════
 function personaYearly(p: PersonaBacktestResponse | null): PersonaYearly[] {
@@ -1129,14 +1075,6 @@ function personaMonthly(p: PersonaBacktestResponse | null): PersonaMonthly[] {
 function winningMonths(months: PersonaMonthly[], year: number): { wins: number; total: number } {
   const ms = months.filter(m => m.year === year)
   return { wins: ms.filter(m => m.return_pct > 0).length, total: ms.length }
-}
-function pctTone(v: number | null | undefined): string {
-  if (v == null) return C.faint
-  return v >= 0 ? C.mint : C.red
-}
-function fmtPct(v: number | null | undefined, dp = 1): string {
-  if (v == null || !Number.isFinite(v)) return '—'
-  return `${v >= 0 ? '+' : ''}${v.toFixed(dp)}%`
 }
 
 // The operator-supplied RISK DISCLOSURE, shown VERBATIM as a static caveat.
@@ -1309,49 +1247,8 @@ function ReplayPendingCard({ startDate }: { startDate: string }) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Formatting helpers
+// Local helper (formatters / icons now come from the shared cotrade-kit)
 // ════════════════════════════════════════════════════════════════════════════
 function perTradeFor(capital: number): number {
   return Math.max(0, (capital / BASE_CAPITAL) * BASE_PER_TRADE)
-}
-function fmtINR(v: number): string {
-  if (!Number.isFinite(v)) return '—'
-  return '₹' + Math.round(v).toLocaleString('en-IN')
-}
-function signedINR(v: number): string {
-  if (!Number.isFinite(v)) return '—'
-  return (v >= 0 ? '+' : '−') + '₹' + Math.abs(Math.round(v)).toLocaleString('en-IN')
-}
-function fmtNum(v: number): string {
-  return v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-}
-function fmtCapital(v: number): string {
-  if (v >= 1e7) return `₹${(v / 1e7).toFixed(v % 1e7 === 0 ? 0 : 1)} Cr`
-  if (v >= 1e5) return `₹${(v / 1e5).toFixed(v % 1e5 === 0 ? 0 : 1)} L`
-  return '₹' + v.toLocaleString('en-IN')
-}
-function istTodayISO(): string {
-  const now = new Date()
-  const istMs = now.getTime() + (now.getTimezoneOffset() + 330) * 60_000
-  return new Date(istMs).toISOString().slice(0, 10)
-}
-
-// ── Inline icons (match AskFalconHome style) ─────────────────────────────────
-const ICON = {
-  flame:   (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M12 3c1 3 4 4.5 4 8a4 4 0 0 1-8 0c0-1.5.6-2.5 1.2-3.3C9.8 9 11.5 8 12 3z" strokeLinejoin="round"/></svg>,
-  clock:   (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2" strokeLinecap="round"/></svg>,
-  bolt:    (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M13 3L5 13h6l-1 8 8-10h-6l1-8z" strokeLinejoin="round"/></svg>,
-  trend:   (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M4 15l5-5 3 3 7-7" strokeLinecap="round" strokeLinejoin="round"/><path d="M16 6h4v4" strokeLinecap="round" strokeLinejoin="round"/></svg>,
-  shield:  (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" strokeLinejoin="round"/></svg>,
-  chevron: (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round"/></svg>,
-  chevronR:(n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M9 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round"/></svg>,
-  wallet:  (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><rect x="3" y="6" width="18" height="13" rx="2.5"/><path d="M16 12h3" strokeLinecap="round"/><path d="M3 9h13a2 2 0 0 1 2 2" /></svg>,
-  arrow: (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M5 12h14M13 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round"/></svg>,
-  back:  (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round"/></svg>,
-  info:  (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01" strokeLinecap="round"/></svg>,
-  bot:   (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><rect x="4" y="8" width="16" height="11" rx="2.5"/><path d="M12 8V4.5M9 13h.01M15 13h.01" strokeLinecap="round"/><circle cx="12" cy="4" r="1"/></svg>,
-  book:  (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z" strokeLinejoin="round"/><path d="M4 20.5A2.5 2.5 0 0 1 6.5 18H20" /><path d="M8 7.5h7M8 11h7" strokeLinecap="round"/></svg>,
-  close: (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9"><path d="M6 6l12 12M18 6L6 18" strokeLinecap="round"/></svg>,
-  user:  (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="8" r="3.4"/><path d="M5.5 19a6.5 6.5 0 0 1 13 0" strokeLinecap="round"/></svg>,
-  loop:  (n: number) => <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 12a8 8 0 0 1 13.5-5.8L20 8" strokeLinecap="round" strokeLinejoin="round"/><path d="M20 4v4h-4" strokeLinecap="round" strokeLinejoin="round"/><path d="M20 12a8 8 0 0 1-13.5 5.8L4 16" strokeLinecap="round" strokeLinejoin="round"/><path d="M4 20v-4h4" strokeLinecap="round" strokeLinejoin="round"/></svg>,
 }

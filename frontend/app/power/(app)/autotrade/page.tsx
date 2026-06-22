@@ -1,25 +1,40 @@
-/** /power/autotrade — Launch-Pending shell (plan §5; per-user is operator-only today). */
-import { LaunchPending } from '@/components/power/LaunchPending'
+/**
+ * /power/autotrade — AutoTrade (UX + LAUNCH-PENDING ONLY).
+ *
+ * Server component: resolves the greeting first name from the real session and
+ * fetches the LIVE Falcon Top 10 in ONE call — PowerAPI.falconTop20('all500') —
+ * used ONLY to PREVIEW what Falcon would trade today. The page MUST NOT place or
+ * simulate a real order: per-user broker connect + real execution is NOT built
+ * and is high-risk, so AutoTradeExperience is a launch-pending UX (waitlist +
+ * preview). The interactive flow lives in AutoTradeExperience.
+ *
+ * Honesty: NO fabricated fills/P&L. If the engine is unreachable, `data` is null
+ * and the client renders an honest empty state. The preview allocation math
+ * (qty / capital / SL) is REAL — computed from the real picks + entry price.
+ */
+import { PowerAPI } from '@/lib/power-api'
+import { getCurrentUser } from '@/lib/power-auth'
+import { AutoTradeExperience } from '@/components/power/autotrade/AutoTradeExperience'
+import type { Top20Response } from '@/lib/falcon-top20-types'
 
 export const dynamic = 'force-dynamic'
 
-export default function AutoTradePage() {
-  return (
-    <LaunchPending
-      title="AutoTrade"
-      summary="Fully automated execution of Falcon signals against your own broker — readiness check, persona, risk config, and a clear view of what will happen, before anything is live."
-      willDo={[
-        'Run a readiness check: broker token, available funds, risk config.',
-        'Let you pick a persona and configure per-trade size and risk limits.',
-        'Show the eligible signals that would be acted on — before they fire.',
-        'Execute, monitor and trail stops automatically once you opt in.',
-      ]}
-      expect={[
-        'A clear LIVE-vs-not split: nothing trades without your explicit go-ahead.',
-        'Full visibility into every order and stop the system manages for you.',
-        'You can pause or stop automation at any time.',
-      ]}
-      whyNotYet="Automated execution runs today on the operator’s own account only. Per-user AutoTrade needs your individual broker connect plus the safety preflight extended per account — that connection layer isn’t live yet. We will never place an order on your behalf until it is."
-    />
-  )
+function firstNameOf(displayName: string | null, email: string | null): string {
+  if (displayName && displayName.trim()) return displayName.trim().split(/\s+/)[0]
+  if (email && email.includes('@'))      return email.split('@')[0]
+  return 'trader'
+}
+
+export default async function AutoTradePage() {
+  const user = await getCurrentUser()
+  const firstName = firstNameOf(user?.display_name ?? null, user?.email ?? null)
+
+  let data: Top20Response | null = null
+  try {
+    data = await PowerAPI.falconTop20('all500')
+  } catch (e) {
+    console.error('[/power/autotrade] falconTop20 fetch failed:', e)
+  }
+
+  return <AutoTradeExperience data={data} firstName={firstName} />
 }

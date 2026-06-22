@@ -15,12 +15,15 @@
  *   • Top 10 list + explanation  — PowerAPI.falconTop20(universe, sector, signal_date)
  *     → Top20Response (seeded server-side, re-fetched client-side on filter change).
  *   • Greeting name              — real session (passed from page.tsx).
- *   • Universe search            — GET /api/power/universe/symbols (NOT live yet →
- *     graceful 404 fallback to the loaded Top-10 symbols + honest "coming soon").
- *   • Any-stock analysis         — GET /api/power/ask/analyze-stock (NOT live yet →
- *     honest "analysis coming soon"; Top-10 stocks render from loaded data, REAL).
- *   • Current LTP / prev-day LTP / entry price — NOT in any API → honest "—"
- *     placeholders + Backend needs. NEVER fabricated.
+ *   • Universe search            — PowerAPI.universeSymbols() (GET /api/power/universe/
+ *     symbols, LIVE — full ~477-name list, fetched once, filtered client-side). On
+ *     failure → graceful fallback to the loaded Top-10 symbols (no crash).
+ *   • Any-stock analysis         — PowerAPI.analyzeStock() (GET /api/power/ask/
+ *     analyze-stock, LIVE). 404 NOT_COVERED → honest "not covered by Falcon".
+ *     Top-10 stocks render from loaded data (REAL DetailCard).
+ *   • Current / Prev-day LTP     — PowerAPI.quote() (GET /api/power/quote, LIVE).
+ *     HONESTY: last_close is the LAST EOD CLOSE, labeled "last close · {as_of}",
+ *     NEVER a live tick. Entry-day open stays genuinely "market open pending".
  *
  * Honesty: only "Falcon Top 10 Swing" is LIVE; other styles render Launch-Pending
  * (no faked re-ranking). Tiers are REAL engine bands (GOLD/PREMIUM/ENTERPRISE/
@@ -28,7 +31,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { PowerAPI } from '@/lib/power-api'
+import { PowerAPI, PowerAPIError } from '@/lib/power-api'
+import type { Quote, AnalyzeStockResponse } from '@/lib/power-api'
 import { CompassLogo } from '@/components/power/CompassLogo'
 import type {
   Top20Pick, Top20Response, Top20Universe, Rating,
@@ -113,7 +117,24 @@ export function AskFalconHome({ firstName, data: seed }: Props) {
   const [sel, setSel] = useState<string | null>(null)
   const [ws, setWs] = useState<Workspace>({ kind: 'pick' })
 
+  // EOD quotes for the loaded Top 10 (PowerAPI.quote, batched ≤60). Keyed by
+  // symbol. last_close/prev_close are last EOD closes, NOT live ticks.
+  const [quotes, setQuotes] = useState<Record<string, Quote>>({})
+
   const cur = STYLES.find(s => s.id === style)!
+
+  // Fetch EOD quotes for the current Top-10 symbols whenever the picks change.
+  // One batched call (≤60). Failure → leave quotes empty (cells show "—").
+  useEffect(() => {
+    const symbols = picks.map(p => p.symbol)
+    if (symbols.length === 0) { setQuotes({}); return }
+    let alive = true
+    PowerAPI.quote(symbols)
+      .then(res => { if (alive) setQuotes(res) })
+      .catch(() => { if (alive) setQuotes({}) })
+    return () => { alive = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.signal_date, data?.universe, data?.sector])
 
   // Re-fetch on filter change (skip the very first render — seed already loaded).
   useEffect(() => {
@@ -308,7 +329,7 @@ export function AskFalconHome({ firstName, data: seed }: Props) {
           ) : fetchErr ? (
             <RightEmpty hasData={false} />
           ) : current ? (
-            <DetailCard key={current.symbol} pick={current} response={data!} />
+            <DetailCard key={current.symbol} pick={current} response={data!} quote={quotes[current.symbol] ?? null} />
           ) : (
             <RightEmpty hasData={data != null} />
           )}
@@ -395,9 +416,12 @@ function labelForUniverse(u: Top20Universe): string {
 }
 
 // ── Full Nifty-500 stock search ────────────────────────────────────────────
-// Calls GET /api/power/universe/symbols (symbol+name+sector). That endpoint
-// does NOT exist yet → on 404/error we fall back to the loaded Top-10 symbols
-// and show an honest "full universe search coming soon" note. NEVER fabricated.
+// Calls PowerAPI.universeSymbols() (GET /api/power/universe/symbols — LIVE, the
+// full ~477-name tradable universe). Fetched once on first focus, filtered
+// client-side as the user types. On failure we fall back to the loaded Top-10
+// symbols so the field never breaks. NEVER fabricated.
+// (name is `string | null` here so the Top-10 fallback rows — which carry no
+// company name — type-check; the live endpoint always sends a name string.)
 type UniverseSymbol = { symbol: string; name: string | null; sector: string | null }
 
 function StockSearch({
@@ -429,16 +453,13 @@ function StockSearch({
   const list = universeList ?? fallback
   const fullUniverse = universeList != null
 
-  // Lazy-load the full universe on first focus.
+  // Lazy-load the full universe on first focus (LIVE endpoint).
   const ensureLoaded = useCallback(() => {
     if (loaded) return
     setLoaded(true)
-    // NOTE: PowerAPI has no universeSymbols() wrapper yet (Backend need). We hit
-    // the endpoint directly; same-origin rewrite forwards it. 404 → fallback.
-    fetch('/api/power/universe/symbols', { cache: 'no-store' })
-      .then(r => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((j: { symbols?: UniverseSymbol[] }) => {
-        if (Array.isArray(j?.symbols) && j.symbols.length > 0) setUniverseList(j.symbols)
+    PowerAPI.universeSymbols()
+      .then(res => {
+        if (Array.isArray(res?.symbols) && res.symbols.length > 0) setUniverseList(res.symbols)
         else setUniverseErr(true)
       })
       .catch(() => setUniverseErr(true))
@@ -550,7 +571,7 @@ function StockSearch({
 
       {!fullUniverse && universeErr && (
         <p className="text-[10px] mt-1.5" style={{ color: C.faint }}>
-          Full-universe search is coming soon — for now you can analyze the live Top 10.
+          Couldn&apos;t load the full universe just now — searching today&apos;s Top 10 instead.
         </p>
       )}
 
@@ -711,15 +732,33 @@ function ratingToQuality(r: Rating): string {
 
 // ── Price breakdown (RIGHT detail card) — COMPACT one horizontal metrics ROW.
 //    On wide widths: 4 cells in a single divided row (Current · Prev · Signal ·
-//    Entry). On narrow widths: a clean 2×2 grid (NOT 4 tall cards). Signal-day %
-//    is REAL; the rest are honest "—"/"market open pending". See Backend needs. ─
-function PriceBreakdown({ pick, response }: { pick: Top20Pick; response: Top20Response }) {
+//    Entry). On narrow widths: a clean 2×2 grid (NOT 4 tall cards).
+//    Current LTP = quote.last_close (LAST EOD CLOSE, NOT a live tick — labeled as
+//    such), Prev-day LTP = quote.prev_close, day-change derived. Signal-day % is
+//    REAL. Entry-day open is genuinely "market open pending". ─
+function PriceBreakdown({ pick, response, quote }: { pick: Top20Pick; response: Top20Response; quote: Quote | null }) {
   const sig = pick.flags?.day_return_pct ?? null
+  const lc = quote?.last_close ?? null
+  const pc = quote?.prev_close ?? null
+  const chg = lc != null && pc != null && pc !== 0 ? (lc / pc - 1) * 100 : null
+  const asOf = quote?.as_of ?? null
   return (
     <div className="grid grid-cols-2 sm:grid-cols-4 mt-0.5 rounded-[10px] border overflow-hidden"
          style={{ borderColor: C.line, background: 'rgba(255,255,255,0.02)' }}>
-      <PriceCell label="Current LTP" value="—" note="live quote pending" />
-      <PriceCell label="Prev-day LTP" value="—" note="not in feed yet" />
+      <PriceCell
+        label="Current LTP"
+        value={lc != null ? fmtRs(lc) : '—'}
+        valueColor={lc == null ? C.faint : chg == null ? C.ink : chg >= 0 ? C.mint : C.red}
+        note={lc != null
+          ? `last close${asOf ? ` · ${asOf}` : ''}${chg != null ? ` · ${chg >= 0 ? '+' : ''}${chg.toFixed(1)}%` : ''}`
+          : 'quote unavailable'}
+        real={lc != null}
+      />
+      <PriceCell
+        label="Prev-day LTP"
+        value={pc != null ? fmtRs(pc) : '—'}
+        note={pc != null ? 'prior EOD close' : 'quote unavailable'}
+      />
       <PriceCell
         label={`AI signal day · ${response.signal_date ?? '—'}`}
         value={sig != null ? `${sig >= 0 ? '+' : ''}${sig.toFixed(1)}%` : '—'}
@@ -731,6 +770,10 @@ function PriceBreakdown({ pick, response }: { pick: Top20Pick; response: Top20Re
                  note="market open pending" />
     </div>
   )
+}
+// ₹ formatter — two decimals, grouped. EOD closes only (never a live tick).
+function fmtRs(n: number): string {
+  return '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 // Compact metric cell. Thin same-theme separators (left/top borders) keep the
 // row visually one strip; the signal-day cell gets a faint mint wash (REAL).
@@ -748,7 +791,7 @@ function PriceCell({
 }
 
 // ── Detail card (RIGHT) — Top-10 explanation; every section maps to a bucket ─
-function DetailCard({ pick, response }: { pick: Top20Pick; response: Top20Response }) {
+function DetailCard({ pick, response, quote }: { pick: Top20Pick; response: Top20Response; quote: Quote | null }) {
   const band = tierBand(pick.signal_tier)
   const s = TIER_STYLE[BAND_COLORKEY[band ?? ''] ?? 'gray'] ?? TIER_STYLE.gray
   const fires = pick.bucket1?.total_fires_today ?? null
@@ -779,9 +822,9 @@ function DetailCard({ pick, response }: { pick: Top20Pick; response: Top20Respon
         )}
       </div>
 
-      {/* PRICE BREAKDOWN — signal-day % REAL; rest honest placeholders */}
+      {/* PRICE BREAKDOWN — last EOD close + prev close (REAL), signal-day % REAL */}
       <Section title="Price">
-        <PriceBreakdown pick={pick} response={response} />
+        <PriceBreakdown pick={pick} response={response} quote={quote} />
       </Section>
 
       <Rule />
@@ -873,46 +916,36 @@ function TrackRecord({ pick, response }: { pick: Top20Pick; response: Top20Respo
 }
 
 // ── Stock analysis workspace (RIGHT) — for a searched non-Top-10 stock ──────
-// Wires to GET /api/power/ask/analyze-stock?symbol= (NOT live yet). Until that
-// exists we render an HONEST "analysis coming soon" state with the section
-// scaffold the live endpoint will fill. Top-10 stocks never reach here (they
-// render the REAL DetailCard from loaded data).
-const ANALYSIS_SECTIONS = [
-  'Current trend',
-  'Recent price movement',
-  'Recent volume behavior',
-  'Signal-day movement',
-  'Sector performance',
-  'Falcon pattern observations',
-  'Tier eligibility (Gold / Enterprise)',
-  'Entry context',
-  'Risk warnings',
-  'Plain-English explanation',
-]
-
+// Wires to PowerAPI.analyzeStock() (GET /api/power/ask/analyze-stock — LIVE).
+// Renders each REAL field as its own section. A 404 NOT_COVERED → an honest
+// "not covered by Falcon" message (never fabricated). Top-10 stocks never reach
+// here (they render the REAL DetailCard from loaded data).
 function StockAnalysis({
   symbol, name, sector, onBack,
 }: {
   symbol: string; name: string | null; sector: string | null; onBack: () => void
 }) {
-  const [state, setState] = useState<'loading' | 'soon' | 'error'>('loading')
+  const [state, setState] = useState<'loading' | 'ok' | 'not_covered' | 'error'>('loading')
+  const [a, setA] = useState<AnalyzeStockResponse | null>(null)
 
   useEffect(() => {
     let alive = true
-    setState('loading')
-    fetch(`/api/power/ask/analyze-stock?symbol=${encodeURIComponent(symbol)}`, { cache: 'no-store' })
-      .then(r => {
+    setState('loading'); setA(null)
+    PowerAPI.analyzeStock(symbol)
+      .then(res => { if (alive) { setA(res); setState('ok') } })
+      .catch((e: unknown) => {
         if (!alive) return
-        // Endpoint isn't live yet → 404 → honest "coming soon" (NOT an error toast).
-        if (r.status === 404) { setState('soon'); return }
-        if (!r.ok) { setState('error'); return }
-        // When the endpoint ships, parse + render here. For now treat any 2xx
-        // as "soon" too, since the contract/shape isn't finalised.
-        setState('soon')
+        // 404 NOT_COVERED is an EXPECTED, honest outcome — not an error toast.
+        if (e instanceof PowerAPIError && (e.status === 404 || e.code === 'NOT_COVERED')) {
+          setState('not_covered'); return
+        }
+        setState('error')
       })
-      .catch(() => { if (alive) setState('soon') })
     return () => { alive = false }
   }, [symbol])
+
+  const headSector = a?.sector ?? sector
+  const headName = a?.name ?? name
 
   return (
     <div className="rounded-[18px] border p-6 mt-6 shadow-[0_24px_70px_-34px_rgba(0,0,0,0.55)]"
@@ -925,40 +958,104 @@ function StockAnalysis({
         </button>
         <span className="text-[18px] font-semibold" style={{ color: C.ink }}>
           {symbol}
-          {sector && <span className="text-[13px] font-normal ml-2" style={{ color: C.faint }}>· {sector}</span>}
+          {headSector && <span className="text-[13px] font-normal ml-2" style={{ color: C.faint }}>· {headSector}</span>}
         </span>
+        {a?.tier && (
+          <span className="ml-auto"><AnalysisTierBadge tier={a.tier} reason={a.tier_reason} /></span>
+        )}
       </div>
-      {name && <div className="text-[12.5px] mt-1" style={{ color: C.faint }}>{name}</div>}
+      {headName && headName !== symbol && (
+        <div className="text-[12.5px] mt-1" style={{ color: C.faint }}>{headName}</div>
+      )}
 
-      <div className="mt-4 inline-flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider rounded-full px-2.5 py-1"
-           style={{ color: C.mint, background: C.mintDim, border: `1px solid rgba(63,227,164,0.3)` }}>
-        <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: C.mint }} />
-        {state === 'loading' ? 'Loading' : 'Analysis coming soon'}
-      </div>
+      {state === 'loading' && (
+        <div className="mt-4 inline-flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider rounded-full px-2.5 py-1"
+             style={{ color: C.mint, background: C.mintDim, border: `1px solid rgba(63,227,164,0.3)` }}>
+          <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: C.mint }} />
+          Analyzing {symbol}
+        </div>
+      )}
 
-      <p className="text-[13.5px] leading-[1.6] mt-3" style={{ color: C.ink2 }}>
-        Full single-stock analysis for any Nifty 500 name is being wired to the engine.
-        When it&apos;s live, this workspace will explain <b style={{ color: C.ink }}>{symbol}</b> the
-        same way we explain a Top-10 pick — across the sections below. We won&apos;t show
-        fabricated numbers in the meantime.
-      </p>
+      {state === 'not_covered' && (
+        <p className="text-[13.5px] leading-[1.6] mt-4" style={{ color: C.ink2 }}>
+          <b style={{ color: C.ink }}>{symbol} isn&apos;t covered by Falcon yet.</b>{' '}
+          It falls outside the universe our engine currently mines and tracks, so we
+          don&apos;t have an honest analysis to show — and we won&apos;t invent one. Try a
+          name from today&apos;s Top 10 on the left for a full, live explanation.
+        </p>
+      )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4">
-        {ANALYSIS_SECTIONS.map(t => (
-          <div key={t} className="rounded-[10px] border px-3 py-2.5 flex items-center gap-2"
-               style={{ borderColor: C.line, background: 'rgba(255,255,255,0.02)' }}>
-            <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: C.faint }} />
-            <span className="text-[12px]" style={{ color: C.muted }}>{t}</span>
-            <span className="ml-auto text-[8.5px] font-mono uppercase tracking-[0.08em]" style={{ color: C.faint }}>soon</span>
-          </div>
-        ))}
-      </div>
+      {state === 'error' && (
+        <p className="text-[13.5px] leading-[1.6] mt-4" style={{ color: C.ink2 }}>
+          We couldn&apos;t load the analysis for <b style={{ color: C.ink }}>{symbol}</b> just
+          now. This is a live-data view — please try again in a moment.
+        </p>
+      )}
 
-      <p className="text-[11.5px] mt-4" style={{ color: C.faint }}>
-        Want this for a Top-10 name today? Pick it from the list on the left — those
-        are fully explained from live engine data right now.
-      </p>
+      {state === 'ok' && a && (
+        <div className="mt-4">
+          {/* lead plain-English explanation */}
+          <p className="text-[13.5px] leading-[1.6]" style={{ color: C.ink2 }}>{a.explanation}</p>
+          {a.tier_reason && (
+            <p className="text-[12px] mt-2" style={{ color: C.faint }}>{a.tier_reason}</p>
+          )}
+
+          <Rule />
+          <AnalysisSection title="Current trend"               body={a.current_trend} />
+          <AnalysisSection title="Recent price movement"       body={a.recent_price_movement} />
+          <AnalysisSection title="Recent volume behavior"      body={a.recent_volume_behavior} />
+          <AnalysisSection title="Signal-day movement"         body={a.signal_day_movement} />
+          <AnalysisSection title="Sector performance"          body={a.sector_performance} />
+          <AnalysisSection title="Falcon pattern observations" body={a.falcon_pattern_observations} />
+          <AnalysisSection title="Entry context"               body={a.entry_context} />
+
+          {a.risk_warnings.length > 0 && (
+            <>
+              <Rule />
+              <Section title="Risk warnings">
+                <ul className="flex flex-col gap-2 m-0 p-0 list-none">
+                  {a.risk_warnings.map((w, i) => (
+                    <li key={i} className="flex gap-2.5 text-[13px] leading-[1.5]" style={{ color: C.ink2 }}>
+                      <span className="mt-[7px] w-[5px] h-[5px] rounded-full shrink-0" style={{ background: 'rgba(230,180,80,0.8)' }} />
+                      <span>{w}</span>
+                    </li>
+                  ))}
+                </ul>
+              </Section>
+            </>
+          )}
+
+          <p className="text-[11px] mt-4" style={{ color: C.faint }}>
+            As of {a.as_of} · explanatory analysis, not financial advice.
+          </p>
+        </div>
+      )}
     </div>
+  )
+}
+
+// Render a single analysis section only when the backend returned prose for it.
+function AnalysisSection({ title, body }: { title: string; body: string | null | undefined }) {
+  if (!body || !body.trim()) return null
+  return (
+    <Section title={title}>
+      <p className="text-[13.5px] leading-[1.6]" style={{ color: C.ink2 }}>{body}</p>
+    </Section>
+  )
+}
+
+// Tier chip for the analyze-stock card — reuses the canonical band colours.
+function AnalysisTierBadge({ tier, reason }: { tier: string; reason: string | null }) {
+  const band = tierBand(tier)
+  const s = TIER_STYLE[BAND_COLORKEY[band ?? ''] ?? 'gray'] ?? TIER_STYLE.gray
+  return (
+    <span
+      title={reason ?? undefined}
+      className="inline-flex items-center rounded-md font-semibold uppercase tracking-[0.04em] text-[10px] px-2 py-0.5"
+      style={{ color: s.color, background: s.bg, boxShadow: `inset 0 0 0 1px ${s.ring}` }}
+    >
+      {band ?? tier}
+    </span>
   )
 }
 

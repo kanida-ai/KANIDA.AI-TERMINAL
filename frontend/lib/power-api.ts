@@ -618,10 +618,78 @@ export type SizingResult = {
 }
 
 
+// ──────────────────────────────────────────────────────────────────────────
+// Ask-Falcon home — universe symbols, EOD quotes, single-stock analysis
+// (LIVE 2026-06-22). Verified shapes from the backend handoff.
+// ──────────────────────────────────────────────────────────────────────────
+
+/** One entry from GET /api/power/universe/symbols.
+ *  `name == symbol` today (no company-name field yet on the backend). */
+export type UniverseSymbol = {
+  symbol: string
+  name:   string
+  sector: string | null
+}
+
+export type UniverseSymbolsResponse = {
+  as_of:   string
+  count:   number
+  symbols: UniverseSymbol[]
+}
+
+/** One symbol's EOD quote from GET /api/power/quote?symbols=…
+ *  HONESTY: `last_close` is the LAST EOD CLOSE, never a live intraday tick. */
+export type Quote = {
+  last_close: number
+  prev_close: number
+  as_of:      string
+}
+
+/** GET /api/power/quote → keyed by symbol. Missing symbols are simply absent. */
+export type QuoteResponse = Record<string, Quote>
+
+/** GET /api/power/ask/analyze-stock?symbol=… — single-stock explainability.
+ *  All fields are server-authored prose / labels (no fabricated numbers). */
+export type AnalyzeStockResponse = {
+  symbol:                       string
+  name:                         string
+  sector:                       string | null
+  as_of:                        string
+  current_trend:                string
+  recent_price_movement:        string
+  recent_volume_behavior:       string
+  signal_day_movement:          string
+  sector_performance:           string
+  falcon_pattern_observations:  string
+  tier:                         string | null
+  tier_reason:                  string | null
+  entry_context:                string
+  risk_warnings:                string[]
+  explanation:                  string
+}
+
 export const PowerAPI = {
   // ── Public (no JWT) ───────────────────────────────────────────────────
   todayPreview: (signal?: AbortSignal) =>
     apiFetch<TodayResponse>('/api/power/picks/today/preview', { signal }),
+
+  // ── Ask-Falcon home (LIVE) ────────────────────────────────────────────
+  /** Full tradable universe (~477). Fetch once; filter client-side. */
+  universeSymbols: (signal?: AbortSignal) =>
+    apiFetch<UniverseSymbolsResponse>('/api/power/universe/symbols', { signal }),
+
+  /** Last EOD close + prev close for up to 60 symbols. NOT a live tick. */
+  quote: (symbols: string[], signal?: AbortSignal) => {
+    const list = symbols.filter(Boolean).slice(0, 60).join(',')
+    return apiFetch<QuoteResponse>(
+      `/api/power/quote?symbols=${encodeURIComponent(list)}`, { signal })
+  },
+
+  /** Single-stock analysis. Throws PowerAPIError(404, 'NOT_COVERED') for
+   *  symbols Falcon does not cover. */
+  analyzeStock: (symbol: string, signal?: AbortSignal) =>
+    apiFetch<AnalyzeStockResponse>(
+      `/api/power/ask/analyze-stock?symbol=${encodeURIComponent(symbol)}`, { signal }),
 
   // Co-Trader portfolios (all public)
   portfolios: (signal?: AbortSignal) =>
