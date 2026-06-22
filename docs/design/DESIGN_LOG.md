@@ -1,0 +1,650 @@
+# Falcon Front-End — Design Decisions & Feedback Log
+
+The `falcon-ui` agent reads this every run and APPENDS a dated entry after each
+change. Operator feedback goes here too. This is how design iteration compounds.
+Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
+
+## Locked decisions (as of 2026-06-19)
+- **Theme:** dark + mint `#3FE3A4` ("green = profit"). No new accent colors.
+- **Benchmark:** Claude.ai — left nav switches modes; one primary action/surface;
+  progressive disclosure; conversational (guided) entry. Feel = AI product, not dashboard.
+- **IA — 6 modes:** Ask Falcon (home) · Signals · Co-Trading · AutoTrade ·
+  Performance · Plans. Account/Learn/Admin in footer. (Collapses the 17 legacy routes.)
+- **Home layout:** prompt is the HERO; Today's Top 10 is a compact one-tap "peek"
+  strip below it (not a dashboard). Greeting "Good {morning…}, {first_name}" +
+  one rotating market-pulse line.
+- **Prompts are GUIDED only:** intent dropdown -> entity (stock/sector) picker -> Ask
+  -> focused result panel. No open free-text to an LLM.
+- **Personas:** Falcon Top 10 Swing (+ Weekly) = LIVE. BTST / Intraday / Long-Term =
+  Launch-Pending. Per-user AutoTrade = Launch-Pending (operator-only today).
+- **Paywall:** re-wire (built+audited, currently dormant). Free = history/proof;
+  Basic = Standard; Pro = +Gold; Enterprise = +Enterprise + rulebook + AutoTrade.
+  Gating via a single `<PlanGate>`; tier badges/locks inside cards, not on home.
+- **Honesty:** no "certified 80%", no "smartest on earth", no "500 agents/stock".
+  Explainability-led copy. Tiers = qualitative quality bands.
+- **Build discipline:** dev branch/worktree off main; never touch prod tree or the
+  auto-trade execution path.
+- **Path:** build directly in the mint theme (no static-design detour); hero-first
+  as a clickable prototype, operator reacts, then continue.
+
+## Phase order
+1a. AppShell (6-mode nav) + Ask-Falcon home (greeting, pulse line, guided composer,
+    chips, Top-10 peek) + LaunchPending component.   <-- START HERE
+1b. Persona-aware Signals + 7/14/20/30d tracker + paywall re-wire.
+2.  Ask-Falcon analysis endpoints + result panels.
+3.  Performance + free-user proof.
+4.  Co-Trading + AutoTrade readiness.
+5.  Persona expansion (real BTST/Intraday/Long-Term engines).
+
+## Feedback / change entries
+<!-- newest first; falcon-ui appends here -->
+- 2026-06-21 — **Co-Trading SETUP polish round — fill the horizontal space, fit one
+  viewport, fix the truncated mechanism step** (CoTradingExperience.tsx only;
+  page.tsx / AppShell / globals.css untouched; 2-stage flow + mechanism strip +
+  "How Falcon manages your money" rules link + all real wiring/honesty intact 1:1).
+  Operator: setup was a thin centered column with big black side-margins, scrolled
+  vertically, and the mechanism strip's last loop-back step "Repeats every trading
+  day — automatically" was truncated/cramped; general shrink/alignment issues.
+  - **FIX 1 — MECHANISM STRIP gear-train no longer truncates.** The 4 step cells
+    were a `flex … overflow-x-auto` row of fixed `min-w-[118/132px]` cells with the
+    loop-back chip pinned inline at `max-w-[120px]` (clipped "automatically"). Now
+    the steps are a responsive CSS grid (`grid-cols-2 sm:grid-cols-[1fr_auto_1fr_
+    auto_1fr_auto_1fr]`) — equal `1fr` cells that SIZE TO FIT the full strip width
+    with the `→` arrows in their own `auto` columns between cells (arrows hidden
+    `<sm`, where it falls to a 2-up grid). The `↻` loop-back is pulled OUT of the
+    row onto its own full-width centered pill line below (border + faint mint fill),
+    so its label can never clip/wrap-cramp. Removed the `truncate` on step titles
+    (was shrinking "Kanida.AI"). Strip stays a slim banner.
+  - **FIX 2 — use the width + fit the viewport.** Setup container widened
+    `max-w-[760px]` → **`max-w-[1120px]`** (px-6→px-8) so it fills the space instead
+    of leaving dead side-margins. Vertical rhythm tightened (`py-7/9 gap-6` →
+    `py-5/6 gap-4 md:gap-5`; heading logo 30→28, h1 25→24, gap-2→1.5) to fit
+    1366×768 / 1440×900 without page scroll. Composition rebalanced: heading +
+    mechanism strip + **Step 1 (style cards) full-width** (cards now `lg:grid-cols-5`
+    — all five styles on ONE row at desktop, was `md:grid-cols-3` = 2 rows), then
+    **Step 2 (capital) + Step 3 (start) SIDE-BY-SIDE** in a `lg:grid-cols-2` row
+    (they're short — kills the tall vertical gap), then the full-width **"Start
+    Co-Trading"** button below. Stacks cleanly on narrow widths.
+  - **FIX 3 — alignment/shrink cleanup.** Removed the `max-w-[320px]` clamp on the
+    capital input (now fills its column); step grid items `items-start` so the two
+    short columns top-align; subtitle max-w 480→560. No density added — same cards,
+    same copy, same controls, just balanced whitespace + even rhythm.
+  - **Honesty/scope held 1:1.** No copy/data/wiring change — real picks, FIXED
+    ₹50k@₹5L allocation math, persona backtest, honest pending states, the single
+    rules slide-over, viewport-lock (`md:overflow-hidden` + internal scroll),
+    mint/F2 theme, gear animation + `prefers-reduced-motion` all unchanged. Added
+    one import (`Fragment`) for the grid step/arrow interleave.
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npm run build` ✓ compiled
+    (`/power/co-trading` built).
+- 2026-06-21 — **Co-Trading: added a "How Co-Trading works" MECHANISM strip at the
+  top** (CoTradingExperience.tsx only; page.tsx / AppShell / globals.css untouched;
+  the existing 2-stage SetupStage/ResultStage flow, all real wiring + honesty
+  preserved 1:1). Operator goal: ONE compact visual that makes the automation
+  instantly graspable — "set it once, Kanida.AI then runs continuously like a
+  machine" — and acts as the hook toward AutoTrade.
+  - **New `MechanismStrip` component** (+ a small inline-SVG `Gear` cog, the
+    `MECHANISM_STEPS` config, scoped `MECHANISM_CSS`, and two icons `user`/`loop`).
+    A slim mint/F2 gear-train banner: a cluster of GENTLY-ROTATING inline-SVG cogs
+    (8-tooth, `@keyframes ct-gear-spin` 11s linear infinite, meshing pairs spin in
+    ALTERNATE directions via `animation-direction: reverse`) reads as a running
+    mechanism. Headline "Set it once. Falcon runs the machine." + the subline. A
+    left→right 4-step flow with arrows: 1 YOU (mint, marked "input", the only human
+    action) → 2/3/4 ⚙ Kanida.AI (picks Top 10 · decides entry/SL/exit · reports
+    performance), each non-human step carrying its own little spinning cog, then a
+    ↻ loop-back chip "Repeats every trading day — automatically". A compact
+    secondary bridge button "AutoTrade does exactly this with your real broker →"
+    routes to /power/autotrade.
+  - **Placement.** Prominent full version at the TOP of STAGE 1 (SETUP), directly
+    under the heading and above Step 1 — does NOT push the steps below the fold
+    (banner is slim; setup region keeps its `md:overflow-y-auto`, viewport-lock
+    intact). STAGE 2 (RESULT) shows the SLIM 1-line variant in the fixed header
+    (one running cog + "Set once · Falcon picks, enters, manages & exits — every
+    trading day, automatically"), hidden < sm to keep the result uncluttered.
+  - **Honesty + a11y.** 100% STATIC explanatory content — no numbers/P&L/prices.
+    `prefers-reduced-motion: reduce` disables the spin (scoped `<style>` media
+    query; globals.css NOT touched, per the locked "no new bare :root after @theme"
+    rule — keyframes are component-scoped with a unique `ct-gear-*` namespace).
+    Mint accent only, no new color. SetupStage gained an `onAutoTrade` prop
+    (router.push('/power/autotrade')); ResultStage reused its existing one.
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npm run build` ✓ compiled
+    (`/power/co-trading` built).
+- 2026-06-21 — **Co-Trading MAJOR REDESIGN → simple, visual, decision-oriented
+  2-STAGE flow** (CoTradingExperience.tsx only; page.tsx / AppShell / globals.css
+  untouched). Operator: prior 3-column page was too detailed/textbook; must feel
+  like "Choose style → Add capital → Falcon manages the plan → See performance" —
+  understood in a few seconds. Replaced the dense always-on 3-column workspace with
+  ONLY TWO user actions then Falcon does everything; layout is now a centered
+  STAGE state machine (`stage: 'setup' | 'result'`), still viewport-locked
+  (`md:h-full md:overflow-hidden`, internal-scroll regions, no page scroll).
+  - **STAGE 1 — SETUP** (`SetupStage`, centered `max-w-[760px]`, calm): Step 1
+    Choose trading style = visual cards (Swing live; BTST/Intraday/Weekly/Long-Term
+    disabled "soon"). Step 2 virtual capital input + ₹1L/₹5L/₹10L chips. Step 3
+    Choose Start = a clear two-card toggle "Start Today" (live, mint) vs "Replay a
+    past date" (amber, reveals a date picker). ONE big primary **"Start
+    Co-Trading"**. NO risk profile, NO allocation config, NO rules tables — a single
+    secondary link **"How Falcon manages your money"** opens the existing
+    `RulesSlideOver` (renamed header; still the ONLY place rules/capital-model/cycle
+    live). Falcon decides everything (fixed ₹50k@₹5L sizing, entry/SL/trail/exit).
+  - **STAGE 2 — RESULT** (`ResultStage`, the hero): top = compact `SummaryStrip`
+    (Starting · Current/Ending · Total P&L · Return% · Open · Cash · Max Drawdown,
+    honest "—/pending" where live data isn't served). Then branches:
+    • **LIVE ("Start Today")** → `LivePortfolio` "Falcon selected your Top 10": a
+      clean VISUAL card grid (symbol · BAND tier badge · capital · entry+qty · stop)
+      with an HONEST status pill ("Queued · 9:15" when an entry price exists, else
+      "Waiting") + a one-line Falcon caption (enter 9:15 · −7% stop · trail +12% ·
+      exit by day 7). Allocation = REAL (fixed ₹50k@₹5L scaled, qty=floor(perTrade/
+      entry), SL from action.stop_loss_pct else −7%). Live Hold/Trailing/Exit + P&L
+      = Backend need, NOT fabricated.
+    • **REPLAY (historical date)** → `ReplayHero`: big "Starting → Ending value"
+      with Return% / P&L, a real **EQUITY CURVE** (reuses `EquityChart` from
+      EquitySparkline.tsx, built from the REAL persona monthly `end_equity` series
+      for the start-date's calendar year, linearly scaled from the ₹5 L book to the
+      user's capital — flagged honestly), plus Max DD / Win rate / Completed trades /
+      Open-at-end. Pulled from the REAL persona endpoint
+      (`PowerAPI.persona('falcon-top-10')` → yearly/monthly). Year-grain +
+      not-walk-forward + linear-scale all flagged in-card as Backend needs.
+  - **"Inspect deeper"** = ONE collapsed `<details>` (replaces the old default-visible
+    track-record card): rulebook link → slide-over, the REAL year-by-year table
+    (`YearByYearTable`, click a year → real months), and the risk disclosure folded
+    inside. Nothing dense up front. **"← Change plan"** (header back button + chip)
+    returns to Stage 1; AutoTrade bridge CTA at the bottom of the result.
+  - **Removed:** the always-on MIDDLE setup column + RIGHT workspace, the
+    `AllocationCard`/`AllocRowView` table + per-row Reduce/Remove/scale controls and
+    `removed`/`scale` state, the `MobileSetup` bottom bar, `committedReplayDate`,
+    `SetupField`/`MetricsStrip`/`Metric`/`Disclaimer`/`HeadlineStat`/`TrackRecordCard`.
+    Added `SummaryStrip`/`Cell`, `LivePortfolio`/`PositionCard`/`Mini`, `ReplayHero`/
+    `Stat`, `InspectDeeper`, `Step`, `signedINR`, `perTradeFor`. Kept `RulesSlideOver`
+    + all its STATIC sections, `YearByYearTable`, tier-band colouring, the verbatim
+    risk disclosure, all formatters + icons.
+  - **Honesty held 1:1.** Real picks only; allocation math unchanged; no fabricated
+    P&L/price/status; equity curve from the real monthly series; replay window
+    coverage gap + per-date walk-forward + month-DD all surfaced as Backend needs;
+    "virtual capital · not financial advice" kept (compact on setup, header chip-less
+    but stated; status pills honest). Replay still attempts a point-in-time
+    `falconTop20(startDate)` and shows the honest `ReplayPendingCard` on no data.
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npm run build` ✓ compiled
+    (`/power/co-trading` built).
+- 2026-06-21 — **Co-Trading SIMPLIFY / DECLUTTER round** (CoTradingExperience.tsx
+  only; page.tsx / AppShell / globals.css untouched). Operator: page too dense,
+  rules too long, analysis over-informative, flow weak. GOAL FLOW now = setup
+  (middle) → your plan + the proof (right) → start. The 3-column viewport-lock
+  (`md:h-screen` chain, independently-scrolling columns) and ALL real wiring +
+  honesty preserved 1:1.
+  - **CHANGE 1 — rules became ONE button + a slide-over.** Removed the inline
+    7-row "Kanida.ai Virtual Trading Rules" list from the MIDDLE column; replaced
+    with a single compact **"Trading rules"** button. New `RulesSlideOver` (an
+    in-flow faux-overlay: `absolute inset-0`, scrim + right panel, NOT
+    position:fixed — so the viewport-lock/independent-scroll is untouched)
+    consolidates ALL rules content in ONE place: the rule list (VIRTUAL_RULES) +
+    Capital model (fixed allocation) + What this trader does + the 7-step trading
+    cycle. MIDDLE column is now just: trading style · virtual capital (+chips) ·
+    start date (live/replay) · [Trading rules] button · Update/Build button.
+  - **CHANGE 2 — RIGHT panel collapsed from SIX sections to THREE.** Removed the
+    standalone `BacktestSummaryCard`, `SelectedPeriodCard`, and the five
+    `Collapsible`s (Year-by-year / Locked Falcon Rules / Capital Model / What this
+    trader does / Trading cycle), plus the `ActionsFeed`, `ControlsCard`, the
+    generic `Collapsible`, `LockedRules`, `PerfCell`, and `buildSeedActions`/`paused`
+    state. Right panel top→bottom is now ONLY: (a) the **metrics strip** (kept —
+    Starting · Current · P&L · Return% · Open · Cash · Drawdown, honest dashed
+    pending where live data isn't served); (b) the **Allocation plan** (the REAL
+    positions table from Top20Response — the core "what Falcon does with my
+    money"); (c) ONE clean **"Proven track record"** card — three big scannable
+    headline numbers from the REAL persona endpoint (`PowerAPI.persona('falcon-top-10')`:
+    avg yearly return, positive years X-of-Y, win rate), a SINGLE native
+    `<details>` **Year-by-year** expand (real `yearly` → click a year → real
+    `monthly`), and the operator RISK DISCLOSURE folded into one secondary
+    `<details>` line. The selected-period numbers (year return + equiv P&L on the
+    user's capital, REAL) now fold into a slim strip INSIDE the track-record card
+    on a replay date — no longer its own dense section. Then the **AutoTrade
+    bridge** CTA at the very bottom.
+  - **Honesty held.** Metrics strip still shows only computable values as REAL
+    (Starting / Open+%deployed / Cash) and dashes live P&L/return/drawdown as
+    pending; allocation math unchanged (fixed ₹50k@₹5L scaled, qty=floor(alloc/
+    entry), SL from action.stop_loss_pct else locked −7%, BAND-derived tier
+    colours); track-record numbers fetched live from the persona endpoint with
+    loading/error/no-data → "no numbers" not fabrications; the replay strip still
+    flags whole-window-not-walk-forward as a Backend need; the verbatim risk
+    disclosure kept. Disclaimer kept (chip lg+, full card mobile). Added `book` +
+    `close` icons.
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npm run build` ✓ compiled
+    (`/power/co-trading` built).
+- 2026-06-21 — **Co-Trading content round: fixed-allocation model + REAL backtest
+  panel** (CoTradingExperience.tsx only; page.tsx/AppShell untouched). The
+  3-column viewport-first layout (md:h-screen chain, independently-scrolling
+  columns, no page scroll) and ALL existing real allocation wiring are PRESERVED.
+  HONESTY SPLIT enforced: strategy RULES = STATIC documented content; all
+  PERFORMANCE NUMBERS = the REAL persona endpoint, never hardcoded.
+  - **MIDDLE — removed the Risk profile selector** (Conservative/Balanced/Aggressive
+    + `RiskId`/`Risk`/`RISKS` + tilt-weight math all deleted). Replaced with a
+    compact STATIC **"Kanida.ai Virtual Trading Rules"** card (Entry 9:15 IST /
+    Trade size ₹50k@₹5L / Holding 7d / SL −7% gap-down / Smart trailing +12% →
+    higher of entry or 10-day low / Capital cash-only integer shares / Position
+    skip-held). Allocation now uses a single **FIXED model**: perTrade =
+    (capital/₹5L)×₹50k across the full Top 10; qty = floor(perTrade·scale/entry).
+    Same REAL entry/qty/SL math + per-row Reduce/Remove controls kept.
+  - **RIGHT (default-visible):** Allocation preview (REAL) + NEW **Backtested
+    Performance Summary** (REAL `GET /api/power/personas/falcon-top-10`): avg
+    yearly return, equiv. yearly P&L (= avg_return × user capital, COMPUTED),
+    worst year, win rate (avg_win_rate_pct), avg trades/year (total_trades ÷
+    total_years, COMPUTED), positive years (positive_years of total_years) + two
+    STATIC logic lines ("avg_lift × 10-pattern gate" / confidence) + the
+    operator's RISK DISCLOSURE verbatim (2021–2026 only, not crash-tested
+    2008/2015/2020, 2021=15-trade sample, −15.59% 2025). Plus a **Selected-period
+    snapshot** (REAL, scoped to the chosen date's calendar year: period P&L on the
+    base, YTD return, latest-month MTD, open-at-period-end, held-overnight).
+  - **RIGHT (collapsible):** Year-by-year table (REAL `yearly`; click a year →
+    REAL months from the already-loaded `monthly` array, winning months DERIVED
+    count(return_pct>0)); Locked Falcon Rules (STATIC full rulebook); Capital
+    Model: Fixed Allocation (STATIC); What this trader does (STATIC); Trading
+    Cycle 7 steps (STATIC). Generic `Collapsible` (mint chevron).
+  - **Honesty held:** persona fetched on mount; loading/error/no-data states show
+    "no numbers" not fabrications; summary typed locally off `Record<string,
+    unknown>`; replay note clarifies aggregates are whole-window not per-date
+    walk-forward (Backend need); sub-year point-in-time P&L + month-level max DD
+    flagged as Backend needs.
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npm run build` ✓ compiled
+    (`/power/co-trading` built).
+- 2026-06-21 — **Co-Trading REFACTORED to the 3-column viewport-first layout**
+  (CoTradingExperience.tsx only; page.tsx + AppShell untouched — AppShell already
+  full-bleeds /power/co-trading with `md:h-[100dvh] md:overflow-hidden`, same as
+  /power/ask). Goal: identical no-page-scroll, independently-scrolling-columns feel
+  as the Ask-Falcon home. **COPIED AskFalconHome's `md:h-screen` mechanism exactly.**
+  - **Before:** a two-STAGE single-column flow (SETUP screen → "Build my allocation"
+    → PREVIEW screen) inside `md:h-[calc(100dvh-7rem)]` with ONE internal scroll
+    region; full-screen stage switching; the right-side cards were a `lg:grid` only
+    inside the preview stage.
+  - **After:** ONE screen, two columns shown together (no stage switching, no page
+    scroll). Root `flex flex-row min-h-screen md:min-h-0 md:h-full md:overflow-hidden`;
+    EACH column pinned `md:h-screen md:min-h-0 md:overflow-hidden` (the h-screen chain,
+    NOT h-full — matching the Ask fix note).
+    • **MIDDLE = SETUP CONTROLS** (`w-[360px]`, flex-col): shrink-0 heading; a
+      `flex-1 min-h-0 overflow-y-auto` region with the four compact controls (style
+      selector dropdown — only Swing live, others "soon"; virtual capital input +
+      ₹1L/₹5L/₹10L chips; start date; risk profile); and a shrink-0 pinned primary
+      button at the BOTTOM (like Ask's composer). Button is "Update plan" for live
+      (the right column already updates live on every input change) and
+      "Build replay / Update replay" for a past date (that needs the point-in-time
+      fetch).
+    • **RIGHT = PORTFOLIO WORKSPACE** (`flex-1`, flex-col): shrink-0 header = title +
+      a NEW compact horizontal **metrics strip** (Ask price-strip treatment: 7 cells
+      — Starting · Current value · Total P&L · Return% · Open · Cash · Drawdown —
+      with a deploy bar) + a compact disclaimer chip; then a `flex-1 min-h-0
+      overflow-y-auto` scroll region with the allocation table → Falcon actions feed
+      → Controls → AutoTrade bridge.
+  - **Honesty PRESERVED 1:1.** Same `entryPriceOf` (action.entry_price_rs only, else
+    "—" + the amber "live quote feed" banner), same REAL allocation math (weight =
+    1+tilt·((N−1−i)/(N−1)), qty=floor(alloc/entry), SL = action.stop_loss_pct else
+    locked −7%), same BAND-derived tier colors (never signal_tier_color). The metrics
+    strip shows ONLY computable values as REAL (Starting, Open count + % deployed,
+    Cash); Current value / Total P&L / Return% / Drawdown are dashed "—/pending".
+    Actions feed still SEEDED from the real allocation decisions + the live-feed
+    Backend-need note. Replay still attempts a point-in-time `falconTop20(startDate)`
+    and shows the honest "replay · backend pending" card on no data. Disclaimer
+    ("virtual capital · not financial advice") kept — as a chip in the right header
+    (lg+) and as the full card above the workspace on smaller widths.
+  - **Mobile:** middle column hidden < md (same as Ask); a compact fixed-bottom
+    setup bar (style/risk/capital/date + a replay Build button) keeps it usable.
+  - **Real source per panel (unchanged):** Setup = local state · Allocation =
+    Top20Response.picks (REAL) + client math · Metrics strip = starting capital +
+    computed allocated/cash (REAL) / live = Backend · Actions = derived from
+    allocation (REAL) / live feed = Backend · Controls = local state / persistence =
+    Backend · Bridge = /power/autotrade. Only Falcon Top 10 Swing live.
+  - **Verify:** `cd frontend && npx tsc --noEmit` clean (EXIT 0); `npm run build` ✓
+    compiled (`/power/co-trading` built).
+- 2026-06-21 — **Co-Trading PHASE 1 built** (COTRADING.md Phase 1 §§1-7; spec
+  "Phase 1 (this build)"). Additive, SCOPE-FENCED: only NEW files —
+  `app/power/(app)/co-trading/page.tsx` (was a LaunchPending stub → now a server
+  component seeding `PowerAPI.falconTop20('all500')` + the real session first name)
+  and the NEW `components/power/cotrading/CoTradingExperience.tsx` client component.
+  Did NOT touch AppShell / AskFalconHome / globals.css / any /power/ask file.
+  - **Two stages, one screen.** SETUP (guided, four numbered blocks: trading style,
+    virtual capital, start date, risk profile) → "Build my allocation" → PREVIEW
+    (allocation table + actions feed on the left; portfolio summary + controls +
+    AutoTrade bridge on the right). Viewport-first: root is
+    `md:h-[calc(100dvh-7rem)]` (the AppShell renders /co-trading in the PADDED,
+    NON-full-bleed `max-w-5xl pt-8 pb-16` main, so I subtract that chrome) with a
+    single internal `overflow-y-auto` scroll region; the actions feed has its own
+    `max-h-[260px]` inner scroll. F2 mint theme; tier bands derived from the BAND
+    NAME via BAND_COLORKEY (GOLD=amber/PREMIUM=teal/ENTERPRISE=green/STANDARD=slate/
+    AVOID=red), NEVER signal_tier_color.
+  - **ALLOCATION RULE (documented, REAL math):** take the top-N picks where N =
+    risk.maxPositions (Conservative 6, Balanced 8, Aggressive 10). Weight_i =
+    1 + tilt·((N−1−i)/(N−1)) with tilt 0 / 0.5 / 1.0 (Conservative = EVEN spread;
+    Balanced/Aggressive tilt toward better ranks), then normalise across the
+    NON-removed names after applying each pick's user scale so freed capital
+    redistributes. targetAlloc = weight·capital; qty = floor(targetAlloc/entry);
+    capital = qty·entry. SL = the pick's `action.stop_loss_pct` if present, else the
+    locked −7% standard (labelled). All of this is REAL (real picks + a real entry
+    price + arithmetic).
+  - **HONESTY held.** Entry price = `pick.action.entry_price_rs` ONLY (no other real
+    close on the Top20Pick contract); when absent the row shows "—", qty 0, and an
+    amber banner points at the live-quote Backend need — NEVER a fabricated price.
+    Portfolio summary shows ONLY computable values (starting capital, positions,
+    capital allocated + % deployed bar, cash available) as REAL; current value /
+    total P&L / return % / max drawdown are dashed "—/pending" tiles with
+    "tracking starts when you begin · market open pending". NO fabricated P&L. The
+    actions feed is SEEDED from the real allocation decisions ("Allocate ₹X to SYM —
+    N sh, GOLD tier, stop −7% (₹…), hold ~7d") and explicitly notes the live
+    entries/exits/trailing/skip/rotation feed is a Backend need. Replay (past start
+    date < IST today) attempts a point-in-time `falconTop20(signal_date)` re-fetch;
+    if the engine has no picks for that date it shows an honest "replay · backend
+    pending" card describing the no-look-ahead walk-forward sim that's needed —
+    never invented.
+  - **Controls (client state).** Per-row Why panel exposes Reduce 25% (clamped to
+    25%), Remove/Restore (redistributes weight), and "Deeper analysis" →
+    `/power/ask?symbol=SYM`. A "Pause new entries" toggle + "Change capital/risk"
+    (back to setup) sit in the Controls card; copy states persistence is a Backend
+    need. AutoTrade bridge CTA → `/power/autotrade` (labelled Launch-Pending).
+  - **Real source per panel:** Setup = local state · Allocation = Top20Response.picks
+    (REAL) + client math · Portfolio = starting capital + computed allocated/cash
+    (REAL) / live = Backend · Actions = derived from allocation (REAL) / live feed =
+    Backend · Controls = local state / persistence = Backend · Bridge =
+    /power/autotrade route. Only Falcon Top 10 Swing live; other styles disabled.
+  - **Verify:** `cd frontend && npx tsc --noEmit` clean. `npm run build` skipped per
+    directive (concurrent agent editing the home; full build runs separately).
+- 2026-06-21 — **Ask-Falcon home: VIEWPORT-FIRST fixed-height layout overhaul**
+  (AppShell.tsx + AskFalconHome.tsx only; co-trading + all other files untouched —
+  another agent owns those). Operator goal: at 100% zoom on 1366×768 / 1440×900,
+  ZERO browser page scroll — the shell fills the viewport and each panel scrolls
+  INTERNALLY only; the search bar + all 10 signals always visible. This was a real
+  fixed-height structure pass, NOT a "shrink the fonts" pass.
+  1. **Shell = viewport-locked.** AppShell fullBleed `<main>` `md:h-screen` →
+     `md:h-[100dvh]` (overflow-hidden kept); removed-by-intent any extra main
+     padding so the three columns share the exact same usable height with no white
+     gap. Comment updated to say each region's top/padding is owned by AskFalconHome.
+  2. **MIDDLE column = true fixed-height flex column** (`md:h-full md:min-h-0
+     md:overflow-hidden`), three regions:
+     • TOP (shrink-0): style selector `pt-2.5 pb-2`→`pt-2 pb-1.5`; list-header +
+       one-line filters `pt-2.5 pb-2`→`pt-2 pb-1.5`; gap between filters and the
+       engine/entry context line `mt-1.5`→`mt-1`.
+     • MIDDLE (flex-1 **min-h-0**, the fix that makes internal-only scroll work):
+       list container `py-1`→`py-0.5`; `ListRow` `py-1.5`→`py-1`, sector label
+       `10.5px`→`10px` + `opacity .8` (smaller/lighter). ~25px/row → all 10 ≈ 250px,
+       fits between filters and composer at 768px with headroom; inner scroll
+       engages only on a smaller viewport.
+     • BOTTOM (shrink-0, sticky): the F2 composer (Intent ▾ · Stock · Ask) now
+       `shrink-0` so it is ALWAYS pinned at the bottom of the column, never pushed
+       below the fold; `pt-2.5 pb-3`→`pt-2 pb-2.5`. Visual unchanged.
+  3. **RIGHT column = fixed-height flex column** aligned to the middle's top
+     (`md:h-full md:min-h-0 md:overflow-hidden`): FIXED header (shrink-0) =
+     greeting + compact [Co-Trading | AutoTrade] CTA row (`pt-5/6 pb-3`→`pt-2/3
+     pb-2`); SCROLLABLE region (flex-1 min-h-0 overflow-y-auto) = the analysis card.
+     First no-scroll view now shows stock name+rank+tier, the metrics row, "Why
+     we're picking this", and the start of "Historical track record".
+  4. **PRICE CARDS → one compact horizontal metrics ROW.** Replaced the four
+     bordered `py-2` cards with a single divided strip (Current LTP · Prev-day LTP ·
+     AI Signal Day · Entry Day) inside one rounded border; cells `py-1.5`, labels
+     `9px`, values `14px` mono, notes `8.5px`; the signal-day cell carries a faint
+     mint wash (the only REAL value). On `<sm` it falls back to a clean 2×2 grid
+     (theme-colored left/top cell borders, no bright default `divide`). Same data +
+     honest "—" / "live quote pending" / "market open pending"; nothing fabricated.
+  5. **CTA cards compact.** `px-3 py-2.5`→`px-2.5 py-2`, icon 7→6, gap/mt trimmed —
+     action buttons, not tall blocks.
+  6. **Greeting trimmed** to fit the fixed header: title `24px`/logo 26 →
+     `20px`/logo 22, subtitle `14px mt-1.5 leading-relaxed`→`12.5px mt-1
+     leading-snug`. DetailCard `p-5 rounded-[18px]`→`p-4 rounded-[16px]`; `Section`
+     `mt-3.5`/`13.5px`/`mb-1.5`→`mt-3`/`13px`/`mb-1`; `Rule` `my-3`→`my-2.5`.
+     Everything else preserved (logo, tiers/bands, REAL falconTop20 wiring, composer
+     intents, greeting copy, all honest placeholders).
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0). `npm run build` deliberately NOT
+    run — another agent is editing concurrently; a full build is run separately.
+- 2026-06-21 — **Ask-Falcon home: STRICT MINIMAL 2-fix round** (AskFalconHome.tsx +
+  AppShell.tsx only; everything else preserved — middle column / all 10 rows,
+  one-line filters, F2 composer visual, right-column CTAs + analysis card, logo,
+  tiers, greeting, REAL data wiring). Scope was exactly these two:
+  1. **No more whole-page scroll — viewport-locked shell, columns scroll
+     independently.** Before: AppShell fullBleed `<main>` was `flex-1 min-h-0`
+     (no height cap) and the right column was one `overflow-y-auto` div wrapping
+     greeting + CTA row + analysis card → the WHOLE page scrolled to read the
+     analysis. After: (a) AppShell fullBleed main = `flex-1 min-h-0 pt-14 md:pt-0
+     md:h-screen md:overflow-hidden` (md+ viewport-locked, mobile stays scrollable);
+     (b) AskFalconHome root `h-full min-h-screen md:min-h-0 md:h-screen` →
+     `min-h-screen md:min-h-0 md:h-full md:overflow-hidden` (fills the locked main
+     exactly); (c) RIGHT column rebuilt as a flex-col: a FIXED header block
+     (greeting + [Co-Trading|AutoTrade] CTA row, `shrink-0`) then a SCROLLABLE
+     analysis region (`flex-1 min-h-0 md:overflow-y-auto`, thin scrollbar) holding
+     the DetailCard / StockAnalysis / mobile fallback. Left nav + middle Top-10
+     now stay fixed; only the analysis pane scrolls. (d) Tightened the detail card
+     modestly so header + tier badges + price grid + "Why we're picking this" are
+     visible without scrolling: card `p-6 mt-6`→`p-5 mt-1`, badges row `mt-3`→`mt-2.5`,
+     `Section` `mt-5`/`mb-2`/`14px`→`mt-3.5`/`mb-1.5`/`13.5px`, `Rule` `my-[18px]`→`my-3`,
+     `PriceCell` `px-3 py-2.5`→`px-2.5 py-2`. No data/typography redesign beyond this.
+  2. **Restored the full guided-intent dropdown in the F2 composer.** Before: the
+     restored F2 composer hard-coded Intent to a single fixed "Analyze a stock"
+     span. After: re-added the original 9-intent closed list (Analyze a stock ·
+     Analyze a sector · Explain today's Top 10 · Find setups beyond Top 10 ·
+     Compare two stocks · Why is X Gold/Enterprise · Review my portfolio · Market
+     & sector strength · Check AutoTrade readiness) as an `INTENTS` config + a
+     dropdown styled exactly like the F2 Intent cell (label + chevron, mint-tinted
+     selected, "soon" tag on non-live items, disabled). Composer VISUAL unchanged
+     (Intent ▾ · Stock · Ask →). The Stock field is now shown only for
+     stock-needing intents and still searches the full Nifty 500 (unchanged
+     `/api/power/universe/symbols` + graceful 404 fallback). LIVE intents:
+     "Analyze a stock" (→ DetailCard for Top-10 / StockAnalysis "soon" otherwise)
+     and "Explain today's Top 10" (→ selects #1, shows the pick workspace) run
+     against the already-loaded REAL Top20Response; all others are disabled "soon".
+     Ask is disabled unless the intent is live and (if it needs a stock) one is
+     chosen → invalid/empty requests stay impossible.
+  - **Verify:** `npx tsc --noEmit` clean (full build skipped to stay fast, per
+    directive).
+- 2026-06-21 — **Ask-Falcon home: STRICT MINIMAL "all 10 must fit" round**
+  (AskFalconHome.tsx only; everything not listed preserved — logo, "Choose Your
+  Trading Style" rename, F2 composer, right-column analysis/price card, tier
+  colors, greeting, one-line filters; data wiring stays REAL `falconTop20`).
+  PRIMARY GOAL = all 10 Top-10 signals visible at once, no inner scroll, on a
+  ~720px content-height laptop (was only ~5 rows).
+  1. **Rows collapsed to a SINGLE tight line** — `ListRow` was a 2-line cell
+     (symbol over sector) at `px-2.5 py-2.5` ≈ 56–58px/row → 10 rows = ~580px
+     (off-screen). Now: rank · symbol with **sector as a dim inline suffix** ·
+     tier badge · signal-day %, all on one baseline-aligned line at `px-2 py-1.5`
+     ≈ 32–34px/row → 10 rows = ~330px. Grid cols `18px→16px`, gaps `2.5→2`.
+     Same REAL fields (rank, symbol, sector, signal_tier band, flags.day_return_pct).
+  2. **Removed the middle-column "Start Co-Trading" CTA entirely** (freed ~64px).
+  3. **Tightened everything above the list** so the list dominates: style selector
+     `pt-4 pb-3`→`pt-2.5 pb-2`, button `py-2.5`→`py-1.5` + icon 28→24px (~28px
+     saved); list-header block `pt-3 pb-2.5`→`pt-2.5 pb-2`; context line
+     `mt-2 text-[11px]`→`mt-1.5 text-[10.5px]`; list container `pt-2`→`py-1`;
+     composer field padding `py-1.5`→`py-1`, top pad `pt-3`→`pt-2.5`.
+     Net middle budget (~720px): selector ~64 + header/filters/context ~110 +
+     10 rows ~330 + composer ~74 ≈ 580px → all 10 fit with headroom, no scroll.
+  4. **RIGHT column: two compact CTA cards added** — `[Start Co-Trading | Create
+     AutoTrade]` side-by-side `grid-cols-2`, placed directly under the greeting
+     subtitle and ABOVE the analysis/detail card (compact `px-3 py-2.5`, ~46px
+     tall, doesn't push analysis far down). Route to `/power/co-trading` and
+     `/power/autotrade` (both routes verified to exist). New `bot` icon added to
+     the ICON map. Mint theme, no new accent.
+  - **Column contract now exact:** MIDDLE = style selector + one-line filters +
+    Falcon Top 10 (all 10) + stock-search composer, nothing else. RIGHT =
+    greeting + [Co-Trading | AutoTrade] CTA row + analysis/price card + explanation.
+  - **Verify:** `npx tsc --noEmit` clean; `npm run build` ✓ compiled
+    (`/power/ask`, `/power/autotrade`, `/power/co-trading` all built).
+- 2026-06-21 — **Ask-Falcon home: STRICT 3-change minimal round** (AskFalconHome.tsx
+  only; no redesign/restyle/respacing — smallest diffs, data wiring unchanged).
+  Operator was frustrated by over-building; scope was exactly these three:
+  1. **Filters collapsed to ONE compact line** — the 5 universe pills (which wrapped
+     to 2 lines) + a second EOD/Sector row were pushing the Top-10 list below the
+     fold (only ranks 8–10 visible). `FilterBar` now renders universe as a single
+     compact `<select>` alongside the EOD-date and Sector `<select>`s on one
+     `flex-nowrap` row. Vertical footprint cut from ~3 rows to 1; the Top-10 list is
+     now the dominant element. Still drives the REAL
+     `PowerAPI.falconTop20(universe, sector, signal_date)` refetch — functionality
+     identical, only layout compacted. "Engine emitted at … qualified for entry on …"
+     context line kept as the single small line under it.
+  2. **Co-Trading CTA relocated to the TOP** — moved the compact "Start Co-Trading"
+     card out of the bottom of the middle column to directly UNDER the "Choose Your
+     Trading Style" selector (above the Falcon Top 10 heading/filters). Same card,
+     same `/power/co-trading` route; only `m-3.5 mt-2` → `mx-3.5 mt-3` for the new
+     position.
+  3. **Reverted the plain search box to the F2 guided composer** — the prior round
+     replaced the F2 "INTENT [▾] STOCK [field] [Ask →]" bar with a plain "Type a
+     name or symbol" box; restored the F2 composer visual (.f2-gp/.f2-gsel/.f2-ask
+     look: bordered shell, Intent + Stock fields, mint Ask button). ONLY the STOCK
+     field's FUNCTIONALITY differs from the static F2: it searches the full Nifty 500
+     (type name/symbol → live suggestions, selectable) via
+     `GET /api/power/universe/symbols` with the SAME graceful 404 fallback (loaded
+     Top-10 + honest "coming soon"). Intent is fixed "Analyze a stock" (guided,
+     closed list → invalid request impossible). Ask renders the chosen stock in the
+     RIGHT column (Top-10 → real DetailCard; non-Top-10 → StockAnalysis "soon").
+  - **Untouched (per directive):** CompassLogo, the "Choose Your Trading Style"
+     rename, the right-column analysis workspace, the price-breakdown card, tier
+     colors, the greeting — all left exactly as they were.
+  - **Verify:** `npx tsc --noEmit` clean; `npm run build` ✓ Compiled successfully.
+- 2026-06-21 — **Ask-Falcon home: 6-item operator feedback round** (AskFalconHome.tsx,
+  data wiring stays REAL — no mock). Acting on the 2026-06-21 worktree directive.
+  1. **Logo fix** — replaced the Claude-style "✴" spark in the right-column greeting
+     with the real Kanida brand mark (`CompassLogo` — the same compass/dial used in
+     the left nav). Consistent branding across the screen.
+  2. **Rename** — middle-column label "Trader persona" → **"Choose Your Trading Style"**.
+  3. **Filters in the middle column** — brought the Power-User-Portal filters in under
+     the "Falcon Top 10" heading (reusing Top20Filters' semantics, adapted to the F2
+     panel + client refetch): universe toggles (Nifty 500 / Nifty 50 / 100 / 200 / F&O),
+     an EOD date dropdown, a Sector dropdown. They drive a REAL client re-fetch of
+     `PowerAPI.falconTop20(universe, sector, signal_date)` (endpoint already supports all
+     three params). Page seeds the first response server-side; filter changes refetch in
+     the browser. Context line kept/improved: "Engine emitted at <signal_date> EOD ·
+     qualified for entry on <entry_date> · <universe> [· <sector>]" — all REAL Top20Response
+     fields. Component switched from server-prop-only to a client filter container.
+  4. **Signal-row price data** — the MIDDLE list stays clean (rank · symbol · sector ·
+     tier · signal-day %). Full price breakdown moved to the RIGHT detail card as a
+     4-cell grid: Current LTP · Previous-day LTP · **AI signal day (<signal_date>)** ·
+     Entry day. Only signal-day %=`pick.flags.day_return_pct` is REAL (mint-ringed cell);
+     Current LTP / Prev-day LTP = honest "—", Entry day = entry_date or "market open
+     pending". NONE fabricated → all added to Backend needs.
+  5. **Co-Trading CTA** (operator option 1) — one compact "Start Co-Trading" card low in
+     the middle column routing to `/power/co-trading` (the full capital/date/allocation
+     workflow stays on that page, still LaunchPending). No flow added to the middle column.
+  6. **Search = full Nifty 500 + output in RIGHT column** — added a searchable stock
+     picker (type name OR symbol → live-filtered suggestions) calling
+     `GET /api/power/universe/symbols`. That endpoint does NOT exist yet → graceful 404
+     handling: falls back to the loaded Top-10 symbols + an honest "full-universe search
+     coming soon" note. Picking a stock renders in the RIGHT column (analysis workspace),
+     NOT the middle. Top-10 picks render the REAL DetailCard from loaded data; a non-Top-10
+     stock renders a StockAnalysis card that calls `GET /api/power/ask/analyze-stock?symbol=`
+     (also not live → honest "analysis coming soon" with the full section scaffold: current
+     trend, recent price/volume, signal-day, sector, Falcon patterns, tier eligibility,
+     entry context, risk warnings, plain-English explanation). No fabricated numbers.
+  - **Layout invariant held:** Left=nav · Middle=style + filters + Top 10 + search +
+     Co-Trading CTA (focused) · Right=analysis workspace. Mint theme + F2 tokens preserved;
+     no new accent. The old GuidedPrompt intent/Ask box was retired — the searchable picker
+     IS the (still guided, closed-list) entry now, so invalid requests stay impossible.
+  - **Verify:** `npx tsc --noEmit` clean; `npm run build` ✓ Compiled successfully; all
+     legacy `/power/*` routes intact (additive). Removed the page→component "guided prompt"
+     plumbing; page.tsx still seeds the first falconTop20 server-side.
+- 2026-06-20 — **Ask-Falcon home rebuilt as F2 master-detail, 100% REAL data**
+  (handoff_ask_falcon_home + the 2026-06-20 F2 directive). Replaced the Phase-1a
+  centered hero with the 3-column F2 layout. ONE shell: the AppShell left rail IS
+  the F2 nav; AppShell `<main>` now renders full-bleed ONLY on `/power/ask` (other
+  modes keep the centered padded column).
+  - **AskFalconHome.tsx** (new, client): middle = persona selector → Falcon Top 10
+    list → guided prompt; right = IST greeting + explanation card. Wired to ONE real
+    call (`PowerAPI.falconTop20('all500')` → Top20Response, fetched server-side in
+    page.tsx). Mappings: list row = `rank·symbol·sector·signal_tier(+color)·flags.day_return_pct`;
+    card Why = `bucket1.synthesis` + `bucket1.total_fires_today`; track record =
+    `per_stock_backtest` (honest empty when n_trades==0); sector = `bucket3.narrative`;
+    setup-quality badge derived from `signal_tier`/`rating` (NOT a buy call).
+  - **Honest swaps applied:** real engine tiers GOLD/PREMIUM/ENTERPRISE/STANDARD/AVOID
+    (compound labels like PREMIUM-Pullback collapsed to band; invented Gold+/Ent.Cand
+    dropped); "STRONG BUY" → tier-derived quality language; greeting market-pulse line
+    is a NEUTRAL honest sentence (no invented commentary) pending /market-pulse.
+  - **NO mock data anywhere:** deleted the orphaned Phase-1a subtree (AskHomeClient,
+    GreetingHero, FalconComposer, ActionChips, **Top10Peek w/ its STUB_ROWS**,
+    EntityPicker, AskResultPanel, composer-config). Backend-down → honest loading/empty
+    states, not stubs.
+  - **Personas:** only Swing live (real falconTop20). BTST/Intraday/Weekly/Long-Term
+    selectable but render a Launch-Pending state in BOTH the middle list and the right
+    panel — no faked re-ranking.
+  - **Guided prompt:** "Explain today's Top 10" + "Analyze this Top-10 stock" are LIVE
+    (answer from loaded Top20Response, no LLM/free-text). analyze-any/sector/compare/
+    why-tier/portfolio/autotrade disabled with a "soon" tag (Backend needs). Stock field
+    = the selected real pick only (no free-text → invalid request impossible).
+  - **Tokens:** added F2 palette (--f2-canvas/panel/card/mint/ink/…/amber/teal/red) to
+    globals.css :root, locked to the handoff table. No new accent — mint stays the only one.
+  - **Verify:** `npx tsc --noEmit` clean; `npm run build` compiled successfully; all other
+    `/power/*` routes intact (additive). Resolved the prior TierColor/PREMIUM(teal) note
+    by mapping signal_tier_color directly in the F2 badge (teal=PREMIUM) — no change to
+    the v1 TierColor union needed.
+- 2026-06-20 — **Phase 1a built** (spec §§1,2,3,8). Shipped the AppShell + Ask-Falcon
+  home + LaunchPending, additively under route group `app/power/(app)/*` (URLs
+  `/power/ask|signals|co-trading|autotrade|performance|plans|account|learn`). Legacy
+  `/power/today|live|replay|admin|…` untouched.
+  - **AppShell** (`components/power/shell/`): persistent left rail, 6 modes + footer
+    (Account/Learn/Admin, Admin operator-only), mint active pill + accent bar, mobile
+    drawer. Launch-Pending modes carry a subtle "Soon" tag in the nav. Inline SVG icons
+    (no icon lib in package.json). Nav is a single config (`nav-config.tsx`).
+  - **Chrome de-dupe decision:** parent `app/power/layout.tsx` now passes shell routes
+    through raw (detected via new `x-pathname` middleware header) so the public TopBar/
+    Footer don't double-wrap the AppShell. Middleware change is read-only/additive — no
+    auth behavior change.
+  - **Ask-Falcon home** (`components/power/ask/`): IST-aware greeting (client clock,
+    first_name from display_name→email→"trader"); ONE rotating market-pulse line (STUB,
+    marked in-UI); **guided composer** = intent dropdown → contextual entity picker
+    (searchable, closed-list only → invalid request impossible) → Ask → focused STUBBED
+    result panel (no page-hop). 9 intents per §3, each carrying its backend-source marker.
+    Action chips seed the composer intent or route to a mode. **Top-10 peek** = real
+    `PowerAPI.falconTop20` data (4 compact rows, signal-tier chip, day return), falls
+    back to a clearly-marked stub on fetch failure.
+  - **Honesty:** AutoTrade intent + 4 modes (Co-Trading/AutoTrade/Performance/Plans) and
+    Account/Learn are LaunchPending with explicit "why not yet"; Signals is a thin REAL
+    shell pointing at the live `/power/today`. Only Falcon Top 10 Swing (+Weekly) framed
+    as live. No "80%"/"smartest"/"500 agents". Tiers = qualitative bands.
+  - **Verify:** worktree has no node_modules — couldn't run next/tsc against project types.
+    Syntax-checked all 21 new/edited TS(X) files with standalone tsc (`--noResolve`); zero
+    syntax errors (only expected unresolved-module/React-namespace noise, which matches the
+    codebase's existing `React.ReactNode`-without-import pattern in UserMenu).
+  - **Open for 1b:** persona-aware Signals + 7/14/20/30d tracker; paywall re-wire; wire
+    composer intents + market-pulse + Top-10 peek tier color to real endpoints (handoff
+    list in the run output's Backend-needs block). TierChip in the peek maps a `teal`
+    color (PREMIUM) not yet present in the v1 `TierColor` union — confirm backend
+    signal_tier_color values for GOLD/ENTERPRISE/PREMIUM/STANDARD/AVOID.
+- 2026-06-19 — Log + falcon-ui agent created. No screens built yet. Next: Phase 1a.
+
+- 2026-06-20 — **F2 design adopted as the Ask-Falcon home LAYOUT REFERENCE ONLY**
+  (docs/design/handoff_ask_falcon_home/). HARD RULE from operator: rebuild it with
+  100% REAL data/APIs/routes — NO mock/static content anywhere. Mapping: the home
+  (middle Top-10 list + right explanation card) wires to the EXISTING
+  `PowerAPI.falconTop20('all500')` -> Top20Response (tier=signal_tier, day%=flags.day_return_pct,
+  why=bucket1, track record=per_stock_backtest, sector=bucket3, signals=n_fires). Greeting
+  name from /auth/me. Honest swaps: use REAL engine tiers (GOLD/PREMIUM/ENTERPRISE/STANDARD;
+  drop invented Gold+/Ent.Candidate); REPLACE "STRONG BUY/BUY/ACCUMULATE" with tier-derived
+  setup-quality language (NOT a buy call — not financial advice). Personas: only Swing live
+  (real falconTop20); BTST/Intraday/Weekly/Long-Term = Launch-Pending (do NOT fake re-ranking).
+  Any field not in the real API (e.g. company name, 0-100 conviction, 30d return) -> omit or
+  honest empty state + add to Backend needs; never fabricate.
+
+- 2026-06-20 — **F2 VISUAL feedback round on AskFalconHome.tsx** (data wiring untouched,
+  no mock reintroduced). Fixed the "flat/grayscale" rendering by restoring F2's vivid
+  color + depth. (1) TIER BADGES now use the FULL F2 token hexes (cite README "Design
+  Tokens" + .f2-badge): GOLD=`--f2-amber #E6B450`, PREMIUM=`--f2-teal #4BCBE0`,
+  ENTERPRISE=`--f2-tier-green #3FE3A4`, STANDARD=`--f2-slate #8595a0`, AVOID=`--f2-red`
+  — each as matching-color text on a faint same-hue fill (~0.14α) with an inset same-hue
+  ring (`box-shadow: inset 0 0 0 1px <ring>`), 6px radius (`rounded-md`), uppercase
+  0.04em. Previous code desaturated these (amber rendered as `#f0d089`) which read gray;
+  removed. (2) MINT accents confirmed/kept: list day-% mint mono+tabular (red only on a
+  down-day for honesty), selected row = `--f2-mint-dim` bg with mint rank, greeting ✴
+  mint, glowing "today" dot. (3) RIGHT CARD depth already correct (gradient card→card-2,
+  line-2 border, r18, `0 24px 70px -34px` shadow, mint mono `#rank`, .f2-badge
+  setup-quality chip with inset mint ring). (4) Added `tabular-nums` to all mono numerics
+  (rank, day-%). Honesty held: most picks legitimately STANDARD/slate, a couple GOLD/amber
+  — colors only vivified, none invented. `tsc --noEmit` + `next build` both green.
+
+- 2026-06-20 — **BUGFIX: tier badges rendered gray (looked grayscale despite F2 pass).**
+  Root cause: TierBadgeF2/DetailCard looked up TIER_STYLE by `pick.signal_tier_color`,
+  but the backend's signal_tier_color semantics differ (GOLD->"yellow", PREMIUM->"amber"),
+  and TIER_STYLE had no "yellow" key -> GOLD fell back to gray (and PREMIUM would've gone
+  amber not teal). Fix: added BAND_COLORKEY {GOLD:amber, PREMIUM:teal, ENTERPRISE:green,
+  STANDARD:gray, AVOID:red} and key the style off the tier BAND (tierBand(signal_tier)),
+  not signal_tier_color. Verified: GOLD now amber, mint accents present, tsc clean, dev
+  hot-reloaded. LESSON for future runs: NEVER style tiers off signal_tier_color (it uses
+  yellow/amber differently) — always derive from the canonical band.
+
+- 2026-06-20 — **ROOT-CAUSE FIX: F2 colors never rendered (looked black & white).**
+  The --f2-* tokens were added as a SEPARATE bare `:root {}` block AFTER Tailwind v4's
+  `@theme` in globals.css — and the bundler (Turbopack/Lightning) DROPPED that block, so
+  NONE of the --f2-* custom properties existed in the compiled CSS. Every var(--f2-*) text
+  color fell back to white (mint %, red negatives, slate, etc.); only literal rgba()/hex
+  (e.g. badge backgrounds) showed, which is why GOLD "looked amber" (bg only) but the % were
+  white. FIX: moved ALL --f2-* defs into the FIRST compiling `:root` (the one with
+  --background, proven by dark-mode working). Verified: compiled CSS chunk now contains
+  --f2-mint/#3fe3a4 etc. LESSON: in this Tailwind v4 setup, define CSS custom properties in
+  the existing top `:root` (or `@theme`), NEVER as a new bare `:root` after `@theme` — it
+  won't compile. (Orphan dead block still in globals.css ~L60; harmless, remove on next edit.)
