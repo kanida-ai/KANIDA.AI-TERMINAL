@@ -502,14 +502,28 @@ def simulate_persona(persona_slug: str, force: bool = False) -> Dict[str, Any]:
         df_tl = pd.DataFrame(r["timeline"])
         df_tl["month"] = df_tl["date"].str[:7]
         prev_eq = cash_start
-        for mo, end_eq_m in df_tl.groupby("month")["equity"].last().items():
+        winning_months = 0   # additive: count of this year's months with return_pct > 0
+        for mo, grp in df_tl.groupby("month"):
+            eq_series = grp["equity"].tolist()
+            end_eq_m = eq_series[-1]
             month_ret = (end_eq_m / prev_eq - 1) * 100
+            # max_dd_pct — worst peak-to-trough inside the month, computed from
+            # the intra-month equity series (most-negative %). Includes the
+            # carry-in level (prev_eq) as the opening peak so a month that only
+            # falls is correctly negative. None if the series is empty.
+            max_dd_pct = _intramonth_max_dd(eq_series, prev_eq)
             monthly_equity_data.append({
                 "year": Y, "month": mo,
                 "end_equity": end_eq_m,
                 "return_pct": month_ret,
+                "max_dd_pct": max_dd_pct,
             })
+            if month_ret > 0:
+                winning_months += 1
             prev_eq = end_eq_m
+
+        # additive: attach winning_months to THIS year's already-appended row.
+        yearly_results[-1]["winning_months"] = winning_months
 
         # Convert trade rows to API-clean format
         for t in r["closed_trades"]:
@@ -604,6 +618,31 @@ def simulate_persona(persona_slug: str, force: bool = False) -> Dict[str, Any]:
     log.info("persona_simulator: %s sim complete in %.0fs",
              persona_slug, result["_elapsed_seconds"])
     return result
+
+
+def _intramonth_max_dd(eq_series: List[float], carry_in_eq: float) -> Optional[float]:
+    """Max drawdown WITHIN a month, as the most-negative peak-to-trough percent.
+
+    Walks the intra-month equity series tracking the running peak and the worst
+    (equity / peak - 1). The carry-in equity (the month's opening level) seeds
+    the first peak so a month that only declines is still correctly negative.
+    Returns 0.0 when the month never dipped below its running peak, or None when
+    the series is empty / unusable.
+    """
+    if not eq_series:
+        return None
+    peak = carry_in_eq if (carry_in_eq and carry_in_eq > 0) else eq_series[0]
+    if not peak or peak <= 0:
+        return None
+    worst = 0.0
+    for eq in eq_series:
+        if eq > peak:
+            peak = eq
+        if peak > 0:
+            dd = (eq / peak - 1.0) * 100.0
+            if dd < worst:
+                worst = dd
+    return round(worst, 2)
 
 
 def _trade_to_api_row(t: Dict, year: int, sector_map: Dict) -> Dict[str, Any]:

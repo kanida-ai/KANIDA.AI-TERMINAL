@@ -54,8 +54,8 @@ def get_persona_backtest(slug: str) -> Dict[str, Any]:
     Returns the same shape as `simulate_persona()`:
       - persona_id, name, tagline, risk_tier, warning
       - config (locked rules — entry, trade size, hold, SL/target)
-      - yearly (list of {year, return_pct, max_dd, wr, n_closed, n_open})
-      - monthly (list of {year, month, end_equity, return_pct})
+      - yearly (list of {year, return_pct, max_dd, wr, n_closed, n_open, winning_months})
+      - monthly (list of {year, month, end_equity, return_pct, max_dd_pct})
       - trades (full trade log with sector, P&L, etc.)
       - summary (avg/median/best/worst yearly return, total P&L)
       - reconciliation (year-by-year P&L tie-out, should all be Re 0)
