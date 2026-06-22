@@ -668,10 +668,89 @@ export type AnalyzeStockResponse = {
   explanation:                  string
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Co-Trading SIMULATION — POST /api/power/cotrade/simulate (LIVE 2026-06-22).
+// A SIMULATION on EOD data: modelled entries/exits, NOT real fills. The response
+// carries an honesty string the UI must surface. Verified shape from the backend
+// handoff. NOT the live auto-trade path — this is the user's virtual portfolio.
+// ──────────────────────────────────────────────────────────────────────────
+
+export type CotradeSimulateRequest = {
+  style:       string            // 'falcon-top-10'
+  capital:     number            // user's virtual book in ₹
+  start_date:  string            // 'YYYY-MM-DD' (live ≈ today)
+  end_date?:   string            // 'YYYY-MM-DD' (replay window end; omit for live)
+}
+
+export type CotradeSummary = {
+  starting_rs:      number
+  current_value_rs: number
+  total_pnl_rs:     number
+  return_pct:       number
+  max_dd_pct:       number
+  n_open:           number
+  n_closed:         number
+  cash_rs:          number
+  win_rate_pct:     number
+  n_trades:         number
+}
+
+export type CotradePosition = {
+  symbol:      string
+  sector:      string | null
+  tier:        string | null     // may be null → join to signal_tier surface if possible, else no badge
+  entry_date:  string
+  entry_price: number
+  qty:         number
+  capital_rs:  number
+  sl_level:    number
+  status:      'open' | 'closed'
+  exit_date?:  string | null
+  exit_price?: number | null
+  pnl_rs:      number
+  pnl_pct:     number
+  hold_days:   number
+  last_close:  number
+}
+
+export type CotradeEquityPoint = {
+  date:      string
+  equity_rs: number
+}
+
+export type CotradeAction = {
+  date:   string
+  type:   'entry' | 'exit' | 'trail' | 'skip'
+  symbol: string
+  price:  number
+  reason: string
+}
+
+export type CotradeSimulateResponse = {
+  style:        string
+  start_date:   string
+  end_date:     string | null
+  as_of:        string
+  honesty:      string           // surface this verbatim — it's a SIMULATION on EOD data
+  last_updated: string
+  summary:      CotradeSummary
+  positions:    CotradePosition[]
+  equity:       CotradeEquityPoint[]
+  actions:      CotradeAction[]
+}
+
 export const PowerAPI = {
   // ── Public (no JWT) ───────────────────────────────────────────────────
   todayPreview: (signal?: AbortSignal) =>
     apiFetch<TodayResponse>('/api/power/picks/today/preview', { signal }),
+
+  // ── Co-Trading SIMULATION (LIVE) ──────────────────────────────────────
+  /** Simulate a virtual Co-Trading portfolio on EOD data (modelled entries/
+   *  exits, NOT real fills). `start_date` ≈ today for a live follow; pass
+   *  `end_date` for a historical replay window. Surface `honesty` in the UI. */
+  cotradeSimulate: (req: CotradeSimulateRequest, signal?: AbortSignal) =>
+    apiFetch<CotradeSimulateResponse>('/api/power/cotrade/simulate',
+      { method: 'POST', body: req, signal }),
 
   // ── Ask-Falcon home (LIVE) ────────────────────────────────────────────
   /** Full tradable universe (~477). Fetch once; filter client-side. */

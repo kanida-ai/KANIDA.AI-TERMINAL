@@ -33,20 +33,33 @@
  *       year-by-year table (real), month drill (real), and the rulebook link.
  *     • "← Change plan" returns to Stage 1; AutoTrade bridge CTA at the end.
  *
+ * DATA WIRING (2026-06-22) — the RESULT stage is driven by the now-LIVE
+ *   POST /api/power/cotrade/simulate. It returns a SIMULATION on EOD data
+ *   (modelled entries/exits, NOT real fills) plus an `honesty` string we surface.
+ *     • SummaryStrip ← summary { starting/current_value/total_pnl/return_pct/
+ *       max_dd/n_open/n_closed/cash/win_rate }.
+ *     • ReplayHero equity curve ← the REAL `equity` series (EquityChart).
+ *     • Positions list ← the REAL `positions` (entry/qty/capital/SL/status/pnl).
+ *     • Falcon ACTIONS feed ← `actions` (entry/exit/trail/skip + reason),
+ *       folded into "Inspect deeper" to keep the result calm.
+ *
  * HARD HONESTY RULES (money is involved):
- *   • 100% REAL signals — PowerAPI.falconTop20('all500') (seeded server-side;
- *     re-fetched by signal_date for a replay attempt).
- *   • Allocation = REAL math: FIXED ₹50k/pick @ ₹5 L base scaled to capital,
- *     qty = floor(alloc / entry). Entry = the pick's real price else "—".
- *   • NO fabricated P&L, current value, return %, drawdown, or live status.
- *   • Replay performance/equity-curve = the REAL persona backtest endpoint
- *     (whole-window year grain; flagged where it isn't a per-date walk-forward).
+ *   • The portfolio is a SIMULATION on EOD data — the `honesty` caption says so.
+ *   • NO fabricated P&L, current value, return %, drawdown, or live fills — every
+ *     number comes from /cotrade/simulate. Loading → calm state; failure → honest
+ *     "couldn't simulate" (never fabricated).
+ *   • The persona "Proven track record" (year-by-year) stays the REAL persona
+ *     backtest endpoint — separate historical confidence, NOT the user's sim.
+ *   • positions[].tier may be null → no badge (never fabricated).
  *   • Only "Falcon Top 10 Swing" is LIVE.
  */
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { PowerAPI } from '@/lib/power-api'
-import type { PersonaBacktestResponse, QuoteResponse } from '@/lib/power-api'
+import type {
+  PersonaBacktestResponse, QuoteResponse,
+  CotradeSimulateResponse, CotradePosition, CotradeAction,
+} from '@/lib/power-api'
 import { CompassLogo } from '@/components/power/CompassLogo'
 import { EquityChart } from '@/components/power/EquitySparkline'
 import type { Top20Pick, Top20Response } from '@/lib/falcon-top20-types'
@@ -169,10 +182,17 @@ export function CoTradingExperience({ data: seed, firstName }: Props) {
   const [mode, setMode] = useState<'today' | 'replay'>('today')   // start choice
   const [startDate, setStartDate] = useState<string>(today)
 
-  // ── Live picks (REAL). A replay attempts a point-in-time signal_date fetch. ─
+  // ── Live picks (REAL) — still used as a pre-sim allocation preview. ─────────
   const [data, setData]       = useState<Top20Response | null>(seed)
   const [loading, setLoading] = useState(false)
   const [replayPending, setReplayPending] = useState(false)
+
+  // ── Co-Trading SIMULATION (REAL — POST /api/power/cotrade/simulate). This is
+  //   the source of truth for the RESULT stage: summary P&L, equity curve,
+  //   positions, and the Falcon actions feed. A SIMULATION on EOD data. ────────
+  const [sim, setSim]               = useState<CotradeSimulateResponse | null>(null)
+  const [simLoading, setSimLoading] = useState(false)
+  const [simErr, setSimErr]         = useState(false)
 
   // ── Trading-rules slide-over (the ONE place all rules content lives) ────────
   const [rulesOpen, setRulesOpen] = useState(false)
@@ -251,24 +271,33 @@ export function CoTradingExperience({ data: seed, firstName }: Props) {
     pnl: null, open: rows.length, live: style.live,
   }], [style.id, style.name, capital, rows.length, style.live])
 
-  // ── Start handler: live → straight to result; replay → fetch then result ───
+  // ── Start handler: run the REAL Co-Trading simulation (POST /cotrade/simulate)
+  //   for BOTH live-today and a historical replay window, then show the result.
+  //   The sim drives summary P&L / equity / positions / actions. We still keep
+  //   the client allocation preview (`rows`) as an honest pre-/fallback view. ──
   async function handleStart() {
     if (!canStart) return
-    if (isReplay) {
-      setLoading(true); setReplayPending(false)
-      try {
-        const res = await PowerAPI.falconTop20('all500', null, startDate)
-        if (res?.picks?.length) { setData(res); setReplayPending(false) }
-        else setReplayPending(true)
-      } catch {
+    setLoading(true); setSimLoading(true); setSimErr(false); setReplayPending(false)
+    if (!isReplay) setData(seed)
+    setStage('result')
+    try {
+      const res = await PowerAPI.cotradeSimulate({
+        style:      'falcon-top-10',
+        capital,
+        start_date: isReplay ? startDate : today,
+        ...(isReplay ? { end_date: today } : {}),
+      })
+      setSim(res)
+      // Honest replay-pending: the sim ran but produced no portfolio for the date.
+      if (isReplay && res.positions.length === 0 && res.equity.length === 0) {
         setReplayPending(true)
-      } finally {
-        setLoading(false)
-        setStage('result')
       }
-    } else {
-      setData(seed)
-      setStage('result')
+    } catch {
+      setSim(null)
+      setSimErr(true)
+    } finally {
+      setSimLoading(false)
+      setLoading(false)
     }
   }
 
@@ -296,6 +325,7 @@ export function CoTradingExperience({ data: seed, firstName }: Props) {
           rows={rows} data={data} isReplay={isReplay} startDate={startDate}
           today={today} perTrade={perTrade} anyEntryMissing={anyEntryMissing}
           showReplayPending={showReplayPending}
+          sim={sim} simLoading={simLoading} simErr={simErr}
           persona={persona} personaLoading={personaLoading} personaErr={personaErr}
           onChangePlan={() => setStage('setup')}
           onOpenRules={() => setRulesOpen(true)}
@@ -522,7 +552,8 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
 // ════════════════════════════════════════════════════════════════════════════
 function ResultStage({
   style, capital, committed, cashLeft, rows, data, isReplay, startDate, today,
-  perTrade, anyEntryMissing, showReplayPending, persona, personaLoading,
+  perTrade, anyEntryMissing, showReplayPending, sim, simLoading, simErr,
+  persona, personaLoading,
   personaErr, onChangePlan, onOpenRules, onAutoTrade, onAnalyze,
   plans, planView, setPlanView, onAddStyle,
 }: {
@@ -530,23 +561,23 @@ function ResultStage({
   capital: number; committed: number; cashLeft: number
   rows: AllocRow[]; data: Top20Response | null; isReplay: boolean; startDate: string
   today: string; perTrade: number; anyEntryMissing: boolean; showReplayPending: boolean
+  sim: CotradeSimulateResponse | null; simLoading: boolean; simErr: boolean
   persona: PersonaBacktestResponse | null; personaLoading: boolean; personaErr: boolean
   onChangePlan: () => void; onOpenRules: () => void; onAutoTrade: () => void
   onAnalyze: (s: string) => void
   plans: Plan[]; planView: string; setPlanView: (v: string) => void; onAddStyle: (styleId: string) => void
 }) {
   const showAggregate = planView === ALL_PLANS
-  // REAL selected-period numbers for the summary strip on a replay (year grain).
-  const yearly = personaYearly(persona)
-  const periodYear = parseInt((isReplay ? startDate : today).slice(0, 4), 10)
-  const yr = yearly.find(y => y.year === periodYear) ?? null
-  const periodRet = yr?.return_pct ?? null
-  const periodPnl = periodRet != null ? (periodRet / 100) * capital : null
-  const periodEnd = periodPnl != null ? capital + periodPnl : null
-  const periodDD  = yr?.max_dd_pct ?? null
-  const periodOpen = yr?.n_open_at_year_end ?? null
-  const periodClosed = yr?.n_closed ?? null
-  const periodWR  = yr?.win_rate_pct ?? null
+  // ── REAL summary from the simulation (the source of truth for P&L). ─────────
+  const s = sim?.summary ?? null
+  const haveSim = !!sim && !simErr
+  // Tier badges: positions[].tier may be null → fall back to the live signal_tier
+  //   surface (Top20) where we can join by symbol; else show no badge (honest).
+  const tierBySymbol = useMemo(() => {
+    const m: Record<string, string | null> = {}
+    for (const p of data?.picks ?? []) m[p.symbol] = p.signal_tier ?? null
+    return m
+  }, [data])
 
   return (
     <div className="flex-1 min-h-0 flex flex-col md:overflow-hidden">
@@ -586,15 +617,20 @@ function ResultStage({
         <div className="hidden sm:block mb-2"><MechanismStrip variant="cotrade" slim /></div>
 
         <SummaryStrip
-          starting={capital}
-          endValue={isReplay ? periodEnd : null}
-          pnl={isReplay ? periodPnl : null}
-          retPct={isReplay ? periodRet : null}
-          open={isReplay ? periodOpen : rows.length}
-          cash={cashLeft}
-          ddPct={isReplay ? periodDD : null}
-          isReplay={isReplay}
-          deployedPct={capital > 0 ? (committed / capital) * 100 : 0}
+          starting={s?.starting_rs ?? capital}
+          endValue={s ? s.current_value_rs : null}
+          pnl={s ? s.total_pnl_rs : null}
+          retPct={s ? s.return_pct : null}
+          open={s ? s.n_open : (haveSim ? null : rows.length)}
+          cash={s ? s.cash_rs : cashLeft}
+          ddPct={s ? s.max_dd_pct : null}
+          haveCash={!!s}
+          deployedPct={s
+            ? (s.starting_rs > 0 ? ((s.starting_rs - s.cash_rs) / s.starting_rs) * 100 : 0)
+            : (capital > 0 ? (committed / capital) * 100 : 0)}
+          showDeployBar={!isReplay}
+          openNote={isReplay ? 'open at period end' : (s ? 'open now' : `${(capital > 0 ? (committed / capital) * 100 : 0).toFixed(0)}% deployed`)}
+          pending={simLoading}
         />
       </div>
 
@@ -608,32 +644,33 @@ function ResultStage({
           </div>
         ) : !style.live ? (
           <StylePendingCard style={style} />
+        ) : simLoading ? (
+          // ── SIMULATING — calm loading state (never fabricate while waiting) ──
+          <SimLoadingCard isReplay={isReplay} startDate={startDate} />
+        ) : simErr ? (
+          // ── HONEST failure — never invent a portfolio ──
+          <SimErrorCard isReplay={isReplay} />
         ) : showReplayPending ? (
           <ReplayPendingCard startDate={startDate} />
-        ) : isReplay ? (
-          // ── REPLAY: the performance HERO (REAL persona backtest + equity curve) ──
+        ) : haveSim && sim ? (
+          // ── REAL SIMULATION RESULT — summary/equity/positions/actions ──
           <div className="flex flex-col gap-5 max-w-[1000px] mx-auto">
-            <ReplayHero
-              persona={persona} loading={personaLoading} err={personaErr}
-              capital={capital} startDate={startDate}
-              periodYear={periodYear} periodRet={periodRet} periodPnl={periodPnl}
-              periodEnd={periodEnd} periodDD={periodDD} periodClosed={periodClosed}
-              periodOpen={periodOpen} periodWR={periodWR}
-            />
-            <InspectDeeper persona={persona} loading={personaLoading} err={personaErr} onOpenRules={onOpenRules} />
+            <SimResult sim={sim} capital={capital} isReplay={isReplay} startDate={startDate}
+                       tierBySymbol={tierBySymbol} holdDays={style.holdDays} onAnalyze={onAnalyze} />
+            <InspectDeeper sim={sim} persona={persona} loading={personaLoading} err={personaErr} onOpenRules={onOpenRules} />
             <AutoTradeBridge onAutoTrade={onAutoTrade} />
           </div>
         ) : !data || rows.length === 0 ? (
           <NoPicksCard />
         ) : (
-          // ── LIVE ("Start Today"): the visual portfolio ──
+          // ── FALLBACK (sim unavailable): client allocation preview only ──
           <div className="flex flex-col gap-5 max-w-[1000px] mx-auto">
             <LivePortfolio
               rows={rows} perTrade={perTrade} anyEntryMissing={anyEntryMissing}
               signalDate={data.signal_date} entryDate={data.entry_date ?? data.next_trading_day}
               holdDays={style.holdDays} onAnalyze={onAnalyze}
             />
-            <InspectDeeper persona={persona} loading={personaLoading} err={personaErr} onOpenRules={onOpenRules} />
+            <InspectDeeper sim={null} persona={persona} loading={personaLoading} err={personaErr} onOpenRules={onOpenRules} />
             <AutoTradeBridge onAutoTrade={onAutoTrade} />
           </div>
         )}
@@ -646,31 +683,40 @@ function ResultStage({
 // SUMMARY STRIP — compact. REAL computed values; honest "—/pending" otherwise.
 // ════════════════════════════════════════════════════════════════════════════
 function SummaryStrip({
-  starting, endValue, pnl, retPct, open, cash, ddPct, isReplay, deployedPct,
+  starting, endValue, pnl, retPct, open, cash, ddPct,
+  haveCash, deployedPct, showDeployBar, openNote, pending,
 }: {
   starting: number; endValue: number | null; pnl: number | null; retPct: number | null
-  open: number | null; cash: number; ddPct: number | null; isReplay: boolean; deployedPct: number
+  open: number | null; cash: number; ddPct: number | null
+  haveCash: boolean; deployedPct: number; showDeployBar: boolean
+  openNote: string; pending: boolean
 }) {
+  // While simulating, every live number reads "…" (calm, never fabricated).
+  const note = pending ? 'simulating…' : 'pending'
+  const dash = pending ? '…' : '—'
   return (
     <div>
       <div className="grid grid-cols-4 lg:grid-cols-7 rounded-[10px] border overflow-hidden"
            style={{ borderColor: C.line, background: 'rgba(255,255,255,0.02)' }}>
         <Cell label="Starting" value={fmtINR(starting)} real />
-        <Cell label={isReplay ? 'Ending value' : 'Current value'}
-              value={endValue == null ? '—' : fmtINR(endValue)}
-              note={endValue == null ? 'pending' : undefined} real={endValue != null} />
-        <Cell label="Total P&L" value={pnl == null ? '—' : signedINR(pnl)}
-              note={pnl == null ? 'pending' : undefined}
+        <Cell label="Current value"
+              value={endValue == null ? dash : fmtINR(endValue)}
+              note={endValue == null ? note : undefined} real={endValue != null} />
+        <Cell label="Total P&L" value={pnl == null ? dash : signedINR(pnl)}
+              note={pnl == null ? note : undefined}
               real={pnl != null} tone={pnl == null ? undefined : pctTone(pnl)} />
-        <Cell label="Return %" value={fmtPct(retPct)} note={retPct == null ? 'pending' : undefined}
+        <Cell label="Return %" value={pnl == null && retPct == null ? dash : fmtPct(retPct)}
+              note={retPct == null ? note : undefined}
               real={retPct != null} tone={retPct == null ? undefined : pctTone(retPct)} />
-        <Cell label="Open" value={open == null ? '—' : String(open)}
-              note={isReplay ? 'at period end' : `${deployedPct.toFixed(0)}% deployed`} real={open != null} />
-        <Cell label="Cash" value={fmtINR(cash)} real={!isReplay} note={isReplay ? 'pending' : undefined} />
-        <Cell label="Max Drawdown" value={fmtPct(ddPct)} note={ddPct == null ? 'pending' : undefined}
+        <Cell label="Open" value={open == null ? dash : String(open)}
+              note={open == null ? note : openNote} real={open != null} />
+        <Cell label="Cash" value={haveCash ? fmtINR(cash) : (pending ? dash : fmtINR(cash))}
+              real={haveCash} note={haveCash ? undefined : (pending ? note : undefined)} />
+        <Cell label="Max Drawdown" value={ddPct == null ? dash : fmtPct(ddPct)}
+              note={ddPct == null ? note : undefined}
               real={ddPct != null} tone={ddPct == null ? undefined : C.red} />
       </div>
-      {!isReplay && (
+      {showDeployBar && (
         <div className="mt-1.5 h-1 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.06)' }}>
           <div className="h-full rounded-full" style={{ width: `${Math.min(100, deployedPct)}%`, background: C.mint }} />
         </div>
@@ -688,6 +734,247 @@ function Cell({
       <div className="text-[13px] font-mono font-semibold tabular-nums leading-tight mt-0.5"
            style={{ color: tone ?? (real ? C.ink : C.faint) }}>{value}</div>
       {note && <div className="text-[8px] leading-tight" style={{ color: real ? C.mint : C.faint }}>{note}</div>}
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SIM RESULT — the REAL Co-Trading simulation. Big numbers + equity curve from
+//   `summary`/`equity`; positions from `positions`. A SIMULATION on EOD data:
+//   the `honesty` string is surfaced as a caption. NO fabricated values.
+// ════════════════════════════════════════════════════════════════════════════
+function SimResult({
+  sim, capital, isReplay, startDate, tierBySymbol, holdDays, onAnalyze,
+}: {
+  sim: CotradeSimulateResponse
+  capital: number; isReplay: boolean; startDate: string
+  tierBySymbol: Record<string, string | null>
+  holdDays: number; onAnalyze: (s: string) => void
+}) {
+  const s = sim.summary
+  const points = sim.equity
+    .filter(p => typeof p.equity_rs === 'number' && p.equity_rs > 0)
+    .map(p => ({ trade_date: p.date, total_equity: p.equity_rs }))
+  // Day-1 of a LIVE follow has ~no P&L yet — say so honestly.
+  const dayOne = !isReplay && Math.abs(s.total_pnl_rs) < 1 && s.n_closed === 0
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* PERFORMANCE HERO — REAL summary + equity curve */}
+      <div className="rounded-2xl border overflow-hidden" style={{ borderColor: C.line2, background: C.panel }}>
+        <div className="px-4 py-3 border-b flex items-center gap-2 flex-wrap" style={{ borderColor: C.line }}>
+          <h3 className="text-[15px] font-semibold" style={{ color: C.ink }}>
+            {isReplay ? 'How your Co-Trading plan would have performed' : 'Your Co-Trading portfolio'}
+          </h3>
+          <span className="text-[10.5px] rounded-full px-2 py-0.5" style={{ color: C.mint, background: C.mintDim }}>
+            simulation · EOD
+          </span>
+          <span className="ml-auto text-[10.5px] font-mono" style={{ color: C.faint }}>
+            {isReplay ? `${sim.start_date} → ${sim.end_date ?? sim.as_of}` : `as of ${sim.as_of}`}
+          </span>
+        </div>
+
+        {/* big hero numbers: start → current value */}
+        <div className="px-4 pt-4 pb-2 flex items-end gap-3 flex-wrap">
+          <div>
+            <div className="text-[9.5px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Starting</div>
+            <div className="text-[22px] font-mono font-semibold tabular-nums leading-none" style={{ color: C.muted }}>{fmtCapital(s.starting_rs)}</div>
+          </div>
+          <span className="text-[18px] pb-0.5" style={{ color: C.faint }}>→</span>
+          <div>
+            <div className="text-[9.5px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>{isReplay ? 'Ending value' : 'Current value'}</div>
+            <div className="text-[30px] md:text-[34px] font-mono font-semibold tabular-nums leading-none tracking-[-0.02em]"
+                 style={{ color: pctTone(s.total_pnl_rs) }}>
+              {fmtCapital(s.current_value_rs)}
+            </div>
+          </div>
+          <div className="ml-auto text-right">
+            <div className="text-[20px] md:text-[24px] font-mono font-semibold tabular-nums leading-none" style={{ color: pctTone(s.return_pct) }}>
+              {fmtPct(s.return_pct)}
+            </div>
+            <div className="text-[12px] font-mono tabular-nums mt-0.5" style={{ color: pctTone(s.total_pnl_rs) }}>
+              {signedINR(s.total_pnl_rs)}
+            </div>
+          </div>
+        </div>
+
+        {/* the EQUITY CURVE (REAL `equity` series from the sim) */}
+        <div className="px-3 pb-1">
+          {points.length >= 2 ? (
+            <EquityChart points={points} capitalStart={s.starting_rs} className="w-full" />
+          ) : (
+            <div className="px-2 py-6 text-[11.5px]" style={{ color: C.faint }}>
+              {dayOne
+                ? 'Your equity curve starts building from today — there’s only one EOD point so far. Check back after the next trading day.'
+                : 'Not enough EOD points to chart the equity curve yet.'}
+            </div>
+          )}
+        </div>
+
+        {/* secondary scannable stats — all REAL */}
+        <div className="grid grid-cols-3 lg:grid-cols-5 border-t" style={{ borderColor: C.line }}>
+          <Stat label="Max drawdown" value={fmtPct(s.max_dd_pct)} tone={C.red} />
+          <Stat label="Win rate" value={s.n_trades > 0 ? `${s.win_rate_pct.toFixed(0)}%` : '—'} />
+          <Stat label="Trades" value={String(s.n_trades)} />
+          <Stat label="Open" value={String(s.n_open)} />
+          <Stat label="Closed" value={String(s.n_closed)} />
+        </div>
+
+        {/* HONESTY caption — surfaced verbatim from the endpoint */}
+        <div className="px-4 py-2 border-t text-[9.5px] flex items-start gap-1.5" style={{ borderColor: C.line, color: C.amber }}>
+          {ICON.info(11)}
+          <span style={{ color: C.faint }}>
+            {sim.honesty || 'Simulation on EOD data — modelled entries/exits, not real fills.'}
+            {dayOne && ' Day one — P&L is ~0 until prices move.'}
+          </span>
+        </div>
+      </div>
+
+      {/* POSITIONS — REAL `positions` from the sim */}
+      <SimPositions positions={sim.positions} isReplay={isReplay}
+                    tierBySymbol={tierBySymbol} holdDays={holdDays} onAnalyze={onAnalyze} />
+    </div>
+  )
+}
+
+// ── Positions list — REAL sim positions (entry/qty/capital/SL/status/pnl). ────
+function SimPositions({
+  positions, isReplay, tierBySymbol, holdDays, onAnalyze,
+}: {
+  positions: CotradePosition[]; isReplay: boolean
+  tierBySymbol: Record<string, string | null>; holdDays: number
+  onAnalyze: (s: string) => void
+}) {
+  if (positions.length === 0) {
+    return (
+      <div className="rounded-2xl border p-5 text-[12.5px] leading-relaxed" style={{ borderColor: C.line2, background: C.panel, color: C.ink2 }}>
+        The simulation produced no positions for this window. Nothing is shown rather than anything fabricated.
+      </div>
+    )
+  }
+  const open   = positions.filter(p => p.status === 'open')
+  const closed = positions.filter(p => p.status === 'closed')
+  return (
+    <div className="rounded-2xl border overflow-hidden" style={{ borderColor: C.line2, background: C.panel }}>
+      <div className="px-4 py-3 border-b flex items-center gap-2 flex-wrap" style={{ borderColor: C.line }}>
+        <h3 className="text-[15px] font-semibold" style={{ color: C.ink }}>
+          {isReplay ? 'Positions Falcon would have taken' : 'Falcon selected your portfolio'}
+        </h3>
+        <span className="text-[11px]" style={{ color: C.faint }}>
+          {open.length} open{closed.length ? ` · ${closed.length} closed` : ''} · hold ~{holdDays}d
+        </span>
+      </div>
+      <div className="p-3 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        {[...open, ...closed].map((p, i) => (
+          <SimPositionCard key={`${p.symbol}-${p.entry_date}-${i}`} p={p}
+                           tier={p.tier ?? tierBySymbol[p.symbol] ?? null} onAnalyze={onAnalyze} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SimPositionCard({ p, tier, onAnalyze }: { p: CotradePosition; tier: string | null; onAnalyze: (s: string) => void }) {
+  const band = tierBand(tier)
+  const ts = TIER_STYLE[BAND_COLORKEY[band ?? ''] ?? 'gray'] ?? TIER_STYLE.gray
+  const isOpen = p.status === 'open'
+  return (
+    <div className="rounded-xl border p-3" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-[14px] font-semibold truncate" style={{ color: C.ink }}>{p.symbol}</span>
+        {band && (
+          <span className="text-[8.5px] font-semibold uppercase tracking-[0.04em] rounded px-1.5 py-0.5 shrink-0"
+                style={{ color: ts.color, background: ts.bg, boxShadow: `inset 0 0 0 1px ${ts.ring}` }}>
+            {band}
+          </span>
+        )}
+        <span className="ml-auto shrink-0 text-[9px] font-semibold uppercase tracking-[0.05em] rounded-full px-2 py-0.5"
+              style={isOpen
+                ? { color: C.mint,  background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }
+                : { color: C.muted, background: 'rgba(255,255,255,0.06)', boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.12)' }}>
+          {isOpen ? 'Open' : 'Closed'}
+        </span>
+      </div>
+      <div className="flex items-center justify-between mb-2.5">
+        <div className="text-[10.5px] truncate" style={{ color: C.faint }}>{p.sector ?? '—'}</div>
+        <div className="text-[12px] font-mono font-semibold tabular-nums" style={{ color: pctTone(p.pnl_rs) }}>
+          {signedINR(p.pnl_rs)} <span className="text-[10px]" style={{ color: pctTone(p.pnl_pct) }}>({fmtPct(p.pnl_pct)})</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-1.5">
+        <Mini label="Capital" value={p.capital_rs > 0 ? fmtINR(p.capital_rs) : '—'} sub={p.qty > 0 ? `${p.qty} sh` : undefined} />
+        <Mini label="Entry" value={`₹${fmtNum(p.entry_price)}`} sub={p.entry_date} />
+        <Mini
+          label={isOpen ? 'Stop' : 'Exit'}
+          value={isOpen
+            ? (p.sl_level ? `₹${fmtNum(p.sl_level)}` : '—')
+            : (p.exit_price ? `₹${fmtNum(p.exit_price)}` : '—')}
+          sub={isOpen ? `${p.hold_days}d held` : (p.exit_date ?? undefined)}
+          tone={isOpen ? C.red : undefined}
+        />
+      </div>
+
+      <button type="button" onClick={() => onAnalyze(p.symbol)}
+              className="mt-2.5 w-full text-[11px] rounded-lg px-2 py-1.5 border inline-flex items-center justify-center gap-1"
+              style={{ borderColor: C.line2, color: C.muted }}>
+        Why this pick {ICON.arrow(11)}
+      </button>
+    </div>
+  )
+}
+
+// ── Falcon ACTIONS feed — REAL `actions` (entry/exit/trail/skip + reason). ────
+function SimActionsFeed({ actions }: { actions: CotradeAction[] }) {
+  if (!actions.length) {
+    return <div className="py-3 text-[11.5px]" style={{ color: C.faint }}>No actions recorded for this window yet.</div>
+  }
+  const tone: Record<CotradeAction['type'], string> = {
+    entry: C.mint, exit: C.ink2, trail: C.amber, skip: C.faint,
+  }
+  return (
+    <div className="mt-2 flex flex-col rounded-xl border overflow-hidden" style={{ borderColor: C.line, background: 'rgba(255,255,255,0.02)' }}>
+      {actions.slice(0, 60).map((a, i) => (
+        <div key={i} className="grid grid-cols-[auto_56px_1fr] gap-2 items-baseline px-3 py-2"
+             style={i > 0 ? { borderTop: `1px solid ${C.line}` } : undefined}>
+          <span className="text-[9.5px] font-mono tabular-nums" style={{ color: C.faint }}>{a.date}</span>
+          <span className="text-[9px] font-semibold uppercase tracking-[0.05em]" style={{ color: tone[a.type] }}>{a.type}</span>
+          <span className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+            <b style={{ color: C.ink }}>{a.symbol}</b>
+            {a.price > 0 && <span className="font-mono" style={{ color: C.muted }}> · ₹{fmtNum(a.price)}</span>}
+            {a.reason && <span style={{ color: C.faint }}> — {a.reason}</span>}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ── Sim loading / error states — calm + honest, never fabricated ─────────────
+function SimLoadingCard({ isReplay, startDate }: { isReplay: boolean; startDate: string }) {
+  return (
+    <div className="rounded-2xl border p-6 max-w-[640px] mx-auto flex items-center gap-3" style={{ borderColor: C.line2, background: C.panel }}>
+      <span className="w-2.5 h-2.5 rounded-full animate-pulse shrink-0" style={{ background: C.mint, boxShadow: `0 0 10px ${C.mint}` }} />
+      <div>
+        <h3 className="text-[14px] font-semibold" style={{ color: C.ink }}>
+          {isReplay ? `Simulating from ${startDate}…` : 'Building your portfolio…'}
+        </h3>
+        <p className="text-[12px] mt-1 leading-snug" style={{ color: C.faint }}>
+          Running the Co-Trading simulation on EOD data — modelled entries and exits, no live fills.
+        </p>
+      </div>
+    </div>
+  )
+}
+function SimErrorCard({ isReplay }: { isReplay: boolean }) {
+  return (
+    <div className="rounded-2xl border p-6 max-w-[640px] mx-auto" style={{ borderColor: 'rgba(232,115,107,0.3)', background: 'rgba(232,115,107,0.05)' }}>
+      <h3 className="text-[15px] font-semibold mb-2" style={{ color: C.ink }}>Couldn&apos;t run the simulation</h3>
+      <p className="text-[13px] leading-[1.6]" style={{ color: C.ink2 }}>
+        The Co-Trading simulation engine didn&apos;t respond just now, so there&apos;s nothing to show —
+        we never invent a portfolio. Go back and try again{isReplay ? ' (or pick a different date)' : ''}.
+        It reads from <span className="font-mono" style={{ color: C.muted }}>POST /api/power/cotrade/simulate</span>.
+      </p>
     </div>
   )
 }
@@ -810,111 +1097,8 @@ function Mini({ label, value, sub, tone }: { label: string; value: string; sub?:
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// REPLAY HERO — big scannable performance result (REAL persona backtest) +
-//   an EQUITY CURVE built from the real monthly end_equity series.
+// Stat — small scannable metric cell (used by the SimResult hero).
 // ════════════════════════════════════════════════════════════════════════════
-function ReplayHero({
-  persona, loading, err, capital, startDate, periodYear, periodRet, periodPnl,
-  periodEnd, periodDD, periodClosed, periodOpen, periodWR,
-}: {
-  persona: PersonaBacktestResponse | null; loading: boolean; err: boolean
-  capital: number; startDate: string
-  periodYear: number; periodRet: number | null; periodPnl: number | null
-  periodEnd: number | null; periodDD: number | null; periodClosed: number | null
-  periodOpen: number | null; periodWR: number | null
-}) {
-  if (loading) {
-    return <div className="rounded-2xl border px-4 py-10 text-[12px]" style={{ borderColor: C.line2, background: C.panel, color: C.faint }}>Loading the real backtest…</div>
-  }
-  if (err || !persona) {
-    return (
-      <div className="rounded-2xl border px-4 py-5 text-[12px] leading-relaxed" style={{ borderColor: C.line2, background: C.panel, color: C.ink2 }}>
-        The backtest couldn&apos;t be loaded from the engine right now. Performance numbers come only from{' '}
-        <span className="font-mono" style={{ color: C.muted }}>GET /api/power/personas/falcon-top-10</span> — we never hardcode them.
-      </div>
-    )
-  }
-
-  // Equity curve from the REAL monthly series, scaled to the user's capital.
-  // The backtest reports a ₹5 L book; we scale end_equity by capital/₹5 L so the
-  // curve is shown in the user's units (honest linear scaling of the real curve).
-  const monthly = personaMonthly(persona).filter(m => m.year === periodYear)
-    .sort((a, b) => a.month.localeCompare(b.month))
-  const scale = capital / BASE_CAPITAL
-  const points = monthly.map(m => ({ trade_date: `${m.month}-01`, total_equity: m.end_equity * scale }))
-  const haveYear = periodRet != null
-
-  return (
-    <div className="rounded-2xl border overflow-hidden" style={{ borderColor: C.line2, background: C.panel }}>
-      <div className="px-4 py-3 border-b flex items-center gap-2 flex-wrap" style={{ borderColor: C.line }}>
-        <h3 className="text-[15px] font-semibold" style={{ color: C.ink }}>How Falcon would have performed</h3>
-        <span className="text-[10.5px] rounded-full px-2 py-0.5" style={{ color: C.mint, background: C.mintDim }}>real backtest · falcon-top-10</span>
-        <span className="ml-auto text-[10.5px] font-mono" style={{ color: C.faint }}>{periodYear}</span>
-      </div>
-
-      {!haveYear ? (
-        <div className="px-4 py-6 text-[12.5px] leading-relaxed" style={{ color: C.ink2 }}>
-          The backtest window doesn&apos;t cover <b style={{ color: C.ink }}>{periodYear}</b> (your start date {startDate}),
-          so there&apos;s nothing real to show for that period. A full point-in-time walk-forward replay is a Backend need.
-        </div>
-      ) : (
-        <>
-          {/* big hero numbers: start → ending value */}
-          <div className="px-4 pt-4 pb-2 flex items-end gap-3 flex-wrap">
-            <div>
-              <div className="text-[9.5px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Starting</div>
-              <div className="text-[22px] font-mono font-semibold tabular-nums leading-none" style={{ color: C.muted }}>{fmtCapital(capital)}</div>
-            </div>
-            <span className="text-[18px] pb-0.5" style={{ color: C.faint }}>→</span>
-            <div>
-              <div className="text-[9.5px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Ending value</div>
-              <div className="text-[30px] md:text-[34px] font-mono font-semibold tabular-nums leading-none tracking-[-0.02em]"
-                   style={{ color: pctTone(periodRet) }}>
-                {periodEnd == null ? '—' : fmtCapital(periodEnd)}
-              </div>
-            </div>
-            <div className="ml-auto text-right">
-              <div className="text-[20px] md:text-[24px] font-mono font-semibold tabular-nums leading-none" style={{ color: pctTone(periodRet) }}>
-                {fmtPct(periodRet)}
-              </div>
-              <div className="text-[12px] font-mono tabular-nums mt-0.5" style={{ color: pctTone(periodPnl) }}>
-                {periodPnl == null ? '—' : signedINR(periodPnl)}
-              </div>
-            </div>
-          </div>
-
-          {/* the EQUITY CURVE (real monthly end_equity series) */}
-          <div className="px-3 pb-1">
-            {points.length >= 2 ? (
-              <EquityChart points={points} capitalStart={capital} className="w-full" />
-            ) : (
-              <div className="px-2 py-6 text-[11.5px]" style={{ color: C.faint }}>
-                The monthly equity series for {periodYear} isn&apos;t granular enough to chart here yet — the
-                year-level result above is real; a richer point-in-time curve is a Backend need.
-              </div>
-            )}
-          </div>
-
-          {/* secondary scannable stats */}
-          <div className="grid grid-cols-3 lg:grid-cols-4 border-t" style={{ borderColor: C.line }}>
-            <Stat label="Max drawdown" value={fmtPct(periodDD)} tone={periodDD == null ? undefined : C.red} />
-            <Stat label="Win rate" value={periodWR == null ? '—' : `${periodWR.toFixed(0)}%`} />
-            <Stat label="Completed trades" value={periodClosed == null ? '—' : String(periodClosed)} />
-            <Stat label="Open at end" value={periodOpen == null ? '—' : String(periodOpen)} />
-          </div>
-
-          <div className="px-4 py-2 border-t text-[9.5px] flex items-center gap-1.5" style={{ borderColor: C.line, color: C.amber }}>
-            {ICON.info(11)}
-            <span style={{ color: C.faint }}>
-              Calendar-year grain (the backtest reports yearly/monthly). A true per-date walk-forward from {startDate}
-              {' '}is a Backend need; equity scaled linearly from the real ₹5 L book.
-            </span>
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
 function Stat({ label, value, tone }: { label: string; value: string; tone?: string }) {
   return (
     <div className="px-3 py-2.5 border-l first:border-l-0" style={{ borderColor: C.line }}>
@@ -930,16 +1114,30 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: str
 //   the user opens it.
 // ════════════════════════════════════════════════════════════════════════════
 function InspectDeeper({
-  persona, loading, err, onOpenRules,
-}: { persona: PersonaBacktestResponse | null; loading: boolean; err: boolean; onOpenRules: () => void }) {
+  sim, persona, loading, err, onOpenRules,
+}: { sim: CotradeSimulateResponse | null; persona: PersonaBacktestResponse | null; loading: boolean; err: boolean; onOpenRules: () => void }) {
   return (
     <details className="group rounded-2xl border overflow-hidden" style={{ borderColor: C.line2, background: C.panel }}>
       <summary className="list-none cursor-pointer flex items-center gap-2 px-4 py-3 select-none">
         <span className="text-[13px] font-semibold" style={{ color: C.ink }}>Inspect deeper</span>
-        <span className="text-[10.5px]" style={{ color: C.faint }}>year-by-year · months · the rulebook</span>
+        <span className="text-[10.5px]" style={{ color: C.faint }}>
+          {sim ? 'Falcon actions · year-by-year · the rulebook' : 'year-by-year · months · the rulebook'}
+        </span>
         <span className="ml-auto transition-transform group-open:rotate-180" style={{ color: C.faint }}>{ICON.chevron(16)}</span>
       </summary>
       <div className="px-4 pb-4 border-t" style={{ borderColor: C.line }}>
+        {/* Falcon ACTIONS feed — REAL `actions` from the sim (kept behind the
+            expand so the result stays calm). */}
+        {sim && (
+          <>
+            <div className="mt-3 text-[11px] uppercase tracking-[0.05em] mb-1 flex items-center gap-2" style={{ color: C.faint }}>
+              Falcon actions
+              <span className="text-[9px] normal-case tracking-normal" style={{ color: C.faint }}>entry · exit · trail · skip — simulated on EOD data</span>
+            </div>
+            <SimActionsFeed actions={sim.actions} />
+          </>
+        )}
+
         {/* rulebook link */}
         <button type="button" onClick={onOpenRules}
                 className="w-full mt-3 mb-1 flex items-center gap-2.5 rounded-xl px-3 py-2.5 border transition-colors text-left"

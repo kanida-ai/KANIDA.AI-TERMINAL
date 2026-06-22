@@ -38,6 +38,51 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-06-22 — **Co-Trading RESULT wired to the now-LIVE POST /api/power/cotrade/
+  simulate** (power-api.ts + CoTradingExperience.tsx only; setup stage / switcher /
+  mechanism strip / mint-F2 theme / viewport-lock all UNCHANGED — DATA WIRING ONLY).
+  The result is now the user's REAL virtual portfolio (a SIMULATION on EOD data —
+  modelled entries/exits, not real fills), replacing the prior "pending" tiles and
+  the persona year-grain-scaled replay numbers.
+  - **power-api.ts** — added the typed contract `CotradeSimulateRequest` +
+    `CotradeSimulateResponse` (summary / positions / equity / actions / honesty,
+    matching the verified shape) and `PowerAPI.cotradeSimulate({style,capital,
+    start_date,end_date?})` (POST via the existing apiFetch).
+  - **handleStart** now calls `cotradeSimulate('falcon-top-10', capital, start_date)`
+    for BOTH paths — live (start_date = IST today, no end_date) and replay
+    (start_date = chosen date, end_date = today) — then drives the RESULT stage from
+    the response. New `sim`/`simLoading`/`simErr` state.
+  - **SummaryStrip** now reads the REAL `summary`: Starting / Current value / Total
+    P&L / Return % / Open / Cash / Max Drawdown. The old "—/pending" dashes for
+    these are REPLACED with real numbers; while the sim runs they read
+    "…/simulating…" (calm, never fabricated).
+  - **SimResult** (new) is the hero: big Starting→Current value + Return%/P&L, the
+    EQUITY CURVE built from the REAL `equity` series (reuses `EquityChart`), and a
+    5-cell stat row (max DD / win rate / trades / open / closed) — all from
+    `summary`. Surfaces the endpoint's `honesty` string verbatim as a caption; a
+    day-one LIVE follow (pnl≈0, n_closed=0) is flagged honestly.
+  - **SimPositions / SimPositionCard** (new) render the REAL `positions` (entry,
+    qty, capital, SL for open / exit for closed, status pill Open/Closed, per-
+    position P&L ₹ + %). Tier badge: `positions[].tier` first, else JOINED to the
+    live signal_tier surface (seeded Top20) by symbol, else NO badge (never
+    fabricated). BAND-derived colours (never signal_tier_color).
+  - **Falcon ACTIONS feed** (`SimActionsFeed`, new) renders `actions`
+    (entry/exit/trail/skip + reason), folded INSIDE the "Inspect deeper" expand so
+    the result stays calm. Colour-toned by action type.
+  - **Honesty / states.** Loading → calm `SimLoadingCard`; failure → honest
+    `SimErrorCard` ("couldn't run the simulation … POST /api/power/cotrade/simulate")
+    — never a fabricated portfolio. Replay returning an empty sim → the existing
+    `ReplayPendingCard`. The client allocation `LivePortfolio` preview is kept ONLY
+    as a fallback when the sim is unavailable.
+  - **Kept AS-IS:** the persona "Proven track record" year-by-year table in
+    "Inspect deeper" still reads `GET /api/power/personas/falcon-top-10` (separate
+    historical confidence, NOT the user's sim). Removed the now-dead `ReplayHero`
+    (the sim replaces the year-grain-scaled replay); `Stat` retained (SimResult uses it).
+  - **Backend needs (remaining):** per-user persistence of the simulated portfolio
+    (so a live follow accumulates across sessions) + live intra-day ticks beyond
+    EOD (the sim is EOD-only by design).
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npx next build` ✓ compiled
+    (`/power/co-trading` built).
 - 2026-06-22 — **AutoTrade page built (launch-pending UX) + shared PlanSwitcher +
   Co-Trading /quote entry-reference wiring** (3 tasks; worktree feat/falcon-ai-shell).
   DRY refactor: extracted the shared Co-Trading primitives into a new
