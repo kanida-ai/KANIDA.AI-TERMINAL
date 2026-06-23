@@ -136,6 +136,43 @@ the **EOD magnitude long (~10%)**, and (separately) the **"will move big"
 magnitude screen** (direction-agnostic). All are real and productisable — none is
 80%-directional.
 
+## 9. REVISED F&O objective — threshold (±5%) high-conviction moves
+
+Operator (2026-06-22) revised the F&O objective away from exact Top-10 ranking to a
+practical threshold target: rank the stocks most likely to **close next day ≥ +5%
+(long) / ≤ −5% (short)**. Built in `engine_thr.py`: a walk-forward
+HistGradientBoosting classifier (the learned stock/persona-agent model) outputs
+P(≥+5%) and P(≤−5%) per stock per EOD; the persona agent ranks them into Long/Short
+lists. Retrained walk-forward each year (train window strictly before test → no
+lookahead). Stores `fo_threshold_predictions/outcomes/missed/feature_importance`.
+
+**Base rates:** only **2.0%** of F&O stock-days close ≥+5% next day; **1.3%** close
+≤−5%. So ±5% days are genuinely rare for this large/mid-cap universe.
+
+**Walk-forward precision (predicted hits ÷ signals), 2023→2026:**
+
+| Year | LONG @3 / @10 / recall | SHORT @3 / @10 / recall | lift |
+|---|---|---|---|
+| 2023 | 11.2% / 8.4% / 24% | 5.3% / 3.7% / 29% | 4.3–4.9× |
+| 2024 | 13.4% / 9.8% / 24% | 5.5% / 4.0% / 22% | 2.9–4.0× |
+| 2025 | 6.4% / 5.8% / 23% | 5.4% / 3.3% / 22% | 2.8–3.6× |
+| 2026 | 5.1% / 4.5% / 14% | 3.9% / 4.1% / 12% | 2.1–2.8× |
+
+* **Real, persistent skill: 2–5× lift** over base rate. Precision is highest at the
+  top of the list (top-3 > top-10) — fewer, higher-conviction signals are cleaner.
+* Absolute precision is bounded by the ~2% base rate: "8 of 10 hit +5%" is not
+  reachable (that needs near-perfect selection of the 2% that move). The model is
+  good; the event is rare.
+* **Metrics produced** (operator's table): Long/Short Hit Rate, Precision (@3/5/10),
+  Recall, Missed Movers (`fo_threshold_missed`), False Positives, and Rule Learning
+  via per-year feature importance.
+* **Rule learning — what differentiates hits:** ATR (volatility), `consol_days`
+  (tight coil before the pop), delivery %, distance-from-20d-high, 60-day RS.
+  Examples of caught 2024 longs: COCHINSHIP +20%, MOTILALOFS +8.4%, PRESTIGE +7.7%.
+
+This is the recommended F&O framing: a **high-conviction ±5% mover screen** (best at
+top-3, ~10–13% precision / 4× lift in normal regimes), not a fixed-Top-10 ranker.
+
 ## 8. Data-class hunt — new NON-price data (operator: "keep hunting")
 
 Fetched fresh classes from NSE at runtime (not derivable from price), to attack the
