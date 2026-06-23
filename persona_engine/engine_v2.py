@@ -61,6 +61,16 @@ def run_v2(con, fo_universe, start="2022-01-01", end=None,
         "SELECT * FROM persona_signal_features WHERE symbol IN (%s)"
         % ",".join("?" * len(fo_universe)), con, params=fo_universe)
     feats = _add_lags(feats)
+    # NEW non-price event/conviction features (earnings flags + delivery)
+    try:
+        ev = pd.read_sql_query(
+            "SELECT symbol,trade_date,earn_next1,earn_recent2,deliv_pct,deliv_z20,accum "
+            "FROM persona_event_features WHERE symbol IN (%s)"
+            % ",".join("?" * len(fo_universe)), con, params=fo_universe)
+        feats = feats.merge(ev, on=["symbol", "trade_date"], how="left")
+    except Exception:
+        for c in ("earn_next1", "earn_recent2", "deliv_pct", "deliv_z20", "accum"):
+            feats[c] = np.nan
     openf = pd.read_sql_query(
         "SELECT * FROM persona_open_features WHERE symbol IN (%s)"
         % ",".join("?" * len(fo_universe)), con, params=fo_universe)
@@ -99,11 +109,13 @@ def run_v2(con, fo_universe, start="2022-01-01", end=None,
         for f, wv in w_short.items():
             if f in eod:
                 short_s += wv * _centered_rank(eod[f]).fillna(0)
-        # add a magnitude tilt (both books want tail names)
+        # add a magnitude tilt (both books want tail names) + earnings-tomorrow boost
         mag = pd.Series(0.0, index=eod.index)
         for f in ["atr_20_pct", "vol_ratio_20d"]:
             if f in eod:
                 mag += _centered_rank(eod[f]).fillna(0)
+        # (earnings-tomorrow boost was tested here; it diluted the top-10 — only ~19%
+        #  of results-day stocks become movers — so it is not applied.)
         long_s = long_s + 1.5 * mag
         short_s = short_s + 1.5 * mag
         long_watch = long_s.sort_values(ascending=False).head(SHORTLIST).index

@@ -30,6 +30,12 @@ import pandas as pd
 # book tilts to consolidating, near-high, recently-soft names and the short book to
 # high-ATR, recently-strong names. The IC self-learning loop refines these online.
 BASELINE_WEIGHTS: Dict[str, Dict[str, float]] = {
+    # NOTE: earnings + delivery features (events.py / persona_event_features) were
+    # acquired and TESTED here. Standalone delivery rank-IC looked best of all
+    # features (+0.049 next-day, 2024) but it did NOT survive integration/OOS — it is
+    # collinear with the volume/magnitude signals and slightly HURT the F&O long
+    # overlap every year (2024–26). So the event weights are intentionally NOT used
+    # in the production rulebook; the data layer is retained for future work.
     "FO_LONG": {   # higher score => more likely a next-day GAINER
         "consol_days": 0.60, "dist_high_20": 0.40, "rs_index_20d": 0.20,
         "trend_5_20_50_200": 0.15, "roc_20": 0.10, "rsi_14": 0.05,

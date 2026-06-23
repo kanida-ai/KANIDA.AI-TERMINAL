@@ -135,3 +135,33 @@ Genuinely capturable edges that DID survive: **short-side weakness (~14–15%)**
 the **EOD magnitude long (~10%)**, and (separately) the **"will move big"
 magnitude screen** (direction-agnostic). All are real and productisable — none is
 80%-directional.
+
+## 8. Data-class hunt — new NON-price data (operator: "keep hunting")
+
+Fetched fresh classes from NSE at runtime (not derivable from price), to attack the
+news-driven movers that price data can't see:
+
+* **Earnings/results dates** — `corporate-board-meetings` API → `corp_earnings_dates`
+  (66,295 rows / 2,454 symbols, 2022–26). Results-day stocks have a **2.0× lift** to
+  be a top-10 mover (19.2% vs 9.8%), abs move 1.94% vs 1.41% — real, BUT only **3.2%
+  of the actual daily top-10 movers had results that day** (too sparse in the F&O
+  cross-section to move the aggregate).
+* **Delivery %** — `sec_bhavdata_full` → `delivery_daily` (1.2M rows, 2024–26).
+  Standalone it was the **best single feature** (next-day rank-IC +0.049, 20d +0.046).
+
+**Integrated result (v2.1, 2024–26):** adding earnings + delivery to the F&O model
+**did not help — it slightly hurt** the long side every year (2024 9.8 vs 11.6,
+2025 8.0 vs 8.6, 2026 8.1 vs 10.0). Delivery's standalone IC **did not survive
+integration / out-of-sample**: it is collinear with the volume/magnitude signals
+already present and is regime-specific. Earnings dilute the top-10. Both weights were
+reverted; the **data infrastructure is retained** (real, reusable: `events.py`,
+`event_features.py`, `corp_earnings_dates`, `delivery_daily`, `persona_event_features`).
+
+**Conclusion after the hunt:** across price/volume/RS/lags/opening/earnings/delivery,
+the capturable directional next-day top-10 overlap is **~10–15% (2–3× random)** and
+does not improve with the new classes. The daily top-10 movers are a long tail of
+idiosyncratic catalysts (results ≈ 3%, plus block deals, broker actions, sector news,
+macro) — no obtainable data class explains a large share. **70–80% directional
+overlap is not achievable with any data we could acquire.** Classes that remain
+genuinely unobtainable: deep OI/options (Kite doesn't expose expired-contract tokens),
+real-time news/broker upgrades, and historical bulk-deal API (blocked).
