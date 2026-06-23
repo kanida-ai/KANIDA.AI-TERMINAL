@@ -93,8 +93,45 @@ Vs the spec targets (F&O 80% = 8/10, LT 70% = 7/10): the engine reaches roughly
   productised differently (e.g. event/volatility screening), but it does not
   satisfy the directional-overlap objective as written.
 
-## 6. Recommendation
+## 6. v2 — two-stage (EOD shortlist → next-open confirm) + daily loop
 
-The engine, loop, and explainable output are built and self-improving. The honest
-ceiling on the spec's directional-overlap metric is single-digit-to-low-teens
-percent, far below 70–80%. Options to discuss with the operator (see chat).
+Per operator direction (2026-06-22, "don't relax the target — chase it with more
+data: D-1/D-2, volume, next-day opening; robust model; daily feedback loop"):
+
+* v1 analysis preserved → `outputs/persona_v1/persona_v1_analysis_2026-06-22.xlsx`.
+* Built `opening.py` (overnight gap full-history + 9:15→9:45 1-min momentum, 2024+),
+  `engine_v2.py` (Stage-1 EOD shortlist of 30 → Stage-2 morning confirm), and
+  `daily_cycle.py` (the real-time EOD-predict → open-confirm → measure+learn loop).
+
+**v2 walk-forward (random ≈ 4.7%):**
+
+| Model | Long | Short | Capturable? |
+|---|---|---|---|
+| Stage-1 EOD (magnitude + lags) | **10.3%** | **14.6%** | yes (predictive) |
+| GAP-confirm vs open→close | 9.6% | 9.2% | yes (from open) |
+| 9:45-confirm vs **9:45→close** | 8.5% | 4.9% | **yes (the honest tradeable number)** |
+| 9:45-NAME vs open→close | 18.4% | 25.2% | **no — screening only, look-ahead** |
+| 9:45-NAME, *full universe* (no shortlist) | ~38% | — | no — screening only, look-ahead |
+
+**Two key results:**
+1. The **opening confirmation does not improve capturable returns** over the EOD
+   model. IC of 9:15→9:45 momentum vs the *rest-of-day* (9:45→close) is **−0.015**
+   (≈ 0). The big "38%" only appears when the metric (open→close) includes the
+   09:15–09:45 window we already observed — a look-ahead artifact, honest only as a
+   "today's movers" *screen*, never as predicted/capturable alpha.
+2. v1's online IC weight-learning was **hurting longs**; the robust **static
+   magnitude model lifts capturable long 2.9% → 10.3%** — a real, kept gain.
+
+## 7. Bottom line
+
+The directional next-day **capturable** top-10 overlap plateaus at **~10–15%
+(≈ 2–3× random)** across price/volume/RS/lag/opening data. The spec's 70–80% is
+not reachable on capturable returns — the rest-of-day after the open is efficient
+(IC ≈ 0). The only path to a large overlap number is a **09:45 "today's movers"
+screen measured on open→close (~25–38%)**, which is useful as a watch-list but is
+partly look-ahead and not tradeable as stated.
+
+Genuinely capturable edges that DID survive: **short-side weakness (~14–15%)**,
+the **EOD magnitude long (~10%)**, and (separately) the **"will move big"
+magnitude screen** (direction-agnostic). All are real and productisable — none is
+80%-directional.
