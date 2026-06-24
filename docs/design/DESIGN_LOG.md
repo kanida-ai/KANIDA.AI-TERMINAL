@@ -849,3 +849,25 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
   --f2-mint/#3fe3a4 etc. LESSON: in this Tailwind v4 setup, define CSS custom properties in
   the existing top `:root` (or `@theme`), NEVER as a new bare `:root` after `@theme` — it
   won't compile. (Orphan dead block still in globals.css ~L60; harmless, remove on next edit.)
+
+- 2026-06-23 — **AutoTrade operator-console LAUNCHER (role-branched /power/autotrade).**
+  Spec section: AutoTrade mode. AutoTrade is now LIVE *for operators* and remains an honest
+  launch-pending preview for everyone else. The real, live Falcon operator console (app/falcon/*:
+  Trade / Pre-Market / Positions / Config / Admin + the /falcon overview) is NOT moved — it stays
+  behind the site-wide HTTP Basic Auth, OUTSIDE the /power invite-auth zone, by design. We only
+  added a launcher that LINKS to it. Changes: (1) NEW
+  components/power/autotrade/AutoTradeConsoleHub.tsx — operator-only mint/F2 card grid (6 cards:
+  /falcon overview, /falcon/trade, /falcon/premarket, /falcon/positions, /falcon/config,
+  /falcon/admin), each title + one-line purpose + "Open console →". Plain <a href> (full
+  navigation out of the (app) group into the Basic-Auth zone), NOT Next <Link>. Reuses cotrade-kit
+  C palette + ICON set + Gear/MECHANISM_CSS so it reads as one product family. Honest header note
+  ("Your live AutoTrade engine. These open the operator console — separately signed in") + footnote
+  (links place no orders / read no live data here). (2) app/power/(app)/autotrade/page.tsx now
+  branches on isOperator = user.role === 'admin' (same check the shell uses for isAdmin): operator →
+  AutoTradeConsoleHub (NO /api/falcon fetch, links only); non-operator → unchanged
+  AutoTradeExperience (falconTop20('all500') preview only — the launch-pending waitlist UX).
+  (3) nav-config.tsx: autotrade live false→true (it now does something real for operators; the nav
+  drops its "Soon" tag; non-operators still land on the honest launch-pending page). SAFETY held:
+  zero /api/falcon/* calls from the /power zone, execution path / app/falcon/* pages untouched —
+  pure navigation UI. Verify: `tsc --noEmit` clean; `npm run build` green (/power/autotrade compiles
+  as a dynamic route).

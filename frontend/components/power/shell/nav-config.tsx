@@ -30,7 +30,7 @@ export const PRIMARY_NAV: NavItem[] = [
   { key: 'ask',         label: 'Ask Falcon',  href: '/power/ask',         Icon: IconSpark,     live: true  },
   { key: 'signals',     label: 'Signals',     href: '/power/signals',     Icon: IconSignal,    live: true  },
   { key: 'co-trading',  label: 'Co-Trading',  href: '/power/co-trading',  Icon: IconHandshake, live: true  },
-  { key: 'autotrade',   label: 'AutoTrade',   href: '/power/autotrade',   Icon: IconBolt,      live: false },
+  { key: 'autotrade',   label: 'AutoTrade',   href: '/power/autotrade',   Icon: IconBolt,      live: true  },
   { key: 'performance', label: 'Performance', href: '/power/performance', Icon: IconChart,     live: true  },
   { key: 'plans',       label: 'Plans',       href: '/power/plans',       Icon: IconLock,      live: false },
 ]
