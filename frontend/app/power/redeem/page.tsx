@@ -59,12 +59,12 @@ export default function RedeemPage() {
     setError(null)
     try {
       const result = await redeemInviteCode(idToken, trimmed)
-      // Success — store JWT cookie + clear stash + go
+      // Success — store JWT cookie + clear stash + go to the new shell home.
       await storeSessionJWT(result.jwt)
       sessionStorage.removeItem(STASH_KEY)
       sessionStorage.removeItem(STASH_EMAIL)
       sessionStorage.removeItem(STASH_NAME)
-      router.push('/power/today')
+      router.push('/power/ask')
       router.refresh()
     } catch (err) {
       // Uniform error message regardless of internal cause

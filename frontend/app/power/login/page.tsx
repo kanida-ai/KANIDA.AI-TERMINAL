@@ -41,9 +41,10 @@ export default function LoginPage() {
       const result = await loginWithInviteCode(cleanEmail, code.trim())
       await storeSessionJWT(result.jwt)
       // After-login destination: admins go to /power/admin (their landing),
-      // everyone else to /power/today. The router.push will hit the server
-      // and the layout will re-render with the new auth cookie.
-      const dest = result.user.role === 'admin' ? '/power/admin' : '/power/today'
+      // everyone else to /power/ask (the new AI-native shell home). The
+      // router.push will hit the server and the layout will re-render with the
+      // new auth cookie. (Legacy /power/today stays reachable from the shell.)
+      const dest = result.user.role === 'admin' ? '/power/admin' : '/power/ask'
       router.push(dest)
       router.refresh()
     } catch (e) {
