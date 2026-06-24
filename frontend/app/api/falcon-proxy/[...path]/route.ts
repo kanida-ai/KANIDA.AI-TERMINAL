@@ -19,7 +19,9 @@ import { NextRequest, NextResponse } from 'next/server'
 
 export const dynamic = 'force-dynamic'
 
-const BACKEND = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
+// Backend base: prefer BACKEND_ORIGIN (the var actually set in Vercel, used by
+// power-api.ts); fall back to NEXT_PUBLIC_API_URL then localhost for dev.
+const BACKEND = process.env.BACKEND_ORIGIN || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
 const TOKEN = process.env.FALCON_OPERATOR_TOKEN || ''
 
 async function forward(req: NextRequest, path: string[]): Promise<NextResponse> {
