@@ -1,63 +1,97 @@
 /**
- * /power/signals — persona-aware Signals (thin real shell for Phase 1a).
+ * /power/signals — the daily picks hub (AI-native shell).
  *
- * The full persona-aware Top 10 + 7/14/20/30d tracker is Phase 1b. For now this
- * is a REAL shell (not Launch-Pending): it states the one LIVE engine honestly
- * and routes to the existing, working Top 10 surface (/power/today) so the daily
- * job is one click away. No faked persona switches.
+ * MIGRATION (2026-06-23): replaced the launch-pending shell with REAL content by
+ * reusing the proven legacy surfaces:
+ *   • Today's Falcon Top 10 — Top20Card + Top20Filters (the /power/today surface),
+ *     data via PowerAPI.falconTop20(universe, sector?, signal_date?).
+ *   • Live ENTER/WAIT/SKIP — CyclePicker + decision buckets (the /power/live
+ *     surface), data via PowerAPI.liveDecisions(jwt, cycle).
+ *   • An entry into Performance → replay outcomes for the viewed date.
+ *
+ * Both surfaces are presented as tabs inside the shell's viewport-lock by
+ * SignalsExperience. The legacy /power/today and /power/live routes stay intact
+ * as fallback. Honesty preserved 1:1 — only the real payloads are rendered.
  */
-import Link from 'next/link'
-import { IconArrowRight } from '@/components/power/shell/icons'
+import { PowerAPI, type LiveCycle, type LiveDecisionsResponse } from '@/lib/power-api'
+import { getSessionJWT } from '@/lib/power-auth'
+import { SignalsExperience } from '@/components/power/signals/SignalsExperience'
+import type { Top20Universe, Top20Response } from '@/lib/falcon-top20-types'
 
 export const dynamic = 'force-dynamic'
+export const revalidate = 0
 
-export default function SignalsPage() {
+const ALLOWED_UNIVERSES = new Set<Top20Universe>([
+  'all500', 'nifty50', 'nifty100', 'nifty200', 'fno',
+])
+
+type SearchParams = Promise<Record<string, string | string[] | undefined>>
+
+export default async function SignalsPage({ searchParams }: { searchParams: SearchParams }) {
+  const sp = await searchParams
+  const universe = pickUniverse(sp.universe)
+  const sector   = pickStr(sp.sector)
+  const reqDate  = pickDate(sp.signal_date)
+  const liveCycle = pickCycle(sp.cycle)
+
+  const jwt = await getSessionJWT()
+
+  // Fetch the two surfaces in parallel. Live needs a JWT — if there isn't one
+  // (e.g. preview-no-auth), we skip it honestly rather than fabricating rows.
+  const [top20Res, liveRes] = await Promise.allSettled([
+    PowerAPI.falconTop20(universe, sector, reqDate),
+    jwt ? PowerAPI.liveDecisions(jwt, liveCycle) : Promise.resolve(null),
+  ])
+
+  let top20: Top20Response | null = null
+  let top20Error: string | null = null
+  if (top20Res.status === 'fulfilled') {
+    top20 = top20Res.value
+  } else {
+    top20Error = top20Res.reason instanceof Error ? top20Res.reason.message : 'Failed to load Top 10.'
+    console.error('[/power/signals] falconTop20 failed:', top20Res.reason)
+  }
+
+  let live: LiveDecisionsResponse | null = null
+  let liveError: string | null = null
+  if (liveRes.status === 'fulfilled') {
+    live = liveRes.value
+  } else {
+    liveError = liveRes.reason instanceof Error ? liveRes.reason.message : 'Failed to load live decisions.'
+    console.error('[/power/signals] liveDecisions failed:', liveRes.reason)
+  }
+
   return (
-    <div className="space-y-8">
-      <header className="space-y-2">
-        <h1 className="text-2xl md:text-3xl font-semibold text-neutral-100">Signals</h1>
-        <p className="text-neutral-400 max-w-2xl leading-relaxed">
-          Today&apos;s Top 10 for your trading style — rank, quality tier,
-          why-selected, and what happened to past signals.
-        </p>
-      </header>
-
-      {/* LIVE engine */}
-      <section className="rounded-xl border border-neutral-800 bg-neutral-950/60 p-5 space-y-4">
-        <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider
-                           text-mint-300 bg-mint-400/10 border border-mint-400/30 rounded-full px-2.5 py-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-mint-400" aria-hidden /> Live
-          </span>
-          <h2 className="text-lg font-semibold text-neutral-100">Falcon Top 10 Swing</h2>
-        </div>
-        <p className="text-sm text-neutral-400 leading-relaxed">
-          The validated engine: a ~7-day-hold swing strategy with a -7% stop, full
-          per-pick explainability (why it fired, the stock&apos;s own track record,
-          sector context) and qualitative quality tiers. Weekly Swing is a variant
-          of the same engine.
-        </p>
-        <Link
-          href="/power/today"
-          className="inline-flex items-center gap-2 rounded-lg bg-mint-400 text-neutral-950 px-4 py-2.5
-                     text-sm font-semibold hover:bg-mint-300 transition-colors"
-        >
-          See today&apos;s Top 10 <IconArrowRight size={15} />
-        </Link>
-      </section>
-
-      {/* What's coming in 1b */}
-      <section className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-5 space-y-2">
-        <h3 className="text-xs font-mono uppercase tracking-wider text-neutral-500">Coming next (1b)</h3>
-        <ul className="space-y-2 text-sm text-neutral-400">
-          <li className="flex gap-2.5"><span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-mint-400/70 shrink-0" />Persona-aware ranking inside this page (no page-hop).</li>
-          <li className="flex gap-2.5"><span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-mint-400/70 shrink-0" />Signal tracker — what happened 7 / 14 / 20 / 30 days after each signal.</li>
-          <li className="flex gap-2.5"><span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-mint-400/70 shrink-0" />Whether a setup is strengthening or weakening after it fired.</li>
-        </ul>
-        <p className="text-xs text-neutral-600 pt-1">
-          BTST, Intraday and Long-Term personas are Launch-Pending — they need engines we haven&apos;t validated yet.
-        </p>
-      </section>
-    </div>
+    <SignalsExperience
+      top20={top20}
+      top20Error={top20Error}
+      universe={universe}
+      sector={sector}
+      live={live}
+      liveError={liveError}
+      liveCycle={liveCycle}
+    />
   )
+}
+
+function pickUniverse(raw: string | string[] | undefined): Top20Universe {
+  const v = Array.isArray(raw) ? raw[0] : raw
+  if (v && ALLOWED_UNIVERSES.has(v as Top20Universe)) return v as Top20Universe
+  return 'all500'
+}
+
+function pickStr(raw: string | string[] | undefined): string | null {
+  const v = Array.isArray(raw) ? raw[0] : raw
+  return v && v.length > 0 ? v : null
+}
+
+function pickDate(raw: string | string[] | undefined): string | null {
+  const v = Array.isArray(raw) ? raw[0] : raw
+  if (!v) return null
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null
+}
+
+function pickCycle(raw: string | string[] | undefined): LiveCycle | 'latest' {
+  const v = Array.isArray(raw) ? raw[0] : raw
+  return v === '0930' || v === '0945' || v === '1000' ? v : 'latest'
 }

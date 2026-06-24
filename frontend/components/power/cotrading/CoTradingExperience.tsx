@@ -59,7 +59,9 @@ import { PowerAPI } from '@/lib/power-api'
 import type {
   PersonaBacktestResponse, QuoteResponse,
   CotradeSimulateResponse, CotradePosition, CotradeAction,
+  PortfolioSummary,
 } from '@/lib/power-api'
+import { PortfolioCard } from '@/components/power/PortfolioCard'
 import { CompassLogo } from '@/components/power/CompassLogo'
 import { EquityChart } from '@/components/power/EquitySparkline'
 import type { Top20Pick, Top20Response } from '@/lib/falcon-top20-types'
@@ -165,11 +167,20 @@ type AllocRow = {
 type Props = {
   data:      Top20Response | null
   firstName: string
+  /**
+   * MIGRATION (2026-06-23): the REAL co-trading personas + equity sparklines,
+   * fetched server-side (PowerAPI.portfolios + portfolioEquity). Rendered as a
+   * "Browse live AI co-traders" listing on the setup screen; each card opens the
+   * in-shell persona detail (/power/co-trading/[slug]). Optional — when absent
+   * (fetch failed) the section is simply omitted, never faked.
+   */
+  personas?:   PortfolioSummary[]
+  sparklines?: Record<string, Array<{ trade_date: string; total_equity: number }>>
 }
 
 type Stage = 'setup' | 'result'
 
-export function CoTradingExperience({ data: seed, firstName }: Props) {
+export function CoTradingExperience({ data: seed, firstName, personas, sparklines }: Props) {
   const router = useRouter()
 
   // ── Flow stage — the whole UX is two screens ───────────────────────────────
@@ -317,6 +328,8 @@ export function CoTradingExperience({ data: seed, firstName }: Props) {
           onAutoTrade={() => router.push('/power/autotrade')}
           plans={plans}
           onAddStyle={(sid) => { const s = STYLES.find(x => x.id === sid); if (s?.live) setStyleId(s.id) }}
+          personas={personas}
+          sparklines={sparklines}
         />
       ) : (
         <ResultStage
@@ -351,7 +364,7 @@ export function CoTradingExperience({ data: seed, firstName }: Props) {
 function SetupStage({
   firstName, styleId, setStyleId, capital, setCapital, mode, setMode,
   startDate, setStartDate, today, canStart, loading, onStart, onOpenRules, onAutoTrade,
-  plans, onAddStyle,
+  plans, onAddStyle, personas, sparklines,
 }: {
   firstName: string
   styleId: StyleId; setStyleId: (s: StyleId) => void
@@ -361,6 +374,8 @@ function SetupStage({
   canStart: boolean; loading: boolean
   onStart: () => void; onOpenRules: () => void; onAutoTrade: () => void
   plans: Plan[]; onAddStyle: (styleId: string) => void
+  personas?: PortfolioSummary[]
+  sparklines?: Record<string, Array<{ trade_date: string; total_equity: number }>>
 }) {
   return (
     <div className="flex-1 min-h-0 md:overflow-y-auto [scrollbar-width:thin]">
@@ -529,6 +544,32 @@ function SetupStage({
             learn the strategy risk-free.
           </p>
         </div>
+
+        {/* MIGRATION (2026-06-23): browse the REAL co-trading personas. Each card
+            opens the in-shell persona detail (/power/co-trading/[slug]) — the
+            full Zerodha-style P&L / positions / trades / equity dashboard. */}
+        {personas && personas.length > 0 && (
+          <section className="mt-1.5 border-t pt-5" style={{ borderColor: C.line2 }}>
+            <div className="flex items-baseline justify-between gap-3 mb-3">
+              <h2 className="text-[14px] font-semibold" style={{ color: C.ink }}>
+                Browse live AI co-traders
+              </h2>
+              <span className="text-[10.5px]" style={{ color: C.faint }}>
+                live virtual portfolios · tap a card for full positions &amp; P&amp;L
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {personas.map(p => (
+                <PortfolioCard
+                  key={p.slug}
+                  summary={p}
+                  sparklinePoints={sparklines?.[p.slug]}
+                  hrefBase="/power/co-trading"
+                />
+              ))}
+            </div>
+          </section>
+        )}
       </div>
     </div>
   )

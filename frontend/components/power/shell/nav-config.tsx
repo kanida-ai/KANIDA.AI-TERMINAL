@@ -31,7 +31,7 @@ export const PRIMARY_NAV: NavItem[] = [
   { key: 'signals',     label: 'Signals',     href: '/power/signals',     Icon: IconSignal,    live: true  },
   { key: 'co-trading',  label: 'Co-Trading',  href: '/power/co-trading',  Icon: IconHandshake, live: true  },
   { key: 'autotrade',   label: 'AutoTrade',   href: '/power/autotrade',   Icon: IconBolt,      live: false },
-  { key: 'performance', label: 'Performance', href: '/power/performance', Icon: IconChart,     live: false },
+  { key: 'performance', label: 'Performance', href: '/power/performance', Icon: IconChart,     live: true  },
   { key: 'plans',       label: 'Plans',       href: '/power/plans',       Icon: IconLock,      live: false },
 ]
 

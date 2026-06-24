@@ -38,6 +38,64 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-06-23 — **MIGRATION: legacy portal functionality mounted inside the new
+  AI-native shell** (route group `app/power/(app)/*`) by REUSING the working
+  legacy components — no rebuild, no backend/auth/admin/execution touched. tsc +
+  `npm run build` GREEN. All legacy routes kept as fallback (deprecate later).
+  - **P1 — SIGNALS** (`signals/page.tsx` rewritten + new
+    `components/power/signals/SignalsExperience.tsx`): replaced the launch-pending
+    shell with REAL content as a 2-tab surface inside the shell's viewport-lock
+    (shrink-0 header + flex-1 min-h-0 overflow-y-auto). Tab "Today's Top 10"
+    REUSES `Top20Card` + `Top20Filters` (data: `PowerAPI.falconTop20(universe,
+    sector?, signal_date?)`) — 3-bucket explainability + universe/sector/EOD-date
+    filters + low-signal-day banner. Tab "Live decisions" REUSES `CyclePicker` +
+    the ENTER/WAIT/SKIP bucket layout (data: `PowerAPI.liveDecisions(jwt, cycle)`;
+    skipped honestly when no JWT, e.g. preview-no-auth). A mint CTA links to
+    Performance → replay outcomes for the viewed signal date
+    (`/power/performance?date=…`). Server page fetches both via
+    `Promise.allSettled` (one failure never blanks the other). nav `signals`
+    stays `live:true`.
+  - **P2 — PERFORMANCE** (`performance/page.tsx` rewritten + new
+    `components/power/performance/PerformanceExperience.tsx`): replaced
+    launch-pending with a 2-tab surface. Tab "The proof" = the ₹30L→₹1.05Cr
+    3.3-yr walk-forward credibility content (reused 1:1 from `/power/credibility`
+    — static, operator-locked, year-by-year + methodology + "what we don't hide").
+    Tab "Replay outcomes" REUSES `ExpandablePickRow` (the `/power/replay/[date]`
+    surface; data: `PowerAPI.replayForDate(date, jwt)`) with an IN-SHELL date
+    navigator routing to `/power/performance?date=…` (so the user never leaves the
+    shell) — aggregate D+1/3/5/10/15 band + per-pick outcomes. Deep-links from
+    Signals open straight on the Replay tab. nav `performance` flipped
+    `false → true`.
+  - **P3 — CO-TRADING** (additive; the existing 2-stage simulate flow UNCHANGED):
+    • Persona LISTING — `SetupStage` now renders a "Browse live AI co-traders"
+      section REUSING `PortfolioCard` (data: `PowerAPI.portfolios()` +
+      `portfolioEquity(slug)` sparklines, fetched server-side in the page,
+      `Promise.allSettled` degrade). Section omitted entirely if the fetch fails
+      (never faked). `CoTradingExperience` + `SetupStage` gained optional
+      `personas`/`sparklines` props; everything else (mechanism strip, steps,
+      sim wiring, honesty) untouched 1:1.
+    • Persona DETAIL — new sub-route `co-trading/[slug]/page.tsx` REUSES
+      `PortfolioDashboardClient` verbatim (the `/power/portfolios/[slug]` surface:
+      Zerodha-style P&L, open positions, recent trades, equity curve, year-by-
+      year), data via `portfolioDetail/positions/trades/equity`. Wrapped in the
+      shell viewport-lock with a "← Back to Co-Trading" link.
+    • `PortfolioCard` gained a backward-compatible `hrefBase` prop (default
+      `/power/portfolios`) so the shell cards link to `/power/co-trading/[slug]`
+      without changing the legacy listing.
+  - **AppShell** `fullBleed` set extended to `/power/signals`, `/power/performance`,
+    and `/power/co-trading/*` so each owns its internal viewport-lock scroll
+    region (no shell page-scroll).
+  - **LEFT as honest "Soon" (not flipped):** Plans, Account, Learn.
+  - **Honesty:** only real payloads rendered; live decisions skipped (not faked)
+    without a JWT; persona listing omitted (not faked) on fetch failure; replay
+    surfaces backend errors plainly. Only Falcon Top 10 Swing is live; other
+    co-trading styles stay "soon".
+  - **Backend needs:** none — all reused endpoints are already LIVE.
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npx next build` ✓ Compiled
+    successfully — `/power/signals`, `/power/performance`, `/power/co-trading`,
+    `/power/co-trading/[slug]` all built; legacy `/power/today`, `/power/live`,
+    `/power/replay/[date]`, `/power/credibility`, `/power/portfolios/[slug]`
+    intact.
 - 2026-06-22 — **Co-Trading RESULT wired to the now-LIVE POST /api/power/cotrade/
   simulate** (power-api.ts + CoTradingExperience.tsx only; setup stage / switcher /
   mechanism strip / mint-F2 theme / viewport-lock all UNCHANGED — DATA WIRING ONLY).

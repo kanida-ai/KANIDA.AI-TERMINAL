@@ -1,25 +1,58 @@
-/** /power/performance — Launch-Pending shell (plan §3 phase / §6 proof). */
-import { LaunchPending } from '@/components/power/LaunchPending'
+/**
+ * /power/performance — proof + replay outcomes (AI-native shell).
+ *
+ * MIGRATION (2026-06-23): replaced the launch-pending shell with REAL content by
+ * reusing the proven legacy surfaces:
+ *   • The ₹30L→₹1.05Cr walk-forward credibility content (from /power/credibility,
+ *     static, operator-locked).
+ *   • A replay/outcomes viewer for any date — ExpandablePickRow + PowerAPI
+ *     .replayForDate(date, jwt), with an in-shell date navigator. Shows D+1/3/5/
+ *     10/15 outcomes for every pick.
+ *
+ * Both reused surfaces' legacy routes (/power/credibility, /power/replay/[date])
+ * stay intact as fallback. Honesty 1:1 — only the real replay payload is rendered.
+ */
+import { PowerAPI, PowerAPIError, assertPickVersion, type ReplayPayload } from '@/lib/power-api'
+import { getSessionJWT } from '@/lib/power-auth'
+import { PerformanceExperience } from '@/components/power/performance/PerformanceExperience'
 
 export const dynamic = 'force-dynamic'
+export const revalidate = 0
 
-export default function PerformancePage() {
+type SearchParams = Promise<{ date?: string | string[] }>
+
+export default async function PerformancePage({ searchParams }: { searchParams: SearchParams }) {
+  const sp = await searchParams
+  const rawDate = Array.isArray(sp.date) ? sp.date[0] : sp.date
+  const replayDate = rawDate && /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : null
+
+  const jwt = await getSessionJWT()
+
+  let replay: ReplayPayload | null = null
+  let replayError: string | null = null
+
+  if (replayDate) {
+    try {
+      replay = await PowerAPI.replayForDate(replayDate, jwt)
+      replay.picks.forEach(assertPickVersion)
+    } catch (e) {
+      if (e instanceof PowerAPIError && e.isUnauthorized()) {
+        replayError = 'Sign in to replay this date.'
+      } else if (e instanceof PowerAPIError) {
+        replayError = e.message || 'Replay unavailable for this date.'
+      } else {
+        replayError = 'Network error — try again.'
+      }
+      console.error('[/power/performance] replayForDate failed:', e)
+    }
+  }
+
   return (
-    <LaunchPending
-      title="Performance"
-      summary="Track your picks and Falcon’s proof in one place — outcomes by horizon, historical performance by persona, and the past-signal evidence free users can explore before upgrading."
-      willDo={[
-        'Show what happened to signals 7 / 14 / 20 / 30 days after they fired.',
-        'Break performance down by persona and by signal quality tier.',
-        'Let free users replay past Falcon signals as proof, with an upgrade path.',
-        'Tie your own entries back to Falcon’s original call and outcome.',
-      ]}
-      expect={[
-        'Honest, walk-forward-validated history — wins and losses both shown.',
-        'Qualitative tiers framed as quality bands, never guaranteed outcomes.',
-        'A calm proof view, not a vanity dashboard.',
-      ]}
-      whyNotYet="The underlying outcome data exists from the walk-forward pipeline, but the unified Performance + proof view is the next build after the shell and signals. We’re bringing it up properly rather than scattering numbers across pages."
+    <PerformanceExperience
+      replay={replay}
+      replayDate={replayDate}
+      replayError={replayError}
+      authed={jwt !== null}
     />
   )
 }

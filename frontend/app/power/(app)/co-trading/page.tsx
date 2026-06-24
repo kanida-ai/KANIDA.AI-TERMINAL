@@ -13,7 +13,7 @@
  * the pick's entry price. Live tracking / replay / persistence are Backend needs,
  * surfaced as honest pending states inside the experience.
  */
-import { PowerAPI } from '@/lib/power-api'
+import { PowerAPI, type PortfolioSummary, type PortfolioEquityPoint } from '@/lib/power-api'
 import { getCurrentUser } from '@/lib/power-auth'
 import { CoTradingExperience } from '@/components/power/cotrading/CoTradingExperience'
 import type { Top20Response } from '@/lib/falcon-top20-types'
@@ -37,5 +37,32 @@ export default async function CoTradingPage() {
     console.error('[/power/co-trading] falconTop20 fetch failed:', e)
   }
 
-  return <CoTradingExperience data={data} firstName={firstName} />
+  // MIGRATION (2026-06-23): the REAL co-trading personas + equity sparklines for
+  // the "Browse live AI co-traders" listing. Degrades gracefully — if any fetch
+  // fails the section is simply omitted (never faked).
+  let personas: PortfolioSummary[] = []
+  const sparklines: Record<string, PortfolioEquityPoint[]> = {}
+  try {
+    const r = await PowerAPI.portfolios()
+    personas = r.portfolios
+    if (personas.length > 0) {
+      const results = await Promise.allSettled(
+        personas.map(p => PowerAPI.portfolioEquity(p.slug)),
+      )
+      results.forEach((res, i) => {
+        if (res.status === 'fulfilled') sparklines[personas[i].slug] = res.value.points
+      })
+    }
+  } catch (e) {
+    console.error('[/power/co-trading] portfolios fetch failed:', e)
+  }
+
+  return (
+    <CoTradingExperience
+      data={data}
+      firstName={firstName}
+      personas={personas}
+      sparklines={sparklines}
+    />
+  )
 }
