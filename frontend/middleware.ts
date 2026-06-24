@@ -77,11 +77,14 @@ export function middleware(req: NextRequest) {
     return res
   }
 
-  const expectedUser = process.env.SITE_USER || ''
-  const expectedPass = process.env.SITE_PASS || ''
+  // Accept SITE_* (canonical) or APP_* (the operator's existing Vercel vars).
+  // The password is the shared secret; the username is OPTIONAL — if no user
+  // var is set, any username is accepted and only the password is validated.
+  const expectedUser = process.env.SITE_USER || process.env.APP_USER || ''
+  const expectedPass = process.env.SITE_PASS || process.env.APP_PASSWORD || ''
 
-  // Fail closed: if creds aren't configured on the server, deny every request.
-  if (!expectedUser || !expectedPass) {
+  // Fail closed: if the password secret isn't configured, deny every request.
+  if (!expectedPass) {
     return notConfigured()
   }
 
@@ -105,7 +108,8 @@ export function middleware(req: NextRequest) {
   const user = decoded.slice(0, idx)
   const pass = decoded.slice(idx + 1)
 
-  if (user !== expectedUser || pass !== expectedPass) {
+  // Username enforced only when configured; password is always required.
+  if ((expectedUser && user !== expectedUser) || pass !== expectedPass) {
     return unauthorized()
   }
 
