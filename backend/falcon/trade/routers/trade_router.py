@@ -17,7 +17,7 @@ import secrets
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from ...db import falcon_conn
@@ -33,7 +33,30 @@ from ..services.order_planner import OrderSpec, plan_orders, cheapest as cheapes
 from ..services.volatility_gate import round_to_tick, sl_order_type
 
 log = logging.getLogger("kanida.falcon.trade.router")
-router = APIRouter()
+
+
+def require_operator_token(x_operator_token: Optional[str] = Header(default=None)) -> None:
+    """Operator-token gate for the live order-execution router.
+
+    The whole /api/falcon/trade/* surface (order placement, SL adoption,
+    pre-market deploy, monitoring reads) requires a shared secret in the
+    `X-Operator-Token` header, matched against the server-side env
+    FALCON_OPERATOR_TOKEN. The token is injected server-side by the Next.js
+    /api/falcon-proxy (which itself sits behind the site HTTP Basic Auth), so
+    the secret never reaches the browser.
+
+    Fail closed: if the env secret is not configured, every call is refused
+    (503) rather than left open. Constant-time compare to avoid timing leaks.
+    This adds AUTH only — it does not touch any order/SL/deploy logic.
+    """
+    expected = os.environ.get("FALCON_OPERATOR_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(503, "AutoTrade operator token not configured on server")
+    if not x_operator_token or not secrets.compare_digest(x_operator_token, expected):
+        raise HTTPException(403, "operator token required")
+
+
+router = APIRouter(dependencies=[Depends(require_operator_token)])
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # In-memory preview store: preview_id → {created_at, request, orders, ...}
