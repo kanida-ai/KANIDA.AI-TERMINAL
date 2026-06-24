@@ -23,7 +23,9 @@
  *   <ConversionCTA>    — bottom CTA + waitlist
  */
 import { Suspense } from 'react'
+import { redirect } from 'next/navigation'
 import Link from 'next/link'
+import { getCurrentUser } from '@/lib/power-auth'
 import {
   PowerAPI,
   type FeaturedReplaySummary,
@@ -45,7 +47,12 @@ export const revalidate = 0
 
 const IST = 'Asia/Kolkata'
 
-export default function LandingPage() {
+export default async function LandingPage() {
+  // Signed-in users go straight to the new AI-native shell — /power IS the
+  // portal. Only logged-out visitors see the public marketing landing below.
+  const user = await getCurrentUser()
+  if (user) redirect('/power/ask')
+
   return (
     <div className="space-y-10 md:space-y-14">
       <Hero />
