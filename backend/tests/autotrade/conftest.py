@@ -72,6 +72,10 @@ def _db():
     # dedicated auto-fire test re-enables it for its own scope.
     from autotrade.monitoring import tick_driver
     tick_driver.set_autostart(False)
+    # Same for the sub-second WS driver — off by default in tests so its daemon
+    # thread can't race assertions on the shared temp DB.
+    from autotrade.monitoring import ws_driver
+    ws_driver.set_autostart(False)
     yield
     try:
         os.remove(_TMP_DB)
@@ -86,6 +90,8 @@ def clean_positions():
     from falcon.db import falcon_conn
     from autotrade.monitoring import tick_driver
     from autotrade.monitoring import entry_scheduler
+    from autotrade.monitoring import ws_driver
+    from autotrade.monitoring import fire_guard
 
     def _stop_all_drivers():
         with tick_driver._LOCK:
@@ -93,6 +99,13 @@ def clean_positions():
         for drv in drivers:
             drv.stop()
         for drv in drivers:
+            drv._thread.join(timeout=2.0)
+        # Also stop any sub-second WS drivers (FEATURE 2 daemon threads).
+        with ws_driver._LOCK:
+            wsdrv = list(ws_driver._DRIVERS.values())
+        for drv in wsdrv:
+            drv.stop()
+        for drv in wsdrv:
             drv._thread.join(timeout=2.0)
         # Also stop any armed entry schedulers so their daemon threads can't
         # fire across tests on the shared temp DB.
@@ -102,6 +115,10 @@ def clean_positions():
             sch.stop()
         for sch in scheds:
             sch._thread.join(timeout=2.0)
+        # Reset the per-session fire guard so a session_id reused across tests
+        # isn't stuck "already fired".
+        with fire_guard._LOCK:
+            fire_guard._FIRED.clear()
 
     _stop_all_drivers()
     with falcon_conn() as con:

@@ -27,6 +27,13 @@ class MockBroker(BrokerClient):
         self.placed: List[Any] = []
         self.exits: List[tuple] = []
         self.cancelled: List[str] = []
+        # GTT-OCO tracking (FEATURE 1/3). gtts: list of placed GTT param dicts;
+        # cancelled_gtts: ids passed to cancel_gtt; gtt_states: id -> state dict
+        # the test can pre-seed to simulate a fired/active GTT for get_gtt.
+        self.gtts: List[dict] = []
+        self.cancelled_gtts: List[str] = []
+        self.gtt_states: Dict[str, dict] = {}
+        self._gtt_seq = 0
 
     # market data
     def get_ltp(self, symbol: str) -> Optional[float]:
@@ -80,3 +87,35 @@ class MockBroker(BrokerClient):
                                symbol=symbol, qty=qty, error="mock failure")
         return OrderResult(status="PLACED", broker_order_id="exit-" + symbol,
                            symbol=symbol, qty=qty)
+
+    # GTT-OCO (FEATURE 1/3). dry_run mirrors the real adapter: no real GTT.
+    def place_gtt_oco(self, symbol, qty, stop_price, target_price, last_price,
+                      product="CNC", exchange="NSE", order_type="LIMIT"):
+        if self.dry_run:
+            return None  # paper: no real GTT (the manager records levels only)
+        self._gtt_seq += 1
+        gid = f"gtt-{symbol}-{self._gtt_seq}"
+        self.gtts.append({"gtt_id": gid, "symbol": symbol, "qty": qty,
+                          "stop": stop_price, "target": target_price,
+                          "last_price": last_price, "product": product,
+                          "exchange": exchange, "order_type": order_type})
+        self.gtt_states[gid] = {"status": "active"}
+        return gid
+
+    def cancel_gtt(self, gtt_id):
+        if self.dry_run:
+            return None
+        self.cancelled_gtts.append(gtt_id)
+        if gtt_id in self.gtt_states:
+            self.gtt_states[gtt_id]["status"] = "deleted"
+        return {"status": "CANCELLED", "trigger_id": gtt_id}
+
+    def get_gtt(self, gtt_id):
+        if self.dry_run:
+            return None
+        return self.gtt_states.get(gtt_id)
+
+    def fire_gtt(self, gtt_id):
+        """Test helper: simulate the broker triggering a GTT (position sold)."""
+        if gtt_id in self.gtt_states:
+            self.gtt_states[gtt_id]["status"] = "triggered"

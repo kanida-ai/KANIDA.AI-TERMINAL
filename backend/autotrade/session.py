@@ -55,8 +55,11 @@ from .execution.slippage import record_slippage
 from .monitoring.registry import PositionRegistry
 from .monitoring.monitor import PortfolioMonitor
 from .monitoring.kill_switch import KillSwitchExecutor
+from .monitoring.gtt_manager import GTTManager
 from .monitoring import tick_driver
 from .monitoring import entry_scheduler
+from .monitoring import fire_guard
+from .monitoring import ws_driver
 
 log = logging.getLogger("kanida.autotrade.session")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -119,6 +122,7 @@ class TradingSession:
         self.monitor = PortfolioMonitor(session_id, config.total_allocated_capital)
         self.brokers: Dict[str, Any] = {}
         self.kill_switch: Optional[KillSwitchExecutor] = None
+        self.gtt_manager: Optional[GTTManager] = None
 
     # ── Persistence / factory ─────────────────────────────────────────────────
     @classmethod
@@ -188,8 +192,11 @@ class TradingSession:
             if not prof.enabled:
                 continue
             self.brokers[prof.profile_id] = build_client(prof, dry_run=self.dry_run)
-        self.kill_switch = KillSwitchExecutor(
+        self.gtt_manager = GTTManager(
             self.session_id, self.config, self.brokers, self.registry)
+        self.kill_switch = KillSwitchExecutor(
+            self.session_id, self.config, self.brokers, self.registry,
+            gtt_manager=self.gtt_manager)
 
     # ── Start: now | scheduled ──────────────────────────────────────────────────
     async def start(self, when: str = "now") -> Dict[str, Any]:
@@ -271,6 +278,16 @@ class TradingSession:
                 rec = await self._place_one(broker, prof, pick, amount, allocator)
                 placed.append(rec)
 
+        # FEATURE 1: place the per-position GTT-OCO broker backup on every open
+        # session position that lacks one. LIVE places real GTTs; paper records
+        # the intended levels only. Best-effort — never blocks the start.
+        gtt_results: List[Dict[str, Any]] = []
+        try:
+            if self.config.per_position_gtt_enabled and self.gtt_manager:
+                gtt_results = self.gtt_manager.backfill_missing()
+        except Exception as e:  # never block start on the backup floor
+            log.warning("GTT backfill failed for %s: %s", self.session_id, e)
+
         # Launch the per-session background tick driver: refreshes ltp +
         # gross_return and AUTO-fires the kill switch on breach. Idempotent;
         # self-stops when the session leaves RUNNING. Paper = no real orders.
@@ -279,8 +296,19 @@ class TradingSession:
         except Exception as e:  # never block start on the driver
             log.warning("tick driver start failed for %s: %s", self.session_id, e)
 
+        # FEATURE 2: arm the sub-second WebSocket-driven kill-switch path (in
+        # ADDITION to the 5s poll). Subscribes the session's symbols and fires
+        # the flatten on a live tick crossing ±kill_switch_pct, coordinated with
+        # the poll via the per-session fire guard. Idempotent; paper = no real
+        # orders on fire. Never blocks the start.
+        try:
+            ws_driver.start_for_session(self.session_id)
+        except Exception as e:  # never block start on the WS driver
+            log.warning("ws driver start failed for %s: %s", self.session_id, e)
+
         return {"session_id": self.session_id, "status": "RUNNING",
-                "mode": self.mode, "n_placed": len(placed), "orders": placed}
+                "mode": self.mode, "n_placed": len(placed), "orders": placed,
+                "gtt": gtt_results}
 
     async def _place_one(self, broker, prof, pick: Pick, amount: float,
                          allocator: CapitalAllocator) -> Dict[str, Any]:
@@ -329,20 +357,34 @@ class TradingSession:
                 "price": fill_price, "broker_order_id": res.broker_order_id,
                 "broker_profile": prof.profile_id, "order_type": order.order_type}
 
-    # ── Tick: monitor + kill switch ───────────────────────────────────────────
+    # ── Tick: monitor + GTT reconcile + kill switch ───────────────────────────
     async def tick(self) -> Dict[str, Any]:
         if not self.brokers:
             self._build_brokers()
+        # COORDINATION (FEATURE 3): detect positions a fired broker GTT closed
+        # externally BEFORE marking to market, so gross_return recomputes on the
+        # remaining positions only (denominator stays total_allocated_capital).
+        gtt_closed = []
+        try:
+            gtt_closed = self.gtt_manager.reconcile_gtt_fills()
+        except Exception as e:  # pragma: no cover - never block the tick
+            log.warning("GTT reconcile failed for %s: %s", self.session_id, e)
         self.monitor.refresh_ltps(self.brokers)
         snap = self.monitor.snapshot()
         gr = snap["gross_return"]
         reason = self.kill_switch.check_threshold(gr) if self.kill_switch else None
         fired = None
         if reason:
-            fired = await self.kill_switch.fire(reason, gross_return=gr)
+            # Single-fire guard: the 5s poll and the sub-second WS path must
+            # never double-fire. Whoever wins the per-session lock fires.
+            with fire_guard.claim_fire(self.session_id) as won:
+                if won:
+                    fired = await self.kill_switch.fire(reason, gross_return=gr)
+                else:
+                    reason = None  # another path already fired/is firing
         return {"gross_return": gr, "snapshot": snap,
-                "kill_switch_fired": bool(reason), "kill_reason": reason,
-                "fire_result": fired}
+                "kill_switch_fired": bool(fired), "kill_reason": reason,
+                "fire_result": fired, "gtt_closed": gtt_closed}
 
     # ── Manual kill ────────────────────────────────────────────────────────────
     async def kill(self, reason: str = "MANUAL") -> Dict[str, Any]:
@@ -359,10 +401,22 @@ class TradingSession:
             tick_driver.stop_for_session(self.session_id)
         except Exception:  # pragma: no cover - defensive
             pass
+        try:
+            ws_driver.stop_for_session(self.session_id)
+        except Exception:  # pragma: no cover - defensive
+            pass
         self.monitor.refresh_ltps(self.brokers)
         gr = self.monitor.compute_gross_return()
-        return await self.kill_switch.fire(f"MANUAL {reason} gross_return={gr:.4f}",
-                                           gross_return=gr)
+        # Single-fire guard so a manual kill can't double-fire with an in-flight
+        # WS/poll fire on the same session.
+        with fire_guard.claim_fire(self.session_id) as won:
+            if not won:
+                return {"session_id": self.session_id,
+                        "trigger_reason": f"MANUAL {reason} (already firing)",
+                        "n_positions": 0, "n_exited_ok": 0, "n_exit_failed": 0,
+                        "details": [], "already_fired": True}
+            return await self.kill_switch.fire(
+                f"MANUAL {reason} gross_return={gr:.4f}", gross_return=gr)
 
     # ── Status ─────────────────────────────────────────────────────────────────
     def status(self) -> Dict[str, Any]:

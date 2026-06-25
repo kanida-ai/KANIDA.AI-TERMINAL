@@ -40,6 +40,7 @@ from falcon.db import falcon_conn
 
 from .monitoring import tick_driver
 from .monitoring import entry_scheduler
+from .monitoring import ws_driver
 
 log = logging.getLogger("kanida.autotrade.recovery")
 
@@ -57,9 +58,47 @@ def _active_sessions() -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def _backfill_live_gtts(session_id: str) -> int:
+    """For a LIVE RUNNING session, place a GTT-OCO for any OPEN position MISSING
+    a gtt_id (so positions opened before this feature deployed get the broker
+    backup retroactively). Paper sessions are SKIPPED. Returns count placed.
+
+    DATA-ISOLATION + best-effort: writes only autotrade_positions; never raises.
+    """
+    from .session import TradingSession
+
+    sess = TradingSession.load(session_id)
+    if sess is None:
+        return 0
+    if sess.mode != "live":
+        return 0  # paper: skip (no real GTTs)
+    if not sess.config.per_position_gtt_enabled:
+        return 0
+    try:
+        sess._build_brokers()
+        results = sess.gtt_manager.backfill_missing()
+        placed = sum(1 for r in results if r.get("status") == "PLACED")
+        if results:
+            log.info("recovery: backfilled GTTs for %s — %d placed of %d missing",
+                     session_id, placed, len(results))
+        return placed
+    except Exception as e:  # never block recovery on the backup floor
+        log.warning("recovery: GTT backfill failed for %s: %s", session_id, e)
+        return 0
+
+
 def _resume_running(session_id: str) -> str:
-    """Re-arm the tick driver for a RUNNING session. Returns an outcome tag."""
+    """Re-arm the tick + WS drivers for a RUNNING session, and backfill any
+    missing per-position GTTs (live only). Returns an outcome tag."""
+    # FEATURE 1/3: retroactively place the broker GTT backup on live positions
+    # that pre-date this feature, BEFORE re-arming the drivers.
+    _backfill_live_gtts(session_id)
     armed = tick_driver.start_for_session(session_id)
+    # FEATURE 2: re-arm the sub-second WS-driven kill-switch path too.
+    try:
+        ws_driver.start_for_session(session_id)
+    except Exception as e:  # pragma: no cover - never block recovery
+        log.warning("recovery: ws driver start failed for %s: %s", session_id, e)
     if armed:
         log.info("recovery: re-armed tick driver for RUNNING session %s", session_id)
         return "tick_rearmed"

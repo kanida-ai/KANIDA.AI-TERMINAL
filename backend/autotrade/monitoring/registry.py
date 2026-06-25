@@ -168,6 +168,54 @@ class PositionRegistry:
                 )
             con.commit()
 
+    # ── GTT-OCO backup (FEATURE 1) ────────────────────────────────────────────
+    def set_gtt(self, symbol: str, gtt_id: Optional[str],
+                gtt_stop: Optional[float] = None,
+                gtt_target: Optional[float] = None,
+                broker_profile: Optional[str] = None) -> None:
+        """Store the per-position GTT-OCO id + levels on the position row.
+
+        In paper mode gtt_id is None (no real GTT) but gtt_stop/gtt_target are
+        still recorded so the UI shows the intended floor/ceiling. Also mirrors
+        the levels into sl_level / target_price for the existing UI fields.
+        Scoped to (session_id, symbol[, broker_profile])."""
+        with falcon_conn() as con:
+            if broker_profile is not None:
+                con.execute(
+                    """UPDATE autotrade_positions
+                       SET gtt_id=?, gtt_stop=?, gtt_target=?,
+                           sl_level=COALESCE(?, sl_level),
+                           target_price=COALESCE(?, target_price)
+                       WHERE session_id=? AND symbol=?
+                         AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
+                    (gtt_id, gtt_stop, gtt_target, gtt_stop, gtt_target,
+                     self.session_id, symbol, broker_profile),
+                )
+            else:
+                con.execute(
+                    """UPDATE autotrade_positions
+                       SET gtt_id=?, gtt_stop=?, gtt_target=?,
+                           sl_level=COALESCE(?, sl_level),
+                           target_price=COALESCE(?, target_price)
+                       WHERE session_id=? AND symbol=?""",
+                    (gtt_id, gtt_stop, gtt_target, gtt_stop, gtt_target,
+                     self.session_id, symbol),
+                )
+            con.commit()
+
+    def get_open_positions_missing_gtt(self) -> List[Dict[str, Any]]:
+        """OPEN positions that have NO gtt_id yet — used to backfill the broker
+        backup on session start and boot-resume (e.g. positions opened before
+        this feature deployed)."""
+        with falcon_conn() as con:
+            rows = con.execute(
+                """SELECT * FROM autotrade_positions
+                   WHERE session_id=? AND status='OPEN' AND qty > 0
+                     AND (gtt_id IS NULL OR gtt_id='')""",
+                (self.session_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def mark_exit_failed(self, symbol: str, error: str,
                          broker_profile: Optional[str] = None) -> None:
         now = datetime.now(IST).isoformat()

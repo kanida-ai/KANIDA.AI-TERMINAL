@@ -203,3 +203,75 @@ class ZerodhaBroker(BrokerClient):
             log.error("place_market_exit failed for %s: %s", symbol, e)
             return OrderResult(status="FAILED", broker_order_id=None,
                                symbol=symbol, qty=qty, error=str(e))
+
+    # ── GTT-OCO (broker-held per-position backup) ─────────────────────────────
+    def place_gtt_oco(self, symbol: str, qty: int, stop_price: float,
+                      target_price: float, last_price: float,
+                      product: str = "CNC", exchange: str = "NSE",
+                      order_type: str = "LIMIT") -> Optional[str]:
+        """Place a two-leg OCO GTT on Kite: a STOP leg (SELL when price <= stop)
+        and a TARGET leg (SELL when price >= target). The broker holds it so a
+        position is protected even if our software is down — the BACKUP floor
+        under the portfolio kill switch.
+
+        Dry-run / live-disabled → returns None (no real GTT). On any error →
+        logs + returns None (best-effort; entry is never blocked on the GTT).
+        """
+        if not self._live_allowed():
+            return None
+        try:
+            from falcon.trade.services.order_executor import _retry_kite_call
+            kite = self.kite
+            product_map = {"CNC": kite.PRODUCT_CNC, "MIS": kite.PRODUCT_MIS,
+                           "NRML": kite.PRODUCT_NRML, "MTF": "MTF"}
+            kprod = product_map.get(product, kite.PRODUCT_CNC)
+            kotype = (kite.ORDER_TYPE_LIMIT if order_type == "LIMIT"
+                      else kite.ORDER_TYPE_MARKET)
+            kexch = getattr(kite, f"EXCHANGE_{exchange}", exchange)
+            stop_price = round(float(stop_price), 2)
+            target_price = round(float(target_price), 2)
+            # Kite OCO trigger_values must be [lower, upper]; leg order matches.
+            orders = [
+                {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": int(qty),
+                 "order_type": kotype, "product": kprod, "price": stop_price},
+                {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": int(qty),
+                 "order_type": kotype, "product": kprod, "price": target_price},
+            ]
+            gid = _retry_kite_call(
+                lambda: kite.place_gtt(
+                    trigger_type=kite.GTT_TYPE_OCO, tradingsymbol=symbol,
+                    exchange=kexch, trigger_values=[stop_price, target_price],
+                    last_price=round(float(last_price), 2), orders=orders),
+                "place_gtt(autotrade)", symbol)
+            # Kite returns {"trigger_id": <id>} or the id directly depending on ver.
+            if isinstance(gid, dict):
+                gid = gid.get("trigger_id") or gid.get("id")
+            return str(gid) if gid is not None else None
+        except Exception as e:
+            log.error("place_gtt_oco failed for %s: %s", symbol, e)
+            return None
+
+    def cancel_gtt(self, gtt_id):
+        """Delete a GTT by id. Dry-run / disabled → no-op. Best-effort on error."""
+        if not self._live_allowed():
+            return None
+        try:
+            from falcon.trade.services.order_executor import _retry_kite_call
+            kite = self.kite
+            return _retry_kite_call(
+                lambda: kite.delete_gtt(trigger_id=gtt_id),
+                "delete_gtt(autotrade)", str(gtt_id))
+        except Exception as e:
+            log.warning("cancel_gtt failed for %s: %s", gtt_id, e)
+            return None
+
+    def get_gtt(self, gtt_id):
+        """Fetch a GTT's current state via kite.get_gtt (to detect it triggered).
+        Dry-run / disabled → None. Returns None on any error."""
+        if not self._live_allowed():
+            return None
+        try:
+            return self.kite.get_gtt(trigger_id=gtt_id)
+        except Exception as e:
+            log.debug("get_gtt failed for %s: %s", gtt_id, e)
+            return None
