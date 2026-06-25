@@ -456,6 +456,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.exception("Boot catch-up crashed (non-fatal): %s", e)
 
+    # AutoTrade: resume active paper/live sessions after a restart. The per-
+    # session tick driver + entry scheduler are in-memory daemon threads that
+    # die on restart, so RUNNING sessions stop refreshing LTP/gross_return and
+    # SCHEDULED sessions silently never fire. resume_active_sessions() re-arms
+    # them from the persisted autotrade_sessions state (idempotent; paper = no
+    # real orders; writes ONLY autotrade_positions). Wrapped so it can never
+    # block boot. See backend/autotrade/recovery.py.
+    try:
+        from autotrade.recovery import resume_active_sessions
+        _at_resume = resume_active_sessions()
+        log.info("AutoTrade resume: running=%d scheduled=%d fired=%d rearmed=%d errors=%d",
+                 _at_resume.get("running", 0), _at_resume.get("scheduled", 0),
+                 _at_resume.get("fired", 0), _at_resume.get("rearmed", 0),
+                 _at_resume.get("errors", 0))
+    except Exception as e:
+        log.exception("AutoTrade resume crashed at boot (non-fatal): %s", e)
+
     yield
 
 

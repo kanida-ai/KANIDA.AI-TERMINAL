@@ -1,0 +1,165 @@
+"""Boot-time recovery for AutoTrade sessions.
+
+PROBLEM (the bug this fixes): the per-session tick driver and entry scheduler are
+in-memory daemon threads (see monitoring/tick_driver.py + monitoring/
+entry_scheduler.py). They DIE on a backend restart, so after a restart:
+  * RUNNING sessions stop refreshing ltp / gross_return (the "LTP not updating"
+    symptom) and the kill switch no longer AUTO-fires, and
+  * SCHEDULED sessions whose entry_time hasn't arrived yet silently never fire.
+
+FIX: `resume_active_sessions()` scans autotrade_sessions on startup and re-arms
+the in-memory threads from the persisted state:
+  * status == 'RUNNING'   → re-arm tick_driver.start_for_session (LTP/gross_return
+                            keep refreshing; kill switch live again).
+  * status == 'SCHEDULED' and entry_time (today IST) still in the FUTURE
+                            → re-arm entry_scheduler.start_for_session.
+  * status == 'SCHEDULED' and entry_time already PASSED while we were down
+                            → fire the entry leg NOW (so it doesn't silently
+                            hang). Paper = no real orders.
+
+SAFETY / SEMANTICS:
+  * Additive + idempotent: start_for_session() on both threads is a no-op when a
+    driver/scheduler is already armed, so calling resume twice is harmless.
+  * DATA-ISOLATION is inherited from the existing paths — re-arming the tick
+    driver and firing via session._fire_entries() write ONLY to
+    autotrade_positions, NEVER falcon_position_state.
+  * Paper sessions place NO real orders (brokers built dry_run=True). Live exits/
+    entries remain gated by FALCON_AUTOTRADE_ENABLED + mode='live'.
+  * Wrapped at the call site (main.py lifespan) in try/except so it can never
+    block boot. Each per-session step is also individually guarded so one bad
+    session can't abort recovery of the others.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List
+
+from falcon.db import falcon_conn
+
+from .monitoring import tick_driver
+from .monitoring import entry_scheduler
+
+log = logging.getLogger("kanida.autotrade.recovery")
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _active_sessions() -> List[Dict[str, Any]]:
+    """RUNNING + SCHEDULED sessions (the only states with live in-memory threads)."""
+    with falcon_conn() as con:
+        rows = con.execute(
+            """SELECT session_id, status FROM autotrade_sessions
+               WHERE status IN ('RUNNING', 'SCHEDULED')
+               ORDER BY created_at ASC"""
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _resume_running(session_id: str) -> str:
+    """Re-arm the tick driver for a RUNNING session. Returns an outcome tag."""
+    armed = tick_driver.start_for_session(session_id)
+    if armed:
+        log.info("recovery: re-armed tick driver for RUNNING session %s", session_id)
+        return "tick_rearmed"
+    # Already running (or autostart disabled in tests) — idempotent no-op.
+    log.info("recovery: tick driver already armed (or disabled) for %s", session_id)
+    return "tick_already_armed"
+
+
+def _resume_scheduled(session_id: str) -> str:
+    """Re-arm the entry scheduler for a SCHEDULED session, OR fire it now if its
+    entry_time already passed while the backend was down. Returns an outcome tag.
+    """
+    # Defer the heavy import so module import stays cheap and circular-safe.
+    from .session import TradingSession, _parse_entry_time_today_ist
+
+    sess = TradingSession.load(session_id)
+    if sess is None:
+        log.warning("recovery: SCHEDULED session %s not found — skipping", session_id)
+        return "scheduled_missing"
+
+    try:
+        target = _parse_entry_time_today_ist(sess.config.entry_time)
+    except ValueError as e:
+        # Unparseable entry_time → fire immediately (never silently hang),
+        # mirroring session._start_scheduled()'s fallback.
+        log.warning("recovery: SCHEDULED session %s has unparseable entry_time "
+                    "(%s) — firing now", session_id, e)
+        asyncio.run(sess._fire_entries())
+        return "scheduled_fired_unparseable"
+
+    now = datetime.now(IST)
+    if now >= target:
+        # entry_time passed while we were down → fire now so it doesn't hang.
+        log.warning("recovery: SCHEDULED session %s entry_time %s already passed "
+                    "while down — firing now", session_id, target.isoformat())
+        asyncio.run(sess._fire_entries())
+        return "scheduled_fired_pastdue"
+
+    # Still in the future → re-arm the scheduler thread.
+    armed = entry_scheduler.start_for_session(session_id, target)
+    seconds = int(max(0.0, (target - now).total_seconds()))
+    if armed:
+        log.info("recovery: re-armed entry scheduler for %s — fires at %s (in %ss)",
+                 session_id, target.isoformat(), seconds)
+        return "scheduled_rearmed"
+    log.info("recovery: entry scheduler already armed for %s", session_id)
+    return "scheduled_already_armed"
+
+
+def resume_active_sessions() -> Dict[str, Any]:
+    """Scan autotrade_sessions and re-arm in-memory threads lost to a restart.
+
+    Idempotent + safe when there are no active sessions. Returns a summary dict
+    (counts + per-session outcomes) and logs a one-line summary. Never raises:
+    each per-session step is individually guarded so one bad row can't abort the
+    rest of recovery.
+    """
+    summary: Dict[str, Any] = {
+        "running": 0, "scheduled": 0, "fired": 0, "rearmed": 0,
+        "errors": 0, "sessions": [],
+    }
+    try:
+        sessions = _active_sessions()
+    except Exception as e:  # pragma: no cover - DB unavailable at boot
+        log.exception("recovery: failed to query active sessions: %s", e)
+        return summary
+
+    if not sessions:
+        log.info("recovery: no active AutoTrade sessions to resume.")
+        return summary
+
+    for s in sessions:
+        sid = s["session_id"]
+        status = s["status"]
+        try:
+            if status == "RUNNING":
+                outcome = _resume_running(sid)
+                summary["running"] += 1
+                if outcome == "tick_rearmed":
+                    summary["rearmed"] += 1
+            elif status == "SCHEDULED":
+                outcome = _resume_scheduled(sid)
+                summary["scheduled"] += 1
+                if "fired" in outcome:
+                    summary["fired"] += 1
+                elif "rearmed" in outcome:
+                    summary["rearmed"] += 1
+            else:  # pragma: no cover - filtered by the query above
+                outcome = "skipped"
+            summary["sessions"].append({"session_id": sid, "status": status,
+                                        "outcome": outcome})
+        except Exception as e:  # one bad session must not abort the rest
+            log.exception("recovery: failed to resume session %s (%s): %s",
+                          sid, status, e)
+            summary["errors"] += 1
+            summary["sessions"].append({"session_id": sid, "status": status,
+                                        "outcome": "error", "error": str(e)})
+
+    log.info("recovery: resumed AutoTrade sessions — running=%d scheduled=%d "
+             "fired=%d rearmed=%d errors=%d",
+             summary["running"], summary["scheduled"], summary["fired"],
+             summary["rearmed"], summary["errors"])
+    return summary
