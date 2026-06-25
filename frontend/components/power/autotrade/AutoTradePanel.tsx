@@ -41,10 +41,11 @@ import TrailConfigPage from '@/app/falcon/config/page'
 import FalconAdminPage from '@/app/falcon/admin/page'
 import FalconTradePage from '@/app/falcon/trade/page'
 
-type Tab = 'sessions' | 'premarket' | 'positions' | 'config' | 'engine'
+type Tab = 'sessions' | 'trade' | 'premarket' | 'positions' | 'config' | 'engine'
 
 const TABS: { id: Tab; label: string; icon: (n: number) => React.ReactNode }[] = [
   { id: 'sessions',  label: 'Sessions',   icon: ICON.bolt },
+  { id: 'trade',     label: 'Trade',      icon: ICON.arrow },
   { id: 'premarket', label: 'Pre-Market', icon: ICON.clock },
   { id: 'positions', label: 'Positions',  icon: ICON.shield },
   { id: 'config',    label: 'Config',     icon: ICON.trend },
@@ -112,22 +113,12 @@ export function AutoTradePanel({ firstName }: { firstName: string }) {
         {tab === 'positions' && <LegacyMount><FalconPositionsPage /></LegacyMount>}
         {tab === 'config'    && <LegacyMount><TrailConfigPage /></LegacyMount>}
 
+        {/* Trade — the live manual entry window (preview → smoke → place), now its own tab. */}
+        {tab === 'trade'     && <LegacyMount><FalconTradePage /></LegacyMount>}
+
         {tab === 'engine' && (
           <div className="mx-auto w-full max-w-5xl px-5 pb-10 sm:px-8">
-            {/* Manual entries: preview → smoke → place lives in the Trade screen. */}
-            <details className="mt-4 rounded-2xl border" style={{ borderColor: C.line2, background: C.card2 }}>
-              <summary className="cursor-pointer list-none flex items-center gap-2 px-4 py-3">
-                <span style={{ color: C.mint }}>{ICON.bolt(15)}</span>
-                <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>
-                  Manual entries — Trade (preview → smoke → place)
-                </span>
-                <span className="ml-auto text-[10.5px]" style={{ color: C.faint }}>expand</span>
-              </summary>
-              <div className="border-t" style={{ borderColor: C.line2 }}>
-                <LegacyMount><FalconTradePage /></LegacyMount>
-              </div>
-            </details>
-
+            {/* Manual Trade (preview → smoke → place) is now its own top-level "Trade" tab. */}
             {/* Preflight / jobs / Kite token / inbox. */}
             <div className="mt-4">
               <LegacyMount><FalconAdminPage /></LegacyMount>
