@@ -5,13 +5,23 @@ existing trade layer uses). Safe to call repeatedly (IF NOT EXISTS + ALTER
 guards). Called once at app boot from autotrade.api.autotrade_routes import,
 and also exposed for tests / manual invocation.
 
+DATA-ISOLATION (CRITICAL): autotrade session positions live in their OWN table,
+`autotrade_positions`, keyed by (session_id, symbol[, broker_profile]). The
+autotrade system must NEVER read/write/upsert/lock falcon_position_state for
+session positions — that table belongs to the existing Falcon swing system and
+its PRIMARY KEY is `symbol`, so a paper session writing into it would overwrite
+a real held position. See the regression test in tests/autotrade.
+
 This module ADDS the following without touching any existing table definition:
-  * falcon_position_state.exit_lock          (INTEGER 0/1)  — exit gate lock
-  * falcon_position_state.exit_initiated_by  (TEXT)         — who claimed exit
-  * falcon_position_state.session_id         (TEXT)         — links to session
-  * falcon_position_state.broker_profile     (TEXT)         — owning broker
-  * falcon_position_state.total_allocated_capital (REAL)    — session denom snapshot
-  * falcon_position_state.unrealised_pnl     (REAL)         — last computed uPnL
+  * autotrade_positions         — ISOLATED session position store (the fix)
+  * falcon_position_state.exit_lock          (INTEGER 0/1)  — legacy, now unused
+  * falcon_position_state.exit_initiated_by  (TEXT)         — legacy, now unused
+  * falcon_position_state.session_id         (TEXT)         — legacy, now unused
+  * falcon_position_state.broker_profile     (TEXT)         — legacy, now unused
+  * falcon_position_state.total_allocated_capital (REAL)    — legacy, now unused
+  * falcon_position_state.unrealised_pnl     (REAL)         — legacy, now unused
+    (These columns are kept as-is — harmless — and are NOT dropped, but the
+     autotrade code no longer touches falcon_position_state at all.)
   * autotrade_sessions          — TradingSessionConfig persistence + status
   * autotrade_config_presets    — named saved config presets
   * autotrade_broker_profiles   — BrokerProfile rows (no plaintext secrets)
@@ -78,6 +88,7 @@ def run_migrations() -> dict:
         con.executescript(_SCHEMA_SQL)
 
         for t in (
+            "autotrade_positions",
             "autotrade_sessions", "autotrade_config_presets",
             "autotrade_broker_profiles", "autotrade_slippage",
             "autotrade_portfolio_snapshots", "autotrade_kill_switch_log",
@@ -93,6 +104,38 @@ def run_migrations() -> dict:
 
 
 _SCHEMA_SQL = """
+-- ISOLATED autotrade session positions. The autotrade system reads/writes ONLY
+-- this table for session positions — never falcon_position_state. Composite
+-- uniqueness on (session_id, symbol, broker_profile) so a paper session can
+-- never collide with (or overwrite) a real Falcon swing position keyed by
+-- `symbol` in falcon_position_state.
+CREATE TABLE IF NOT EXISTS autotrade_positions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    broker_profile  TEXT,
+    symbol          TEXT NOT NULL,
+    instrument_type TEXT NOT NULL DEFAULT 'EQ',
+    exchange        TEXT,
+    qty             INTEGER NOT NULL DEFAULT 0,
+    avg_price       REAL NOT NULL DEFAULT 0,
+    sl_level        REAL,
+    target_price    REAL,
+    ltp             REAL,
+    unrealised_pnl  REAL,
+    status          TEXT NOT NULL DEFAULT 'OPEN',  -- OPEN | CLOSED | EXIT_FAILED
+    exit_lock       INTEGER NOT NULL DEFAULT 0,
+    exit_initiated_by TEXT,
+    opened_at       TEXT,
+    closed_at       TEXT,
+    exit_price      REAL,
+    realised_pnl    REAL,
+    close_reason    TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_autotrade_positions_sess_sym_prof
+    ON autotrade_positions(session_id, symbol, broker_profile);
+CREATE INDEX IF NOT EXISTS idx_autotrade_positions_session
+    ON autotrade_positions(session_id, status);
+
 -- Sessions: one row per TradingSession. config_json holds the full
 -- TradingSessionConfig (sans secrets). status drives the state machine.
 CREATE TABLE IF NOT EXISTS autotrade_sessions (

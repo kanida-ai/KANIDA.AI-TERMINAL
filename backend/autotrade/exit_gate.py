@@ -1,23 +1,33 @@
-"""The SINGLE exit gate. Every exit — the 4 existing per-position / day-bound
-exits AND the new portfolio kill switch — claims a position through here so two
-mechanisms can never double-exit the same position.
+"""The exit gate(s) — atomic exit-claim locks so two mechanisms can never
+double-exit the same position.
 
-Mechanism: an atomic, conditional UPDATE on falcon_position_state sets
-exit_lock=1 only when it is currently 0/NULL. SQLite serialises writes, so the
-UPDATE...WHERE exit_lock=0 is the row lock — exactly one caller flips it from 0
-to 1 and sees rowcount==1; everyone else sees 0 and is blocked.
+TWO ISOLATED SCOPES:
 
-claim_exit(symbol, reason) → bool
-    True  → caller owns the exit, proceed to place the market exit.
-    False → another mechanism already claimed it; do NOT place an order.
+1. The EXISTING Falcon swing system (trail_manager) locks on
+   falcon_position_state keyed by `symbol`. That is left UNCHANGED — it is a
+   separate system and legitimately owns falcon_position_state. The functions
+   claim_exit / release_exit / is_locked / try_exit_position keep operating on
+   falcon_position_state for that caller.
 
-try_exit_position(symbol, reason, broker, qty=None) → dict
-    Convenience wrapper: claim, then (if won) place the market exit via the
-    broker (dry-run-safe). Used by the kill switch. The existing exit executors
-    integrate by calling claim_exit() FIRST (minimal wrap — they keep their own
-    Kite placement logic intact).
+2. The NEW autotrade kill switch + per-session exits lock on the ISOLATED
+   autotrade_positions table, keyed by (session_id, symbol). These are the
+   *_session functions. The autotrade system NEVER touches falcon_position_state.
 
-release_exit(symbol) — for tests / recovery only. Resets the lock.
+Mechanism (both scopes): an atomic, conditional UPDATE sets exit_lock=1 only
+when it is currently 0/NULL. SQLite serialises writes, so UPDATE ... WHERE
+exit_lock=0 is the row lock — exactly one caller flips it from 0 to 1 and sees
+rowcount==1; everyone else sees 0 and is blocked.
+
+Autotrade API (session-scoped):
+    claim_exit_session(session_id, symbol, reason) → bool
+    release_exit_session(session_id, symbol)
+    is_locked_session(session_id, symbol) → bool
+
+Falcon API (legacy, falcon_position_state — DO NOT route autotrade through it):
+    claim_exit(symbol, reason) → bool
+    release_exit(symbol)
+    is_locked(symbol) → bool
+    try_exit_position(symbol, reason, broker, qty=None) → dict
 """
 from __future__ import annotations
 
@@ -38,6 +48,74 @@ VALID_REASONS = {
     "BREACHED_SL", "TIME_STOP", "TARGET_HIT",
 }
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# AUTOTRADE session-scoped exit gate — locks autotrade_positions, never
+# falcon_position_state. Keyed by (session_id, symbol).
+# ════════════════════════════════════════════════════════════════════════════
+
+def claim_exit_session(session_id: str, symbol: str, reason: str) -> bool:
+    """Atomically claim the exit for (session_id, symbol) in autotrade_positions.
+
+    True  → this caller owns the exit (lock was free, or re-entrant same reason).
+    False → another mechanism already claimed it (do NOT place another order),
+            or no such open position.
+    """
+    if reason not in VALID_REASONS:
+        log.warning("exit_gate: unrecognised reason %r for %s/%s (allowing)",
+                    reason, session_id, symbol)
+    now = datetime.now(IST).isoformat()
+    with falcon_conn() as con:
+        cur = con.execute(
+            """UPDATE autotrade_positions
+               SET exit_lock = 1, exit_initiated_by = ?
+               WHERE session_id = ? AND symbol = ?
+                 AND COALESCE(exit_lock, 0) = 0""",
+            (reason, session_id, symbol),
+        )
+        con.commit()
+        if cur.rowcount == 1:
+            log.info("exit_gate: %s/%s claimed by %s", session_id, symbol, reason)
+            return True
+        row = con.execute(
+            """SELECT exit_initiated_by FROM autotrade_positions
+               WHERE session_id=? AND symbol=?""",
+            (session_id, symbol),
+        ).fetchone()
+    owner = row["exit_initiated_by"] if row else "NO_SUCH_POSITION"
+    if owner == reason:
+        log.info("exit_gate: %s/%s re-entrant claim by %s", session_id, symbol, reason)
+        return True
+    log.info("exit_gate: %s/%s blocked — owned by %s (wanted %s)",
+             session_id, symbol, owner, reason)
+    return False
+
+
+def release_exit_session(session_id: str, symbol: str) -> None:
+    """Reset the session lock. For tests / operator recovery only."""
+    with falcon_conn() as con:
+        con.execute(
+            """UPDATE autotrade_positions
+               SET exit_lock=0, exit_initiated_by=NULL
+               WHERE session_id=? AND symbol=?""",
+            (session_id, symbol),
+        )
+        con.commit()
+
+
+def is_locked_session(session_id: str, symbol: str) -> bool:
+    with falcon_conn() as con:
+        row = con.execute(
+            """SELECT COALESCE(exit_lock,0) AS l FROM autotrade_positions
+               WHERE session_id=? AND symbol=?""",
+            (session_id, symbol),
+        ).fetchone()
+    return bool(row and row["l"])
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# FALCON legacy exit gate — falcon_position_state (existing swing system only).
+# ════════════════════════════════════════════════════════════════════════════
 
 def _ensure_lock_columns(con) -> None:
     """Defensive: make sure exit_lock / exit_initiated_by exist. The migration

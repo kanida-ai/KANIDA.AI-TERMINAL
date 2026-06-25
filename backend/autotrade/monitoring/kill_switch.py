@@ -81,16 +81,18 @@ class KillSwitchExecutor:
                 or next(iter(self.brokers.values()), None)
             if broker is None:
                 continue
-            # Single exit gate: claim first. If another mechanism already owns
-            # this exit (e.g. day-bound fired the same second), skip — no
-            # duplicate order.
-            if not exit_gate.claim_exit(symbol, "KILL_SWITCH"):
+            # Single exit gate (session-scoped on autotrade_positions): claim
+            # first. If another mechanism already owns this exit (e.g. day-bound
+            # fired the same second), skip — no duplicate order.
+            if not exit_gate.claim_exit_session(self.session_id, symbol, "KILL_SWITCH"):
                 exit_meta.append({"symbol": symbol, "claimed": False})
                 continue
             qty = int(pos.get("qty") or 0)   # recompute open qty (spec rule)
             itype = pos.get("instrument_type") or "EQ"
+            prof_id = pos.get("broker_profile")
             exit_coros.append(broker.place_market_exit(symbol, qty, itype))
-            exit_meta.append({"symbol": symbol, "claimed": True, "qty": qty})
+            exit_meta.append({"symbol": symbol, "claimed": True, "qty": qty,
+                              "broker_profile": prof_id})
 
         results = await asyncio.gather(*exit_coros, return_exceptions=True)
 
@@ -107,17 +109,23 @@ class KillSwitchExecutor:
                 n_failed += 1
                 alerts.send_urgent(
                     f"MANUAL EXIT REQUIRED: {meta['symbol']} ({self.session_id})")
-                self._mark_exit_failed(meta["symbol"], str(res))
+                self.registry.mark_exit_failed(
+                    meta["symbol"], str(res),
+                    broker_profile=meta.get("broker_profile"))
                 details.append({**meta, "status": "EXIT_FAILED", "error": str(res)})
             elif getattr(res, "status", None) == "FAILED":
                 n_failed += 1
                 alerts.send_urgent(
                     f"MANUAL EXIT REQUIRED: {meta['symbol']} ({self.session_id})")
-                self._mark_exit_failed(meta["symbol"], res.error or "exit failed")
+                self.registry.mark_exit_failed(
+                    meta["symbol"], res.error or "exit failed",
+                    broker_profile=meta.get("broker_profile"))
                 details.append({**meta, "status": "EXIT_FAILED", "error": res.error})
             else:
                 n_ok += 1
-                self.registry.mark_closed(meta["symbol"], "KILL_SWITCH")
+                self.registry.mark_closed(
+                    meta["symbol"], "KILL_SWITCH",
+                    broker_profile=meta.get("broker_profile"))
                 details.append({**meta, "status": getattr(res, "status", "PLACED"),
                                 "broker_order_id": getattr(res, "broker_order_id", None)})
 
@@ -145,14 +153,6 @@ class KillSwitchExecutor:
                     "UPDATE autotrade_sessions SET status=?, "
                     "closed_at=COALESCE(?, closed_at) WHERE session_id=?",
                     (status, closed_at, self.session_id))
-            con.commit()
-
-    def _mark_exit_failed(self, symbol: str, error: str) -> None:
-        with falcon_conn() as con:
-            con.execute(
-                "UPDATE falcon_position_state SET last_event_kind='EXIT_FAILED', "
-                "last_event_at=?, last_event_kind=? WHERE symbol=?",
-                (datetime.now(IST).isoformat(), "EXIT_FAILED", symbol))
             con.commit()
 
     def _log_fire(self, trigger_reason, gross_return, n_positions,

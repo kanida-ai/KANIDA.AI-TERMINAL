@@ -7,22 +7,44 @@ import asyncio
 
 import pytest
 
+import time
+
 import autotrade.broker.router as router_mod
 from autotrade.config import TradingSessionConfig, BrokerProfile
 from autotrade.session import TradingSession
 from autotrade import exit_gate
+from autotrade.monitoring import tick_driver
 from tests.autotrade.conftest import seed_signals
 from tests.autotrade.mock_broker import MockBroker
+
+
+def _falcon_rows_for_session(session_id):
+    """Count any falcon_position_state rows referencing this autotrade session.
+    Returns (total_rows_in_table, rows_linked_to_session)."""
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        total = con.execute(
+            "SELECT COUNT(*) FROM falcon_position_state").fetchone()[0]
+        cols = [r[1] for r in con.execute(
+            "PRAGMA table_info(falcon_position_state)")]
+        linked = 0
+        if "session_id" in cols:
+            linked = con.execute(
+                "SELECT COUNT(*) FROM falcon_position_state WHERE session_id=?",
+                (session_id,)).fetchone()[0]
+    return total, linked
 
 
 @pytest.fixture
 def patched_brokers(monkeypatch):
     created = {}
+    # SHARED ltps dict so every broker built (incl. the background tick driver's
+    # independently-loaded session) sees the same live prices. set_ltp on any
+    # broker mutates this shared dict.
+    shared_ltps = {"A": 100.0, "B": 200.0, "C": 50.0, "D": 150.0, "E": 300.0}
 
     def fake_build_client(profile, dry_run=True):
-        mb = MockBroker(profile=profile, dry_run=False,
-                        ltps={"A": 100.0, "B": 200.0, "C": 50.0,
-                              "D": 150.0, "E": 300.0})
+        mb = MockBroker(profile=profile, dry_run=False, ltps=shared_ltps)
         created[profile.profile_id] = mb
         return mb
 
@@ -88,8 +110,137 @@ def test_trailing_stop_then_kill_denominator(clean_positions, patched_brokers):
     sess = TradingSession.create(cfg, mode="paper")
     asyncio.run(sess.start())
     # Simulate a trailing-stop exit on C via the shared exit gate path.
-    assert exit_gate.claim_exit("C", "TRAILING_STOP") is True
+    assert exit_gate.claim_exit_session(sess.session_id, "C", "TRAILING_STOP") is True
     sess.registry.mark_closed("C", "TRAILING_STOP")
     # Denominator unchanged.
     assert sess.monitor.total_allocated_capital == cap
     assert sess.status()["n_open_positions"] == 4
+
+
+# ── REGRESSION TEST FOR THE BUG ──────────────────────────────────────────────
+# A paper session must write ONLY to autotrade_positions and leave
+# falcon_position_state COMPLETELY UNTOUCHED. This is the exact bug that
+# overwrote real held positions in the prod smoke test.
+
+def test_session_does_not_touch_falcon_position_state(clean_positions,
+                                                      patched_brokers):
+    from falcon.db import falcon_conn
+    # Seed a REAL existing Falcon swing position for one of the same symbols.
+    # If the bug regressed, the paper session would overwrite this row.
+    with falcon_conn() as con:
+        con.execute(
+            """INSERT INTO falcon_position_state
+               (symbol, managed_by, product, qty, avg_entry, initial_sl_price,
+                current_sl_price, target_price, high_water_price, entry_date)
+               VALUES ('A','falcon','CNC', 999, 55.5, 50, 50, 70, 60, '2026-06-01')""")
+        con.commit()
+
+    seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0),
+                  ("C", 3, 7.0, 50.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=300000.0, top_n_stocks=3,
+                               sizing_mode="equal", kill_switch_enabled=False)
+    sess = TradingSession.create(cfg, mode="paper")
+    asyncio.run(sess.start())
+
+    # All session positions landed in autotrade_positions.
+    with falcon_conn() as con:
+        at_rows = con.execute(
+            "SELECT symbol, qty, avg_price FROM autotrade_positions WHERE session_id=?",
+            (sess.session_id,)).fetchall()
+    assert len(at_rows) == 3
+    at_map = {r["symbol"]: dict(r) for r in at_rows}
+    assert set(at_map) == {"A", "B", "C"}
+
+    # The pre-existing Falcon swing row is UNCHANGED — qty/avg_entry intact.
+    with falcon_conn() as con:
+        fp = con.execute(
+            "SELECT symbol, qty, avg_entry, managed_by FROM falcon_position_state "
+            "WHERE symbol='A'").fetchone()
+    assert fp is not None
+    assert fp["qty"] == 999            # NOT overwritten by the session's qty
+    assert abs(fp["avg_entry"] - 55.5) < 1e-9
+    assert fp["managed_by"] == "falcon"
+
+    # ZERO falcon_position_state rows reference this session — full isolation.
+    _, linked = _falcon_rows_for_session(sess.session_id)
+    assert linked == 0
+
+    # And the session never CREATED extra falcon_position_state rows.
+    with falcon_conn() as con:
+        total_fp = con.execute(
+            "SELECT COUNT(*) FROM falcon_position_state").fetchone()[0]
+    assert total_fp == 1               # only the one pre-existing real position
+
+
+def test_gross_return_from_isolated_table_frozen_denominator(clean_positions,
+                                                             patched_brokers):
+    """gross_return is computed from autotrade_positions only, and the
+    denominator stays the frozen total_allocated_capital."""
+    seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0)])
+    cap = 100000.0
+    cfg = TradingSessionConfig(total_allocated_capital=cap, top_n_stocks=2,
+                               sizing_mode="equal", kill_switch_enabled=False)
+    sess = TradingSession.create(cfg, mode="paper")
+    asyncio.run(sess.start())
+    for mb in patched_brokers.values():
+        mb.set_ltp("A", 110.0)
+        mb.set_ltp("B", 220.0)
+    sess.monitor.refresh_ltps(sess.brokers)
+    gr = sess.monitor.compute_gross_return()
+    # qty A = 50000/100 = 500 → uPnL 5000; qty B = 50000/200 = 250 → uPnL 5000.
+    assert abs(gr - (10000.0 / cap)) < 1e-9
+    assert sess.monitor.total_allocated_capital == cap
+    # Denominator frozen even after closing a position.
+    sess.registry.mark_closed("A", "TRAILING_STOP")
+    assert sess.monitor.total_allocated_capital == cap
+    assert sess.monitor.compute_gross_return() < gr
+
+
+def test_kill_switch_autofires_via_tick_driver(clean_positions, patched_brokers):
+    """The background tick driver refreshes ltp + gross_return and AUTO-fires the
+    kill switch when the threshold is crossed (paper — no real orders)."""
+    seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=100000.0, top_n_stocks=2,
+                               sizing_mode="equal", kill_switch_enabled=True,
+                               kill_switch_pct=0.005, kill_switch_direction="profit")
+    sess = TradingSession.create(cfg, mode="paper")
+
+    # Enable autostart + a fast interval for this test, then drive prices up so
+    # the driver's own next tick crosses the threshold and fires.
+    import os
+    tick_driver.set_autostart(True)
+    os.environ["FALCON_AUTOTRADE_TICK_INTERVAL"] = "0.2"
+    try:
+        asyncio.run(sess.start())
+        assert tick_driver.is_running(sess.session_id)
+        # The driver loads its OWN session/brokers; patch all brokers it created.
+        for mb in patched_brokers.values():
+            mb.set_ltp("A", 130.0)
+            mb.set_ltp("B", 260.0)
+        # Wait for the driver to tick + fire (interval default 5s; poll status).
+        fired = False
+        deadline = time.time() + 12.0
+        from falcon.db import falcon_conn
+        while time.time() < deadline:
+            with falcon_conn() as con:
+                row = con.execute(
+                    "SELECT status FROM autotrade_sessions WHERE session_id=?",
+                    (sess.session_id,)).fetchone()
+            if row and row["status"] == "CLOSED":
+                fired = True
+                break
+            time.sleep(0.25)
+        assert fired, "kill switch did not auto-fire via the tick driver"
+        # A kill-switch fire was logged for this session.
+        with falcon_conn() as con:
+            n = con.execute(
+                "SELECT COUNT(*) FROM autotrade_kill_switch_log WHERE session_id=?",
+                (sess.session_id,)).fetchone()[0]
+        assert n >= 1
+        # Driver self-stopped (session no longer RUNNING).
+        time.sleep(0.5)
+        assert not tick_driver.is_running(sess.session_id)
+    finally:
+        tick_driver.set_autostart(False)
+        tick_driver.stop_for_session(sess.session_id)
+        os.environ.pop("FALCON_AUTOTRADE_TICK_INTERVAL", None)

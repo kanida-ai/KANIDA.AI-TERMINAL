@@ -67,6 +67,11 @@ def _db():
     _seed_base_schema(_TMP_DB)
     from autotrade.db_migrations import run_migrations
     run_migrations()
+    # Default: tests drive session.tick() manually, so the background tick driver
+    # must NOT auto-start (it would race assertions on a shared temp DB). The
+    # dedicated auto-fire test re-enables it for its own scope.
+    from autotrade.monitoring import tick_driver
+    tick_driver.set_autostart(False)
     yield
     try:
         os.remove(_TMP_DB)
@@ -76,14 +81,32 @@ def _db():
 
 @pytest.fixture
 def clean_positions():
-    """Wipe positions between tests."""
+    """Wipe positions between tests + stop any background tick drivers so their
+    daemon threads can't mutate the shared temp DB across tests."""
     from falcon.db import falcon_conn
+    from autotrade.monitoring import tick_driver
+
+    def _stop_all_drivers():
+        with tick_driver._LOCK:
+            drivers = list(tick_driver._DRIVERS.values())
+        for drv in drivers:
+            drv.stop()
+        for drv in drivers:
+            drv._thread.join(timeout=2.0)
+
+    _stop_all_drivers()
     with falcon_conn() as con:
+        # autotrade_positions is the ONLY session-position store now. We also
+        # clear falcon_position_state to PROVE (in the regression test) that the
+        # autotrade path never writes into it.
+        con.execute("DELETE FROM autotrade_positions")
         con.execute("DELETE FROM falcon_position_state")
+        con.execute("DELETE FROM autotrade_sessions")
         con.execute("DELETE FROM autotrade_portfolio_snapshots")
         con.execute("DELETE FROM autotrade_kill_switch_log")
         con.commit()
     yield
+    _stop_all_drivers()
 
 
 def seed_signals(symbols_ranks):
