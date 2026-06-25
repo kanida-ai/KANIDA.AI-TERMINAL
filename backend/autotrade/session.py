@@ -117,6 +117,22 @@ class TradingSession:
         cfg = TradingSessionConfig.from_json(row["config_json"])
         return cls(session_id, cfg, mode=row["mode"])
 
+    @classmethod
+    def list_sessions(cls, limit: int = 50) -> List[Dict[str, Any]]:
+        """Recent sessions (newest first) for the operator UI session list.
+
+        This is what lets the panel SHOW existing sessions instead of resetting
+        to a blank create form — a created session stays visible/resumable.
+        """
+        with falcon_conn() as con:
+            rows = con.execute(
+                """SELECT session_id, created_at, started_at, closed_at, status, mode,
+                          total_allocated_capital, last_gross_return
+                   FROM autotrade_sessions ORDER BY created_at DESC LIMIT ?""",
+                (int(limit),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── Broker construction ───────────────────────────────────────────────────
     def _build_brokers(self) -> None:
         profiles = self.config.broker_profiles
