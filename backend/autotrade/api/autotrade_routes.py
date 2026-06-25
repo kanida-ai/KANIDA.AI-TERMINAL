@@ -147,6 +147,12 @@ def session_positions(session_id: str):
     return {"session_id": session_id, "positions": sess.positions()}
 
 
+@router.get("/autotrade/sessions")
+def session_list():
+    """List recent sessions (newest first) so the UI can show + resume them."""
+    return {"sessions": TradingSession.list_sessions()}
+
+
 @router.post("/autotrade/config/save")
 def config_save(req: SavePresetRequest):
     try:
