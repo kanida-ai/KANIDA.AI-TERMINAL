@@ -1,16 +1,19 @@
 /**
  * /power/autotrade — role-branched AutoTrade surface.
  *
- *  • OPERATOR (user.role === 'admin'): renders OperatorAutoTrade — a two-tab
- *    shell. Tab 1 "Portfolio Sessions" is the NEW multi-broker /api/autotrade/*
- *    console (create → start → status → kill) called via the same-origin Falcon
- *    proxy (ships disabled: paper default, kill off, server flag for live).
- *    Tab 2 "Operator Console" is the existing AutoTradeConsoleHub — a PURE
- *    navigation launcher (mint/F2 card grid) into the real, LIVE Falcon operator
- *    console at app/falcon/* (Trade / Pre-Market / Positions / Config / Admin +
- *    the /falcon overview). That console already exists and is protected by the
- *    site-wide HTTP Basic Auth, OUTSIDE the /power invite-auth zone — we link to
- *    it (plain <a href>), we do NOT move it.
+ *  • OPERATOR (user.role === 'admin'): renders ONE unified AutoTradePanel — a
+ *    single sub-tabbed surface where EVERYTHING AutoTrade lives (no separate
+ *    legacy panel, no "Operator Console" launcher). Tabs:
+ *      Sessions (HOME)  — the NEW multi-broker /api/autotrade/* system
+ *                         (create / list / RESUME / status / kill).
+ *      Pre-Market       — the LIVE legacy app/falcon/premarket screen, reused.
+ *      Positions        — the LIVE legacy app/falcon/positions screen, reused.
+ *      Config           — the LIVE legacy app/falcon/config screen, reused.
+ *      Engine           — the LIVE legacy app/falcon/admin screen + embedded
+ *                         app/falcon/trade (manual preview→smoke→place), reused.
+ *    The reused legacy screens call FalconAPI, which routes through the same-
+ *    origin /api/falcon-proxy (operator token injected server-side), so they
+ *    work unchanged inside /power. The /falcon/* routes stay live as a fallback.
  *
  *  • EVERYONE ELSE: the existing AutoTradeExperience — a launch-pending UX
  *    (style / capital / readiness / waitlist preview). Per-user broker connect +
@@ -25,7 +28,7 @@
 import { PowerAPI } from '@/lib/power-api'
 import { getCurrentUser } from '@/lib/power-auth'
 import { AutoTradeExperience } from '@/components/power/autotrade/AutoTradeExperience'
-import { OperatorAutoTrade } from '@/components/power/autotrade/OperatorAutoTrade'
+import { AutoTradePanel } from '@/components/power/autotrade/AutoTradePanel'
 import type { Top20Response } from '@/lib/falcon-top20-types'
 
 export const dynamic = 'force-dynamic'
@@ -40,11 +43,11 @@ export default async function AutoTradePage() {
   const user = await getCurrentUser()
   const firstName = firstNameOf(user?.display_name ?? null, user?.email ?? null)
 
-  // Operator branch: launcher into the live console — same admin check the shell
-  // uses for isAdmin. No /api/falcon fetch here; links only.
+  // Operator branch: the single unified panel — same admin check the shell uses
+  // for isAdmin. The panel's children fetch their own data client-side.
   const isOperator = user?.role === 'admin'
   if (isOperator) {
-    return <OperatorAutoTrade firstName={firstName} />
+    return <AutoTradePanel firstName={firstName} />
   }
 
   // Non-operator branch: unchanged launch-pending experience.

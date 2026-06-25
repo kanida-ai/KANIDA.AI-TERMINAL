@@ -38,6 +38,58 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-06-24 — **UNIFIED AutoTrade panel — ONE place for everything**
+  (operator's explicit ask). Replaced the two-tab `OperatorAutoTrade`
+  (PortfolioAutoTrade + `AutoTradeConsoleHub` launcher) with a SINGLE sub-tabbed
+  `components/power/autotrade/AutoTradePanel.tsx` rendered by the operator branch
+  of `app/power/(app)/autotrade/page.tsx` (role==='admin'). The
+  `AutoTradeConsoleHub` LAUNCHER is GONE — its 6 links are now real tabs.
+  UI-ONLY; no backend/execution code touched; `/falcon/*` routes left fully
+  working as a fallback. tsc + `npm run build` GREEN.
+  - **5 tabs, everything in one panel:**
+    1. **Sessions** (HOME/default) — the new multi-broker `/api/autotrade/*`
+       system (`PortfolioAutoTrade`).
+    2. **Pre-Market** — REUSES the legacy `app/falcon/premarket/page.tsx`
+       verbatim (default export imported + rendered in the tab).
+    3. **Positions** — REUSES `app/falcon/positions/page.tsx` verbatim.
+    4. **Config** — REUSES `app/falcon/config/page.tsx` verbatim (trail config +
+       engine playbook).
+    5. **Engine** — REUSES `app/falcon/admin/page.tsx` (preflight / jobs / Kite
+       token / inbox) + an embedded `<details>` of `app/falcon/trade/page.tsx`
+       (manual preview→smoke→place).
+    Reuse mechanism: the legacy pages are plain default-export client components
+    that call `FalconAPI`, which ALREADY routes through the same-origin
+    `/api/falcon-proxy` (operator token injected server-side) — so they work
+    unchanged inside `/power`. No logic/behaviour changed; imported via the
+    `@/app/falcon/*/page` alias and mounted in a `LegacyMount` padded container.
+  - **DISAPPEARING-SESSION BUG FIXED (list + resume).** Added
+    `listSessions()` to `lib/autotrade-api.ts` (`GET` →
+    `/api/falcon-proxy/api/autotrade/sessions`, typed `SessionsListResponse` /
+    `SessionSummary`, read-only). `PortfolioAutoTrade` gained a new `'list'` HOME
+    phase: on mount it fetches the sessions and shows **"Your sessions"**
+    (newest-first, sorted by `created_at` desc) — each row shows status · mode
+    pill · gross return · capital · id · created_at. **Clicking a row RESUMES**
+    it (jumps to the live `running` view + polls status) instead of resetting to
+    a blank form. **"New session"** is now an explicit action that opens the
+    create form; after Create the list refreshes so the new session is visible,
+    and the running view has a **"← Your sessions"** back button + a **"New
+    session"** button. So a reload no longer loses your session — it restores
+    the list and you resume.
+  - **Honesty kept 1:1.** Top-of-panel framing: "Sessions run in PAPER by
+    default; live needs `FALCON_AUTOTRADE_ENABLED`; Pre-Market/Positions/Config/
+    Engine are your live Falcon operator controls." Ships-disabled banner,
+    paper-default/green + live-behind-typed-"LIVE"-confirm, KILL-typed-confirm,
+    honest loading/empty/error on the sessions list (never fabricated). All
+    numbers from the backend. Mint/F2 theme + viewport-lock preserved.
+  - **Dead code:** `OperatorAutoTrade.tsx` + `AutoTradeConsoleHub.tsx` are no
+    longer imported anywhere (kept in tree, tree-shaken; safe to delete later).
+  - **Backend needs:** `GET /api/autotrade/sessions` → `{ sessions: [{
+    session_id, status, mode, total_allocated_capital, gross_return, created_at,
+    top_n_stocks?, n_open_positions? }] }` (any order; the UI sorts by
+    created_at). If this endpoint isn't live yet, the list shows an honest error
+    + Retry (no fabrication) — the rest of the panel is unaffected.
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npm run build` ✓ compiled —
+    `/power/autotrade` + all `/falcon/*` routes built.
 - 2026-06-24 — **Portfolio AutoTrade operator UI** (LIVE multi-broker
   `/api/autotrade/*`, operator-token gated). UI-ONLY; no backend/execution code
   touched. New files: `lib/autotrade-api.ts` (transport-only client → existing

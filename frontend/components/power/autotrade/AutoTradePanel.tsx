@@ -1,0 +1,171 @@
+'use client'
+
+/**
+ * AutoTradePanel — the SINGLE unified operator AutoTrade surface.
+ *
+ * Everything AutoTrade lives here, sub-tabbed — there is NO separate legacy
+ * panel and NO "Operator Console" launcher anymore. The five tabs:
+ *
+ *   1. Sessions  (HOME)  — the NEW multi-broker /api/autotrade/* system
+ *                          (PortfolioAutoTrade): list your sessions → resume a
+ *                          live session OR create a new one → status / kill.
+ *   2. Pre-Market        — the LIVE legacy screen (app/falcon/premarket): stage /
+ *                          confirm / 9:15 deploy queue. Reused verbatim.
+ *   3. Positions         — the LIVE legacy screen (app/falcon/positions): held
+ *                          positions, SL, adopt. Reused verbatim.
+ *   4. Config            — the LIVE legacy screen (app/falcon/config): trail
+ *                          config + engine playbook. Reused verbatim.
+ *   5. Engine            — the LIVE legacy screens (app/falcon/admin = preflight /
+ *                          jobs / Kite token / inbox) + an embedded link into the
+ *                          manual Trade preview→smoke→place (app/falcon/trade).
+ *
+ * HOW THE LEGACY SCREENS WORK IN HERE: each legacy page is a plain default-export
+ * client component that calls FalconAPI, which already routes through the
+ * same-origin /api/falcon-proxy (operator token injected server-side). So they
+ * function unchanged inside /power. We import the page components directly and
+ * render them in a tab — no logic/behaviour change, and the /falcon/* routes are
+ * left fully working as a fallback.
+ *
+ * SAFETY: UI only. No backend / execution code is touched; no order is placed by
+ * this shell. Mint/F2 theme + viewport-lock (shrink-0 header + flex-1 min-h-0
+ * scroll body) preserved. Honest paper/live labelling carried from the children.
+ */
+import { useState } from 'react'
+import { C, ICON, Gear, MECHANISM_CSS } from '@/components/power/shared/cotrade-kit'
+import { PortfolioAutoTrade } from '@/components/power/autotrade/PortfolioAutoTrade'
+
+// Legacy operator screens — reused verbatim (default exports rendered as tabs).
+import PremarketPage from '@/app/falcon/premarket/page'
+import FalconPositionsPage from '@/app/falcon/positions/page'
+import TrailConfigPage from '@/app/falcon/config/page'
+import FalconAdminPage from '@/app/falcon/admin/page'
+import FalconTradePage from '@/app/falcon/trade/page'
+
+type Tab = 'sessions' | 'premarket' | 'positions' | 'config' | 'engine'
+
+const TABS: { id: Tab; label: string; icon: (n: number) => React.ReactNode }[] = [
+  { id: 'sessions',  label: 'Sessions',   icon: ICON.bolt },
+  { id: 'premarket', label: 'Pre-Market', icon: ICON.clock },
+  { id: 'positions', label: 'Positions',  icon: ICON.shield },
+  { id: 'config',    label: 'Config',     icon: ICON.trend },
+  { id: 'engine',    label: 'Engine',     icon: ICON.bot },
+]
+
+export function AutoTradePanel({ firstName }: { firstName: string }) {
+  const [tab, setTab] = useState<Tab>('sessions')
+
+  return (
+    <div className="h-full w-full flex flex-col" style={{ background: C.canvas, color: C.ink }}>
+      <style>{MECHANISM_CSS}</style>
+
+      {/* ── Header + framing + tabs (shrink-0) ───────────────────────────────── */}
+      <div className="shrink-0 px-5 pt-7 pb-3 sm:px-8">
+        <div className="mx-auto w-full max-w-5xl">
+          <div className="flex items-start gap-3">
+            <div className="flex items-center -space-x-1 shrink-0 mt-0.5">
+              <Gear size={26} dir={1} />
+              <Gear size={18} dir={-1} dim />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <h1 className="text-[20px] sm:text-[22px] font-semibold leading-tight" style={{ color: C.ink }}>
+                  AutoTrade
+                </h1>
+                <span className="inline-flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2.5 py-1"
+                  style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.42)' }}>
+                  <span className="w-1.5 h-1.5 rounded-full" style={{ background: C.mint }} />
+                  Operator
+                </span>
+              </div>
+              <p className="text-[12.5px] leading-snug mt-1" style={{ color: C.muted }}>
+                {firstName ? `${firstName}, everything` : 'Everything'} AutoTrade in one place.{' '}
+                <b style={{ color: C.ink2 }}>Sessions run in PAPER by default</b>; live needs the
+                server flag <code style={{ color: C.ink }}>FALCON_AUTOTRADE_ENABLED</code>.{' '}
+                Pre-Market, Positions, Config &amp; Engine are your live Falcon operator controls.
+              </p>
+            </div>
+          </div>
+
+          {/* Tabs */}
+          <div className="mt-5 inline-flex flex-wrap gap-0.5 rounded-xl border p-0.5"
+            style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+            {TABS.map((t) => (
+              <TabBtn key={t.id} active={tab === t.id} onClick={() => setTab(t.id)} icon={t.icon}>
+                {t.label}
+              </TabBtn>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Body (flex-1, scrolls) ───────────────────────────────────────────── */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {tab === 'sessions' && (
+          <div className="mx-auto w-full max-w-4xl px-5 pb-10 sm:px-8">
+            <PortfolioAutoTrade />
+          </div>
+        )}
+
+        {/* The legacy screens own their own internal layout/scroll; render them
+            inside the scroll body unchanged. */}
+        {tab === 'premarket' && <LegacyMount><PremarketPage /></LegacyMount>}
+        {tab === 'positions' && <LegacyMount><FalconPositionsPage /></LegacyMount>}
+        {tab === 'config'    && <LegacyMount><TrailConfigPage /></LegacyMount>}
+
+        {tab === 'engine' && (
+          <div className="mx-auto w-full max-w-5xl px-5 pb-10 sm:px-8">
+            {/* Manual entries: preview → smoke → place lives in the Trade screen. */}
+            <details className="mt-4 rounded-2xl border" style={{ borderColor: C.line2, background: C.card2 }}>
+              <summary className="cursor-pointer list-none flex items-center gap-2 px-4 py-3">
+                <span style={{ color: C.mint }}>{ICON.bolt(15)}</span>
+                <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>
+                  Manual entries — Trade (preview → smoke → place)
+                </span>
+                <span className="ml-auto text-[10.5px]" style={{ color: C.faint }}>expand</span>
+              </summary>
+              <div className="border-t" style={{ borderColor: C.line2 }}>
+                <LegacyMount><FalconTradePage /></LegacyMount>
+              </div>
+            </details>
+
+            {/* Preflight / jobs / Kite token / inbox. */}
+            <div className="mt-4">
+              <LegacyMount><FalconAdminPage /></LegacyMount>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * LegacyMount — wraps a reused legacy /falcon screen. The legacy pages were
+ * authored as standalone routes (some assume a light/page-level background); we
+ * give them a stable padded container so they sit cleanly inside the tabbed
+ * body. No props/logic are passed in — behaviour is 1:1 with the route.
+ */
+function LegacyMount({ children }: { children: React.ReactNode }) {
+  return <div className="legacy-mount">{children}</div>
+}
+
+function TabBtn({
+  active, onClick, icon, children,
+}: {
+  active: boolean; onClick: () => void; icon: (n: number) => React.ReactNode; children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex items-center gap-2 px-4 py-2 rounded-lg text-[12.5px] font-semibold transition-colors"
+      style={{
+        color: active ? '#06130c' : C.ink2,
+        background: active ? C.mint : 'transparent',
+      }}
+    >
+      {icon(14)}
+      {children}
+    </button>
+  )
+}

@@ -30,7 +30,7 @@ import {
   AutoTradeAPI,
   type Mode, type SizingMode, type OrderProduct, type KillDirection,
   type SessionConfig, type CreateResponse, type StartResponse,
-  type StatusResponse, type SavedConfig, type Broker,
+  type StatusResponse, type SavedConfig, type Broker, type SessionSummary,
 } from '@/lib/autotrade-api'
 
 // ── Safe defaults — paper + kill switch OFF, per the ships-disabled contract ──
@@ -60,7 +60,10 @@ const KILL_DIR_OPTIONS: { id: KillDirection; label: string }[] = [
 ]
 const CAPITAL_PRESETS = [100_000, 500_000, 1_000_000, 3_000_000]
 
-type Phase = 'config' | 'created' | 'running'
+// 'list' is the HOME phase: your saved sessions (newest first). 'config' is the
+// explicit New-Session form. 'created'/'running' are the live session views,
+// reached either by creating one OR by RESUMING an existing one from the list.
+type Phase = 'list' | 'config' | 'created' | 'running'
 
 // ── Small shared field primitives ────────────────────────────────────────────
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
@@ -113,10 +116,15 @@ export function PortfolioAutoTrade() {
   const [config, setConfig] = useState<SessionConfig>(DEFAULT_CONFIG)
   const [mode, setMode] = useState<Mode>('paper')
 
-  const [phase, setPhase] = useState<Phase>('config')
+  const [phase, setPhase] = useState<Phase>('list')
   const [session, setSession] = useState<CreateResponse | null>(null)
   const [startResult, setStartResult] = useState<StartResponse | null>(null)
   const [status, setStatus] = useState<StatusResponse | null>(null)
+
+  // Your Sessions list (newest first) — the HOME view. Resumes survive reload.
+  const [sessions, setSessions] = useState<SessionSummary[] | null>(null)
+  const [sessionsLoading, setSessionsLoading] = useState(false)
+  const [sessionsErr, setSessionsErr] = useState<string | null>(null)
 
   const [busy, setBusy] = useState<null | 'create' | 'start' | 'status' | 'kill'>(null)
   const [error, setError] = useState<string | null>(null)
@@ -135,6 +143,40 @@ export function PortfolioAutoTrade() {
 
   const liveReady = mode === 'paper' || liveConfirm.trim().toUpperCase() === 'LIVE'
 
+  // ── Your Sessions (list + resume) ────────────────────────────────────────────
+  const loadSessions = useCallback(async () => {
+    setSessionsLoading(true); setSessionsErr(null)
+    try {
+      const res = await AutoTradeAPI.listSessions()
+      // Newest first — sort by created_at desc when present, else keep order.
+      const list = (res.sessions ?? []).slice().sort((a, b) => {
+        const ta = a.created_at ? Date.parse(a.created_at) : 0
+        const tb = b.created_at ? Date.parse(b.created_at) : 0
+        return tb - ta
+      })
+      setSessions(list)
+    } catch (e) {
+      setSessionsErr(e instanceof Error ? e.message : 'Could not load your sessions.')
+    } finally {
+      setSessionsLoading(false)
+    }
+  }, [])
+
+  // Fetch the list once on mount so a reload RESTORES your sessions (the
+  // "session disappears" fix) instead of dumping you on a blank form.
+  useEffect(() => { loadSessions() }, [loadSessions])
+
+  // Resume an existing session: jump straight to its live view + pull status.
+  const onResume = useCallback(async (s: SessionSummary) => {
+    setError(null)
+    setSession({ session_id: s.session_id, status: s.status ?? 'unknown', mode: s.mode ?? 'paper' })
+    setStartResult(null)
+    setStatus(null)
+    setLiveConfirm(''); setKillArmed(false); setKillConfirm('')
+    setPhase('running')
+    setPoll(true)
+  }, [])
+
   // ── Actions ────────────────────────────────────────────────────────────────
   const onCreate = useCallback(async () => {
     setError(null); setBusy('create')
@@ -144,12 +186,14 @@ export function PortfolioAutoTrade() {
       setPhase('created')
       setStartResult(null)
       setStatus(null)
+      // Keep the list fresh so the new session shows the moment you return.
+      loadSessions()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to create session')
     } finally {
       setBusy(null)
     }
-  }, [mode, config])
+  }, [mode, config, loadSessions])
 
   const onStart = useCallback(async () => {
     if (!session) return
@@ -203,9 +247,19 @@ export function PortfolioAutoTrade() {
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [phase, poll, session, refreshStatus])
 
-  const resetToConfig = () => {
+  // Open the explicit New-Session form (resets the in-flight session).
+  const openNewSession = () => {
     setPhase('config'); setSession(null); setStartResult(null); setStatus(null)
+    setConfig(DEFAULT_CONFIG); setMode('paper')
     setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
+  }
+
+  // Return to the Your-Sessions list and refresh it (so a just-created/started
+  // session is visible — the disappearing-session fix).
+  const backToList = () => {
+    setPhase('list'); setSession(null); setStartResult(null); setStatus(null)
+    setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
+    loadSessions()
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -228,9 +282,98 @@ export function PortfolioAutoTrade() {
         </div>
       </div>
 
-      {/* ── CONFIG PHASE ─────────────────────────────────────────────────────── */}
+      {/* ── LIST PHASE (HOME) — Your Sessions, newest first ──────────────────── */}
+      {phase === 'list' && (
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center gap-2">
+            <span style={{ color: C.mint }}>{ICON.bolt(16)}</span>
+            <span className="text-[14px] font-semibold" style={{ color: C.ink }}>Your sessions</span>
+            <div className="ml-auto flex items-center gap-2">
+              <button type="button" disabled={sessionsLoading} onClick={loadSessions}
+                className="text-[11.5px] px-2.5 py-1.5 rounded-lg transition-colors disabled:opacity-40"
+                style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+                {sessionsLoading ? 'Refreshing…' : 'Refresh'}
+              </button>
+              <button type="button" onClick={openNewSession}
+                className="flex items-center gap-1.5 text-[12px] font-semibold px-3.5 py-1.5 rounded-lg transition-opacity"
+                style={{ color: '#06130c', background: C.mint }}>
+                {ICON.bolt(13)} New session
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+            {sessionsLoading && sessions === null ? (
+              <p className="text-[12px]" style={{ color: C.muted }}>Loading your sessions…</p>
+            ) : sessionsErr ? (
+              <div className="flex items-start gap-2 text-[12px] leading-snug" style={{ color: C.ink2 }}>
+                <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+                <span>{sessionsErr} <button type="button" onClick={loadSessions} className="underline" style={{ color: C.mint }}>Retry</button></span>
+              </div>
+            ) : !sessions?.length ? (
+              <div className="flex flex-col items-start gap-3">
+                <p className="text-[12.5px]" style={{ color: C.muted }}>
+                  No sessions yet. Create one to begin — it stays here after you create or
+                  reload, so you can resume its live view anytime.
+                </p>
+                <button type="button" onClick={openNewSession}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl text-[12.5px] font-semibold"
+                  style={{ color: '#06130c', background: C.mint }}>
+                  {ICON.bolt(14)} Create your first session
+                </button>
+              </div>
+            ) : (
+              <ul className="flex flex-col gap-2">
+                {sessions.map((s, i) => {
+                  const ret = typeof s.gross_return === 'number' ? s.gross_return : null
+                  return (
+                    <li key={s.session_id ?? i}>
+                      <button type="button" onClick={() => onResume(s)}
+                        className="w-full flex items-center gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors hover:border-[rgba(63,227,164,0.4)]"
+                        style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.015)' }}>
+                        <span className="shrink-0" style={{ color: C.mint }}>{ICON.bolt(15)}</span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[12.5px] font-semibold truncate" style={{ color: C.ink }}>
+                              {s.status ?? 'session'}
+                            </span>
+                            {s.mode && <ModePill mode={s.mode} />}
+                          </div>
+                          <div className="text-[10.5px] mt-0.5 font-mono truncate" style={{ color: C.faint }}>
+                            {s.session_id}{s.created_at ? ` · ${s.created_at}` : ''}
+                          </div>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Return</div>
+                          <div className="text-[13px] font-semibold" style={{ color: ret == null ? C.faint : pctTone(ret) }}>
+                            {ret == null ? '—' : fmtPct(ret)}
+                          </div>
+                        </div>
+                        <div className="shrink-0 text-right hidden sm:block">
+                          <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Capital</div>
+                          <div className="text-[13px] font-semibold" style={{ color: C.ink2 }}>
+                            {typeof s.total_allocated_capital === 'number' ? fmtCapital(s.total_allocated_capital) : '—'}
+                          </div>
+                        </div>
+                        <span className="shrink-0" style={{ color: C.faint }}>{ICON.chevronR(14)}</span>
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── CONFIG PHASE — explicit New Session form ─────────────────────────── */}
       {phase === 'config' && (
         <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+          <button type="button" onClick={backToList}
+            className="mb-4 inline-flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-lg transition-colors"
+            style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+            ← Your sessions
+          </button>
           {/* Mode selector */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-5">
             <span className="text-[11px] font-semibold uppercase tracking-[0.05em]" style={{ color: C.muted }}>Mode</span>
@@ -461,7 +604,7 @@ export function PortfolioAutoTrade() {
             >
               {busy === 'start' ? 'Starting…' : <>Start session {ICON.bolt(13)}</>}
             </button>
-            <button type="button" onClick={resetToConfig}
+            <button type="button" onClick={backToList}
               className="text-[12px] px-3 py-2 rounded-lg transition-colors"
               style={{ color: C.muted, border: `1px solid ${C.line}` }}>
               Discard
@@ -643,11 +786,18 @@ export function PortfolioAutoTrade() {
             )}
           </div>
 
-          <button type="button" onClick={resetToConfig}
-            className="self-start text-[12px] px-3 py-2 rounded-lg transition-colors"
-            style={{ color: C.muted, border: `1px solid ${C.line}` }}>
-            ← New session
-          </button>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={backToList}
+              className="self-start text-[12px] px-3 py-2 rounded-lg transition-colors"
+              style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+              ← Your sessions
+            </button>
+            <button type="button" onClick={openNewSession}
+              className="self-start text-[12px] px-3 py-2 rounded-lg transition-colors"
+              style={{ color: C.mint, border: `1px solid rgba(63,227,164,0.3)` }}>
+              New session
+            </button>
+          </div>
         </div>
       )}
 

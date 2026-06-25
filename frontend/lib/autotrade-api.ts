@@ -85,6 +85,25 @@ export type KillResponse = {
 
 export type PositionsResponse = { positions: OpenPosition[] }
 
+// A session as returned by GET /autotrade/sessions (newest first). The backend
+// shape is permissive — we read the fields we know and keep the rest indexable
+// so a missing/renamed field never crashes the list.
+export type SessionSummary = {
+  session_id: string
+  status?: string
+  mode?: Mode
+  total_allocated_capital?: number
+  gross_return?: number
+  created_at?: string
+  top_n_stocks?: number
+  n_open_positions?: number
+  [k: string]: unknown
+}
+export type SessionsListResponse = {
+  sessions?: SessionSummary[]
+  [k: string]: unknown
+}
+
 export type SavedConfig = {
   id?: string | number
   name?: string
@@ -128,6 +147,11 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const AutoTradeAPI = {
+  // List existing sessions (newest first) so the operator can RESUME a session
+  // instead of starting from a blank form — fixes the "session disappears on
+  // reload" gap. Read-only; places nothing.
+  listSessions: () => call<SessionsListResponse>('/sessions'),
+
   createSession: (mode: Mode, config: SessionConfig) =>
     call<CreateResponse>('/session/create', {
       method: 'POST',
