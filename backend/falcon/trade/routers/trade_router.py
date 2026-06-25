@@ -1600,3 +1600,45 @@ def positions_exit(req: PositionExitRequest):
         "exit_qty":           h["qty"],
         "exit_price":         h["current_price"],
     }
+
+
+# ── Egress IP (broker allowlist self-service) ────────────────────────────────
+# The backend's outbound IP must be on the Kite app's Allowed-IPs or live orders
+# error. This reports it so the operator can allowlist it in one glance. Cached
+# ~5 min. Operator-token gated at the router level (require_operator_token).
+_EGRESS_CACHE: Dict[str, Any] = {"ip": None, "as_of": None, "error": None, "_ts": None}
+_EGRESS_TTL = timedelta(minutes=5)
+_EGRESS_ECHOES = ("https://api.ipify.org", "https://checkip.amazonaws.com")
+
+
+def _detect_egress_ip() -> Dict[str, Any]:
+    """Return {ip, as_of, error}. Tries each echo with a short timeout; caches a
+    success ~5 min. NEVER raises — on total failure returns {ip: None, error}."""
+    now = datetime.now()
+    cached_ts = _EGRESS_CACHE.get("_ts")
+    if (cached_ts is not None and _EGRESS_CACHE.get("ip")
+            and (now - cached_ts) < _EGRESS_TTL):
+        return {"ip": _EGRESS_CACHE["ip"], "as_of": _EGRESS_CACHE["as_of"], "error": None}
+    import urllib.request  # noqa: WPS433 — stdlib, no extra dep
+    last_error: Optional[str] = None
+    for url in _EGRESS_ECHOES:
+        try:
+            with urllib.request.urlopen(url, timeout=3) as resp:  # noqa: S310
+                ip = resp.read().decode("utf-8", "replace").strip()
+            if ip:
+                as_of = datetime.now(IST).isoformat()
+                _EGRESS_CACHE.update({"ip": ip, "as_of": as_of, "error": None, "_ts": now})
+                return {"ip": ip, "as_of": as_of, "error": None}
+            last_error = f"{url} returned empty body"
+        except Exception as e:  # noqa: BLE001 — must never crash the endpoint
+            last_error = f"{type(e).__name__}: {e}"
+            log.warning("egress-ip echo %s failed: %s", url, last_error)
+    return {"ip": None, "as_of": datetime.now(IST).isoformat(),
+            "error": last_error or "all echoes failed"}
+
+
+@router.get("/falcon/egress-ip")
+def egress_ip():
+    """Backend's current outbound public IP for the Kite allowlist. Returns
+    { ip, as_of } or { ip: null, as_of, error }. Gated at the router level."""
+    return _detect_egress_ip()
