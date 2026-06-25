@@ -1,12 +1,16 @@
 /**
  * /power/autotrade — role-branched AutoTrade surface.
  *
- *  • OPERATOR (user.role === 'admin'): renders AutoTradeConsoleHub — a PURE
+ *  • OPERATOR (user.role === 'admin'): renders OperatorAutoTrade — a two-tab
+ *    shell. Tab 1 "Portfolio Sessions" is the NEW multi-broker /api/autotrade/*
+ *    console (create → start → status → kill) called via the same-origin Falcon
+ *    proxy (ships disabled: paper default, kill off, server flag for live).
+ *    Tab 2 "Operator Console" is the existing AutoTradeConsoleHub — a PURE
  *    navigation launcher (mint/F2 card grid) into the real, LIVE Falcon operator
  *    console at app/falcon/* (Trade / Pre-Market / Positions / Config / Admin +
  *    the /falcon overview). That console already exists and is protected by the
  *    site-wide HTTP Basic Auth, OUTSIDE the /power invite-auth zone — we link to
- *    it (plain <a href>), we do NOT move it and we fetch NO /api/falcon data here.
+ *    it (plain <a href>), we do NOT move it.
  *
  *  • EVERYONE ELSE: the existing AutoTradeExperience — a launch-pending UX
  *    (style / capital / readiness / waitlist preview). Per-user broker connect +
@@ -21,7 +25,7 @@
 import { PowerAPI } from '@/lib/power-api'
 import { getCurrentUser } from '@/lib/power-auth'
 import { AutoTradeExperience } from '@/components/power/autotrade/AutoTradeExperience'
-import { AutoTradeConsoleHub } from '@/components/power/autotrade/AutoTradeConsoleHub'
+import { OperatorAutoTrade } from '@/components/power/autotrade/OperatorAutoTrade'
 import type { Top20Response } from '@/lib/falcon-top20-types'
 
 export const dynamic = 'force-dynamic'
@@ -40,7 +44,7 @@ export default async function AutoTradePage() {
   // uses for isAdmin. No /api/falcon fetch here; links only.
   const isOperator = user?.role === 'admin'
   if (isOperator) {
-    return <AutoTradeConsoleHub firstName={firstName} />
+    return <OperatorAutoTrade firstName={firstName} />
   }
 
   // Non-operator branch: unchanged launch-pending experience.

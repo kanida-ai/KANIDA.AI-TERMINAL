@@ -38,6 +38,31 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-06-24 — **Portfolio AutoTrade operator UI** (LIVE multi-broker
+  `/api/autotrade/*`, operator-token gated). UI-ONLY; no backend/execution code
+  touched. New files: `lib/autotrade-api.ts` (transport-only client → existing
+  same-origin `/api/falcon-proxy/api/autotrade/...`; proxy injects the operator
+  token server-side, secret never hits the browser),
+  `components/power/autotrade/PortfolioAutoTrade.tsx` (the new console) and
+  `components/power/autotrade/OperatorAutoTrade.tsx` (two-tab shell). Wired into
+  `app/power/(app)/autotrade/page.tsx` — the `isOperator` branch now renders
+  `OperatorAutoTrade` (tab "Portfolio Sessions" [new] + tab "Operator Console" =
+  the EXISTING `AutoTradeConsoleHub`, kept, not removed). Flow: config form
+  (capital + presets / top_n 3·5·7·10 / sizing equal·pct_cap·manual /
+  max_pct_per_position when pct_cap / order_product CNC·MIS·MTF·NRML / kill switch
+  {toggle, pct, direction} / entry_time) → Create → Start (per-symbol
+  placed/skipped table) → live Status card (gross return %, kill-switch state,
+  open-positions table, 12s auto-refresh + manual refresh) → red KILL with a
+  typed "KILL" confirm. **HONESTY:** standing amber "Ships disabled" banner
+  (paper default · kill off · live needs server `FALCON_AUTOTRADE_ENABLED`);
+  Mode selector presents PAPER as green/safe DEFAULT and LIVE as red behind a
+  typed "LIVE" confirm + a standing red warning that it still does nothing until
+  the server flag is set. All numbers from backend; honest loading/empty/error
+  states, never fabricated. Read-only `config/list` + `broker/list` in a
+  load-on-demand "Saved presets & brokers" panel. Reuses cotrade-kit palette +
+  icons; viewport-lock (shrink-0 header + flex-1 min-h-0 scroll body) preserved.
+  Backend needs: none (all 9 endpoints already live). tsc + `npm run build`
+  GREEN.
 - 2026-06-23 — **MIGRATION: legacy portal functionality mounted inside the new
   AI-native shell** (route group `app/power/(app)/*`) by REUSING the working
   legacy components — no rebuild, no backend/auth/admin/execution touched. tsc +
