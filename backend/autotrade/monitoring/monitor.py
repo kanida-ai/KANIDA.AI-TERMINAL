@@ -1,14 +1,27 @@
 """PortfolioMonitor — tick-level aggregate gross return.
 
-compute_gross_return(session_id) = sum(unrealised_pnl over OPEN positions)
-                                   / total_allocated_capital
+TWO capital bases (both reported; the kill switch measures against the INVESTED
+one):
 
-CRITICAL (spec Section 10 + addendum): the denominator is ALWAYS the original
-total_allocated_capital. It does NOT shrink as positions are closed by trailing
-stops / time-bound exits. A per-position exit reduces the numerator only.
+  1. INVESTED (notional) basis — THE KILL BASIS.
+     compute_gross_return_invested() = sum(unrealised_pnl over OPEN positions)
+                                       / invested_basis
+     invested_basis = Σ(qty * avg_price) across the session's positions AT ENTRY,
+     FROZEN once when the orders are placed (stored on autotrade_sessions). This
+     is the capital actually put to work IN THE PRODUCT and is product-aware
+     automatically: under MTF it is the LEVERAGED invested value, under CNC/NRML
+     it is the deployed cash. It does NOT shrink as positions close (frozen at
+     entry), so returns are measured against what was committed.
 
-DATA-ISOLATION: reads/writes ONLY autotrade_positions WHERE session_id=?.
-Never touches falcon_position_state.
+  2. ON-FUND basis — the secondary "on your fund/margin" view.
+     compute_gross_return() = sum(unrealised_pnl) / total_allocated_capital.
+
+CRITICAL (spec Section 10 + addendum): NEITHER denominator shrinks as positions
+are closed by trailing stops / time-bound exits. A per-position exit reduces the
+numerator only.
+
+DATA-ISOLATION: reads/writes ONLY autotrade_positions / autotrade_sessions WHERE
+session_id=?. Never touches falcon_position_state.
 
 Mark source (pricing.resolve_*): KiteTicker / broker LTP if available, else the
 latest close from ohlc_daily, else the position's entry price — never a stale
@@ -18,7 +31,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from falcon.db import falcon_conn
 from .pricing import resolve_brokers_ltp
@@ -27,17 +40,98 @@ log = logging.getLogger("kanida.autotrade.monitor")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
+def compute_kill_preview(*, kill_switch_enabled: bool, kill_switch_pct: float,
+                         kill_switch_direction: str, invested_basis: float,
+                         total_allocated_capital: float) -> Optional[Dict[str, Any]]:
+    """Build the kill_preview object: the ₹ you'd make/lose at the kill
+    thresholds, plus the equivalent % on your fund.
+
+    The kill switch measures gross_return on the INVESTED basis, so:
+      target/stop ₹ = ±kill_switch_pct * invested_basis
+      fund_pct      = that ₹ / total_allocated_capital
+    `target` is present when direction is profit/both; `stop` when loss/both.
+    Returns None when the kill switch is disabled (nothing to preview).
+
+    Shared by TradingSession.status() and the /preview endpoint so both surface
+    identical math.
+    """
+    if not kill_switch_enabled:
+        return None
+    basis = invested_basis if invested_basis and invested_basis > 0 \
+        else total_allocated_capital
+    fund = total_allocated_capital if total_allocated_capital and \
+        total_allocated_capital > 0 else basis
+    pct = float(kill_switch_pct)
+    out: Dict[str, Any] = {}
+    if kill_switch_direction in ("profit", "both"):
+        rs = pct * basis
+        out["target"] = {"pct": pct, "basis_value_rs": rs,
+                         "fund_pct": rs / fund if fund else 0.0}
+    if kill_switch_direction in ("loss", "both"):
+        rs = -abs(pct) * basis
+        out["stop"] = {"pct": -abs(pct), "basis_value_rs": rs,
+                       "fund_pct": rs / fund if fund else 0.0}
+    return out
+
+
 class PortfolioMonitor:
     def __init__(self, session_id: str, total_allocated_capital: float):
         if total_allocated_capital <= 0:
             raise ValueError("total_allocated_capital must be > 0")
         self.session_id = session_id
-        # Frozen at construction — the single source of truth denominator.
+        # Frozen at construction — the on-fund denominator.
         self._total_allocated_capital = float(total_allocated_capital)
 
     @property
     def total_allocated_capital(self) -> float:
         return self._total_allocated_capital
+
+    # ── Invested (notional) capital basis — THE KILL BASIS ─────────────────────
+    def invested_basis(self) -> float:
+        """The FROZEN invested-capital basis for this session.
+
+        Reads autotrade_sessions.invested_basis (captured once at entry =
+        Σ qty*avg_price across the session's positions, product-aware: MTF
+        leveraged value / CNC cash). Falls back to total_allocated_capital when
+        it is missing or 0 (no positions placed yet) so callers never divide by
+        zero. Never recomputed from live positions — it must NOT shrink as
+        positions close.
+        """
+        with falcon_conn() as con:
+            row = con.execute(
+                "SELECT invested_basis FROM autotrade_sessions WHERE session_id=?",
+                (self.session_id,),
+            ).fetchone()
+        ib = (row["invested_basis"] if row else None)
+        if ib is None or ib <= 0:
+            return self._total_allocated_capital
+        return float(ib)
+
+    @staticmethod
+    def compute_invested_basis(positions: List[Dict[str, Any]]) -> float:
+        """Σ(qty * avg_price) over the given positions. Product-aware purely by
+        construction — avg_price is the entry fill, so under MTF this sums the
+        full (leveraged) invested value and under CNC the deployed cash."""
+        total = 0.0
+        for p in positions:
+            total += float(p.get("qty") or 0) * float(p.get("avg_price") or 0)
+        return total
+
+    def freeze_invested_basis(self) -> float:
+        """Capture Σ(qty*avg_price) across the session's OPEN positions and
+        persist it on the session row (FROZEN). Idempotent — call once after
+        entries are placed. Returns the value stored (falls back to
+        total_allocated_capital when there are no positions, to avoid a 0/div)."""
+        positions = self._open_positions()
+        ib = self.compute_invested_basis(positions)
+        stored = ib if ib > 0 else self._total_allocated_capital
+        with falcon_conn() as con:
+            con.execute(
+                "UPDATE autotrade_sessions SET invested_basis=? WHERE session_id=?",
+                (stored, self.session_id),
+            )
+            con.commit()
+        return stored
 
     def _open_positions(self) -> List[Dict[str, Any]]:
         with falcon_conn() as con:
@@ -59,8 +153,18 @@ class PortfolioMonitor:
         return total
 
     def compute_gross_return(self) -> float:
-        """sum(uPnL) / total_allocated_capital. Denominator never shrinks."""
+        """ON-FUND view: sum(uPnL) / total_allocated_capital. Secondary basis.
+        Denominator never shrinks."""
         return self.total_unrealised() / self._total_allocated_capital
+
+    def compute_gross_return_invested(self) -> float:
+        """KILL BASIS: sum(uPnL) / invested_basis (frozen at entry).
+
+        This is the return on the capital actually put to work in the product
+        (MTF leveraged value / CNC cash). The kill switch is checked against
+        THIS value. invested_basis() falls back to total_allocated_capital when
+        no positions exist, so this never divides by zero."""
+        return self.total_unrealised() / self.invested_basis()
 
     def refresh_ltps(self, brokers: Dict[str, Any]) -> int:
         """Mark every open position to market and persist ltp + uPnL.

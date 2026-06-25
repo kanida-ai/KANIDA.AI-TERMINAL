@@ -3,7 +3,7 @@
 Drives the kill-switch threshold check off KiteTicker LIVE ticks (sub-second), in
 ADDITION to the existing 5s tick_driver heartbeat. On each relevant tick it:
   1. updates that symbol's ltp on the session's OPEN positions,
-  2. recomputes gross_return (denominator stays total_allocated_capital),
+  2. recomputes the INVESTED-basis gross_return (÷ frozen invested_basis),
   3. if it crosses ±kill_switch_pct → fires the flatten — coordinated with the
      5s poll via the per-session fire guard so the two NEVER double-fire.
 
@@ -180,7 +180,9 @@ class _WSDriver:
                 sess.registry.update_ltp(
                     pos["symbol"], float(ltp),
                     broker_profile=pos.get("broker_profile"))
-        gr = sess.monitor.compute_gross_return()
+        # KILL BASIS: check the kill switch against the INVESTED-basis gross
+        # return (÷ frozen invested_basis), matching the 5s poll path.
+        gr = sess.monitor.compute_gross_return_invested()
         reason = (sess.kill_switch.check_threshold(gr)
                   if sess.kill_switch else None)
         if not reason:
