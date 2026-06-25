@@ -131,11 +131,27 @@ class TradingSessionConfig:
             raise ValueError(f"invalid kill_switch_direction: {self.kill_switch_direction}")
         if self.top_n_stocks <= 0:
             raise ValueError("top_n_stocks must be > 0")
+        # Defensive units check: these percentages are FRACTIONS (0.01 = 1%), not
+        # whole-number percents. The UI has historically sent 1.0 (intending
+        # "100%"), which would make the kill switch effectively never fire — a
+        # silent no-fire. Reject obviously-mis-scaled values at the door.
+        if self.kill_switch_enabled:
+            if not (0.0 < self.kill_switch_pct <= 0.5):
+                raise ValueError(
+                    "kill_switch_pct must be a fraction (e.g. 0.01 = 1%), "
+                    f"got {self.kill_switch_pct}"
+                )
         if self.per_position_gtt_enabled:
-            if not (0.0 < self.per_position_stop_pct < 1.0):
-                raise ValueError("per_position_stop_pct must be in (0, 1)")
-            if self.per_position_target_pct <= 0.0:
-                raise ValueError("per_position_target_pct must be > 0")
+            if not (0.0 < self.per_position_stop_pct <= 0.5):
+                raise ValueError(
+                    "per_position_stop_pct must be a fraction (e.g. 0.03 = 3%), "
+                    f"got {self.per_position_stop_pct}"
+                )
+            if not (0.0 < self.per_position_target_pct <= 0.5):
+                raise ValueError(
+                    "per_position_target_pct must be a fraction (e.g. 0.06 = 6%), "
+                    f"got {self.per_position_target_pct}"
+                )
         if self.sizing_mode == "manual":
             total = sum(self.manual_amounts.values())
             if total > self.total_allocated_capital + 1e-6:
