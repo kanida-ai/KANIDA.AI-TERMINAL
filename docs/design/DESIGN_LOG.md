@@ -38,6 +38,64 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-06-24 — **AutoTrade Sessions: critical % UNITS fix + Kite-style P&L +
+  egress-IP self-service** (operator ask; 3 fixes). UI-ONLY; no backend/execution
+  code touched; all calls via the existing same-origin `/api/falcon-proxy`. Two
+  files: `lib/autotrade-api.ts` + `components/power/autotrade/PortfolioAutoTrade.tsx`.
+  Co-Trading / other AutoTrade tabs / all other pages untouched. tsc +
+  `npm run build` GREEN (`/power/autotrade` built).
+  - **(1) UNITS — the backend speaks FRACTIONS, the UI was sending/showing raw.**
+    The backend uses fractions for percentages (`kill_switch_pct=0.01`=1%,
+    `gross_return=-0.0136`=-1.36%). Previously the UI sent the user's "1" as `1.0`
+    (=100% → kill switch never fired) and displayed fractions without ×100
+    (showed "-0.0%" for -1.36%). FIXED both directions:
+    • **SEND ÷100** — `onCreate` now converts `config.kill_switch_pct` (kept in
+      state as a PERCENT so the input reads "1") to a FRACTION at the create
+      boundary only (`/100`); state is untouched, so there is NO double-conversion.
+      The input stays labelled "Trigger at (%)".
+    • **DISPLAY ×100** — every backend fraction now ×100 + "%": Live status
+      **GROSS RETURN** (`fmtPct(status.gross_return*100)`), the kill-switch
+      threshold line (**"±X%"** from `status.kill_switch_pct*100`, trailing zeros
+      trimmed), and the **session-list gross** (`s.gross_return*100`). Per-position
+      Chg % was already computed as a true percent from ltp/avg — left as-is.
+    • Net: a "1%" kill switch now actually arms at 1%; GROSS RETURN reads -1.36%
+      not -0.0%. (Per-position-stop/target fields aren't in this form yet — only
+      `kill_switch_pct` exists to convert; noted for when they're added.)
+  - **(2) KITE-STYLE P&L.** The Live-status positions table gained an absolute
+    **P&L (₹)** column per row = the backend's `unrealised_pnl` (signed ₹ via
+    `signedINR`, green/red via `pctTone`); the existing per-position return % is
+    now the **Chg** column; "LTP" relabelled from "Last". Added a Kite-footer
+    **portfolio summary** (`PortfolioSummary`): **Invested** = Σ(qty×avg_price),
+    **Current value** = Σ(qty×ltp), **Total P&L** = Σ(unrealised_pnl) shown as ₹
+    AND % (Total P&L ÷ Invested ×100), color-coded. Each cell is HONEST — a total
+    is summed only when EVERY contributing position supplies the field, else "—"
+    (never a partial/fabricated total). ₹ via cotrade-kit `fmtINR`/`signedINR`.
+  - **(3) EGRESS-IP SELF-SERVICE.** Added `AutoTradeAPI.egressIp()` → GET
+    `/api/falcon-proxy/api/falcon/egress-ip` (the `call` helper gained an optional
+    `base` so this one call targets the `/api/falcon` proxy root instead of
+    `/api/autotrade`; proxy injects the operator token + forwards verbatim). New
+    `EgressIpCard` on the panel (below KILL/sessions, above the saved-presets
+    panel): shows **"Broker allowlist IP: <ip>"** with a **Copy** button (+ "as of"
+    when given) and the line *"Add this to your broker's Allowed IPs
+    (developers.kite.trade) so live orders don't error."* Graceful: a 404 / not-yet-
+    live endpoint shows **"—"** + a Retry + an honest "endpoint isn't reporting yet"
+    note — never a fabricated IP.
+  - **API (`lib/autotrade-api.ts`):** added `EgressIpResponse { ip; as_of? }` +
+    `egressIp()`; `call<T>` now accepts `{ base? }` to reach the sibling
+    `/api/falcon` proxy root. `OpenPosition.unrealised_pnl` was already typed — now
+    consumed by the P&L column + summary.
+  - **Honesty held 1:1.** No conversion is applied twice (state stays in percent,
+    convert only at send; display only at render). P&L cells/totals use the
+    backend's own fields and show "—" on any missing field. Egress IP never
+    fabricated. Ships-disabled banner, paper-default/typed-LIVE, KILL, scheduled
+    flow, list/resume/delete all untouched. Mint/F2 theme + viewport-lock intact.
+  - **Backend needs:** `GET /api/falcon/egress-ip` → `{ ip: string, as_of?: string }`
+    (the server's outbound IP for the broker allowlist) — being added; the card
+    degrades to "—" until live. Better-if-present: `unrealised_pnl` on each
+    `open_position` of the session status (the P&L column + Total P&L read it; rows
+    show "—" where absent). No other new endpoints.
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npx next build` ✓ compiled —
+    `/power/autotrade` built, all other routes intact.
 - 2026-06-24 — **AutoTrade Sessions list: position count + live indicator,
   immediate-refresh-on-resume, multi-select bulk delete** (operator ask: a
   RUNNING session showed only "Running" with no position count, so it read as

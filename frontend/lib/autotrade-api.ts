@@ -113,6 +113,16 @@ export type DeleteSessionsResponse = {
 
 export type PositionsResponse = { positions: OpenPosition[] }
 
+// Egress IP self-service. The broker (Zerodha / developers.kite.trade) requires
+// the SERVER's outbound IP on its Allowed-IPs list or live orders error. This
+// endpoint reports the IP the backend places orders FROM, plus when it was read.
+// Backend being added; a 404 is handled gracefully (the UI shows "—").
+export type EgressIpResponse = {
+  ip: string
+  as_of?: string
+  [k: string]: unknown
+}
+
 // A session as returned by GET /autotrade/sessions (newest first). The backend
 // shape is permissive — we read the fields we know and keep the rest indexable
 // so a missing/renamed field never crashes the list.
@@ -156,11 +166,14 @@ export type Broker = {
 export type BrokerListResponse = { brokers?: Broker[]; [k: string]: unknown }
 
 // ── Transport helper — honest errors, never fabricates a success ─────────────
-async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, {
+// `base` lets a call target a sibling proxy root (e.g. /api/falcon for the
+// egress-IP endpoint) without changing the default /api/autotrade transport.
+async function call<T>(path: string, init?: RequestInit & { base?: string }): Promise<T> {
+  const { base = BASE, ...rest } = init ?? {}
+  const r = await fetch(`${base}${path}`, {
     cache: 'no-store',
-    ...init,
-    headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
+    ...rest,
+    headers: { 'content-type': 'application/json', ...(rest.headers ?? {}) },
   })
   const text = await r.text()
   let body: unknown = null
@@ -219,4 +232,11 @@ export const AutoTradeAPI = {
 
   configList: () => call<ConfigListResponse>('/config/list'),
   brokerList: () => call<BrokerListResponse>('/broker/list'),
+
+  // The backend's outbound IP (for the broker's Allowed-IPs allowlist). This is
+  // under /api/falcon (not /api/autotrade), so it bypasses BASE and hits the
+  // Falcon proxy root directly. Read-only; a 404 surfaces as a normal error so
+  // the caller can fall back to "—" without fabricating an IP.
+  egressIp: () =>
+    call<EgressIpResponse>('/egress-ip', { base: '/api/falcon-proxy/api/falcon' }),
 }

@@ -24,13 +24,14 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  C, ICON, Gear, MECHANISM_CSS, fmtCapital, fmtPct, pctTone,
+  C, ICON, Gear, MECHANISM_CSS, fmtCapital, fmtPct, pctTone, fmtINR, signedINR,
 } from '@/components/power/shared/cotrade-kit'
 import {
   AutoTradeAPI,
   type Mode, type StartWhen, type SizingMode, type OrderProduct, type KillDirection,
   type SessionConfig, type CreateResponse, type StartResponse,
   type StatusResponse, type SavedConfig, type Broker, type SessionSummary,
+  type OpenPosition,
 } from '@/lib/autotrade-api'
 
 // ── Safe defaults — paper + kill switch OFF, per the ships-disabled contract ──
@@ -269,7 +270,15 @@ export function PortfolioAutoTrade() {
   const onCreate = useCallback(async () => {
     setError(null); setBusy('create')
     try {
-      const res = await AutoTradeAPI.createSession(mode, config)
+      // UNITS: the backend uses FRACTIONS for percentages (0.01 = 1%). The form
+      // captures kill_switch_pct as a PERCENT (e.g. 1, 3, 6) so it reads naturally;
+      // convert it to a fraction ONLY at the send boundary. State stays in percent
+      // (the input keeps showing "1"); there is no double-conversion.
+      const payload: SessionConfig = {
+        ...config,
+        kill_switch_pct: (Number(config.kill_switch_pct) || 0) / 100,
+      }
+      const res = await AutoTradeAPI.createSession(mode, payload)
       setSession(res)
       setPhase('created')
       setStartResult(null)
@@ -478,7 +487,8 @@ export function PortfolioAutoTrade() {
 
                 <ul className="flex flex-col gap-2">
                 {sessions.map((s, i) => {
-                  const ret = typeof s.gross_return === 'number' ? s.gross_return : null
+                  // Backend gross_return is a FRACTION (-0.0136 = -1.36%); ×100 to display.
+                  const ret = typeof s.gross_return === 'number' ? s.gross_return * 100 : null
                   const sched = isScheduled(s.status)
                   const running = (s.status ?? '').toUpperCase() === 'RUNNING'
                   const nOpen = typeof s.n_open_positions === 'number' ? s.n_open_positions : null
@@ -975,12 +985,13 @@ export function PortfolioAutoTrade() {
               <>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
                   <Stat label="Status" value={status.status} />
-                  <Stat label="Gross return" value={fmtPct(status.gross_return)} valueColor={pctTone(status.gross_return)} />
+                  {/* GROSS RETURN: backend fraction ×100 (-0.0136 → -1.36%). */}
+                  <Stat label="Gross return" value={fmtPct(status.gross_return * 100)} valueColor={pctTone(status.gross_return)} />
                   <Stat label="Allocated" value={fmtCapital(status.total_allocated_capital)} />
                   <Stat label="Open positions" value={String(status.n_open_positions)} />
                 </div>
 
-                {/* Kill-switch state readout */}
+                {/* Kill-switch state readout — threshold is a backend FRACTION (0.01 = 1%). */}
                 <div className="flex items-center gap-2 mb-4 text-[11.5px]" style={{ color: C.muted }}>
                   <span style={{ color: status.kill_switch_enabled ? C.red : C.faint }}>{ICON.shield(14)}</span>
                   Kill switch{' '}
@@ -988,12 +999,13 @@ export function PortfolioAutoTrade() {
                     {status.kill_switch_enabled ? 'ARMED' : 'OFF'}
                   </b>
                   {status.kill_switch_enabled && (
-                    <span>· {status.kill_switch_pct}% {status.kill_switch_direction}</span>
+                    <span>· ±{(status.kill_switch_pct * 100).toFixed(2).replace(/\.?0+$/, '')}% {status.kill_switch_direction}</span>
                   )}
                 </div>
 
-                {/* Open positions table */}
+                {/* Open positions table — Kite-style: absolute P&L (₹) + Chg % per row */}
                 {status.open_positions?.length ? (
+                  <>
                   <div className="overflow-x-auto">
                     <table className="w-full text-[12px]">
                       <thead>
@@ -1001,23 +1013,29 @@ export function PortfolioAutoTrade() {
                           <th className="text-left font-medium pb-2">Symbol</th>
                           <th className="text-right font-medium pb-2">Qty</th>
                           <th className="text-right font-medium pb-2">Avg</th>
-                          <th className="text-right font-medium pb-2">Last</th>
-                          <th className="text-right font-medium pb-2">Return</th>
+                          <th className="text-right font-medium pb-2">LTP</th>
+                          <th className="text-right font-medium pb-2">P&amp;L (₹)</th>
+                          <th className="text-right font-medium pb-2">Chg</th>
                         </tr>
                       </thead>
                       <tbody>
                         {status.open_positions.map((p, i) => {
-                          // Backend sends `ltp` + `avg_price`; per-position return %
-                          // is derived from them (no return_pct field exists).
+                          // Backend sends `ltp` + `avg_price`; per-position Chg %
+                          // is derived from them (no return_pct field exists). The
+                          // absolute P&L (₹) is the backend's own `unrealised_pnl`.
                           const ret = (typeof p.ltp === 'number' && typeof p.avg_price === 'number' && p.avg_price > 0)
                             ? ((p.ltp - p.avg_price) / p.avg_price) * 100
                             : null
+                          const pnl = typeof p.unrealised_pnl === 'number' ? p.unrealised_pnl : null
                           return (
                             <tr key={`${p.symbol ?? i}`} style={{ borderTop: `1px solid ${C.line}` }}>
                               <td className="py-1.5 font-medium" style={{ color: C.ink }}>{p.symbol ?? '—'}</td>
                               <td className="py-1.5 text-right" style={{ color: C.ink2 }}>{p.qty ?? '—'}</td>
                               <td className="py-1.5 text-right" style={{ color: C.ink2 }}>{p.avg_price ?? '—'}</td>
                               <td className="py-1.5 text-right" style={{ color: C.ink2 }}>{p.ltp ?? '—'}</td>
+                              <td className="py-1.5 text-right font-medium tabular-nums" style={{ color: pnl == null ? C.faint : pctTone(pnl) }}>
+                                {pnl == null ? '—' : signedINR(pnl)}
+                              </td>
                               <td className="py-1.5 text-right" style={{ color: ret == null ? C.faint : pctTone(ret) }}>
                                 {ret == null ? '—' : fmtPct(ret)}
                               </td>
@@ -1027,6 +1045,8 @@ export function PortfolioAutoTrade() {
                       </tbody>
                     </table>
                   </div>
+                  <PortfolioSummary positions={status.open_positions} />
+                  </>
                 ) : (
                   <p className="text-[12px]" style={{ color: C.muted }}>No open positions.</p>
                 )}
@@ -1106,6 +1126,9 @@ export function PortfolioAutoTrade() {
         </div>
       )}
 
+      {/* ── Broker allowlist (egress IP self-service) ────────────────────────── */}
+      <EgressIpCard />
+
       {/* ── Read-only saved configs + brokers ────────────────────────────────── */}
       <ReferenceLists />
     </div>
@@ -1147,11 +1170,135 @@ function SchedPill() {
   )
 }
 
+// ── Kite-style portfolio footer ──────────────────────────────────────────────
+// Invested = Σ(qty×avg_price); Current value = Σ(qty×ltp); Total P&L =
+// Σ(unrealised_pnl) shown as ₹ AND % (Total P&L ÷ Invested ×100). Each cell is
+// HONEST: a field is summed only when every contributing position supplies it;
+// if any required field is missing the cell shows "—" (never a partial/fabricated
+// total). Total P&L prefers the backend's own unrealised_pnl sum.
+function PortfolioSummary({ positions }: { positions: OpenPosition[] }) {
+  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+
+  let invested = 0; let investedOk = positions.length > 0
+  let current = 0; let currentOk = positions.length > 0
+  let pnl = 0; let pnlOk = positions.length > 0
+
+  for (const p of positions) {
+    const qty = num(p.qty); const avg = num(p.avg_price); const ltp = num(p.ltp); const up = num(p.unrealised_pnl)
+    if (qty != null && avg != null) invested += qty * avg; else investedOk = false
+    if (qty != null && ltp != null) current += qty * ltp; else currentOk = false
+    if (up != null) pnl += up; else pnlOk = false
+  }
+
+  const investedVal = investedOk ? invested : null
+  const currentVal = currentOk ? current : null
+  const pnlVal = pnlOk ? pnl : null
+  const pnlPct = pnlVal != null && investedVal != null && investedVal > 0 ? (pnlVal / investedVal) * 100 : null
+
+  return (
+    <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-3 rounded-xl border px-3.5 py-3"
+      style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+      <SumCell label="Invested" value={investedVal == null ? '—' : fmtINR(investedVal)} />
+      <SumCell label="Current value" value={currentVal == null ? '—' : fmtINR(currentVal)} />
+      <SumCell
+        label="Total P&L"
+        value={pnlVal == null ? '—' : signedINR(pnlVal)}
+        sub={pnlPct == null ? undefined : fmtPct(pnlPct, 2)}
+        valueColor={pnlVal == null ? C.faint : pctTone(pnlVal)}
+      />
+    </div>
+  )
+}
+
+function SumCell({ label, value, sub, valueColor }: { label: string; value: string; sub?: string; valueColor?: string }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>{label}</div>
+      <div className="text-[15px] font-semibold mt-0.5 tabular-nums" style={{ color: valueColor ?? C.ink }}>
+        {value}{sub && <span className="text-[12px] font-medium ml-1.5" style={{ color: valueColor ?? C.muted }}>({sub})</span>}
+      </div>
+    </div>
+  )
+}
+
 function Stat({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
   return (
     <div className="rounded-xl border px-3 py-2.5" style={{ borderColor: C.line, background: 'rgba(255,255,255,0.015)' }}>
       <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>{label}</div>
       <div className="text-[15px] font-semibold mt-0.5" style={{ color: valueColor ?? C.ink }}>{value}</div>
+    </div>
+  )
+}
+
+// ── Broker allowlist IP self-service ─────────────────────────────────────────
+// Shows the backend's outbound IP so the operator can add it to the broker's
+// Allowed-IPs list (developers.kite.trade) — otherwise live orders error. Loads
+// on mount; graceful if the endpoint isn't live yet (shows "—", no fabrication).
+function EgressIpCard() {
+  const [ip, setIp] = useState<string | null>(null)
+  const [asOf, setAsOf] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true); setErr(null)
+    try {
+      const res = await AutoTradeAPI.egressIp()
+      setIp(typeof res.ip === 'string' && res.ip ? res.ip : null)
+      setAsOf(typeof res.as_of === 'string' ? res.as_of : null)
+    } catch (e) {
+      setIp(null)
+      setErr(e instanceof Error ? e.message : 'unavailable')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const onCopy = useCallback(async () => {
+    if (!ip) return
+    try {
+      await navigator.clipboard.writeText(ip)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    } catch { /* clipboard blocked — the IP is shown for manual copy */ }
+  }, [ip])
+
+  return (
+    <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span style={{ color: C.mint }}>{ICON.shield(15)}</span>
+        <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Broker allowlist IP</span>
+        {asOf && <span className="ml-auto text-[10px]" style={{ color: C.faint }}>as of {asOf}</span>}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2.5 mb-2">
+        <code className="text-[14px] font-mono rounded-lg px-3 py-1.5"
+          style={{ color: ip ? C.ink : C.faint, background: 'rgba(255,255,255,0.03)', border: `1px solid ${C.line2}` }}>
+          {loading ? 'Loading…' : (ip ?? '—')}
+        </code>
+        {ip && (
+          <button type="button" onClick={onCopy}
+            className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-colors"
+            style={{ color: C.mint, border: `1px solid rgba(63,227,164,0.3)` }}>
+            {copied ? ICON.check(13) : ICON.book(13)} {copied ? 'Copied' : 'Copy'}
+          </button>
+        )}
+        {!loading && !ip && (
+          <button type="button" onClick={load}
+            className="text-[11.5px] px-2.5 py-1.5 rounded-lg transition-colors"
+            style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+            Retry
+          </button>
+        )}
+      </div>
+
+      <p className="text-[11px] leading-snug" style={{ color: C.muted }}>
+        Add this to your broker&apos;s Allowed IPs (developers.kite.trade) so live orders don&apos;t error.
+        {!loading && !ip && <span style={{ color: C.faint }}>{' '}The egress-IP endpoint isn&apos;t reporting yet{err ? ` (${err})` : ''} — showing &ldquo;—&rdquo;.</span>}
+      </p>
     </div>
   )
 }
