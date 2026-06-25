@@ -55,6 +55,11 @@ class BrokerClient(ABC):
     def get_lot_size(self, contract: str) -> int:
         ...
 
+    def get_margin_per_share(self, symbol: str, product: str = "MTF") -> Optional[float]:
+        """Per-share margin the broker locks for `product` (MTF leverage).
+        Default None → caller falls back to cash sizing. Live brokers override."""
+        return None
+
     @abstractmethod
     def get_active_futures(self, symbol: str, expiry_preference: str) -> str:
         ...
