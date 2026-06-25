@@ -62,6 +62,20 @@ class ZerodhaBroker(BrokerClient):
             log.warning("REST ltp failed for %s: %s", symbol, e)
             return None
 
+    # ── MTF margin (leverage) — reuse the legacy order_margins lookup ─────────
+    def get_margin_per_share(self, symbol: str, product: str = "MTF") -> Optional[float]:
+        """Per-share margin Zerodha locks for `product`, via kite.order_margins —
+        the SAME lookup the legacy order_planner uses for MTF sizing (so the new
+        system's MTF quantities match deployable size + the backtest). Returns
+        None on any failure → caller falls back to cash sizing (flagged)."""
+        try:
+            from falcon.trade.services.margin_calc import fetch_margins_batch
+            res = fetch_margins_batch(self.kite, [(symbol, product)])
+            return res.get(symbol)
+        except Exception as e:  # pragma: no cover
+            log.warning("MTF margin lookup failed for %s (%s) — cash fallback", symbol, e)
+            return None
+
     # ── Instrument master (F&O) — always runtime, never hardcoded ────────────
     def get_lot_size(self, contract: str) -> int:
         try:

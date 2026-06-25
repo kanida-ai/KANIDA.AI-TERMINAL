@@ -6,7 +6,8 @@ Sizing modes (select via TradingSessionConfig.sizing_mode):
   manual   : exact per-symbol ₹ amounts from config.manual_amounts
 
 calculate_quantity fetches live LTP + lot size from the broker at entry time:
-  EQ / MTF / CNC : floor(amount / ltp)
+  EQ / CNC       : floor(amount / ltp)
+  MTF            : floor(amount / margin_per_share)  [leveraged; cash fallback]
   FUT            : floor(amount / (ltp * lot_size)) * lot_size
   CE / PE        : floor(amount / (premium * lot_size)) * lot_size
 Never returns 0 — raises InsufficientCapitalError when amount < one lot value.
@@ -14,10 +15,13 @@ Lot sizes ALWAYS come from the broker instrument master (never hardcoded).
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Dict, List
 
 from .config import TradingSessionConfig
+
+log = logging.getLogger("kanida.autotrade.capital")
 
 
 class InsufficientCapitalError(Exception):
@@ -75,10 +79,25 @@ class CapitalAllocator:
             )
 
         if itype in ("EQ", "MTF"):
-            qty = math.floor(amount / ltp)
+            # MTF is LEVERAGED: size off the per-share MARGIN Zerodha locks
+            # (qty = amount / margin_per_share), matching the legacy engine and
+            # the backtest. Cash equity (EQ/CNC) sizes off LTP. If the margin
+            # lookup fails we fall back to cash sizing so we never over-deploy.
+            per_unit = ltp
+            if itype == "MTF":
+                mps = None
+                try:
+                    mps = broker.get_margin_per_share(symbol, "MTF")
+                except Exception as e:  # pragma: no cover
+                    log.warning("%s: MTF margin lookup error (%s) — cash fallback", symbol, e)
+                if mps and mps > 0:
+                    per_unit = mps
+                else:
+                    log.warning("%s: MTF margin unavailable — cash-sizing fallback", symbol)
+            qty = math.floor(amount / per_unit)
             if qty < 1:
                 raise InsufficientCapitalError(
-                    f"{symbol}: amount ₹{amount:.0f} < 1 share at ₹{ltp:.2f}"
+                    f"{symbol}: amount ₹{amount:.0f} < 1 unit at ₹{per_unit:.2f}"
                 )
             return qty
 
