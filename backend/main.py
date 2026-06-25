@@ -483,6 +483,7 @@ from falcon.routers.portfolio_router  import router as falcon_portfolio_router
 from falcon.routers.patterns_router   import router as falcon_patterns_router
 from falcon.routers.admin_router      import router as falcon_admin_router
 from falcon.trade.routers.trade_router import router as falcon_trade_router
+from autotrade.api.autotrade_routes import router as autotrade_router  # AutoTrade portfolio + kill switch (operator-token gated)
 # P1PUB (2026-06-14): laptop → cloud "publish intelligence" ingest. Self-auth
 # (X-Publish-Secret), atomic full-replace. See CLOUD_ARCHITECTURE.md §6.
 from falcon.routers.publish_router     import router as falcon_publish_router
@@ -547,6 +548,7 @@ app.include_router(power_top20_router,         tags=["Power-User"])    # Falcon 
 app.include_router(power_billing_router,       tags=["Power-User"])    # Razorpay billing + webhook (M3)
 app.include_router(power_ask_router,            tags=["Power-User"])    # Ask-Falcon: universe / quote / analyze-stock
 app.include_router(power_cotrade_router,         tags=["Power-User"])    # Co-Trading virtual-portfolio sim (falcon-top-10)
+app.include_router(autotrade_router,             prefix="/api", tags=["AutoTrade"])    # AutoTrade: multi-broker portfolio sessions + kill switch (/api/autotrade/*) — ships DISABLED
 
 # Power User schema init — idempotent, creates tables on first boot.
 # Uses POWER_DB_PATH resolver — same DB as the engine read-only tables
@@ -622,6 +624,17 @@ try:
     log.info("Falcon schema extensions applied.")
 except Exception as _e:
     log.warning("Falcon schema extensions skipped: %s", _e)
+
+# AutoTrade schema migration — idempotent, additive (adds exit_lock +
+# exit_initiated_by to falcon_position_state and the new autotrade_* tables).
+# Never modifies existing tables; safe on every boot.
+try:
+    from autotrade.db_migrations import run_migrations as _run_autotrade_migrations
+    _at_manifest = _run_autotrade_migrations()
+    log.info("AutoTrade schema OK: +cols=%s tables=%s",
+             _at_manifest.get("added_columns"), _at_manifest.get("tables_present"))
+except Exception as _at_e:  # pragma: no cover - never block boot
+    log.warning("AutoTrade migration skipped/failed (non-fatal): %s", _at_e)
 
 # Start Phase 2 position monitor (background thread, idempotent)
 try:

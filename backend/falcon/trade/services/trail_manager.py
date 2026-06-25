@@ -274,10 +274,29 @@ def execute_replace_sl(kite, state: Dict[str, Any], action: ReplaceSL) -> Dict[s
 
 
 def execute_exit_at_market(kite, state: Dict[str, Any], reason: str) -> Dict[str, Any]:
-    """Cancel SL, place MARKET sell with market_protection=1.0."""
+    """Cancel SL, place MARKET sell with market_protection=1.0.
+
+    AutoTrade exit-gate integration (additive, minimal): before placing ANY
+    exit, claim the position through the single exit gate so the portfolio kill
+    switch and the existing per-position / day-bound exits never double-exit the
+    same symbol. If another mechanism already owns the exit we return BLOCKED
+    and place nothing. The gate is re-entrant for the SAME reason, so the kill
+    switch (which pre-claims as KILL_SWITCH and then routes here with the same
+    reason) is not blocked by its own lock. Internal placement logic below is
+    unchanged. If the gate import/DB is unavailable we fail OPEN (place the
+    exit) so this integration can never strand a live position.
+    """
     symbol = state["symbol"]
     qty    = state["qty"]
     old_id = state.get("sl_kite_order_id")
+
+    try:
+        from autotrade.exit_gate import claim_exit as _claim_exit
+        if not _claim_exit(symbol, reason):
+            log.info("Exit for %s blocked by exit-gate (already being exited)", symbol)
+            return {"status": "BLOCKED", "kite_order_id": None, "error": None}
+    except Exception as _ge:  # pragma: no cover - fail open, never strand a position
+        log.warning("exit-gate unavailable for %s (%s) — proceeding with exit", symbol, _ge)
 
     if old_id:
         try:
