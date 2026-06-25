@@ -101,6 +101,15 @@ class TradingSessionConfig:
     kill_switch_direction: str = "both"    # profit | loss | both
     kill_switch_enabled: bool = False
 
+    # Per-position GTT-OCO broker backup (FEATURE 1). The portfolio kill switch
+    # is the PRIMARY exit (software, ours); the per-position GTT is the broker-
+    # held BACKUP floor. Widths default WIDER than kill_switch_pct so the
+    # portfolio target usually fires first. LIVE-only: in paper mode no real GTT
+    # is placed (the intended levels are still recorded for the UI).
+    per_position_gtt_enabled: bool = True
+    per_position_stop_pct: float = 0.03    # stop  = entry * (1 - this)
+    per_position_target_pct: float = 0.06  # target = entry * (1 + this)
+
     # Broker routing
     broker_profiles: List[BrokerProfile] = field(default_factory=list)
 
@@ -122,6 +131,11 @@ class TradingSessionConfig:
             raise ValueError(f"invalid kill_switch_direction: {self.kill_switch_direction}")
         if self.top_n_stocks <= 0:
             raise ValueError("top_n_stocks must be > 0")
+        if self.per_position_gtt_enabled:
+            if not (0.0 < self.per_position_stop_pct < 1.0):
+                raise ValueError("per_position_stop_pct must be in (0, 1)")
+            if self.per_position_target_pct <= 0.0:
+                raise ValueError("per_position_target_pct must be > 0")
         if self.sizing_mode == "manual":
             total = sum(self.manual_amounts.values())
             if total > self.total_allocated_capital + 1e-6:
@@ -159,6 +173,9 @@ class TradingSessionConfig:
             kill_switch_pct=float(d.get("kill_switch_pct", 0.012)),
             kill_switch_direction=d.get("kill_switch_direction", "both"),
             kill_switch_enabled=bool(d.get("kill_switch_enabled", False)),
+            per_position_gtt_enabled=bool(d.get("per_position_gtt_enabled", True)),
+            per_position_stop_pct=float(d.get("per_position_stop_pct", 0.03)),
+            per_position_target_pct=float(d.get("per_position_target_pct", 0.06)),
             broker_profiles=[BrokerProfile.from_public_dict(b) for b in bps],
             entry_time=d.get("entry_time", "09:15:00"),
             entry_window_seconds=int(d.get("entry_window_seconds", 60)),

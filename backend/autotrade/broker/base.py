@@ -90,3 +90,24 @@ class BrokerClient(ABC):
     async def place_market_exit(self, symbol: str, qty: int,
                                 instrument_type: str) -> OrderResult:
         ...
+
+    # ── GTT-OCO (broker-held per-position backup floor) ───────────────────────
+    # Default no-ops so stub brokers (fyers/upstox/angel/dhan) and dry-run never
+    # place real GTTs — they return None. Only the live Zerodha adapter overrides
+    # these with real kite.place_gtt / kite.delete_gtt calls.
+    def place_gtt_oco(self, symbol: str, qty: int, stop_price: float,
+                      target_price: float, last_price: float,
+                      product: str = "CNC", exchange: str = "NSE",
+                      order_type: str = "LIMIT") -> Optional[str]:
+        """Place a two-leg OCO GTT (STOP + TARGET sell). Returns the broker GTT
+        id, or None when not placed (dry-run / unsupported broker)."""
+        return None
+
+    def cancel_gtt(self, gtt_id: str) -> Any:
+        """Cancel a GTT by id. No-op default (returns None)."""
+        return None
+
+    def get_gtt(self, gtt_id: str) -> Optional[Any]:
+        """Fetch a GTT's current state (e.g. to detect it triggered). No-op
+        default (returns None)."""
+        return None

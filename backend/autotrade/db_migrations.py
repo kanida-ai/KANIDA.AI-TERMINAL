@@ -87,6 +87,20 @@ def run_migrations() -> dict:
         # ── 2. New tables (all IF NOT EXISTS) ────────────────────────────────
         con.executescript(_SCHEMA_SQL)
 
+        # ── 2b. ALTER-guard the GTT-OCO columns on autotrade_positions ───────
+        # FEATURE 1: broker-held per-position OCO backup. gtt_id is the Kite GTT
+        # trigger id returned by kite.place_gtt; gtt_stop/gtt_target the levels.
+        # Additive + idempotent — only added when missing.
+        if _table_exists(con, "autotrade_positions"):
+            have = set(_existing_columns(con, "autotrade_positions"))
+            for name, ddl_type in (("gtt_id", "TEXT"),
+                                   ("gtt_stop", "REAL"),
+                                   ("gtt_target", "REAL")):
+                if name not in have:
+                    con.execute(
+                        f"ALTER TABLE autotrade_positions ADD COLUMN {name} {ddl_type}")
+                    added_cols.append(name)
+
         for t in (
             "autotrade_positions",
             "autotrade_sessions", "autotrade_config_presets",
@@ -129,7 +143,12 @@ CREATE TABLE IF NOT EXISTS autotrade_positions (
     closed_at       TEXT,
     exit_price      REAL,
     realised_pnl    REAL,
-    close_reason    TEXT
+    close_reason    TEXT,
+    -- FEATURE 1: broker-held per-position GTT-OCO backup (LIVE only). gtt_id is
+    -- the Kite GTT trigger id; gtt_stop/gtt_target the placed/intended levels.
+    gtt_id          TEXT,
+    gtt_stop        REAL,
+    gtt_target      REAL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_autotrade_positions_sess_sym_prof
     ON autotrade_positions(session_id, symbol, broker_profile);

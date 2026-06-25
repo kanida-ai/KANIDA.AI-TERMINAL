@@ -32,11 +32,12 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 class KillSwitchExecutor:
     def __init__(self, session_id: str, config, brokers: Dict[str, Any],
-                 registry):
+                 registry, gtt_manager=None):
         self.session_id = session_id
         self.config = config
         self.brokers = brokers          # {broker_profile: BrokerClient}
         self.registry = registry        # PositionRegistry
+        self.gtt_manager = gtt_manager  # GTTManager | None (FEATURE 3)
 
     # ── Threshold check (called every tick) ───────────────────────────────────
     def check_threshold(self, gross_return: float) -> Optional[str]:
@@ -70,6 +71,18 @@ class KillSwitchExecutor:
                     cancel_tasks.append(broker.cancel_order(oid))
         if cancel_tasks:
             await asyncio.gather(*cancel_tasks, return_exceptions=True)
+
+        # STEP 1b — COORDINATION (FEATURE 3): cancel each position's broker-held
+        # GTT-OCO BEFORE the market exits so no orphan GTT remains to re-fire on
+        # a symbol we just flattened. Best-effort — a GTT-cancel failure must
+        # NOT block the flatten (logged + continue inside cancel_session_gtts).
+        gtt_cancels: List[Dict[str, Any]] = []
+        if self.gtt_manager is not None:
+            try:
+                gtt_cancels = self.gtt_manager.cancel_session_gtts()
+            except Exception as e:  # never block the flatten on GTT cancels
+                log.warning("kill switch: GTT cancel sweep failed for %s: %s",
+                            self.session_id, e)
 
         # STEP 2 — flatten all open positions across all brokers (parallel).
         positions = self.registry.get_open_positions()
@@ -135,7 +148,8 @@ class KillSwitchExecutor:
                        n_ok, n_failed, details)
         summary = {"session_id": self.session_id, "trigger_reason": trigger_reason,
                    "n_positions": len(positions), "n_exited_ok": n_ok,
-                   "n_exit_failed": n_failed, "details": details}
+                   "n_exit_failed": n_failed, "details": details,
+                   "gtt_cancelled": gtt_cancels}
         log.critical("KILL SWITCH COMPLETE: %s", summary)
         return summary
 
