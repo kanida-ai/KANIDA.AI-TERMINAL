@@ -53,7 +53,7 @@ from .broker.router import BrokerRouter, build_client
 from .execution.orders import build_order, place_order_with_retry
 from .execution.slippage import record_slippage
 from .monitoring.registry import PositionRegistry
-from .monitoring.monitor import PortfolioMonitor
+from .monitoring.monitor import PortfolioMonitor, compute_kill_preview
 from .monitoring.kill_switch import KillSwitchExecutor
 from .monitoring.gtt_manager import GTTManager
 from .monitoring import tick_driver
@@ -109,6 +109,94 @@ def load_falcon_picks(top_n: int = 100) -> List[Pick]:
     return [Pick(symbol=r["symbol"], rank=r["rank"],
                  score=r["score"] or 0.0, sector=r["sector"],
                  close_at_signal=r["close_at_signal"]) for r in rows]
+
+
+def preview_session_sizing(config: TradingSessionConfig,
+                           mode: str = "paper") -> Dict[str, Any]:
+    """Size the picks EXACTLY as _fire_entries would (route → allocate →
+    per-position qty incl. MTF margin) but PLACE NOTHING and create NO session.
+
+    Returns the estimated invested_basis, total_allocated_capital, leverage, the
+    per-position rows, and the kill_preview — to power the UI preview before
+    Start. Brokers are built in PAPER mode (dry_run) only to read LTP / MTF
+    margin; no order is ever placed and no DB row is created.
+
+    invested_basis = Σ(qty * ref_price), where ref_price is the broker LTP at
+    preview time (the entry mark). leverage = invested_basis /
+    total_allocated_capital (>1 under MTF, ~≤1 for CNC). Falls back to the fund
+    capital when nothing is sizable (no picks / no LTP).
+    """
+    config.validate()
+
+    # Ensure broker_profiles is populated the same way _build_brokers does.
+    profiles = list(config.broker_profiles or [])
+    if not profiles:
+        from .config import BrokerProfile
+        profiles = [BrokerProfile(
+            profile_id="zerodha_default", broker_name="zerodha",
+            allocated_capital=config.total_allocated_capital,
+            order_product=config.order_product,
+            instrument_type=config.instrument_type)]
+
+    falcon_picks = load_falcon_picks(top_n=max(config.top_n_stocks, 10))
+    if config.rank_filter:
+        falcon_picks = [p for p in falcon_picks if p.rank in config.rank_filter]
+
+    router = BrokerRouter(top_n_stocks=config.top_n_stocks)
+    routed = router.route_picks(falcon_picks, profiles)
+
+    allocator = CapitalAllocator(config)
+    positions: List[Dict[str, Any]] = []
+    invested_basis = 0.0
+    dry_run = (mode != "live")
+    for prof in profiles:
+        if not prof.enabled:
+            continue
+        try:
+            broker = build_client(prof, dry_run=dry_run)
+        except Exception as e:  # unknown/unimplemented broker — skip, note it
+            log.warning("preview: broker build failed for %s: %s",
+                        prof.profile_id, e)
+            continue
+        picks = routed.get(prof.profile_id, [])
+        amounts = allocator.allocate([p.symbol for p in picks])
+        for pick in picks:
+            amount = amounts.get(pick.symbol, 0.0)
+            if amount <= 0:
+                continue
+            try:
+                qty = allocator.calculate_quantity(pick.symbol, amount, broker)
+            except InsufficientCapitalError as e:
+                positions.append({"symbol": pick.symbol,
+                                  "broker_profile": prof.profile_id,
+                                  "status": "SKIPPED", "reason": str(e)})
+                continue
+            ref_price = broker.get_ltp(pick.symbol) or 0.0
+            invested = qty * ref_price
+            invested_basis += invested
+            positions.append({"symbol": pick.symbol,
+                              "broker_profile": prof.profile_id,
+                              "qty": qty, "ref_price": ref_price,
+                              "invested_value": invested,
+                              "order_product": prof.order_product,
+                              "instrument_type": prof.instrument_type})
+
+    total_alloc = float(config.total_allocated_capital)
+    basis = invested_basis if invested_basis > 0 else total_alloc
+    leverage = (invested_basis / total_alloc) if total_alloc > 0 else 0.0
+    return {
+        "invested_basis": invested_basis,
+        "total_allocated_capital": total_alloc,
+        "leverage": leverage,
+        "n_positions": len([p for p in positions if p.get("status") != "SKIPPED"]),
+        "positions": positions,
+        "kill_preview": compute_kill_preview(
+            kill_switch_enabled=config.kill_switch_enabled,
+            kill_switch_pct=config.kill_switch_pct,
+            kill_switch_direction=config.kill_switch_direction,
+            invested_basis=basis,
+            total_allocated_capital=total_alloc),
+    }
 
 
 class TradingSession:
@@ -278,6 +366,20 @@ class TradingSession:
                 rec = await self._place_one(broker, prof, pick, amount, allocator)
                 placed.append(rec)
 
+        # INVESTED-CAPITAL-BASIS: freeze Σ(qty*avg_price) across the positions
+        # just placed. This is the product-aware capital actually put to work
+        # (MTF leveraged value / CNC cash) and becomes the kill-switch + gross
+        # return denominator. Captured ONCE here, never recomputed as positions
+        # close. Falls back to total_allocated_capital if nothing was placed.
+        try:
+            invested_basis = self.monitor.freeze_invested_basis()
+            log.info("session %s invested_basis frozen at ₹%.2f (fund ₹%.2f)",
+                     self.session_id, invested_basis,
+                     self.config.total_allocated_capital)
+        except Exception as e:  # never block start on the basis capture
+            log.warning("invested_basis freeze failed for %s: %s",
+                        self.session_id, e)
+
         # FEATURE 1: place the per-position GTT-OCO broker backup on every open
         # session position that lacks one. LIVE places real GTTs; paper records
         # the intended levels only. Best-effort — never blocks the start.
@@ -371,20 +473,26 @@ class TradingSession:
             log.warning("GTT reconcile failed for %s: %s", self.session_id, e)
         self.monitor.refresh_ltps(self.brokers)
         snap = self.monitor.snapshot()
-        gr = snap["gross_return"]
-        reason = self.kill_switch.check_threshold(gr) if self.kill_switch else None
+        # KILL BASIS: the kill switch measures the INVESTED-basis gross return
+        # (÷ frozen invested_basis), not the on-fund gross. snapshot() keeps the
+        # on-fund gross_return for the history/charts.
+        gr_invested = self.monitor.compute_gross_return_invested()
+        reason = (self.kill_switch.check_threshold(gr_invested)
+                  if self.kill_switch else None)
         fired = None
         if reason:
             # Single-fire guard: the 5s poll and the sub-second WS path must
             # never double-fire. Whoever wins the per-session lock fires.
             with fire_guard.claim_fire(self.session_id) as won:
                 if won:
-                    fired = await self.kill_switch.fire(reason, gross_return=gr)
+                    fired = await self.kill_switch.fire(
+                        reason, gross_return=gr_invested)
                 else:
                     reason = None  # another path already fired/is firing
-        return {"gross_return": gr, "snapshot": snap,
-                "kill_switch_fired": bool(fired), "kill_reason": reason,
-                "fire_result": fired, "gtt_closed": gtt_closed}
+        return {"gross_return": gr_invested, "gross_return_fund": snap["gross_return"],
+                "snapshot": snap, "kill_switch_fired": bool(fired),
+                "kill_reason": reason, "fire_result": fired,
+                "gtt_closed": gtt_closed}
 
     # ── Manual kill ────────────────────────────────────────────────────────────
     async def kill(self, reason: str = "MANUAL") -> Dict[str, Any]:
@@ -406,7 +514,9 @@ class TradingSession:
         except Exception:  # pragma: no cover - defensive
             pass
         self.monitor.refresh_ltps(self.brokers)
-        gr = self.monitor.compute_gross_return()
+        # Report the INVESTED-basis gross in the manual-kill reason (the kill
+        # basis), matching the automatic path.
+        gr = self.monitor.compute_gross_return_invested()
         # Single-fire guard so a manual kill can't double-fire with an in-flight
         # WS/poll fire on the same session.
         with fire_guard.claim_fire(self.session_id) as won:
@@ -428,16 +538,28 @@ class TradingSession:
         sess = dict(row) if row else {}
         status = sess.get("status")
         positions = self.registry.get_open_positions()
-        gr = self.monitor.compute_gross_return()
+        # Two clearly-named gross returns. gross_return is the KILL BASIS
+        # (÷ frozen invested_basis); gross_return_fund is the on-fund view.
+        invested_basis = self.monitor.invested_basis()
+        gr_invested = self.monitor.compute_gross_return_invested()
+        gr_fund = self.monitor.compute_gross_return()
         out = {
             "session_id": self.session_id,
             "status": status,
             "mode": sess.get("mode", self.mode),
-            "gross_return": gr,
+            "gross_return": gr_invested,          # kill basis (÷ invested_basis)
+            "gross_return_fund": gr_fund,         # on-fund (÷ allocated)
+            "invested_basis": invested_basis,
             "total_allocated_capital": self.config.total_allocated_capital,
             "kill_switch_enabled": self.config.kill_switch_enabled,
             "kill_switch_pct": self.config.kill_switch_pct,
             "kill_switch_direction": self.config.kill_switch_direction,
+            "kill_preview": compute_kill_preview(
+                kill_switch_enabled=self.config.kill_switch_enabled,
+                kill_switch_pct=self.config.kill_switch_pct,
+                kill_switch_direction=self.config.kill_switch_direction,
+                invested_basis=invested_basis,
+                total_allocated_capital=self.config.total_allocated_capital),
             "n_open_positions": len(positions),
             "open_positions": positions,
         }

@@ -7,6 +7,7 @@ FALCON_OPERATOR_TOKEN is unset, constant-time compare). The secret never
 reaches the browser — it's injected server-side by the Next.js proxy.
 
 Endpoints:
+  POST /autotrade/preview            (config-time sizing + kill preview, no session)
   POST /autotrade/session/create
   POST /autotrade/session/{id}/start
   GET  /autotrade/session/{id}/status
@@ -36,7 +37,7 @@ from falcon.db import falcon_conn
 
 from .. import config as cfgmod
 from ..config import TradingSessionConfig
-from ..session import TradingSession
+from ..session import TradingSession, preview_session_sizing
 from ..monitoring import tick_driver, entry_scheduler
 
 log = logging.getLogger("kanida.autotrade.api")
@@ -70,6 +71,12 @@ router = APIRouter(dependencies=[Depends(require_operator_token)])
 class CreateSessionRequest(BaseModel):
     config: Dict[str, Any] = Field(..., description="TradingSessionConfig dict")
     mode: str = Field("paper", description="'paper' (default, no real orders) | 'live'")
+
+
+class PreviewRequest(BaseModel):
+    config: Dict[str, Any] = Field(..., description="TradingSessionConfig dict")
+    mode: str = Field("paper", description="'paper' (default) | 'live' — sizing "
+                      "is identical; only LTP/margin source differs")
 
 
 class StartSessionRequest(BaseModel):
@@ -169,6 +176,29 @@ def session_create(req: CreateSessionRequest):
     mode = req.mode if req.mode in ("paper", "live") else "paper"
     sess = TradingSession.create(cfg, mode=mode)
     return {"session_id": sess.session_id, "mode": mode, "status": "CREATED"}
+
+
+@router.post("/autotrade/preview")
+def autotrade_preview(req: PreviewRequest):
+    """Config-time sizing preview — creates NO session and places NO orders.
+
+    Sizes the Falcon picks exactly as session start would (CapitalAllocator +
+    per-position MTF margin/qty) and returns the estimated invested_basis,
+    total_allocated_capital, leverage, the per-position rows, and the same
+    kill_preview (potential profit at +pct / loss at -pct, in ₹ and as a % on
+    both bases). Operator-token gated (router-level dependency). Powers the UI
+    preview before Start."""
+    try:
+        cfg = TradingSessionConfig.from_dict(req.config)
+        cfg.validate()
+    except Exception as e:
+        raise HTTPException(400, f"invalid config: {e}")
+    mode = req.mode if req.mode in ("paper", "live") else "paper"
+    try:
+        return preview_session_sizing(cfg, mode=mode)
+    except Exception as e:
+        log.exception("preview failed: %s", e)
+        raise HTTPException(500, f"preview failed: {e}")
 
 
 @router.post("/autotrade/session/{session_id}/start")

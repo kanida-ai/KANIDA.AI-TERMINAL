@@ -41,6 +41,9 @@ class KillSwitchExecutor:
 
     # ── Threshold check (called every tick) ───────────────────────────────────
     def check_threshold(self, gross_return: float) -> Optional[str]:
+        # `gross_return` is the INVESTED-basis gross (÷ frozen invested_basis) —
+        # the callers (session.tick / ws_driver / manual kill) pass that value.
+        # kill_switch_pct is a validated FRACTION (0.012 = 1.2%).
         if not self.config.kill_switch_enabled:
             return None
         d = self.config.kill_switch_direction

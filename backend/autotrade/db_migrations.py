@@ -23,6 +23,7 @@ This module ADDS the following without touching any existing table definition:
     (These columns are kept as-is — harmless — and are NOT dropped, but the
      autotrade code no longer touches falcon_position_state at all.)
   * autotrade_sessions          — TradingSessionConfig persistence + status
+                                  (+ invested_basis: frozen Σ qty*avg_price)
   * autotrade_config_presets    — named saved config presets
   * autotrade_broker_profiles   — BrokerProfile rows (no plaintext secrets)
   * autotrade_slippage          — per-fill slippage record
@@ -101,6 +102,20 @@ def run_migrations() -> dict:
                         f"ALTER TABLE autotrade_positions ADD COLUMN {name} {ddl_type}")
                     added_cols.append(name)
 
+        # ── 2c. ALTER-guard invested_basis on autotrade_sessions ─────────────
+        # INVESTED-CAPITAL-BASIS feature: the FROZEN sum of qty*avg_price across
+        # the session's positions AT ENTRY. This is the product-aware capital
+        # actually put to work (MTF = leveraged invested value; CNC = deployed
+        # cash) and is the denominator the kill switch / gross return measure
+        # against. Captured ONCE in session._fire_entries after orders are
+        # placed; never updated as positions close. Additive + idempotent.
+        if _table_exists(con, "autotrade_sessions"):
+            have = set(_existing_columns(con, "autotrade_sessions"))
+            if "invested_basis" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_sessions ADD COLUMN invested_basis REAL")
+                added_cols.append("invested_basis")
+
         for t in (
             "autotrade_positions",
             "autotrade_sessions", "autotrade_config_presets",
@@ -166,6 +181,11 @@ CREATE TABLE IF NOT EXISTS autotrade_sessions (
         -- CREATED | RUNNING | KILLING | CLOSED | FAILED
     mode            TEXT NOT NULL DEFAULT 'paper',   -- 'paper' | 'live'
     total_allocated_capital REAL NOT NULL,
+    -- FROZEN invested (notional) capital basis = Σ(qty*avg_price) at entry.
+    -- Product-aware (MTF leveraged value / CNC cash). The kill-switch + gross
+    -- return denominator. NULL until _fire_entries captures it. (Also added via
+    -- idempotent ALTER for DBs created before this column.)
+    invested_basis  REAL,
     config_json     TEXT NOT NULL,
     last_gross_return REAL,
     kill_reason     TEXT,
