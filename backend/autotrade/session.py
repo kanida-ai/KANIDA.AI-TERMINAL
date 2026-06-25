@@ -127,7 +127,8 @@ class TradingSession:
         with falcon_conn() as con:
             rows = con.execute(
                 """SELECT session_id, created_at, started_at, closed_at, status, mode,
-                          total_allocated_capital, last_gross_return
+                          total_allocated_capital, last_gross_return,
+                          last_gross_return AS gross_return
                    FROM autotrade_sessions ORDER BY created_at DESC LIMIT ?""",
                 (int(limit),),
             ).fetchall()
