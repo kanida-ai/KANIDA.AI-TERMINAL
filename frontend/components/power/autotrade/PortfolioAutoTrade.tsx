@@ -1007,13 +1007,17 @@ export function PortfolioAutoTrade() {
                       </thead>
                       <tbody>
                         {status.open_positions.map((p, i) => {
-                          const ret = typeof p.return_pct === 'number' ? p.return_pct : null
+                          // Backend sends `ltp` + `avg_price`; per-position return %
+                          // is derived from them (no return_pct field exists).
+                          const ret = (typeof p.ltp === 'number' && typeof p.avg_price === 'number' && p.avg_price > 0)
+                            ? ((p.ltp - p.avg_price) / p.avg_price) * 100
+                            : null
                           return (
                             <tr key={`${p.symbol ?? i}`} style={{ borderTop: `1px solid ${C.line}` }}>
                               <td className="py-1.5 font-medium" style={{ color: C.ink }}>{p.symbol ?? '—'}</td>
                               <td className="py-1.5 text-right" style={{ color: C.ink2 }}>{p.qty ?? '—'}</td>
                               <td className="py-1.5 text-right" style={{ color: C.ink2 }}>{p.avg_price ?? '—'}</td>
-                              <td className="py-1.5 text-right" style={{ color: C.ink2 }}>{p.last_price ?? '—'}</td>
+                              <td className="py-1.5 text-right" style={{ color: C.ink2 }}>{p.ltp ?? '—'}</td>
                               <td className="py-1.5 text-right" style={{ color: ret == null ? C.faint : pctTone(ret) }}>
                                 {ret == null ? '—' : fmtPct(ret)}
                               </td>

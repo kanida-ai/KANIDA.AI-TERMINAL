@@ -67,7 +67,9 @@ export type OpenPosition = {
   symbol?: string
   qty?: number
   avg_price?: number
-  last_price?: number
+  ltp?: number              // live last price from backend (was mis-read as last_price)
+  last_price?: number       // legacy/unused — backend sends `ltp`
+  unrealised_pnl?: number
   pnl?: number
   return_pct?: number
   [k: string]: unknown
