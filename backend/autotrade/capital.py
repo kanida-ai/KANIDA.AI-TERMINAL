@@ -83,8 +83,12 @@ class CapitalAllocator:
             # (qty = amount / margin_per_share), matching the legacy engine and
             # the backtest. Cash equity (EQ/CNC) sizes off LTP. If the margin
             # lookup fails we fall back to cash sizing so we never over-deploy.
+            # MTF leverage is driven by the ORDER PRODUCT (MTF), which applies to
+            # equity (instrument_type EQ) — not a separate instrument type. Trigger
+            # margin-based sizing whenever the product is MTF (or itype==MTF).
+            use_mtf_margin = (itype == "MTF") or (cfg.order_product == "MTF")
             per_unit = ltp
-            if itype == "MTF":
+            if use_mtf_margin:
                 mps = None
                 try:
                     mps = broker.get_margin_per_share(symbol, "MTF")
