@@ -453,6 +453,7 @@ from falcon.routers.portfolio_router  import router as falcon_portfolio_router
 from falcon.routers.patterns_router   import router as falcon_patterns_router
 from falcon.routers.admin_router      import router as falcon_admin_router
 from falcon.trade.routers.trade_router import router as falcon_trade_router
+from autotrade.api.autotrade_routes import router as autotrade_router
 
 # Power User Portal (Phase 1 — invite-only beta).
 # Public surface namespaced under /api/power/* — strict separation from
@@ -490,6 +491,20 @@ app.include_router(falcon_portfolio_router, prefix="/api", tags=["Falcon"])
 app.include_router(falcon_patterns_router,  prefix="/api", tags=["Falcon"])
 app.include_router(falcon_admin_router,     prefix="/api", tags=["Falcon"])
 app.include_router(falcon_trade_router,     prefix="/api", tags=["Falcon-Trade"])
+# AutoTrade — additive multi-broker portfolio + kill switch (operator-token gated).
+# Endpoints live under /api/autotrade/*. Tables migrated idempotently below.
+app.include_router(autotrade_router,        prefix="/api", tags=["AutoTrade"])
+
+# AutoTrade schema migration — idempotent, additive (adds exit_lock +
+# exit_initiated_by to falcon_position_state and the new autotrade_* tables).
+# Never modifies existing tables; safe on every boot.
+try:
+    from autotrade.db_migrations import run_migrations as _run_autotrade_migrations
+    _at_manifest = _run_autotrade_migrations()
+    log.info("AutoTrade schema OK: +cols=%s tables=%s",
+             _at_manifest["added_columns"], _at_manifest["tables_present"])
+except Exception as _at_e:  # pragma: no cover - never block boot
+    log.warning("AutoTrade migration skipped/failed (non-fatal): %s", _at_e)
 
 # Power User Portal — endpoints already self-prefix with /api/power/*
 app.include_router(power_auth_router,         tags=["Power-User"])

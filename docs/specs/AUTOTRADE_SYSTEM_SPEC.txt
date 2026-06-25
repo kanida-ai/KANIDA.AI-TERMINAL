@@ -1,0 +1,416 @@
+KANIDA.AI
+Automated Portfolio Trading System
+Multi-Broker · Portfolio Kill Switch · Capital Allocation Engine · Falcon Top 10 Integration
+Claude Code Build Specification — Complete Implementation Prompt
+June 2026 · Extends existing autotrade system
+0. Before Writing Any Code — Mandatory Audit
+
+[TABLE]
+Read the existing autotrade system completely before touching anything. This spec extends what exists — it does not replace it. Missing this step will break live trading.
+[/TABLE]
+
+Perform the following audit and report findings before proceeding:
+Read the full existing autotrade codebase. Map every existing module: what it does, what DB tables it reads/writes, what Kite API calls it makes.
+Identify which of the 7 sections below are already implemented. For each: confirm the exact function/class name, file location, and whether it is tested.
+List everything that is MISSING and needs to be built fresh.
+Confirm the Kite WebSocket and REST API are correctly connected and authenticated.
+Confirm existing order placement, position tracking, and PnL calculation are working in production.
+Do NOT modify any existing working module. Extend it with new parameters or wrap it. Never rewrite working code.
+None of the current auto trade functionality should be removed. Eveything below is adding to it .
+Report the audit as a table: Module | Status (EXISTS / MISSING / PARTIAL) | File | Notes. Then proceed.
+1. System Architecture Overview
+The system has seven layers. Each is independent and communicates only through defined interfaces. Build in this exact sequence — later layers depend on earlier ones.
+
+[TABLE]
+Layer | Module | Already exists? | Build action
+1 | Stock Identification — Falcon Top 10 picks | YES — do not touch | Read output only. Never modify Falcon engine.
+2 | Capital Allocation Engine | PARTIAL — check audit | Extend with multi-broker, position-count, and percentage-cap modes.
+3 | Multi-Broker Router | UNKNOWN — check audit | New if missing. Routes orders to correct broker per profile.
+4 | Order Execution Engine | PARTIAL — check audit | Extend with limit/VWAP modes, F&O support, MTF flag.
+5 | Position Registry | PARTIAL — check audit | Extend with real-time per-broker PnL aggregation.
+6 | Portfolio Risk Monitor | LIKELY MISSING | New. Tick-level gross return calculation + kill switch.
+7 | Kill Switch Executor | LIKELY MISSING | New. Instant multi-broker flatten on threshold breach.
+[/TABLE]
+
+2. Global Configuration
+2.1 Master config object — all user inputs live here
+Every user-configurable value must be a parameter in a single config object. No hardcoded values anywhere in the trading logic. The UI reads and writes this object. Claude Code must implement this as a DB-backed config table with a Python dataclass wrapper.
+# kanida/autotrade/config.py
+@dataclass
+class TradingSessionConfig:
+    # ── Capital ─────────────────────────────────────────────────────
+    total_allocated_capital: float        # e.g. 500000.0 (₹5L)
+    # ── Stock selection ─────────────────────────────────────────────
+    top_n_stocks: int                     # 3, 5, 7, or 10
+    rank_filter: list[int] | None         # e.g. [1,2,3] for specific ranks only
+    # ── Position sizing mode (pick ONE) ─────────────────────────────
+    sizing_mode: str                      # "equal" | "pct_cap" | "manual"
+    max_pct_per_position: float           # used if sizing_mode="pct_cap", e.g. 0.05 = 5%
+    manual_amounts: dict[str,float]       # used if sizing_mode="manual", e.g. {"INFY":25000}
+    # ── Order type ──────────────────────────────────────────────────
+    order_product: str                    # "CNC" | "MIS" | "MTF" | "NRML"
+    order_type: str                       # "MARKET" | "LIMIT" | "VWAP"
+    limit_offset_pct: float               # for LIMIT: offset from open, e.g. 0.001 = 0.1%
+    vwap_window_seconds: int              # for VWAP: observation window, e.g. 60
+    # ── Instrument type ─────────────────────────────────────────────
+    instrument_type: str                  # "EQ" | "FUT" | "CE" | "PE"
+    expiry_preference: str                # "near" | "next" | "far" (for F&O)
+    # ── Kill switch ─────────────────────────────────────────────────
+    kill_switch_pct: float                # e.g. 0.012 = +1.2%, 0.02 = +2.0%
+    kill_switch_direction: str            # "profit" | "loss" | "both"
+    kill_switch_enabled: bool             # master on/off
+    # ── Broker routing ──────────────────────────────────────────────
+    broker_profiles: list[BrokerProfile]  # list of broker configs (see Section 4)
+    # ── Entry timing ────────────────────────────────────────────────
+    entry_time: str                       # default "09:15:00"
+    entry_window_seconds: int             # place orders within N seconds of entry_time
+3. Capital Allocation Engine
+3.1 Three sizing modes — implement all three, select via config
+
+[TABLE]
+Mode | Config value | Logic | Example
+Equal distribution | sizing_mode = "equal" | capital / top_n_stocks per position. All stocks get same amount. | ₹5L ÷ 5 stocks = ₹1L each
+Percentage cap | sizing_mode = "pct_cap" | min(capital/n, capital × max_pct_per_position) per position. Prevents single-stock concentration. | ₹5L × 5% max = ₹25K cap per stock
+Manual override | sizing_mode = "manual" | User specifies exact ₹ amount per symbol. Total must not exceed total_allocated_capital. | INFY: ₹25K, TCS: ₹50K, WIPRO: ₹15K
+[/TABLE]
+
+3.2 Quantity calculation
+def calculate_quantity(symbol: str, amount: float, instrument_type: str,
+                        expiry_preference: str, broker: BrokerClient) -> int:
+    """
+    Fetch live LTP from broker at entry time.
+    For EQ/MTF/CNC: qty = floor(amount / ltp)
+    For FUT: qty = floor(amount / (ltp × lot_size)) × lot_size
+    For CE/PE: qty = floor(amount / (premium × lot_size)) × lot_size
+    Never returns 0. If amount < 1 lot value: raise InsufficientCapitalError.
+    Lot sizes fetched from broker instrument master — never hardcoded.
+    """
+4. Multi-Broker Router
+4.1 Why this exists
+The system must support running the same session across multiple brokers simultaneously. Example use cases: 5 stocks on Zerodha (MTF), 5 stocks on Fyers (CNC), options on Upstox. Each broker gets its own profile with its own capital allocation, order type, and stock list.
+4.2 Broker profile schema
+@dataclass
+class BrokerProfile:
+    profile_id: str            # unique name, e.g. "zerodha_mtf", "fyers_eq"
+    broker_name: str           # "zerodha" | "fyers" | "upstox" | "angel" | "dhan"
+    api_key: str               # from secrets manager, never plaintext in code
+    api_secret: str            # from secrets manager
+    access_token: str          # refreshed daily, stored in DB
+    allocated_capital: float   # this broker's share of total capital
+    symbols: list[str] | None  # if None: use Falcon top_n. if set: use this exact list.
+    rank_range: tuple[int,int] | None  # e.g. (1,5) = ranks 1-5 go to this broker
+    order_product: str         # "CNC" | "MIS" | "MTF" | "NRML" — per-broker override
+    instrument_type: str       # "EQ" | "FUT" | "CE" | "PE" — per-broker override
+    enabled: bool              # can disable one broker without touching others
+4.3 Routing logic
+class BrokerRouter:
+    def route_picks(self, falcon_picks: list[Pick],
+                    profiles: list[BrokerProfile]) -> dict[str, list[Pick]]:
+        """
+        For each broker profile:
+          - If profile.symbols is set: use that exact list
+          - If profile.rank_range is set: filter falcon_picks by rank
+          - If both None: use all falcon_picks up to top_n_stocks
+        Returns: {profile_id: [Pick, ...]}
+        A symbol CAN appear in multiple broker profiles (same stock, different products).
+        Capital accounting is per-profile, not aggregate.
+        """
+
+[TABLE]
+Multi-broker kill switch: when the portfolio kill switch fires, it must fire simultaneously across ALL active broker profiles. No broker is excluded. A single API failure on one broker must not block the others — fire all in parallel using asyncio.gather with independent error handling.
+[/TABLE]
+
+5. Order Execution Engine
+5.1 Entry timing — 9:15 AM logic
+Backtesting is done at 9:15 AM open price. The live system must match this as closely as possible.
+
+[TABLE]
+Order type | When to use | Execution logic | Slippage risk
+MARKET (default) | All standard entries | Place market order at exactly entry_time. Accept open price. | Low — 1-3 ticks typical at 9:15
+LIMIT | When user wants price control | Place limit at (live_pre_open_price × (1 + limit_offset_pct)). If unfilled in entry_window_seconds: cancel and place MARKET. | None if fills. Miss risk if stock gaps up.
+VWAP | Smoother entry on high-volatility days | Observe for vwap_window_seconds from entry_time. Place MARKET at end of window. | VWAP of window period vs 9:15 open.
+[/TABLE]
+
+5.2 Instrument-specific order construction
+def build_order(symbol: str, qty: int, config: TradingSessionConfig,
+                broker: BrokerClient) -> OrderParams:
+    if config.instrument_type == "EQ":
+        return EQOrder(symbol, qty, config.order_product, config.order_type)
+    elif config.instrument_type == "MTF":
+        return MTFOrder(symbol, qty)  # product=MTF, always CNC-like hold
+    elif config.instrument_type == "FUT":
+        contract = broker.get_active_futures(symbol, config.expiry_preference)
+        # expiry_preference: "near" = current month, "next" = next month
+        lot_size = broker.get_lot_size(contract)
+        lots = qty // lot_size
+        return FUTOrder(contract, lots, "NRML", config.order_type)
+    elif config.instrument_type in ("CE", "PE"):
+        chain = broker.get_option_chain(symbol)
+        strike = select_atm_strike(chain, config.instrument_type)
+        contract = broker.get_option_contract(symbol, strike, config.expiry_preference)
+        lot_size = broker.get_lot_size(contract)
+        lots = qty // lot_size
+        return OptionOrder(contract, lots, "NRML", config.order_type)
+5.3 Error handling — mandatory for all order placement
+# Every order placement must handle:
+# 1. API timeout
+async def place_order_with_retry(order, broker, max_retries=3, timeout_ms=2000):
+    for attempt in range(max_retries):
+        try:
+            return await asyncio.wait_for(broker.place_order(order), timeout=timeout_ms/1000)
+        except asyncio.TimeoutError:
+            log.error(f"Order timeout attempt {attempt+1}: {order.symbol}")
+            if attempt == max_retries - 1:
+                raise OrderTimeoutError(order)
+# 2. Partial fills — detect and handle
+def handle_partial_fill(order_id, filled_qty, requested_qty, broker):
+    if filled_qty < requested_qty:
+        remaining = requested_qty - filled_qty
+        # Log partial. Register partial position in registry.
+        # Do NOT place another order for remaining unless user config says so.
+        log.warning(f"Partial fill: {order_id} filled {filled_qty}/{requested_qty}")
+        position_registry.register_partial(order_id, filled_qty)
+# 3. Slippage tracking
+def record_slippage(symbol, expected_price, actual_price, qty):
+    slippage_pct = (actual_price - expected_price) / expected_price * 100
+    db.insert("order_slippage", {symbol, expected_price, actual_price, slippage_pct, qty})
+    if abs(slippage_pct) > 0.5:  # Alert on > 0.5% slippage
+        alert.send(f"High slippage on {symbol}: {slippage_pct:.2f}%")
+6. Position Registry
+6.1 Real-time position tracking — one record per position per broker
+CREATE TABLE live_positions (
+  id              BIGSERIAL PRIMARY KEY,
+  session_id      UUID NOT NULL,           -- links to trading_sessions table
+  broker_profile  VARCHAR(50) NOT NULL,
+  symbol          VARCHAR(20) NOT NULL,
+  instrument_type VARCHAR(10) NOT NULL,    -- EQ / FUT / CE / PE / MTF
+  exchange        VARCHAR(10) NOT NULL,
+  qty             INTEGER NOT NULL,
+  avg_price       FLOAT NOT NULL,
+  order_id        VARCHAR(50) NOT NULL,
+  status          VARCHAR(20) DEFAULT 'OPEN',  -- OPEN / CLOSING / CLOSED
+  ltp             FLOAT,                   -- updated every tick
+  unrealised_pnl  FLOAT,                   -- (ltp - avg_price) * qty
+  gross_return    FLOAT,                   -- unrealised_pnl / avg_price * qty / total_capital
+  opened_at       TIMESTAMP NOT NULL,
+  closed_at       TIMESTAMP,
+  close_price     FLOAT,
+  realised_pnl    FLOAT,
+  close_order_id  VARCHAR(50),
+  close_reason    VARCHAR(50)              -- KILL_SWITCH / MANUAL / STOP / TIME
+);
+6.2 Aggregate portfolio PnL — computed every tick
+class PortfolioMonitor:
+    def compute_gross_return(self, session_id: str) -> float:
+        """
+        Called every tick (or every 1 second if tick not available).
+        gross_return = sum(unrealised_pnl for all OPEN positions) / total_allocated_capital
+        This is the number compared against kill_switch_pct.
+        """
+        positions = db.get_open_positions(session_id)
+        total_unrealised = sum(
+            (p.ltp - p.avg_price) * p.qty
+            for p in positions if p.ltp is not None
+        )
+        return total_unrealised / self.config.total_allocated_capital
+    def get_tick_source(self, broker: BrokerClient) -> str:
+        """
+        Zerodha: WebSocket (every tick)
+        Others: REST poll every 1 second
+        Use WebSocket if available. Fall back to 1-second poll.
+        """
+7. Portfolio Kill Switch
+7.1 What the kill switch does
+When aggregate gross return crosses the configured threshold, the kill switch fires. It overrides everything. No individual stop-losses, no pending orders, no held positions matter at that point. Everything is flattened as fast as possible across all brokers.
+
+[TABLE]
+The kill switch is the highest-priority process in the system. When it fires, it cancels all pending orders first, then liquidates all positions. Nothing else runs until all exits are confirmed or timed out.
+[/TABLE]
+
+7.2 Kill switch configuration
+
+[TABLE]
+Config field | Example value | Meaning
+kill_switch_pct | 0.012 | Fire when gross return ≥ +1.2% (profit target)
+kill_switch_pct | -0.010 | Fire when gross return ≤ −1.0% (loss limit)
+kill_switch_direction | "profit" | Only fire on positive threshold (lock in gains)
+kill_switch_direction | "loss" | Only fire on negative threshold (cut losses)
+kill_switch_direction | "both" | Fire on either side — use kill_switch_pct as magnitude
+kill_switch_enabled | False | Disable entirely — manual exit only
+[/TABLE]
+
+7.3 Kill switch execution sequence
+class KillSwitchExecutor:
+    async def fire(self, session_id: str, trigger_reason: str):
+        """Sequence is CRITICAL. Do not reorder."""
+        log.critical(f"KILL SWITCH FIRED: {trigger_reason}")
+        db.update_session_status(session_id, "KILLING")
+        # STEP 1: Cancel all pending orders across all brokers (parallel)
+        cancel_tasks = []
+        for profile in self.active_broker_profiles:
+            pending = await profile.broker.get_pending_orders()
+            for order in pending:
+                cancel_tasks.append(profile.broker.cancel_order(order.id))
+        await asyncio.gather(*cancel_tasks, return_exceptions=True)
+        # return_exceptions=True: one broker failure does not stop others
+        # STEP 2: Liquidate all open positions across all brokers (parallel)
+        exit_tasks = []
+        positions = db.get_open_positions(session_id)
+        for pos in positions:
+            broker = self.get_broker(pos.broker_profile)
+            exit_tasks.append(
+                broker.place_market_exit(pos.symbol, pos.qty, pos.instrument_type)
+            )
+        results = await asyncio.gather(*exit_tasks, return_exceptions=True)
+        # STEP 3: Handle failures
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                pos = positions[i]
+                log.error(f"Exit FAILED for {pos.symbol} on {pos.broker_profile}: {result}")
+                alert.send_urgent(f"MANUAL EXIT REQUIRED: {pos.symbol} on {pos.broker_profile}")
+                # Mark in DB as EXIT_FAILED — human must act
+                db.update_position_status(pos.id, "EXIT_FAILED", str(result))
+        # STEP 4: Mark session closed
+        db.update_session_status(session_id, "CLOSED")
+        db.record_kill_switch_event(session_id, trigger_reason, gross_return)
+    def check_threshold(self, gross_return: float) -> str | None:
+        """Called every tick. Returns trigger reason or None."""
+        if not self.config.kill_switch_enabled:
+            return None
+        if self.config.kill_switch_direction in ("profit","both"):
+            if gross_return >= self.config.kill_switch_pct:
+                return f"PROFIT_TARGET gross_return={gross_return:.4f}"
+        if self.config.kill_switch_direction in ("loss","both"):
+            if gross_return <= -abs(self.config.kill_switch_pct):
+                return f"LOSS_LIMIT gross_return={gross_return:.4f}"
+        return None
+8. File Structure
+kanida/
+  autotrade/
+    __init__.py
+    config.py            # TradingSessionConfig, BrokerProfile dataclasses
+    capital.py           # CapitalAllocator — 3 sizing modes
+    broker/
+      __init__.py
+      router.py          # BrokerRouter — routes picks to broker profiles
+      base.py            # BrokerClient abstract base class
+      zerodha.py         # Zerodha (Kite) implementation
+      fyers.py           # Fyers implementation (stub if not yet needed)
+      upstox.py          # Upstox implementation (stub if not yet needed)
+    execution/
+      __init__.py
+      orders.py          # build_order, place_order_with_retry
+      instruments.py     # EQ / MTF / FUT / Options order construction
+      slippage.py        # record_slippage, slippage report
+    monitoring/
+      __init__.py
+      registry.py        # PositionRegistry — CRUD on live_positions
+      monitor.py         # PortfolioMonitor — tick-level gross return
+      kill_switch.py     # KillSwitchExecutor
+    session.py           # TradingSession — orchestrates all layers
+    alerts.py            # unified alert dispatcher (SMS/push/email)
+  api/
+    autotrade_routes.py  # REST endpoints for UI
+tests/
+  autotrade/
+    test_capital.py
+    test_router.py
+    test_kill_switch.py
+    test_execution.py
+9. API Endpoints for UI
+
+[TABLE]
+Method | Endpoint | Purpose
+POST | /autotrade/session/create | Create new trading session with config. Returns session_id.
+POST | /autotrade/session/{id}/start | Start the session — begin monitoring and fire entries at entry_time.
+GET | /autotrade/session/{id}/status | Live session status: gross_return, open positions, kill switch state.
+POST | /autotrade/session/{id}/kill | Manual kill switch — same as automatic but user-triggered.
+GET | /autotrade/session/{id}/positions | All open + closed positions for this session.
+POST | /autotrade/config/save | Save a named config preset for reuse.
+GET | /autotrade/config/list | List all saved config presets.
+POST | /autotrade/broker/add | Add a broker profile (tokens stored in secrets manager).
+GET | /autotrade/broker/list | List all configured broker profiles and their status.
+[/TABLE]
+
+10. Parity Checks — Confirm These After Build
+TOTAL_ALLOCATED_CAPITAL is the single source of truth. Kill switch gross return = unrealised PnL / this number. Confirm the formula in a unit test.
+Multi-broker fire must be parallel, not sequential. Use asyncio.gather. Test with a mock broker that takes 500ms — total kill time must be <500ms not <500ms × n_brokers.
+Partial fills must not break the position registry. A stock with 80 shares when 100 were ordered must appear as 80 shares, not 0 or 100.
+If kill switch fires during order placement window (9:15 to 9:15+entry_window_seconds), all pending BUY orders must be cancelled first, then existing positions liquidated.
+Lot size and contract selection for F&O: always from broker instrument master at runtime. Test this with a real Kite API call returning current lot sizes.
+All broker credentials must be in a secrets manager or environment variables. Zero plaintext credentials in code or DB. Confirm with a grep for api_key and access_token literals in source.
+All endpoints must check user authentication before exposing autotrade data. This system is accessible to app users — never expose one user's positions to another.
+Daily access token refresh must run before entry_time. If refresh fails, the session must not start and must alert the operator.
+
+[TABLE]
+Do not build a frontend. The UI already exists. Connect to the REST API endpoints defined in Section 9 only. Never modify the frontend codebase.
+[/TABLE]
+
+
+[TABLE]
+Do not modify Falcon Top 10 or the tier classification system. Read Falcon output from the existing DB table. The autotrade system is a consumer of Falcon signals, not a producer.
+[/TABLE]
+
+ADDENDUM — Existing Exit Logic: Preserve Intact
+
+[TABLE]
+This addendum supplements the Kanida AutoTrade System Spec. The autotrade system already has trailing stop loss, trailing profit, time-bound exit, and day-bound exit fully implemented. DO NOT rewrite, refactor, or replace any of this logic. Your only job is to make these four mechanisms co-exist correctly with the new portfolio kill switch. Read this document in full before touching the exit layer.
+[/TABLE]
+
+What already exists — do not touch these
+
+[TABLE]
+Exit mechanism | What it does | Scope | Status
+Trailing Stop Loss | Tracks peak price since entry. If price retraces by stop_trail_pct from the peak, exit that individual position. | Per position (stock-level) | EXISTS — do not touch
+Trailing Profit | Locks in profit as price rises. Moves the profit floor up with the price. Exits when price falls back through the floor. | Per position (stock-level) | EXISTS — do not touch
+Time-Bound Exit | If a position has been open for N minutes/hours without hitting any other exit, close it at that time. | Per position (stock-level) | EXISTS — do not touch
+Day-Bound Exit | Force-close all open positions by a fixed market time (e.g. 3:15 PM IST) regardless of P&L. | Session-level (all positions) | EXISTS — do not touch
+[/TABLE]
+
+The one new thing: Kill Switch priority
+The portfolio kill switch introduced in the main spec is the only new exit mechanism. It sits above all four existing exits in priority. The interaction rules are:
+
+[TABLE]
+Situation | What happens | Rule
+Kill switch fires while trailing stop is monitoring a position | Kill switch wins. Cancel the trailing stop monitor. Fire market exit immediately. | Kill switch overrides all per-position exits
+Kill switch fires while time-bound exit is pending | Kill switch wins. Do not wait for the time-bound exit. Fire immediately. | Kill switch overrides time-bound exit
+Kill switch fires at the same time as day-bound exit | Either fires the market exit. Do not double-exit. Use a position lock to prevent duplicate orders. | First one wins. Lock the position on first exit attempt.
+Trailing stop fires on stock A while kill switch is NOT triggered | Trailing stop exits stock A normally. Other positions continue. Kill switch keeps monitoring the remaining portfolio. | Per-position exits are unaffected until kill switch fires
+Day-bound exit fires and closes all positions before kill switch threshold is reached | Session ends via day-bound exit. Kill switch never fires (nothing left to exit). | Day-bound exit is the last resort if kill switch threshold was never reached
+Kill switch fires and one position is mid-fill from a trailing stop exit | Cancel the partial trailing stop exit order. Place a fresh market exit for the full remaining quantity. | Kill switch must recalculate open quantity before placing exit
+[/TABLE]
+
+How to implement the priority — position state machine
+Each position must have a status field that prevents duplicate exits. This is the only code change needed in the existing exit layer:
+# Add to existing live_positions table (or equivalent in your schema):
+# exit_lock: BOOLEAN DEFAULT FALSE
+# exit_initiated_by: VARCHAR(30)  -- TRAILING_STOP | TRAILING_PROFIT |
+# #                                   TIME_BOUND | DAY_BOUND | KILL_SWITCH | MANUAL
+# In every existing exit handler, wrap with this lock check:
+def try_exit_position(position_id: str, exit_reason: str, qty: int, broker):
+    """
+    Single exit gate. Every exit — trailing stop, time-bound, kill switch —
+    must go through this function. Never place an exit order directly.
+    """
+    with db.row_lock(position_id):          # database-level row lock
+        pos = db.get_position(position_id)
+        if pos.exit_lock:
+            log.info(f"Exit blocked: {position_id} already being exited by {pos.exit_initiated_by}")
+            return  # another mechanism already claimed this exit
+        db.set_exit_lock(position_id, exit_reason)
+    # Lock acquired — this mechanism owns the exit
+    broker.place_market_exit(pos.symbol, qty, pos.instrument_type)
+    db.update_position_status(position_id, "CLOSING", exit_reason)
+Verification checklist — run these tests before releasing
+Trailing stop fires on rank-3 stock. Ranks 1, 2, 4, 5 remain open. Kill switch keeps monitoring the reduced portfolio. Confirm the gross return denominator is still total_allocated_capital, not the remaining 4 positions' capital.
+Kill switch fires at +1.2% gross return while trailing profit monitor is active on rank-1. Confirm trailing profit monitor is cancelled before kill switch exit is placed. Confirm no duplicate exit order is sent.
+Day-bound exit fires at 3:15 PM. Kill switch threshold was never reached. Confirm session closes cleanly via day-bound exit and kill switch monitor thread terminates without error.
+Kill switch and day-bound exit fire within the same second. Confirm only one set of exit orders is placed (exit_lock prevents the second one). Confirm no position is left open.
+Time-bound exit fires on rank-5 (e.g. 60 minutes since entry, no movement). Kill switch has not fired. Confirm rank-5 closes. Confirm the portfolio monitor updates gross return correctly using the 4 remaining positions.
+Run a full-day simulation: entry at 9:15, trailing stops active on all 5, kill switch set to +2%, day-bound exit at 3:15 PM. Confirm all exits are clean and the session closes with zero open positions.
+
+[TABLE]
+The gross return denominator is always total_allocated_capital — the original session capital. It does NOT change as individual positions are closed by trailing stops or time-bound exits. A trailing stop exit on one stock reduces the unrealised PnL numerator but never changes the denominator. This ensures the kill switch threshold is measured against the original capital at risk, not a shrinking base.
+[/TABLE]
+
+End of addendum. Send both this document and the main Kanida AutoTrade System Spec to Claude Code together.
