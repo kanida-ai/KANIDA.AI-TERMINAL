@@ -11,6 +11,15 @@ Lifecycle:
 
 Falcon picks are READ-ONLY from falcon_signals_live. We never write to it.
 
+DATA-ISOLATION: all session positions live in autotrade_positions (the
+PositionRegistry / PortfolioMonitor / kill switch operate ONLY on that table,
+keyed by session_id). The autotrade system NEVER reads, writes, or locks
+falcon_position_state — that belongs to the existing Falcon swing system.
+
+TICK DRIVER: start() launches a per-session background tick driver that refreshes
+LTPs + gross_return and AUTO-fires the kill switch on threshold breach; kill()
+and the kill switch stop it. Paper = no real orders.
+
 PAPER vs LIVE: mode defaults to 'paper'. In paper mode brokers are built with
 dry_run=True → no real orders. Live requires mode='live' AND each broker's
 own live gate (FALCON_AUTOTRADE_ENABLED). The kill switch is independently
@@ -35,6 +44,7 @@ from .execution.slippage import record_slippage
 from .monitoring.registry import PositionRegistry
 from .monitoring.monitor import PortfolioMonitor
 from .monitoring.kill_switch import KillSwitchExecutor
+from .monitoring import tick_driver
 
 log = logging.getLogger("kanida.autotrade.session")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -154,6 +164,14 @@ class TradingSession:
                 rec = await self._place_one(broker, prof, pick, amount, allocator)
                 placed.append(rec)
 
+        # Launch the per-session background tick driver: refreshes ltp +
+        # gross_return and AUTO-fires the kill switch on breach. Idempotent;
+        # self-stops when the session leaves RUNNING. Paper = no real orders.
+        try:
+            tick_driver.start_for_session(self.session_id)
+        except Exception as e:  # never block start on the driver
+            log.warning("tick driver start failed for %s: %s", self.session_id, e)
+
         return {"session_id": self.session_id, "status": "RUNNING",
                 "mode": self.mode, "n_placed": len(placed), "orders": placed}
 
@@ -189,11 +207,13 @@ class TradingSession:
         if res.status == "PARTIAL":
             self.registry.register_partial(symbol, prof.profile_id,
                                            fill_qty, fill_price,
-                                           product=prof.order_product)
+                                           product=prof.order_product,
+                                           instrument_type=prof.instrument_type)
         else:
             self.registry.register(symbol=symbol, broker_profile=prof.profile_id,
                                    qty=fill_qty, avg_price=fill_price,
-                                   product=prof.order_product)
+                                   product=prof.order_product,
+                                   instrument_type=prof.instrument_type)
         if ref_price > 0 and res.avg_price:
             record_slippage(symbol, ref_price, res.avg_price, fill_qty,
                             session_id=self.session_id,
@@ -221,6 +241,11 @@ class TradingSession:
     async def kill(self, reason: str = "MANUAL") -> Dict[str, Any]:
         if not self.brokers:
             self._build_brokers()
+        # Stop the background tick driver first so it can't race the manual kill.
+        try:
+            tick_driver.stop_for_session(self.session_id)
+        except Exception:  # pragma: no cover - defensive
+            pass
         self.monitor.refresh_ltps(self.brokers)
         gr = self.monitor.compute_gross_return()
         return await self.kill_switch.fire(f"MANUAL {reason} gross_return={gr:.4f}",

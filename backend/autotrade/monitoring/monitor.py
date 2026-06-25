@@ -7,15 +7,21 @@ CRITICAL (spec Section 10 + addendum): the denominator is ALWAYS the original
 total_allocated_capital. It does NOT shrink as positions are closed by trailing
 stops / time-bound exits. A per-position exit reduces the numerator only.
 
-Tick source: Zerodha WS via kite_ticker.get_ltp, REST fallback to broker.get_ltp.
+DATA-ISOLATION: reads/writes ONLY autotrade_positions WHERE session_id=?.
+Never touches falcon_position_state.
+
+Mark source (pricing.resolve_*): KiteTicker / broker LTP if available, else the
+latest close from ohlc_daily, else the position's entry price — never a stale
+unrelated value.
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from falcon.db import falcon_conn
+from .pricing import resolve_brokers_ltp
 
 log = logging.getLogger("kanida.autotrade.monitor")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -36,10 +42,9 @@ class PortfolioMonitor:
     def _open_positions(self) -> List[Dict[str, Any]]:
         with falcon_conn() as con:
             rows = con.execute(
-                """SELECT symbol, qty, avg_entry, last_seen_price, unrealised_pnl
-                   FROM falcon_position_state
-                   WHERE session_id=? AND qty > 0
-                     AND COALESCE(managed_by,'') <> 'falcon_exited'""",
+                """SELECT symbol, qty, avg_price, ltp, unrealised_pnl
+                   FROM autotrade_positions
+                   WHERE session_id=? AND status='OPEN' AND qty > 0""",
                 (self.session_id,),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -47,10 +52,10 @@ class PortfolioMonitor:
     def total_unrealised(self) -> float:
         total = 0.0
         for p in self._open_positions():
-            ltp = p.get("last_seen_price")
+            ltp = p.get("ltp")
             if ltp is None:
                 continue
-            total += (ltp - (p.get("avg_entry") or 0)) * (p.get("qty") or 0)
+            total += (ltp - (p.get("avg_price") or 0)) * (p.get("qty") or 0)
         return total
 
     def compute_gross_return(self) -> float:
@@ -58,30 +63,32 @@ class PortfolioMonitor:
         return self.total_unrealised() / self._total_allocated_capital
 
     def refresh_ltps(self, brokers: Dict[str, Any]) -> int:
-        """Pull fresh LTP per open position from its owning broker, persist it.
-        `brokers` is {broker_profile: BrokerClient}. Returns count updated."""
+        """Mark every open position to market and persist ltp + uPnL.
+
+        Price per position: broker LTP → ohlc_daily latest close → entry price
+        (pricing.resolve_brokers_ltp). Returns count updated.
+        """
         updated = 0
         with falcon_conn() as con:
             rows = con.execute(
-                """SELECT symbol, broker_profile FROM falcon_position_state
-                   WHERE session_id=? AND qty > 0
-                     AND COALESCE(managed_by,'') <> 'falcon_exited'""",
+                """SELECT id, symbol, broker_profile, avg_price
+                   FROM autotrade_positions
+                   WHERE session_id=? AND status='OPEN' AND qty > 0""",
                 (self.session_id,),
             ).fetchall()
         for r in rows:
-            broker = brokers.get(r["broker_profile"]) or next(iter(brokers.values()), None)
-            if broker is None:
-                continue
-            ltp = broker.get_ltp(r["symbol"])
+            ltp = resolve_brokers_ltp(
+                r["symbol"], brokers or {},
+                broker_profile=r["broker_profile"],
+                fallback_entry=r["avg_price"])
             if ltp is None:
                 continue
             with falcon_conn() as con:
                 con.execute(
-                    """UPDATE falcon_position_state
-                       SET last_seen_price=?, unrealised_pnl=(? - avg_entry)*qty,
-                           last_polled_at=?
-                       WHERE symbol=?""",
-                    (ltp, ltp, datetime.now(IST).isoformat(), r["symbol"]),
+                    """UPDATE autotrade_positions
+                       SET ltp=?, unrealised_pnl=(? - avg_price)*qty
+                       WHERE id=?""",
+                    (ltp, ltp, r["id"]),
                 )
                 con.commit()
             updated += 1

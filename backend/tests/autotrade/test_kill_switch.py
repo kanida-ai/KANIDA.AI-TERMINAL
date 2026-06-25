@@ -115,10 +115,10 @@ def test_exit_lock_prevents_double_exit(clean_positions):
     reg = PositionRegistry(sid, cap)
     reg.register(symbol="X", broker_profile="zer", qty=100, avg_price=100.0)
     reg.update_ltp("X", 100.0)
-    # Day-bound exit claims first.
-    assert exit_gate.claim_exit("X", "DAY_BOUND") is True
+    # Day-bound exit claims first (session-scoped gate on autotrade_positions).
+    assert exit_gate.claim_exit_session(sid, "X", "DAY_BOUND") is True
     # Kill switch tries to claim the same position — must be blocked.
-    assert exit_gate.claim_exit("X", "KILL_SWITCH") is False
+    assert exit_gate.claim_exit_session(sid, "X", "KILL_SWITCH") is False
     # The kill switch fire should therefore NOT place an exit for X.
     broker = MockBroker(profile=BrokerProfile("zer", "mock"), dry_run=False,
                         ltps={"X": 100.0})
@@ -135,9 +135,9 @@ def test_exit_lock_reentrant_same_reason(clean_positions):
     _make_session_row(sid, cap)
     reg = PositionRegistry(sid, cap)
     reg.register(symbol="Y", broker_profile="zer", qty=10, avg_price=100.0)
-    assert exit_gate.claim_exit("Y", "KILL_SWITCH") is True
+    assert exit_gate.claim_exit_session(sid, "Y", "KILL_SWITCH") is True
     # Same mechanism re-claims (kill switch → shared exit path) → allowed.
-    assert exit_gate.claim_exit("Y", "KILL_SWITCH") is True
+    assert exit_gate.claim_exit_session(sid, "Y", "KILL_SWITCH") is True
 
 
 # ── Threshold direction logic ───────────────────────────────────────────────
