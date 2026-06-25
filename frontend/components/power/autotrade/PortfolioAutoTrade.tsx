@@ -31,7 +31,7 @@ import {
   type Mode, type StartWhen, type SizingMode, type OrderProduct, type KillDirection,
   type SessionConfig, type CreateResponse, type StartResponse,
   type StatusResponse, type SavedConfig, type Broker, type SessionSummary,
-  type OpenPosition,
+  type OpenPosition, type PreviewResponse, type KillPreview,
 } from '@/lib/autotrade-api'
 
 // ── Safe defaults — paper + kill switch OFF, per the ships-disabled contract ──
@@ -152,6 +152,13 @@ export function PortfolioAutoTrade() {
   const [busy, setBusy] = useState<null | 'create' | 'start' | 'status' | 'kill'>(null)
   const [error, setError] = useState<string | null>(null)
 
+  // ── P&L preview (the "Potential outcome" card on the CONFIG form) ─────────────
+  // An ESTIMATE from POST /api/autotrade/preview — creates no session, places
+  // nothing. Debounced on the config fields that move the bases / kill outcome.
+  const [preview, setPreview] = useState<PreviewResponse | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewErr, setPreviewErr] = useState<string | null>(null)
+
   // Live-mode typed confirmation + kill typed confirmation
   const [liveConfirm, setLiveConfirm] = useState('')
   const [killArmed, setKillArmed] = useState(false)
@@ -172,6 +179,45 @@ export function PortfolioAutoTrade() {
     setConfig((c) => ({ ...c, [k]: v }))
 
   const liveReady = mode === 'paper' || liveConfirm.trim().toUpperCase() === 'LIVE'
+
+  // ── Debounced P&L preview (CONFIG form, kill switch enabled) ──────────────────
+  // Re-estimate the invested basis + kill outcome whenever a config field that
+  // moves them changes. Debounced 450ms so typing in the capital/threshold inputs
+  // doesn't spam the backend. UNITS: state holds kill_switch_pct as a PERCENT
+  // ("1" reads naturally); the backend speaks FRACTIONS, so we send /100 here —
+  // the SAME convention as createSession (no double-conversion; state untouched).
+  useEffect(() => {
+    if (phase !== 'config' || !config.kill_switch_enabled) {
+      setPreview(null); setPreviewErr(null); setPreviewLoading(false)
+      return
+    }
+    let cancelled = false
+    setPreviewLoading(true)
+    const t = setTimeout(async () => {
+      try {
+        const res = await AutoTradeAPI.preview({
+          ...config,
+          kill_switch_pct: (Number(config.kill_switch_pct) || 0) / 100,
+        })
+        if (!cancelled) { setPreview(res); setPreviewErr(null) }
+      } catch (e) {
+        if (!cancelled) { setPreview(null); setPreviewErr(e instanceof Error ? e.message : 'Could not estimate the outcome.') }
+      } finally {
+        if (!cancelled) setPreviewLoading(false)
+      }
+    }, 450)
+    return () => { cancelled = true; clearTimeout(t) }
+  }, [
+    phase,
+    config.kill_switch_enabled,
+    config.total_allocated_capital,
+    config.top_n_stocks,
+    config.sizing_mode,
+    config.order_product,
+    config.kill_switch_pct,
+    config.kill_switch_direction,
+    config.max_pct_per_position,
+  ])
 
   // ── Your Sessions (list + resume) ────────────────────────────────────────────
   const loadSessions = useCallback(async () => {
@@ -740,7 +786,7 @@ export function PortfolioAutoTrade() {
 
             {config.kill_switch_enabled && (
               <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Field label="Trigger at (%)" hint="Auto-exits when this threshold is hit.">
+                <Field label="Trigger at (%)" hint="Auto-exits when this threshold is hit (on INVESTED return).">
                   <input
                     type="number" min={0} step={0.5}
                     value={config.kill_switch_pct}
@@ -757,6 +803,16 @@ export function PortfolioAutoTrade() {
                   />
                 </Field>
               </div>
+            )}
+
+            {/* ── Potential outcome (P&L preview) — only when the kill switch is on ── */}
+            {config.kill_switch_enabled && (
+              <PotentialOutcome
+                preview={preview}
+                loading={previewLoading}
+                err={previewErr}
+                direction={config.kill_switch_direction}
+              />
             )}
           </div>
 
@@ -983,25 +1039,59 @@ export function PortfolioAutoTrade() {
               <p className="text-[12px]" style={{ color: C.muted }}>Loading status…</p>
             ) : (
               <>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+                {/* DUAL RETURN — both returns, clearly labelled. All backend
+                    figures are FRACTIONS → ×100. The kill switch triggers on the
+                    INVESTED return (gross_return), so that one is the kill basis. */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
                   <Stat label="Status" value={status.status} />
-                  {/* GROSS RETURN: backend fraction ×100 (-0.0136 → -1.36%). */}
-                  <Stat label="Gross return" value={fmtPct(status.gross_return * 100)} valueColor={pctTone(status.gross_return)} />
-                  <Stat label="Allocated" value={fmtCapital(status.total_allocated_capital)} />
+                  <Stat
+                    label="Return (invested)"
+                    value={fmtPct(status.gross_return * 100)}
+                    valueColor={pctTone(status.gross_return)}
+                    sub="kill basis"
+                  />
+                  <Stat
+                    label="Return (on fund)"
+                    value={typeof status.gross_return_fund === 'number' ? fmtPct(status.gross_return_fund * 100) : '—'}
+                    valueColor={typeof status.gross_return_fund === 'number' ? pctTone(status.gross_return_fund) : undefined}
+                    sub="÷ your fund"
+                  />
                   <Stat label="Open positions" value={String(status.n_open_positions)} />
                 </div>
 
+                {/* The two ₹ bases behind the returns, so "invested" vs "fund" is
+                    unambiguous (MTF = leveraged invested value, CNC = cash). */}
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-1 mb-3 text-[11px]" style={{ color: C.faint }}>
+                  <span>
+                    Invested basis{' '}
+                    <b style={{ color: C.ink2 }}>{typeof status.invested_basis === 'number' ? fmtINR(status.invested_basis) : '—'}</b>
+                    {' '}· the kill basis
+                  </span>
+                  <span>
+                    Fund{' '}
+                    <b style={{ color: C.ink2 }}>{fmtCapital(status.total_allocated_capital)}</b>
+                  </span>
+                </div>
+
                 {/* Kill-switch state readout — threshold is a backend FRACTION (0.01 = 1%). */}
-                <div className="flex items-center gap-2 mb-4 text-[11.5px]" style={{ color: C.muted }}>
+                <div className="flex items-center gap-2 mb-3 text-[11.5px]" style={{ color: C.muted }}>
                   <span style={{ color: status.kill_switch_enabled ? C.red : C.faint }}>{ICON.shield(14)}</span>
                   Kill switch{' '}
                   <b style={{ color: status.kill_switch_enabled ? C.red : C.faint }}>
                     {status.kill_switch_enabled ? 'ARMED' : 'OFF'}
                   </b>
                   {status.kill_switch_enabled && (
-                    <span>· ±{(status.kill_switch_pct * 100).toFixed(2).replace(/\.?0+$/, '')}% {status.kill_switch_direction}</span>
+                    <span>· triggers at ±{(status.kill_switch_pct * 100).toFixed(2).replace(/\.?0+$/, '')}% {status.kill_switch_direction} on the <b style={{ color: C.ink2 }}>invested</b> return</span>
                   )}
                 </div>
+
+                {/* LIVE, exact kill-switch outcome for the running session (same
+                    shape as the config preview) — surfaced when the backend sends it. */}
+                {status.kill_switch_enabled && status.kill_preview && (status.kill_preview.target || status.kill_preview.stop) && (
+                  <div className="mb-4">
+                    <KillPreviewCard kill={status.kill_preview} direction={status.kill_switch_direction} live />
+                  </div>
+                )}
 
                 {/* Open positions table — Kite-style: absolute P&L (₹) + Chg % per row */}
                 {status.open_positions?.length ? (
@@ -1221,11 +1311,107 @@ function SumCell({ label, value, sub, valueColor }: { label: string; value: stri
   )
 }
 
-function Stat({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
+function Stat({ label, value, valueColor, sub }: { label: string; value: string; valueColor?: string; sub?: string }) {
   return (
     <div className="rounded-xl border px-3 py-2.5" style={{ borderColor: C.line, background: 'rgba(255,255,255,0.015)' }}>
       <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>{label}</div>
       <div className="text-[15px] font-semibold mt-0.5" style={{ color: valueColor ?? C.ink }}>{value}</div>
+      {sub && <div className="text-[9.5px] mt-0.5" style={{ color: C.faint }}>{sub}</div>}
+    </div>
+  )
+}
+
+// ── P&L preview card (CONFIG form) ───────────────────────────────────────────
+// Renders the "Potential outcome" estimate from POST /api/autotrade/preview.
+// Honest "—" / loading / error states; nothing is fabricated. UNITS: every pct
+// from the backend is a FRACTION (×100 to display); ₹ via fmtINR/signedINR.
+function PotentialOutcome({
+  preview, loading, err, direction,
+}: { preview: PreviewResponse | null; loading: boolean; err: string | null; direction: KillDirection }) {
+  return (
+    <div className="mt-4 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.04)' }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span style={{ color: C.mint }}>{ICON.info(14)}</span>
+        <span className="text-[12px] font-semibold" style={{ color: C.ink }}>Potential outcome</span>
+        <span className="ml-auto text-[10px]" style={{ color: C.faint }}>estimate — places nothing</span>
+      </div>
+
+      {loading && !preview ? (
+        <p className="text-[11.5px]" style={{ color: C.muted }}>Estimating…</p>
+      ) : err ? (
+        <p className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+          <span style={{ color: C.amber }}>Couldn&apos;t estimate the outcome</span>{' '}
+          <span style={{ color: C.faint }}>({err}) — the preview endpoint may not be reporting yet. Showing &ldquo;—&rdquo;.</span>
+        </p>
+      ) : preview ? (
+        <>
+          <KillPreviewCard kill={preview.kill_preview} direction={direction} />
+          <p className="text-[10.5px] leading-snug mt-2.5" style={{ color: C.faint }}>
+            on <b style={{ color: C.ink2 }}>{fmtINR(preview.invested_basis)}</b> invested
+            {' '}· ~{(preview.leverage ?? 1).toFixed(preview.leverage % 1 === 0 ? 0 : 2)}× MTF
+            {' '}· fund <b style={{ color: C.ink2 }}>{fmtCapital(preview.total_allocated_capital)}</b>
+          </p>
+        </>
+      ) : (
+        <p className="text-[11.5px]" style={{ color: C.faint }}>—</p>
+      )}
+    </div>
+  )
+}
+
+// The two-sided kill outcome (target / stop). Shared by the CONFIG preview and
+// the LIVE running status. Each side: ₹ on the INVESTED basis + (% on your fund).
+// UNITS: pct/fund_pct are FRACTIONS (×100); basis_value_rs is ₹.
+function KillPreviewCard({ kill, direction, live }: { kill: KillPreview; direction: KillDirection; live?: boolean }) {
+  const showTarget = (direction === 'profit' || direction === 'both') && kill.target
+  const showStop = (direction === 'loss' || direction === 'both') && kill.stop
+  if (!showTarget && !showStop) {
+    return <p className="text-[11.5px]" style={{ color: C.faint }}>—</p>
+  }
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+      {kill.target && (direction === 'profit' || direction === 'both') && (
+        <OutcomeSide
+          label={`At +${(kill.target.pct * 100).toFixed(2).replace(/\.?0+$/, '')}% target`}
+          rs={kill.target.basis_value_rs}
+          fundPct={kill.target.fund_pct}
+          positive
+          live={live}
+        />
+      )}
+      {kill.stop && (direction === 'loss' || direction === 'both') && (
+        <OutcomeSide
+          label={`At −${(kill.stop.pct * 100).toFixed(2).replace(/\.?0+$/, '')}% stop`}
+          rs={kill.stop.basis_value_rs}
+          fundPct={kill.stop.fund_pct}
+          positive={false}
+          live={live}
+        />
+      )}
+    </div>
+  )
+}
+
+function OutcomeSide({
+  label, rs, fundPct, positive, live,
+}: { label: string; rs: number; fundPct: number; positive: boolean; live?: boolean }) {
+  // basis_value_rs is reported as a magnitude on the invested basis; sign it by
+  // side (target = +, stop = −) so the ₹ + % read consistently. fund_pct is a
+  // FRACTION (×100). Never fabricate — caller only renders sides the backend gave.
+  const signedRs = positive ? Math.abs(rs) : -Math.abs(rs)
+  const signedFund = positive ? Math.abs(fundPct) : -Math.abs(fundPct)
+  const tone = positive ? C.mint : C.red
+  return (
+    <div className="rounded-lg border px-3 py-2.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+      <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>
+        {label}{live && <span className="ml-1.5" style={{ color: C.mint }}>· live</span>}
+      </div>
+      <div className="text-[15px] font-semibold mt-0.5 tabular-nums" style={{ color: tone }}>
+        {Number.isFinite(rs) ? signedINR(signedRs) : '—'}
+      </div>
+      <div className="text-[10.5px] mt-0.5" style={{ color: tone }}>
+        {Number.isFinite(fundPct) ? `${fmtPct(signedFund * 100, 2)} on your fund` : '—'}
+      </div>
     </div>
   )
 }

@@ -75,6 +75,22 @@ export type OpenPosition = {
   [k: string]: unknown
 }
 
+// One side (target/stop) of the kill-switch preview. The backend returns the
+// pcts as FRACTIONS (×100 to display); basis_value_rs is already in ₹ on the
+// INVESTED basis (the kill basis); fund_pct is the same outcome expressed as a
+// FRACTION of YOUR fund (×100 to display).
+export type KillPreviewSide = {
+  pct: number              // FRACTION (0.05 = 5%) — the configured threshold
+  basis_value_rs: number   // ₹ P&L at that threshold, on the INVESTED basis
+  fund_pct: number         // FRACTION — same ₹ ÷ your fund
+}
+// Kill-switch outcome preview — either side may be absent depending on the
+// configured direction (loss / profit / both).
+export type KillPreview = {
+  target?: KillPreviewSide
+  stop?: KillPreviewSide
+}
+
 // Session status. `status` is permissive (backend may report PAPER/RUNNING/
 // CLOSED/SCHEDULED/etc.). A SCHEDULED session has NOT placed yet — it is armed
 // to fire at `fires_at` and the scheduling fields below are present.
@@ -82,8 +98,19 @@ export type SessionStatusName = 'SCHEDULED' | 'RUNNING' | 'CLOSED' | string
 export type StatusResponse = {
   status: SessionStatusName
   mode: Mode
+  // gross_return is the KILL BASIS = return on INVESTED capital (product-aware:
+  // MTF = leveraged invested value, CNC = cash), a FRACTION (-0.0136 = -1.36%).
   gross_return: number
+  // gross_return_fund = the same P&L ÷ your fund, a FRACTION. Shown alongside
+  // gross_return so the operator sees both the kill basis and the fund-level view.
+  gross_return_fund?: number
+  // The ₹ bases behind the two returns: invested_basis (the kill basis, ₹) and
+  // the fund (total_allocated_capital, ₹).
+  invested_basis?: number
   total_allocated_capital: number
+  // Exact, LIVE kill-switch outcome preview for the running session (mirrors the
+  // POST /preview shape). Present when the kill switch is configured.
+  kill_preview?: KillPreview
   kill_switch_enabled: boolean
   kill_switch_pct: number
   kill_switch_direction: KillDirection
@@ -95,6 +122,16 @@ export type StatusResponse = {
   fires_at?: string
   seconds_remaining?: number
   scheduler_armed?: boolean
+}
+
+// POST /api/autotrade/preview — an ESTIMATE before Start. Creates no session and
+// places nothing; it just reports the bases + the kill-switch outcome for the
+// given config so the operator can see "+₹X / −₹Y" before committing.
+export type PreviewResponse = {
+  invested_basis: number          // ₹ — the kill basis (product-aware)
+  total_allocated_capital: number // ₹ — your fund
+  leverage: number                // ~×N (MTF leverage; ~1 for CNC)
+  kill_preview: KillPreview
 }
 
 export type KillResponse = {
@@ -202,6 +239,16 @@ export const AutoTradeAPI = {
     call<CreateResponse>('/session/create', {
       method: 'POST',
       body: JSON.stringify({ mode, config }),
+    }),
+
+  // Estimate the invested basis + kill-switch outcome for a config BEFORE Start.
+  // Creates no session and places nothing — pure read-through estimate. The
+  // caller must send `config.kill_switch_pct` as a FRACTION (the same /100
+  // convention as createSession), since the backend speaks fractions.
+  preview: (config: SessionConfig) =>
+    call<PreviewResponse>('/preview', {
+      method: 'POST',
+      body: JSON.stringify({ config }),
     }),
 
   // when='now' (default) places immediately → RUNNING; when='scheduled' arms the

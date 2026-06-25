@@ -38,6 +38,62 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-06-24 — **AutoTrade: DUAL return display (invested vs fund, kill basis
+  made explicit) + P&L "Potential outcome" preview card** (operator ask; backend
+  moved the kill switch + gross return to an INVESTED-capital basis and now
+  returns the new fields + a `POST /api/autotrade/preview`). UI-ONLY; no backend/
+  execution code touched; all calls via the existing same-origin `/api/falcon-proxy`.
+  Two files: `lib/autotrade-api.ts` + `components/power/autotrade/PortfolioAutoTrade.tsx`.
+  Co-Trading / other AutoTrade tabs / all other pages untouched. tsc +
+  `npm run build` GREEN (`/power/autotrade` built).
+  - **(1) DUAL RETURN (Live status).** The single "Gross return" stat is replaced
+    by TWO clearly-labelled stats: **Return (invested)** = `gross_return×100`
+    (sub-label **"kill basis"**) and **Return (on fund)** = `gross_return_fund×100`
+    (sub-label **"÷ your fund"**). Below them a basis line shows **Invested basis**
+    = `fmtINR(invested_basis)` ("the kill basis") + **Fund** =
+    `fmtCapital(total_allocated_capital)` so invested-vs-fund is unambiguous (MTF =
+    leveraged invested value, CNC = cash). The kill-switch readout now states it
+    **"triggers at ±X% … on the invested return"** (was a bare "±X%"). The existing
+    Kite-style per-row P&L (₹) + Chg columns and the Invested/Current/Total-P&L
+    `PortfolioSummary` footer are unchanged. `Stat` gained an optional `sub` label.
+    Honest "—" when `gross_return_fund`/`invested_basis` aren't sent.
+  - **(2) P&L PREVIEW (the operator's ask, CONFIG form).** New `PotentialOutcome`
+    card renders ONLY when the kill switch is enabled, sourced from a new
+    `AutoTradeAPI.preview(config)` → `POST /api/autotrade/preview` (creates no
+    session, places nothing). It shows, per the configured direction:
+    **At +target% → +₹{basis_value_rs} ( +{fund_pct×100}% on your fund )** and/or
+    **At −stop% → −₹{basis_value_rs} ( −{fund_pct×100}% on your fund )**, plus the
+    basis line **"on ₹{invested_basis} invested · ~{leverage}× MTF · fund {…}"**.
+    The call is **debounced 450ms** on the config fields that move the bases/
+    outcome (capital, top_n, sizing, order_product, kill_switch_pct, direction,
+    max_pct_per_position). Honest **"Estimating…" / error ("preview endpoint may
+    not be reporting yet" → "—") / "—"** states; never fabricated. The same
+    two-sided renderer (`KillPreviewCard`/`OutcomeSide`) ALSO surfaces the LIVE,
+    exact `status().kill_preview` in the running view (sub-tagged **"· live"**)
+    when the backend supplies it.
+  - **UNITS held 1:1.** Everything from the backend is a FRACTION → **×100** for
+    %; ₹ via `fmtINR`/`signedINR`. State keeps `kill_switch_pct` as a PERCENT
+    (input reads "1"); the preview call sends **/100** at the boundary — the SAME
+    convention as `createSession`, so there is no double-conversion. `basis_value_rs`
+    (a magnitude) is signed by side (target +, stop −) so ₹ + % read consistently.
+  - **API (`lib/autotrade-api.ts`):** added `KillPreviewSide { pct; basis_value_rs;
+    fund_pct }`, `KillPreview { target?; stop? }`, `PreviewResponse { invested_basis;
+    total_allocated_capital; leverage; kill_preview }`; extended `StatusResponse`
+    with `gross_return_fund?`, `invested_basis?`, `kill_preview?` (gross_return
+    re-documented as the INVESTED/kill basis); added `AutoTradeAPI.preview(config)`
+    → `POST /preview`.
+  - **Honesty.** Preview/live cards render only the sides + figures the backend
+    returns; missing fields → "—"; estimate is labelled "places nothing"; ships-
+    disabled banner, paper-default/typed-LIVE, KILL, scheduled flow, list/resume/
+    delete, egress-IP all untouched. Mint/F2 theme + viewport-lock intact; reuses
+    cotrade-kit `fmtINR`/`signedINR`/`fmtPct`/`fmtCapital`/`pctTone`/`ICON`/`C`.
+  - **Backend needs:** none (the ask states `status()` already returns
+    `gross_return`/`gross_return_fund`/`invested_basis`/`total_allocated_capital`/
+    `kill_preview` and `POST /api/autotrade/preview {config}` →
+    `{ invested_basis, total_allocated_capital, leverage, kill_preview }` are LIVE).
+    The UI degrades to "—"/honest-error if any field/endpoint isn't reporting yet.
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npx next build` ✓ compiled —
+    `/power/autotrade` built, all other routes intact.
 - 2026-06-24 — **AutoTrade Sessions: critical % UNITS fix + Kite-style P&L +
   egress-IP self-service** (operator ask; 3 fixes). UI-ONLY; no backend/execution
   code touched; all calls via the existing same-origin `/api/falcon-proxy`. Two
