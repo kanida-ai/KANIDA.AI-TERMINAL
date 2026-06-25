@@ -159,10 +159,15 @@ class TradingSession:
         """
         with falcon_conn() as con:
             rows = con.execute(
-                """SELECT session_id, created_at, started_at, closed_at, status, mode,
-                          total_allocated_capital, last_gross_return,
-                          last_gross_return AS gross_return
-                   FROM autotrade_sessions ORDER BY created_at DESC LIMIT ?""",
+                """SELECT s.session_id, s.created_at, s.started_at, s.closed_at,
+                          s.status, s.mode, s.total_allocated_capital,
+                          s.last_gross_return,
+                          s.last_gross_return AS gross_return,
+                          (SELECT COUNT(*) FROM autotrade_positions p
+                           WHERE p.session_id = s.session_id
+                             AND p.status = 'OPEN') AS n_open_positions
+                   FROM autotrade_sessions s
+                   ORDER BY s.created_at DESC LIMIT ?""",
                 (int(limit),),
             ).fetchall()
         return [dict(r) for r in rows]

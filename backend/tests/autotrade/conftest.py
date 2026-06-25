@@ -85,6 +85,7 @@ def clean_positions():
     daemon threads can't mutate the shared temp DB across tests."""
     from falcon.db import falcon_conn
     from autotrade.monitoring import tick_driver
+    from autotrade.monitoring import entry_scheduler
 
     def _stop_all_drivers():
         with tick_driver._LOCK:
@@ -93,6 +94,14 @@ def clean_positions():
             drv.stop()
         for drv in drivers:
             drv._thread.join(timeout=2.0)
+        # Also stop any armed entry schedulers so their daemon threads can't
+        # fire across tests on the shared temp DB.
+        with entry_scheduler._LOCK:
+            scheds = list(entry_scheduler._SCHEDULERS.values())
+        for sch in scheds:
+            sch.stop()
+        for sch in scheds:
+            sch._thread.join(timeout=2.0)
 
     _stop_all_drivers()
     with falcon_conn() as con:

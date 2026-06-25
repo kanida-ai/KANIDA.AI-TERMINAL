@@ -37,6 +37,7 @@ from falcon.db import falcon_conn
 from .. import config as cfgmod
 from ..config import TradingSessionConfig
 from ..session import TradingSession
+from ..monitoring import tick_driver, entry_scheduler
 
 log = logging.getLogger("kanida.autotrade.api")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -83,6 +84,10 @@ class SavePresetRequest(BaseModel):
     config: Dict[str, Any]
 
 
+class DeleteSessionsRequest(BaseModel):
+    session_ids: List[str] = Field(..., description="Session ids to delete")
+
+
 class AddBrokerRequest(BaseModel):
     profile_id: str
     broker_name: str
@@ -102,6 +107,54 @@ def _now() -> str:
 
 async def _maybe_run(coro):
     return await coro
+
+
+def _delete_one_session(session_id: str) -> bool:
+    """Stop a session's in-memory threads and delete its persisted rows.
+
+    Steps (paper-safe, isolated table only):
+      1. Stop the entry scheduler + tick driver (idempotent no-ops if absent) so
+         neither daemon thread can fire/tick after the rows are gone.
+      2. Delete the session's rows from autotrade_positions (+ snapshots +
+         kill-switch log for completeness) — scoped strictly to session_id.
+      3. Delete the autotrade_sessions row.
+
+    NEVER touches falcon_position_state. For a live RUNNING session we still
+    delete (paper has no real broker orders); a warning is logged so the
+    operator has a trail. Returns True if a session row was deleted.
+    """
+    # 1. Stop background threads first (best-effort; never raise).
+    try:
+        entry_scheduler.stop_for_session(session_id)
+    except Exception:  # pragma: no cover - defensive
+        pass
+    try:
+        tick_driver.stop_for_session(session_id)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    with falcon_conn() as con:
+        row = con.execute(
+            "SELECT status, mode FROM autotrade_sessions WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        if row["status"] == "RUNNING":
+            log.warning("delete: session %s is RUNNING (mode=%s) — deleting anyway "
+                        "(paper has no real broker orders)", session_id, row["mode"])
+        # 2. Delete owned rows (scoped to session_id only — never any other
+        # session and NEVER falcon_position_state).
+        con.execute("DELETE FROM autotrade_positions WHERE session_id=?", (session_id,))
+        con.execute("DELETE FROM autotrade_portfolio_snapshots WHERE session_id=?",
+                    (session_id,))
+        con.execute("DELETE FROM autotrade_kill_switch_log WHERE session_id=?",
+                    (session_id,))
+        # 3. Delete the session row.
+        con.execute("DELETE FROM autotrade_sessions WHERE session_id=?", (session_id,))
+        con.commit()
+    log.info("delete: removed AutoTrade session %s + its positions", session_id)
+    return True
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -164,6 +217,33 @@ def session_positions(session_id: str):
 def session_list():
     """List recent sessions (newest first) so the UI can show + resume them."""
     return {"sessions": TradingSession.list_sessions()}
+
+
+@router.post("/autotrade/sessions/delete")
+def sessions_delete(req: DeleteSessionsRequest):
+    """Bulk-delete paper sessions. For each id: stop its tick driver + entry
+    scheduler, delete its autotrade_positions rows, delete the session row.
+    Operator-token gated (router-level dependency). Paper-safe: no real broker
+    orders are cancelled; live RUNNING sessions are still deleted with a logged
+    warning. Returns {deleted: n, ids: [...]} where ids are the rows actually
+    removed (missing ids are silently skipped)."""
+    deleted: List[str] = []
+    for sid in req.session_ids:
+        try:
+            if _delete_one_session(sid):
+                deleted.append(sid)
+        except Exception as e:
+            log.exception("delete failed for session %s: %s", sid, e)
+    return {"deleted": len(deleted), "ids": deleted}
+
+
+@router.delete("/autotrade/session/{session_id}")
+def session_delete(session_id: str):
+    """Single-session delete — same logic as the bulk endpoint."""
+    ok = _delete_one_session(session_id)
+    if not ok:
+        raise HTTPException(404, "session not found")
+    return {"deleted": 1, "ids": [session_id]}
 
 
 @router.post("/autotrade/config/save")
