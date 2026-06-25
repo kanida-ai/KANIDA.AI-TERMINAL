@@ -142,6 +142,12 @@ export function PortfolioAutoTrade() {
   const [sessionsLoading, setSessionsLoading] = useState(false)
   const [sessionsErr, setSessionsErr] = useState<string | null>(null)
 
+  // Multi-select delete (paper/test housekeeping). `selected` holds the chosen
+  // session_ids; `deleting` gates the bulk action; `deleteErr` is honest.
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [deleting, setDeleting] = useState(false)
+  const [deleteErr, setDeleteErr] = useState<string | null>(null)
+
   const [busy, setBusy] = useState<null | 'create' | 'start' | 'status' | 'kill'>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -189,7 +195,47 @@ export function PortfolioAutoTrade() {
   // "session disappears" fix) instead of dumping you on a blank form.
   useEffect(() => { loadSessions() }, [loadSessions])
 
+  // ── Multi-select delete (paper/test housekeeping) ────────────────────────────
+  const toggleSelect = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }, [])
+
+  const allIds = (sessions ?? []).map((s) => s.session_id).filter(Boolean) as string[]
+  const allSelected = allIds.length > 0 && allIds.every((id) => selected.has(id))
+  const toggleSelectAll = useCallback(() => {
+    setSelected((prev) => (allIds.length > 0 && allIds.every((id) => prev.has(id)))
+      ? new Set()
+      : new Set(allIds))
+  }, [allIds])
+
+  const onDeleteSelected = useCallback(async () => {
+    const ids = Array.from(selected)
+    if (!ids.length) return
+    if (!window.confirm(
+      `Delete ${ids.length} session${ids.length > 1 ? 's' : ''}? This removes the ` +
+      `session record${ids.length > 1 ? 's' : ''} (paper/test housekeeping) and cannot be undone.`,
+    )) return
+    setDeleting(true); setDeleteErr(null)
+    try {
+      await AutoTradeAPI.deleteSessions(ids)
+      setSelected(new Set())
+      await loadSessions()
+    } catch (e) {
+      setDeleteErr(e instanceof Error ? e.message : 'Could not delete the selected sessions.')
+    } finally {
+      setDeleting(false)
+    }
+  }, [selected, loadSessions])
+
   // Resume an existing session: jump straight to its live view + pull status.
+  // RESUME FIX: fetch status IMMEDIATELY using the row's id (not relying on the
+  // poll interval, which would leave the view on a blank "No open positions"
+  // for up to 12s while positions/LTP/gross are unknown). The poll effect still
+  // takes over afterwards; this just makes the first paint correct at once.
   const onResume = useCallback(async (s: SessionSummary) => {
     setError(null)
     setSession({ session_id: s.session_id, status: s.status ?? 'unknown', mode: s.mode ?? 'paper' })
@@ -201,6 +247,22 @@ export function PortfolioAutoTrade() {
     setCountdown(isScheduled(s.status) && typeof s.seconds_remaining === 'number' ? s.seconds_remaining : null)
     setPhase('running')
     setPoll(true)
+    // Immediate, non-poll-dependent status pull so positions + LTP + gross show
+    // right away. Errors here are non-fatal — the poll will retry.
+    setBusy('status')
+    try {
+      const res = await AutoTradeAPI.sessionStatus(s.session_id)
+      setStatus(res)
+      if (isScheduled(res.status) && typeof res.seconds_remaining === 'number') {
+        setCountdown(res.seconds_remaining)
+      } else if (!isScheduled(res.status)) {
+        setCountdown(null)
+      }
+    } catch {
+      /* poll will retry; keep the loading state honest */
+    } finally {
+      setBusy(null)
+    }
   }, [])
 
   // ── Actions ────────────────────────────────────────────────────────────────
@@ -322,6 +384,8 @@ export function PortfolioAutoTrade() {
   return (
     <div className="flex flex-col gap-4">
       <style>{MECHANISM_CSS}</style>
+      {/* Scoped live-indicator pulse (mint), namespaced to avoid token clashes. */}
+      <style>{`@keyframes at-live-pulse{0%,100%{opacity:1}50%{opacity:.35}}.live-dot{animation:at-live-pulse 1.6s ease-in-out infinite}@media (prefers-reduced-motion: reduce){.live-dot{animation:none}}`}</style>
 
       {/* ── Ships-disabled honesty banner (always on) ────────────────────────── */}
       <div
@@ -341,10 +405,19 @@ export function PortfolioAutoTrade() {
       {/* ── LIST PHASE (HOME) — Your Sessions, newest first ──────────────────── */}
       {phase === 'list' && (
         <div className="flex flex-col gap-4">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span style={{ color: C.mint }}>{ICON.bolt(16)}</span>
             <span className="text-[14px] font-semibold" style={{ color: C.ink }}>Your sessions</span>
             <div className="ml-auto flex items-center gap-2">
+              {/* Delete-selected — appears only when something is checked. These
+                  are paper/test session records; deletion is record cleanup. */}
+              {selected.size > 0 && (
+                <button type="button" disabled={deleting} onClick={onDeleteSelected}
+                  className="flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-40"
+                  style={{ color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}>
+                  {ICON.close(12)} {deleting ? 'Deleting…' : `Delete selected (${selected.size})`}
+                </button>
+              )}
               <button type="button" disabled={sessionsLoading} onClick={loadSessions}
                 className="text-[11.5px] px-2.5 py-1.5 rounded-lg transition-colors disabled:opacity-40"
                 style={{ color: C.muted, border: `1px solid ${C.line}` }}>
@@ -379,49 +452,104 @@ export function PortfolioAutoTrade() {
                 </button>
               </div>
             ) : (
-              <ul className="flex flex-col gap-2">
+              <>
+                {/* Honest delete error (record cleanup failed) */}
+                {deleteErr && (
+                  <div className="mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px] leading-snug"
+                    style={{ borderColor: 'rgba(232,115,107,0.35)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
+                    <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(13)}</span>
+                    <span>{deleteErr}</span>
+                    <button type="button" onClick={() => setDeleteErr(null)} className="ml-auto shrink-0" style={{ color: C.faint }}>
+                      {ICON.close(12)}
+                    </button>
+                  </div>
+                )}
+
+                {/* Select-all + housekeeping note */}
+                <div className="mb-2 flex items-center gap-2.5 px-1">
+                  <label className="flex items-center gap-2 text-[11px] cursor-pointer select-none" style={{ color: C.muted }}>
+                    <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
+                    Select all
+                  </label>
+                  <span className="text-[10.5px]" style={{ color: C.faint }}>
+                    Checkboxes select paper/test session records for deletion — they don&apos;t open the session.
+                  </span>
+                </div>
+
+                <ul className="flex flex-col gap-2">
                 {sessions.map((s, i) => {
                   const ret = typeof s.gross_return === 'number' ? s.gross_return : null
                   const sched = isScheduled(s.status)
+                  const running = (s.status ?? '').toUpperCase() === 'RUNNING'
+                  const nOpen = typeof s.n_open_positions === 'number' ? s.n_open_positions : null
+                  const checked = selected.has(s.session_id)
                   return (
                     <li key={s.session_id ?? i}>
-                      <button type="button" onClick={() => onResume(s)}
-                        className="w-full flex items-center gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors hover:border-[rgba(63,227,164,0.4)]"
-                        style={{ borderColor: sched ? 'rgba(63,227,164,0.32)' : C.line2, background: 'rgba(255,255,255,0.015)' }}>
-                        <span className="shrink-0" style={{ color: C.mint }}>{sched ? ICON.clock(15) : ICON.bolt(15)}</span>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            {sched ? <SchedPill /> : (
-                              <span className="text-[12.5px] font-semibold truncate" style={{ color: C.ink }}>
-                                {s.status ?? 'session'}
-                              </span>
-                            )}
-                            {s.mode && <ModePill mode={s.mode} />}
+                      <div
+                        className="w-full flex items-center gap-3 rounded-xl border px-3.5 py-3 transition-colors"
+                        style={{
+                          borderColor: checked ? 'rgba(232,115,107,0.45)' : (sched ? 'rgba(63,227,164,0.32)' : C.line2),
+                          background: checked ? 'rgba(232,115,107,0.05)' : 'rgba(255,255,255,0.015)',
+                        }}>
+                        {/* Selection checkbox — not part of the resume click target */}
+                        <label className="shrink-0 flex items-center cursor-pointer" onClick={(e) => e.stopPropagation()}>
+                          <input type="checkbox" checked={checked}
+                            onChange={() => s.session_id && toggleSelect(s.session_id)} />
+                        </label>
+
+                        {/* Resume target — the rest of the row opens the live view */}
+                        <button type="button" onClick={() => onResume(s)}
+                          className="min-w-0 flex-1 flex items-center gap-3 text-left">
+                          <span className="shrink-0" style={{ color: C.mint }}>{sched ? ICON.clock(15) : ICON.bolt(15)}</span>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              {sched ? <SchedPill /> : running ? <RunningPill /> : (
+                                <span className="text-[12.5px] font-semibold truncate" style={{ color: C.ink }}>
+                                  {s.status ?? 'session'}
+                                </span>
+                              )}
+                              {s.mode && <ModePill mode={s.mode} />}
+                            </div>
+                            <div className="text-[10.5px] mt-0.5 font-mono truncate" style={{ color: C.faint }}>
+                              {sched && s.fires_at
+                                ? <span style={{ color: C.mint }}>fires {s.fires_at}{typeof s.seconds_remaining === 'number' ? ` · in ${fmtCountdown(s.seconds_remaining)}` : ''}</span>
+                                : <>{s.session_id}{s.created_at ? ` · ${s.created_at}` : ''}</>}
+                            </div>
                           </div>
-                          <div className="text-[10.5px] mt-0.5 font-mono truncate" style={{ color: C.faint }}>
-                            {sched && s.fires_at
-                              ? <span style={{ color: C.mint }}>fires {s.fires_at}{typeof s.seconds_remaining === 'number' ? ` · in ${fmtCountdown(s.seconds_remaining)}` : ''}</span>
-                              : <>{s.session_id}{s.created_at ? ` · ${s.created_at}` : ''}</>}
+
+                          {/* Positions — a RUNNING session holds positions; never
+                              look empty. Show the count if the list gives one,
+                              else an honest "open" / "—" with the live dot. */}
+                          {!sched && (
+                            <div className="shrink-0 text-right">
+                              <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Positions</div>
+                              <div className="text-[13px] font-semibold flex items-center justify-end gap-1.5" style={{ color: nOpen ? C.ink : C.ink2 }}>
+                                {running && <span className="inline-block w-1.5 h-1.5 rounded-full live-dot" style={{ background: C.mint }} />}
+                                {nOpen != null ? nOpen : (running ? 'open' : '—')}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="shrink-0 text-right">
+                            <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>{sched ? 'Status' : 'Return'}</div>
+                            <div className="text-[13px] font-semibold" style={{ color: sched ? C.mint : (ret == null ? C.faint : pctTone(ret)) }}>
+                              {sched ? 'Scheduled' : (ret == null ? '—' : fmtPct(ret))}
+                            </div>
                           </div>
-                        </div>
-                        <div className="shrink-0 text-right">
-                          <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>{sched ? 'Status' : 'Return'}</div>
-                          <div className="text-[13px] font-semibold" style={{ color: sched ? C.mint : (ret == null ? C.faint : pctTone(ret)) }}>
-                            {sched ? 'Scheduled' : (ret == null ? '—' : fmtPct(ret))}
+                          <div className="shrink-0 text-right hidden sm:block">
+                            <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Capital</div>
+                            <div className="text-[13px] font-semibold" style={{ color: C.ink2 }}>
+                              {typeof s.total_allocated_capital === 'number' ? fmtCapital(s.total_allocated_capital) : '—'}
+                            </div>
                           </div>
-                        </div>
-                        <div className="shrink-0 text-right hidden sm:block">
-                          <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Capital</div>
-                          <div className="text-[13px] font-semibold" style={{ color: C.ink2 }}>
-                            {typeof s.total_allocated_capital === 'number' ? fmtCapital(s.total_allocated_capital) : '—'}
-                          </div>
-                        </div>
-                        <span className="shrink-0" style={{ color: C.faint }}>{ICON.chevronR(14)}</span>
-                      </button>
+                          <span className="shrink-0" style={{ color: C.faint }}>{ICON.chevronR(14)}</span>
+                        </button>
+                      </div>
                     </li>
                   )
                 })}
-              </ul>
+                </ul>
+              </>
             )}
           </div>
         </div>
@@ -989,6 +1117,18 @@ function ModePill({ mode }: { mode: Mode }) {
         ? { color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }
         : { color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
       {mode}
+    </span>
+  )
+}
+
+// RUNNING status pill — mint with a pulsing live dot so a running session that
+// holds positions never reads as empty/"no orders" in the list.
+function RunningPill() {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+      style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+      <span className="inline-block w-1.5 h-1.5 rounded-full live-dot" style={{ background: C.mint }} />
+      Running
     </span>
   )
 }

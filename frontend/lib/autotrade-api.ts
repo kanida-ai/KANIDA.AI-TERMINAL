@@ -101,6 +101,14 @@ export type KillResponse = {
   [k: string]: unknown
 }
 
+// Bulk-delete (paper/test) sessions. Read-only on positions — removes the
+// session rows; the backend returns how many it actually removed + their ids.
+export type DeleteSessionsResponse = {
+  deleted: number
+  ids: string[]
+  [k: string]: unknown
+}
+
 export type PositionsResponse = { positions: OpenPosition[] }
 
 // A session as returned by GET /autotrade/sessions (newest first). The backend
@@ -194,6 +202,15 @@ export const AutoTradeAPI = {
 
   killSession: (id: string) =>
     call<KillResponse>(`/session/${encodeURIComponent(id)}/kill`, { method: 'POST' }),
+
+  // Bulk-delete sessions (paper/test housekeeping). POSTs the id list; the
+  // backend removes the rows and reports { deleted, ids }. Does NOT place or
+  // exit any order — it's session-record cleanup only.
+  deleteSessions: (ids: string[]) =>
+    call<DeleteSessionsResponse>('/sessions/delete', {
+      method: 'POST',
+      body: JSON.stringify({ session_ids: ids }),
+    }),
 
   positions: (id: string) =>
     call<PositionsResponse>(`/session/${encodeURIComponent(id)}/positions`),

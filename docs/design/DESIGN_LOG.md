@@ -38,6 +38,59 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-06-24 — **AutoTrade Sessions list: position count + live indicator,
+  immediate-refresh-on-resume, multi-select bulk delete** (operator ask: a
+  RUNNING session showed only "Running" with no position count, so it read as
+  "no orders were placed" even though the backend holds 5 positions; also needed
+  bulk delete of paper/test sessions; also resuming briefly showed a blank "No
+  open positions" until the first poll). UI-ONLY; no backend/execution code
+  touched; all calls go through the existing same-origin `/api/falcon-proxy`. Two
+  files: `lib/autotrade-api.ts` + `components/power/autotrade/PortfolioAutoTrade.tsx`.
+  Co-Trading / other AutoTrade tabs / all other pages untouched. tsc +
+  `npm run build` GREEN (`/power/autotrade` built).
+  - **List rows no longer look empty for RUNNING sessions.** A RUNNING row now
+    renders a mint **"Running" pill with a pulsing live dot** (new `RunningPill`
+    + scoped `at-live-pulse` keyframe, `prefers-reduced-motion` honored) instead
+    of a flat "Running" text label. Each non-scheduled row gained a **Positions**
+    cell: shows `n_open_positions` when the list endpoint provides it, else an
+    honest **"open"** (RUNNING, with the live dot) or **"—"** — never a fabricated
+    count. **Gross return** + **mode pill** were already shown; kept. Net effect:
+    a running session visibly indicates it holds positions even before you open
+    it. SCHEDULED rows keep their existing distinct treatment (no Positions cell).
+  - **RESUME fix — status fetched IMMEDIATELY.** `onResume` now awaits a direct
+    `AutoTradeAPI.sessionStatus(s.session_id)` (using the row's id, not relying
+    on closure timing) right after switching to the running view, seeding
+    positions/LTP/gross/countdown at once. Previously the first status only
+    arrived on the poll interval (up to 12s), leaving a blank "No open positions".
+    Errors here are non-fatal (the poll retries); `busy='status'` keeps the
+    loading state honest. The poll effect is unchanged and still takes over.
+  - **MULTI-SELECT BULK DELETE (paper/test housekeeping).** Each row gained a
+    selection checkbox (stop-propagation so it doesn't trigger resume) + a header
+    **"Select all"** + a **"Delete selected (N)"** red button that appears only
+    when ≥1 is checked. Selected rows get a red-tinted border/fill. On delete:
+    `window.confirm` (states it removes the session RECORD, paper/test
+    housekeeping, cannot be undone) → `AutoTradeAPI.deleteSessions(ids)` → clears
+    the selection + reloads the list. Honest loading ("Deleting…") + an inline
+    red error toast with retry/dismiss. A small caption under "Select all" says
+    the checkboxes select records for deletion and don't open the session.
+  - **API (`lib/autotrade-api.ts`):** added `deleteSessions(ids: string[])` →
+    `POST /api/falcon-proxy/api/autotrade/sessions/delete` body `{ session_ids }`,
+    typed `DeleteSessionsResponse { deleted: number; ids: string[] }`. The
+    `SessionSummary.n_open_positions?` field was already in the type — now
+    consumed by the list row.
+  - **Honesty held 1:1.** No fabricated counts (uses `n_open_positions` if given,
+    else "open"/"—"); delete is framed as paper/test record cleanup, confirmed,
+    irreversible-warned; ships-disabled banner + paper-default + all other honesty
+    untouched. Mint/F2 theme + viewport-lock + everything else (instant/scheduled
+    start, SCHEDULED countdown, KILL) intact.
+  - **Backend needs:** `POST /api/autotrade/sessions/delete` body
+    `{ session_ids: string[] }` → `{ deleted: number, ids: string[] }` (being
+    added per the ask). Optional-but-better: include `n_open_positions` on each
+    row of `GET /api/autotrade/sessions` so the list shows the exact count
+    without opening the session (the UI already reads it if present, else shows
+    "open"/"—").
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npm run build` ✓ compiled —
+    `/power/autotrade` built, all other routes intact.
 - 2026-06-24 — **AutoTrade: instant-vs-scheduled start wired into the portal**
   (operator ask; backend already LIVE). UI-ONLY; no backend/execution code
   touched; everything goes through the existing same-origin `/api/falcon-proxy`
