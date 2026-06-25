@@ -38,6 +38,59 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-06-24 — **AutoTrade: instant-vs-scheduled start wired into the portal**
+  (operator ask; backend already LIVE). UI-ONLY; no backend/execution code
+  touched; everything goes through the existing same-origin `/api/falcon-proxy`
+  (which forwards the JSON body verbatim, so `{ when }` reaches
+  `/api/autotrade/session/{id}/start`). Two files:
+  `lib/autotrade-api.ts` + `components/power/autotrade/PortfolioAutoTrade.tsx`.
+  Co-Trading / the other AutoTrade tabs / all other pages untouched. tsc +
+  `npm run build` GREEN (`/power/autotrade` built).
+  - **API (`lib/autotrade-api.ts`):** added `StartWhen = 'now' | 'scheduled'`;
+    `startSession(id, when='now')` now POSTs `{ when }` (was a bare POST).
+    `StatusResponse` + `StartResponse` + `SessionSummary` gained the SCHEDULED
+    fields `fires_at?` (ISO IST), `seconds_remaining?` (int), `scheduler_armed?`
+    (bool), and `status` is typed `SessionStatusName` (incl `'SCHEDULED'`).
+    `entry_time` was already on `SessionConfig` — kept.
+  - **Create form:** the **Entry time (IST)** `<input type="time">` is wired to
+    `config.entry_time`; default changed `09:20 → 09:15` (matches the backend
+    default + the spec). Used only when you choose to schedule.
+  - **TWO clear start actions (replaces the single "Start session"):** after
+    Create the CREATED card now shows side-by-side **"Start now"** (mint/paper
+    or red/live → `startSession(id,'now')`, places immediately → RUNNING) and
+    **"Schedule for {entry_time}"** (mint outline → `startSession(id,'scheduled')`,
+    arms it → SCHEDULED, places nothing). Each button carries a one-line honest
+    subtitle; paper stays the safe default, live framing/typed-LIVE-confirm
+    unchanged. The header line now also shows the entry time.
+  - **SCHEDULED waiting state (running/session view):** when status is SCHEDULED
+    the normal RUNNING view (Live status + positions + KILL block) is HIDDEN and
+    a mint **"Scheduled — waiting to fire"** card shows instead: **Fires at
+    {fires_at}** + a big **live countdown** (seeded from `seconds_remaining`,
+    ticked locally each 1s, re-synced on every poll — backend stays source of
+    truth; shows "firing…" at 0), an honest "nothing placed yet" line, and a
+    red **"Cancel schedule"** button (calls `kill` — places nothing). If
+    `scheduler_armed === false` (post-restart) it instead shows an amber **"Not
+    armed — re-schedule to arm the timer again"** note with a **Re-schedule**
+    action (`startSession(id,'scheduled')`). Polling SPEEDS UP to 6s while
+    SCHEDULED (12s otherwise) so the auto-flip to RUNNING + its placement shows
+    promptly; on flip the countdown clears and the normal running view returns.
+  - **Sessions list row:** a SCHEDULED session renders distinctly — a mint
+    clock icon + **"Scheduled"** pill (new `SchedPill`), a mint "fires {fires_at}
+    · in {countdown}" subline (instead of id/created_at), a mint status cell
+    "Scheduled" (instead of Return), and a mint-tinted border — so it reads apart
+    from RUNNING/CLOSED rows. Resuming a SCHEDULED row seeds the countdown from
+    the row immediately.
+  - **Honesty held 1:1.** Ships-disabled banner, paper-default + typed-LIVE,
+    KILL/cancel framing, "nothing placed until entry time", not-armed honesty,
+    all numbers from the backend, no fabrication. Mint/F2 theme + viewport-lock
+    preserved (reuses cotrade-kit `ICON.clock`/`C`/`fmtPct`/`pctTone`).
+  - **Backend needs:** none — `start {when}`, the SCHEDULED status fields, and
+    `kill`-cancels-a-scheduled-session are all LIVE. (The sessions LIST showing
+    `fires_at`/`seconds_remaining` per-row is best-effort: if the list endpoint
+    omits them the row still shows the Scheduled pill from `status` and resume
+    re-fetches the live fields via `status`.)
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npm run build` ✓ compiled —
+    `/power/autotrade` built, all other routes intact.
 - 2026-06-24 — **UNIFIED AutoTrade panel — ONE place for everything**
   (operator's explicit ask). Replaced the two-tab `OperatorAutoTrade`
   (PortfolioAutoTrade + `AutoTradeConsoleHub` launcher) with a SINGLE sub-tabbed

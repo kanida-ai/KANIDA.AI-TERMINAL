@@ -28,7 +28,7 @@ import {
 } from '@/components/power/shared/cotrade-kit'
 import {
   AutoTradeAPI,
-  type Mode, type SizingMode, type OrderProduct, type KillDirection,
+  type Mode, type StartWhen, type SizingMode, type OrderProduct, type KillDirection,
   type SessionConfig, type CreateResponse, type StartResponse,
   type StatusResponse, type SavedConfig, type Broker, type SessionSummary,
 } from '@/lib/autotrade-api'
@@ -43,7 +43,23 @@ const DEFAULT_CONFIG: SessionConfig = {
   kill_switch_enabled: false,
   kill_switch_pct: 5,
   kill_switch_direction: 'loss',
-  entry_time: '09:20',
+  entry_time: '09:15',
+}
+
+// A SCHEDULED session that lost its in-memory timer (backend restart) reports
+// scheduler_armed === false. Everything else is "armed enough to wait".
+const isScheduled = (s?: string | null) => (s ?? '').toUpperCase() === 'SCHEDULED'
+
+// Live countdown helper — turns seconds into "2h 14m 03s" / "14m 03s" / "43s".
+function fmtCountdown(totalSec: number): string {
+  const s = Math.max(0, Math.floor(totalSec))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  const pad = (n: number) => String(n).padStart(2, '0')
+  if (h > 0) return `${h}h ${pad(m)}m ${pad(sec)}s`
+  if (m > 0) return `${m}m ${pad(sec)}s`
+  return `${sec}s`
 }
 
 const TOP_N_OPTIONS = [3, 5, 7, 10]
@@ -138,6 +154,13 @@ export function PortfolioAutoTrade() {
   const [poll, setPoll] = useState(true)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  // Live countdown for a SCHEDULED session. Seeded from status.seconds_remaining
+  // on every poll, then ticked down locally each second so the display is smooth
+  // between the (slower) status polls. Re-sync on each fresh status keeps it
+  // honest — the backend remains the source of truth.
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
   const set = <K extends keyof SessionConfig>(k: K, v: SessionConfig[K]) =>
     setConfig((c) => ({ ...c, [k]: v }))
 
@@ -173,6 +196,9 @@ export function PortfolioAutoTrade() {
     setStartResult(null)
     setStatus(null)
     setLiveConfirm(''); setKillArmed(false); setKillConfirm('')
+    // Seed the countdown from the list row if this is a SCHEDULED session, so
+    // the waiting view is correct the instant you resume (the poll re-syncs it).
+    setCountdown(isScheduled(s.status) && typeof s.seconds_remaining === 'number' ? s.seconds_remaining : null)
     setPhase('running')
     setPoll(true)
   }, [])
@@ -195,13 +221,19 @@ export function PortfolioAutoTrade() {
     }
   }, [mode, config, loadSessions])
 
-  const onStart = useCallback(async () => {
+  const onStart = useCallback(async (when: StartWhen) => {
     if (!session) return
     setError(null); setBusy('start')
     try {
-      const res = await AutoTradeAPI.startSession(session.session_id)
+      const res = await AutoTradeAPI.startSession(session.session_id, when)
       setStartResult(res)
+      // A scheduled start places nothing yet — seed the countdown from the
+      // backend's seconds_remaining so the waiting state is immediate.
+      if (isScheduled(res.status) && typeof res.seconds_remaining === 'number') {
+        setCountdown(res.seconds_remaining)
+      }
       setPhase('running')
+      setPoll(true)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to start session')
     } finally {
@@ -215,6 +247,13 @@ export function PortfolioAutoTrade() {
     try {
       const res = await AutoTradeAPI.sessionStatus(session.session_id)
       setStatus(res)
+      // Re-sync the countdown from the backend on every poll while SCHEDULED;
+      // clear it once the session has flipped to RUNNING/CLOSED.
+      if (isScheduled(res.status) && typeof res.seconds_remaining === 'number') {
+        setCountdown(res.seconds_remaining)
+      } else if (!isScheduled(res.status)) {
+        setCountdown(null)
+      }
     } catch (e) {
       if (!silent) setError(e instanceof Error ? e.message : 'Failed to load status')
     } finally {
@@ -238,19 +277,35 @@ export function PortfolioAutoTrade() {
   }, [session, refreshStatus])
 
   // ── Poll status while running ────────────────────────────────────────────────
+  // While SCHEDULED, poll FASTER (6s) so the auto-flip to RUNNING (and the
+  // placement that comes with it) shows promptly; otherwise 12s is plenty.
+  const scheduledNow = isScheduled(status?.status)
   useEffect(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
     if (phase === 'running' && poll && session) {
       refreshStatus(true)
-      pollRef.current = setInterval(() => refreshStatus(true), 12_000)
+      pollRef.current = setInterval(() => refreshStatus(true), scheduledNow ? 6_000 : 12_000)
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
-  }, [phase, poll, session, refreshStatus])
+  }, [phase, poll, session, refreshStatus, scheduledNow])
+
+  // ── Local 1s ticker for the SCHEDULED countdown ──────────────────────────────
+  // Runs only while a countdown is active; floors at 0 (the next poll then
+  // confirms the flip to RUNNING). Independent of the auto-refresh toggle.
+  useEffect(() => {
+    if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null }
+    if (phase === 'running' && scheduledNow && countdown !== null) {
+      tickRef.current = setInterval(() => {
+        setCountdown((c) => (c === null ? null : Math.max(0, c - 1)))
+      }, 1_000)
+    }
+    return () => { if (tickRef.current) clearInterval(tickRef.current) }
+  }, [phase, scheduledNow, countdown !== null])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // Open the explicit New-Session form (resets the in-flight session).
   const openNewSession = () => {
     setPhase('config'); setSession(null); setStartResult(null); setStatus(null)
-    setConfig(DEFAULT_CONFIG); setMode('paper')
+    setConfig(DEFAULT_CONFIG); setMode('paper'); setCountdown(null)
     setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
   }
 
@@ -258,6 +313,7 @@ export function PortfolioAutoTrade() {
   // session is visible — the disappearing-session fix).
   const backToList = () => {
     setPhase('list'); setSession(null); setStartResult(null); setStatus(null)
+    setCountdown(null)
     setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
     loadSessions()
   }
@@ -326,27 +382,32 @@ export function PortfolioAutoTrade() {
               <ul className="flex flex-col gap-2">
                 {sessions.map((s, i) => {
                   const ret = typeof s.gross_return === 'number' ? s.gross_return : null
+                  const sched = isScheduled(s.status)
                   return (
                     <li key={s.session_id ?? i}>
                       <button type="button" onClick={() => onResume(s)}
                         className="w-full flex items-center gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors hover:border-[rgba(63,227,164,0.4)]"
-                        style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.015)' }}>
-                        <span className="shrink-0" style={{ color: C.mint }}>{ICON.bolt(15)}</span>
+                        style={{ borderColor: sched ? 'rgba(63,227,164,0.32)' : C.line2, background: 'rgba(255,255,255,0.015)' }}>
+                        <span className="shrink-0" style={{ color: C.mint }}>{sched ? ICON.clock(15) : ICON.bolt(15)}</span>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <span className="text-[12.5px] font-semibold truncate" style={{ color: C.ink }}>
-                              {s.status ?? 'session'}
-                            </span>
+                            {sched ? <SchedPill /> : (
+                              <span className="text-[12.5px] font-semibold truncate" style={{ color: C.ink }}>
+                                {s.status ?? 'session'}
+                              </span>
+                            )}
                             {s.mode && <ModePill mode={s.mode} />}
                           </div>
                           <div className="text-[10.5px] mt-0.5 font-mono truncate" style={{ color: C.faint }}>
-                            {s.session_id}{s.created_at ? ` · ${s.created_at}` : ''}
+                            {sched && s.fires_at
+                              ? <span style={{ color: C.mint }}>fires {s.fires_at}{typeof s.seconds_remaining === 'number' ? ` · in ${fmtCountdown(s.seconds_remaining)}` : ''}</span>
+                              : <>{s.session_id}{s.created_at ? ` · ${s.created_at}` : ''}</>}
                           </div>
                         </div>
                         <div className="shrink-0 text-right">
-                          <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Return</div>
-                          <div className="text-[13px] font-semibold" style={{ color: ret == null ? C.faint : pctTone(ret) }}>
-                            {ret == null ? '—' : fmtPct(ret)}
+                          <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>{sched ? 'Status' : 'Return'}</div>
+                          <div className="text-[13px] font-semibold" style={{ color: sched ? C.mint : (ret == null ? C.faint : pctTone(ret)) }}>
+                            {sched ? 'Scheduled' : (ret == null ? '—' : fmtPct(ret))}
                           </div>
                         </div>
                         <div className="shrink-0 text-right hidden sm:block">
@@ -589,40 +650,136 @@ export function PortfolioAutoTrade() {
           </div>
           <div className="text-[11.5px] mb-4" style={{ color: C.muted }}>
             ID <code style={{ color: C.ink2 }}>{session.session_id}</code> · status{' '}
-            <span style={{ color: C.ink2 }}>{session.status}</span>
+            <span style={{ color: C.ink2 }}>{session.status}</span> · entry time{' '}
+            <span style={{ color: C.ink2 }}>{config.entry_time} IST</span>
           </div>
 
-          <div className="flex items-center gap-3">
+          {/* TWO clear ways to begin — fire now, or arm for the entry time. */}
+          <div className="flex flex-col sm:flex-row sm:items-stretch gap-3">
+            {/* Start now → places immediately (RUNNING). */}
             <button
               type="button"
               disabled={busy === 'start'}
-              onClick={onStart}
-              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-semibold transition-opacity disabled:opacity-40"
+              onClick={() => onStart('now')}
+              className="flex-1 flex flex-col items-start gap-1 px-4 py-3 rounded-xl text-left transition-opacity disabled:opacity-40"
               style={session.mode === 'live'
                 ? { color: '#1a0908', background: C.red }
                 : { color: '#06130c', background: C.mint }}
             >
-              {busy === 'start' ? 'Starting…' : <>Start session {ICON.bolt(13)}</>}
+              <span className="flex items-center gap-2 text-[13px] font-semibold">
+                {ICON.bolt(14)} {busy === 'start' ? 'Starting…' : 'Start now'}
+              </span>
+              <span className="text-[10.5px] leading-snug opacity-80">
+                Places {session.mode === 'paper' ? 'simulated' : 'real'} entries immediately.
+              </span>
             </button>
+
+            {/* Schedule → arms the session to auto-fire at entry_time (SCHEDULED). */}
+            <button
+              type="button"
+              disabled={busy === 'start'}
+              onClick={() => onStart('scheduled')}
+              className="flex-1 flex flex-col items-start gap-1 px-4 py-3 rounded-xl text-left transition-colors disabled:opacity-40"
+              style={{ color: C.mint, background: 'rgba(63,227,164,0.10)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}
+            >
+              <span className="flex items-center gap-2 text-[13px] font-semibold">
+                {ICON.clock(14)} {busy === 'start' ? 'Scheduling…' : `Schedule for ${config.entry_time}`}
+              </span>
+              <span className="text-[10.5px] leading-snug" style={{ color: C.muted }}>
+                Arms it to auto-fire at {config.entry_time} IST — nothing is placed until then.
+              </span>
+            </button>
+          </div>
+
+          <div className="mt-3 flex items-center gap-3">
             <button type="button" onClick={backToList}
               className="text-[12px] px-3 py-2 rounded-lg transition-colors"
               style={{ color: C.muted, border: `1px solid ${C.line}` }}>
               Discard
             </button>
+            <p className="text-[11px] leading-snug" style={{ color: C.faint }}>
+              {session.mode === 'paper'
+                ? 'Paper simulates placement — no broker orders are sent.'
+                : 'Live attempts real broker orders, but only if the server flag FALCON_AUTOTRADE_ENABLED is set; otherwise it reports skipped.'}
+            </p>
           </div>
-          <p className="mt-3 text-[11px] leading-snug" style={{ color: C.faint }}>
-            {session.mode === 'paper'
-              ? 'Paper start simulates placement — no broker orders are sent.'
-              : 'Live start attempts real broker orders, but only if the server flag FALCON_AUTOTRADE_ENABLED is set; otherwise it reports skipped.'}
-          </p>
         </div>
       )}
 
       {/* ── RUNNING PHASE — start result + live status + kill ─────────────────── */}
       {phase === 'running' && session && (
         <div className="flex flex-col gap-4">
+          {/* SCHEDULED — armed, waiting to fire. Places nothing until entry time. */}
+          {scheduledNow && (
+            <div className="rounded-2xl border p-4 sm:p-5"
+              style={{ borderColor: 'rgba(63,227,164,0.32)', background: 'rgba(63,227,164,0.05)' }}>
+              <div className="flex items-center gap-2 mb-3">
+                <span style={{ color: C.mint }}>{ICON.clock(17)}</span>
+                <span className="text-[14px] font-semibold" style={{ color: C.ink }}>Scheduled — waiting to fire</span>
+                {status && <ModePill mode={status.mode} />}
+              </div>
+
+              {/* Armed: show fire time + live countdown. Not armed: honest note. */}
+              {status?.scheduler_armed === false ? (
+                <div className="rounded-xl border px-3.5 py-3 mb-4"
+                  style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
+                  <div className="flex items-start gap-2 text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+                    <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(15)}</span>
+                    <span>
+                      <b style={{ color: C.amber }}>Not armed.</b>{' '}
+                      The backend restarted and lost this session&apos;s in-memory timer, so it
+                      will NOT auto-fire. Re-schedule it to arm the timer again.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy === 'start'}
+                    onClick={() => onStart('scheduled')}
+                    className="mt-3 inline-flex items-center gap-2 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+                    style={{ color: '#06130c', background: C.mint }}
+                  >
+                    {ICON.clock(13)} {busy === 'start' ? 'Re-scheduling…' : 'Re-schedule'}
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-end gap-x-8 gap-y-3 mb-4">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Fires at (IST)</div>
+                    <div className="text-[15px] font-semibold mt-0.5" style={{ color: C.ink }}>
+                      {status?.fires_at ?? `${config.entry_time}`}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>In</div>
+                    <div className="text-[20px] font-semibold mt-0.5 tabular-nums" style={{ color: C.mint }}>
+                      {countdown !== null
+                        ? (countdown <= 0 ? 'firing…' : fmtCountdown(countdown))
+                        : (typeof status?.seconds_remaining === 'number' ? fmtCountdown(status.seconds_remaining) : '—')}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <p className="text-[11px] leading-snug mb-3" style={{ color: C.faint }}>
+                Nothing is placed yet. At the entry time the session auto-flips to RUNNING
+                and places its entries — this view updates automatically.
+              </p>
+
+              {/* Cancel a SCHEDULED session — kill cancels it (places nothing). */}
+              <button
+                type="button"
+                disabled={busy === 'kill'}
+                onClick={onKill}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors disabled:opacity-40"
+                style={{ color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}
+              >
+                {ICON.close(13)} {busy === 'kill' ? 'Cancelling…' : 'Cancel schedule'}
+              </button>
+            </div>
+          )}
+
           {/* Placement result */}
-          {startResult && (
+          {!scheduledNow && startResult && (
             <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
               <div className="flex items-center gap-2 mb-3">
                 <span style={{ color: C.mint }}>{ICON.bolt(15)}</span>
@@ -664,7 +821,8 @@ export function PortfolioAutoTrade() {
             </div>
           )}
 
-          {/* Live status */}
+          {/* Live status — the normal RUNNING view (hidden while SCHEDULED). */}
+          {!scheduledNow && (
           <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
             <div className="flex items-center gap-2 mb-4">
               <Gear size={18} dir={1} />
@@ -743,8 +901,10 @@ export function PortfolioAutoTrade() {
               </>
             )}
           </div>
+          )}
 
-          {/* KILL block */}
+          {/* KILL block — hidden while SCHEDULED (use "Cancel schedule" above). */}
+          {!scheduledNow && (
           <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: 'rgba(232,115,107,0.32)', background: 'rgba(232,115,107,0.04)' }}>
             <div className="flex items-center gap-2 mb-2">
               <span style={{ color: C.red }}>{ICON.bolt(15)}</span>
@@ -785,6 +945,7 @@ export function PortfolioAutoTrade() {
               </div>
             )}
           </div>
+          )}
 
           <div className="flex items-center gap-2">
             <button type="button" onClick={backToList}
@@ -828,6 +989,16 @@ function ModePill({ mode }: { mode: Mode }) {
         ? { color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }
         : { color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
       {mode}
+    </span>
+  )
+}
+
+// SCHEDULED status pill — mint, distinct from RUNNING/CLOSED in the list.
+function SchedPill() {
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+      style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+      {ICON.clock(10)} Scheduled
     </span>
   )
 }

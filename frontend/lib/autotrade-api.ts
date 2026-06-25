@@ -19,6 +19,9 @@ const BASE = '/api/falcon-proxy/api/autotrade'
 
 // ── Request / response shapes (mirror the 9 backend endpoints) ───────────────
 export type Mode = 'paper' | 'live'
+// When to start: 'now' fires immediately (→ RUNNING); 'scheduled' arms the
+// session to auto-fire at its configured entry_time (→ SCHEDULED until then).
+export type StartWhen = 'now' | 'scheduled'
 export type SizingMode = 'equal' | 'pct_cap' | 'manual'
 export type OrderProduct = 'CNC' | 'MIS' | 'MTF' | 'NRML'
 export type KillDirection = 'profit' | 'loss' | 'both'
@@ -49,10 +52,15 @@ export type PlacedOrder = {
 }
 
 export type StartResponse = {
-  status: string
+  // 'now' → RUNNING with placed orders; 'scheduled' → SCHEDULED (nothing placed
+  // yet) carrying the scheduling fields.
+  status: SessionStatusName
   mode: Mode
   n_placed: number
   orders: PlacedOrder[]
+  fires_at?: string
+  seconds_remaining?: number
+  scheduler_armed?: boolean
 }
 
 export type OpenPosition = {
@@ -65,8 +73,12 @@ export type OpenPosition = {
   [k: string]: unknown
 }
 
+// Session status. `status` is permissive (backend may report PAPER/RUNNING/
+// CLOSED/SCHEDULED/etc.). A SCHEDULED session has NOT placed yet — it is armed
+// to fire at `fires_at` and the scheduling fields below are present.
+export type SessionStatusName = 'SCHEDULED' | 'RUNNING' | 'CLOSED' | string
 export type StatusResponse = {
-  status: string
+  status: SessionStatusName
   mode: Mode
   gross_return: number
   total_allocated_capital: number
@@ -75,6 +87,12 @@ export type StatusResponse = {
   kill_switch_direction: KillDirection
   n_open_positions: number
   open_positions: OpenPosition[]
+  // Present (and meaningful) while status === 'SCHEDULED'. fires_at is ISO IST;
+  // seconds_remaining counts down to the entry; scheduler_armed=false means a
+  // backend restart dropped the in-memory timer → it must be re-started.
+  fires_at?: string
+  seconds_remaining?: number
+  scheduler_armed?: boolean
 }
 
 export type KillResponse = {
@@ -97,6 +115,11 @@ export type SessionSummary = {
   created_at?: string
   top_n_stocks?: number
   n_open_positions?: number
+  // A SCHEDULED session in the list shows its fire time distinctly from
+  // RUNNING/CLOSED. These mirror StatusResponse and may be absent for others.
+  fires_at?: string
+  seconds_remaining?: number
+  scheduler_armed?: boolean
   [k: string]: unknown
 }
 export type SessionsListResponse = {
@@ -158,8 +181,13 @@ export const AutoTradeAPI = {
       body: JSON.stringify({ mode, config }),
     }),
 
-  startSession: (id: string) =>
-    call<StartResponse>(`/session/${encodeURIComponent(id)}/start`, { method: 'POST' }),
+  // when='now' (default) places immediately → RUNNING; when='scheduled' arms the
+  // session to auto-fire at its entry_time → SCHEDULED (places nothing yet).
+  startSession: (id: string, when: StartWhen = 'now') =>
+    call<StartResponse>(`/session/${encodeURIComponent(id)}/start`, {
+      method: 'POST',
+      body: JSON.stringify({ when }),
+    }),
 
   sessionStatus: (id: string) =>
     call<StatusResponse>(`/session/${encodeURIComponent(id)}/status`),
