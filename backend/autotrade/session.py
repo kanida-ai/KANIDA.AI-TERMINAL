@@ -2,8 +2,19 @@
 
 Lifecycle:
   create()   → persist config, status CREATED. No orders.
-  start()    → route picks → size → place entries (dry-run-safe) → register
-               positions → status RUNNING. Entries respect MARKET/LIMIT/VWAP.
+  start(when)→ when="now"  : fire entries IMMEDIATELY (route → size → place →
+                             register → status RUNNING). Entries respect
+                             MARKET/LIMIT/VWAP. (Default — backward-compatible.)
+               when="scheduled": parse config.entry_time as today-IST. Future →
+                             status SCHEDULED + a background scheduler thread
+                             that fires at entry_time. Past → fire now (fallback,
+                             with a note). The order-firing leg itself lives in
+                             _fire_entries() and is shared by both paths.
+
+  SCHEDULED RESTART CAVEAT: a scheduled fire lives only in this process (same as
+  the tick driver). If the backend restarts after a session is SCHEDULED but
+  before entry_time, the in-memory timer is lost and it will NOT auto-fire — the
+  operator must re-start it. See monitoring/entry_scheduler.py.
   tick()     → refresh LTPs → compute gross_return → snapshot → check kill
                switch threshold → fire if breached.
   kill()     → manual kill (same path as automatic).
@@ -45,6 +56,7 @@ from .monitoring.registry import PositionRegistry
 from .monitoring.monitor import PortfolioMonitor
 from .monitoring.kill_switch import KillSwitchExecutor
 from .monitoring import tick_driver
+from .monitoring import entry_scheduler
 
 log = logging.getLogger("kanida.autotrade.session")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -52,6 +64,27 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 def _now_ist_iso() -> str:
     return datetime.now(IST).isoformat()
+
+
+def _parse_entry_time_today_ist(entry_time: str) -> datetime:
+    """Parse config.entry_time ("HH:MM" or "HH:MM:SS") as a time TODAY in IST.
+
+    Returns an IST-aware datetime for today's date at the given clock time.
+    Raises ValueError on an unparseable string so the caller can fall back.
+    """
+    s = (entry_time or "").strip()
+    parsed = None
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            parsed = datetime.strptime(s, fmt)
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        raise ValueError(f"unparseable entry_time: {entry_time!r}")
+    now = datetime.now(IST)
+    return now.replace(hour=parsed.hour, minute=parsed.minute,
+                       second=parsed.second, microsecond=0)
 
 
 # ── Falcon picks (read-only consumer) ────────────────────────────────────────
@@ -153,8 +186,60 @@ class TradingSession:
         self.kill_switch = KillSwitchExecutor(
             self.session_id, self.config, self.brokers, self.registry)
 
-    # ── Start: route → size → place → register ────────────────────────────────
-    async def start(self) -> Dict[str, Any]:
+    # ── Start: now | scheduled ──────────────────────────────────────────────────
+    async def start(self, when: str = "now") -> Dict[str, Any]:
+        """Start the session.
+
+        when="now" (default, backward-compatible): fire entries IMMEDIATELY —
+            set status RUNNING and run _fire_entries() right now.
+
+        when="scheduled": parse config.entry_time as TODAY in IST.
+            * If entry_time is in the FUTURE: set status SCHEDULED, store the
+              target, and arm a background scheduler thread that sleeps until
+              entry_time (interruptible) then fires + flips to RUNNING.
+            * If entry_time has already PASSED: fire immediately now (fallback)
+              and include a note. Never silently does nothing.
+        """
+        if when == "scheduled":
+            return await self._start_scheduled()
+        # when == "now" (or any unknown value → safe default: fire now)
+        return await self._fire_entries()
+
+    async def _start_scheduled(self) -> Dict[str, Any]:
+        try:
+            target = _parse_entry_time_today_ist(self.config.entry_time)
+        except ValueError as e:
+            log.warning("scheduled start for %s: %s — firing immediately",
+                        self.session_id, e)
+            res = await self._fire_entries()
+            res["note"] = f"entry_time unparseable ({e}) — fired immediately"
+            res["when"] = "scheduled"
+            return res
+
+        now = datetime.now(IST)
+        if now >= target:
+            # entry_time already passed today → fire immediately (fallback).
+            res = await self._fire_entries()
+            res["note"] = ("entry_time already passed — fired immediately")
+            res["when"] = "scheduled"
+            res["entry_time"] = self.config.entry_time
+            return res
+
+        # Future → arm the scheduler; place NOTHING yet.
+        self._set_status("SCHEDULED")
+        armed = entry_scheduler.start_for_session(self.session_id, target)
+        seconds = int(max(0.0, (target - now).total_seconds()))
+        log.info("session %s SCHEDULED — entry at %s (in %ss, armed=%s)",
+                 self.session_id, target.isoformat(), seconds, armed)
+        return {"session_id": self.session_id, "status": "SCHEDULED",
+                "mode": self.mode, "when": "scheduled",
+                "entry_time": self.config.entry_time,
+                "fires_at": target.isoformat(),
+                "seconds_remaining": seconds,
+                "scheduler_armed": armed, "n_placed": 0, "orders": []}
+
+    # ── Fire entries: route → size → place → register (THE order-firing leg) ────
+    async def _fire_entries(self) -> Dict[str, Any]:
         self._build_brokers()
         self._set_status("RUNNING", started_at=_now_ist_iso())
 
@@ -258,7 +343,13 @@ class TradingSession:
     async def kill(self, reason: str = "MANUAL") -> Dict[str, Any]:
         if not self.brokers:
             self._build_brokers()
-        # Stop the background tick driver first so it can't race the manual kill.
+        # Stop the entry scheduler FIRST so a SCHEDULED session that hasn't fired
+        # yet can be cancelled/killed and place NOTHING. Then stop the tick
+        # driver so it can't race the manual kill.
+        try:
+            entry_scheduler.stop_for_session(self.session_id)
+        except Exception:  # pragma: no cover - defensive
+            pass
         try:
             tick_driver.stop_for_session(self.session_id)
         except Exception:  # pragma: no cover - defensive
@@ -276,11 +367,12 @@ class TradingSession:
                 (self.session_id,),
             ).fetchone()
         sess = dict(row) if row else {}
+        status = sess.get("status")
         positions = self.registry.get_open_positions()
         gr = self.monitor.compute_gross_return()
-        return {
+        out = {
             "session_id": self.session_id,
-            "status": sess.get("status"),
+            "status": status,
             "mode": sess.get("mode", self.mode),
             "gross_return": gr,
             "total_allocated_capital": self.config.total_allocated_capital,
@@ -290,6 +382,26 @@ class TradingSession:
             "n_open_positions": len(positions),
             "open_positions": positions,
         }
+        # SCHEDULED: surface the armed entry time so the UI can show
+        # "Scheduled for 09:15" + a live countdown.
+        if status == "SCHEDULED":
+            out["entry_time"] = self.config.entry_time
+            target = entry_scheduler.target_for_session(self.session_id)
+            if target is None:
+                # In-memory timer lost (e.g. backend restarted) — derive the
+                # nominal target from config so the UI still shows the time.
+                try:
+                    target = _parse_entry_time_today_ist(self.config.entry_time)
+                except ValueError:
+                    target = None
+                out["scheduler_armed"] = False
+            else:
+                out["scheduler_armed"] = entry_scheduler.is_running(self.session_id)
+            if target is not None:
+                out["fires_at"] = target.isoformat()
+                out["seconds_remaining"] = int(
+                    max(0.0, (target - datetime.now(IST)).total_seconds()))
+        return out
 
     def positions(self) -> List[Dict[str, Any]]:
         return self.registry.get_all_positions()

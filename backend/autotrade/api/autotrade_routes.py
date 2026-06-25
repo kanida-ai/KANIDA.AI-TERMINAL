@@ -71,6 +71,13 @@ class CreateSessionRequest(BaseModel):
     mode: str = Field("paper", description="'paper' (default, no real orders) | 'live'")
 
 
+class StartSessionRequest(BaseModel):
+    when: str = Field(
+        "now",
+        description="'now' (default, fire immediately — backward-compatible) | "
+                    "'scheduled' (fire at config.entry_time IST)")
+
+
 class SavePresetRequest(BaseModel):
     name: str
     config: Dict[str, Any]
@@ -112,12 +119,18 @@ def session_create(req: CreateSessionRequest):
 
 
 @router.post("/autotrade/session/{session_id}/start")
-async def session_start(session_id: str):
+async def session_start(session_id: str,
+                        req: Optional[StartSessionRequest] = None):
+    """Start a session. Optional JSON body {"when": "now" | "scheduled"};
+    defaults to "now" for backward-compatibility when the body is omitted."""
     sess = TradingSession.load(session_id)
     if not sess:
         raise HTTPException(404, "session not found")
+    when = (req.when if req else "now")
+    if when not in ("now", "scheduled"):
+        raise HTTPException(400, f"invalid 'when': {when!r} (now|scheduled)")
     try:
-        return await sess.start()
+        return await sess.start(when=when)
     except Exception as e:
         log.exception("session start failed: %s", e)
         raise HTTPException(500, f"start failed: {e}")
