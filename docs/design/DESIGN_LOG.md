@@ -38,6 +38,37 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-06-25 — **AutoTrade: wired the new Falcon Intraday Basket strategy into the
+  console (strategy dropdown + preset prefill, branched form, live trail status
+  panel, intraday strategy-summary)** (operator ask; backend now supports two exit
+  strategies). UI-ONLY; no backend/execution code touched; all calls via the
+  existing same-origin `/api/falcon-proxy`. Two files: `lib/autotrade-api.ts` +
+  `components/power/autotrade/PortfolioAutoTrade.tsx`. Co-Trading / other tabs /
+  the kill-switch UX all untouched. tsc + `npm run build` GREEN (`/power/autotrade`).
+  - **Strategy dropdown (create form).** New `strategy` field on `SessionConfig`:
+    `portfolio_kill_switch` (default, "flat ±% basket exit", the EXISTING behaviour)
+    | `intraday_basket` ("Falcon Intraday Basket — arm & trail, square-off").
+    Selecting intraday seeds the VALIDATED PRESET (`INTRADAY_PRESET`): top_n=5,
+    entry 09:15:00, MTF, arm 1.0%, floor 1.0%, trail giveback 0.75%, stop 1.5%,
+    square-off 15:29:00 — all editable. Switching back restores kill-switch defaults.
+  - **Branched form.** kill-switch → unchanged single kill_switch_pct + direction.
+    intraday → hides the kill number; shows four labelled %-inputs (Arm/profit,
+    Lock floor, Trail giveback, Stop loss) each with helper text, plus a
+    square-off-time field (HH:MM, sent as HH:MM:SS). UNITS: state in PERCENTS,
+    `toWireConfig` converts ÷100 per-strategy ONLY at the send boundary (one
+    conversion site); intraday forces kill_switch_enabled=false on the wire.
+  - **Strategy summary (config).** For intraday, instead of the kill-switch
+    "Potential outcome" card, a single legible line: entry → arm +X% → trail Y%
+    giveback (floor +Z%) → stop −W% → square-off HH:MM, on ₹{invested} notional
+    ~{leverage}× from `/preview` (invested_basis+leverage). Honest —/loading/error.
+  - **Trail status panel (Live status).** For intraday sessions, reads
+    `status.trail{…}` (flat mirrors as fallback). Shows strategy pill + ARMED
+    state, Current notional return / Peak / live Exit-trigger (×100) + a mm:ss
+    square-off countdown, the plain-English line "Armed at +1% · peak +2.3% ·
+    exits if it gives back to +1.55%", and the four configured numbers. On CLOSE:
+    exit_reason + notional_return×100 + own_funds_return×100. Kill-switch's dual
+    return + Kite ₹ P&L + kill_preview displays are unchanged and shown only for
+    the kill-switch strategy. All fields degrade to "—" when absent.
 - 2026-06-24 — **AutoTrade: DUAL return display (invested vs fund, kill basis
   made explicit) + P&L "Potential outcome" preview card** (operator ask; backend
   moved the kill switch + gross return to an INVESTED-capital basis and now

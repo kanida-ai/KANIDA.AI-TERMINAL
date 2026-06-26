@@ -29,13 +29,14 @@ import {
 import {
   AutoTradeAPI,
   type Mode, type StartWhen, type SizingMode, type OrderProduct, type KillDirection,
-  type SessionConfig, type CreateResponse, type StartResponse,
+  type Strategy, type SessionConfig, type CreateResponse, type StartResponse,
   type StatusResponse, type SavedConfig, type Broker, type SessionSummary,
   type OpenPosition, type PreviewResponse, type KillPreview,
 } from '@/lib/autotrade-api'
 
 // ── Safe defaults — paper + kill switch OFF, per the ships-disabled contract ──
 const DEFAULT_CONFIG: SessionConfig = {
+  strategy: 'portfolio_kill_switch',
   total_allocated_capital: 500_000,
   top_n_stocks: 5,
   sizing_mode: 'equal',
@@ -46,6 +47,26 @@ const DEFAULT_CONFIG: SessionConfig = {
   kill_switch_direction: 'loss',
   entry_time: '09:15',
 }
+
+// ── Intraday-basket VALIDATED PRESET ──────────────────────────────────────────
+// The precoded defaults for the Falcon Intraday Basket strategy. Operator can
+// still edit every field; this just seeds the form when they pick the strategy.
+// Percent fields are kept as PERCENTS in state (sent ÷100); times are "HH:MM:SS".
+const INTRADAY_PRESET: Partial<SessionConfig> = {
+  top_n_stocks: 5,
+  entry_time: '09:15:00',
+  order_product: 'MTF',
+  arm_pct: 1.0,
+  floor_pct: 1.0,
+  trail_giveback_pct: 0.75,
+  stop_pct: 1.5,
+  square_off_time: '15:29:00',
+}
+
+const STRATEGY_OPTIONS: { id: Strategy; label: string }[] = [
+  { id: 'portfolio_kill_switch', label: 'Portfolio Kill Switch — flat ±% basket exit' },
+  { id: 'intraday_basket',       label: 'Falcon Intraday Basket — arm & trail, square-off' },
+]
 
 // A SCHEDULED session that lost its in-memory timer (backend restart) reports
 // scheduler_armed === false. Everything else is "armed enough to wait".
@@ -61,6 +82,25 @@ function fmtCountdown(totalSec: number): string {
   if (h > 0) return `${h}h ${pad(m)}m ${pad(sec)}s`
   if (m > 0) return `${m}m ${pad(sec)}s`
   return `${sec}s`
+}
+
+// mm:ss countdown for the square-off timer (intraday_basket). Negative/absent → '—'.
+function fmtMMSS(totalSec: number | null | undefined): string {
+  if (totalSec == null || !Number.isFinite(totalSec)) return '—'
+  const s = Math.max(0, Math.floor(totalSec))
+  const m = Math.floor(s / 60)
+  const sec = s % 60
+  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+}
+
+// A backend FRACTION → a trimmed, signed percent string ("+2.3%", "-1.55%").
+// Returns '—' for absent/non-finite values so nothing is fabricated.
+function fracPct(frac: number | null | undefined, signed = true, dp = 2): string {
+  if (frac == null || !Number.isFinite(frac)) return '—'
+  const v = frac * 100
+  const trimmed = v.toFixed(dp).replace(/\.?0+$/, '')
+  const sign = signed && v >= 0 ? '+' : ''
+  return `${sign}${trimmed}%`
 }
 
 const TOP_N_OPTIONS = [3, 5, 7, 10]
@@ -178,6 +218,44 @@ export function PortfolioAutoTrade() {
   const set = <K extends keyof SessionConfig>(k: K, v: SessionConfig[K]) =>
     setConfig((c) => ({ ...c, [k]: v }))
 
+  // Switch strategy. For intraday_basket, SEED the validated preset (operator can
+  // still edit). For portfolio_kill_switch, fall back to the safe defaults so the
+  // existing kill-switch UX is byte-for-byte unchanged.
+  const onStrategyChange = (next: Strategy) => {
+    setConfig((c) => {
+      if (next === 'intraday_basket') {
+        return { ...c, ...INTRADAY_PRESET, strategy: next }
+      }
+      return {
+        ...c,
+        strategy: next,
+        order_product: DEFAULT_CONFIG.order_product,
+        entry_time: DEFAULT_CONFIG.entry_time,
+        kill_switch_enabled: DEFAULT_CONFIG.kill_switch_enabled,
+        kill_switch_pct: DEFAULT_CONFIG.kill_switch_pct,
+        kill_switch_direction: DEFAULT_CONFIG.kill_switch_direction,
+      }
+    })
+  }
+
+  // Build the wire payload for a config: percents → fractions, exactly at the
+  // send boundary (state stays in percents so the inputs read naturally). Both
+  // create + preview use this so there is one conversion site per strategy.
+  const toWireConfig = useCallback((c: SessionConfig): SessionConfig => {
+    if (c.strategy === 'intraday_basket') {
+      return {
+        ...c,
+        arm_pct: (Number(c.arm_pct) || 0) / 100,
+        floor_pct: (Number(c.floor_pct) || 0) / 100,
+        trail_giveback_pct: (Number(c.trail_giveback_pct) || 0) / 100,
+        stop_pct: (Number(c.stop_pct) || 0) / 100,
+        // intraday_basket exits via the trail, not the flat kill switch
+        kill_switch_enabled: false,
+      }
+    }
+    return { ...c, kill_switch_pct: (Number(c.kill_switch_pct) || 0) / 100 }
+  }, [])
+
   const liveReady = mode === 'paper' || liveConfirm.trim().toUpperCase() === 'LIVE'
 
   // ── Debounced P&L preview (CONFIG form, kill switch enabled) ──────────────────
@@ -186,8 +264,13 @@ export function PortfolioAutoTrade() {
   // doesn't spam the backend. UNITS: state holds kill_switch_pct as a PERCENT
   // ("1" reads naturally); the backend speaks FRACTIONS, so we send /100 here —
   // the SAME convention as createSession (no double-conversion; state untouched).
+  // intraday_basket ALWAYS previews (for the strategy-summary line: invested
+  // basis + leverage); portfolio_kill_switch previews only when the kill switch
+  // is on (the "Potential outcome" card). Both convert percents→fractions via
+  // toWireConfig at the send boundary.
+  const intraday = config.strategy === 'intraday_basket'
   useEffect(() => {
-    if (phase !== 'config' || !config.kill_switch_enabled) {
+    if (phase !== 'config' || (!intraday && !config.kill_switch_enabled)) {
       setPreview(null); setPreviewErr(null); setPreviewLoading(false)
       return
     }
@@ -195,10 +278,7 @@ export function PortfolioAutoTrade() {
     setPreviewLoading(true)
     const t = setTimeout(async () => {
       try {
-        const res = await AutoTradeAPI.preview({
-          ...config,
-          kill_switch_pct: (Number(config.kill_switch_pct) || 0) / 100,
-        })
+        const res = await AutoTradeAPI.preview(toWireConfig(config))
         if (!cancelled) { setPreview(res); setPreviewErr(null) }
       } catch (e) {
         if (!cancelled) { setPreview(null); setPreviewErr(e instanceof Error ? e.message : 'Could not estimate the outcome.') }
@@ -209,6 +289,8 @@ export function PortfolioAutoTrade() {
     return () => { cancelled = true; clearTimeout(t) }
   }, [
     phase,
+    intraday,
+    config.strategy,
     config.kill_switch_enabled,
     config.total_allocated_capital,
     config.top_n_stocks,
@@ -217,6 +299,12 @@ export function PortfolioAutoTrade() {
     config.kill_switch_pct,
     config.kill_switch_direction,
     config.max_pct_per_position,
+    config.arm_pct,
+    config.floor_pct,
+    config.trail_giveback_pct,
+    config.stop_pct,
+    config.square_off_time,
+    toWireConfig,
   ])
 
   // ── Your Sessions (list + resume) ────────────────────────────────────────────
@@ -317,14 +405,10 @@ export function PortfolioAutoTrade() {
     setError(null); setBusy('create')
     try {
       // UNITS: the backend uses FRACTIONS for percentages (0.01 = 1%). The form
-      // captures kill_switch_pct as a PERCENT (e.g. 1, 3, 6) so it reads naturally;
-      // convert it to a fraction ONLY at the send boundary. State stays in percent
-      // (the input keeps showing "1"); there is no double-conversion.
-      const payload: SessionConfig = {
-        ...config,
-        kill_switch_pct: (Number(config.kill_switch_pct) || 0) / 100,
-      }
-      const res = await AutoTradeAPI.createSession(mode, payload)
+      // captures every pct as a PERCENT so it reads naturally; toWireConfig
+      // converts to fractions ONLY at the send boundary (per strategy). State
+      // stays in percent (inputs keep showing "1"); no double-conversion.
+      const res = await AutoTradeAPI.createSession(mode, toWireConfig(config))
       setSession(res)
       setPhase('created')
       setStartResult(null)
@@ -336,7 +420,7 @@ export function PortfolioAutoTrade() {
     } finally {
       setBusy(null)
     }
-  }, [mode, config, loadSessions])
+  }, [mode, config, loadSessions, toWireConfig])
 
   const onStart = useCallback(async (when: StartWhen) => {
     if (!session) return
@@ -619,6 +703,32 @@ export function PortfolioAutoTrade() {
             style={{ color: C.muted, border: `1px solid ${C.line}` }}>
             ← Your sessions
           </button>
+
+          {/* Strategy selector — picks the exit engine. Switching to the
+              intraday basket seeds its validated preset (operator can still
+              edit); switching back restores the kill-switch defaults. */}
+          <div className="mb-5">
+            <Field
+              label="Strategy"
+              hint={config.strategy === 'intraday_basket'
+                ? 'Arms a trailing exit once the basket profits, locks a floor, trails a giveback %, hard-stops, and squares off at a set time.'
+                : 'A single flat ±% basket exit on the invested return (the kill switch).'}
+            >
+              <select
+                value={config.strategy}
+                onChange={(e) => onStrategyChange(e.target.value as Strategy)}
+                className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
+                style={inputStyle}
+              >
+                {STRATEGY_OPTIONS.map((o) => (
+                  <option key={o.id} value={o.id} style={{ background: '#0b1410', color: C.ink }}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
+
           {/* Mode selector */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-5">
             <span className="text-[11px] font-semibold uppercase tracking-[0.05em]" style={{ color: C.muted }}>Mode</span>
@@ -759,7 +869,62 @@ export function PortfolioAutoTrade() {
             </div>
           )}
 
-          {/* Kill switch block */}
+          {/* ── intraday_basket: four trail %s + square-off + strategy summary ── */}
+          {config.strategy === 'intraday_basket' && (
+            <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.04)' }}>
+              <div className="flex items-center gap-2 mb-3">
+                <span style={{ color: C.mint }}>{ICON.trend(15)}</span>
+                <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Trailing exit (intraday basket)</span>
+                <span className="ml-auto text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+                  style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+                  Preset loaded
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="Arm / profit (%)" hint="Arms trailing once the basket hits this on notional.">
+                  <input type="number" min={0} step={0.05}
+                    value={config.arm_pct ?? ''}
+                    onChange={(e) => set('arm_pct', Number(e.target.value) || 0)}
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                </Field>
+                <Field label="Lock floor (%)" hint="Locks in at least this profit once armed.">
+                  <input type="number" min={0} step={0.05}
+                    value={config.floor_pct ?? ''}
+                    onChange={(e) => set('floor_pct', Number(e.target.value) || 0)}
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                </Field>
+                <Field label="Trail giveback (%)" hint="Exits if the basket gives back this much from its peak.">
+                  <input type="number" min={0} step={0.05}
+                    value={config.trail_giveback_pct ?? ''}
+                    onChange={(e) => set('trail_giveback_pct', Number(e.target.value) || 0)}
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                </Field>
+                <Field label="Stop loss (%)" hint="Hard exit if the basket drops this much on notional.">
+                  <input type="number" min={0} step={0.05}
+                    value={config.stop_pct ?? ''}
+                    onChange={(e) => set('stop_pct', Number(e.target.value) || 0)}
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                </Field>
+                <Field label="Square-off time (IST)" hint="Forces a flat basket at this time (HH:MM).">
+                  <input type="time"
+                    value={(config.square_off_time ?? '15:29:00').slice(0, 5)}
+                    onChange={(e) => set('square_off_time', `${e.target.value}:00`)}
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                </Field>
+              </div>
+
+              <IntradayStrategySummary
+                config={config}
+                preview={preview}
+                loading={previewLoading}
+                err={previewErr}
+              />
+            </div>
+          )}
+
+          {/* Kill switch block — portfolio_kill_switch strategy only */}
+          {config.strategy === 'portfolio_kill_switch' && (
           <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.015)' }}>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -815,6 +980,7 @@ export function PortfolioAutoTrade() {
               />
             )}
           </div>
+          )}
 
           {/* Create CTA */}
           <div className="mt-5 flex items-center gap-3">
@@ -1022,6 +1188,7 @@ export function PortfolioAutoTrade() {
               <Gear size={18} dir={1} />
               <span className="text-[13.5px] font-semibold" style={{ color: C.ink }}>Live status</span>
               {status && <ModePill mode={status.mode} />}
+              {status?.strategy && <StrategyPill strategy={status.strategy} />}
               <div className="ml-auto flex items-center gap-2">
                 <label className="flex items-center gap-1.5 text-[11px] cursor-pointer" style={{ color: C.muted }}>
                   <input type="checkbox" checked={poll} onChange={(e) => setPoll(e.target.checked)} />
@@ -1073,6 +1240,17 @@ export function PortfolioAutoTrade() {
                   </span>
                 </div>
 
+                {/* intraday_basket → the live TRAIL STATUS PANEL. */}
+                {status.strategy === 'intraday_basket' && (
+                  <div className="mb-4">
+                    <TrailStatusPanel status={status} />
+                  </div>
+                )}
+
+                {/* portfolio_kill_switch → the kill-switch readout + live preview
+                    (unchanged). Hidden for intraday_basket, which trails instead. */}
+                {status.strategy !== 'intraday_basket' && (
+                  <>
                 {/* Kill-switch state readout — threshold is a backend FRACTION (0.01 = 1%). */}
                 <div className="flex items-center gap-2 mb-3 text-[11.5px]" style={{ color: C.muted }}>
                   <span style={{ color: status.kill_switch_enabled ? C.red : C.faint }}>{ICON.shield(14)}</span>
@@ -1091,6 +1269,8 @@ export function PortfolioAutoTrade() {
                   <div className="mb-4">
                     <KillPreviewCard kill={status.kill_preview} direction={status.kill_switch_direction} live />
                   </div>
+                )}
+                  </>
                 )}
 
                 {/* Open positions table — Kite-style: absolute P&L (₹) + Chg % per row */}
@@ -1238,6 +1418,99 @@ function ModePill({ mode }: { mode: Mode }) {
   )
 }
 
+// Strategy pill — names the exit engine in the live header. Mint for both; the
+// label disambiguates (kill-switch vs intraday trailing basket).
+function StrategyPill({ strategy }: { strategy: Strategy }) {
+  const label = strategy === 'intraday_basket' ? 'Intraday Basket' : 'Kill Switch'
+  return (
+    <span className="text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+      style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+      {label}
+    </span>
+  )
+}
+
+// ── Live trail status (intraday_basket) ──────────────────────────────────────
+// Reads the nested `trail{...}` (falling back to the flat mirror fields), all
+// FRACTIONS (×100 to display). Shows armed state, peak, current notional return,
+// the live exit-trigger level, the four configured numbers, and a square-off
+// countdown. On a CLOSED session it shows the exit reason + the dual final
+// returns. Every field degrades to "—" when absent — nothing is fabricated.
+function TrailStatusPanel({ status }: { status: StatusResponse }) {
+  const t = status.trail ?? {}
+  // Prefer nested trail fields; fall back to the flat status mirrors.
+  const armed = t.armed ?? status.trail_armed
+  const peak = t.peak ?? status.trail_peak
+  const current = t.current_gross_return ?? status.gross_return
+  const trigger = t.trigger ?? status.trail_trigger
+  const armPct = t.arm_pct
+  const floorPct = t.floor_pct
+  const trailPct = t.trail_giveback_pct
+  const stopPct = t.stop_pct
+  const sqTime = t.square_off_time ?? status.square_off_time ?? '—'
+  const sqSecs = t.seconds_to_square_off ?? status.seconds_to_square_off
+  const closed = (status.status ?? '').toUpperCase() === 'CLOSED'
+
+  // Plain-English trail line, built only from fields the backend actually sent.
+  const armedLine = armed
+    ? `Armed at ${fracPct(armPct)} · peak ${fracPct(peak)} · exits if it gives back to ${fracPct(trigger)}`
+    : `Not armed yet — arms once the basket reaches ${fracPct(armPct)} on notional.`
+
+  return (
+    <div className="rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.05)' }}>
+      <div className="flex items-center gap-2 mb-3">
+        <span style={{ color: C.mint }}>{ICON.trend(15)}</span>
+        <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Trailing exit</span>
+        <span className="text-[9px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+          style={armed
+            ? { color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }
+            : { color: C.faint, background: 'rgba(255,255,255,0.04)' }}>
+          {armed == null ? 'TRAIL —' : armed ? 'ARMED' : 'NOT ARMED'}
+        </span>
+        <span className="ml-auto text-[11px]" style={{ color: C.faint }}>
+          square-off <b style={{ color: C.ink2 }}>{sqTime !== '—' ? sqTime.slice(0, 5) : '—'}</b>
+          {' '}· in <b style={{ color: C.mint }}>{fmtMMSS(sqSecs)}</b>
+        </span>
+      </div>
+
+      {/* Closed → exit reason + dual final returns. Else the live trail metrics. */}
+      {closed ? (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3">
+          <Stat label="Exit reason" value={status.exit_reason ?? '—'} valueColor={C.ink} />
+          <Stat
+            label="Final (notional)"
+            value={fracPct(status.notional_return)}
+            valueColor={pctTone(status.notional_return)}
+          />
+          <Stat
+            label="Final (own funds)"
+            value={fracPct(status.own_funds_return)}
+            valueColor={pctTone(status.own_funds_return)}
+          />
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+            <Stat label="Current (notional)" value={fracPct(current)} valueColor={pctTone(current)} sub="trail basis" />
+            <Stat label="Peak" value={fracPct(peak)} valueColor={pctTone(peak)} />
+            <Stat label="Exit trigger" value={fracPct(trigger)} valueColor={C.ink} sub="exits here" />
+            <Stat label="Square-off in" value={fmtMMSS(sqSecs)} valueColor={C.mint} />
+          </div>
+          <p className="text-[11.5px] leading-snug mb-3" style={{ color: C.muted }}>{armedLine}</p>
+        </>
+      )}
+
+      {/* The four configured numbers (×100), always shown for legibility. */}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px]" style={{ color: C.faint }}>
+        <span>arm <b style={{ color: C.mint }}>{fracPct(armPct, false)}</b></span>
+        <span>floor <b style={{ color: C.mint }}>{fracPct(floorPct, false)}</b></span>
+        <span>trail <b style={{ color: C.ink2 }}>{fracPct(trailPct, false)}</b></span>
+        <span>stop <b style={{ color: C.red }}>{fracPct(stopPct, false)}</b></span>
+      </div>
+    </div>
+  )
+}
+
 // RUNNING status pill — mint with a pulsing live dot so a running session that
 // holds positions never reads as empty/"no orders" in the list.
 function RunningPill() {
@@ -1355,6 +1628,50 @@ function PotentialOutcome({
       ) : (
         <p className="text-[11.5px]" style={{ color: C.faint }}>—</p>
       )}
+    </div>
+  )
+}
+
+// ── Intraday-basket strategy summary (CONFIG form) ───────────────────────────
+// A single legible line describing the configured trail, on the ESTIMATED bases
+// from POST /api/autotrade/preview (invested_basis + leverage). The pct fields
+// come from the config in PERCENTS (display as-is). Honest "—"/loading/error.
+function IntradayStrategySummary({
+  config, preview, loading, err,
+}: { config: SessionConfig; preview: PreviewResponse | null; loading: boolean; err: string | null }) {
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+  const arm = num(config.arm_pct); const floor = num(config.floor_pct)
+  const trail = num(config.trail_giveback_pct); const stop = num(config.stop_pct)
+  const sq = (config.square_off_time ?? '').slice(0, 5) || '—'
+  const entry = (config.entry_time ?? '').slice(0, 5) || '—'
+  const trim = (v: number | null) => (v == null ? '—' : String(v))
+
+  return (
+    <div className="mt-4 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.05)' }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span style={{ color: C.mint }}>{ICON.info(14)}</span>
+        <span className="text-[12px] font-semibold" style={{ color: C.ink }}>Strategy summary</span>
+        <span className="ml-auto text-[10px]" style={{ color: C.faint }}>estimate — places nothing</span>
+      </div>
+      <p className="text-[12px] leading-relaxed" style={{ color: C.ink2 }}>
+        Enter <b style={{ color: C.ink }}>{entry}</b>
+        {' → '}arm <b style={{ color: C.mint }}>+{trim(arm)}%</b>
+        {' → '}trail <b style={{ color: C.ink }}>{trim(trail)}%</b> giveback
+        {' '}(floor <b style={{ color: C.mint }}>+{trim(floor)}%</b>)
+        {' → '}stop <b style={{ color: C.red }}>−{trim(stop)}%</b>
+        {' → '}square-off <b style={{ color: C.ink }}>{sq}</b>
+      </p>
+      <p className="text-[10.5px] leading-snug mt-2" style={{ color: C.faint }}>
+        {loading && !preview ? (
+          'Estimating notional…'
+        ) : err ? (
+          <><span style={{ color: C.amber }}>Couldn&apos;t estimate the notional</span>{' '}({err}) — showing &ldquo;—&rdquo;.</>
+        ) : preview ? (
+          <>on <b style={{ color: C.ink2 }}>{fmtINR(preview.invested_basis)}</b> notional
+            {' '}· ~{(preview.leverage ?? 1).toFixed(preview.leverage % 1 === 0 ? 0 : 2)}× ({config.order_product})
+            {' '}· fund <b style={{ color: C.ink2 }}>{fmtCapital(preview.total_allocated_capital)}</b></>
+        ) : '—'}
+      </p>
     </div>
   )
 }

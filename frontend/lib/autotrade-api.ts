@@ -26,17 +26,36 @@ export type SizingMode = 'equal' | 'pct_cap' | 'manual'
 export type OrderProduct = 'CNC' | 'MIS' | 'MTF' | 'NRML'
 export type KillDirection = 'profit' | 'loss' | 'both'
 
+// The backend supports two exit strategies:
+//   • 'portfolio_kill_switch' (default, the EXISTING behaviour) — a single flat
+//     ±% basket exit on the invested return (the kill switch).
+//   • 'intraday_basket' — Falcon Intraday Basket: arm a trailing exit once the
+//     basket hits +arm_pct, lock a floor, trail by a giveback %, hard stop at
+//     −stop_pct, and square off at square_off_time. The four trail %s + the
+//     square-off time replace the single kill number.
+export type Strategy = 'portfolio_kill_switch' | 'intraday_basket'
+
 export type SessionConfig = {
+  strategy: Strategy
   total_allocated_capital: number
   top_n_stocks: number
   sizing_mode: SizingMode
   max_pct_per_position?: number
   manual_amounts?: Record<string, number>
   order_product: OrderProduct
+  // ── portfolio_kill_switch strategy ──
   kill_switch_enabled: boolean
   kill_switch_pct: number
   kill_switch_direction: KillDirection
   entry_time: string
+  // ── intraday_basket strategy ── (all percent fields are FRACTIONS on the wire,
+  // i.e. send ÷100; the UI captures + displays them as percents). square_off_time
+  // is an "HH:MM:SS" IST string.
+  arm_pct?: number
+  floor_pct?: number
+  trail_giveback_pct?: number
+  stop_pct?: number
+  square_off_time?: string
 }
 
 export type CreateResponse = {
@@ -91,13 +110,35 @@ export type KillPreview = {
   stop?: KillPreviewSide
 }
 
+// Live trail state for an 'intraday_basket' session (read from status()). All
+// pct fields are FRACTIONS on the wire (×100 to display); square_off_time is an
+// "HH:MM:SS" IST string; seconds_to_square_off counts down to it. Any field may
+// be absent → the UI degrades to "—".
+export type TrailState = {
+  armed?: boolean                 // has the basket armed the trail (hit +arm_pct)?
+  peak?: number                   // FRACTION — best notional return seen
+  current_gross_return?: number   // FRACTION — current notional return
+  trigger?: number                // FRACTION — the live exit-trigger level
+  arm_pct?: number                // FRACTION — configured arm/profit threshold
+  floor_pct?: number              // FRACTION — configured lock floor
+  trail_giveback_pct?: number     // FRACTION — configured trail giveback
+  stop_pct?: number               // FRACTION — configured hard stop
+  square_off_time?: string        // "HH:MM:SS" IST
+  seconds_to_square_off?: number  // seconds until square-off
+  square_off_armed?: boolean      // is the square-off timer armed?
+}
+
 // Session status. `status` is permissive (backend may report PAPER/RUNNING/
 // CLOSED/SCHEDULED/etc.). A SCHEDULED session has NOT placed yet — it is armed
 // to fire at `fires_at` and the scheduling fields below are present.
 export type SessionStatusName = 'SCHEDULED' | 'RUNNING' | 'CLOSED' | string
+// Exit reason on a CLOSED intraday_basket session.
+export type ExitReason = 'SQUARE_OFF' | 'STOP' | 'TRAIL_EXIT' | 'FLOOR_EXIT' | string
 export type StatusResponse = {
   status: SessionStatusName
   mode: Mode
+  // Which exit strategy this session runs. Absent → treat as 'portfolio_kill_switch'.
+  strategy?: Strategy
   // gross_return is the KILL BASIS = return on INVESTED capital (product-aware:
   // MTF = leveraged invested value, CNC = cash), a FRACTION (-0.0136 = -1.36%).
   gross_return: number
@@ -122,6 +163,18 @@ export type StatusResponse = {
   fires_at?: string
   seconds_remaining?: number
   scheduler_armed?: boolean
+  // ── intraday_basket live trail state ── (present when strategy === 'intraday_basket').
+  // Prefer the nested `trail{...}`; the flat mirror fields are a fallback.
+  trail?: TrailState
+  trail_armed?: boolean
+  trail_peak?: number
+  trail_trigger?: number
+  square_off_time?: string
+  seconds_to_square_off?: number
+  // ── intraday_basket close summary ── (present on a CLOSED session).
+  exit_reason?: ExitReason
+  notional_return?: number    // FRACTION — final return on the invested/notional basis
+  own_funds_return?: number   // FRACTION — final return on your own funds
 }
 
 // POST /api/autotrade/preview — an ESTIMATE before Start. Creates no session and
