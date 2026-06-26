@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -65,6 +66,8 @@ class KillSwitchExecutor:
         (TRAIL_EXIT / FLOOR_EXIT / STOP / SQUARE_OFF) through here so the per-day
         report shows WHY the basket exited. The flatten sequence is identical."""
         log.critical("KILL SWITCH FIRED [%s]: %s", self.session_id, trigger_reason)
+        # SPEED PASS: time trigger → all-flat for exit_latency_ms observability.
+        _exit_t0 = time.monotonic()
         self._set_session_status("KILLING", kill_reason=trigger_reason)
 
         # STEP 1 — cancel all pending orders across all brokers (parallel).
@@ -89,7 +92,15 @@ class KillSwitchExecutor:
         gtt_cancels: List[Dict[str, Any]] = []
         if self.gtt_manager is not None:
             try:
-                gtt_cancels = self.gtt_manager.cancel_session_gtts()
+                # SPEED PASS: parallel cancel sweep (still BEFORE the market exits
+                # so no orphan GTT can re-fire). Falls back to the sequential sweep
+                # if the async variant isn't available.
+                cancel_async = getattr(
+                    self.gtt_manager, "cancel_session_gtts_async", None)
+                if cancel_async is not None:
+                    gtt_cancels = await cancel_async()
+                else:
+                    gtt_cancels = self.gtt_manager.cancel_session_gtts()
             except Exception as e:  # never block the flatten on GTT cancels
                 log.warning("kill switch: GTT cancel sweep failed for %s: %s",
                             self.session_id, e)
@@ -152,8 +163,19 @@ class KillSwitchExecutor:
                 details.append({**meta, "status": getattr(res, "status", "PLACED"),
                                 "broker_order_id": getattr(res, "broker_order_id", None)})
 
-        # STEP 4 — close session + log.
+        # STEP 4 — close session + log. Record exit_latency_ms (trigger → flat).
         self._set_session_status("CLOSED")
+        exit_latency_ms = int((time.monotonic() - _exit_t0) * 1000)
+        try:
+            with falcon_conn() as con:
+                con.execute(
+                    "UPDATE autotrade_sessions SET exit_latency_ms=? "
+                    "WHERE session_id=?", (exit_latency_ms, self.session_id))
+                con.commit()
+        except Exception as e:  # pragma: no cover - never block on observability
+            log.debug("exit_latency record failed for %s: %s", self.session_id, e)
+        log.critical("KILL SWITCH flatten complete in %dms [%s]",
+                     exit_latency_ms, self.session_id)
         self._log_fire(trigger_reason, gross_return, len(positions),
                        n_ok, n_failed, details)
         summary = {"session_id": self.session_id, "trigger_reason": trigger_reason,

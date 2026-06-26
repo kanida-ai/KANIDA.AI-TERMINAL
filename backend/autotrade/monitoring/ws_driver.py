@@ -10,13 +10,16 @@ ADDITION to the existing 5s tick_driver heartbeat. On each relevant tick it:
 The 5s tick_driver remains as the fallback/heartbeat (it also snapshots + does
 GTT reconcile). This driver is the LOW-LATENCY path.
 
-DESIGN: rather than hook the global KiteTicker's _on_ticks callback (which is
-owned by the Falcon swing monitor), this driver SUBSCRIBES the session's symbols
-to the shared ticker (refresh_subscriptions is symbol-driven off
-falcon_position_state, so we subscribe explicitly) and POLLS the ticker's LTP
-cache on a sub-second interval. Reading a ~0–2s-old cached tick gives sub-second
-reaction without contending for the callback. The poll interval defaults to
-0.25s (4× per second).
+DESIGN (SPEED PASS — event-driven): this driver SUBSCRIBES the session's symbols
+to the shared ticker and registers an ADDITIVE tick listener
+(kite_ticker.add_tick_listener) so an incoming tick for a held symbol WAKES the
+eval loop IMMEDIATELY — true sub-second reaction without waiting for a poll. The
+listener only sets an Event (coalescing tick bursts into one wake); the actual
+recompute + trail/kill decision still runs on the driver thread (so the
+KiteTicker thread is never blocked and the Falcon monitor is never disturbed).
+The poll remains as a BACKSTOP at a lowered default of 0.1s (override via
+FALCON_AUTOTRADE_WS_POLL) in case the WS is briefly down. The legacy _on_ticks
+default behaviour is UNCHANGED when no session has a listener registered.
 
 SAFETY:
   * Paper sessions place NO real orders on fire (brokers built dry_run=True).
@@ -38,7 +41,7 @@ from falcon.db import falcon_conn
 
 log = logging.getLogger("kanida.autotrade.ws_driver")
 
-DEFAULT_POLL_SEC = 0.25
+DEFAULT_POLL_SEC = 0.1
 
 # Production leaves this on; tests flip it off so a background WS thread can't
 # race assertions on the shared temp DB. The dedicated WS test re-enables it.
@@ -118,6 +121,12 @@ class _WSDriver:
         self.poll_sec = poll_sec
         self.ltp_source = ltp_source or _default_ltp_source
         self._stop = threading.Event()
+        # EVENT-DRIVEN: set by the kite_ticker tick listener when a symbol this
+        # session cares about ticks → the run loop wakes IMMEDIATELY (no waiting
+        # for the next poll). Coalesces bursts (many ticks → one wake).
+        self._wake = threading.Event()
+        self._symbols: set = set()   # cached subscribed symbols (this session)
+        self._listener = None        # registered tick listener (for cleanup)
         self._thread = threading.Thread(
             target=self._run, name=f"autotrade-ws-{session_id[:8]}", daemon=True)
 
@@ -126,9 +135,53 @@ class _WSDriver:
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()  # unblock the loop so it exits promptly
+        self._unregister_listener()
 
     def is_alive(self) -> bool:
         return self._thread.is_alive()
+
+    # ── tick listener (event-driven trigger) ──────────────────────────────────
+    def _on_tick(self, ticked_syms: set) -> None:
+        """Called from the kite_ticker tick thread (off its lock). If any symbol
+        this session holds just ticked, wake the eval loop immediately."""
+        if self._stop.is_set():
+            return
+        if not self._symbols or (ticked_syms & self._symbols):
+            self._wake.set()
+
+    def _register_listener(self) -> None:
+        try:
+            from falcon.trade.services import kite_ticker
+            self._listener = self._on_tick
+            kite_ticker.add_tick_listener(self._listener)
+        except Exception as e:  # pragma: no cover - degrade to poll-only
+            log.debug("ws_driver: tick listener register failed for %s: %s",
+                      self.session_id, e)
+            self._listener = None
+
+    def _unregister_listener(self) -> None:
+        if self._listener is None:
+            return
+        try:
+            from falcon.trade.services import kite_ticker
+            kite_ticker.remove_tick_listener(self._listener)
+        except Exception:  # pragma: no cover
+            pass
+        self._listener = None
+
+    def _refresh_symbols(self, positions) -> None:
+        """Cache the open-position symbol set + (re)subscribe them on the ticker.
+        Called on entry/exit changes only (not every wake) — keeps the hot path
+        free of redundant token lookups. AUTO-RECONNECT: re-subscribing each
+        change also re-arms the subscription after a ticker reconnect."""
+        syms = {p["symbol"] for p in positions}
+        if syms != self._symbols:
+            self._symbols = syms
+            try:
+                _subscribe_session_symbols(list(syms))
+            except Exception:  # pragma: no cover
+                pass
 
     def _run(self) -> None:
         from ..session import TradingSession
@@ -146,14 +199,15 @@ class _WSDriver:
             return
         sess._build_brokers()
 
-        # Best-effort subscribe the session's symbols to the shared ticker.
+        # Cache + subscribe the session's symbols, and arm the event-driven
+        # listener so a tick wakes us immediately (poll is the backstop).
         try:
-            syms = [p["symbol"] for p in sess.registry.get_open_positions()]
-            _subscribe_session_symbols(syms)
+            self._refresh_symbols(sess.registry.get_open_positions())
         except Exception:  # pragma: no cover
             pass
+        self._register_listener()
 
-        log.info("ws_driver started for %s (poll=%ss)",
+        log.info("ws_driver started for %s (poll=%ss, event-driven)",
                  self.session_id, self.poll_sec)
         try:
             while not self._stop.is_set():
@@ -164,8 +218,12 @@ class _WSDriver:
                 except Exception as e:  # pragma: no cover - never kill the thread
                     log.exception("ws_driver tick error for %s: %s",
                                   self.session_id, e)
-                self._stop.wait(self.poll_sec)
+                # EVENT-DRIVEN wait: wake on the next tick OR after poll_sec
+                # (backstop). Coalesce: clear the flag, then wait for the next.
+                self._wake.clear()
+                self._wake.wait(self.poll_sec)
         finally:
+            self._unregister_listener()
             self._deregister()
             log.info("ws_driver stopped for %s", self.session_id)
 
@@ -174,6 +232,11 @@ class _WSDriver:
         positions = sess.registry.get_open_positions()
         if not positions:
             return
+        # Keep the cached symbol set + subscription current (only acts on change).
+        try:
+            self._refresh_symbols(positions)
+        except Exception:  # pragma: no cover
+            pass
         for pos in positions:
             ltp = self.ltp_source(pos["symbol"])
             if ltp is not None and ltp > 0:

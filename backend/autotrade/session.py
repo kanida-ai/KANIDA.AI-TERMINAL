@@ -40,6 +40,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -66,9 +68,38 @@ from .monitoring import trail_engine
 log = logging.getLogger("kanida.autotrade.session")
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# SPEED PASS: max concurrent entry legs (asyncio.gather over _place_one).
+# Kite caps order placement at ~10/s; 5–10 concurrent is safe. Configurable.
+def _entry_concurrency() -> int:
+    try:
+        v = int(os.environ.get("FALCON_AUTOTRADE_ENTRY_CONCURRENCY", "8"))
+        return max(1, min(v, 10))
+    except ValueError:
+        return 8
+
+
+_ENTRY_CONCURRENCY = _entry_concurrency()
+
 
 def _now_ist_iso() -> str:
     return datetime.now(IST).isoformat()
+
+
+def _last_tick_age_ms() -> Optional[int]:
+    """Age in ms of the newest WS tick the system has received (now − tick ts),
+    for the SPEED-PASS status readout. None when the ticker is unavailable / has
+    no ticks yet (e.g. tests, pre-open, WS down)."""
+    try:
+        from falcon.trade.services import kite_ticker
+        last = kite_ticker.last_tick_at()
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if last is None:
+        return None
+    try:
+        return int(max(0.0, (datetime.now(IST) - last).total_seconds() * 1000))
+    except Exception:  # pragma: no cover
+        return None
 
 
 def _parse_entry_time_today_ist(entry_time: str) -> datetime:
@@ -162,18 +193,26 @@ def preview_session_sizing(config: TradingSessionConfig,
             continue
         picks = routed.get(prof.profile_id, [])
         amounts = allocator.allocate([p.symbol for p in picks])
+        # SPEED PASS: ONE batched LTP + MTF-margin prefetch for the preview too.
+        fund_syms = [p.symbol for p in picks if amounts.get(p.symbol, 0.0) > 0]
+        try:
+            pcache = allocator.prefetch(fund_syms, broker)
+        except Exception:  # pragma: no cover - per-symbol fallback inside
+            pcache = {}
         for pick in picks:
             amount = amounts.get(pick.symbol, 0.0)
             if amount <= 0:
                 continue
             try:
-                qty = allocator.calculate_quantity(pick.symbol, amount, broker)
+                qty = allocator.calculate_quantity_cached(
+                    pick.symbol, amount, broker, cache=pcache)
             except InsufficientCapitalError as e:
                 positions.append({"symbol": pick.symbol,
                                   "broker_profile": prof.profile_id,
                                   "status": "SKIPPED", "reason": str(e)})
                 continue
-            ref_price = broker.get_ltp(pick.symbol) or 0.0
+            _c = pcache.get(pick.symbol, {})
+            ref_price = float(_c.get("ltp") or 0.0) or (broker.get_ltp(pick.symbol) or 0.0)
             invested = qty * ref_price
             invested_basis += invested
             positions.append({"symbol": pick.symbol,
@@ -353,7 +392,30 @@ class TradingSession:
         router = BrokerRouter(top_n_stocks=self.config.top_n_stocks)
         routed = router.route_picks(falcon_picks, self.config.broker_profiles)
 
-        placed: List[Dict[str, Any]] = []
+        # SPEED PASS: time the whole fire (start → all legs settled) for the
+        # entry_latency_ms observability field.
+        _fire_t0 = time.monotonic()
+
+        # SPEED PASS: place all legs CONCURRENTLY. Each profile's picks are sized
+        # off ONE batched LTP + ONE batched MTF-margin prefetch (zero per-symbol
+        # round-trips in the common case), then all _place_one coroutines are
+        # fanned out with asyncio.gather. A bounded semaphore respects the Kite
+        # order rate limit (~10/s). Per-leg failure is ISOLATED inside _place_one
+        # (it returns a FAILED/SKIPPED dict, never raises) so one bad leg can
+        # never abort the others. invested_basis is frozen AFTER all legs settle.
+        sem = asyncio.Semaphore(_ENTRY_CONCURRENCY)
+
+        async def _guarded_place(broker, prof, pick, amount, allocator, cache):
+            async with sem:
+                try:
+                    return await self._place_one(
+                        broker, prof, pick, amount, allocator, prefetch=cache)
+                except Exception as e:  # belt-and-braces leg isolation
+                    log.error("entry leg crashed for %s: %s", pick.symbol, e)
+                    return {"symbol": pick.symbol, "status": "FAILED",
+                            "error": str(e)}
+
+        leg_coros = []
         for prof in self.config.broker_profiles:
             if not prof.enabled:
                 continue
@@ -361,12 +423,28 @@ class TradingSession:
             picks = routed.get(prof.profile_id, [])
             allocator = CapitalAllocator(self.config)
             amounts = allocator.allocate([p.symbol for p in picks])
-            for pick in picks:
+            fund_picks = [p for p in picks if amounts.get(p.symbol, 0.0) > 0]
+            # ONE batched prefetch per profile (LTP + MTF margin for all picks).
+            try:
+                cache = allocator.prefetch([p.symbol for p in fund_picks], broker)
+            except Exception as e:  # pragma: no cover - per-symbol fallback inside
+                log.warning("prefetch failed for %s (%s) — per-symbol fallback",
+                            prof.profile_id, e)
+                cache = {}
+            for pick in fund_picks:
                 amount = amounts.get(pick.symbol, 0.0)
-                if amount <= 0:
-                    continue
-                rec = await self._place_one(broker, prof, pick, amount, allocator)
-                placed.append(rec)
+                leg_coros.append(_guarded_place(
+                    broker, prof, pick, amount, allocator, cache))
+
+        placed: List[Dict[str, Any]] = list(
+            await asyncio.gather(*leg_coros)) if leg_coros else []
+        entry_latency_ms = int((time.monotonic() - _fire_t0) * 1000)
+        try:
+            self._record_latency(entry_latency_ms=entry_latency_ms)
+        except Exception as e:  # pragma: no cover - never block on observability
+            log.debug("entry_latency record failed for %s: %s", self.session_id, e)
+        log.info("session %s entry fired %d legs in %dms (concurrency=%d)",
+                 self.session_id, len(placed), entry_latency_ms, _ENTRY_CONCURRENCY)
 
         # INVESTED-CAPITAL-BASIS: freeze Σ(qty*avg_price) across the positions
         # just placed. This is the product-aware capital actually put to work
@@ -444,15 +522,22 @@ class TradingSession:
         return square_off_scheduler.start_for_session(self.session_id, target)
 
     async def _place_one(self, broker, prof, pick: Pick, amount: float,
-                         allocator: CapitalAllocator) -> Dict[str, Any]:
+                         allocator: CapitalAllocator,
+                         prefetch: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         symbol = pick.symbol
         try:
-            qty = allocator.calculate_quantity(symbol, amount, broker)
+            qty = allocator.calculate_quantity_cached(
+                symbol, amount, broker, cache=prefetch)
         except InsufficientCapitalError as e:
             log.warning("skip %s: %s", symbol, e)
             return {"symbol": symbol, "status": "SKIPPED", "reason": str(e)}
 
-        ref_price = broker.get_ltp(symbol) or 0.0
+        # Reuse the prefetched LTP (the entry mark) when present; else one lookup.
+        ref_price = 0.0
+        if prefetch and symbol in prefetch and prefetch[symbol].get("ltp"):
+            ref_price = float(prefetch[symbol]["ltp"])
+        else:
+            ref_price = broker.get_ltp(symbol) or 0.0
         order = build_order(symbol, qty, self.config, broker)
         if order.order_type == "LIMIT" and ref_price > 0:
             order.price = order.compute_limit_price(ref_price)
@@ -647,6 +732,10 @@ class TradingSession:
                 total_allocated_capital=self.config.total_allocated_capital),
             "n_open_positions": len(positions),
             "open_positions": positions,
+            # SPEED-PASS observability so the operator can SEE the latency.
+            "entry_latency_ms": sess.get("entry_latency_ms"),
+            "exit_latency_ms": sess.get("exit_latency_ms"),
+            "last_tick_age_ms": _last_tick_age_ms(),
         }
         # SCHEDULED: surface the armed entry time so the UI can show
         # "Scheduled for 09:15" + a live countdown.
@@ -732,6 +821,21 @@ class TradingSession:
         return self.registry.get_all_positions()
 
     # ── helpers ─────────────────────────────────────────────────────────────────
+    def _record_latency(self, *, entry_latency_ms: Optional[int] = None,
+                        exit_latency_ms: Optional[int] = None) -> None:
+        """Persist the speed-pass observability fields on the session row
+        (idempotent COALESCE-style UPDATE; only the provided field is written)."""
+        with falcon_conn() as con:
+            if entry_latency_ms is not None:
+                con.execute(
+                    "UPDATE autotrade_sessions SET entry_latency_ms=? "
+                    "WHERE session_id=?", (int(entry_latency_ms), self.session_id))
+            if exit_latency_ms is not None:
+                con.execute(
+                    "UPDATE autotrade_sessions SET exit_latency_ms=? "
+                    "WHERE session_id=?", (int(exit_latency_ms), self.session_id))
+            con.commit()
+
     def _set_status(self, status: str, started_at: Optional[str] = None) -> None:
         with falcon_conn() as con:
             con.execute(

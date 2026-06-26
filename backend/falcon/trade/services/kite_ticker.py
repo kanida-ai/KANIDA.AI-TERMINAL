@@ -56,10 +56,38 @@ class _TickerState:
 _state = _TickerState()
 
 
+# ─── Optional tick listeners (ADDITIVE, default-empty) ───────────────────────
+# AutoTrade Sessions register a lightweight callback here to get EVENT-DRIVEN
+# (sub-second) notification of incoming ticks, instead of polling the cache.
+# DEFAULT BEHAVIOUR IS UNCHANGED: with no listeners registered (the production
+# default until an AutoTrade session arms one), _on_ticks does exactly what it
+# did before. Listeners are invoked OUTSIDE the state lock, each wrapped so a
+# listener exception can never disturb the cache update or the Falcon monitor.
+_listeners_lock = threading.Lock()
+_tick_listeners: List[Any] = []  # list of callables: fn(symbols: set[str]) -> None
+
+
+def add_tick_listener(fn) -> None:
+    """Register a callback invoked (best-effort, off-lock) after each tick batch
+    with the SET of symbols that just ticked. Idempotent per callable."""
+    with _listeners_lock:
+        if fn not in _tick_listeners:
+            _tick_listeners.append(fn)
+
+
+def remove_tick_listener(fn) -> None:
+    with _listeners_lock:
+        try:
+            _tick_listeners.remove(fn)
+        except ValueError:
+            pass
+
+
 # ─── Tick callbacks (run in KiteTicker background thread) ────────────────────
 
 def _on_ticks(ws, ticks: List[Dict[str, Any]]) -> None:
     now = datetime.now(IST)
+    ticked_syms = set()
     with _state.lock:
         for t in ticks:
             tok = int(t.get("instrument_token") or 0)
@@ -71,7 +99,26 @@ def _on_ticks(ws, ticks: List[Dict[str, Any]]) -> None:
             sym = _state.token_to_sym.get(tok)
             _state.tick_cache[tok] = {"ltp": ltp, "ts": now, "symbol": sym}
             _state.tick_count += 1
+            if sym:
+                ticked_syms.add(sym)
         _state.last_tick_at = now
+    # Notify optional listeners OUTSIDE the lock. No listeners → no-op (unchanged
+    # default behaviour). Each is wrapped so it can never affect the Falcon path.
+    if ticked_syms:
+        with _listeners_lock:
+            listeners = list(_tick_listeners)
+        for fn in listeners:
+            try:
+                fn(ticked_syms)
+            except Exception as e:  # pragma: no cover - never disturb ticking
+                log.debug("tick listener error: %s", e)
+
+
+def last_tick_at():
+    """The IST datetime of the newest tick received (None if none yet). Used by
+    AutoTrade status() to report last_tick_age_ms."""
+    with _state.lock:
+        return _state.last_tick_at
 
 
 def _on_connect(ws, response) -> None:

@@ -28,6 +28,7 @@ COORDINATION (FEATURE 3):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -133,6 +134,43 @@ class GTTManager:
                 out.append({"symbol": pos["symbol"], "gtt_id": gtt_id,
                             "status": "CANCEL_FAILED", "error": str(e)})
         return out
+
+    async def cancel_session_gtts_async(self) -> List[Dict[str, Any]]:
+        """SPEED PASS: parallel GTT-cancel sweep. Same semantics as
+        cancel_session_gtts (best-effort, a cancel failure NEVER blocks the
+        flatten) but all broker.cancel_gtt calls run CONCURRENTLY via a thread
+        pool (cancel_gtt is a sync Kite call) so N GTTs are cancelled in ~one
+        round-trip's time, not N serial ones.
+
+        ORDERING (critical, unchanged): the kill switch AWAITS this BEFORE placing
+        any market exit, so no orphan GTT can re-fire on a symbol we then flatten.
+        """
+        targets: List[Dict[str, Any]] = []
+        for pos in self.registry.get_open_positions():
+            gtt_id = pos.get("gtt_id")
+            if not gtt_id:
+                continue
+            prof_id = pos.get("broker_profile")
+            broker = self.brokers.get(prof_id) or next(iter(self.brokers.values()), None)
+            if broker is None:
+                continue
+            targets.append({"symbol": pos["symbol"], "gtt_id": gtt_id,
+                            "broker": broker})
+        if not targets:
+            return []
+
+        async def _one(t):
+            try:
+                await asyncio.to_thread(t["broker"].cancel_gtt, t["gtt_id"])
+                return {"symbol": t["symbol"], "gtt_id": t["gtt_id"],
+                        "status": "CANCELLED"}
+            except Exception as e:  # never block the flatten on a GTT cancel
+                log.warning("cancel_gtt failed for %s (%s): %s",
+                            t["symbol"], t["gtt_id"], e)
+                return {"symbol": t["symbol"], "gtt_id": t["gtt_id"],
+                        "status": "CANCEL_FAILED", "error": str(e)}
+
+        return list(await asyncio.gather(*[_one(t) for t in targets]))
 
     # ── Reconcile GTT fills (a position closed externally by a fired GTT) ──────
     def reconcile_gtt_fills(self) -> List[Dict[str, Any]]:
