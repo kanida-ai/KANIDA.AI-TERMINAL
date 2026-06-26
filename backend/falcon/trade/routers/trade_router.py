@@ -1637,8 +1637,41 @@ def _detect_egress_ip() -> Dict[str, Any]:
             "error": last_error or "all echoes failed"}
 
 
+def _detect_proxy_egress_ip() -> Optional[str]:
+    """Egress IP AS SEEN THROUGH the broker proxy (BROKER_PROXY_URL).
+
+    Lets the operator confirm the IP Kite will actually see matches the proxy's
+    registered static IP. Returns the proxy-side IP string, or None if no proxy
+    is configured / the check fails. Best-effort, NEVER raises. Not cached — this
+    is an occasional operator verification, and we want a live read."""
+    url = os.environ.get("BROKER_PROXY_URL", "").strip()
+    if not url:
+        return None
+    try:
+        import requests  # noqa: WPS433
+        proxies = {"http": url, "https": url}
+        for echo in _EGRESS_ECHOES:
+            try:
+                r = requests.get(echo, proxies=proxies, timeout=4)
+                ip = (r.text or "").strip()
+                if ip:
+                    return ip
+            except Exception as e:  # noqa: BLE001 — try next echo
+                log.warning("egress-ip proxy echo %s failed: %s", echo, e)
+        return None
+    except Exception as e:  # noqa: BLE001 — must never crash the endpoint
+        log.warning("egress-ip proxy check failed: %s", e)
+        return None
+
+
 @router.get("/falcon/egress-ip")
 def egress_ip():
-    """Backend's current outbound public IP for the Kite allowlist. Returns
-    { ip, as_of } or { ip: null, as_of, error }. Gated at the router level."""
-    return _detect_egress_ip()
+    """Backend's outbound public IP for the Kite allowlist.
+
+    Returns { ip (direct egress), proxy_ip (egress THROUGH BROKER_PROXY_URL if
+    set, else null), as_of, error }. The direct check is always present (cached
+    ~5 min); proxy_ip is the IP Kite will actually see once the static-IP proxy
+    is wired. Gated at the router level. Never crashes."""
+    base = _detect_egress_ip()
+    base["proxy_ip"] = _detect_proxy_egress_ip()
+    return base

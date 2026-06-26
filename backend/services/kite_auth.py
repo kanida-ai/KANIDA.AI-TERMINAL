@@ -64,6 +64,46 @@ if not os.path.isabs(DB_PATH):
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+
+# ── Static-egress proxy for broker REST (SEBI registered-IP rule) ────────────
+# 2026-06-25: SEBI now requires a registered STATIC IP for live ORDER APIs. The
+# laptop server's egress IP is dynamic (Comcast), so we route the KiteConnect
+# REST client through a static-IP proxy. kiteconnect 5.2.0 has native support:
+# KiteConnect(..., proxies={...}) is stored as self.proxies and passed verbatim
+# to reqsession.request(..., proxies=self.proxies) on EVERY REST call (orders,
+# GTT, quotes) — verified in site-packages/kiteconnect/connect.py.
+#
+# ADDITIVE + DEFAULT-OFF: when BROKER_PROXY_URL is unset, _kite_proxies() returns
+# None and NO proxies kwarg is passed → behaviour is byte-identical to before.
+# Value format (set ONCE the static-IP proxy is up):
+#     BROKER_PROXY_URL=http://user:pass@HOST:PORT
+# The same URL is used for both http and https (broker REST is https; http kept
+# for completeness / any redirect). The KiteTicker WebSocket (market data) stays
+# DIRECT — the SEBI rule is for order APIs, and WS proxying is non-trivial.
+
+def _kite_proxies() -> Optional[dict]:
+    """Return a requests-style proxies dict if BROKER_PROXY_URL is set, else None.
+
+    None → caller passes NO proxies kwarg → unchanged behaviour (direct egress)."""
+    _load_env_file()
+    url = os.environ.get("BROKER_PROXY_URL", "").strip()
+    if not url:
+        return None
+    return {"http": url, "https": url}
+
+
+def _new_kite(api_key: str):
+    """Construct a KiteConnect client, applying BROKER_PROXY_URL if set.
+
+    Single construction helper so all sites share the default-off proxy logic."""
+    from kiteconnect import KiteConnect
+
+    proxies = _kite_proxies()
+    if proxies is not None:
+        return KiteConnect(api_key=api_key, proxies=proxies)
+    return KiteConnect(api_key=api_key)
+
+
 # ── Error types ───────────────────────────────────────────────────────────────
 
 class KiteAuthError(Exception):
@@ -187,12 +227,10 @@ def get_kite_client(check: bool = False):
     Raises:
         KiteAuthError: TOKEN_MISSING | TOKEN_EXPIRED | CONFIG_MISSING | KITE_AUTH_FAILED
     """
-    from kiteconnect import KiteConnect
-
     api_key, _  = _get_credentials()
     access_token = get_access_token()
 
-    kite = KiteConnect(api_key=api_key)
+    kite = _new_kite(api_key)
     kite.set_access_token(access_token)
 
     if check:
@@ -223,8 +261,7 @@ def get_token_status() -> dict:
         return {"valid": False, "code": e.code, "reason": e.detail}
 
     try:
-        from kiteconnect import KiteConnect
-        kite = KiteConnect(api_key=api_key)
+        kite = _new_kite(api_key)
         kite.set_access_token(token)
         profile = kite.profile()
         return {
@@ -248,8 +285,7 @@ def exchange_and_save(request_token: str) -> str:
     api_key, api_secret = _get_credentials()
 
     try:
-        from kiteconnect import KiteConnect
-        kite    = KiteConnect(api_key=api_key)
+        kite    = _new_kite(api_key)
         session = kite.generate_session(request_token, api_secret=api_secret)
         token: str = session["access_token"]
     except Exception as e:
