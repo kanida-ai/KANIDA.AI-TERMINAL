@@ -175,6 +175,12 @@ export type StatusResponse = {
   exit_reason?: ExitReason
   notional_return?: number    // FRACTION — final return on the invested/notional basis
   own_funds_return?: number   // FRACTION — final return on your own funds
+  // ── SPEED / latency readout ── (ALWAYS present; ints in ms, may be null).
+  // Works for BOTH strategies. entry/exit are deploy/exit speeds; last_tick_age_ms
+  // is the data-freshness heartbeat that proves sub-second monitoring.
+  entry_latency_ms?: number | null  // fire start → all legs settled (deploy speed)
+  exit_latency_ms?: number | null   // flatten trigger → all flat (exit speed; once flattened)
+  last_tick_age_ms?: number | null  // now − newest tick used (data freshness / liveness)
 }
 
 // POST /api/autotrade/preview — an ESTIMATE before Start. Creates no session and

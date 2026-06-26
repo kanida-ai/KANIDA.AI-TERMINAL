@@ -93,6 +93,25 @@ function fmtMMSS(totalSec: number | null | undefined): string {
   return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
 }
 
+// A latency in ms → a compact, human string: <1000 stays "368 ms"; ≥1000 becomes
+// "2.7 s" (one decimal, trailing .0 trimmed). null/non-finite → "—" (not measured).
+function fmtMs(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return '—'
+  const v = Math.max(0, ms)
+  if (v < 1000) return `${Math.round(v)} ms`
+  return `${(v / 1000).toFixed(1).replace(/\.0$/, '')} s`
+}
+
+// Liveness tone for the last-tick age (the monitoring heartbeat): green if the
+// feed is sub-second-ish (<1500ms), amber while it lags (1500–5000ms), red/stale
+// when older or not measured. Returns the tone color + an honest label.
+function tickLiveness(ms: number | null | undefined): { color: string; label: string; fresh: boolean } {
+  if (ms == null || !Number.isFinite(ms)) return { color: C.faint, label: 'no data', fresh: false }
+  if (ms < 1500) return { color: C.mint, label: 'monitoring sub-second', fresh: true }
+  if (ms <= 5000) return { color: C.amber, label: 'feed lagging', fresh: false }
+  return { color: C.red, label: 'stale', fresh: false }
+}
+
 // A backend FRACTION → a trimmed, signed percent string ("+2.3%", "-1.55%").
 // Returns '—' for absent/non-finite values so nothing is fabricated.
 function fracPct(frac: number | null | undefined, signed = true, dp = 2): string {
@@ -1240,6 +1259,11 @@ export function PortfolioAutoTrade() {
                   </span>
                 </div>
 
+                {/* SPEED strip — deploy/exit latency + the live data-freshness
+                    heartbeat. Works for BOTH strategies; sits above the
+                    strategy-specific panels and doesn't disturb them. */}
+                <SpeedStrip status={status} />
+
                 {/* intraday_basket → the live TRAIL STATUS PANEL. */}
                 {status.strategy === 'intraday_basket' && (
                   <div className="mb-4">
@@ -1427,6 +1451,56 @@ function StrategyPill({ strategy }: { strategy: Strategy }) {
       style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
       {label}
     </span>
+  )
+}
+
+// ── Speed / latency strip (BOTH strategies) ──────────────────────────────────
+// A compact readout of the three backend latency ints (ms, may be null):
+//   • Entry — fire start → all legs settled (deploy speed); neutral.
+//   • Exit  — flatten trigger → all flat (exit speed); shown ONLY once a flatten
+//             has happened (exit_latency_ms present), so it doesn't imply a
+//             flatten that hasn't occurred. Neutral.
+//   • Data  — age of the newest tick used; the monitoring heartbeat. Coloured as
+//             a liveness signal (green sub-second, amber lagging, red/stale/—).
+// Every value degrades to "—" when not measured; nothing is fabricated.
+function SpeedStrip({ status }: { status: StatusResponse }) {
+  const entry = status.entry_latency_ms
+  const exit = status.exit_latency_ms
+  const tickAge = status.last_tick_age_ms
+  const live = tickLiveness(tickAge)
+  const showExit = exit != null && Number.isFinite(exit)
+
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-xl border px-3.5 py-2.5"
+      style={{ borderColor: C.line, background: 'rgba(255,255,255,0.015)' }}>
+      <span className="text-[10px] font-semibold uppercase tracking-[0.06em]" style={{ color: C.faint }}>Speed</span>
+
+      {/* Entry deploy speed — neutral */}
+      <span className="text-[11.5px]" style={{ color: C.muted }}>
+        Entry <b className="tabular-nums" style={{ color: C.ink2 }}>{fmtMs(entry)}</b>
+      </span>
+
+      {/* Exit speed — only once a flatten has actually been measured */}
+      {showExit && (
+        <span className="text-[11.5px]" style={{ color: C.muted }}>
+          Exit <b className="tabular-nums" style={{ color: C.ink2 }}>{fmtMs(exit)}</b>
+        </span>
+      )}
+
+      {/* Data freshness — the live heartbeat, coloured by liveness */}
+      <span className="inline-flex items-center gap-1.5 text-[11.5px]" style={{ color: C.muted }}>
+        <span
+          className={`inline-block w-1.5 h-1.5 rounded-full${live.fresh ? ' live-dot' : ''}`}
+          style={{ background: live.color }}
+        />
+        Data <b className="tabular-nums" style={{ color: live.color }}>{fmtMs(tickAge)}</b>
+      </span>
+
+      {/* Honest liveness label (last tick age) */}
+      <span className="text-[10px] font-mono uppercase tracking-[0.05em]" style={{ color: live.color }}>
+        {live.label}
+      </span>
+    </div>
   )
 }
 

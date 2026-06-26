@@ -38,6 +38,29 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-06-25 — **AutoTrade: added a compact SPEED / latency readout to the Live
+  status area (works for BOTH strategies — kill switch + intraday_basket)**
+  (operator ask; backend `status()` now ALWAYS returns three latency ints, may be
+  null). UI-ONLY; no backend/execution code touched; all calls still via the
+  existing same-origin `/api/falcon-proxy`. Two files: `lib/autotrade-api.ts` +
+  `components/power/autotrade/PortfolioAutoTrade.tsx`. Trail panel / dual returns /
+  Kite P&L table / kill_preview all untouched. tsc + `npm run build` GREEN
+  (`/power/autotrade`).
+  - **Type.** `StatusResponse` gained `entry_latency_ms` (fire → all legs settled,
+    deploy speed), `exit_latency_ms` (flatten trigger → all flat, exit speed),
+    `last_tick_age_ms` (now − newest tick, data freshness) — all `number | null`,
+    documented as ALWAYS-present ints in ms.
+  - **Speed strip.** New `<SpeedStrip>` renders inside Live status, ABOVE the
+    strategy-specific panels (so identical for both strategies), below the bases
+    line. Shows "Entry {…}" (neutral), "Exit {…}" (only once a flatten has been
+    measured, i.e. `exit_latency_ms != null`, so it never implies an exit that
+    hasn't happened), and "Data {…}" (last tick age) with a dot.
+  - **Formatting.** `fmtMs`: <1000 → "368 ms"; ≥1000 → "2.7 s" (1 dp, trailing .0
+    trimmed); null/non-finite → "—" (not measured yet).
+  - **Liveness colour.** `tickLiveness` tones the tick-age + dot: green +pulsing
+    dot + label "monitoring sub-second" when <1500ms; amber "feed lagging"
+    1500–5000ms; red "stale" when older; faint "no data" when null. Entry/Exit
+    stay neutral. This is the heartbeat proving sub-second monitoring.
 - 2026-06-25 — **AutoTrade: wired the new Falcon Intraday Basket strategy into the
   console (strategy dropdown + preset prefill, branched form, live trail status
   panel, intraday strategy-summary)** (operator ask; backend now supports two exit
