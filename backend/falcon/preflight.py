@@ -158,8 +158,16 @@ def check_kite_ip_allowed(kite, _ctx: Dict[str, Any]) -> CheckResult:
         except Exception as e:
             msg = str(e)
             lc = msg.lower()
-            if 'ip' in lc and 'not allowed' in lc:
-                return RED, f"IP blocked: {msg}", "clear Allowed IPs at https://developers.kite.trade/apps"
+            # IP-level rejections that BLOCK live orders. Two forms:
+            #  • classic "ip ... not allowed" (this egress IP isn't in the allowlist)
+            #  • SEBI-era "No IPs configured for this app / add allowed IPs" — since
+            #    Apr 2026 an EMPTY allowlist REJECTS orders; it is NOT allow-all.
+            ip_blocked = (('ip' in lc and 'not allowed' in lc)
+                          or 'no ips configured' in lc
+                          or ('allowed ip' in lc and ('add' in lc or 'no ' in lc)))
+            if ip_blocked:
+                return RED, f"IP not allowed for orders: {msg[:120]}", \
+                    "register a STATIC IP on the Kite app Allowed-IPs + profile page (SEBI); an empty allowlist now rejects orders"
             # Any other error means IP passed — broker just rejected the bad order.
             return GREEN, f"IP allowed (validation-layer reject as expected: {msg[:80]})", ""
     return _check("kite_ip_allowed", _fn)
