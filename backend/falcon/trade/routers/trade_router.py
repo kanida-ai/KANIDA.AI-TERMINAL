@@ -17,7 +17,7 @@ import secrets
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from ...db import falcon_conn
@@ -1577,3 +1577,104 @@ def positions_exit(req: PositionExitRequest):
         "exit_qty":           h["qty"],
         "exit_price":         h["current_price"],
     }
+
+
+# ─── Egress IP (self-service for the Kite allowlist) ──────────────────────────
+#
+# Zerodha pins API access to an allow-listed set of outbound IPs. When the
+# backend's egress IP changes (cloud redeploy, ISP rotation), order placement
+# starts failing with an opaque auth error. This endpoint lets the operator read
+# the CURRENT outbound public IP so they can update the Kite allowlist without
+# shelling into the box. Operator-token gated like the rest of the trade surface.
+
+def _require_operator_token(x_operator_token: Optional[str] = Header(default=None)) -> None:
+    """Operator-token gate — same semantics as the autotrade router's gate
+    (X-Operator-Token header vs server-side FALCON_OPERATOR_TOKEN env,
+    fail-closed if unset, constant-time compare). Auth only.
+
+    Defined locally because this branch predates the trade_router-wide gate
+    commit; when rebased onto a base that already exposes a shared gate this can
+    be swapped for the import — behaviour is identical.
+    """
+    expected = os.environ.get("FALCON_OPERATOR_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(503, "operator token not configured on server")
+    if not x_operator_token or not secrets.compare_digest(x_operator_token, expected):
+        raise HTTPException(403, "operator token required")
+
+
+# In-process cache: avoid hammering the public echo on every poll. ~5 min TTL.
+_EGRESS_CACHE: Dict[str, Any] = {"ip": None, "as_of": None, "error": None, "_ts": None}
+_EGRESS_TTL = timedelta(minutes=5)
+_EGRESS_ECHOES = ("https://api.ipify.org", "https://checkip.amazonaws.com")
+
+
+def _detect_egress_ip() -> Dict[str, Any]:
+    """Return {ip, as_of, error}. Tries each public echo with a short timeout;
+    caches a successful result ~5 min. NEVER raises — on total failure returns
+    {ip: None, error: ...}."""
+    now = datetime.now()
+    cached_ts = _EGRESS_CACHE.get("_ts")
+    if (cached_ts is not None and _EGRESS_CACHE.get("ip")
+            and (now - cached_ts) < _EGRESS_TTL):
+        return {"ip": _EGRESS_CACHE["ip"], "as_of": _EGRESS_CACHE["as_of"],
+                "error": None}
+
+    import urllib.request  # noqa: WPS433 — stdlib, no extra dep
+
+    last_error: Optional[str] = None
+    for url in _EGRESS_ECHOES:
+        try:
+            with urllib.request.urlopen(url, timeout=3) as resp:  # noqa: S310 — fixed trusted URLs
+                ip = resp.read().decode("utf-8", "replace").strip()
+            if ip:
+                as_of = datetime.now(IST).isoformat()
+                _EGRESS_CACHE.update({"ip": ip, "as_of": as_of, "error": None, "_ts": now})
+                return {"ip": ip, "as_of": as_of, "error": None}
+            last_error = f"{url} returned empty body"
+        except Exception as e:  # noqa: BLE001 — must never crash the endpoint
+            last_error = f"{type(e).__name__}: {e}"
+            log.warning("egress-ip echo %s failed: %s", url, last_error)
+
+    return {"ip": None, "as_of": datetime.now(IST).isoformat(),
+            "error": last_error or "all echoes failed"}
+
+
+def _detect_proxy_egress_ip() -> Optional[str]:
+    """Egress IP AS SEEN THROUGH the broker proxy (BROKER_PROXY_URL).
+
+    Lets the operator confirm the IP Kite will actually see matches the proxy's
+    registered static IP. Returns the proxy-side IP string, or None if no proxy
+    is configured / the check fails. Best-effort, NEVER raises. Not cached — this
+    is an occasional operator verification, and we want a live read."""
+    url = os.environ.get("BROKER_PROXY_URL", "").strip()
+    if not url:
+        return None
+    try:
+        import requests  # noqa: WPS433
+        proxies = {"http": url, "https": url}
+        for echo in _EGRESS_ECHOES:
+            try:
+                r = requests.get(echo, proxies=proxies, timeout=4)
+                ip = (r.text or "").strip()
+                if ip:
+                    return ip
+            except Exception as e:  # noqa: BLE001 — try next echo
+                log.warning("egress-ip proxy echo %s failed: %s", echo, e)
+        return None
+    except Exception as e:  # noqa: BLE001 — must never crash the endpoint
+        log.warning("egress-ip proxy check failed: %s", e)
+        return None
+
+
+@router.get("/falcon/egress-ip", dependencies=[Depends(_require_operator_token)])
+def egress_ip():
+    """Return the backend's outbound public IP for the Kite allowlist.
+
+    { "ip": "<ip>", "proxy_ip": "<ip|null>", "as_of": "<iso>", "error": ... }
+    The direct check is always present (cached ~5 min); proxy_ip is the egress
+    THROUGH BROKER_PROXY_URL if set (the IP Kite will actually see), else null.
+    Operator-token gated. Never crashes."""
+    base = _detect_egress_ip()
+    base["proxy_ip"] = _detect_proxy_egress_ip()
+    return base

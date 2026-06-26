@@ -80,6 +80,54 @@ def test_detect_falls_through_to_second_echo(monkeypatch):
     assert out["error"] is None
 
 
+# ── proxy-aware egress (BROKER_PROXY_URL) ────────────────────────────────────
+
+def test_proxy_ip_none_when_unset(monkeypatch):
+    monkeypatch.delenv("BROKER_PROXY_URL", raising=False)
+    assert tr._detect_proxy_egress_ip() is None
+
+
+def test_egress_endpoint_proxy_ip_null_when_unset(monkeypatch):
+    monkeypatch.delenv("BROKER_PROXY_URL", raising=False)
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen("203.0.113.7\n"))
+    out = tr.egress_ip()
+    assert out["ip"] == "203.0.113.7"     # direct check still present
+    assert out["proxy_ip"] is None        # default-off: no proxy reported
+
+
+def test_proxy_ip_reports_through_proxy_when_set(monkeypatch):
+    monkeypatch.setenv("BROKER_PROXY_URL", "http://u:p@1.2.3.4:8080")
+
+    captured = {}
+
+    class _Resp:
+        text = "198.51.100.99"
+
+    def _fake_get(url, proxies=None, timeout=None):  # noqa: ARG001
+        captured["proxies"] = proxies
+        return _Resp()
+
+    import requests
+    monkeypatch.setattr(requests, "get", _fake_get)
+    ip = tr._detect_proxy_egress_ip()
+    assert ip == "198.51.100.99"
+    assert captured["proxies"] == {
+        "http":  "http://u:p@1.2.3.4:8080",
+        "https": "http://u:p@1.2.3.4:8080",
+    }
+
+
+def test_proxy_ip_never_crashes_on_failure(monkeypatch):
+    monkeypatch.setenv("BROKER_PROXY_URL", "http://u:p@1.2.3.4:8080")
+
+    def _boom(url, proxies=None, timeout=None):  # noqa: ARG001
+        raise OSError("proxy unreachable")
+
+    import requests
+    monkeypatch.setattr(requests, "get", _boom)
+    assert tr._detect_proxy_egress_ip() is None   # best-effort, no raise
+
+
 # ── operator-token gate ──────────────────────────────────────────────────────
 
 def test_gate_rejects_missing_token():
