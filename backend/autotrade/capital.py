@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .config import TradingSessionConfig
 
@@ -61,6 +61,89 @@ class CapitalAllocator:
             return out
 
         raise ValueError(f"unknown sizing_mode: {cfg.sizing_mode}")
+
+    # ── Batched prefetch + sizing (SPEED PASS) ────────────────────────────────
+    def prefetch(self, symbols: List[str], broker) -> Dict[str, Dict[str, float]]:
+        """ONE batched LTP fetch + (for MTF) ONE batched margin fetch for the
+        whole pick list, returned as {symbol: {"ltp":..,"margin":..}}.
+
+        SPEED PASS: replaces N sequential broker.get_ltp + get_margin_per_share
+        round-trips with one call each. EQ/CNC skips the margin probe entirely.
+        Missing entries are simply absent → calculate_quantity_cached cash-sizes
+        (margin miss) or raises InsufficientCapitalError (no LTP) per symbol, so
+        a partial batch NEVER over-deploys. Falls back transparently to per-symbol
+        lookups inside calculate_quantity_cached when a value is absent."""
+        cfg = self.config
+        ltps: Dict[str, float] = {}
+        try:
+            ltps = broker.get_ltps_batch(list(symbols)) or {}
+        except Exception as e:  # pragma: no cover - defensive; per-symbol fallback
+            log.warning("batch LTP prefetch failed (%s) — per-symbol fallback", e)
+        margins: Dict[str, float] = {}
+        use_mtf = (cfg.instrument_type == "MTF") or (cfg.order_product == "MTF")
+        if use_mtf and cfg.instrument_type in ("EQ", "MTF"):
+            try:
+                margins = broker.get_margins_batch(list(symbols), "MTF") or {}
+            except Exception as e:  # pragma: no cover
+                log.warning("batch margin prefetch failed (%s) — per-symbol "
+                            "fallback", e)
+        out: Dict[str, Dict[str, float]] = {}
+        for s in symbols:
+            d: Dict[str, float] = {}
+            if s in ltps:
+                d["ltp"] = ltps[s]
+            if s in margins:
+                d["margin"] = margins[s]
+            out[s] = d
+        return out
+
+    def calculate_quantity_cached(self, symbol: str, amount: float, broker,
+                                  cache: Optional[Dict[str, Dict[str, float]]]
+                                  = None) -> int:
+        """Like calculate_quantity but uses a prefetch() cache for LTP + MTF
+        margin so the hot entry path makes ZERO per-symbol broker calls when the
+        batch already has the values. For F&O (FUT/CE/PE) it delegates to the
+        per-symbol path (those need contract/chain lookups not in the batch).
+
+        SAFETY: identical math + cash-fallback rules as calculate_quantity. A
+        cache MISS for a symbol falls back to the per-symbol broker call (never
+        silently zero / over-deploy)."""
+        cfg = self.config
+        itype = cfg.instrument_type
+        if itype not in ("EQ", "MTF"):
+            # F&O still uses the per-symbol contract/chain path.
+            return self.calculate_quantity(symbol, amount, broker)
+
+        c = (cache or {}).get(symbol, {}) if cache else {}
+        ltp = c.get("ltp")
+        if ltp is None or ltp <= 0:
+            ltp = broker.get_ltp(symbol)
+        if ltp is None or ltp <= 0:
+            raise InsufficientCapitalError(
+                f"{symbol}: no valid LTP from broker (got {ltp})")
+
+        use_mtf_margin = (itype == "MTF") or (cfg.order_product == "MTF")
+        per_unit = ltp
+        if use_mtf_margin:
+            mps = c.get("margin")
+            if mps is None or mps <= 0:
+                # Cache miss — per-symbol probe (never over-deploy on a miss).
+                try:
+                    mps = broker.get_margin_per_share(symbol, "MTF")
+                except Exception as e:  # pragma: no cover
+                    log.warning("%s: MTF margin lookup error (%s) — cash fallback",
+                                symbol, e)
+                    mps = None
+            if mps and mps > 0:
+                per_unit = mps
+            else:
+                log.warning("%s: MTF margin unavailable — cash-sizing fallback",
+                            symbol)
+        qty = math.floor(amount / per_unit)
+        if qty < 1:
+            raise InsufficientCapitalError(
+                f"{symbol}: amount ₹{amount:.0f} < 1 unit at ₹{per_unit:.2f}")
+        return qty
 
     # ── Quantity from broker LTP + lot size ───────────────────────────────────
     def calculate_quantity(self, symbol: str, amount: float, broker) -> int:

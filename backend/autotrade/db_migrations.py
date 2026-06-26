@@ -133,6 +133,20 @@ def run_migrations() -> dict:
                         f"ADD COLUMN {name} {ddl_type}{default_clause}")
                     added_cols.append(name)
 
+        # ── 2e. ALTER-guard the SPEED-PASS latency observability columns ──────
+        # entry_latency_ms: fire start → all legs settled (asyncio.gather done).
+        # exit_latency_ms: flatten trigger → all positions flat. Persisted so the
+        # operator can SEE the end-to-end speed in status(). Additive + idempotent
+        # + inert for any existing session. last_tick_age_ms is computed live in
+        # status() (now − newest tick used), not persisted.
+        if _table_exists(con, "autotrade_sessions"):
+            have = set(_existing_columns(con, "autotrade_sessions"))
+            for name in ("entry_latency_ms", "exit_latency_ms"):
+                if name not in have:
+                    con.execute(
+                        f"ALTER TABLE autotrade_sessions ADD COLUMN {name} INTEGER")
+                    added_cols.append(name)
+
         for t in (
             "autotrade_positions",
             "autotrade_sessions", "autotrade_config_presets",
@@ -210,6 +224,11 @@ CREATE TABLE IF NOT EXISTS autotrade_sessions (
     -- idempotent ALTER for DBs created before these columns.)
     trail_armed     INTEGER DEFAULT 0,
     trail_peak      REAL,
+    -- SPEED-PASS latency observability. entry_latency_ms: fire start → all legs
+    -- settled. exit_latency_ms: flatten trigger → all positions flat. (Also
+    -- added via idempotent ALTER for DBs created before these columns.)
+    entry_latency_ms INTEGER,
+    exit_latency_ms  INTEGER,
     config_json     TEXT NOT NULL,
     last_gross_return REAL,
     kill_reason     TEXT,

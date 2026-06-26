@@ -62,7 +62,65 @@ class ZerodhaBroker(BrokerClient):
             log.warning("REST ltp failed for %s: %s", symbol, e)
             return None
 
+    def get_ltps_batch(self, symbols: List[str]) -> dict:
+        """SPEED PASS: ONE multi-symbol LTP fetch for the whole pick list.
+
+        Pass 1 — the shared KiteTicker WS cache (sub-second fresh, zero network).
+        Pass 2 — a SINGLE kite.ltp([...]) REST call for the symbols the cache
+        missed (one round-trip instead of N). Symbols with no valid price are
+        absent → the caller cash-sizes / skips per symbol (never over-deploys)."""
+        out: dict = {}
+        if not symbols:
+            return out
+        # Pass 1: WS tick cache.
+        try:
+            from falcon.trade.services.kite_ticker import get_ltp as ws_ltp
+        except Exception:  # pragma: no cover - defensive
+            ws_ltp = None
+        misses: List[str] = []
+        for s in symbols:
+            v = None
+            if ws_ltp is not None:
+                try:
+                    v = ws_ltp(s)
+                except Exception:  # pragma: no cover
+                    v = None
+            if v is not None and v > 0:
+                out[s] = float(v)
+            else:
+                misses.append(s)
+        if not misses:
+            return out
+        # Pass 2: ONE batched REST call for the misses.
+        try:
+            keys = [f"NSE:{s}" for s in misses]
+            data = self.kite.ltp(keys)
+            for s in misses:
+                row = data.get(f"NSE:{s}")
+                if row and row.get("last_price"):
+                    out[s] = float(row["last_price"])
+        except Exception as e:
+            log.warning("batch REST ltp failed for %d syms: %s", len(misses), e)
+        return out
+
     # ── MTF margin (leverage) — reuse the legacy order_margins lookup ─────────
+    def get_margins_batch(self, symbols: List[str],
+                          product: str = "MTF") -> dict:
+        """SPEED PASS: ONE kite.order_margins() probe for the WHOLE pick list via
+        the legacy margin_calc.fetch_margins_batch (which also caches per
+        symbol). Returns {symbol: per_share_margin}; symbols that error are
+        ABSENT so the caller cash-falls-back per symbol (never over-deploys)."""
+        if not symbols:
+            return {}
+        try:
+            from falcon.trade.services.margin_calc import fetch_margins_batch
+            items = [(s, product) for s in symbols]
+            return dict(fetch_margins_batch(self.kite, items))
+        except Exception as e:  # pragma: no cover
+            log.warning("batch MTF margin lookup failed for %d syms (%s) — "
+                        "cash fallback per symbol", len(symbols), e)
+            return {}
+
     def get_margin_per_share(self, symbol: str, product: str = "MTF") -> Optional[float]:
         """Per-share margin Zerodha locks for `product`, via kite.order_margins —
         the SAME lookup the legacy order_planner uses for MTF sizing (so the new

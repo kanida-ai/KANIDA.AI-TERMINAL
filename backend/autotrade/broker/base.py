@@ -50,6 +50,22 @@ class BrokerClient(ABC):
     def get_ltp(self, symbol: str) -> Optional[float]:
         ...
 
+    def get_ltps_batch(self, symbols: List[str]) -> dict:
+        """Return {symbol: ltp} for many symbols at once. SPEED PASS: the live
+        Zerodha adapter overrides this with ONE WS-cache pass + a single batched
+        kite.ltp() REST fallback for the whole list (instead of N round-trips).
+        The default loops over get_ltp so stub brokers + mocks work unchanged;
+        symbols with no valid LTP are simply absent from the result."""
+        out = {}
+        for s in symbols:
+            try:
+                v = self.get_ltp(s)
+            except Exception:  # pragma: no cover - defensive
+                v = None
+            if v is not None and v > 0:
+                out[s] = float(v)
+        return out
+
     # ── Instrument master (F&O) ──────────────────────────────────────────────
     @abstractmethod
     def get_lot_size(self, contract: str) -> int:
@@ -59,6 +75,25 @@ class BrokerClient(ABC):
         """Per-share margin the broker locks for `product` (MTF leverage).
         Default None → caller falls back to cash sizing. Live brokers override."""
         return None
+
+    def get_margins_batch(self, symbols: List[str],
+                          product: str = "MTF") -> dict:
+        """Return {symbol: per_share_margin} for many symbols in ONE broker call.
+        SPEED PASS: the live Zerodha adapter overrides this with a single
+        margin_calc.fetch_margins_batch (one kite.order_margins() probe for the
+        whole list) instead of N sequential get_margin_per_share calls. The
+        default loops over get_margin_per_share so stubs/mocks behave unchanged;
+        symbols whose margin is unavailable are ABSENT (caller cash-falls-back per
+        symbol — never over-deploy)."""
+        out = {}
+        for s in symbols:
+            try:
+                m = self.get_margin_per_share(s, product)
+            except Exception:  # pragma: no cover - defensive
+                m = None
+            if m is not None and m > 0:
+                out[s] = float(m)
+        return out
 
     @abstractmethod
     def get_active_futures(self, symbol: str, expiry_preference: str) -> str:
