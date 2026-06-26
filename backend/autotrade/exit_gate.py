@@ -43,6 +43,8 @@ IST = timezone(timedelta(hours=5, minutes=30))
 VALID_REASONS = {
     "TRAILING_STOP", "TRAILING_PROFIT", "TIME_BOUND", "DAY_BOUND",
     "KILL_SWITCH", "MANUAL",
+    # Intraday-basket trail engine reasons (strategy=="intraday_basket").
+    "TRAIL_EXIT", "FLOOR_EXIT", "STOP", "SQUARE_OFF",
     # Map the existing trail_manager reasons onto the gate vocabulary too, so a
     # minimal wrap there can pass its native reason string through unchanged.
     "BREACHED_SL", "TIME_STOP", "TARGET_HIT",

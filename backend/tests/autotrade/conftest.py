@@ -76,6 +76,9 @@ def _db():
     # thread can't race assertions on the shared temp DB.
     from autotrade.monitoring import ws_driver
     ws_driver.set_autostart(False)
+    # Same for the intraday-basket square-off scheduler.
+    from autotrade.monitoring import square_off_scheduler
+    square_off_scheduler.set_autostart(False)
     yield
     try:
         os.remove(_TMP_DB)
@@ -91,6 +94,7 @@ def clean_positions():
     from autotrade.monitoring import tick_driver
     from autotrade.monitoring import entry_scheduler
     from autotrade.monitoring import ws_driver
+    from autotrade.monitoring import square_off_scheduler
     from autotrade.monitoring import fire_guard
 
     def _stop_all_drivers():
@@ -114,6 +118,13 @@ def clean_positions():
         for sch in scheds:
             sch.stop()
         for sch in scheds:
+            sch._thread.join(timeout=2.0)
+        # Also stop any armed square-off schedulers (intraday_basket).
+        with square_off_scheduler._LOCK:
+            sqscheds = list(square_off_scheduler._SCHEDULERS.values())
+        for sch in sqscheds:
+            sch.stop()
+        for sch in sqscheds:
             sch._thread.join(timeout=2.0)
         # Reset the per-session fire guard so a session_id reused across tests
         # isn't stuck "already fired".

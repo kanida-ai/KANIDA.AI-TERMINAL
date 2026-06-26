@@ -180,9 +180,34 @@ class _WSDriver:
                 sess.registry.update_ltp(
                     pos["symbol"], float(ltp),
                     broker_profile=pos.get("broker_profile"))
-        # KILL BASIS: check the kill switch against the INVESTED-basis gross
-        # return (÷ frozen invested_basis), matching the 5s poll path.
+        # KILL BASIS: check against the INVESTED-basis gross return (÷ frozen
+        # invested_basis), matching the 5s poll path.
         gr = sess.monitor.compute_gross_return_invested()
+
+        # INTRADAY BASKET: run the sub-second trail engine (arm/peak ratchet,
+        # giveback/floor trigger, hard stop, square-off) — mirrors session.tick's
+        # intraday branch. State changes are persisted so a restart resumes the
+        # trail; on EXIT we reuse kill_switch.fire with the trail close_reason.
+        if getattr(sess.config, "strategy", "portfolio_kill_switch") \
+                == "intraday_basket":
+            from . import trail_engine
+            state = sess.monitor.load_trail_state()
+            params = trail_engine.params_from_config(sess.config)
+            decision = trail_engine.decide(gr, state, params)
+            if decision.state_changed:
+                sess.monitor.save_trail_state(decision.state)
+            if decision.action != "EXIT":
+                return
+            with fire_guard.claim_fire(self.session_id) as won:
+                if not won:
+                    return  # the 5s poll (or a manual kill) already fired
+                log.critical("ws_driver: intraday trail AUTO-fired (sub-second) "
+                             "for %s (%s)", self.session_id, decision.reason)
+                asyncio.run(sess.kill_switch.fire(
+                    f"INTRADAY_BASKET {decision.reason} gross_return={gr:.4f}",
+                    gross_return=gr, close_reason=decision.reason))
+            return
+
         reason = (sess.kill_switch.check_threshold(gr)
                   if sess.kill_switch else None)
         if not reason:

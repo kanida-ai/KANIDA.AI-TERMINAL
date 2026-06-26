@@ -41,6 +41,7 @@ from falcon.db import falcon_conn
 from .monitoring import tick_driver
 from .monitoring import entry_scheduler
 from .monitoring import ws_driver
+from .monitoring import square_off_scheduler
 
 log = logging.getLogger("kanida.autotrade.recovery")
 
@@ -87,6 +88,27 @@ def _backfill_live_gtts(session_id: str) -> int:
         return 0
 
 
+def _rearm_square_off(session_id: str) -> None:
+    """Re-arm the square-off scheduler for a resumed RUNNING intraday_basket
+    session (future square_off_time only). No-op for kill-switch sessions or when
+    the time has passed (the in-tick square-off handles that case)."""
+    from .session import TradingSession, _parse_entry_time_today_ist
+
+    sess = TradingSession.load(session_id)
+    if sess is None or sess.config.strategy != "intraday_basket":
+        return
+    try:
+        target = _parse_entry_time_today_ist(sess.config.square_off_time)
+    except ValueError:
+        return  # unparseable → in-tick square-off backstop
+    if datetime.now(IST) >= target:
+        return  # already past → next tick squares off
+    armed = square_off_scheduler.start_for_session(session_id, target)
+    if armed:
+        log.info("recovery: re-armed square-off for %s at %s",
+                 session_id, target.isoformat())
+
+
 def _resume_running(session_id: str) -> str:
     """Re-arm the tick + WS drivers for a RUNNING session, and backfill any
     missing per-position GTTs (live only). Returns an outcome tag."""
@@ -99,6 +121,16 @@ def _resume_running(session_id: str) -> str:
         ws_driver.start_for_session(session_id)
     except Exception as e:  # pragma: no cover - never block recovery
         log.warning("recovery: ws driver start failed for %s: %s", session_id, e)
+    # INTRADAY BASKET: re-arm the precise-time square-off scheduler so a resumed
+    # session still flattens on the second at square_off_time. The trail state
+    # (armed, peak) is already restored from the session row by load_trail_state,
+    # so the trail continues mid-day. If square_off_time already passed while
+    # down, the next tick squares the basket off (in-tick backstop). Best-effort.
+    try:
+        _rearm_square_off(session_id)
+    except Exception as e:  # pragma: no cover - never block recovery
+        log.warning("recovery: square-off re-arm failed for %s: %s",
+                    session_id, e)
     if armed:
         log.info("recovery: re-armed tick driver for RUNNING session %s", session_id)
         return "tick_rearmed"

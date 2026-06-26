@@ -116,6 +116,23 @@ def run_migrations() -> dict:
                     "ALTER TABLE autotrade_sessions ADD COLUMN invested_basis REAL")
                 added_cols.append("invested_basis")
 
+        # ── 2d. ALTER-guard the INTRADAY-BASKET trail state on autotrade_sessions
+        # strategy=="intraday_basket" persists its trailing-profit state here so a
+        # resumed RUNNING session restores armed+peak and the trail continues
+        # mid-day. trail_armed: 0/1; trail_peak: the high-water gross return G.
+        # Additive + idempotent; inert for portfolio_kill_switch sessions.
+        if _table_exists(con, "autotrade_sessions"):
+            have = set(_existing_columns(con, "autotrade_sessions"))
+            for name, ddl_type, default in (
+                    ("trail_armed", "INTEGER", "0"),
+                    ("trail_peak", "REAL", "NULL")):
+                if name not in have:
+                    default_clause = "" if default == "NULL" else f" DEFAULT {default}"
+                    con.execute(
+                        f"ALTER TABLE autotrade_sessions "
+                        f"ADD COLUMN {name} {ddl_type}{default_clause}")
+                    added_cols.append(name)
+
         for t in (
             "autotrade_positions",
             "autotrade_sessions", "autotrade_config_presets",
@@ -186,6 +203,13 @@ CREATE TABLE IF NOT EXISTS autotrade_sessions (
     -- return denominator. NULL until _fire_entries captures it. (Also added via
     -- idempotent ALTER for DBs created before this column.)
     invested_basis  REAL,
+    -- INTRADAY-BASKET trailing-profit state (strategy=="intraday_basket").
+    -- trail_armed: 0/1 — has the trail armed (G crossed +arm_pct). trail_peak:
+    -- the high-water gross return G since arming. Persisted each tick + restored
+    -- on boot-resume so the trail continues correctly mid-day. (Also added via
+    -- idempotent ALTER for DBs created before these columns.)
+    trail_armed     INTEGER DEFAULT 0,
+    trail_peak      REAL,
     config_json     TEXT NOT NULL,
     last_gross_return REAL,
     kill_reason     TEXT,
