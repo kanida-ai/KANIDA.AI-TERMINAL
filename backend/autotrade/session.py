@@ -60,6 +60,8 @@ from .monitoring import tick_driver
 from .monitoring import entry_scheduler
 from .monitoring import fire_guard
 from .monitoring import ws_driver
+from .monitoring import square_off_scheduler
+from .monitoring import trail_engine
 
 log = logging.getLogger("kanida.autotrade.session")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -408,9 +410,38 @@ class TradingSession:
         except Exception as e:  # never block start on the WS driver
             log.warning("ws driver start failed for %s: %s", self.session_id, e)
 
+        # INTRADAY BASKET: arm the precise-time square-off scheduler so the basket
+        # is flattened at config.square_off_time (never overnight). The tick
+        # driver's in-tick square-off (trail_engine.decide) is the restart-safe
+        # backstop; this is the on-the-second path. Future time only — if
+        # square_off_time has already passed the next tick squares off. Best-
+        # effort, never blocks the start.
+        try:
+            if self.config.strategy == "intraday_basket":
+                self._arm_square_off()
+        except Exception as e:  # never block start on the square-off scheduler
+            log.warning("square-off arm failed for %s: %s", self.session_id, e)
+
         return {"session_id": self.session_id, "status": "RUNNING",
                 "mode": self.mode, "n_placed": len(placed), "orders": placed,
                 "gtt": gtt_results}
+
+    def _arm_square_off(self) -> bool:
+        """Arm the per-session square-off scheduler at config.square_off_time
+        (today, IST). No-op if the time is unparseable or already past (the tick
+        driver squares off defensively in that case). Returns True if armed."""
+        try:
+            target = _parse_entry_time_today_ist(self.config.square_off_time)
+        except ValueError:
+            log.warning("session %s: unparseable square_off_time %r — relying on "
+                        "in-tick square-off", self.session_id,
+                        self.config.square_off_time)
+            return False
+        if datetime.now(IST) >= target:
+            log.info("session %s: square_off_time %s already passed — in-tick "
+                     "square-off will fire", self.session_id, target.isoformat())
+            return False
+        return square_off_scheduler.start_for_session(self.session_id, target)
 
     async def _place_one(self, broker, prof, pick: Pick, amount: float,
                          allocator: CapitalAllocator) -> Dict[str, Any]:
@@ -459,7 +490,7 @@ class TradingSession:
                 "price": fill_price, "broker_order_id": res.broker_order_id,
                 "broker_profile": prof.profile_id, "order_type": order.order_type}
 
-    # ── Tick: monitor + GTT reconcile + kill switch ───────────────────────────
+    # ── Tick: monitor + GTT reconcile + kill switch / trail engine ─────────────
     async def tick(self) -> Dict[str, Any]:
         if not self.brokers:
             self._build_brokers()
@@ -473,10 +504,15 @@ class TradingSession:
             log.warning("GTT reconcile failed for %s: %s", self.session_id, e)
         self.monitor.refresh_ltps(self.brokers)
         snap = self.monitor.snapshot()
-        # KILL BASIS: the kill switch measures the INVESTED-basis gross return
+        # KILL BASIS: both strategies measure the INVESTED-basis gross return
         # (÷ frozen invested_basis), not the on-fund gross. snapshot() keeps the
         # on-fund gross_return for the history/charts.
         gr_invested = self.monitor.compute_gross_return_invested()
+
+        if self.config.strategy == "intraday_basket":
+            return await self._tick_intraday(gr_invested, snap, gtt_closed)
+
+        # DEFAULT strategy: portfolio_kill_switch (UNCHANGED).
         reason = (self.kill_switch.check_threshold(gr_invested)
                   if self.kill_switch else None)
         fired = None
@@ -491,6 +527,51 @@ class TradingSession:
                     reason = None  # another path already fired/is firing
         return {"gross_return": gr_invested, "gross_return_fund": snap["gross_return"],
                 "snapshot": snap, "kill_switch_fired": bool(fired),
+                "kill_reason": reason, "fire_result": fired,
+                "gtt_closed": gtt_closed}
+
+    async def _tick_intraday(self, gr_invested: float, snap: Dict[str, Any],
+                             gtt_closed) -> Dict[str, Any]:
+        """One tick for strategy=="intraday_basket": run the pure trail engine
+        over the invested-basis gross return + persisted (armed, peak) state.
+
+        The engine DECIDES only; on EXIT we REUSE the existing flatten
+        (kill_switch.fire) passing the trail reason through as close_reason. State
+        changes (arm / peak ratchet) are persisted on autotrade_sessions so a
+        restart resumes the trail mid-day. Square-off is enforced defensively here
+        even if the timer thread was dropped by a restart."""
+        from .monitoring import trail_engine
+
+        state = self.monitor.load_trail_state()
+        params = trail_engine.params_from_config(self.config)
+        decision = trail_engine.decide(gr_invested, state, params)
+
+        # Persist any state change (arm transition or peak ratchet) so the trail
+        # is durable across restarts BEFORE any exit fires.
+        if decision.state_changed:
+            self.monitor.save_trail_state(decision.state)
+
+        fired = None
+        reason = None
+        if decision.action == "EXIT":
+            reason = decision.reason
+            with fire_guard.claim_fire(self.session_id) as won:
+                if won:
+                    fired = await self.kill_switch.fire(
+                        f"INTRADAY_BASKET {reason} "
+                        f"gross_return={gr_invested:.4f}",
+                        gross_return=gr_invested, close_reason=reason)
+                else:
+                    reason = None  # another path already fired/is firing
+        return {"gross_return": gr_invested,
+                "gross_return_fund": snap["gross_return"],
+                "snapshot": snap,
+                "strategy": "intraday_basket",
+                "trail_action": decision.action,
+                "trail_armed": decision.state.armed,
+                "trail_peak": decision.state.peak,
+                "trail_trigger": decision.trigger,
+                "kill_switch_fired": bool(fired),
                 "kill_reason": reason, "fire_result": fired,
                 "gtt_closed": gtt_closed}
 
@@ -511,6 +592,10 @@ class TradingSession:
             pass
         try:
             ws_driver.stop_for_session(self.session_id)
+        except Exception:  # pragma: no cover - defensive
+            pass
+        try:
+            square_off_scheduler.stop_for_session(self.session_id)
         except Exception:  # pragma: no cover - defensive
             pass
         self.monitor.refresh_ltps(self.brokers)
@@ -582,7 +667,66 @@ class TradingSession:
                 out["fires_at"] = target.isoformat()
                 out["seconds_remaining"] = int(
                     max(0.0, (target - datetime.now(IST)).total_seconds()))
+
+        # Always surface the strategy so the UI can pick the right panel.
+        out["strategy"] = self.config.strategy
+
+        # INTRADAY BASKET: surface the full trailing-engine state + the per-day
+        # dual-return report so the UI can render the trail status panel.
+        if self.config.strategy == "intraday_basket":
+            state = self.monitor.load_trail_state()
+            params = trail_engine.params_from_config(self.config)
+            trigger = trail_engine.compute_trigger(state, params)
+            out["trail"] = {
+                "armed": state.armed,
+                "peak": state.peak,
+                "current_gross_return": gr_invested,     # notional G (kill basis)
+                "trigger": trigger,                       # live exit-trigger G
+                "arm_pct": self.config.arm_pct,
+                "floor_pct": self.config.floor_pct,
+                "trail_giveback_pct": self.config.trail_giveback_pct,
+                "stop_pct": self.config.stop_pct,
+                "square_off_time": self.config.square_off_time,
+                "seconds_to_square_off": trail_engine.seconds_to_square_off(
+                    self.config.square_off_time),
+                "square_off_armed": square_off_scheduler.is_running(
+                    self.session_id),
+            }
+            # Flat aliases (handy for the frontend + matches the spec wording).
+            out["trail_armed"] = state.armed
+            out["trail_peak"] = state.peak
+            out["trail_trigger"] = trigger
+            out["square_off_time"] = self.config.square_off_time
+            out["seconds_to_square_off"] = out["trail"]["seconds_to_square_off"]
+
+            # On close: the exit reason + the final dual return. close_reason is
+            # stored on the (now CLOSED) position rows by kill_switch.fire;
+            # own_funds_return = notional G × leverage = the on-fund gross.
+            if status in ("CLOSED", "KILLING"):
+                out["exit_reason"] = self._last_exit_reason()
+                out["notional_return"] = gr_invested
+                out["own_funds_return"] = gr_fund
         return out
+
+    def _last_exit_reason(self) -> Optional[str]:
+        """The close_reason written to this session's positions on flatten
+        (TRAIL_EXIT / FLOOR_EXIT / STOP / SQUARE_OFF / KILL_SWITCH), or None."""
+        with falcon_conn() as con:
+            row = con.execute(
+                """SELECT close_reason FROM autotrade_positions
+                   WHERE session_id=? AND close_reason IS NOT NULL
+                   ORDER BY closed_at DESC LIMIT 1""",
+                (self.session_id,),
+            ).fetchone()
+        if row and row["close_reason"]:
+            return row["close_reason"]
+        # Fall back to the session-level kill_reason (e.g. nothing was open).
+        with falcon_conn() as con:
+            row = con.execute(
+                "SELECT kill_reason FROM autotrade_sessions WHERE session_id=?",
+                (self.session_id,),
+            ).fetchone()
+        return row["kill_reason"] if row and row["kill_reason"] else None
 
     def positions(self) -> List[Dict[str, Any]]:
         return self.registry.get_all_positions()

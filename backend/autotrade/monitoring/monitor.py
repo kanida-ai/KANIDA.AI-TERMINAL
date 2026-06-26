@@ -133,6 +133,37 @@ class PortfolioMonitor:
             con.commit()
         return stored
 
+    # ── Intraday-basket trail state (strategy=="intraday_basket") ──────────────
+    def load_trail_state(self):
+        """Read the persisted (armed, peak) trail state for this session.
+
+        Returns a trail_engine.TrailState. Defaults to (armed=False, peak=0.0)
+        when unset (a fresh / non-intraday session). Restored on boot-resume so
+        a mid-day trail continues correctly after a restart.
+        """
+        from .trail_engine import TrailState
+        with falcon_conn() as con:
+            row = con.execute(
+                "SELECT trail_armed, trail_peak FROM autotrade_sessions "
+                "WHERE session_id=?",
+                (self.session_id,),
+            ).fetchone()
+        if not row:
+            return TrailState(armed=False, peak=0.0)
+        armed = bool(row["trail_armed"]) if row["trail_armed"] is not None else False
+        peak = float(row["trail_peak"]) if row["trail_peak"] is not None else 0.0
+        return TrailState(armed=armed, peak=peak)
+
+    def save_trail_state(self, state) -> None:
+        """Persist the (armed, peak) trail state on the session row."""
+        with falcon_conn() as con:
+            con.execute(
+                "UPDATE autotrade_sessions SET trail_armed=?, trail_peak=? "
+                "WHERE session_id=?",
+                (1 if state.armed else 0, float(state.peak), self.session_id),
+            )
+            con.commit()
+
     def _open_positions(self) -> List[Dict[str, Any]]:
         with falcon_conn() as con:
             rows = con.execute(

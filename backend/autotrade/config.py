@@ -24,6 +24,22 @@ def _now_ist_iso() -> str:
     return datetime.now(IST).isoformat()
 
 
+def _parse_clock_to_seconds(value: str) -> int:
+    """Parse an IST clock string ("HH:MM" or "HH:MM:SS") to seconds-since-midnight.
+
+    Used to validate ordering of entry_time vs square_off_time without binding to
+    a specific date. Raises ValueError on an unparseable string.
+    """
+    s = (value or "").strip()
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            t = datetime.strptime(s, fmt)
+            return t.hour * 3600 + t.minute * 60 + t.second
+        except ValueError:
+            continue
+    raise ValueError(f"unparseable clock time: {value!r}")
+
+
 # ── BrokerProfile ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -77,6 +93,17 @@ class TradingSessionConfig:
     # Capital
     total_allocated_capital: float
 
+    # ── Strategy selector ────────────────────────────────────────────────────
+    # "portfolio_kill_switch" (DEFAULT, UNCHANGED) = the existing flat basket
+    #   kill switch (±kill_switch_pct on the invested basis).
+    # "intraday_basket" = the basket-level TRAILING-PROFIT engine + square-off
+    #   time (monitoring/trail_engine.py). The trail_* / stop_pct / arm_pct /
+    #   floor_pct / square_off_time knobs below ONLY apply when this is selected;
+    #   for portfolio_kill_switch they are inert. Additive + default-off: an
+    #   existing session (no strategy in its config_json) loads as the kill-switch
+    #   strategy and behaves exactly as before.
+    strategy: str = "portfolio_kill_switch"
+
     # Stock selection
     top_n_stocks: int = 5
     rank_filter: Optional[List[int]] = None
@@ -110,6 +137,22 @@ class TradingSessionConfig:
     per_position_stop_pct: float = 0.03    # stop  = entry * (1 - this)
     per_position_target_pct: float = 0.06  # target = entry * (1 + this)
 
+    # ── INTRADAY BASKET trailing engine (strategy=="intraday_basket" only) ────
+    # All percentages are FRACTIONS (0.01 = 1%), validated in (0, 0.5], exactly
+    # like kill_switch_pct. They drive monitoring/trail_engine.py over the
+    # NOTIONAL / invested-basis gross return G (compute_gross_return_invested):
+    #   arm_pct            : G >= +arm_pct → the trail ARMS (locks a floor).
+    #   floor_pct          : the minimum locked floor once armed (default = arm).
+    #   trail_giveback_pct : giveback from the peak G once armed.
+    #   stop_pct           : downside hard stop, applied as -stop_pct (pre-arm).
+    #   square_off_time    : IST clock time to flatten the basket (never overnight).
+    # Inert when strategy != "intraday_basket".
+    arm_pct: float = 0.01
+    floor_pct: float = 0.01
+    trail_giveback_pct: float = 0.0075
+    stop_pct: float = 0.015
+    square_off_time: str = "15:29:00"
+
     # Broker routing
     broker_profiles: List[BrokerProfile] = field(default_factory=list)
 
@@ -131,6 +174,8 @@ class TradingSessionConfig:
             raise ValueError(f"invalid kill_switch_direction: {self.kill_switch_direction}")
         if self.top_n_stocks <= 0:
             raise ValueError("top_n_stocks must be > 0")
+        if self.strategy not in ("portfolio_kill_switch", "intraday_basket"):
+            raise ValueError(f"invalid strategy: {self.strategy}")
         # Defensive units check: these percentages are FRACTIONS (0.01 = 1%), not
         # whole-number percents. The UI has historically sent 1.0 (intending
         # "100%"), which would make the kill switch effectively never fire — a
@@ -152,6 +197,38 @@ class TradingSessionConfig:
                     "per_position_target_pct must be a fraction (e.g. 0.06 = 6%), "
                     f"got {self.per_position_target_pct}"
                 )
+        # INTRADAY BASKET knobs — only validated when the strategy is selected,
+        # so an existing kill-switch session is never blocked by these defaults.
+        if self.strategy == "intraday_basket":
+            for nm, v in (("arm_pct", self.arm_pct),
+                          ("floor_pct", self.floor_pct),
+                          ("trail_giveback_pct", self.trail_giveback_pct),
+                          ("stop_pct", self.stop_pct)):
+                if not (0.0 < float(v) <= 0.5):
+                    raise ValueError(
+                        f"{nm} must be a fraction in (0, 0.5] (e.g. 0.01 = 1%), "
+                        f"got {v}")
+            if self.floor_pct > self.arm_pct + 1e-12:
+                raise ValueError(
+                    f"floor_pct ({self.floor_pct}) must be <= arm_pct "
+                    f"({self.arm_pct})")
+            # Times must parse and square-off must be strictly after entry.
+            try:
+                entry_s = _parse_clock_to_seconds(self.entry_time)
+            except ValueError as e:
+                raise ValueError(f"entry_time {e}")
+            try:
+                sq_s = _parse_clock_to_seconds(self.square_off_time)
+            except ValueError as e:
+                raise ValueError(f"square_off_time {e}")
+            if sq_s <= entry_s:
+                raise ValueError(
+                    f"square_off_time ({self.square_off_time}) must be after "
+                    f"entry_time ({self.entry_time})")
+            if self.top_n_stocks < 3 or self.top_n_stocks > 10:
+                raise ValueError(
+                    "intraday_basket basket_size (top_n_stocks) must be 3..10, "
+                    f"got {self.top_n_stocks}")
         if self.sizing_mode == "manual":
             total = sum(self.manual_amounts.values())
             if total > self.total_allocated_capital + 1e-6:
@@ -175,6 +252,7 @@ class TradingSessionConfig:
         bps = d.pop("broker_profiles", []) or []
         cfg = cls(
             total_allocated_capital=float(d["total_allocated_capital"]),
+            strategy=d.get("strategy", "portfolio_kill_switch"),
             top_n_stocks=int(d.get("top_n_stocks", 5)),
             rank_filter=d.get("rank_filter"),
             sizing_mode=d.get("sizing_mode", "equal"),
@@ -192,6 +270,11 @@ class TradingSessionConfig:
             per_position_gtt_enabled=bool(d.get("per_position_gtt_enabled", True)),
             per_position_stop_pct=float(d.get("per_position_stop_pct", 0.03)),
             per_position_target_pct=float(d.get("per_position_target_pct", 0.06)),
+            arm_pct=float(d.get("arm_pct", 0.01)),
+            floor_pct=float(d.get("floor_pct", 0.01)),
+            trail_giveback_pct=float(d.get("trail_giveback_pct", 0.0075)),
+            stop_pct=float(d.get("stop_pct", 0.015)),
+            square_off_time=d.get("square_off_time", "15:29:00"),
             broker_profiles=[BrokerProfile.from_public_dict(b) for b in bps],
             entry_time=d.get("entry_time", "09:15:00"),
             entry_window_seconds=int(d.get("entry_window_seconds", 60)),

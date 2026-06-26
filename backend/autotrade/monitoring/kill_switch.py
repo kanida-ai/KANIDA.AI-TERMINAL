@@ -56,7 +56,14 @@ class KillSwitchExecutor:
 
     # ── Fire (the critical sequence) ──────────────────────────────────────────
     async def fire(self, trigger_reason: str,
-                   gross_return: Optional[float] = None) -> Dict[str, Any]:
+                   gross_return: Optional[float] = None,
+                   close_reason: str = "KILL_SWITCH") -> Dict[str, Any]:
+        """Flatten the basket. `close_reason` is the tag written to each closed
+        position's close_reason column (and used to claim the exit gate) — it
+        defaults to "KILL_SWITCH" (the portfolio-kill-switch path, UNCHANGED).
+        The intraday-basket trail engine passes its trail reason
+        (TRAIL_EXIT / FLOOR_EXIT / STOP / SQUARE_OFF) through here so the per-day
+        report shows WHY the basket exited. The flatten sequence is identical."""
         log.critical("KILL SWITCH FIRED [%s]: %s", self.session_id, trigger_reason)
         self._set_session_status("KILLING", kill_reason=trigger_reason)
 
@@ -100,7 +107,7 @@ class KillSwitchExecutor:
             # Single exit gate (session-scoped on autotrade_positions): claim
             # first. If another mechanism already owns this exit (e.g. day-bound
             # fired the same second), skip — no duplicate order.
-            if not exit_gate.claim_exit_session(self.session_id, symbol, "KILL_SWITCH"):
+            if not exit_gate.claim_exit_session(self.session_id, symbol, close_reason):
                 exit_meta.append({"symbol": symbol, "claimed": False})
                 continue
             qty = int(pos.get("qty") or 0)   # recompute open qty (spec rule)
@@ -140,7 +147,7 @@ class KillSwitchExecutor:
             else:
                 n_ok += 1
                 self.registry.mark_closed(
-                    meta["symbol"], "KILL_SWITCH",
+                    meta["symbol"], close_reason,
                     broker_profile=meta.get("broker_profile"))
                 details.append({**meta, "status": getattr(res, "status", "PLACED"),
                                 "broker_order_id": getattr(res, "broker_order_id", None)})
