@@ -38,6 +38,73 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-06-28 — **AutoTrade: wired the new execution-date / trading-day rule into
+  the console (entry-date picker + on-missed-window + advanced grace; the 400
+  "not a trading day" one-click apply; the resolved-fire line; the three new
+  non-placed statuses)** (operator ask; backend now supports the rule). UI-ONLY;
+  no backend/execution code touched; all calls still via the existing same-origin
+  `/api/falcon-proxy`. Two files: `lib/autotrade-api.ts` +
+  `components/power/autotrade/PortfolioAutoTrade.tsx`. Strategy dropdown, trail
+  panel, dual returns, Kite P&L, kill_preview, speed strip, egress card, list/
+  resume/delete, SCHEDULED flow all untouched. tsc + `npx next build` GREEN
+  (`/power/autotrade` compiled).
+  - **Types (`lib/autotrade-api.ts`).** New `OnMissedWindow = 'expire' |
+    'carry_next_trading_day'`. `SessionConfig` gained `entry_date?` ("YYYY-MM-DD",
+    optional — empty = backend resolves the next valid session),
+    `on_missed_window?` (default 'expire'), `entry_grace_seconds?` (default 120).
+    `SessionStatusName` widened with the three non-placed statuses
+    `REJECTED_NON_TRADING_DAY` | `EXPIRED_MISSED_WINDOW` | `DEFERRED_MARKET_CLOSED`.
+    `StatusResponse` gained `resolved_fire_datetime?`, `resolved_fire_date?`,
+    `is_trading_day?`, `market_open_now?`, `entry_date?`, `on_missed_window?`,
+    `deferred_reason?`.
+  - **Create/Preview form.** A DATE PICKER ("Entry date (IST)") sits next to the
+    entry-time field with a Clear button + an "auto" chip when empty (empty =
+    next valid trading session). A segmented "If the fire moment is missed"
+    control = Expire | Carry to next trading day, with the exact helper line
+    ("if the fire moment is missed or lands on a non-trading day: drop it, or
+    roll to the next trading day"). An "Advanced" `<details>` tucks the
+    "Entry grace (seconds)" number input (default 120). `toWireConfig` sends
+    `entry_date` only when non-empty (empty string would be an invalid date),
+    always sends `on_missed_window` + a numeric `entry_grace_seconds`; pct→fraction
+    conversion + the per-strategy boundary are unchanged.
+  - **400 "not a trading day" → friendly one-click apply.** `onCreate` no longer
+    dumps the raw 400. `parseSuggestedTradingDay` pulls the suggested
+    `YYYY-MM-DD` out of the detail (matches "...Next trading day: 2026-06-29");
+    `isNonTradingDayError` recognises the case. The form then shows an amber
+    inline message ("That date isn't a trading day. The next trading day is
+    {date}.") with a mint **"Use {date}"** button that sets `entry_date` + lets
+    them retry, plus "Clear date (use next session)" and "Dismiss". Cleared on
+    new-session / back-to-list / editing the date.
+  - **Status / live view.** New `ResolvedFireLine` renders
+    "Fires {resolved_fire_datetime} IST · trading day ✓/✗ · market open/closed"
+    (trading-day ✓=mint / ✗=amber; market open=mint / closed=muted; every absent
+    field → "—"; renders nothing when no relevant field is present). It shows
+    PROMINENTLY in the SCHEDULED card (the resolved fire datetime now leads the
+    "Fires at" stat, not just the bare time) and also inside the normal RUNNING
+    Live-status block.
+  - **Three new statuses, distinct + muted/amber.** New `NonPlacedCard` handles
+    `REJECTED_NON_TRADING_DAY` / `EXPIRED_MISSED_WINDOW` / `DEFERRED_MARKET_CLOSED`
+    with an amber/muted treatment (a "did not place" pill — never the green
+    RUNNING look). It surfaces `deferred_reason` verbatim when present (else a
+    per-status fallback sentence), the resolved-fire line, and the echoed
+    entry_date / on_missed_window. A `nonPlacedNow` gate HIDES the RUNNING views +
+    KILL block for these; only `DEFERRED_MARKET_CLOSED` (still alive) keeps a
+    Cancel action.
+  - **Honesty held 1:1.** Empty entry_date is shown as "auto / next valid
+    session"; every new backend field degrades to "—"; non-placed statuses are
+    visually unmistakable as not-placed; ships-disabled banner + paper-default/
+    typed-LIVE + KILL all intact. Mint/F2 theme preserved (reuses cotrade-kit
+    `ICON.clock`/`info`/`check`/`chevronR`/`C`).
+  - **Backend needs:** none — the ask states the rule is LIVE
+    (`POST /session/create` accepts `entry_date` / `on_missed_window` /
+    `entry_grace_seconds` and 400s with the suggested-date detail; `status()`
+    returns `resolved_fire_datetime` / `resolved_fire_date` / `is_trading_day` /
+    `market_open_now` / `entry_date` / `on_missed_window` / `deferred_reason` and
+    the three new status values). The UI degrades gracefully if any field/status
+    isn't reporting yet.
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npx next build` ✓ Compiled
+    successfully — `/power/autotrade` built, all other routes intact. NOT pushed
+    (operator deploys).
 - 2026-06-25 — **AutoTrade: added a compact SPEED / latency readout to the Live
   status area (works for BOTH strategies — kill switch + intraday_basket)**
   (operator ask; backend `status()` now ALWAYS returns three latency ints, may be

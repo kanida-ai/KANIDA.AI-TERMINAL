@@ -26,6 +26,11 @@ export type SizingMode = 'equal' | 'pct_cap' | 'manual'
 export type OrderProduct = 'CNC' | 'MIS' | 'MTF' | 'NRML'
 export type KillDirection = 'profit' | 'loss' | 'both'
 
+// Execution-date / trading-day rule. What to do if the fire moment is missed or
+// lands on a non-trading day: drop it ('expire', the default) or roll it forward
+// to the next valid trading session ('carry_next_trading_day').
+export type OnMissedWindow = 'expire' | 'carry_next_trading_day'
+
 // The backend supports two exit strategies:
 //   • 'portfolio_kill_switch' (default, the EXISTING behaviour) — a single flat
 //     ±% basket exit on the invested return (the kill switch).
@@ -48,6 +53,16 @@ export type SessionConfig = {
   kill_switch_pct: number
   kill_switch_direction: KillDirection
   entry_time: string
+  // ── Execution-date / trading-day rule ── (applies to BOTH strategies)
+  // entry_date: optional "YYYY-MM-DD" the session should fire on; empty/omitted
+  //   → the backend resolves to the next valid trading session.
+  // on_missed_window: if the fire moment is missed or lands on a non-trading day,
+  //   'expire' (default) drops it; 'carry_next_trading_day' rolls it forward.
+  // entry_grace_seconds: how late after the fire moment the session may still
+  //   fire before it's treated as missed (advanced; backend default 120).
+  entry_date?: string
+  on_missed_window?: OnMissedWindow
+  entry_grace_seconds?: number
   // ── intraday_basket strategy ── (all percent fields are FRACTIONS on the wire,
   // i.e. send ÷100; the UI captures + displays them as percents). square_off_time
   // is an "HH:MM:SS" IST string.
@@ -131,7 +146,15 @@ export type TrailState = {
 // Session status. `status` is permissive (backend may report PAPER/RUNNING/
 // CLOSED/SCHEDULED/etc.). A SCHEDULED session has NOT placed yet — it is armed
 // to fire at `fires_at` and the scheduling fields below are present.
-export type SessionStatusName = 'SCHEDULED' | 'RUNNING' | 'CLOSED' | string
+// REJECTED_NON_TRADING_DAY — the chosen entry_date is not a trading day and the
+//   session was rejected outright. EXPIRED_MISSED_WINDOW — the fire moment was
+//   missed (past the grace) and on_missed_window='expire', so nothing was placed.
+//   DEFERRED_MARKET_CLOSED — the fire moment landed while the market was closed
+//   and the session is deferred (see deferred_reason). None of these placed orders.
+export type SessionStatusName =
+  | 'SCHEDULED' | 'RUNNING' | 'CLOSED'
+  | 'REJECTED_NON_TRADING_DAY' | 'EXPIRED_MISSED_WINDOW' | 'DEFERRED_MARKET_CLOSED'
+  | string
 // Exit reason on a CLOSED intraday_basket session.
 export type ExitReason = 'SQUARE_OFF' | 'STOP' | 'TRAIL_EXIT' | 'FLOOR_EXIT' | string
 export type StatusResponse = {
@@ -163,6 +186,20 @@ export type StatusResponse = {
   fires_at?: string
   seconds_remaining?: number
   scheduler_armed?: boolean
+  // ── Execution-date / trading-day rule (read-back) ──
+  // resolved_fire_datetime is the exact ISO IST moment the session will/did fire
+  // (the backend's resolution of entry_date + entry_time → next valid session);
+  // resolved_fire_date is its date part. is_trading_day / market_open_now describe
+  // that resolved moment. entry_date / on_missed_window echo the config back.
+  // deferred_reason carries the human reason for a DEFERRED_MARKET_CLOSED (and may
+  // accompany the other non-placed statuses) so the UI can surface it verbatim.
+  resolved_fire_datetime?: string
+  resolved_fire_date?: string
+  is_trading_day?: boolean
+  market_open_now?: boolean
+  entry_date?: string
+  on_missed_window?: OnMissedWindow
+  deferred_reason?: string
   // ── intraday_basket live trail state ── (present when strategy === 'intraday_basket').
   // Prefer the nested `trail{...}`; the flat mirror fields are a fallback.
   trail?: TrailState

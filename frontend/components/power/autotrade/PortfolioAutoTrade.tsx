@@ -29,6 +29,7 @@ import {
 import {
   AutoTradeAPI,
   type Mode, type StartWhen, type SizingMode, type OrderProduct, type KillDirection,
+  type OnMissedWindow,
   type Strategy, type SessionConfig, type CreateResponse, type StartResponse,
   type StatusResponse, type SavedConfig, type Broker, type SessionSummary,
   type OpenPosition, type PreviewResponse, type KillPreview,
@@ -46,6 +47,11 @@ const DEFAULT_CONFIG: SessionConfig = {
   kill_switch_pct: 5,
   kill_switch_direction: 'loss',
   entry_time: '09:15',
+  // Execution-date / trading-day rule — empty entry_date = backend resolves to
+  // the next valid trading session; expire = drop a missed/non-trading-day fire.
+  entry_date: '',
+  on_missed_window: 'expire',
+  entry_grace_seconds: 120,
 }
 
 // ── Intraday-basket VALIDATED PRESET ──────────────────────────────────────────
@@ -135,6 +141,42 @@ const KILL_DIR_OPTIONS: { id: KillDirection; label: string }[] = [
   { id: 'both',   label: 'Both' },
 ]
 const CAPITAL_PRESETS = [100_000, 500_000, 1_000_000, 3_000_000]
+const ON_MISSED_OPTIONS: { id: OnMissedWindow; label: string }[] = [
+  { id: 'expire',                label: 'Expire' },
+  { id: 'carry_next_trading_day', label: 'Carry to next trading day' },
+]
+
+// The three non-placed terminal/blocked statuses from the trading-day rule. A
+// session in one of these did NOT place — render it muted/amber, never the green
+// RUNNING look.
+const NON_PLACED_STATUSES = ['REJECTED_NON_TRADING_DAY', 'EXPIRED_MISSED_WINDOW', 'DEFERRED_MARKET_CLOSED']
+const isNonPlaced = (s?: string | null) => NON_PLACED_STATUSES.includes((s ?? '').toUpperCase())
+
+// Parse a backend 400 detail that names the suggested next trading day, e.g.
+// "2026-06-28 is not a trading day. Next trading day: 2026-06-29" → "2026-06-29".
+// Returns null when no YYYY-MM-DD follows a "next trading day" cue.
+function parseSuggestedTradingDay(detail: string | null | undefined): string | null {
+  if (!detail) return null
+  const m = detail.match(/next\s+trading\s+day[^0-9]*(\d{4}-\d{2}-\d{2})/i)
+  return m ? m[1] : null
+}
+
+// True when an error detail looks like the "not a trading day" rejection (so we
+// show the friendly one-click apply rather than a raw error toast).
+function isNonTradingDayError(detail: string | null | undefined): boolean {
+  if (!detail) return false
+  return /not\s+a\s+trading\s+day/i.test(detail) || parseSuggestedTradingDay(detail) != null
+}
+
+// Friendly label for a non-placed status (the three trading-day-rule outcomes).
+function nonPlacedLabel(status: string): string {
+  switch (status.toUpperCase()) {
+    case 'REJECTED_NON_TRADING_DAY': return 'Rejected — not a trading day'
+    case 'EXPIRED_MISSED_WINDOW':    return 'Expired — entry window missed'
+    case 'DEFERRED_MARKET_CLOSED':   return 'Deferred — market closed'
+    default:                         return status
+  }
+}
 
 // 'list' is the HOME phase: your saved sessions (newest first). 'config' is the
 // explicit New-Session form. 'created'/'running' are the live session views,
@@ -211,6 +253,11 @@ export function PortfolioAutoTrade() {
   const [busy, setBusy] = useState<null | 'create' | 'start' | 'status' | 'kill'>(null)
   const [error, setError] = useState<string | null>(null)
 
+  // When Create returns a "not a trading day" 400, we parse the suggested next
+  // trading day from the detail and offer a one-click "Use {date}" apply instead
+  // of a raw error. { detail } is the friendly message; { suggested } the date.
+  const [createSuggest, setCreateSuggest] = useState<{ detail: string; suggested: string | null } | null>(null)
+
   // ── P&L preview (the "Potential outcome" card on the CONFIG form) ─────────────
   // An ESTIMATE from POST /api/autotrade/preview — creates no session, places
   // nothing. Debounced on the config fields that move the bases / kill outcome.
@@ -261,9 +308,20 @@ export function PortfolioAutoTrade() {
   // send boundary (state stays in percents so the inputs read naturally). Both
   // create + preview use this so there is one conversion site per strategy.
   const toWireConfig = useCallback((c: SessionConfig): SessionConfig => {
+    // Execution-date / trading-day rule: an empty entry_date means "let the
+    // backend resolve the next valid trading session" — send it as omitted (the
+    // empty string would be an invalid date), and pass through the rest.
+    const entry_date = c.entry_date && c.entry_date.trim() ? c.entry_date.trim() : undefined
+    const exec = {
+      entry_date,
+      on_missed_window: c.on_missed_window ?? 'expire',
+      entry_grace_seconds: Number.isFinite(Number(c.entry_grace_seconds))
+        ? Number(c.entry_grace_seconds) : 120,
+    }
     if (c.strategy === 'intraday_basket') {
       return {
         ...c,
+        ...exec,
         arm_pct: (Number(c.arm_pct) || 0) / 100,
         floor_pct: (Number(c.floor_pct) || 0) / 100,
         trail_giveback_pct: (Number(c.trail_giveback_pct) || 0) / 100,
@@ -272,7 +330,7 @@ export function PortfolioAutoTrade() {
         kill_switch_enabled: false,
       }
     }
-    return { ...c, kill_switch_pct: (Number(c.kill_switch_pct) || 0) / 100 }
+    return { ...c, ...exec, kill_switch_pct: (Number(c.kill_switch_pct) || 0) / 100 }
   }, [])
 
   const liveReady = mode === 'paper' || liveConfirm.trim().toUpperCase() === 'LIVE'
@@ -421,7 +479,7 @@ export function PortfolioAutoTrade() {
 
   // ── Actions ────────────────────────────────────────────────────────────────
   const onCreate = useCallback(async () => {
-    setError(null); setBusy('create')
+    setError(null); setCreateSuggest(null); setBusy('create')
     try {
       // UNITS: the backend uses FRACTIONS for percentages (0.01 = 1%). The form
       // captures every pct as a PERCENT so it reads naturally; toWireConfig
@@ -435,7 +493,15 @@ export function PortfolioAutoTrade() {
       // Keep the list fresh so the new session shows the moment you return.
       loadSessions()
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to create session')
+      // Execution-date rule: a 400 whose detail says the chosen entry_date isn't
+      // a trading day carries the suggested next trading day. Don't dump a raw
+      // error — parse it, show a friendly inline message + a one-click apply.
+      const detail = e instanceof Error ? e.message : 'Failed to create session'
+      if (isNonTradingDayError(detail)) {
+        setCreateSuggest({ detail, suggested: parseSuggestedTradingDay(detail) })
+      } else {
+        setError(detail)
+      }
     } finally {
       setBusy(null)
     }
@@ -500,6 +566,10 @@ export function PortfolioAutoTrade() {
   // While SCHEDULED, poll FASTER (6s) so the auto-flip to RUNNING (and the
   // placement that comes with it) shows promptly; otherwise 12s is plenty.
   const scheduledNow = isScheduled(status?.status)
+  // A non-placed terminal/blocked status from the trading-day rule (rejected /
+  // expired / deferred). When true the normal RUNNING + KILL views are hidden in
+  // favour of a muted/amber explanation card — it never placed.
+  const nonPlacedNow = isNonPlaced(status?.status)
   useEffect(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
     if (phase === 'running' && poll && session) {
@@ -527,6 +597,7 @@ export function PortfolioAutoTrade() {
     setPhase('config'); setSession(null); setStartResult(null); setStatus(null)
     setConfig(DEFAULT_CONFIG); setMode('paper'); setCountdown(null)
     setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
+    setCreateSuggest(null)
   }
 
   // Return to the Your-Sessions list and refresh it (so a just-created/started
@@ -535,6 +606,7 @@ export function PortfolioAutoTrade() {
     setPhase('list'); setSession(null); setStartResult(null); setStatus(null)
     setCountdown(null)
     setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
+    setCreateSuggest(null)
     loadSessions()
   }
 
@@ -871,13 +943,69 @@ export function PortfolioAutoTrade() {
             <Field label="Entry time (IST)" hint="When the session places entries.">
               <input
                 type="time"
-                value={config.entry_time}
+                value={(config.entry_time ?? '').slice(0, 5)}
                 onChange={(e) => set('entry_time', e.target.value)}
                 className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
                 style={inputStyle}
               />
             </Field>
+
+            {/* Execution date — optional. Empty = the backend resolves to the
+                next valid trading session. Clearing it is one tap (the chip). */}
+            <Field label="Entry date (IST)" hint="Optional. Leave empty to fire on the next valid trading session.">
+              <div className="flex items-center gap-2">
+                <input
+                  type="date"
+                  value={config.entry_date ?? ''}
+                  onChange={(e) => { set('entry_date', e.target.value); setCreateSuggest(null) }}
+                  className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
+                  style={inputStyle}
+                />
+                {config.entry_date ? (
+                  <button type="button" onClick={() => { set('entry_date', ''); setCreateSuggest(null) }}
+                    className="shrink-0 text-[11px] px-2.5 py-2 rounded-lg transition-colors"
+                    style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+                    Clear
+                  </button>
+                ) : (
+                  <span className="shrink-0 text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-1"
+                    style={{ color: C.mint, background: 'rgba(63,227,164,0.10)' }}>auto</span>
+                )}
+              </div>
+            </Field>
+
+            {/* On missed window — drop or roll forward. */}
+            <Field
+              label="If the fire moment is missed"
+              hint="If the fire moment is missed or lands on a non-trading day: drop it, or roll to the next trading day."
+            >
+              <Segmented
+                options={ON_MISSED_OPTIONS}
+                value={config.on_missed_window ?? 'expire'}
+                onChange={(v) => set('on_missed_window', v)}
+              />
+            </Field>
           </div>
+
+          {/* Advanced — entry grace window (tucked away; backend default 120s). */}
+          <details className="mt-3 group">
+            <summary className="inline-flex items-center gap-1.5 text-[11.5px] cursor-pointer select-none list-none"
+              style={{ color: C.muted }}>
+              <span className="transition-transform group-open:rotate-90" style={{ color: C.faint }}>{ICON.chevronR(11)}</span>
+              Advanced
+            </summary>
+            <div className="mt-3 max-w-[280px]">
+              <Field label="Entry grace (seconds)" hint="How late after the fire moment the session may still fire before it's treated as missed.">
+                <input
+                  type="number" min={0} step={10}
+                  value={config.entry_grace_seconds ?? 120}
+                  onChange={(e) => set('entry_grace_seconds', Number(e.target.value) || 0)}
+                  className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
+                  style={inputStyle}
+                />
+              </Field>
+            </div>
+          </details>
 
           {config.sizing_mode === 'manual' && (
             <div className="mt-3 rounded-xl border px-3.5 py-2.5 text-[11px] leading-snug"
@@ -1001,6 +1129,49 @@ export function PortfolioAutoTrade() {
           </div>
           )}
 
+          {/* ── Non-trading-day suggestion (from a Create 400) ──────────────────
+              Friendly inline message + a one-click "Use {date}" that sets
+              entry_date and lets the operator retry — instead of a raw error. */}
+          {createSuggest && (
+            <div className="mt-5 rounded-xl border px-3.5 py-3"
+              style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
+              <div className="flex items-start gap-2 text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+                <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(15)}</span>
+                <span>
+                  <b style={{ color: C.amber }}>That date isn&apos;t a trading day.</b>{' '}
+                  {createSuggest.suggested
+                    ? <>The next trading day is <b style={{ color: C.ink }}>{createSuggest.suggested}</b>.</>
+                    : <>Pick a valid trading day, or clear the date to use the next valid session.</>}
+                </span>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2.5">
+                {createSuggest.suggested && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      set('entry_date', createSuggest.suggested as string)
+                      setCreateSuggest(null)
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[12px] font-semibold transition-opacity"
+                    style={{ color: '#06130c', background: C.mint }}
+                  >
+                    {ICON.check(13)} Use {createSuggest.suggested}
+                  </button>
+                )}
+                <button type="button"
+                  onClick={() => { set('entry_date', ''); setCreateSuggest(null) }}
+                  className="text-[11.5px] px-3 py-1.5 rounded-lg transition-colors"
+                  style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+                  Clear date (use next session)
+                </button>
+                <button type="button" onClick={() => setCreateSuggest(null)}
+                  className="text-[11.5px]" style={{ color: C.faint }}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Create CTA */}
           <div className="mt-5 flex items-center gap-3">
             <button
@@ -1029,8 +1200,11 @@ export function PortfolioAutoTrade() {
           </div>
           <div className="text-[11.5px] mb-4" style={{ color: C.muted }}>
             ID <code style={{ color: C.ink2 }}>{session.session_id}</code> · status{' '}
-            <span style={{ color: C.ink2 }}>{session.status}</span> · entry time{' '}
-            <span style={{ color: C.ink2 }}>{config.entry_time} IST</span>
+            <span style={{ color: C.ink2 }}>{session.status}</span> · entry{' '}
+            <span style={{ color: C.ink2 }}>
+              {config.entry_date ? `${config.entry_date} ` : ''}{(config.entry_time ?? '').slice(0, 5)} IST
+            </span>
+            {!config.entry_date && <span style={{ color: C.faint }}> · next valid session</span>}
           </div>
 
           {/* TWO clear ways to begin — fire now, or arm for the entry time. */}
@@ -1121,11 +1295,15 @@ export function PortfolioAutoTrade() {
                   </button>
                 </div>
               ) : (
-                <div className="flex flex-wrap items-end gap-x-8 gap-y-3 mb-4">
+                <>
+                <div className="flex flex-wrap items-end gap-x-8 gap-y-3 mb-3">
                   <div>
                     <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Fires at (IST)</div>
+                    {/* Prefer the backend's RESOLVED fire datetime (the exact moment
+                        it will fire after resolving entry_date+time → next valid
+                        session), not just the bare time. */}
                     <div className="text-[15px] font-semibold mt-0.5" style={{ color: C.ink }}>
-                      {status?.fires_at ?? `${config.entry_time}`}
+                      {status?.resolved_fire_datetime ?? status?.fires_at ?? `${config.entry_time}`}
                     </div>
                   </div>
                   <div>
@@ -1137,6 +1315,9 @@ export function PortfolioAutoTrade() {
                     </div>
                   </div>
                 </div>
+                {/* "Fires {…} · trading day ✓/✗ · market open/closed" */}
+                {status && <ResolvedFireLine status={status} />}
+                </>
               )}
 
               <p className="text-[11px] leading-snug mb-3" style={{ color: C.faint }}>
@@ -1157,8 +1338,12 @@ export function PortfolioAutoTrade() {
             </div>
           )}
 
+          {/* NON-PLACED — rejected / expired / deferred by the trading-day rule.
+              Muted/amber so it's obvious the session did NOT place. */}
+          {nonPlacedNow && status && <NonPlacedCard status={status} onKill={onKill} busyKill={busy === 'kill'} />}
+
           {/* Placement result */}
-          {!scheduledNow && startResult && (
+          {!scheduledNow && !nonPlacedNow && startResult && (
             <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
               <div className="flex items-center gap-2 mb-3">
                 <span style={{ color: C.mint }}>{ICON.bolt(15)}</span>
@@ -1200,8 +1385,9 @@ export function PortfolioAutoTrade() {
             </div>
           )}
 
-          {/* Live status — the normal RUNNING view (hidden while SCHEDULED). */}
-          {!scheduledNow && (
+          {/* Live status — the normal RUNNING view (hidden while SCHEDULED or
+              when a trading-day-rule status means it never placed). */}
+          {!scheduledNow && !nonPlacedNow && (
           <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
             <div className="flex items-center gap-2 mb-4">
               <Gear size={18} dir={1} />
@@ -1258,6 +1444,10 @@ export function PortfolioAutoTrade() {
                     <b style={{ color: C.ink2 }}>{fmtCapital(status.total_allocated_capital)}</b>
                   </span>
                 </div>
+
+                {/* Resolved fire moment + trading-day / market state. Shown when
+                    the backend reports it (degrades to nothing when absent). */}
+                <ResolvedFireLine status={status} className="mb-3" />
 
                 {/* SPEED strip — deploy/exit latency + the live data-freshness
                     heartbeat. Works for BOTH strategies; sits above the
@@ -1349,8 +1539,9 @@ export function PortfolioAutoTrade() {
           </div>
           )}
 
-          {/* KILL block — hidden while SCHEDULED (use "Cancel schedule" above). */}
-          {!scheduledNow && (
+          {/* KILL block — hidden while SCHEDULED (use "Cancel schedule" above) and
+              when a trading-day-rule status means there's nothing to kill. */}
+          {!scheduledNow && !nonPlacedNow && (
           <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: 'rgba(232,115,107,0.32)', background: 'rgba(232,115,107,0.04)' }}>
             <div className="flex items-center gap-2 mb-2">
               <span style={{ color: C.red }}>{ICON.bolt(15)}</span>
@@ -1451,6 +1642,105 @@ function StrategyPill({ strategy }: { strategy: Strategy }) {
       style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
       {label}
     </span>
+  )
+}
+
+// ── Resolved fire line (execution-date / trading-day rule) ───────────────────
+// "Fires {resolved_fire_datetime IST} · trading day ✓/✗ · market open/closed".
+// Renders only what the backend actually returned — every absent field becomes
+// an honest "—"; if nothing relevant is present it renders nothing at all.
+function ResolvedFireLine({ status, className = '' }: { status: StatusResponse; className?: string }) {
+  const fire = status.resolved_fire_datetime ?? status.resolved_fire_date
+  const hasTradingDay = typeof status.is_trading_day === 'boolean'
+  const hasMarket = typeof status.market_open_now === 'boolean'
+  // Nothing to show → render nothing (don't fabricate a line).
+  if (!fire && !hasTradingDay && !hasMarket) return null
+
+  const tradingColor = hasTradingDay ? (status.is_trading_day ? C.mint : C.amber) : C.faint
+  const marketColor = hasMarket ? (status.market_open_now ? C.mint : C.muted) : C.faint
+
+  return (
+    <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] ${className}`} style={{ color: C.muted }}>
+      <span style={{ color: C.faint }}>{ICON.clock(13)}</span>
+      <span>
+        Fires{' '}
+        <b style={{ color: C.ink }}>{fire ?? '—'}</b>
+        {fire && <span style={{ color: C.faint }}> IST</span>}
+      </span>
+      <span style={{ color: C.faint }}>·</span>
+      <span>
+        trading day{' '}
+        <b style={{ color: tradingColor }}>
+          {hasTradingDay ? (status.is_trading_day ? '✓' : '✗') : '—'}
+        </b>
+      </span>
+      <span style={{ color: C.faint }}>·</span>
+      <span>
+        market{' '}
+        <b style={{ color: marketColor }}>
+          {hasMarket ? (status.market_open_now ? 'open' : 'closed') : '—'}
+        </b>
+      </span>
+    </div>
+  )
+}
+
+// ── Non-placed card (trading-day rule) ───────────────────────────────────────
+// Surfaces REJECTED_NON_TRADING_DAY / EXPIRED_MISSED_WINDOW / DEFERRED_MARKET_CLOSED
+// distinctly: a MUTED/AMBER treatment (never the green RUNNING look) so it's
+// obvious the session did NOT place. Shows the friendly status label, the
+// backend's deferred_reason (verbatim when present), the resolved-fire line, and
+// the echoed entry_date / on_missed_window. DEFERRED keeps a Cancel action.
+function NonPlacedCard({ status, onKill, busyKill }: { status: StatusResponse; onKill: () => void; busyKill: boolean }) {
+  const raw = (status.status ?? '').toUpperCase()
+  const deferred = raw === 'DEFERRED_MARKET_CLOSED'
+  // Default reasons when the backend doesn't supply deferred_reason.
+  const fallbackReason =
+    raw === 'REJECTED_NON_TRADING_DAY' ? 'The chosen entry date is not a trading day, so the session was rejected.'
+    : raw === 'EXPIRED_MISSED_WINDOW'  ? 'The entry window was missed (past the grace period) and on-missed was set to expire — nothing was placed.'
+    : raw === 'DEFERRED_MARKET_CLOSED' ? 'The fire moment landed while the market was closed — the session is deferred and placed nothing.'
+    : 'This session did not place.'
+  const reason = status.deferred_reason ?? fallbackReason
+
+  return (
+    <div className="rounded-2xl border p-4 sm:p-5"
+      style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span style={{ color: C.amber }}>{ICON.info(17)}</span>
+        <span className="text-[14px] font-semibold" style={{ color: C.amber }}>{nonPlacedLabel(raw)}</span>
+        {status.mode && <ModePill mode={status.mode} />}
+        <span className="ml-auto text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+          style={{ color: C.amber, background: 'rgba(230,180,80,0.14)', boxShadow: 'inset 0 0 0 1px rgba(230,180,80,0.4)' }}>
+          did not place
+        </span>
+      </div>
+
+      <p className="text-[11.5px] leading-snug mb-3" style={{ color: C.ink2 }}>{reason}</p>
+
+      {/* Resolved fire moment + trading-day / market state (degrades to "—"). */}
+      <ResolvedFireLine status={status} className="mb-3" />
+
+      {/* The echoed config that drove the outcome. */}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px] mb-1" style={{ color: C.faint }}>
+        <span>entry date <b style={{ color: C.ink2 }}>{status.entry_date || '—'}</b></span>
+        <span>on missed <b style={{ color: C.ink2 }}>{status.on_missed_window ?? '—'}</b></span>
+        <span>status <b style={{ color: C.amber }}>{raw}</b></span>
+      </div>
+
+      {/* A DEFERRED session is still alive (awaiting the next open) — let the
+          operator cancel it. Rejected/expired are terminal — nothing to cancel. */}
+      {deferred && (
+        <button
+          type="button"
+          disabled={busyKill}
+          onClick={onKill}
+          className="mt-3 inline-flex items-center gap-2 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors disabled:opacity-40"
+          style={{ color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}
+        >
+          {ICON.close(13)} {busyKill ? 'Cancelling…' : 'Cancel session'}
+        </button>
+      )}
+    </div>
   )
 }
 
