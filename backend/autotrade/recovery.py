@@ -141,43 +141,59 @@ def _resume_running(session_id: str) -> str:
 
 def _resume_scheduled(session_id: str) -> str:
     """Re-arm the entry scheduler for a SCHEDULED session, OR fire it now if its
-    entry_time already passed while the backend was down. Returns an outcome tag.
+    target already passed while the backend was down — BUT ONLY THROUGH THE
+    TRADING-DAY / MARKET-OPEN GATE. A session that comes back up on a weekend /
+    holiday / after-hours / with a missed window does NOT fire: _fire_entries()
+    re-checks the gate and sets a terminal/deferred state (or carries per
+    on_missed_window). Returns an outcome tag.
     """
     # Defer the heavy import so module import stays cheap and circular-safe.
-    from .session import TradingSession, _parse_entry_time_today_ist
+    from .session import TradingSession, evaluate_fire_gate, now_ist
 
     sess = TradingSession.load(session_id)
     if sess is None:
         log.warning("recovery: SCHEDULED session %s not found — skipping", session_id)
         return "scheduled_missing"
 
+    now = now_ist()
     try:
-        target = _parse_entry_time_today_ist(sess.config.entry_time)
+        target = sess.config.resolve_fire_datetime(now)
     except ValueError as e:
-        # Unparseable entry_time → fire immediately (never silently hang),
-        # mirroring session._start_scheduled()'s fallback.
-        log.warning("recovery: SCHEDULED session %s has unparseable entry_time "
-                    "(%s) — firing now", session_id, e)
+        # Unparseable entry_time → safe refusal (never fire blind). _fire_entries
+        # re-evaluates the gate and sets the terminal state.
+        log.warning("recovery: SCHEDULED session %s unparseable entry_time "
+                    "(%s) — gating", session_id, e)
         asyncio.run(sess._fire_entries())
-        return "scheduled_fired_unparseable"
+        return "scheduled_gated_unparseable"
 
-    now = datetime.now(IST)
-    if now >= target:
-        # entry_time passed while we were down → fire now so it doesn't hang.
-        log.warning("recovery: SCHEDULED session %s entry_time %s already passed "
-                    "while down — firing now", session_id, target.isoformat())
+    gate = evaluate_fire_gate(sess.config, now, fire_dt=target)
+    if gate.allow:
+        # Target is now-or-just-past AND market is open within grace → fire (the
+        # gate is re-checked inside _fire_entries too — defence in depth).
+        log.info("recovery: SCHEDULED session %s in fire window — firing now",
+                 session_id)
         asyncio.run(sess._fire_entries())
-        return "scheduled_fired_pastdue"
+        return "scheduled_fired_inwindow"
 
-    # Still in the future → re-arm the scheduler thread.
-    armed = entry_scheduler.start_for_session(session_id, target)
-    seconds = int(max(0.0, (target - now).total_seconds()))
-    if armed:
-        log.info("recovery: re-armed entry scheduler for %s — fires at %s (in %ss)",
-                 session_id, target.isoformat(), seconds)
-        return "scheduled_rearmed"
-    log.info("recovery: entry scheduler already armed for %s", session_id)
-    return "scheduled_already_armed"
+    if gate.status in ("SCHEDULED", "DEFERRED_MARKET_CLOSED"):
+        # Future trading day (or before-the-bell) → re-arm for the resolved
+        # target. Place NOTHING.
+        armed = entry_scheduler.start_for_session(
+            session_id, gate.fire_dt, now_fn=now_ist)
+        seconds = int(max(0.0, (gate.fire_dt - now).total_seconds()))
+        if armed:
+            log.info("recovery: re-armed entry scheduler for %s — fires at %s "
+                     "(in %ss)", session_id, gate.fire_dt.isoformat(), seconds)
+            return "scheduled_rearmed"
+        log.info("recovery: entry scheduler already armed for %s", session_id)
+        return "scheduled_already_armed"
+
+    # Missed window / non-trading-day → refuse (expire or carry per policy).
+    # Run the same refusal path the start path uses (sets status / carries).
+    sess._refuse_fire(gate, when="recovery")
+    log.warning("recovery: SCHEDULED session %s NOT fired (%s): %s",
+                session_id, gate.status, gate.reason)
+    return "scheduled_gated_missed"
 
 
 def resume_active_sessions() -> Dict[str, Any]:

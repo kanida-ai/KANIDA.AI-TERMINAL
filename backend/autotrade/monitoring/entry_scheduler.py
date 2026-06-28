@@ -56,9 +56,13 @@ def _session_status(session_id: str) -> Optional[str]:
 
 
 class _Scheduler:
-    def __init__(self, session_id: str, target_ist: datetime):
+    def __init__(self, session_id: str, target_ist: datetime, now_fn=None):
         self.session_id = session_id
         self.target_ist = target_ist
+        # now_fn is the clock used to compute the remaining sleep. Production
+        # passes None → real datetime.now(IST). Tests may inject a frozen clock
+        # so an "armed but never fires" scheduler doesn't fire on a fake target.
+        self._now_fn = now_fn or (lambda: datetime.now(IST))
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name=f"autotrade-entry-{session_id[:8]}",
@@ -74,7 +78,10 @@ class _Scheduler:
         return self._thread.is_alive()
 
     def _seconds_remaining(self) -> float:
-        return (self.target_ist - datetime.now(IST)).total_seconds()
+        # Production: real wall-clock. Tests may inject a frozen now_fn. The
+        # trading-day / market-open GATE is re-evaluated at WAKE inside
+        # _fire_entries() (clock-seam aware) — this only governs the sleep length.
+        return (self.target_ist - self._now_fn()).total_seconds()
 
     def _run(self) -> None:
         log.info("entry_scheduler armed for %s — fires at %s (in %.1fs)",
@@ -129,15 +136,17 @@ class _Scheduler:
                 _SCHEDULERS.pop(self.session_id, None)
 
 
-def start_for_session(session_id: str, target_ist: datetime) -> bool:
+def start_for_session(session_id: str, target_ist: datetime,
+                      now_fn=None) -> bool:
     """Arm an entry scheduler for session_id that fires at target_ist (an
     IST-aware datetime). Idempotent — returns False if one is already armed for
-    this session_id, True if a new scheduler was armed."""
+    this session_id, True if a new scheduler was armed. `now_fn` (tests only)
+    injects a frozen clock for the sleep computation."""
     with _LOCK:
         existing = _SCHEDULERS.get(session_id)
         if existing is not None and existing.is_alive():
             return False
-        sch = _Scheduler(session_id, target_ist)
+        sch = _Scheduler(session_id, target_ist, now_fn=now_fn)
         _SCHEDULERS[session_id] = sch
     sch.start()
     return True

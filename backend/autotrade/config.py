@@ -160,6 +160,27 @@ class TradingSessionConfig:
     entry_time: str = "09:15:00"
     entry_window_seconds: int = 60
 
+    # ── EXECUTION-DATE / TRADING-DAY rule (real-money safety) ─────────────────
+    # entry_date (optional "YYYY-MM-DD"): the calendar date on which the entry
+    #   should fire @ entry_time. If SET it must be a real NSE trading day (else
+    #   validate() rejects with the suggested next trading day). If UNSET the
+    #   scheduler resolves it to the NEXT VALID trading session — today iff today
+    #   is a trading day AND entry_time is still in the future, else the next
+    #   trading day. This is what makes "set up today for tomorrow 09:15" real:
+    #   set entry_date=<next trading day>.
+    entry_date: Optional[str] = None
+    # on_missed_window: what to do when the fire moment is missed or lands on a
+    #   non-trading day.
+    #     "expire" (DEFAULT, SAFE)        → do NOT fire; terminal EXPIRED status.
+    #     "carry_next_trading_day"        → roll entry_date forward to the next
+    #                                       trading day and stay SCHEDULED.
+    on_missed_window: str = "expire"
+    # entry_grace_seconds: if the target moment is in the PAST but it is STILL
+    #   the same trading day, the market is OPEN, and we are within this many
+    #   seconds of the target, fire anyway (covers a slightly-late wake / a
+    #   "now" click a moment after the bell). Beyond the grace → expire/carry.
+    entry_grace_seconds: int = 120
+
     # ── Validation ──────────────────────────────────────────────────────────
     def validate(self) -> None:
         if self.total_allocated_capital <= 0:
@@ -236,6 +257,62 @@ class TradingSessionConfig:
                     f"manual_amounts total {total} exceeds "
                     f"total_allocated_capital {self.total_allocated_capital}"
                 )
+        # ── EXECUTION-DATE / TRADING-DAY rule ────────────────────────────────
+        if self.on_missed_window not in ("expire", "carry_next_trading_day"):
+            raise ValueError(
+                "invalid on_missed_window (expire | carry_next_trading_day): "
+                f"{self.on_missed_window}")
+        # entry_time must parse (it does for intraday already; enforce always).
+        try:
+            _parse_clock_to_seconds(self.entry_time)
+        except ValueError as e:
+            raise ValueError(f"entry_time {e}")
+        if self.entry_date is not None and str(self.entry_date).strip():
+            # Shape + trading-day check. A non-trading-day entry_date is rejected
+            # AT CREATE with the suggested next trading day, so the operator never
+            # schedules a fire into a closed market.
+            from . import trading_calendar as _cal
+            try:
+                _d = datetime.strptime(str(self.entry_date).strip(),
+                                       "%Y-%m-%d").date()
+            except ValueError:
+                raise ValueError(
+                    f"entry_date must be YYYY-MM-DD, got {self.entry_date!r}")
+            if not _cal.is_trading_day(_d):
+                nxt = _cal.next_trading_day(_d, inclusive=True)
+                raise ValueError(
+                    f"entry_date {self.entry_date} is NOT an NSE trading day "
+                    f"(weekend/holiday). Next trading day: {nxt.isoformat()}")
+
+    # ── EXECUTION-DATE resolution ─────────────────────────────────────────────
+    def resolve_fire_datetime(self, now_ist: Optional[datetime] = None
+                              ) -> "datetime":
+        """The IST-aware datetime at which this session SHOULD fire entries.
+
+        * entry_date SET  → that date @ entry_time (validate() already proved it
+                            is a trading day).
+        * entry_date UNSET → the NEXT VALID trading session: TODAY @ entry_time
+                            iff today is a trading day AND entry_time is still in
+                            the future; otherwise the NEXT trading day @
+                            entry_time.
+
+        Determinism: pass now_ist in tests. Pure (no side effects)."""
+        from . import trading_calendar as _cal
+        now = now_ist or datetime.now(IST)
+        secs = _parse_clock_to_seconds(self.entry_time)
+        hh, mm, ss = secs // 3600, (secs % 3600) // 60, secs % 60
+
+        def _at(d) -> "datetime":
+            return datetime(d.year, d.month, d.day, hh, mm, ss, tzinfo=IST)
+
+        if self.entry_date and str(self.entry_date).strip():
+            d = datetime.strptime(str(self.entry_date).strip(), "%Y-%m-%d").date()
+            return _at(d)
+        # UNSET → next valid trading session.
+        today = now.date()
+        if _cal.is_trading_day(today) and _at(today) > now:
+            return _at(today)
+        return _at(_cal.next_trading_day(today))
 
     # ── (de)serialisation (secrets stripped) ─────────────────────────────────
     def to_dict(self) -> Dict[str, Any]:
@@ -278,6 +355,9 @@ class TradingSessionConfig:
             broker_profiles=[BrokerProfile.from_public_dict(b) for b in bps],
             entry_time=d.get("entry_time", "09:15:00"),
             entry_window_seconds=int(d.get("entry_window_seconds", 60)),
+            entry_date=(d.get("entry_date") or None),
+            on_missed_window=d.get("on_missed_window", "expire"),
+            entry_grace_seconds=int(d.get("entry_grace_seconds", 120)),
         )
         return cfg
 

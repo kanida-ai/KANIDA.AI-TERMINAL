@@ -21,6 +21,11 @@ os.environ["FALCON_DB_PATH"] = _TMP_DB
 os.environ.setdefault("FALCON_OPERATOR_TOKEN", "test-operator-token")
 # Master live-trade switch stays OFF for all tests — defence in depth.
 os.environ.pop("FALCON_AUTOTRADE_ENABLED", None)
+# DETERMINISM for the trading-day fire gate: freeze "now" to a known NSE trading
+# day DURING market hours (Thu 2026-06-25 10:00 IST) so the firing tests in the
+# existing suite fire deterministically regardless of the wall clock. The
+# trading-day rule's OWN tests override / clear this per-test via set_fake_now().
+os.environ["FALCON_AUTOTRADE_FAKE_NOW"] = "2026-06-25T10:00:00"
 
 
 def _seed_base_schema(path: str) -> None:
@@ -72,6 +77,13 @@ def _db():
     # dedicated auto-fire test re-enables it for its own scope.
     from autotrade.monitoring import tick_driver
     tick_driver.set_autostart(False)
+    # Same for the sub-second WS driver — off by default in tests so its daemon
+    # thread can't race assertions on the shared temp DB.
+    from autotrade.monitoring import ws_driver
+    ws_driver.set_autostart(False)
+    # Same for the intraday-basket square-off scheduler.
+    from autotrade.monitoring import square_off_scheduler
+    square_off_scheduler.set_autostart(False)
     yield
     try:
         os.remove(_TMP_DB)
@@ -85,6 +97,10 @@ def clean_positions():
     daemon threads can't mutate the shared temp DB across tests."""
     from falcon.db import falcon_conn
     from autotrade.monitoring import tick_driver
+    from autotrade.monitoring import entry_scheduler
+    from autotrade.monitoring import ws_driver
+    from autotrade.monitoring import square_off_scheduler
+    from autotrade.monitoring import fire_guard
 
     def _stop_all_drivers():
         with tick_driver._LOCK:
@@ -93,6 +109,32 @@ def clean_positions():
             drv.stop()
         for drv in drivers:
             drv._thread.join(timeout=2.0)
+        # Also stop any sub-second WS drivers (FEATURE 2 daemon threads).
+        with ws_driver._LOCK:
+            wsdrv = list(ws_driver._DRIVERS.values())
+        for drv in wsdrv:
+            drv.stop()
+        for drv in wsdrv:
+            drv._thread.join(timeout=2.0)
+        # Also stop any armed entry schedulers so their daemon threads can't
+        # fire across tests on the shared temp DB.
+        with entry_scheduler._LOCK:
+            scheds = list(entry_scheduler._SCHEDULERS.values())
+        for sch in scheds:
+            sch.stop()
+        for sch in scheds:
+            sch._thread.join(timeout=2.0)
+        # Also stop any armed square-off schedulers (intraday_basket).
+        with square_off_scheduler._LOCK:
+            sqscheds = list(square_off_scheduler._SCHEDULERS.values())
+        for sch in sqscheds:
+            sch.stop()
+        for sch in sqscheds:
+            sch._thread.join(timeout=2.0)
+        # Reset the per-session fire guard so a session_id reused across tests
+        # isn't stuck "already fired".
+        with fire_guard._LOCK:
+            fire_guard._FIRED.clear()
 
     _stop_all_drivers()
     with falcon_conn() as con:
