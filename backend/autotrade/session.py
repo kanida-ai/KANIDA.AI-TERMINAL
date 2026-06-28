@@ -49,6 +49,7 @@ from typing import Any, Dict, List, Optional
 from falcon.db import falcon_conn
 
 from .config import TradingSessionConfig
+from . import trading_calendar
 from .capital import CapitalAllocator, InsufficientCapitalError
 from .broker.base import Pick
 from .broker.router import BrokerRouter, build_client
@@ -83,6 +84,42 @@ _ENTRY_CONCURRENCY = _entry_concurrency()
 
 def _now_ist_iso() -> str:
     return datetime.now(IST).isoformat()
+
+
+# ── Clock seam (DETERMINISM) ─────────────────────────────────────────────────
+# Production reads the real IST wall clock. Tests (and only tests) may freeze
+# "now" by setting FALCON_AUTOTRADE_FAKE_NOW="YYYY-MM-DDTHH:MM:SS" (interpreted
+# IST) or by calling set_fake_now(dt). When UNSET this is byte-identical to
+# datetime.now(IST) — no behaviour change in prod. Used by every fire-gate path
+# so a frozen clock yields a deterministic trading-day/market-open verdict.
+_FAKE_NOW: Optional[datetime] = None
+
+
+def set_fake_now(dt: Optional[datetime]) -> None:
+    """TEST ONLY: freeze (or clear with None) the IST 'now' used by fire gates."""
+    global _FAKE_NOW
+    _FAKE_NOW = dt
+
+
+def now_ist() -> datetime:
+    """The current IST time, honouring a test clock override if present.
+
+    Order: explicit set_fake_now() > env FALCON_AUTOTRADE_FAKE_NOW > real now.
+    Env value is parsed as a naive IST clock ("YYYY-MM-DDTHH:MM:SS" or with a
+    space) and stamped with the IST tzinfo. Any parse failure falls back to the
+    real clock (never crashes a fire path)."""
+    if _FAKE_NOW is not None:
+        return _FAKE_NOW
+    raw = os.environ.get("FALCON_AUTOTRADE_FAKE_NOW", "").strip()
+    if raw:
+        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M"):
+            try:
+                p = datetime.strptime(raw, fmt)
+                return p.replace(tzinfo=IST)
+            except ValueError:
+                continue
+    return datetime.now(IST)
 
 
 def _last_tick_age_ms() -> Optional[int]:
@@ -121,6 +158,119 @@ def _parse_entry_time_today_ist(entry_time: str) -> datetime:
     now = datetime.now(IST)
     return now.replace(hour=parsed.hour, minute=parsed.minute,
                        second=parsed.second, microsecond=0)
+
+
+# ── EXECUTION-DATE / TRADING-DAY fire gate ───────────────────────────────────
+# Terminal/deferred session statuses introduced by the trading-day rule. These
+# are ADDITIVE — existing CREATED/RUNNING/SCHEDULED/CLOSED/KILLING are untouched.
+STATUS_REJECTED_NON_TRADING_DAY = "REJECTED_NON_TRADING_DAY"
+STATUS_EXPIRED_MISSED_WINDOW = "EXPIRED_MISSED_WINDOW"
+STATUS_DEFERRED_MARKET_CLOSED = "DEFERRED_MARKET_CLOSED"
+
+
+class FireGate:
+    """Result of evaluating whether a fire may proceed RIGHT NOW.
+
+    allow=True  → place orders.
+    allow=False → DO NOT place; `status` is the terminal/deferred state to set,
+                  `carry_to` (if set) is the next entry_date to roll to, and
+                  `reason` is human-readable for status()/logs.
+    """
+    __slots__ = ("allow", "status", "reason", "carry_to", "fire_dt")
+
+    def __init__(self, allow, status=None, reason=None, carry_to=None,
+                 fire_dt=None):
+        self.allow = allow
+        self.status = status
+        self.reason = reason
+        self.carry_to = carry_to
+        self.fire_dt = fire_dt
+
+
+def evaluate_fire_gate(config: TradingSessionConfig, now_ist: datetime,
+                       fire_dt: Optional[datetime] = None) -> FireGate:
+    """The SINGLE trading-day/market-open decision shared by every fire path.
+
+    Given the resolved target fire datetime and `now`, decide whether to fire.
+    NEVER fires into a closed market or on a non-trading day. Pure + deterministic
+    (pass now_ist in tests).
+
+    Rules:
+      1. The FIRE DATE must be a real NSE trading day. If not → per
+         on_missed_window: expire (REJECTED_NON_TRADING_DAY) or carry forward.
+      2. The market must be OPEN at `now` (09:15–15:30 IST on a trading day).
+         If now is BEFORE today's open on a trading day → defer (still SCHEDULED,
+         the scheduler waits). If now is AFTER close / a non-trading day now →
+         per policy.
+      3. If the target is in the PAST: fire ONLY if it is still the same trading
+         day, the market is open, and we are within entry_grace_seconds of the
+         target. Otherwise → expire/carry (the window was missed).
+    """
+    fdt = fire_dt or config.resolve_fire_datetime(now_ist)
+    fire_date = fdt.date()
+    grace = max(0, int(getattr(config, "entry_grace_seconds", 120)))
+    policy = getattr(config, "on_missed_window", "expire")
+
+    def _missed(reason: str) -> FireGate:
+        if policy == "carry_next_trading_day":
+            nxt = trading_calendar.next_trading_day(now_ist.date(), inclusive=True)
+            # If now is already past today's open on a trading day, "today" is no
+            # good — roll to a STRICTLY future trading day.
+            if nxt == now_ist.date():
+                nxt = trading_calendar.next_trading_day(now_ist.date())
+            return FireGate(False, status="SCHEDULED",
+                            reason=f"{reason} — carried to {nxt.isoformat()}",
+                            carry_to=nxt.isoformat(), fire_dt=fdt)
+        return FireGate(False, status=STATUS_EXPIRED_MISSED_WINDOW,
+                        reason=reason, fire_dt=fdt)
+
+    # 1. Fire DATE must be a trading day.
+    if not trading_calendar.is_trading_day(fire_date):
+        if policy == "carry_next_trading_day":
+            nxt = trading_calendar.next_trading_day(fire_date, inclusive=True)
+            return FireGate(False, status="SCHEDULED",
+                            reason=(f"{fire_date.isoformat()} is not an NSE "
+                                    f"trading day — carried to {nxt.isoformat()}"),
+                            carry_to=nxt.isoformat(), fire_dt=fdt)
+        return FireGate(False, status=STATUS_REJECTED_NON_TRADING_DAY,
+                        reason=(f"{fire_date.isoformat()} is not an NSE trading "
+                                f"day (weekend/holiday)"), fire_dt=fdt)
+
+    # The fire date IS a trading day. Now consider WHEN relative to now.
+    if fdt > now_ist:
+        # Future target. If it's a future trading day, just wait (SCHEDULED).
+        # The scheduler thread sleeps until fdt; nothing to fire now.
+        return FireGate(False, status="SCHEDULED",
+                        reason=f"waiting until {fdt.isoformat()}", fire_dt=fdt)
+
+    # Target is now-or-past. We may fire only inside the open window + grace.
+    if fire_date != now_ist.date():
+        # The target day already fully elapsed (we are on a later day) → missed.
+        return _missed(f"entry window on {fire_date.isoformat()} elapsed")
+
+    # Same calendar day as the target. Is the market open right now?
+    if not trading_calendar.is_market_open(now_ist):
+        open_dt, close_dt = trading_calendar.market_open_for_date(fire_date)
+        if now_ist < open_dt:
+            # Before the bell on a trading day → defer (wait for open).
+            return FireGate(False, status=STATUS_DEFERRED_MARKET_CLOSED,
+                            reason=(f"market not yet open (opens "
+                                    f"{open_dt.strftime('%H:%M')} IST)"),
+                            fire_dt=fdt)
+        # After close → window missed.
+        return _missed(f"market closed for {fire_date.isoformat()}")
+
+    # Market is OPEN and we're on the target trading day. If the target is in the
+    # past, enforce the grace window (don't fire a long-stale target).
+    behind = (now_ist - fdt).total_seconds()
+    if behind > grace:
+        return _missed(
+            f"target {fdt.strftime('%H:%M:%S')} passed {int(behind)}s ago "
+            f"(> grace {grace}s)")
+
+    # All clear: trading day, market open, within grace of the target.
+    return FireGate(True, status="RUNNING",
+                    reason="trading day + market open", fire_dt=fdt)
 
 
 # ── Falcon picks (read-only consumer) ────────────────────────────────────────
@@ -329,58 +479,145 @@ class TradingSession:
 
     # ── Start: now | scheduled ──────────────────────────────────────────────────
     async def start(self, when: str = "now") -> Dict[str, Any]:
-        """Start the session.
+        """Start the session — GATED by the trading-day / market-open rule.
 
-        when="now" (default, backward-compatible): fire entries IMMEDIATELY —
-            set status RUNNING and run _fire_entries() right now.
+        when="now": fire entries IMMEDIATELY, but ONLY after the fire gate passes
+            (a real NSE trading day AND the market open at this moment). If the
+            gate refuses (weekend/holiday/closed market) NO order is placed and
+            the session moves to a clear terminal/deferred state.
 
-        when="scheduled": parse config.entry_time as TODAY in IST.
-            * If entry_time is in the FUTURE: set status SCHEDULED, store the
-              target, and arm a background scheduler thread that sleeps until
-              entry_time (interruptible) then fires + flips to RUNNING.
-            * If entry_time has already PASSED: fire immediately now (fallback)
-              and include a note. Never silently does nothing.
+        when="scheduled": resolve the fire datetime from entry_date@entry_time
+            (or the next valid trading session if entry_date is unset).
+            * Future trading day → status SCHEDULED + a scheduler thread that
+              sleeps until the target, then fires THROUGH THE GATE.
+            * Non-trading-day target → REJECTED_NON_TRADING_DAY or carried per
+              on_missed_window. Never fires into a closed market.
         """
         if when == "scheduled":
             return await self._start_scheduled()
-        # when == "now" (or any unknown value → safe default: fire now)
+        return await self._start_now()
+
+    async def _start_now(self) -> Dict[str, Any]:
+        """when='now' — fire immediately IF the gate allows. The 'fire into a
+        closed market' hole is closed here: an instant start on a Sunday / after
+        hours is REFUSED with a clear status, never placed."""
+        now = now_ist()
+        # For an instant start the intended fire moment is NOW (subject to the
+        # gate's trading-day + open-window checks).
+        gate = evaluate_fire_gate(self.config, now, fire_dt=now)
+        if not gate.allow:
+            return self._refuse_fire(gate, when="now")
         return await self._fire_entries()
 
     async def _start_scheduled(self) -> Dict[str, Any]:
+        now = now_ist()
         try:
-            target = _parse_entry_time_today_ist(self.config.entry_time)
+            target = self.config.resolve_fire_datetime(now)
         except ValueError as e:
-            log.warning("scheduled start for %s: %s — firing immediately",
+            # Unparseable entry_time → safe refusal (never fire blind).
+            log.warning("scheduled start for %s: %s — refusing",
                         self.session_id, e)
-            res = await self._fire_entries()
-            res["note"] = f"entry_time unparseable ({e}) — fired immediately"
-            res["when"] = "scheduled"
-            return res
+            gate = FireGate(False, status=STATUS_EXPIRED_MISSED_WINDOW,
+                            reason=f"entry_time unparseable: {e}")
+            return self._refuse_fire(gate, when="scheduled")
 
-        now = datetime.now(IST)
-        if now >= target:
-            # entry_time already passed today → fire immediately (fallback).
+        gate = evaluate_fire_gate(self.config, now, fire_dt=target)
+
+        # Gate says fire NOW (we're inside the open window + grace of the target).
+        if gate.allow:
             res = await self._fire_entries()
-            res["note"] = ("entry_time already passed — fired immediately")
+            res["note"] = ("target within grace + market open — fired now")
             res["when"] = "scheduled"
             res["entry_time"] = self.config.entry_time
+            res["fires_at"] = target.isoformat()
             return res
 
-        # Future → arm the scheduler; place NOTHING yet.
-        self._set_status("SCHEDULED")
-        armed = entry_scheduler.start_for_session(self.session_id, target)
-        seconds = int(max(0.0, (target - now).total_seconds()))
-        log.info("session %s SCHEDULED — entry at %s (in %ss, armed=%s)",
-                 self.session_id, target.isoformat(), seconds, armed)
-        return {"session_id": self.session_id, "status": "SCHEDULED",
-                "mode": self.mode, "when": "scheduled",
-                "entry_time": self.config.entry_time,
-                "fires_at": target.isoformat(),
-                "seconds_remaining": seconds,
-                "scheduler_armed": armed, "n_placed": 0, "orders": []}
+        # Carry policy (missed/non-trading-day → roll entry_date forward) — must
+        # be handled BEFORE the plain WAIT branch, since a carry also reports
+        # status SCHEDULED but additionally needs entry_date rolled.
+        if gate.carry_to:
+            return self._refuse_fire(gate, when="scheduled")
+
+        # Gate says WAIT (future trading day, or deferred before the bell): arm
+        # the scheduler for the resolved target. Place NOTHING yet.
+        if gate.status in ("SCHEDULED", STATUS_DEFERRED_MARKET_CLOSED):
+            self._set_status("SCHEDULED", reason=gate.reason)
+            armed = entry_scheduler.start_for_session(
+                self.session_id, gate.fire_dt, now_fn=now_ist)
+            seconds = int(max(0.0, (gate.fire_dt - now).total_seconds()))
+            log.info("session %s SCHEDULED — entry at %s (in %ss, armed=%s, %s)",
+                     self.session_id, gate.fire_dt.isoformat(), seconds, armed,
+                     gate.reason)
+            return {"session_id": self.session_id, "status": "SCHEDULED",
+                    "mode": self.mode, "when": "scheduled",
+                    "entry_time": self.config.entry_time,
+                    "entry_date": self.config.entry_date,
+                    "fires_at": gate.fire_dt.isoformat(),
+                    "trading_day": True,
+                    "seconds_remaining": seconds,
+                    "scheduler_armed": armed, "n_placed": 0, "orders": [],
+                    "note": gate.reason}
+
+        # Gate refuses (non-trading-day with expire policy, or carry).
+        return self._refuse_fire(gate, when="scheduled")
+
+    def _refuse_fire(self, gate: "FireGate", when: str) -> Dict[str, Any]:
+        """Apply a NON-firing gate decision: set the terminal/deferred status,
+        carry entry_date forward + re-arm the scheduler if the policy says so, and
+        return a clear payload. Places NOTHING."""
+        if gate.carry_to:
+            # carry_next_trading_day: roll entry_date forward + stay SCHEDULED.
+            self._persist_entry_date(gate.carry_to)
+            self.config.entry_date = gate.carry_to
+            now = now_ist()
+            try:
+                new_target = self.config.resolve_fire_datetime(now)
+            except ValueError:
+                new_target = None
+            self._set_status("SCHEDULED", reason=gate.reason)
+            armed = False
+            seconds = None
+            if new_target is not None:
+                armed = entry_scheduler.start_for_session(
+                    self.session_id, new_target, now_fn=now_ist)
+                seconds = int(max(0.0, (new_target - now).total_seconds()))
+            log.info("session %s CARRIED to %s (%s, armed=%s)",
+                     self.session_id, gate.carry_to, gate.reason, armed)
+            out = {"session_id": self.session_id, "status": "SCHEDULED",
+                   "mode": self.mode, "when": when, "n_placed": 0, "orders": [],
+                   "entry_date": gate.carry_to,
+                   "trading_day": True,
+                   "scheduler_armed": armed,
+                   "deferred_reason": gate.reason, "note": gate.reason}
+            if new_target is not None:
+                out["fires_at"] = new_target.isoformat()
+            if seconds is not None:
+                out["seconds_remaining"] = seconds
+            return out
+        # expire / reject: terminal, place nothing.
+        self._set_status(gate.status, reason=gate.reason,
+                         closed_at=_now_ist_iso())
+        log.warning("session %s NOT fired (%s): %s", self.session_id,
+                    gate.status, gate.reason)
+        return {"session_id": self.session_id, "status": gate.status,
+                "mode": self.mode, "when": when, "n_placed": 0, "orders": [],
+                "trading_day": gate.status != STATUS_REJECTED_NON_TRADING_DAY,
+                "expired_reason": gate.reason, "note": gate.reason}
 
     # ── Fire entries: route → size → place → register (THE order-firing leg) ────
-    async def _fire_entries(self) -> Dict[str, Any]:
+    async def _fire_entries(self, *, gate_checked: bool = False) -> Dict[str, Any]:
+        # DEFENCE-IN-DEPTH trading-day/market-open gate. Every caller of
+        # _fire_entries (instant start, the entry_scheduler thread at wake,
+        # recovery's past-due fire) passes THROUGH here, so even if an upstream
+        # check is bypassed we NEVER place an order on a non-trading day or into a
+        # closed market. `gate_checked=True` from callers that already evaluated
+        # the gate this same instant (start_now / scheduled-fire-now) skips the
+        # redundant re-check but the result is identical.
+        if not gate_checked:
+            now = now_ist()
+            gate = evaluate_fire_gate(self.config, now, fire_dt=now)
+            if not gate.allow:
+                return self._refuse_fire(gate, when="fire")
         self._build_brokers()
         self._set_status("RUNNING", started_at=_now_ist_iso())
 
@@ -737,18 +974,38 @@ class TradingSession:
             "exit_latency_ms": sess.get("exit_latency_ms"),
             "last_tick_age_ms": _last_tick_age_ms(),
         }
+        # EXECUTION-DATE / TRADING-DAY surface — ALWAYS expose the resolved fire
+        # datetime + the trading-day verdict so the UI can show "Fires
+        # <date> 09:15 (trading day)" and any deferred/expired reason.
+        out["entry_time"] = self.config.entry_time
+        out["entry_date"] = self.config.entry_date
+        out["on_missed_window"] = self.config.on_missed_window
+        _now = now_ist()
+        try:
+            resolved = self.config.resolve_fire_datetime(_now)
+            out["resolved_fire_datetime"] = resolved.isoformat()
+            out["resolved_fire_date"] = resolved.date().isoformat()
+            out["is_trading_day"] = trading_calendar.is_trading_day(
+                resolved.date())
+        except Exception:  # pragma: no cover - never break status on calendar
+            resolved = None
+            out["resolved_fire_datetime"] = None
+            out["is_trading_day"] = None
+        out["market_open_now"] = trading_calendar.is_market_open(_now)
+        # Surface the terminal/deferred reason (stored in notes).
+        if status in (STATUS_REJECTED_NON_TRADING_DAY,
+                      STATUS_EXPIRED_MISSED_WINDOW,
+                      STATUS_DEFERRED_MARKET_CLOSED):
+            out["deferred_reason"] = sess.get("notes")
+
         # SCHEDULED: surface the armed entry time so the UI can show
         # "Scheduled for 09:15" + a live countdown.
         if status == "SCHEDULED":
-            out["entry_time"] = self.config.entry_time
             target = entry_scheduler.target_for_session(self.session_id)
             if target is None:
                 # In-memory timer lost (e.g. backend restarted) — derive the
-                # nominal target from config so the UI still shows the time.
-                try:
-                    target = _parse_entry_time_today_ist(self.config.entry_time)
-                except ValueError:
-                    target = None
+                # resolved target from config so the UI still shows the time.
+                target = resolved
                 out["scheduler_armed"] = False
             else:
                 out["scheduler_armed"] = entry_scheduler.is_running(self.session_id)
@@ -836,10 +1093,25 @@ class TradingSession:
                     "WHERE session_id=?", (int(exit_latency_ms), self.session_id))
             con.commit()
 
-    def _set_status(self, status: str, started_at: Optional[str] = None) -> None:
+    def _set_status(self, status: str, started_at: Optional[str] = None,
+                    reason: Optional[str] = None,
+                    closed_at: Optional[str] = None) -> None:
         with falcon_conn() as con:
             con.execute(
                 "UPDATE autotrade_sessions SET status=?, "
-                "started_at=COALESCE(?, started_at) WHERE session_id=?",
-                (status, started_at, self.session_id))
+                "started_at=COALESCE(?, started_at), "
+                "closed_at=COALESCE(?, closed_at), "
+                "notes=COALESCE(?, notes) WHERE session_id=?",
+                (status, started_at, closed_at, reason, self.session_id))
+            con.commit()
+
+    def _persist_entry_date(self, entry_date: str) -> None:
+        """Roll the stored config_json's entry_date forward (carry policy) so a
+        restart resumes from the carried date. Idempotent rewrite of config_json.
+        """
+        self.config.entry_date = entry_date
+        with falcon_conn() as con:
+            con.execute(
+                "UPDATE autotrade_sessions SET config_json=? WHERE session_id=?",
+                (self.config.to_json(), self.session_id))
             con.commit()

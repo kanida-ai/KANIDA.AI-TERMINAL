@@ -21,6 +21,11 @@ os.environ["FALCON_DB_PATH"] = _TMP_DB
 os.environ.setdefault("FALCON_OPERATOR_TOKEN", "test-operator-token")
 # Master live-trade switch stays OFF for all tests — defence in depth.
 os.environ.pop("FALCON_AUTOTRADE_ENABLED", None)
+# DETERMINISM for the trading-day fire gate: freeze "now" to a known NSE trading
+# day DURING market hours (Thu 2026-06-25 10:00 IST) so the firing tests in the
+# existing suite fire deterministically regardless of the wall clock. The
+# trading-day rule's OWN tests override / clear this per-test via set_fake_now().
+os.environ["FALCON_AUTOTRADE_FAKE_NOW"] = "2026-06-25T10:00:00"
 
 
 def _seed_base_schema(path: str) -> None:

@@ -1,11 +1,15 @@
-"""Tests for the dual entry-firing modes: start(when="now") and
-start(when="scheduled").
+"""Tests for the entry-firing modes under the EXECUTION-DATE / TRADING-DAY rule:
+start(when="now") and start(when="scheduled").
 
-All paper / dry-run — patches broker.router.build_client to return MockBrokers
-so no real Kite is ever touched. The scheduled tests use a near-future
-entry_time (1-2s ahead) so they run fast, and assert the SCHEDULED → RUNNING
-arming + fire, the PAST-time immediate fallback, cancel/kill of a SCHEDULED
-session, and the falcon_position_state isolation regression for both paths.
+All paper / dry-run — patches broker.router.build_client to return MockBrokers so
+no real Kite is ever touched. "now" is FROZEN per-test via set_fake_now() so the
+trading-day / market-open gate is deterministic (no wall-clock dependence). The
+scheduled-future tests use a near-future entry_time so the scheduler thread fires
+fast; the gate-evaluation 'now' is the frozen clock, the SLEEP target is the real
+wall-clock entry_time (the scheduler thread sleeps in real time).
+
+Trading-day baseline: 2026-06-25 is a Thursday NSE trading day; 09:15–15:30 IST
+is the open window.
 """
 import asyncio
 import time
@@ -15,12 +19,25 @@ import pytest
 
 import autotrade.broker.router as router_mod
 from autotrade.config import TradingSessionConfig
-from autotrade.session import TradingSession
+from autotrade.session import TradingSession, set_fake_now
 from autotrade.monitoring import entry_scheduler, tick_driver
 from tests.autotrade.conftest import seed_signals
 from tests.autotrade.mock_broker import MockBroker
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+# A known NSE trading day, mid-session.
+TRADING_DAY = "2026-06-25"          # Thursday
+OPEN_NOW = datetime(2026, 6, 25, 10, 0, 0, tzinfo=IST)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_open_clock():
+    """Default every test in this module to mid-session on a trading day. Tests
+    that need a different 'now' call set_fake_now() themselves."""
+    set_fake_now(OPEN_NOW)
+    yield
+    set_fake_now(None)
 
 
 @pytest.fixture
@@ -52,7 +69,7 @@ def _session_status_db(session_id):
     return row["status"] if row else None
 
 
-# ── 1. when="now" fires immediately ──────────────────────────────────────────
+# ── 1. when="now" fires immediately ON A TRADING DAY DURING MARKET HOURS ───────
 
 def test_start_now_fires_immediately(clean_positions, patched_brokers):
     seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0),
@@ -79,14 +96,48 @@ def test_start_default_when_is_now(clean_positions, patched_brokers):
     assert res["n_placed"] == 1
 
 
-# ── 2. when="scheduled" with a near-future entry_time arms then fires ─────────
+# ── 2. when="now" with the MARKET CLOSED is REFUSED — places NOTHING ───────────
+
+def test_start_now_market_closed_refused(clean_positions, patched_brokers):
+    """Instant start after the bell (still a trading day) must NOT fire."""
+    set_fake_now(datetime(2026, 6, 25, 16, 0, 0, tzinfo=IST))  # after 15:30
+    seed_signals([("A", 1, 9.0, 100.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=100000.0, top_n_stocks=1,
+                               sizing_mode="equal", kill_switch_enabled=False)
+    sess = TradingSession.create(cfg, mode="paper")
+    res = asyncio.run(sess.start(when="now"))
+    assert res["status"] == "EXPIRED_MISSED_WINDOW"
+    assert res["n_placed"] == 0
+    assert sess.status()["n_open_positions"] == 0
+
+
+def test_start_now_sunday_refused(clean_positions, patched_brokers):
+    """Instant start on a Sunday must NOT fire (no order)."""
+    set_fake_now(datetime(2026, 6, 28, 11, 0, 0, tzinfo=IST))  # Sunday
+    seed_signals([("A", 1, 9.0, 100.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=100000.0, top_n_stocks=1,
+                               sizing_mode="equal", kill_switch_enabled=False)
+    sess = TradingSession.create(cfg, mode="paper")
+    res = asyncio.run(sess.start(when="now"))
+    assert res["status"] == "REJECTED_NON_TRADING_DAY"
+    assert res["n_placed"] == 0
+    assert sess.status()["n_open_positions"] == 0
+
+
+# ── 3. when="scheduled" with a near-future entry_time arms then fires ──────────
 
 def test_start_scheduled_future_arms_then_fires(clean_positions, patched_brokers):
     seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0)])
-    target = datetime.now(IST) + timedelta(seconds=2)
+    # Freeze 'now' to 10:00 on the trading day; arm the scheduler for 10:00:02 so
+    # it sleeps ~2 REAL seconds (target − frozen now), wakes, and fires through
+    # the gate (still frozen at 10:00 — market open). Deterministic.
+    frozen = datetime(2026, 6, 25, 10, 0, 0, tzinfo=IST)
+    set_fake_now(frozen)
+    target_clock = frozen + timedelta(seconds=2)
     cfg = TradingSessionConfig(total_allocated_capital=200000.0, top_n_stocks=2,
                                sizing_mode="equal", kill_switch_enabled=False,
-                               entry_time=_ist_hhmmss(target))
+                               entry_date=TRADING_DAY,
+                               entry_time=_ist_hhmmss(target_clock))
     sess = TradingSession.create(cfg, mode="paper")
 
     res = asyncio.run(sess.start(when="scheduled"))
@@ -96,18 +147,15 @@ def test_start_scheduled_future_arms_then_fires(clean_positions, patched_brokers
     assert res["seconds_remaining"] >= 0
     assert "fires_at" in res
 
-    # status() reflects SCHEDULED with the entry time + countdown.
     st = sess.status()
     assert st["status"] == "SCHEDULED"
-    assert st["entry_time"] == _ist_hhmmss(target)
+    assert st["entry_date"] == TRADING_DAY
+    assert st["is_trading_day"] is True
     assert "fires_at" in st
-    assert st["seconds_remaining"] >= 0
-    assert st["n_open_positions"] == 0
     assert entry_scheduler.is_running(sess.session_id)
 
-    # Wait for the scheduler thread to wake, flip RUNNING, AND finish placing
-    # both positions. _fire_entries() sets RUNNING before the placement loop, so
-    # we poll on the position count (the real completion signal), not status.
+    # The scheduler thread wakes at the wall-clock entry_time and fires through
+    # the gate. Its gate 'now' is the frozen fake-now (still 10:00, market open).
     deadline = time.time() + 8.0
     while time.time() < deadline:
         st2 = sess.status()
@@ -118,61 +166,97 @@ def test_start_scheduled_future_arms_then_fires(clean_positions, patched_brokers
     assert st2["status"] == "RUNNING", "scheduled session did not fire by entry_time"
     assert st2["n_open_positions"] == 2
 
-    # Scheduler self-deregisters once the fire completes.
     deadline = time.time() + 3.0
     while time.time() < deadline and entry_scheduler.is_running(sess.session_id):
         time.sleep(0.1)
     assert not entry_scheduler.is_running(sess.session_id)
 
 
-# ── 3. when="scheduled" with a PAST entry_time fires immediately + note ───────
+# ── 4. when="scheduled" with a PAST target BEYOND GRACE → EXPIRED, no order ────
 
-def test_start_scheduled_past_fires_immediately(clean_positions, patched_brokers):
+def test_start_scheduled_past_beyond_grace_expires(clean_positions, patched_brokers):
+    """The dangerous 'fire immediately if past' is REPLACED: a target long past
+    (beyond entry_grace_seconds) on a trading day must EXPIRE, not fire."""
+    set_fake_now(OPEN_NOW)  # 10:00
     seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0)])
-    past = datetime.now(IST) - timedelta(minutes=5)
     cfg = TradingSessionConfig(total_allocated_capital=200000.0, top_n_stocks=2,
                                sizing_mode="equal", kill_switch_enabled=False,
-                               entry_time=_ist_hhmmss(past))
+                               entry_date=TRADING_DAY,
+                               entry_time="09:15:00",  # 45min before now → missed
+                               on_missed_window="expire",
+                               entry_grace_seconds=120)
     sess = TradingSession.create(cfg, mode="paper")
+    res = asyncio.run(sess.start(when="scheduled"))
+    assert res["status"] == "EXPIRED_MISSED_WINDOW"
+    assert res["n_placed"] == 0
+    assert not entry_scheduler.is_running(sess.session_id)
+    assert sess.status()["n_open_positions"] == 0
 
+
+def test_start_scheduled_past_within_grace_and_open_fires(clean_positions,
+                                                          patched_brokers):
+    """A target just past (within grace), still the same trading day + market
+    open → FIRES."""
+    set_fake_now(datetime(2026, 6, 25, 10, 0, 30, tzinfo=IST))  # 30s past 10:00
+    seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=200000.0, top_n_stocks=2,
+                               sizing_mode="equal", kill_switch_enabled=False,
+                               entry_date=TRADING_DAY,
+                               entry_time="10:00:00",  # 30s ago, within 120s grace
+                               on_missed_window="expire",
+                               entry_grace_seconds=120)
+    sess = TradingSession.create(cfg, mode="paper")
     res = asyncio.run(sess.start(when="scheduled"))
     assert res["status"] == "RUNNING"
     assert res["n_placed"] == 2
-    assert "note" in res
-    assert "already passed" in res["note"].lower()
-    assert not entry_scheduler.is_running(sess.session_id)
     assert sess.status()["n_open_positions"] == 2
 
 
-# ── 4. cancel/kill a SCHEDULED session stops it + places nothing ──────────────
+# ── 5. carry_next_trading_day rolls a missed window to the next trading day ────
+
+def test_start_scheduled_missed_carries_to_next_day(clean_positions,
+                                                    patched_brokers):
+    set_fake_now(OPEN_NOW)  # 10:00, target 09:15 already missed
+    seed_signals([("A", 1, 9.0, 100.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=100000.0, top_n_stocks=1,
+                               sizing_mode="equal", kill_switch_enabled=False,
+                               entry_date=TRADING_DAY,
+                               entry_time="09:15:00",
+                               on_missed_window="carry_next_trading_day")
+    sess = TradingSession.create(cfg, mode="paper")
+    res = asyncio.run(sess.start(when="scheduled"))
+    assert res["status"] == "SCHEDULED"
+    assert res["n_placed"] == 0
+    # 2026-06-25 Thu → next trading day is 2026-06-26 Fri.
+    assert res["entry_date"] == "2026-06-26"
+
+
+# ── 6. cancel/kill a SCHEDULED session stops it + places nothing ──────────────
 
 def test_kill_scheduled_session_places_nothing(clean_positions, patched_brokers):
+    set_fake_now(OPEN_NOW)
     seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0)])
-    target = datetime.now(IST) + timedelta(seconds=30)  # far enough out
     cfg = TradingSessionConfig(total_allocated_capital=200000.0, top_n_stocks=2,
                                sizing_mode="equal", kill_switch_enabled=False,
-                               entry_time=_ist_hhmmss(target))
+                               entry_date=TRADING_DAY,
+                               entry_time="14:00:00")  # future vs 10:00
     sess = TradingSession.create(cfg, mode="paper")
     asyncio.run(sess.start(when="scheduled"))
     assert sess.status()["status"] == "SCHEDULED"
     assert entry_scheduler.is_running(sess.session_id)
 
     res = asyncio.run(sess.kill(reason="OPERATOR"))
-    # Nothing was open, so nothing was exited.
     assert res["n_positions"] == 0
 
     st = sess.status()
     assert st["status"] == "CLOSED"
     assert st["n_open_positions"] == 0
 
-    # Scheduler stopped; give the thread a moment to wind down.
     deadline = time.time() + 3.0
     while time.time() < deadline and entry_scheduler.is_running(sess.session_id):
         time.sleep(0.1)
     assert not entry_scheduler.is_running(sess.session_id)
 
-    # Wait past where the original target would have been short-circuited and
-    # confirm NO positions ever landed in autotrade_positions.
     from falcon.db import falcon_conn
     with falcon_conn() as con:
         n = con.execute(
@@ -181,10 +265,11 @@ def test_kill_scheduled_session_places_nothing(clean_positions, patched_brokers)
     assert n == 0
 
 
-# ── 5. regression: scheduled fire leaves falcon_position_state untouched ──────
+# ── 7. regression: scheduled fire leaves falcon_position_state untouched ──────
 
 def test_scheduled_fire_does_not_touch_falcon_position_state(clean_positions,
                                                              patched_brokers):
+    set_fake_now(datetime(2026, 6, 25, 10, 0, 30, tzinfo=IST))
     from falcon.db import falcon_conn
     with falcon_conn() as con:
         con.execute(
@@ -195,22 +280,15 @@ def test_scheduled_fire_does_not_touch_falcon_position_state(clean_positions,
         con.commit()
 
     seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0)])
-    target = datetime.now(IST) + timedelta(seconds=2)
     cfg = TradingSessionConfig(total_allocated_capital=200000.0, top_n_stocks=2,
                                sizing_mode="equal", kill_switch_enabled=False,
-                               entry_time=_ist_hhmmss(target))
+                               entry_date=TRADING_DAY,
+                               entry_time="10:00:00",  # within grace of 10:00:30
+                               entry_grace_seconds=120)
     sess = TradingSession.create(cfg, mode="paper")
-    asyncio.run(sess.start(when="scheduled"))
+    res = asyncio.run(sess.start(when="scheduled"))
+    assert res["status"] == "RUNNING"
 
-    deadline = time.time() + 8.0
-    while time.time() < deadline:
-        if (_session_status_db(sess.session_id) == "RUNNING"
-                and sess.status()["n_open_positions"] == 2):
-            break
-        time.sleep(0.1)
-    assert _session_status_db(sess.session_id) == "RUNNING"
-
-    # Session positions in autotrade_positions only.
     with falcon_conn() as con:
         at = con.execute(
             "SELECT symbol FROM autotrade_positions WHERE session_id=?",
@@ -221,7 +299,6 @@ def test_scheduled_fire_does_not_touch_falcon_position_state(clean_positions,
         total_fp = con.execute(
             "SELECT COUNT(*) FROM falcon_position_state").fetchone()[0]
     assert len(at) == 2
-    # Pre-existing Falcon swing row untouched.
     assert fp["qty"] == 999
     assert abs(fp["avg_entry"] - 55.5) < 1e-9
     assert fp["managed_by"] == "falcon"

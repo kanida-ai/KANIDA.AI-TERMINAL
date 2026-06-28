@@ -19,13 +19,25 @@ import pytest
 
 import autotrade.broker.router as router_mod
 from autotrade.config import TradingSessionConfig
-from autotrade.session import TradingSession
+from autotrade.session import TradingSession, set_fake_now
 from autotrade.monitoring import entry_scheduler, tick_driver
 from autotrade import recovery
 from tests.autotrade.conftest import seed_signals
 from tests.autotrade.mock_broker import MockBroker
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+TRADING_DAY = "2026-06-25"          # Thursday NSE trading day
+OPEN_NOW = datetime(2026, 6, 25, 10, 0, 0, tzinfo=IST)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_open_clock():
+    """Default recovery tests to mid-session on a trading day; per-test override
+    via set_fake_now()."""
+    set_fake_now(OPEN_NOW)
+    yield
+    set_fake_now(None)
 
 
 @pytest.fixture
@@ -100,10 +112,10 @@ def test_resume_running_rearms_tick_driver(clean_positions, patched_brokers):
 
 def test_resume_scheduled_future_rearms_scheduler(clean_positions, patched_brokers):
     seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0)])
-    target = datetime.now(IST) + timedelta(seconds=30)  # far enough out
+    # Future trading-day target (14:00 vs frozen 10:00) so resume re-arms, not fires.
     cfg = TradingSessionConfig(total_allocated_capital=200000.0, top_n_stocks=2,
                                sizing_mode="equal", kill_switch_enabled=False,
-                               entry_time=_ist_hhmmss(target))
+                               entry_date=TRADING_DAY, entry_time="14:00:00")
     sess = TradingSession.create(cfg, mode="paper")
     asyncio.run(sess.start(when="scheduled"))
     assert _session_status_db(sess.session_id) == "SCHEDULED"
@@ -126,43 +138,55 @@ def test_resume_scheduled_future_rearms_scheduler(clean_positions, patched_broke
     entry_scheduler.stop_for_session(sess.session_id)
 
 
-# ── 4. SCHEDULED past-due → fired now ─────────────────────────────────────────
+# ── 4. SCHEDULED past-due WITHIN GRACE + market open → fired now ──────────────
 
 def test_resume_scheduled_pastdue_fires_now(clean_positions, patched_brokers):
+    """A session whose target is just past (within grace) on the SAME trading
+    day with the market open → recovery fires it (it didn't miss the window)."""
+    set_fake_now(datetime(2026, 6, 25, 10, 0, 30, tzinfo=IST))  # 30s past target
     seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0)])
-    # Build a SCHEDULED session with a FUTURE time so start() arms it cleanly,
-    # then rewrite config_json to a PAST time to simulate "entry_time passed
-    # while the backend was down".
-    target = datetime.now(IST) + timedelta(seconds=30)
     cfg = TradingSessionConfig(total_allocated_capital=200000.0, top_n_stocks=2,
                                sizing_mode="equal", kill_switch_enabled=False,
-                               entry_time=_ist_hhmmss(target))
+                               entry_date=TRADING_DAY, entry_time="10:00:00",
+                               entry_grace_seconds=120)
     sess = TradingSession.create(cfg, mode="paper")
-    asyncio.run(sess.start(when="scheduled"))
-    assert _session_status_db(sess.session_id) == "SCHEDULED"
-
-    # Simulate restart: stop scheduler thread, then set entry_time to the past.
-    entry_scheduler.stop_for_session(sess.session_id)
-    past = datetime.now(IST) - timedelta(minutes=5)
-    cfg.entry_time = _ist_hhmmss(past)
-    from falcon.db import falcon_conn
-    with falcon_conn() as con:
-        con.execute("UPDATE autotrade_sessions SET config_json=? WHERE session_id=?",
-                    (cfg.to_json(), sess.session_id))
-        con.commit()
+    # Persist as SCHEDULED to simulate a session that was scheduled before the
+    # restart (recovery only scans RUNNING/SCHEDULED).
+    sess._set_status("SCHEDULED")
 
     summary = recovery.resume_active_sessions()
     assert summary["scheduled"] == 1
     assert summary["fired"] == 1
-    # Fired now → RUNNING with both positions placed.
     assert _session_status_db(sess.session_id) == "RUNNING"
     assert sess.status()["n_open_positions"] == 2
+
+
+# ── 4b. SCHEDULED comes back up on a NON-TRADING DAY → NO fire ────────────────
+
+def test_resume_on_non_trading_day_does_not_fire(clean_positions, patched_brokers):
+    """Restart on a Sunday: a SCHEDULED session must NOT fire — recovery defers
+    it to the next trading day's resolved target (entry_date unset → resolve)."""
+    set_fake_now(datetime(2026, 6, 28, 11, 0, 0, tzinfo=IST))  # Sunday
+    seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=200000.0, top_n_stocks=2,
+                               sizing_mode="equal", kill_switch_enabled=False,
+                               entry_time="09:15:00")  # entry_date unset
+    sess = TradingSession.create(cfg, mode="paper")
+    sess._set_status("SCHEDULED")
+
+    summary = recovery.resume_active_sessions()
+    assert summary["fired"] == 0
+    assert _session_status_db(sess.session_id) == "SCHEDULED"
+    assert sess.status()["n_open_positions"] == 0
+    # Cleanup the re-armed scheduler thread.
+    entry_scheduler.stop_for_session(sess.session_id)
 
 
 # ── 5. regression: recovery leaves falcon_position_state untouched ────────────
 
 def test_resume_does_not_touch_falcon_position_state(clean_positions,
                                                      patched_brokers):
+    set_fake_now(datetime(2026, 6, 25, 10, 0, 30, tzinfo=IST))
     from falcon.db import falcon_conn
     with falcon_conn() as con:
         con.execute(
@@ -173,20 +197,13 @@ def test_resume_does_not_touch_falcon_position_state(clean_positions,
         con.commit()
 
     seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0)])
-    # A past-due SCHEDULED session → recovery FIRES it (exercises the write path).
-    target = datetime.now(IST) + timedelta(seconds=30)
+    # A past-due (within grace) SCHEDULED session → recovery FIRES it.
     cfg = TradingSessionConfig(total_allocated_capital=200000.0, top_n_stocks=2,
                                sizing_mode="equal", kill_switch_enabled=False,
-                               entry_time=_ist_hhmmss(target))
+                               entry_date=TRADING_DAY, entry_time="10:00:00",
+                               entry_grace_seconds=120)
     sess = TradingSession.create(cfg, mode="paper")
-    asyncio.run(sess.start(when="scheduled"))
-    entry_scheduler.stop_for_session(sess.session_id)
-    past = datetime.now(IST) - timedelta(minutes=5)
-    cfg.entry_time = _ist_hhmmss(past)
-    with falcon_conn() as con:
-        con.execute("UPDATE autotrade_sessions SET config_json=? WHERE session_id=?",
-                    (cfg.to_json(), sess.session_id))
-        con.commit()
+    sess._set_status("SCHEDULED")
 
     recovery.resume_active_sessions()
 
