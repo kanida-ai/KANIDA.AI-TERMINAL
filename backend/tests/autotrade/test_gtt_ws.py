@@ -288,10 +288,18 @@ def test_gtt_fill_marks_closed_and_recomputes(clean_positions):
             "SELECT status, close_reason FROM autotrade_positions "
             "WHERE session_id=? AND symbol='A'", (sid,)).fetchone()
     assert row["status"] == "CLOSED" and row["close_reason"] == "GTT"
-    # gross recomputes on the REMAINDER (B only); denominator unchanged.
+    # gross recomputes on the REMAINDER (B open) + CLOSED A realised P&L.
+    # Fix-1: compute_gross_return now includes realised_pnl from CLOSED rows.
+    # A fired at broker.ltps["A"] = 100.0 (MockBroker's fire_gtt fills at ltps,
+    # not at the updated reg ltp). So realised = (100-100)*100 = 0.
+    # B still open: uPnL = (210-200)*50 = +500.
+    # Total PnL = 0 + 500 = 500; denominator = cap.
     gr_after = mon.compute_gross_return()
     assert mon.total_allocated_capital == cap
-    assert abs(gr_after - (500.0 / cap)) < 1e-9
+    assert abs(gr_after - (500.0 / cap)) < 1e-9, (
+        f"Expected 500/{cap:.0f}={500.0/cap:.6f}, got {gr_after:.6f}. "
+        "A was filled at broker.ltps=100 (avg=100) → realised=0; "
+        "only B open uPnL (+500) flows through.")
     assert gr_after < gr_before
 
 

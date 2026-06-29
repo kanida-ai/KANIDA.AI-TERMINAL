@@ -60,6 +60,15 @@ def test_gross_return_formula(clean_positions):
 # ── Addendum: denominator stays total_allocated_capital after a per-pos exit ──
 
 def test_denominator_unchanged_after_position_exit(clean_positions):
+    """Denominator (total_allocated_capital) stays frozen when a position closes.
+
+    Fix-1 note: compute_gross_return() now includes realised P&L from CLOSED
+    positions so the total PnL is correctly tracked. When C closes at its current
+    ltp (110 = exit price via COALESCE(exit_price, ltp)), the realised_pnl =
+    (110-100)*100 = 1000, which exactly replaces C's unrealised contribution —
+    so gr_after == gr_before (the portfolio's true return is unchanged when you
+    capture the same profit). The denominator (total_allocated_capital) is frozen.
+    """
     sid = _session_id()
     cap = 500000.0
     _make_session_row(sid, cap)
@@ -71,13 +80,29 @@ def test_denominator_unchanged_after_position_exit(clean_positions):
         reg.update_ltp(s, l)
     mon = PortfolioMonitor(sid, cap)
     gr_before = mon.compute_gross_return()
-    # trailing stop closes C
+    # trailing stop closes C at ltp=110 (realised = (110-100)*100 = +1000).
     reg.mark_closed("C", "TRAILING_STOP")
     gr_after = mon.compute_gross_return()
-    assert mon.total_allocated_capital == cap     # denominator frozen
-    assert gr_after < gr_before                    # numerator shrank only
-    # numerator dropped by exactly C's uPnL (1000) / cap
-    assert abs((gr_before - gr_after) - (1000.0 / cap)) < 1e-9
+    assert mon.total_allocated_capital == cap     # denominator frozen (critical)
+    # Fix-1: with realised P&L included, closing at exact ltp captures the profit
+    # so total PnL is unchanged. gr_after == gr_before (not < gr_before).
+    # The key safety property is that the DENOMINATOR is frozen, not that the
+    # return shrinks on exit (it shouldn't if we captured the gain).
+    assert abs(gr_after - gr_before) < 1e-9, (
+        "gross_return should be unchanged when C closes at its ltp "
+        "(realised P&L replaces the unrealised P&L exactly)")
+
+    # Verify by closing C at a LOSS (below avg_price): total PnL DOES shrink.
+    # Directly write a realised loss to test that path.
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        con.execute(
+            "UPDATE autotrade_positions SET realised_pnl=-500.0 "
+            "WHERE session_id=? AND symbol='C'", (sid,))
+        con.commit()
+    gr_loss = mon.compute_gross_return()
+    assert gr_loss < gr_before, (
+        "gross_return must decrease when a position closes at a loss")
 
 
 # ── Parity check: parallel kill < 500ms with a 500ms-per-broker mock ─────────

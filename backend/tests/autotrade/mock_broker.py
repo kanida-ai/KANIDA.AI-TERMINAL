@@ -119,7 +119,32 @@ class MockBroker(BrokerClient):
             return None
         return self.gtt_states.get(gtt_id)
 
-    def fire_gtt(self, gtt_id):
-        """Test helper: simulate the broker triggering a GTT (position sold)."""
-        if gtt_id in self.gtt_states:
-            self.gtt_states[gtt_id]["status"] = "triggered"
+    def fire_gtt(self, gtt_id, avg_price: float = 0.0, qty: int = 0):
+        """Test helper: simulate the broker triggering a GTT (position sold).
+
+        Now includes an 'orders' list with a COMPLETE SELL leg so that
+        GTTManager._gtt_execution_result() confirms the fill and marks the
+        position CLOSED. avg_price defaults to the position's LTP if 0.
+
+        Without this, the new conservative check in _gtt_execution_result would
+        treat 'triggered + no orders' as 'pending' (safe default), which was the
+        correct pre-fix behaviour but breaks existing tests that expect a close.
+        """
+        if gtt_id not in self.gtt_states:
+            return
+        # Resolve a default price if not provided.
+        gtt_info = next((g for g in self.gtts if g["gtt_id"] == gtt_id), {})
+        symbol = gtt_info.get("symbol", "")
+        fill_price = avg_price if avg_price > 0 else float(self.ltps.get(symbol, 100.0))
+        fill_qty = qty if qty > 0 else int(gtt_info.get("qty", 1))
+        self.gtt_states[gtt_id] = {
+            "status": "triggered",
+            "orders": [
+                {
+                    "transaction_type": "SELL",
+                    "status": "COMPLETE",
+                    "quantity": fill_qty,
+                    "average_price": fill_price,
+                }
+            ],
+        }

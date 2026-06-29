@@ -191,9 +191,16 @@ def test_gross_return_from_isolated_table_frozen_denominator(clean_positions,
     assert abs(gr - (10000.0 / cap)) < 1e-9
     assert sess.monitor.total_allocated_capital == cap
     # Denominator frozen even after closing a position.
+    # Fix-1: compute_gross_return() includes realised P&L. mark_closed at ltp=110
+    # captures realised_pnl = (110-100)*500 = 5000. Total PnL unchanged → gr same.
     sess.registry.mark_closed("A", "TRAILING_STOP")
     assert sess.monitor.total_allocated_capital == cap
-    assert sess.monitor.compute_gross_return() < gr
+    # Closing at ltp means realised exactly replaces unrealised — gr is unchanged.
+    assert abs(sess.monitor.compute_gross_return() - gr) < 1e-9, (
+        "gross_return should be unchanged when A closes at its ltp "
+        "(realised P&L replaces unrealised; denominator stays cap)")
+    # The denominator is frozen regardless.
+    assert sess.monitor.total_allocated_capital == cap
 
 
 def test_kill_switch_autofires_via_tick_driver(clean_positions, patched_brokers):

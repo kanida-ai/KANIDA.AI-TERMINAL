@@ -59,6 +59,7 @@ from .monitoring.registry import PositionRegistry
 from .monitoring.monitor import PortfolioMonitor, compute_kill_preview
 from .monitoring.kill_switch import KillSwitchExecutor
 from .monitoring.gtt_manager import GTTManager
+from . import exit_gate as _exit_gate_mod
 from .monitoring import tick_driver
 from .monitoring import entry_scheduler
 from .monitoring import fire_guard
@@ -422,6 +423,80 @@ def preview_session_sizing(config: TradingSessionConfig,
             invested_basis=basis,
             total_allocated_capital=total_alloc),
     }
+
+
+async def _exit_single_position(
+        session_id: str,
+        position: Dict[str, Any],
+        reason: str,
+        brokers: Dict[str, Any],
+        registry: Any,
+        gtt_manager: Any,
+) -> Dict[str, Any]:
+    """Our backend directly exits one position (per-stock software stop).
+
+    Sequence:
+      1. Claim the exit via the session-scoped exit gate (prevents double-fire
+         with the portfolio kill switch or a concurrent GTT reconcile).
+      2. Cancel the position's GTT best-effort BEFORE placing the sell, so the
+         broker-held backup can't re-fire after we flatten.
+      3. Place a market sell via the position's broker.
+      4. Mark CLOSED (with the confirmed fill price) or EXIT_FAILED on error.
+
+    Reuses the same exit_gate.claim_exit_session / registry.mark_closed /
+    registry.mark_exit_failed patterns as kill_switch.fire().
+    Returns a result dict with at least {"symbol", "status"}.
+    """
+    symbol = position["symbol"]
+    prof_id = position.get("broker_profile")
+    broker = brokers.get(prof_id) or next(iter(brokers.values()), None)
+    if broker is None:
+        log.warning("per-stock stop %s/%s: no broker found — skip", session_id, symbol)
+        return {"symbol": symbol, "status": "NO_BROKER"}
+
+    # 1. Claim the exit gate so no other path double-fires this position.
+    if not _exit_gate_mod.claim_exit_session(session_id, symbol, reason):
+        log.info("per-stock stop %s/%s: exit already claimed — skip",
+                 session_id, symbol)
+        return {"symbol": symbol, "status": "BLOCKED"}
+
+    # 2. Cancel the broker GTT for this position (best-effort, never block exit).
+    gtt_id = position.get("gtt_id")
+    if gtt_manager and gtt_id:
+        try:
+            await asyncio.to_thread(broker.cancel_gtt, gtt_id)
+            log.info("per-stock stop %s/%s: GTT %s cancelled", session_id, symbol, gtt_id)
+        except Exception as e:
+            log.warning("per-stock stop %s/%s: GTT cancel failed (%s): %s",
+                        session_id, symbol, gtt_id, e)
+
+    # 3. Place the market sell.
+    qty = int(position.get("qty") or 0)
+    itype = position.get("instrument_type") or "EQ"
+    try:
+        res = await broker.place_market_exit(symbol, qty, itype)
+    except Exception as e:
+        log.error("per-stock stop %s/%s: place_market_exit raised: %s",
+                  session_id, symbol, e)
+        registry.mark_exit_failed(symbol, str(e), broker_profile=prof_id)
+        return {"symbol": symbol, "status": "EXIT_FAILED", "error": str(e)}
+
+    # 4. Handle the result.
+    if res is not None and getattr(res, "status", None) not in (None, "FAILED"):
+        # Use fill price from the result if available, else fall back to current ltp.
+        exit_price = getattr(res, "avg_price", None) or position.get("ltp")
+        registry.mark_closed(symbol, reason, exit_price=exit_price,
+                             broker_profile=prof_id)
+        log.warning("per-stock stop FIRED %s/%s (reason=%s) exit_price=%s",
+                    session_id, symbol, reason, exit_price)
+        return {"symbol": symbol, "status": "EXITED", "reason": reason,
+                "exit_price": exit_price,
+                "broker_order_id": getattr(res, "broker_order_id", None)}
+    else:
+        err = getattr(res, "error", None) or "exit failed"
+        registry.mark_exit_failed(symbol, err, broker_profile=prof_id)
+        log.error("per-stock stop EXIT_FAILED %s/%s: %s", session_id, symbol, err)
+        return {"symbol": symbol, "status": "EXIT_FAILED", "error": err}
 
 
 class TradingSession:
@@ -999,8 +1074,44 @@ class TradingSession:
         (kill_switch.fire) passing the trail reason through as close_reason. State
         changes (arm / peak ratchet) are persisted on autotrade_sessions so a
         restart resumes the trail mid-day. Square-off is enforced defensively here
-        even if the timer thread was dropped by a restart."""
+        even if the timer thread was dropped by a restart.
+
+        PER-STOCK SOFTWARE STOP: before running the portfolio trail engine, each
+        open position is checked against config.stop_pct. If a single stock
+        has fallen more than stop_pct from its entry, OUR backend exits just that
+        position (cancel its GTT first, then market sell). The GTT at -3% remains
+        the broker-held backup; our software stop fires earlier (default -1.5%).
+        After per-stock exits the trail engine runs on the remaining positions."""
         from .monitoring import trail_engine
+
+        # PER-STOCK SOFTWARE STOP LOOP.
+        # Runs BEFORE the portfolio-level trail engine so the trail sees the
+        # updated (smaller) basket on this same tick.
+        per_stock_exits: List[Dict[str, Any]] = []
+        try:
+            stop_pct = float(getattr(self.config, "stop_pct", 0.015))
+            open_positions = self.monitor._open_positions()
+            for pos in open_positions:
+                ltp = pos.get("ltp")
+                avg_price = float(pos.get("avg_price") or 0)
+                if ltp is None or avg_price <= 0:
+                    continue
+                stock_return = (float(ltp) - avg_price) / avg_price
+                if stock_return <= -stop_pct:
+                    result = await _exit_single_position(
+                        session_id=self.session_id,
+                        position=pos,
+                        reason="STOP_STOCK",
+                        brokers=self.brokers,
+                        registry=self.registry,
+                        gtt_manager=self.gtt_manager,
+                    )
+                    per_stock_exits.append(result)
+                    log.warning(
+                        "per-stock stop TRIGGERED %s/%s: return=%.4f <= -%.4f",
+                        self.session_id, pos["symbol"], stock_return, stop_pct)
+        except Exception as e:  # never block the tick on per-stock stop errors
+            log.error("per-stock stop loop error for %s: %s", self.session_id, e)
 
         state = self.monitor.load_trail_state()
         params = trail_engine.params_from_config(self.config)
@@ -1033,7 +1144,8 @@ class TradingSession:
                 "trail_trigger": decision.trigger,
                 "kill_switch_fired": bool(fired),
                 "kill_reason": reason, "fire_result": fired,
-                "gtt_closed": gtt_closed}
+                "gtt_closed": gtt_closed,
+                "per_stock_exits": per_stock_exits}
 
     # ── Manual kill ────────────────────────────────────────────────────────────
     async def kill(self, reason: str = "MANUAL") -> Dict[str, Any]:
