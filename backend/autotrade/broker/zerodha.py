@@ -31,10 +31,45 @@ class ZerodhaBroker(BrokerClient):
     # ── lazy kite client (only when we actually need it) ──────────────────────
     @property
     def kite(self):
+        """The authenticated KiteConnect for THIS adapter.
+
+        PHASE-2 MULTI-TENANT: if the profile carries account-bound creds
+        (api_key + access_token, populated from the vault at session-build time
+        OR a non-null broker_account_id), build a DEDICATED proxy-aware
+        KiteConnect for that account — NO process-global state, so two concurrent
+        sessions on different accounts never cross-contaminate. When the profile
+        has NO account creds (broker_account_id is None), fall back to the
+        PROCESS-GLOBAL get_kite_client() = today's operator path, byte-for-byte.
+        """
         if self._kite is None:
-            from services.kite_auth import get_kite_client
-            self._kite = get_kite_client(check=False)
+            self._kite = self._build_kite()
         return self._kite
+
+    def _build_kite(self):
+        prof = self.profile
+        api_key = getattr(prof, "api_key", "") or ""
+        access_token = getattr(prof, "access_token", "") or ""
+        bound = getattr(prof, "broker_account_id", None)
+        # Per-account path: explicit creds supplied (vault-resolved) → build a
+        # dedicated client. Requires BOTH api_key and access_token; a bound
+        # account missing a token is a real error (caller should re-login), but
+        # we surface it as a KiteAuthError-style ValueError rather than silently
+        # using the operator's global token (which would trade the WRONG account).
+        if bound is not None:
+            if not api_key or not access_token:
+                raise ValueError(
+                    f"broker_account {bound}: api_key/access_token not resolved "
+                    "(vault disabled, account missing, or token expired — "
+                    "re-connect the account)")
+            from services.kite_auth import _new_kite  # proxy-aware constructor
+            kite = _new_kite(api_key)
+            kite.set_access_token(access_token)
+            log.info("zerodha: built per-account KiteConnect for account %s",
+                     bound)
+            return kite
+        # Legacy / operator path: process-global client (env + kite_tokens).
+        from services.kite_auth import get_kite_client
+        return get_kite_client(check=False)
 
     def _live_allowed(self) -> bool:
         """Real orders require dry_run off AND the master env switch on."""

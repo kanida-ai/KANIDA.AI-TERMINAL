@@ -29,6 +29,12 @@ This module ADDS the following without touching any existing table definition:
   * autotrade_slippage          — per-fill slippage record
   * autotrade_portfolio_snapshots — periodic gross_return snapshots
   * autotrade_kill_switch_log   — kill-switch fire audit
+  * broker_accounts             — PHASE-2 multi-tenant credential vault
+                                  (per user×broker×account; Fernet-encrypted)
+  * autotrade_sessions.user_id / .broker_account_id  (TEXT, NULLABLE) — bind a
+                                  session to a portal user + vaulted account;
+                                  NULL = operator/global creds path (today)
+  * autotrade_positions.broker_account_id  (TEXT, NULLABLE) — per-account audit
 """
 from __future__ import annotations
 
@@ -133,6 +139,27 @@ def run_migrations() -> dict:
                         f"ADD COLUMN {name} {ddl_type}{default_clause}")
                     added_cols.append(name)
 
+        # ── 2e-mt. PHASE-2 MULTI-TENANT scoping columns (additive, NULLABLE) ──
+        # user_id + broker_account_id on autotrade_sessions bind a session to a
+        # portal user and a specific vaulted broker account. BOTH default NULL →
+        # a NULL on either behaves EXACTLY as today (operator/global creds path).
+        # Existing sessions (no user_id/broker_account_id) are byte-for-byte
+        # unaffected. broker_account_id on autotrade_positions carries the bound
+        # account onto each position for per-account audit (also NULLABLE).
+        if _table_exists(con, "autotrade_sessions"):
+            have = set(_existing_columns(con, "autotrade_sessions"))
+            for name in ("user_id", "broker_account_id"):
+                if name not in have:
+                    con.execute(
+                        f"ALTER TABLE autotrade_sessions ADD COLUMN {name} TEXT")
+                    added_cols.append(name)
+        if _table_exists(con, "autotrade_positions"):
+            have = set(_existing_columns(con, "autotrade_positions"))
+            if "broker_account_id" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_positions ADD COLUMN broker_account_id TEXT")
+                added_cols.append("broker_account_id")
+
         # ── 2e. ALTER-guard the SPEED-PASS latency observability columns ──────
         # entry_latency_ms: fire start → all legs settled (asyncio.gather done).
         # exit_latency_ms: flatten trigger → all positions flat. Persisted so the
@@ -152,6 +179,7 @@ def run_migrations() -> dict:
             "autotrade_sessions", "autotrade_config_presets",
             "autotrade_broker_profiles", "autotrade_slippage",
             "autotrade_portfolio_snapshots", "autotrade_kill_switch_log",
+            "broker_accounts",
         ):
             if _table_exists(con, t):
                 created_tables.append(t)
@@ -288,6 +316,34 @@ CREATE TABLE IF NOT EXISTS autotrade_portfolio_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_autotrade_snap_session
     ON autotrade_portfolio_snapshots(session_id, snapped_at DESC);
+
+-- PHASE-2 MULTI-TENANT credential vault. One row per (user, broker, account).
+-- api_secret_enc / access_token_enc are FERNET-ENCRYPTED at rest (the key lives
+-- outside the DB, via vault.KeyProvider). Secrets are NEVER returned over any
+-- API (only status + masked previews). A user holds MANY accounts via distinct
+-- account_label values; UNIQUE(user_id,broker,account_label) blocks dup labels
+-- but allows unlimited accounts. Per-user isolation: every read is WHERE
+-- user_id=?. This table is INDEPENDENT of the legacy kite_tokens table (which
+-- the legacy /falcon path keeps using untouched).
+CREATE TABLE IF NOT EXISTS broker_accounts (
+    broker_account_id TEXT PRIMARY KEY,           -- uuid4 hex (stable handle)
+    user_id           TEXT NOT NULL,              -- portal user
+    broker            TEXT NOT NULL,              -- zerodha|upstox|angel|dhan|fyers
+    account_label     TEXT NOT NULL,              -- user-chosen, e.g. "Main Kite"
+    api_key           TEXT NOT NULL,              -- broker app api_key
+    api_secret_enc    BLOB,                       -- Fernet-ENCRYPTED api_secret
+    access_token_enc  BLOB,                       -- Fernet-ENCRYPTED access_token
+    token_date        TEXT,                       -- IST date the token was minted
+    token_expiry      TEXT,                       -- ISO IST expiry (broker-specific)
+    status            TEXT NOT NULL DEFAULT 'PENDING',
+        -- PENDING | ACTIVE | EXPIRED | REVOKED | ERROR
+    created_at        TEXT NOT NULL,              -- ISO IST
+    updated_at        TEXT,
+    last_login_at     TEXT,
+    UNIQUE (user_id, broker, account_label)
+);
+CREATE INDEX IF NOT EXISTS idx_broker_accounts_user
+    ON broker_accounts(user_id, status);
 
 -- Kill-switch fire audit.
 CREATE TABLE IF NOT EXISTS autotrade_kill_switch_log (

@@ -34,11 +34,16 @@ class PositionRegistry:
                  instrument_type: str = "EQ", exchange: Optional[str] = None,
                  sl_level: Optional[float] = None,
                  target_price: Optional[float] = None,
-                 entry_date: Optional[str] = None) -> None:
+                 entry_date: Optional[str] = None,
+                 broker_account_id: Optional[str] = None) -> None:
         """Insert or update a session position in autotrade_positions.
 
         Keyed by (session_id, symbol, broker_profile). Seeds the mark (ltp) to
         avg_price so a pre-open gross_return ~= 0 rather than a bogus value.
+
+        PHASE-2 MULTI-TENANT: broker_account_id (NULLABLE) records WHICH vaulted
+        account this position was opened through, for per-account audit. NULL =
+        the operator/global account (today's behaviour).
         """
         now = datetime.now(IST).isoformat()
         with falcon_conn() as con:
@@ -63,26 +68,29 @@ class PositionRegistry:
             else:
                 con.execute(
                     """INSERT INTO autotrade_positions
-                       (session_id, broker_profile, symbol, instrument_type,
-                        exchange, qty, avg_price, sl_level, target_price, ltp,
-                        unrealised_pnl, status, exit_lock, opened_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?, 'OPEN', 0, ?)""",
-                    (self.session_id, broker_profile, symbol, instrument_type,
-                     exchange, qty, avg_price, sl_level, target_price, avg_price,
-                     0.0, now),
+                       (session_id, broker_profile, broker_account_id, symbol,
+                        instrument_type, exchange, qty, avg_price, sl_level,
+                        target_price, ltp, unrealised_pnl, status, exit_lock,
+                        opened_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN', 0, ?)""",
+                    (self.session_id, broker_profile, broker_account_id, symbol,
+                     instrument_type, exchange, qty, avg_price, sl_level,
+                     target_price, avg_price, 0.0, now),
                 )
             con.commit()
 
     def register_partial(self, symbol: str, broker_profile: str,
                          filled_qty: int, avg_price: float,
                          product: str = "CNC",
-                         instrument_type: str = "EQ") -> None:
+                         instrument_type: str = "EQ",
+                         broker_account_id: Optional[str] = None) -> None:
         """Partial fill: register the FILLED qty (spec parity check #3 — 80 not
         0/100)."""
         log.warning("Partial fill registered: %s filled=%d", symbol, filled_qty)
         self.register(symbol=symbol, broker_profile=broker_profile,
                       qty=filled_qty, avg_price=avg_price, product=product,
-                      instrument_type=instrument_type)
+                      instrument_type=instrument_type,
+                      broker_account_id=broker_account_id)
 
     # ── Reads ─────────────────────────────────────────────────────────────────
     def get_open_positions(self) -> List[Dict[str, Any]]:
