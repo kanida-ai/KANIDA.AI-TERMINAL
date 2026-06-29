@@ -1,5 +1,9 @@
 """AutoTrade REST endpoints (spec Section 9).
 
+Includes:
+  GET /autotrade/session/{id}/journal   — Daily Trade Journal (BUILD 2)
+
+
 All 9 endpoints are AUTH-GATED with the SAME operator-token dependency the
 Falcon trade router uses (require_operator_token / X-Operator-Token), imported
 directly from that router so the gate stays identical (fail-closed if
@@ -39,6 +43,7 @@ from .. import config as cfgmod
 from ..config import TradingSessionConfig
 from ..session import TradingSession, preview_session_sizing
 from ..monitoring import tick_driver, entry_scheduler
+from .journal_routes import build_journal
 
 log = logging.getLogger("kanida.autotrade.api")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -275,6 +280,18 @@ def session_positions(session_id: str):
     if not sess:
         raise HTTPException(404, "session not found")
     return {"session_id": session_id, "positions": sess.positions()}
+
+
+@router.get("/autotrade/session/{session_id}/journal")
+def session_journal(session_id: str):
+    """Daily Trade Journal for a session — available for CREATED/RUNNING/CLOSED.
+
+    Builds a structured summary + per-position journal from autotrade_sessions
+    and autotrade_positions (never falcon_position_state).  Open positions
+    contribute unrealised_pnl; closed positions contribute realised_pnl.
+    Returns 404 if the session_id is not found.
+    """
+    return build_journal(session_id)
 
 
 @router.get("/autotrade/sessions")

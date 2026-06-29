@@ -90,13 +90,17 @@ class MockBroker(BrokerClient):
 
     # GTT-OCO (FEATURE 1/3). dry_run mirrors the real adapter: no real GTT.
     def place_gtt_oco(self, symbol, qty, stop_price, target_price, last_price,
-                      product="CNC", exchange="NSE", order_type="LIMIT"):
+                      product="CNC", exchange="NSE", order_type="LIMIT",
+                      stop_limit_price=None):
         if self.dry_run:
             return None  # paper: no real GTT (the manager records levels only)
         self._gtt_seq += 1
         gid = f"gtt-{symbol}-{self._gtt_seq}"
+        # Record stop_limit separately so tests can assert the buffer was applied.
+        stop_lim = stop_limit_price if stop_limit_price is not None else stop_price
         self.gtts.append({"gtt_id": gid, "symbol": symbol, "qty": qty,
-                          "stop": stop_price, "target": target_price,
+                          "stop": stop_price, "stop_limit": stop_lim,
+                          "target": target_price,
                           "last_price": last_price, "product": product,
                           "exchange": exchange, "order_type": order_type})
         self.gtt_states[gid] = {"status": "active"}

@@ -67,12 +67,16 @@ def patched_brokers(monkeypatch):
 # ── FEATURE 1: level computation ─────────────────────────────────────────────
 
 def test_compute_levels_from_pct():
-    stop, target = compute_levels(100.0, 0.03, 0.06)
-    assert stop == 97.0
-    assert target == 106.0
+    stop_trig, stop_lim, tgt_trig, tgt_lim = compute_levels(100.0, 0.03, 0.06)
+    assert stop_trig == 97.0
+    assert tgt_trig == 106.0
+    # stop_limit must be below trigger (slippage buffer applied).
+    assert stop_lim < stop_trig
+    # target limit should equal trigger (no buffer needed for target leg).
+    assert tgt_lim == tgt_trig
     # wider widths than a 1.2% portfolio kill switch → portfolio fires first.
-    assert (1.0 - stop / 100.0) > 0.012
-    assert (target / 100.0 - 1.0) > 0.012
+    assert (1.0 - stop_trig / 100.0) > 0.012
+    assert (tgt_trig / 100.0 - 1.0) > 0.012
 
 
 # ── FEATURE 1: GTT placed in LIVE, levels recorded; NOT placed in PAPER ───────

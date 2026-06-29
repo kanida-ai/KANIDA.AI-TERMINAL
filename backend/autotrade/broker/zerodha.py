@@ -301,11 +301,16 @@ class ZerodhaBroker(BrokerClient):
     def place_gtt_oco(self, symbol: str, qty: int, stop_price: float,
                       target_price: float, last_price: float,
                       product: str = "CNC", exchange: str = "NSE",
-                      order_type: str = "LIMIT") -> Optional[str]:
+                      order_type: str = "LIMIT",
+                      stop_limit_price: Optional[float] = None) -> Optional[str]:
         """Place a two-leg OCO GTT on Kite: a STOP leg (SELL when price <= stop)
         and a TARGET leg (SELL when price >= target). The broker holds it so a
         position is protected even if our software is down — the BACKUP floor
         under the portfolio kill switch.
+
+        stop_limit_price: limit price for the stop leg's order. When provided it
+        is set BELOW stop_price (the trigger) so the sell order fills even when
+        price gaps below the trigger. Falls back to stop_price when None.
 
         Dry-run / live-disabled → returns None (no real GTT). On any error →
         logs + returns None (best-effort; entry is never blocked on the GTT).
@@ -322,11 +327,15 @@ class ZerodhaBroker(BrokerClient):
                       else kite.ORDER_TYPE_MARKET)
             kexch = getattr(kite, f"EXCHANGE_{exchange}", exchange)
             stop_price = round(float(stop_price), 2)
+            # Stop leg: use stop_limit_price (below trigger) when provided,
+            # otherwise fall back to the trigger price itself.
+            stop_lim = round(float(stop_limit_price), 2) if stop_limit_price is not None \
+                else stop_price
             target_price = round(float(target_price), 2)
             # Kite OCO trigger_values must be [lower, upper]; leg order matches.
             orders = [
                 {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": int(qty),
-                 "order_type": kotype, "product": kprod, "price": stop_price},
+                 "order_type": kotype, "product": kprod, "price": stop_lim},
                 {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": int(qty),
                  "order_type": kotype, "product": kprod, "price": target_price},
             ]

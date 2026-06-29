@@ -30,21 +30,60 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger("kanida.autotrade.gtt_manager")
 
+# ── GTT limit-price slippage buffer ──────────────────────────────────────────
+# When price gaps below a GTT stop trigger the limit sell order must be set
+# BELOW the trigger so it fills even in a fast gap.  Without the buffer the
+# limit equals the trigger exactly and the order can be stuck pending.
+#
+# FALCON_GTT_STOP_BUFFER: fraction below the stop trigger used as limit price.
+#   default 0.003 (0.3%)  →  limit = trigger * (1 - 0.003)
+# Override at runtime: set env FALCON_GTT_STOP_BUFFER=0.005 for 0.5%.
+_GTT_STOP_LIMIT_BUFFER_DEFAULT = 0.003
+
+
+def _gtt_stop_buffer() -> float:
+    """Read FALCON_GTT_STOP_BUFFER from env at call time (so tests can patch
+    os.environ without re-importing)."""
+    raw = os.environ.get("FALCON_GTT_STOP_BUFFER", "")
+    try:
+        val = float(raw)
+        if val <= 0 or val > 0.10:
+            raise ValueError(f"out of range: {val}")
+        return val
+    except (ValueError, TypeError):
+        return _GTT_STOP_LIMIT_BUFFER_DEFAULT
+
 
 def compute_levels(entry_price: float, stop_pct: float,
-                   target_pct: float) -> Tuple[float, float]:
-    """Return (stop_price, target_price) rounded to tick-friendly 2dp.
+                   target_pct: float) -> Tuple[float, float, float, float]:
+    """Return (stop_trigger, stop_limit, target_trigger, target_limit) rounded
+    to tick-friendly 2dp.
 
-    stop   = entry * (1 - stop_pct)
-    target = entry * (1 + target_pct)
+    stop_trigger  = entry * (1 - stop_pct)
+    stop_limit    = stop_trigger * (1 - GTT_STOP_LIMIT_BUFFER)   ← NEW
+                    Limit set BELOW trigger so a gap-down still fills the order.
+
+    target_trigger = entry * (1 + target_pct)
+    target_limit   = target_trigger  (sell-limit AT or above trigger is safe)
+
+    Legacy callers that unpacked only two values still work because they only
+    see (stop_trigger, target_trigger) in positions [0] and [2].  Any code
+    that unpacked exactly 2 values — ``stop, target = compute_levels(...)`` —
+    will get a ValueError at runtime; those sites have been updated to unpack
+    all four or to use the convenience wrappers below.
     """
-    stop = round(float(entry_price) * (1.0 - float(stop_pct)), 2)
-    target = round(float(entry_price) * (1.0 + float(target_pct)), 2)
-    return stop, target
+    buf = _gtt_stop_buffer()
+    e = float(entry_price)
+    stop_trig  = round(e * (1.0 - float(stop_pct)), 2)
+    stop_lim   = round(stop_trig * (1.0 - buf), 2)
+    tgt_trig   = round(e * (1.0 + float(target_pct)), 2)
+    tgt_lim    = tgt_trig          # target limit equals trigger (no buffer needed)
+    return stop_trig, stop_lim, tgt_trig, tgt_lim
 
 
 class GTTManager:
@@ -67,7 +106,7 @@ class GTTManager:
         if qty <= 0 or entry <= 0:
             return {"symbol": symbol, "status": "SKIPPED_NO_QTY_OR_PRICE"}
 
-        stop, target = compute_levels(
+        stop_trig, stop_lim, tgt_trig, tgt_lim = compute_levels(
             entry, self.config.per_position_stop_pct,
             self.config.per_position_target_pct)
 
@@ -83,20 +122,26 @@ class GTTManager:
                 or self.config.order_product
             try:
                 gtt_id = broker.place_gtt_oco(
-                    symbol=symbol, qty=qty, stop_price=stop, target_price=target,
+                    symbol=symbol, qty=qty,
+                    stop_price=stop_trig, stop_limit_price=stop_lim,
+                    target_price=tgt_trig,
                     last_price=last, product=product,
                     exchange=pos.get("exchange") or "NSE")
             except Exception as e:  # best-effort — never block on the backup
                 log.error("place_gtt_oco raised for %s: %s", symbol, e)
                 gtt_id = None
 
-        self.registry.set_gtt(symbol, gtt_id, gtt_stop=stop, gtt_target=target,
+        # gtt_stop / gtt_target stored as the TRIGGER prices (the levels the UI
+        # and the reconciler care about — the limit offset is a broker mechanic).
+        self.registry.set_gtt(symbol, gtt_id, gtt_stop=stop_trig, gtt_target=tgt_trig,
                               broker_profile=prof_id)
         status = "PLACED" if gtt_id else "RECORDED_ONLY"
-        log.info("GTT %s for %s/%s stop=%.2f target=%.2f gtt_id=%s",
-                 status, self.session_id, symbol, stop, target, gtt_id)
+        log.info("GTT %s for %s/%s stop_trig=%.2f stop_lim=%.2f "
+                 "target=%.2f gtt_id=%s",
+                 status, self.session_id, symbol,
+                 stop_trig, stop_lim, tgt_trig, gtt_id)
         return {"symbol": symbol, "status": status, "gtt_id": gtt_id,
-                "stop": stop, "target": target}
+                "stop": stop_trig, "stop_limit": stop_lim, "target": tgt_trig}
 
     # ── Backfill missing GTTs (session start + boot-resume) ───────────────────
     def backfill_missing(self) -> List[Dict[str, Any]]:

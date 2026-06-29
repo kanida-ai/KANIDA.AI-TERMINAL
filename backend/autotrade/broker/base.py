@@ -133,9 +133,15 @@ class BrokerClient(ABC):
     def place_gtt_oco(self, symbol: str, qty: int, stop_price: float,
                       target_price: float, last_price: float,
                       product: str = "CNC", exchange: str = "NSE",
-                      order_type: str = "LIMIT") -> Optional[str]:
+                      order_type: str = "LIMIT",
+                      stop_limit_price: Optional[float] = None) -> Optional[str]:
         """Place a two-leg OCO GTT (STOP + TARGET sell). Returns the broker GTT
-        id, or None when not placed (dry-run / unsupported broker)."""
+        id, or None when not placed (dry-run / unsupported broker).
+
+        stop_limit_price: limit price for the stop leg. When set it should be
+        slightly below stop_price (the trigger) so the sell order fills even if
+        price gaps below the trigger. Defaults to stop_price when None
+        (backward-compatible — stub implementations ignore it)."""
         return None
 
     def cancel_gtt(self, gtt_id: str) -> Any:
