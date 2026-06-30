@@ -59,6 +59,7 @@ from .monitoring.registry import PositionRegistry
 from .monitoring.monitor import PortfolioMonitor, compute_kill_preview
 from .monitoring.kill_switch import KillSwitchExecutor
 from .monitoring.gtt_manager import GTTManager
+from . import exit_gate as _exit_gate_mod
 from .monitoring import tick_driver
 from .monitoring import entry_scheduler
 from .monitoring import fire_guard
@@ -294,8 +295,38 @@ def load_falcon_picks(top_n: int = 100) -> List[Pick]:
                  close_at_signal=r["close_at_signal"]) for r in rows]
 
 
+def _preview_resolve_creds(prof, user_id: Optional[str]) -> None:
+    """Best-effort vault cred resolution for the PREVIEW path (paper-only).
+
+    Mirrors TradingSession._resolve_account_creds but is standalone (preview
+    creates no session). NO-OP + global fallback when there is no bound account,
+    the vault is disabled, or the account can't be resolved — preview never fails
+    on creds."""
+    acct_id = getattr(prof, "broker_account_id", None)
+    if acct_id is None:
+        return
+    try:
+        from . import vault
+        if not vault.vault_enabled():
+            prof.broker_account_id = None
+            return
+        creds = vault.get_decrypted_creds(acct_id, user_id=user_id)
+        if creds is None or not creds.api_key or not creds.access_token:
+            prof.broker_account_id = None
+            return
+        prof.api_key = creds.api_key
+        prof.api_secret = creds.api_secret or ""
+        prof.access_token = creds.access_token
+        prof.broker_account_id = acct_id
+    except Exception:  # pragma: no cover - preview must never crash on creds
+        prof.broker_account_id = None
+
+
 def preview_session_sizing(config: TradingSessionConfig,
-                           mode: str = "paper") -> Dict[str, Any]:
+                           mode: str = "paper",
+                           user_id: Optional[str] = None,
+                           broker_account_id: Optional[str] = None
+                           ) -> Dict[str, Any]:
     """Size the picks EXACTLY as _fire_entries would (route → allocate →
     per-position qty incl. MTF margin) but PLACE NOTHING and create NO session.
 
@@ -319,7 +350,11 @@ def preview_session_sizing(config: TradingSessionConfig,
             profile_id="zerodha_default", broker_name="zerodha",
             allocated_capital=config.total_allocated_capital,
             order_product=config.order_product,
-            instrument_type=config.instrument_type)]
+            instrument_type=config.instrument_type,
+            broker_account_id=broker_account_id)]
+    # PHASE-2: best-effort per-account cred resolution (global fallback on miss).
+    for _p in profiles:
+        _preview_resolve_creds(_p, user_id)
 
     falcon_picks = load_falcon_picks(top_n=max(config.top_n_stocks, 10))
     if config.rank_filter:
@@ -390,13 +425,123 @@ def preview_session_sizing(config: TradingSessionConfig,
     }
 
 
+async def _exit_single_position(
+        session_id: str,
+        position: Dict[str, Any],
+        reason: str,
+        brokers: Dict[str, Any],
+        registry: Any,
+        gtt_manager: Any,
+) -> Dict[str, Any]:
+    """Our backend directly exits one position (per-stock software stop).
+
+    Sequence:
+      1. Claim the exit via the session-scoped exit gate (prevents double-fire
+         with the portfolio kill switch or a concurrent GTT reconcile).
+      2. Cancel the position's GTT best-effort BEFORE placing the sell, so the
+         broker-held backup can't re-fire after we flatten.
+      3. Place a market sell via the position's broker.
+      4. Mark CLOSED (with the confirmed fill price) or EXIT_FAILED on error.
+
+    Reuses the same exit_gate.claim_exit_session / registry.mark_closed /
+    registry.mark_exit_failed patterns as kill_switch.fire().
+    Returns a result dict with at least {"symbol", "status"}.
+    """
+    symbol = position["symbol"]
+    prof_id = position.get("broker_profile")
+    broker = brokers.get(prof_id) or next(iter(brokers.values()), None)
+    if broker is None:
+        log.warning("per-stock stop %s/%s: no broker found — skip", session_id, symbol)
+        return {"symbol": symbol, "status": "NO_BROKER"}
+
+    # 1. Claim the exit gate so no other path double-fires this position.
+    if not _exit_gate_mod.claim_exit_session(session_id, symbol, reason):
+        log.info("per-stock stop %s/%s: exit already claimed — skip",
+                 session_id, symbol)
+        return {"symbol": symbol, "status": "BLOCKED"}
+
+    # 2. Cancel the broker GTT for this position (best-effort, never block exit).
+    gtt_id = position.get("gtt_id")
+    if gtt_manager and gtt_id:
+        try:
+            await asyncio.to_thread(broker.cancel_gtt, gtt_id)
+            log.info("per-stock stop %s/%s: GTT %s cancelled", session_id, symbol, gtt_id)
+        except Exception as e:
+            log.warning("per-stock stop %s/%s: GTT cancel failed (%s): %s",
+                        session_id, symbol, gtt_id, e)
+
+    # 3. Place the market sell.
+    qty = int(position.get("qty") or 0)
+    itype = position.get("instrument_type") or "EQ"
+    try:
+        res = await broker.place_market_exit(symbol, qty, itype)
+    except Exception as e:
+        log.error("per-stock stop %s/%s: place_market_exit raised: %s",
+                  session_id, symbol, e)
+        registry.mark_exit_failed(symbol, str(e), broker_profile=prof_id)
+        return {"symbol": symbol, "status": "EXIT_FAILED", "error": str(e)}
+
+    # 4. Handle the placement result — then confirm the fill.
+    if res is None or getattr(res, "status", None) == "FAILED":
+        err = getattr(res, "error", None) or "exit failed"
+        registry.mark_exit_failed(symbol, err, broker_profile=prof_id)
+        log.error("per-stock stop EXIT_FAILED %s/%s: %s", session_id, symbol, err)
+        return {"symbol": symbol, "status": "EXIT_FAILED", "error": err}
+
+    order_id = getattr(res, "broker_order_id", None)
+    is_dry = (order_id is None or
+              str(order_id).upper() in ("DRY_RUN", "NONE", ""))
+
+    # Import here to avoid top-level circular dependency.
+    from autotrade.monitoring.exit_poller import confirm_exit as _confirm_exit
+
+    confirm_result = await _confirm_exit(
+        session_id=session_id,
+        symbol=symbol,
+        order_id=order_id,
+        qty=qty,
+        broker=broker,
+        registry=registry,
+        close_reason=reason,
+        max_wait_sec=60,
+        poll_interval_sec=5.0,
+    )
+    confirm_status = confirm_result.get("status", "UNKNOWN")
+    exit_price = confirm_result.get("exit_price") or position.get("ltp")
+
+    if confirm_status in ("COMPLETE", "DRY_RUN"):
+        log.warning("per-stock stop FIRED %s/%s (reason=%s) exit_price=%s",
+                    session_id, symbol, reason, exit_price)
+        return {"symbol": symbol, "status": "EXITED", "reason": reason,
+                "exit_price": exit_price,
+                "broker_order_id": order_id}
+    else:
+        # PARTIAL / TIMEOUT / REJECTED — mark_exit_failed already called by confirm_exit
+        # for REJECTED/CANCELLED. For PARTIAL/TIMEOUT the gate was NOT released by
+        # confirm_exit so we release it here to allow a future retry.
+        if confirm_status in ("PARTIAL", "TIMEOUT"):
+            from autotrade.exit_gate import release_exit_session as _release
+            _release(session_id, symbol)
+        log.error("per-stock stop EXIT_FAILED %s/%s (confirm_status=%s)",
+                  session_id, symbol, confirm_status)
+        return {"symbol": symbol, "status": "EXIT_FAILED",
+                "confirm_status": confirm_status}
+
+
 class TradingSession:
     def __init__(self, session_id: str, config: TradingSessionConfig,
-                 mode: str = "paper"):
+                 mode: str = "paper", user_id: Optional[str] = None,
+                 broker_account_id: Optional[str] = None):
         self.session_id = session_id
         self.config = config
         self.mode = mode  # 'paper' | 'live'
         self.dry_run = (mode != "live")
+        # PHASE-2 MULTI-TENANT (additive). Both default None → operator/global
+        # creds path (today's behaviour, byte-for-byte). user_id scopes ownership
+        # + vault lookups; broker_account_id binds the session's default broker
+        # leg to a specific vaulted account.
+        self.user_id = user_id
+        self.broker_account_id = broker_account_id
         self.registry = PositionRegistry(session_id, config.total_allocated_capital)
         self.monitor = PortfolioMonitor(session_id, config.total_allocated_capital)
         self.brokers: Dict[str, Any] = {}
@@ -405,77 +550,171 @@ class TradingSession:
 
     # ── Persistence / factory ─────────────────────────────────────────────────
     @classmethod
-    def create(cls, config: TradingSessionConfig, mode: str = "paper") -> "TradingSession":
+    def create(cls, config: TradingSessionConfig, mode: str = "paper",
+               user_id: Optional[str] = None,
+               broker_account_id: Optional[str] = None) -> "TradingSession":
+        """Create a session.
+
+        PHASE-2 MULTI-TENANT (additive, backward-compatible): user_id +
+        broker_account_id are OPTIONAL. When both are None the session is the
+        operator/global session exactly as before (the INSERT writes NULLs, which
+        the columns default to). When broker_account_id is set, it is validated
+        to exist (and be owned by user_id, if given) so a session can't be bound
+        to a non-existent / someone else's account; the per-leg cred resolution
+        happens at _build_brokers time from the vault."""
         config.validate()
+        # If a broker account is bound, verify it exists + ownership BEFORE
+        # creating the session (fail fast, no orphan binding). NULL → skip.
+        if broker_account_id is not None:
+            from . import vault
+            if not vault.account_exists(broker_account_id, user_id=user_id):
+                raise ValueError(
+                    f"broker_account_id {broker_account_id} not found"
+                    + (f" for user {user_id}" if user_id else ""))
         session_id = uuid.uuid4().hex
         with falcon_conn() as con:
             con.execute(
                 """INSERT INTO autotrade_sessions
                    (session_id, created_at, status, mode,
-                    total_allocated_capital, config_json)
-                   VALUES (?,?,?,?,?,?)""",
+                    total_allocated_capital, config_json, user_id,
+                    broker_account_id)
+                   VALUES (?,?,?,?,?,?,?,?)""",
                 (session_id, _now_ist_iso(), "CREATED", mode,
-                 config.total_allocated_capital, config.to_json()),
+                 config.total_allocated_capital, config.to_json(), user_id,
+                 broker_account_id),
             )
             con.commit()
-        log.info("AutoTrade session %s created (mode=%s)", session_id, mode)
-        return cls(session_id, config, mode=mode)
+        log.info("AutoTrade session %s created (mode=%s, user=%s, account=%s)",
+                 session_id, mode, user_id, broker_account_id)
+        return cls(session_id, config, mode=mode, user_id=user_id,
+                   broker_account_id=broker_account_id)
 
     @classmethod
     def load(cls, session_id: str) -> Optional["TradingSession"]:
         with falcon_conn() as con:
             row = con.execute(
-                "SELECT mode, config_json FROM autotrade_sessions WHERE session_id=?",
+                "SELECT mode, config_json, user_id, broker_account_id "
+                "FROM autotrade_sessions WHERE session_id=?",
                 (session_id,),
             ).fetchone()
         if not row:
             return None
         cfg = TradingSessionConfig.from_json(row["config_json"])
-        return cls(session_id, cfg, mode=row["mode"])
+        # user_id / broker_account_id are NULL for pre-Phase-2 sessions → the
+        # operator/global path, unchanged.
+        d = dict(row)
+        return cls(session_id, cfg, mode=row["mode"],
+                   user_id=d.get("user_id"),
+                   broker_account_id=d.get("broker_account_id"))
 
     @classmethod
-    def list_sessions(cls, limit: int = 50) -> List[Dict[str, Any]]:
+    def list_sessions(cls, limit: int = 50,
+                      user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Recent sessions (newest first) for the operator UI session list.
 
         This is what lets the panel SHOW existing sessions instead of resetting
         to a blank create form — a created session stays visible/resumable.
+
+        PHASE-2 MULTI-TENANT: when user_id is provided, ONLY that user's sessions
+        are returned (per-user isolation). When user_id is None the list is the
+        full operator view (today's behaviour) — used by the operator console.
         """
+        base = (
+            """SELECT s.session_id, s.created_at, s.started_at, s.closed_at,
+                      s.status, s.mode, s.total_allocated_capital,
+                      s.last_gross_return,
+                      s.last_gross_return AS gross_return,
+                      s.user_id, s.broker_account_id,
+                      (SELECT COUNT(*) FROM autotrade_positions p
+                       WHERE p.session_id = s.session_id
+                         AND p.status = 'OPEN') AS n_open_positions
+               FROM autotrade_sessions s
+            """)
         with falcon_conn() as con:
-            rows = con.execute(
-                """SELECT s.session_id, s.created_at, s.started_at, s.closed_at,
-                          s.status, s.mode, s.total_allocated_capital,
-                          s.last_gross_return,
-                          s.last_gross_return AS gross_return,
-                          (SELECT COUNT(*) FROM autotrade_positions p
-                           WHERE p.session_id = s.session_id
-                             AND p.status = 'OPEN') AS n_open_positions
-                   FROM autotrade_sessions s
-                   ORDER BY s.created_at DESC LIMIT ?""",
-                (int(limit),),
-            ).fetchall()
+            if user_id is not None:
+                rows = con.execute(
+                    base + " WHERE s.user_id = ? ORDER BY s.created_at DESC "
+                    "LIMIT ?", (user_id, int(limit)),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    base + " ORDER BY s.created_at DESC LIMIT ?",
+                    (int(limit),),
+                ).fetchall()
         return [dict(r) for r in rows]
 
     # ── Broker construction ───────────────────────────────────────────────────
     def _build_brokers(self) -> None:
         profiles = self.config.broker_profiles
         if not profiles:
-            # Default single zerodha profile spanning the whole capital.
+            # Default single zerodha profile spanning the whole capital. PHASE-2:
+            # inherit the session's broker_account_id so a single-leg session
+            # bound to a vaulted account trades that account (None → global).
             from .config import BrokerProfile
             profiles = [BrokerProfile(
                 profile_id="zerodha_default", broker_name="zerodha",
                 allocated_capital=self.config.total_allocated_capital,
                 order_product=self.config.order_product,
-                instrument_type=self.config.instrument_type)]
+                instrument_type=self.config.instrument_type,
+                broker_account_id=self.broker_account_id)]
             self.config.broker_profiles = profiles
         for prof in profiles:
             if not prof.enabled:
                 continue
+            # PHASE-2 MULTI-TENANT: resolve per-account creds from the vault into
+            # this profile (in memory only). No-op when the profile has no bound
+            # account / the vault is disabled → the adapter uses the global path.
+            self._resolve_account_creds(prof)
             self.brokers[prof.profile_id] = build_client(prof, dry_run=self.dry_run)
         self.gtt_manager = GTTManager(
             self.session_id, self.config, self.brokers, self.registry)
         self.kill_switch = KillSwitchExecutor(
             self.session_id, self.config, self.brokers, self.registry,
             gtt_manager=self.gtt_manager)
+
+    def _resolve_account_creds(self, prof) -> None:
+        """PHASE-2 MULTI-TENANT cred resolution (in memory only).
+
+        If the profile binds a vaulted account (prof.broker_account_id, or the
+        session's broker_account_id falling through onto the default leg), AND the
+        vault is enabled, decrypt that account's api_key + access_token into the
+        profile so the adapter builds its OWN client for that account. Defense in
+        depth: the account must be owned by this session's user_id (when set).
+
+        SAFETY HINGE: this is a NO-OP (leaves prof secrets empty + clears any
+        bound id so the adapter takes the global path) when:
+          * the profile has no bound account, OR
+          * the vault is disabled (no FALCON_VAULT_KEY), OR
+          * the account is absent / not owned / decryption fails.
+        i.e. a NULL account or a disabled vault behaves EXACTLY as today."""
+        acct_id = getattr(prof, "broker_account_id", None)
+        if acct_id is None:
+            return  # no bound account → global path (unchanged)
+        from . import vault
+        if not vault.vault_enabled():
+            # Bound account but vault disabled: we CANNOT trade the right
+            # account. Clear the binding so the adapter doesn't error trying to
+            # build a per-account client; it falls back to the global operator
+            # path. (Live trades still need FALCON_AUTOTRADE_ENABLED; this only
+            # affects WHICH account — surfaced via a warning.)
+            log.warning("session %s: profile %s bound to account %s but vault "
+                        "is DISABLED — falling back to global operator creds",
+                        self.session_id, prof.profile_id, acct_id)
+            prof.broker_account_id = None
+            return
+        creds = vault.get_decrypted_creds(acct_id, user_id=self.user_id)
+        if creds is None:
+            log.warning("session %s: could not resolve creds for account %s "
+                        "(absent / not owned / decrypt failed) — global fallback",
+                        self.session_id, acct_id)
+            prof.broker_account_id = None
+            return
+        # Populate in-memory creds (NEVER persisted). The adapter's _build_kite
+        # uses these to build a dedicated proxy-aware client for this account.
+        prof.api_key = creds.api_key or ""
+        prof.api_secret = creds.api_secret or ""
+        prof.access_token = creds.access_token or ""
+        prof.broker_account_id = acct_id
 
     # ── Start: now | scheduled ──────────────────────────────────────────────────
     async def start(self, when: str = "now") -> Dict[str, Any]:
@@ -794,16 +1033,19 @@ class TradingSession:
         # intended qty at the reference price so monitoring works in paper mode.
         fill_price = res.avg_price or ref_price
         fill_qty = res.filled_qty or qty
+        acct_id = getattr(prof, "broker_account_id", None)
         if res.status == "PARTIAL":
             self.registry.register_partial(symbol, prof.profile_id,
                                            fill_qty, fill_price,
                                            product=prof.order_product,
-                                           instrument_type=prof.instrument_type)
+                                           instrument_type=prof.instrument_type,
+                                           broker_account_id=acct_id)
         else:
             self.registry.register(symbol=symbol, broker_profile=prof.profile_id,
                                    qty=fill_qty, avg_price=fill_price,
                                    product=prof.order_product,
-                                   instrument_type=prof.instrument_type)
+                                   instrument_type=prof.instrument_type,
+                                   broker_account_id=acct_id)
         if ref_price > 0 and res.avg_price:
             record_slippage(symbol, ref_price, res.avg_price, fill_qty,
                             session_id=self.session_id,
@@ -825,6 +1067,29 @@ class TradingSession:
         except Exception as e:  # pragma: no cover - never block the tick
             log.warning("GTT reconcile failed for %s: %s", self.session_id, e)
         self.monitor.refresh_ltps(self.brokers)
+
+        # EXIT_FAILED RETRY: after the GTT reconcile step, re-attempt any
+        # position whose exit previously failed and whose exit_gate was
+        # released by registry.mark_exit_failed. Uses the same
+        # _exit_single_position path (which now calls confirm_exit).
+        # Fire-and-forget via create_task so we don't block the tick.
+        try:
+            failed_positions = self.monitor.get_exit_failed_positions()
+            for fp in failed_positions:
+                if _exit_gate_mod.claim_exit_session(
+                        self.session_id, fp["symbol"], "EXIT_RETRY"):
+                    asyncio.create_task(_exit_single_position(
+                        session_id=self.session_id,
+                        position=fp,
+                        reason="EXIT_RETRY",
+                        brokers=self.brokers,
+                        registry=self.registry,
+                        gtt_manager=self.gtt_manager,
+                    ))
+        except Exception as _efr_e:
+            log.warning("EXIT_FAILED retry sweep failed for %s: %s",
+                        self.session_id, _efr_e)
+
         snap = self.monitor.snapshot()
         # KILL BASIS: both strategies measure the INVESTED-basis gross return
         # (÷ frozen invested_basis), not the on-fund gross. snapshot() keeps the
@@ -861,8 +1126,44 @@ class TradingSession:
         (kill_switch.fire) passing the trail reason through as close_reason. State
         changes (arm / peak ratchet) are persisted on autotrade_sessions so a
         restart resumes the trail mid-day. Square-off is enforced defensively here
-        even if the timer thread was dropped by a restart."""
+        even if the timer thread was dropped by a restart.
+
+        PER-STOCK SOFTWARE STOP: before running the portfolio trail engine, each
+        open position is checked against config.stop_pct. If a single stock
+        has fallen more than stop_pct from its entry, OUR backend exits just that
+        position (cancel its GTT first, then market sell). The GTT at -3% remains
+        the broker-held backup; our software stop fires earlier (default -1.5%).
+        After per-stock exits the trail engine runs on the remaining positions."""
         from .monitoring import trail_engine
+
+        # PER-STOCK SOFTWARE STOP LOOP.
+        # Runs BEFORE the portfolio-level trail engine so the trail sees the
+        # updated (smaller) basket on this same tick.
+        per_stock_exits: List[Dict[str, Any]] = []
+        try:
+            stop_pct = float(getattr(self.config, "stop_pct", 0.015))
+            open_positions = self.monitor._open_positions()
+            for pos in open_positions:
+                ltp = pos.get("ltp")
+                avg_price = float(pos.get("avg_price") or 0)
+                if ltp is None or avg_price <= 0:
+                    continue
+                stock_return = (float(ltp) - avg_price) / avg_price
+                if stock_return <= -stop_pct:
+                    result = await _exit_single_position(
+                        session_id=self.session_id,
+                        position=pos,
+                        reason="STOP_STOCK",
+                        brokers=self.brokers,
+                        registry=self.registry,
+                        gtt_manager=self.gtt_manager,
+                    )
+                    per_stock_exits.append(result)
+                    log.warning(
+                        "per-stock stop TRIGGERED %s/%s: return=%.4f <= -%.4f",
+                        self.session_id, pos["symbol"], stock_return, stop_pct)
+        except Exception as e:  # never block the tick on per-stock stop errors
+            log.error("per-stock stop loop error for %s: %s", self.session_id, e)
 
         state = self.monitor.load_trail_state()
         params = trail_engine.params_from_config(self.config)
@@ -895,7 +1196,8 @@ class TradingSession:
                 "trail_trigger": decision.trigger,
                 "kill_switch_fired": bool(fired),
                 "kill_reason": reason, "fire_result": fired,
-                "gtt_closed": gtt_closed}
+                "gtt_closed": gtt_closed,
+                "per_stock_exits": per_stock_exits}
 
     # ── Manual kill ────────────────────────────────────────────────────────────
     async def kill(self, reason: str = "MANUAL") -> Dict[str, Any]:
@@ -973,6 +1275,9 @@ class TradingSession:
             "entry_latency_ms": sess.get("entry_latency_ms"),
             "exit_latency_ms": sess.get("exit_latency_ms"),
             "last_tick_age_ms": _last_tick_age_ms(),
+            # PHASE-2 MULTI-TENANT ownership/binding (NULL for operator sessions).
+            "user_id": sess.get("user_id"),
+            "broker_account_id": sess.get("broker_account_id"),
         }
         # EXECUTION-DATE / TRADING-DAY surface — ALWAYS expose the resolved fire
         # datetime + the trading-day verdict so the UI can show "Fires

@@ -52,7 +52,15 @@ class BrokerProfile:
     order_product: str = "CNC"             # CNC | MIS | MTF | NRML
     instrument_type: str = "EQ"            # EQ | FUT | CE | PE | MTF
     enabled: bool = True
-    # Secrets — in-memory only, NEVER persisted. Sourced from env / kite_tokens.
+    # PHASE-2 MULTI-TENANT (additive, NULLABLE): the vaulted broker account this
+    # routing leg trades through. None → the PROCESS-GLOBAL operator creds path
+    # (today's behaviour, byte-for-byte). When set, the broker adapter resolves
+    # this account's api_key + access_token from the vault and builds its OWN
+    # client (no shared global state). Carried in to_public_dict (it is an id,
+    # NOT a secret).
+    broker_account_id: Optional[str] = None
+    # Secrets — in-memory only, NEVER persisted. Sourced from env / kite_tokens
+    # OR, when broker_account_id is set, decrypted from the vault at build time.
     api_key: str = field(default="", repr=False)
     api_secret: str = field(default="", repr=False)
     access_token: str = field(default="", repr=False)
@@ -68,6 +76,7 @@ class BrokerProfile:
             "order_product": self.order_product,
             "instrument_type": self.instrument_type,
             "enabled": self.enabled,
+            "broker_account_id": self.broker_account_id,
             "creds_configured": bool(self.api_key and self.access_token),
         }
 
@@ -83,6 +92,7 @@ class BrokerProfile:
             order_product=d.get("order_product", "CNC"),
             instrument_type=d.get("instrument_type", "EQ"),
             enabled=bool(d.get("enabled", True)),
+            broker_account_id=d.get("broker_account_id"),
         )
 
 

@@ -1,5 +1,9 @@
 """AutoTrade REST endpoints (spec Section 9).
 
+Includes:
+  GET /autotrade/session/{id}/journal   — Daily Trade Journal (BUILD 2)
+
+
 All 9 endpoints are AUTH-GATED with the SAME operator-token dependency the
 Falcon trade router uses (require_operator_token / X-Operator-Token), imported
 directly from that router so the gate stays identical (fail-closed if
@@ -39,6 +43,7 @@ from .. import config as cfgmod
 from ..config import TradingSessionConfig
 from ..session import TradingSession, preview_session_sizing
 from ..monitoring import tick_driver, entry_scheduler
+from .journal_routes import build_journal
 
 log = logging.getLogger("kanida.autotrade.api")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -71,12 +76,36 @@ router = APIRouter(dependencies=[Depends(require_operator_token)])
 class CreateSessionRequest(BaseModel):
     config: Dict[str, Any] = Field(..., description="TradingSessionConfig dict")
     mode: str = Field("paper", description="'paper' (default, no real orders) | 'live'")
+    # PHASE-2 MULTI-TENANT (additive, optional). Both None → operator/global
+    # session, byte-for-byte as today. The portal supplies user_id server-side
+    # (the authenticated user) + broker_account_id chosen from the user's vault.
+    user_id: Optional[str] = Field(None, description="Portal user id (optional)")
+    broker_account_id: Optional[str] = Field(
+        None, description="Vaulted broker account to trade (optional)")
 
 
 class PreviewRequest(BaseModel):
     config: Dict[str, Any] = Field(..., description="TradingSessionConfig dict")
     mode: str = Field("paper", description="'paper' (default) | 'live' — sizing "
                       "is identical; only LTP/margin source differs")
+    user_id: Optional[str] = Field(None, description="Portal user id (optional)")
+    broker_account_id: Optional[str] = Field(
+        None, description="Vaulted broker account to size against (optional)")
+
+
+# ── PHASE-2 MULTI-TENANT broker-account (vault) request models ───────────────
+
+class ConnectBrokerAccountRequest(BaseModel):
+    user_id: str = Field(..., description="Portal user id (owner of the account)")
+    broker: str = Field(..., description="zerodha|upstox|angel|dhan|fyers")
+    account_label: str = Field(..., description="User-chosen label, e.g. 'Main Kite'")
+    api_key: str = Field(..., description="Broker app api_key")
+    api_secret: str = Field(..., description="Broker app api_secret (encrypted at rest)")
+
+
+class RefreshTokenRequest(BaseModel):
+    user_id: Optional[str] = Field(None, description="Portal user id (enforced if given)")
+    request_token: str = Field(..., description="Broker request_token from the login redirect")
 
 
 class StartSessionRequest(BaseModel):
@@ -174,8 +203,16 @@ def session_create(req: CreateSessionRequest):
     except Exception as e:
         raise HTTPException(400, f"invalid config: {e}")
     mode = req.mode if req.mode in ("paper", "live") else "paper"
-    sess = TradingSession.create(cfg, mode=mode)
-    return {"session_id": sess.session_id, "mode": mode, "status": "CREATED"}
+    try:
+        # PHASE-2: user_id/broker_account_id default None → operator/global
+        # session, unchanged. A bound account is validated to exist + be owned.
+        sess = TradingSession.create(
+            cfg, mode=mode, user_id=req.user_id,
+            broker_account_id=req.broker_account_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"session_id": sess.session_id, "mode": mode, "status": "CREATED",
+            "user_id": req.user_id, "broker_account_id": req.broker_account_id}
 
 
 @router.post("/autotrade/preview")
@@ -195,7 +232,9 @@ def autotrade_preview(req: PreviewRequest):
         raise HTTPException(400, f"invalid config: {e}")
     mode = req.mode if req.mode in ("paper", "live") else "paper"
     try:
-        return preview_session_sizing(cfg, mode=mode)
+        return preview_session_sizing(
+            cfg, mode=mode, user_id=req.user_id,
+            broker_account_id=req.broker_account_id)
     except Exception as e:
         log.exception("preview failed: %s", e)
         raise HTTPException(500, f"preview failed: {e}")
@@ -243,10 +282,25 @@ def session_positions(session_id: str):
     return {"session_id": session_id, "positions": sess.positions()}
 
 
+@router.get("/autotrade/session/{session_id}/journal")
+def session_journal(session_id: str):
+    """Daily Trade Journal for a session — available for CREATED/RUNNING/CLOSED.
+
+    Builds a structured summary + per-position journal from autotrade_sessions
+    and autotrade_positions (never falcon_position_state).  Open positions
+    contribute unrealised_pnl; closed positions contribute realised_pnl.
+    Returns 404 if the session_id is not found.
+    """
+    return build_journal(session_id)
+
+
 @router.get("/autotrade/sessions")
-def session_list():
-    """List recent sessions (newest first) so the UI can show + resume them."""
-    return {"sessions": TradingSession.list_sessions()}
+def session_list(user_id: Optional[str] = None):
+    """List recent sessions (newest first) so the UI can show + resume them.
+
+    PHASE-2: pass ?user_id=<id> to scope to one user's sessions (per-user
+    isolation). Omit it for the full operator view (today's behaviour)."""
+    return {"sessions": TradingSession.list_sessions(user_id=user_id)}
 
 
 @router.post("/autotrade/sessions/delete")
@@ -326,3 +380,91 @@ def broker_list():
             "SELECT * FROM autotrade_broker_profiles ORDER BY profile_id"
         ).fetchall()
     return {"brokers": [dict(r) for r in rows]}
+
+
+# ── PHASE-2 MULTI-TENANT: broker-account (credential vault) endpoints ─────────
+# Operator-token gated at the router level (same as everything here); user
+# isolation is enforced by the user_id supplied by the portal (server-side).
+# Secrets are encrypted at rest and NEVER returned — only status + masked
+# previews. All endpoints are NO-OP-safe when the vault is disabled (no
+# FALCON_VAULT_KEY): connect/refresh return a clear 400; list returns [].
+
+@router.post("/autotrade/broker-account")
+def broker_account_connect(req: ConnectBrokerAccountRequest):
+    """Connect (store) a broker account: encrypt api_secret at rest under the
+    vault, status PENDING (no token yet). Re-posting the same
+    (user_id, broker, account_label) UPDATES the creds in place. Returns the
+    PUBLIC dict (no secrets). 400 if the vault is disabled."""
+    from .. import vault
+    try:
+        return vault.put_account(
+            user_id=req.user_id, broker=req.broker,
+            account_label=req.account_label, api_key=req.api_key,
+            api_secret=req.api_secret)
+    except vault.VaultDisabledError as e:
+        raise HTTPException(400, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/autotrade/broker-accounts")
+def broker_accounts_list(user_id: str):
+    """List a user's broker accounts (masked, no secrets). Scoped to user_id."""
+    from .. import vault
+    return {"accounts": vault.list_accounts(user_id=user_id),
+            "vault_enabled": vault.vault_enabled()}
+
+
+@router.delete("/autotrade/broker-account/{broker_account_id}")
+def broker_account_delete(broker_account_id: str, user_id: str):
+    """Delete a broker account, scoped to (broker_account_id, user_id)."""
+    from .. import vault
+    ok = vault.delete_account(broker_account_id, user_id=user_id)
+    if not ok:
+        raise HTTPException(404, "broker account not found")
+    return {"deleted": 1, "broker_account_id": broker_account_id}
+
+
+@router.get("/autotrade/broker-account/{broker_account_id}/login-url")
+def broker_account_login_url(broker_account_id: str, user_id: Optional[str] = None):
+    """Build the broker login URL for THIS account (so the user can mint a fresh
+    daily token). Zerodha implemented; other brokers' login flows are a
+    follow-up. 400 if the vault is disabled / account not found."""
+    from ..broker import zerodha_auth
+    from .. import vault
+    acct = vault.get_account_public(broker_account_id, user_id=user_id)
+    if acct is None:
+        raise HTTPException(404, "broker account not found")
+    if acct["broker"] != "zerodha":
+        raise HTTPException(
+            400, f"login-url not implemented for broker {acct['broker']!r} "
+            "(Zerodha verified; others are a follow-up)")
+    try:
+        return {"broker_account_id": broker_account_id,
+                "login_url": zerodha_auth.login_url(broker_account_id,
+                                                    user_id=user_id)}
+    except zerodha_auth.AccountAuthError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/autotrade/broker-account/{broker_account_id}/refresh-token")
+def broker_account_refresh_token(broker_account_id: str,
+                                 req: RefreshTokenRequest):
+    """Exchange a broker request_token for an access_token and store it
+    (encrypted) in the vault → status ACTIVE, token_date today. Zerodha
+    implemented; other brokers are a follow-up. Returns the PUBLIC account dict
+    (no secrets)."""
+    from ..broker import zerodha_auth
+    from .. import vault
+    acct = vault.get_account_public(broker_account_id, user_id=req.user_id)
+    if acct is None:
+        raise HTTPException(404, "broker account not found")
+    if acct["broker"] != "zerodha":
+        raise HTTPException(
+            400, f"refresh-token not implemented for broker {acct['broker']!r} "
+            "(Zerodha verified; others are a follow-up)")
+    try:
+        return zerodha_auth.exchange_token(
+            broker_account_id, req.request_token, user_id=req.user_id)
+    except zerodha_auth.AccountAuthError as e:
+        raise HTTPException(400, str(e))

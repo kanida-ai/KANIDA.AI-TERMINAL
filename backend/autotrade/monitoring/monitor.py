@@ -165,14 +165,54 @@ class PortfolioMonitor:
             con.commit()
 
     def _open_positions(self) -> List[Dict[str, Any]]:
+        """Return all OPEN positions for this session with the fields needed by
+        both the trail engine (symbol/qty/avg_price/ltp/unrealised_pnl) and the
+        per-stock stop (gtt_id/broker_profile/instrument_type)."""
         with falcon_conn() as con:
             rows = con.execute(
-                """SELECT symbol, qty, avg_price, ltp, unrealised_pnl
+                """SELECT symbol, qty, avg_price, ltp, unrealised_pnl,
+                          gtt_id, broker_profile, instrument_type
                    FROM autotrade_positions
                    WHERE session_id=? AND status='OPEN' AND qty > 0""",
                 (self.session_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_exit_failed_positions(self) -> List[Dict[str, Any]]:
+        """Return all EXIT_FAILED positions for this session.
+
+        Called by session.tick() to retry positions whose exits failed and
+        whose exit_gate was subsequently released by mark_exit_failed.
+        The gate release (in registry.mark_exit_failed) is the prerequisite
+        for claim_exit_session to succeed on the retry.
+        """
+        with falcon_conn() as con:
+            rows = con.execute(
+                """SELECT symbol, qty, avg_price, ltp,
+                          gtt_id, broker_profile, instrument_type
+                   FROM autotrade_positions
+                   WHERE session_id=? AND status='EXIT_FAILED' AND qty > 0""",
+                (self.session_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def _total_realised(self) -> float:
+        """Sum of realised_pnl across all CLOSED positions for this session.
+
+        Called alongside total_unrealised() so that positions closed by a GTT
+        or per-stock stop are included in the gross-return numerator. Without
+        this a GTT-closed loss disappears from the numerator and the trail
+        engine sees a falsely healthy portfolio.
+        Returns 0.0 when there are no closed positions or realised_pnl is NULL.
+        """
+        with falcon_conn() as con:
+            row = con.execute(
+                "SELECT COALESCE(SUM(realised_pnl), 0.0) AS total "
+                "FROM autotrade_positions "
+                "WHERE session_id=? AND status='CLOSED' AND realised_pnl IS NOT NULL",
+                (self.session_id,),
+            ).fetchone()
+        return float(row["total"]) if row else 0.0
 
     def total_unrealised(self) -> float:
         total = 0.0
@@ -184,18 +224,26 @@ class PortfolioMonitor:
         return total
 
     def compute_gross_return(self) -> float:
-        """ON-FUND view: sum(uPnL) / total_allocated_capital. Secondary basis.
-        Denominator never shrinks."""
-        return self.total_unrealised() / self._total_allocated_capital
+        """ON-FUND view: (sum(uPnL) + realised_pnl) / total_allocated_capital.
+
+        Secondary basis — for display only, not the kill basis. Includes
+        realised P&L from CLOSED positions so a GTT-closed loss is reflected.
+        Denominator never shrinks (frozen total_allocated_capital).
+        """
+        total_pnl = self.total_unrealised() + self._total_realised()
+        return total_pnl / self._total_allocated_capital
 
     def compute_gross_return_invested(self) -> float:
-        """KILL BASIS: sum(uPnL) / invested_basis (frozen at entry).
+        """KILL BASIS: (sum(uPnL) + realised_pnl) / invested_basis (frozen at entry).
 
         This is the return on the capital actually put to work in the product
         (MTF leveraged value / CNC cash). The kill switch is checked against
-        THIS value. invested_basis() falls back to total_allocated_capital when
-        no positions exist, so this never divides by zero."""
-        return self.total_unrealised() / self.invested_basis()
+        THIS value. Includes realised P&L from CLOSED positions so that a
+        GTT-closed loss cannot inflate the remaining portfolio's apparent return.
+        invested_basis() falls back to total_allocated_capital when no positions
+        exist, so this never divides by zero."""
+        total_pnl = self.total_unrealised() + self._total_realised()
+        return total_pnl / self.invested_basis()
 
     def refresh_ltps(self, brokers: Dict[str, Any]) -> int:
         """Mark every open position to market and persist ltp + uPnL.

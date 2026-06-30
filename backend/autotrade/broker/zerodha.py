@@ -31,10 +31,45 @@ class ZerodhaBroker(BrokerClient):
     # ── lazy kite client (only when we actually need it) ──────────────────────
     @property
     def kite(self):
+        """The authenticated KiteConnect for THIS adapter.
+
+        PHASE-2 MULTI-TENANT: if the profile carries account-bound creds
+        (api_key + access_token, populated from the vault at session-build time
+        OR a non-null broker_account_id), build a DEDICATED proxy-aware
+        KiteConnect for that account — NO process-global state, so two concurrent
+        sessions on different accounts never cross-contaminate. When the profile
+        has NO account creds (broker_account_id is None), fall back to the
+        PROCESS-GLOBAL get_kite_client() = today's operator path, byte-for-byte.
+        """
         if self._kite is None:
-            from services.kite_auth import get_kite_client
-            self._kite = get_kite_client(check=False)
+            self._kite = self._build_kite()
         return self._kite
+
+    def _build_kite(self):
+        prof = self.profile
+        api_key = getattr(prof, "api_key", "") or ""
+        access_token = getattr(prof, "access_token", "") or ""
+        bound = getattr(prof, "broker_account_id", None)
+        # Per-account path: explicit creds supplied (vault-resolved) → build a
+        # dedicated client. Requires BOTH api_key and access_token; a bound
+        # account missing a token is a real error (caller should re-login), but
+        # we surface it as a KiteAuthError-style ValueError rather than silently
+        # using the operator's global token (which would trade the WRONG account).
+        if bound is not None:
+            if not api_key or not access_token:
+                raise ValueError(
+                    f"broker_account {bound}: api_key/access_token not resolved "
+                    "(vault disabled, account missing, or token expired — "
+                    "re-connect the account)")
+            from services.kite_auth import _new_kite  # proxy-aware constructor
+            kite = _new_kite(api_key)
+            kite.set_access_token(access_token)
+            log.info("zerodha: built per-account KiteConnect for account %s",
+                     bound)
+            return kite
+        # Legacy / operator path: process-global client (env + kite_tokens).
+        from services.kite_auth import get_kite_client
+        return get_kite_client(check=False)
 
     def _live_allowed(self) -> bool:
         """Real orders require dry_run off AND the master env switch on."""
@@ -230,47 +265,120 @@ class ZerodhaBroker(BrokerClient):
             "cancel_order(autotrade)", str(order_id),
         )
 
+    def _resolve_symbol(self, symbol: str):
+        """Return (trading_symbol, exchange) for Kite order placement.
+
+        Symbols may arrive as bare NSE codes ("INFY") or with an exchange
+        suffix ("INFY:BSE"). Split on ":" if present; default exchange NSE.
+        """
+        if ":" in symbol:
+            parts = symbol.split(":", 1)
+            return parts[0], parts[1].upper()
+        return symbol, "NSE"
+
+    def _resolve_product(self, instrument_type: str):
+        """Map our instrument_type string to the Kite product constant.
+
+        CNC  → PRODUCT_CNC   (delivery cash)
+        MIS  → PRODUCT_MIS   (intraday margin)
+        NRML → PRODUCT_NRML  (F&O / carry)
+        MTF  → "MTF"         (margin trade facility — string, not a constant)
+        EQ   → PRODUCT_CNC   (equity default)
+        Anything else → PRODUCT_CNC (safe fallback, logged).
+        """
+        kite = self.kite
+        mapping = {
+            "CNC": kite.PRODUCT_CNC,
+            "MIS": kite.PRODUCT_MIS,
+            "NRML": kite.PRODUCT_NRML,
+            "MTF": "MTF",
+            "EQ": kite.PRODUCT_CNC,
+        }
+        prod = mapping.get(instrument_type.upper() if instrument_type else "CNC")
+        if prod is None:
+            log.warning("_resolve_product: unknown instrument_type %r — defaulting CNC",
+                        instrument_type)
+            prod = kite.PRODUCT_CNC
+        return prod
+
     async def place_market_exit(self, symbol: str, qty: int,
                                 instrument_type: str) -> OrderResult:
-        """Flatten one position with a MARKET sell.
+        """Flatten one position with a direct Kite MARKET SELL.
 
-        Reuses trail_manager.execute_exit_at_market when possible so we share the
-        exact, battle-tested exit semantics (SL cancel + market_protection). In
-        dry-run we never touch Kite.
+        Places the order directly via kite.place_order (VARIETY_REGULAR,
+        ORDER_TYPE_MARKET) rather than delegating to trail_manager so we own the
+        order_id and can poll its fill status via confirm_exit / exit_poller.
+        In dry-run we never touch Kite.
         """
         if not self._live_allowed():
             return OrderResult(status="DRY_RUN", broker_order_id=None,
                                symbol=symbol, qty=qty, raw={"dry_run": True})
         try:
-            from falcon.trade.services import trail_manager
-            from falcon.trade.services import position_monitor
             kite = self.kite
-            state = position_monitor.get_state(symbol) or {
-                "symbol": symbol, "qty": qty, "product": self.profile.order_product,
-                "sl_kite_order_id": None,
-            }
-            # Recompute open qty (spec: kill switch must use the full remaining qty).
-            state = dict(state)
-            state["qty"] = qty
-            res = trail_manager.execute_exit_at_market(kite, state, "KILL_SWITCH")
-            status = "PLACED" if res.get("status") == "PLACED" else "FAILED"
-            return OrderResult(status=status,
-                               broker_order_id=res.get("kite_order_id"),
-                               symbol=symbol, qty=qty, error=res.get("error"))
+            trading_symbol, exchange = self._resolve_symbol(symbol)
+            kexch = getattr(kite, f"EXCHANGE_{exchange}", exchange)
+            order_id = kite.place_order(
+                variety=kite.VARIETY_REGULAR,
+                exchange=kexch,
+                tradingsymbol=trading_symbol,
+                transaction_type=kite.TRANSACTION_TYPE_SELL,
+                quantity=int(qty),
+                product=self._resolve_product(instrument_type),
+                order_type=kite.ORDER_TYPE_MARKET,
+            )
+            return OrderResult(status="PLACED", broker_order_id=str(order_id),
+                               symbol=symbol, qty=qty)
         except Exception as e:
             log.error("place_market_exit failed for %s: %s", symbol, e)
             return OrderResult(status="FAILED", broker_order_id=None,
                                symbol=symbol, qty=qty, error=str(e))
 
+    def get_order_status(self, order_id: str) -> dict:
+        """Scan today's Kite orders and return the matching order dict.
+
+        Returns {} when the order is not found (treat as unknown / still pending).
+        Raises on a Kite API error so the caller can log and decide to retry.
+        """
+        try:
+            orders = self.kite.orders()
+            for o in orders:
+                if str(o.get("order_id")) == str(order_id):
+                    return o
+            return {}
+        except Exception as e:
+            log.warning("get_order_status failed for order %s: %s", order_id, e)
+            raise
+
+    def cancel_order_sync(self, order_id: str) -> bool:
+        """Synchronously cancel a regular Kite order.
+
+        Returns True if the cancel request was submitted. Returns False (and logs)
+        on any error — callers should still attempt a fresh exit after failure.
+        """
+        if not self._live_allowed():
+            return True
+        try:
+            kite = self.kite
+            kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=order_id)
+            return True
+        except Exception as e:
+            log.warning("cancel_order_sync failed for %s: %s", order_id, e)
+            return False
+
     # ── GTT-OCO (broker-held per-position backup) ─────────────────────────────
     def place_gtt_oco(self, symbol: str, qty: int, stop_price: float,
                       target_price: float, last_price: float,
                       product: str = "CNC", exchange: str = "NSE",
-                      order_type: str = "LIMIT") -> Optional[str]:
+                      order_type: str = "LIMIT",
+                      stop_limit_price: Optional[float] = None) -> Optional[str]:
         """Place a two-leg OCO GTT on Kite: a STOP leg (SELL when price <= stop)
         and a TARGET leg (SELL when price >= target). The broker holds it so a
         position is protected even if our software is down — the BACKUP floor
         under the portfolio kill switch.
+
+        stop_limit_price: limit price for the stop leg's order. When provided it
+        is set BELOW stop_price (the trigger) so the sell order fills even when
+        price gaps below the trigger. Falls back to stop_price when None.
 
         Dry-run / live-disabled → returns None (no real GTT). On any error →
         logs + returns None (best-effort; entry is never blocked on the GTT).
@@ -287,11 +395,15 @@ class ZerodhaBroker(BrokerClient):
                       else kite.ORDER_TYPE_MARKET)
             kexch = getattr(kite, f"EXCHANGE_{exchange}", exchange)
             stop_price = round(float(stop_price), 2)
+            # Stop leg: use stop_limit_price (below trigger) when provided,
+            # otherwise fall back to the trigger price itself.
+            stop_lim = round(float(stop_limit_price), 2) if stop_limit_price is not None \
+                else stop_price
             target_price = round(float(target_price), 2)
             # Kite OCO trigger_values must be [lower, upper]; leg order matches.
             orders = [
                 {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": int(qty),
-                 "order_type": kotype, "product": kprod, "price": stop_price},
+                 "order_type": kotype, "product": kprod, "price": stop_lim},
                 {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": int(qty),
                  "order_type": kotype, "product": kprod, "price": target_price},
             ]

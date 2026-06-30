@@ -126,6 +126,23 @@ class BrokerClient(ABC):
                                 instrument_type: str) -> OrderResult:
         ...
 
+    def get_order_status(self, order_id: str) -> dict:
+        """Return Kite order details dict for `order_id`.
+
+        Default (paper / mock): returns a synthetic COMPLETE result so
+        dry-run confirm_exit succeeds immediately without polling.
+        Live Zerodha adapter overrides with a real kite.orders() scan.
+        """
+        return {"status": "COMPLETE", "filled_quantity": 0, "average_price": 0.0}
+
+    def cancel_order_sync(self, order_id: str) -> bool:
+        """Synchronous cancel for the retry loop in exit_poller.
+
+        Default: returns True (safe no-op for paper / stub brokers).
+        Live Zerodha adapter overrides with kite.cancel_order().
+        """
+        return True
+
     # ── GTT-OCO (broker-held per-position backup floor) ───────────────────────
     # Default no-ops so stub brokers (fyers/upstox/angel/dhan) and dry-run never
     # place real GTTs — they return None. Only the live Zerodha adapter overrides
@@ -133,9 +150,15 @@ class BrokerClient(ABC):
     def place_gtt_oco(self, symbol: str, qty: int, stop_price: float,
                       target_price: float, last_price: float,
                       product: str = "CNC", exchange: str = "NSE",
-                      order_type: str = "LIMIT") -> Optional[str]:
+                      order_type: str = "LIMIT",
+                      stop_limit_price: Optional[float] = None) -> Optional[str]:
         """Place a two-leg OCO GTT (STOP + TARGET sell). Returns the broker GTT
-        id, or None when not placed (dry-run / unsupported broker)."""
+        id, or None when not placed (dry-run / unsupported broker).
+
+        stop_limit_price: limit price for the stop leg. When set it should be
+        slightly below stop_price (the trigger) so the sell order fills even if
+        price gaps below the trigger. Defaults to stop_price when None
+        (backward-compatible — stub implementations ignore it)."""
         return None
 
     def cancel_gtt(self, gtt_id: str) -> Any:

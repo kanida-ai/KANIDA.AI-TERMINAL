@@ -45,9 +45,14 @@ VALID_REASONS = {
     "KILL_SWITCH", "MANUAL",
     # Intraday-basket trail engine reasons (strategy=="intraday_basket").
     "TRAIL_EXIT", "FLOOR_EXIT", "STOP", "SQUARE_OFF",
+    # Per-stock software stop (Fix 3: individual stock exits before the GTT fires).
+    "STOP_STOCK",
     # Map the existing trail_manager reasons onto the gate vocabulary too, so a
     # minimal wrap there can pass its native reason string through unchanged.
     "BREACHED_SL", "TIME_STOP", "TARGET_HIT",
+    # EXIT_FAILED retry path — tick() re-attempts exits whose gate was released
+    # by registry.mark_exit_failed after a prior placement failure.
+    "EXIT_RETRY",
 }
 
 
