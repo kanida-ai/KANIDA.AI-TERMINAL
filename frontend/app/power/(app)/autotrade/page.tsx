@@ -47,7 +47,9 @@ export default async function AutoTradePage() {
   // for isAdmin. The panel's children fetch their own data client-side.
   const isOperator = user?.role === 'admin'
   if (isOperator) {
-    return <AutoTradePanel firstName={firstName} />
+    // user.id is the logged-in operator's numeric id — reused as the per-account
+    // owner for the new broker-accounts panel + per-account session scoping.
+    return <AutoTradePanel firstName={firstName} userId={user!.id} />
   }
 
   // Non-operator branch: unchanged launch-pending experience.

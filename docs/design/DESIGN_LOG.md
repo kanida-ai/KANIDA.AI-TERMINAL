@@ -38,6 +38,79 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-06-28 — **AutoTrade Phase-2 multi-tenant: connect-your-broker-account panel
+  + per-account session selection + graceful vault-disabled state** (operator ask;
+  backend worktree commit a770457 adds the operator-token-gated broker-account
+  endpoints under the existing `/api/falcon-proxy/api/autotrade` root, deploys
+  later). UI-ONLY; NO backend/execution code touched; all calls via the existing
+  same-origin `/api/falcon-proxy`. **NOT pushed/deployed — operator deploys with
+  the backend later.** Files: `lib/autotrade-api.ts`,
+  `components/power/autotrade/BrokerAccountsPanel.tsx` (NEW),
+  `components/power/autotrade/PortfolioAutoTrade.tsx`,
+  `components/power/autotrade/AutoTradePanel.tsx`,
+  `app/power/(app)/autotrade/page.tsx`. tsc clean (EXIT 0) + `npx next build`
+  GREEN (`/power/autotrade` built, all routes intact).
+  - **Types/API (`lib/autotrade-api.ts`).** New `BrokerAccountStatus`
+    (PENDING|ACTIVE|EXPIRED), `BrokerName`, `BrokerAccount {broker_account_id,
+    broker, account_label, status, api_key_masked?, has_secret?, has_token?}`,
+    `BrokerAccountsResponse {accounts?, vault_enabled?}`,
+    `CreateBrokerAccountRequest` (api_secret documented WRITE-ONLY),
+    `LoginUrlResponse`, `RefreshTokenResponse`, `SessionScope {user_id?,
+    broker_account_id?}`. New methods: `brokerAccounts(userId)` →
+    GET `/broker-accounts?user_id=`; `createBrokerAccount(req)` → POST
+    `/broker-account`; `deleteBrokerAccount(id, userId)` → DELETE
+    `/broker-account/{id}?user_id=`; `brokerLoginUrl(id, userId)` → GET
+    `/broker-account/{id}/login-url?user_id=`; `refreshBrokerToken(id, token,
+    userId?)` → POST `/broker-account/{id}/refresh-token`. `listSessions` /
+    `createSession` / `preview` gained an optional `scope` (user_id via query on
+    list, user_id+broker_account_id in the body on create/preview) — default
+    (no scope) = the global/operator session, unchanged. Added `q`/`userQuery`/
+    `scopeBody` query helpers.
+  - **BROKER ACCOUNTS panel (NEW `BrokerAccountsPanel`).** New "Broker accounts"
+    tab in `AutoTradePanel`. (1) Connect form: broker dropdown (Zerodha tagged
+    **verified**; Upstox/Angel/Dhan/Fyers tagged **beta — unverified**),
+    account_label, api_key, **api_secret (type=password, WRITE-ONLY)** → POST
+    broker-account. The secret is snapshotted to a local then **cleared from
+    state in the same tick** before the call resolves, and is NEVER read back or
+    displayed. (2) Accounts list: account_label · broker · status badge (PENDING
+    amber / ACTIVE green / EXPIRED red) · api_key_masked · secret-on-file ·
+    token-active — NO secrets ever rendered. (3) Per row: **Connect / Re-connect**
+    → GET login-url → `window.open` popup → user logs in at broker → pastes the
+    `request_token` into an inline input → POST refresh-token → list reloads (row
+    flips ACTIVE). **Delete** with `window.confirm`. (4) **vault_enabled=false →
+    a calm amber "Broker-account vault isn't enabled yet — operator must set the
+    vault key" empty state** (NOT an error; says sessions keep running on the
+    global operator account).
+  - **PER-ACCOUNT SESSION SELECTION (`PortfolioAutoTrade`).** The component now
+    takes a `userId` prop (the logged-in operator's `user.id` from the existing
+    power-auth session — no new auth invented). When `userId` exists it loads the
+    user's accounts and the create form shows an optional **"Broker account"**
+    selector — default **"Global account (operator default)"** (unchanged
+    behaviour) or a connected account. When chosen, `broker_account_id`+`user_id`
+    are sent on create + preview; the sessions list is scoped with `?user_id=`.
+    **A LIVE Start on an EXPIRED account is BLOCKED** with a "re-connect first"
+    prompt (paper is allowed; the global session is unaffected). An EXPIRED
+    selection shows an inline red re-connect warning.
+  - **Honesty.** api_secret never read back/displayed/persisted in the browser;
+    every backend field degrades to "—"; vault-disabled is a friendly empty
+    state, not an error; beta brokers flagged unverified; ALL existing AutoTrade
+    UI (strategy dropdown, trail panel, dual returns, Kite P&L, kill_preview,
+    speed strip, egress card, entry_date/trading-day rule, the three non-placed
+    statuses, list/resume/delete, SCHEDULED flow) intact 1:1. Mint/F2 theme +
+    viewport-lock preserved (reuses cotrade-kit `C`/`ICON`).
+  - **Backend needs:** the operator-token-gated broker-account endpoints under
+    `/api/autotrade` (commit a770457, deploys later): POST `/broker-account`
+    `{user_id, broker, account_label, api_key, api_secret}` → masked dict; GET
+    `/broker-accounts?user_id=` → `{accounts:[{broker_account_id, broker,
+    account_label, status, api_key_masked, has_secret, has_token}],
+    vault_enabled}`; DELETE `/broker-account/{id}?user_id=`; GET
+    `/broker-account/{id}/login-url?user_id=` → `{login_url}`; POST
+    `/broker-account/{id}/refresh-token {user_id?, request_token}`; and
+    create/`/preview`/GET `/sessions` accepting optional `user_id` +
+    `broker_account_id`. The UI degrades gracefully (empty selector, "—",
+    silent fallback to the global session) if any endpoint isn't reporting yet.
+  - **Verify:** `npx tsc --noEmit` clean (EXIT 0); `npx next build` ✓ Compiled —
+    `/power/autotrade` built, all other routes intact. **NOT pushed.**
 - 2026-06-28 — **AutoTrade: wired the new execution-date / trading-day rule into
   the console (entry-date picker + on-missed-window + advanced grace; the 400
   "not a trading day" one-click apply; the resolved-fire line; the three new

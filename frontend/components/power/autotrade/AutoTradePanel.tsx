@@ -33,6 +33,8 @@
 import { useState } from 'react'
 import { C, ICON, Gear, MECHANISM_CSS } from '@/components/power/shared/cotrade-kit'
 import { PortfolioAutoTrade } from '@/components/power/autotrade/PortfolioAutoTrade'
+import { BrokerAccountsPanel } from '@/components/power/autotrade/BrokerAccountsPanel'
+import { TradeJournalPanel } from '@/components/power/autotrade/TradeJournalPanel'
 
 // Legacy operator screens — reused verbatim (default exports rendered as tabs).
 import PremarketPage from '@/app/falcon/premarket/page'
@@ -41,19 +43,25 @@ import TrailConfigPage from '@/app/falcon/config/page'
 import FalconAdminPage from '@/app/falcon/admin/page'
 import FalconTradePage from '@/app/falcon/trade/page'
 
-type Tab = 'sessions' | 'trade' | 'premarket' | 'positions' | 'config' | 'engine'
+type Tab = 'sessions' | 'journal' | 'brokers' | 'trade' | 'premarket' | 'positions' | 'config' | 'engine'
 
 const TABS: { id: Tab; label: string; icon: (n: number) => React.ReactNode }[] = [
-  { id: 'sessions',  label: 'Sessions',   icon: ICON.bolt },
-  { id: 'trade',     label: 'Trade',      icon: ICON.arrow },
-  { id: 'premarket', label: 'Pre-Market', icon: ICON.clock },
-  { id: 'positions', label: 'Positions',  icon: ICON.shield },
-  { id: 'config',    label: 'Config',     icon: ICON.trend },
-  { id: 'engine',    label: 'Engine',     icon: ICON.bot },
+  { id: 'sessions',  label: 'Sessions',       icon: ICON.bolt },
+  { id: 'journal',   label: 'Journal',        icon: ICON.book },
+  { id: 'brokers',   label: 'Broker accounts', icon: ICON.link },
+  { id: 'trade',     label: 'Trade',          icon: ICON.arrow },
+  { id: 'premarket', label: 'Pre-Market',     icon: ICON.clock },
+  { id: 'positions', label: 'Positions',      icon: ICON.shield },
+  { id: 'config',    label: 'Config',         icon: ICON.trend },
+  { id: 'engine',    label: 'Engine',         icon: ICON.bot },
 ]
 
-export function AutoTradePanel({ firstName }: { firstName: string }) {
+export function AutoTradePanel({ firstName, userId }: { firstName: string; userId: number | string }) {
   const [tab, setTab] = useState<Tab>('sessions')
+  // activeSessionId is lifted here so the Journal tab can receive it without
+  // requiring PortfolioAutoTrade to be rewritten. PortfolioAutoTrade notifies
+  // us via onSessionChange whenever the operator resumes or creates a session.
+  const [activeSessionId, setActiveSessionId] = useState<string>('')
 
   return (
     <div className="h-full w-full flex flex-col" style={{ background: C.canvas, color: C.ink }}>
@@ -103,7 +111,31 @@ export function AutoTradePanel({ firstName }: { firstName: string }) {
       <div className="flex-1 min-h-0 overflow-y-auto">
         {tab === 'sessions' && (
           <div className="mx-auto w-full max-w-4xl px-5 pb-10 sm:px-8">
-            <PortfolioAutoTrade />
+            <PortfolioAutoTrade userId={userId} onSessionChange={setActiveSessionId} />
+          </div>
+        )}
+
+        {tab === 'journal' && (
+          <div className="mx-auto w-full max-w-4xl px-5 pb-10 sm:px-8 pt-4">
+            {activeSessionId ? (
+              <TradeJournalPanel sessionId={activeSessionId} />
+            ) : (
+              <div className="flex flex-col items-center justify-center gap-3 py-20 text-center">
+                <span style={{ color: C.faint }}>{ICON.book(28)}</span>
+                <p className="text-[13px]" style={{ color: C.muted }}>
+                  Select a session to view its trade journal.
+                </p>
+                <p className="text-[11.5px]" style={{ color: C.faint }}>
+                  Resume a session from the Sessions tab to see its journal here.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === 'brokers' && (
+          <div className="mx-auto w-full max-w-4xl px-5 pb-10 sm:px-8">
+            <BrokerAccountsPanel userId={userId} />
           </div>
         )}
 

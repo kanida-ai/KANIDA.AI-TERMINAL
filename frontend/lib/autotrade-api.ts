@@ -44,6 +44,12 @@ export type SessionConfig = {
   strategy: Strategy
   total_allocated_capital: number
   top_n_stocks: number
+  // universe_filter: which index/universe the top-N picks are drawn from.
+  // Default 'all500' (= current behaviour; backend ignores absent/null).
+  universe_filter?: string
+  // symbol_whitelist: when set, ONLY these symbols are traded (ignoring rank
+  // beyond the list). Absent = default top-N by rank (current behaviour).
+  symbol_whitelist?: string[]
   sizing_mode: SizingMode
   max_pct_per_position?: number
   manual_amounts?: Record<string, number>
@@ -298,6 +304,149 @@ export type Broker = {
 }
 export type BrokerListResponse = { brokers?: Broker[]; [k: string]: unknown }
 
+// ── Broker accounts (Phase-2 multi-tenant: connect-your-broker) ──────────────
+// A connected broker account, operator-token-gated, scoped by user_id. The
+// api_secret is WRITE-ONLY — it is NEVER returned by any endpoint and never
+// stored in the browser; only `has_secret` reports whether one is on file.
+// status: PENDING (no daily token yet — needs a Connect login) | ACTIVE (has a
+// live token, ready to trade) | EXPIRED (token lapsed — needs Re-connect).
+export type BrokerAccountStatus = 'PENDING' | 'ACTIVE' | 'EXPIRED' | string
+export type BrokerName = 'zerodha' | 'upstox' | 'angel' | 'dhan' | 'fyers' | string
+
+export type BrokerAccount = {
+  broker_account_id: string
+  broker: BrokerName
+  account_label: string
+  status: BrokerAccountStatus
+  api_key_masked?: string
+  has_secret?: boolean
+  has_token?: boolean
+  [k: string]: unknown
+}
+
+// GET /autotrade/broker-accounts?user_id= →
+//   { accounts:[...], vault_enabled }
+// vault_enabled=false means the operator hasn't set the vault key yet, so the
+// feature is dormant — the UI shows a friendly empty state, never an error.
+export type BrokerAccountsResponse = {
+  accounts?: BrokerAccount[]
+  vault_enabled?: boolean
+  [k: string]: unknown
+}
+
+// POST /autotrade/broker-account → the public masked dict of the new account
+// (the secret is consumed server-side and never echoed).
+export type CreateBrokerAccountRequest = {
+  user_id: number | string
+  broker: BrokerName
+  account_label: string
+  api_key: string
+  api_secret: string  // WRITE-ONLY — sent once, never read back; cleared from state after submit
+}
+
+// GET /autotrade/broker-account/{id}/login-url?user_id= → { login_url }
+export type LoginUrlResponse = { login_url: string; [k: string]: unknown }
+
+// POST /autotrade/broker-account/{id}/refresh-token { user_id?, request_token }
+// → the updated (now ACTIVE) masked account.
+export type RefreshTokenResponse = BrokerAccount
+
+// ── Trade Journal types ───────────────────────────────────────────────────────
+
+export type JournalPosition = {
+  symbol: string
+  exchange: string
+  qty: number
+  avg_price: number
+  invested_rs: number
+  sl_level: number
+  target_price: number
+  sl_pct: number
+  target_pct: number
+  gtt_stop: number | null
+  gtt_target: number | null
+  ltp: number | null
+  status: 'OPEN' | 'CLOSED'
+  exit_price: number | null
+  realised_pnl: number | null
+  unrealised_pnl: number | null
+  pnl_rs: number
+  pnl_pct: number
+  close_reason: string | null
+  opened_at: string
+  closed_at: string | null
+  hold_minutes: number | null
+  review_flag: 'DEEP_LOSS' | 'LARGE_WIN' | 'STOP_RECOVERED' | 'CONTINUED_DECLINE_OPEN' | 'WINNER_OPEN' | null
+  review_note: string | null
+}
+
+export type JournalReviewItem = {
+  symbol: string
+  flag: string
+  note: string
+}
+
+export type JournalSessionSummary = {
+  total_allocated_capital: number
+  invested_basis: number
+  leverage: number
+  total_realised_pnl: number
+  total_unrealised_pnl: number
+  total_pnl: number
+  total_pnl_pct_invested: number   // already ×100 = percent
+  total_pnl_pct_fund: number
+  n_positions: number
+  n_closed: number
+  n_open: number
+  n_winners: number
+  n_losers: number
+  n_stop_hits: number
+  n_target_hits: number
+  n_trail_exits: number
+  n_square_off: number
+  n_kill_switch: number
+  best_trade: { symbol: string; pnl_rs: number; pnl_pct: number } | null
+  worst_trade: { symbol: string; pnl_rs: number; pnl_pct: number } | null
+  avg_hold_minutes: number | null
+  session_status: string
+  entry_latency_ms: number | null
+  exit_latency_ms: number | null
+}
+
+export type TradeJournal = {
+  session_id: string
+  trading_date: string      // "YYYY-MM-DD"
+  strategy: string
+  mode: 'paper' | 'live'
+  session_summary: JournalSessionSummary
+  positions: JournalPosition[]
+  review_items: JournalReviewItem[]
+}
+
+// ── Universe filter + manual stock picker (session creation) ──────────────────
+
+// The five universe filter options — identical to the Top20Filters / signals page.
+export type UniverseFilter = 'all500' | 'nifty50' | 'nifty100' | 'nifty200' | 'fno'
+
+// A single ranked pick in the session-picks preview list.
+export type PickItem = {
+  rank: number
+  symbol: string
+  sector: string
+  score: number
+  n_fires: number
+  avg_lift: number
+  close_at_signal: number
+}
+
+// Response from GET /api/autotrade/session/picks?universe=&top_n=
+export type PicksResponse = {
+  signal_date: string
+  universe_filter: string
+  top_n: number
+  picks: PickItem[]
+}
+
 // ── Transport helper — honest errors, never fabricates a success ─────────────
 // `base` lets a call target a sibling proxy root (e.g. /api/falcon for the
 // egress-IP endpoint) without changing the default /api/autotrade transport.
@@ -325,26 +474,90 @@ async function call<T>(path: string, init?: RequestInit & { base?: string }): Pr
   return body as T
 }
 
+// ── Query-string / scope helpers ─────────────────────────────────────────────
+// Build a "?a=b&c=d" string from defined params (skips null/undefined/empty).
+function q(params: Record<string, string | number | undefined | null>): string {
+  const usp = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v == null || v === '') continue
+    usp.set(k, String(v))
+  }
+  const s = usp.toString()
+  return s ? `?${s}` : ''
+}
+
+// Optional per-user / per-account scoping for session create / preview / list.
+// When a user context exists (and an ACTIVE broker account is chosen) these are
+// sent so the session runs on that account. Default (both absent) = the
+// operator/global session, exactly as before.
+export type SessionScope = { user_id?: number | string; broker_account_id?: string }
+
+// Scope as a query string (for GET /sessions) — only the user_id is used.
+function userQuery(scope?: SessionScope): string {
+  return scope?.user_id != null ? q({ user_id: scope.user_id }) : ''
+}
+
+// Scope as request-body fields (for POST create/preview) — only defined fields.
+function scopeBody(scope?: SessionScope): Record<string, string | number> {
+  const out: Record<string, string | number> = {}
+  if (scope?.user_id != null) out.user_id = scope.user_id
+  if (scope?.broker_account_id) out.broker_account_id = scope.broker_account_id
+  return out
+}
+
 export const AutoTradeAPI = {
   // List existing sessions (newest first) so the operator can RESUME a session
   // instead of starting from a blank form — fixes the "session disappears on
-  // reload" gap. Read-only; places nothing.
-  listSessions: () => call<SessionsListResponse>('/sessions'),
+  // reload" gap. Read-only; places nothing. Scoped by user_id when present.
+  listSessions: (scope?: SessionScope) =>
+    call<SessionsListResponse>(`/sessions${userQuery(scope)}`),
 
-  createSession: (mode: Mode, config: SessionConfig) =>
+  createSession: (mode: Mode, config: SessionConfig, scope?: SessionScope) =>
     call<CreateResponse>('/session/create', {
       method: 'POST',
-      body: JSON.stringify({ mode, config }),
+      body: JSON.stringify({ mode, config, ...scopeBody(scope) }),
     }),
 
   // Estimate the invested basis + kill-switch outcome for a config BEFORE Start.
   // Creates no session and places nothing — pure read-through estimate. The
   // caller must send `config.kill_switch_pct` as a FRACTION (the same /100
   // convention as createSession), since the backend speaks fractions.
-  preview: (config: SessionConfig) =>
+  preview: (config: SessionConfig, scope?: SessionScope) =>
     call<PreviewResponse>('/preview', {
       method: 'POST',
-      body: JSON.stringify({ config }),
+      body: JSON.stringify({ config, ...scopeBody(scope) }),
+    }),
+
+  // ── Broker accounts (connect-your-broker; operator-token-gated) ─────────────
+  // List a user's connected broker accounts + whether the server vault is on.
+  brokerAccounts: (userId: number | string) =>
+    call<BrokerAccountsResponse>(`/broker-accounts${q({ user_id: userId })}`),
+
+  // Connect a new broker account. api_secret is WRITE-ONLY — consumed server-side
+  // and never echoed back. The caller MUST clear it from state after this resolves.
+  createBrokerAccount: (req: CreateBrokerAccountRequest) =>
+    call<BrokerAccount>('/broker-account', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+
+  // Remove a connected account (with the user scope so the backend authorises it).
+  deleteBrokerAccount: (id: string, userId: number | string) =>
+    call<{ ok?: boolean; [k: string]: unknown }>(
+      `/broker-account/${encodeURIComponent(id)}${q({ user_id: userId })}`,
+      { method: 'DELETE' },
+    ),
+
+  // Get the broker login URL (Zerodha) so the user can authenticate in a popup
+  // and obtain a request_token to paste back.
+  brokerLoginUrl: (id: string, userId: number | string) =>
+    call<LoginUrlResponse>(`/broker-account/${encodeURIComponent(id)}/login-url${q({ user_id: userId })}`),
+
+  // Exchange the pasted request_token for a daily access token → account ACTIVE.
+  refreshBrokerToken: (id: string, requestToken: string, userId?: number | string) =>
+    call<RefreshTokenResponse>(`/broker-account/${encodeURIComponent(id)}/refresh-token`, {
+      method: 'POST',
+      body: JSON.stringify({ request_token: requestToken, ...(userId != null ? { user_id: userId } : {}) }),
     }),
 
   // when='now' (default) places immediately → RUNNING; when='scheduled' arms the
@@ -376,10 +589,25 @@ export const AutoTradeAPI = {
   configList: () => call<ConfigListResponse>('/config/list'),
   brokerList: () => call<BrokerListResponse>('/broker/list'),
 
+  // Fetch the trade journal for a completed (or live) session.
+  // Route: GET /api/falcon-proxy/api/autotrade/session/{id}/journal
+  // Returns the full session summary, per-position detail, and review flags.
+  journal: (sessionId: string) =>
+    call<TradeJournal>(`/session/${encodeURIComponent(sessionId)}/journal`),
+
   // The backend's outbound IP (for the broker's Allowed-IPs allowlist). This is
   // under /api/falcon (not /api/autotrade), so it bypasses BASE and hits the
   // Falcon proxy root directly. Read-only; a 404 surfaces as a normal error so
   // the caller can fall back to "—" without fabricating an IP.
   egressIp: () =>
     call<EgressIpResponse>('/egress-ip', { base: '/api/falcon-proxy/api/falcon' }),
+
+  // Ranked picks list for the session creation manual picker.
+  // GET /api/autotrade/session/picks?universe=&top_n=
+  // A 404 or error means the backend doesn't have this endpoint yet — callers
+  // must catch and degrade gracefully (show "Universe preview unavailable").
+  sessionPicks: (universe: string, topN: number): Promise<PicksResponse> => {
+    const qs = new URLSearchParams({ universe, top_n: String(topN) })
+    return call<PicksResponse>(`/session/picks?${qs.toString()}`)
+  },
 }

@@ -33,6 +33,8 @@ import {
   type Strategy, type SessionConfig, type CreateResponse, type StartResponse,
   type StatusResponse, type SavedConfig, type Broker, type SessionSummary,
   type OpenPosition, type PreviewResponse, type KillPreview,
+  type BrokerAccount, type SessionScope,
+  type UniverseFilter, type PickItem, type PicksResponse,
 } from '@/lib/autotrade-api'
 
 // ── Safe defaults — paper + kill switch OFF, per the ships-disabled contract ──
@@ -127,6 +129,15 @@ function fracPct(frac: number | null | undefined, signed = true, dp = 2): string
   const sign = signed && v >= 0 ? '+' : ''
   return `${sign}${trimmed}%`
 }
+
+// ── Universe filter options — identical to the signals page Top20Filters ─────
+const UNIVERSE_OPTIONS: Array<{ key: UniverseFilter; label: string }> = [
+  { key: 'all500',   label: 'All 500'   },
+  { key: 'nifty50',  label: 'Nifty 50'  },
+  { key: 'nifty100', label: 'Nifty 100' },
+  { key: 'nifty200', label: 'Nifty 200' },
+  { key: 'fno',      label: 'F&O'       },
+]
 
 const TOP_N_OPTIONS = [3, 5, 7, 10]
 const SIZING_OPTIONS: { id: SizingMode; label: string; hint: string }[] = [
@@ -230,9 +241,26 @@ const inputStyle: React.CSSProperties = {
   color: C.ink,
 }
 
-export function PortfolioAutoTrade() {
+export function PortfolioAutoTrade({
+  userId,
+  onSessionChange,
+}: {
+  userId?: number | string
+  // Called whenever the user focuses a session (resume or create).
+  // Passes the session_id up so sibling tabs (Journal) can use it.
+  onSessionChange?: (sessionId: string) => void
+}) {
   const [config, setConfig] = useState<SessionConfig>(DEFAULT_CONFIG)
   const [mode, setMode] = useState<Mode>('paper')
+
+  // ── Per-account session selection (Phase-2 multi-tenant) ──────────────────────
+  // The user's connected broker accounts (for the optional "Broker account"
+  // selector on the create form). '' = the global/operator session (default,
+  // unchanged). Only ACTIVE accounts may run a LIVE session; an EXPIRED account
+  // is offered but blocks live Start until re-connected. Loaded only when a user
+  // context exists; on failure we silently fall back to the global session.
+  const [accounts, setAccounts] = useState<BrokerAccount[]>([])
+  const [brokerAccountId, setBrokerAccountId] = useState<string>('')
 
   const [phase, setPhase] = useState<Phase>('list')
   const [session, setSession] = useState<CreateResponse | null>(null)
@@ -265,6 +293,24 @@ export function PortfolioAutoTrade() {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewErr, setPreviewErr] = useState<string | null>(null)
 
+  // ── Universe filter + manual stock picker ─────────────────────────────────
+  // universeFilter: which index the picks come from (default all500 = current
+  // behaviour). Sent in SessionConfig as universe_filter; the backend falls
+  // back silently when the field is absent (graceful degradation).
+  const [universeFilter, setUniverseFilter] = useState<UniverseFilter>('all500')
+
+  // picks: the ranked list for the manual picker (from GET /session/picks).
+  // null = not yet loaded or unavailable; [] = loaded but empty.
+  const [picks, setPicks] = useState<PickItem[] | null>(null)
+  const [picksLoading, setPicksLoading] = useState(false)
+  const [picksErr, setPicksErr] = useState<string | null>(null)
+
+  // checkedSymbols: which symbols the user has checked. null = use default top-N
+  // (the picker hasn't been interacted with or failed to load). We seed it from
+  // the picks list once loaded (top_n items pre-checked, rest unchecked), but
+  // the user can override freely.
+  const [checkedSymbols, setCheckedSymbols] = useState<Set<string> | null>(null)
+
   // Live-mode typed confirmation + kill typed confirmation
   const [liveConfirm, setLiveConfirm] = useState('')
   const [killArmed, setKillArmed] = useState(false)
@@ -283,6 +329,26 @@ export function PortfolioAutoTrade() {
 
   const set = <K extends keyof SessionConfig>(k: K, v: SessionConfig[K]) =>
     setConfig((c) => ({ ...c, [k]: v }))
+
+  // The selected account object (if any) + the scope to send on create/preview/list.
+  // scope is omitted entirely when no user context exists (default global session).
+  const selectedAccount = accounts.find((a) => a.broker_account_id === brokerAccountId) ?? null
+  const accountExpired = (selectedAccount?.status ?? '').toUpperCase() === 'EXPIRED'
+  const scope: SessionScope | undefined =
+    userId != null
+      ? { user_id: userId, ...(brokerAccountId ? { broker_account_id: brokerAccountId } : {}) }
+      : undefined
+
+  // Load the user's broker accounts (for the selector). Best-effort: a missing
+  // endpoint / disabled vault leaves the selector showing only "Global account".
+  useEffect(() => {
+    if (userId == null) return
+    let cancelled = false
+    AutoTradeAPI.brokerAccounts(userId)
+      .then((res) => { if (!cancelled) setAccounts(res.accounts ?? []) })
+      .catch(() => { if (!cancelled) setAccounts([]) })
+    return () => { cancelled = true }
+  }, [userId])
 
   // Switch strategy. For intraday_basket, SEED the validated preset (operator can
   // still edit). For portfolio_kill_switch, fall back to the safe defaults so the
@@ -307,7 +373,12 @@ export function PortfolioAutoTrade() {
   // Build the wire payload for a config: percents → fractions, exactly at the
   // send boundary (state stays in percents so the inputs read naturally). Both
   // create + preview use this so there is one conversion site per strategy.
-  const toWireConfig = useCallback((c: SessionConfig): SessionConfig => {
+  // Also carries universe_filter + symbol_whitelist through (passed as extra args
+  // at the call site so the effect dependency arrays can declare them cleanly).
+  const toWireConfig = useCallback((
+    c: SessionConfig,
+    opts?: { universeFilter?: string; symbolWhitelist?: string[] },
+  ): SessionConfig => {
     // Execution-date / trading-day rule: an empty entry_date means "let the
     // backend resolve the next valid trading session" — send it as omitted (the
     // empty string would be an invalid date), and pass through the rest.
@@ -318,10 +389,20 @@ export function PortfolioAutoTrade() {
       entry_grace_seconds: Number.isFinite(Number(c.entry_grace_seconds))
         ? Number(c.entry_grace_seconds) : 120,
     }
+    // universe_filter: only send when not the default (all500 = current behaviour).
+    // symbol_whitelist: only send when the user has made a non-default selection.
+    const universeExtra: Partial<SessionConfig> = {}
+    if (opts?.universeFilter && opts.universeFilter !== 'all500') {
+      universeExtra.universe_filter = opts.universeFilter
+    }
+    if (opts?.symbolWhitelist && opts.symbolWhitelist.length > 0) {
+      universeExtra.symbol_whitelist = opts.symbolWhitelist
+    }
     if (c.strategy === 'intraday_basket') {
       return {
         ...c,
         ...exec,
+        ...universeExtra,
         arm_pct: (Number(c.arm_pct) || 0) / 100,
         floor_pct: (Number(c.floor_pct) || 0) / 100,
         trail_giveback_pct: (Number(c.trail_giveback_pct) || 0) / 100,
@@ -330,8 +411,70 @@ export function PortfolioAutoTrade() {
         kill_switch_enabled: false,
       }
     }
-    return { ...c, ...exec, kill_switch_pct: (Number(c.kill_switch_pct) || 0) / 100 }
+    return { ...c, ...exec, ...universeExtra, kill_switch_pct: (Number(c.kill_switch_pct) || 0) / 100 }
   }, [])
+
+  // ── Load picks when the config form is open (universe or top_n changes) ──────
+  // If the endpoint errors (backend not yet deployed), gracefully degrade: show
+  // an inline note and leave checkedSymbols null so create still works normally.
+  useEffect(() => {
+    if (phase !== 'config') {
+      setPicks(null); setPicksErr(null); setPicksLoading(false); setCheckedSymbols(null)
+      return
+    }
+    let cancelled = false
+    setPicksLoading(true)
+    setPicksErr(null)
+    const t = setTimeout(async () => {
+      try {
+        const res: PicksResponse = await AutoTradeAPI.sessionPicks(universeFilter, config.top_n_stocks)
+        if (cancelled) return
+        setPicks(res.picks ?? [])
+        setPicksErr(null)
+        // Seed the checked set: top_n items pre-checked by rank, rest unchecked.
+        const defaultChecked = new Set(
+          (res.picks ?? [])
+            .filter((p) => p.rank <= config.top_n_stocks)
+            .map((p) => p.symbol),
+        )
+        setCheckedSymbols(defaultChecked)
+      } catch {
+        if (cancelled) return
+        setPicks(null)
+        setPicksErr('Universe preview unavailable — top N picks will be used.')
+        setCheckedSymbols(null)
+      } finally {
+        if (!cancelled) setPicksLoading(false)
+      }
+    }, 300)
+    return () => { cancelled = true; clearTimeout(t) }
+  }, [phase, universeFilter, config.top_n_stocks])
+
+  // When the user clicks a different Top N, re-sync checked state to the new N
+  // (top N pre-checked, rest unchecked). Called in addition to set('top_n_stocks').
+  const onTopNChange = useCallback((n: number) => {
+    set('top_n_stocks', n)
+    if (picks) {
+      const newChecked = new Set(
+        picks.filter((p) => p.rank <= n).map((p) => p.symbol),
+      )
+      setCheckedSymbols(newChecked)
+    }
+  }, [picks])
+
+  // Compute the symbol_whitelist to send: undefined if the selection equals the
+  // default top-N (no override needed); string[] otherwise (the checked set).
+  const symbolWhitelist: string[] | undefined = (() => {
+    if (!checkedSymbols || !picks) return undefined
+    const defaultSet = new Set(
+      picks.filter((p) => p.rank <= config.top_n_stocks).map((p) => p.symbol),
+    )
+    const isDefault =
+      checkedSymbols.size === defaultSet.size &&
+      [...checkedSymbols].every((s) => defaultSet.has(s))
+    if (isDefault) return undefined
+    return [...checkedSymbols]
+  })()
 
   const liveReady = mode === 'paper' || liveConfirm.trim().toUpperCase() === 'LIVE'
 
@@ -355,7 +498,10 @@ export function PortfolioAutoTrade() {
     setPreviewLoading(true)
     const t = setTimeout(async () => {
       try {
-        const res = await AutoTradeAPI.preview(toWireConfig(config))
+        const res = await AutoTradeAPI.preview(
+          toWireConfig(config, { universeFilter, symbolWhitelist }),
+          scope,
+        )
         if (!cancelled) { setPreview(res); setPreviewErr(null) }
       } catch (e) {
         if (!cancelled) { setPreview(null); setPreviewErr(e instanceof Error ? e.message : 'Could not estimate the outcome.') }
@@ -381,6 +527,10 @@ export function PortfolioAutoTrade() {
     config.trail_giveback_pct,
     config.stop_pct,
     config.square_off_time,
+    universeFilter,
+    symbolWhitelist,
+    userId,
+    brokerAccountId,
     toWireConfig,
   ])
 
@@ -388,7 +538,7 @@ export function PortfolioAutoTrade() {
   const loadSessions = useCallback(async () => {
     setSessionsLoading(true); setSessionsErr(null)
     try {
-      const res = await AutoTradeAPI.listSessions()
+      const res = await AutoTradeAPI.listSessions(userId != null ? { user_id: userId } : undefined)
       // Newest first — sort by created_at desc when present, else keep order.
       const list = (res.sessions ?? []).slice().sort((a, b) => {
         const ta = a.created_at ? Date.parse(a.created_at) : 0
@@ -401,7 +551,7 @@ export function PortfolioAutoTrade() {
     } finally {
       setSessionsLoading(false)
     }
-  }, [])
+  }, [userId])
 
   // Fetch the list once on mount so a reload RESTORES your sessions (the
   // "session disappears" fix) instead of dumping you on a blank form.
@@ -451,6 +601,7 @@ export function PortfolioAutoTrade() {
   const onResume = useCallback(async (s: SessionSummary) => {
     setError(null)
     setSession({ session_id: s.session_id, status: s.status ?? 'unknown', mode: s.mode ?? 'paper' })
+    onSessionChange?.(s.session_id)
     setStartResult(null)
     setStatus(null)
     setLiveConfirm(''); setKillArmed(false); setKillConfirm('')
@@ -475,7 +626,7 @@ export function PortfolioAutoTrade() {
     } finally {
       setBusy(null)
     }
-  }, [])
+  }, [onSessionChange])
 
   // ── Actions ────────────────────────────────────────────────────────────────
   const onCreate = useCallback(async () => {
@@ -485,11 +636,17 @@ export function PortfolioAutoTrade() {
       // captures every pct as a PERCENT so it reads naturally; toWireConfig
       // converts to fractions ONLY at the send boundary (per strategy). State
       // stays in percent (inputs keep showing "1"); no double-conversion.
-      const res = await AutoTradeAPI.createSession(mode, toWireConfig(config))
+      const res = await AutoTradeAPI.createSession(
+        mode,
+        toWireConfig(config, { universeFilter, symbolWhitelist }),
+        scope,
+      )
       setSession(res)
       setPhase('created')
       setStartResult(null)
       setStatus(null)
+      // Notify sibling tabs (Journal) of the newly active session.
+      onSessionChange?.(res.session_id)
       // Keep the list fresh so the new session shows the moment you return.
       loadSessions()
     } catch (e) {
@@ -505,10 +662,20 @@ export function PortfolioAutoTrade() {
     } finally {
       setBusy(null)
     }
-  }, [mode, config, loadSessions, toWireConfig])
+  }, [mode, config, loadSessions, toWireConfig, userId, brokerAccountId, onSessionChange, universeFilter, symbolWhitelist])
 
   const onStart = useCallback(async (when: StartWhen) => {
     if (!session) return
+    // Live placement is blocked on an EXPIRED account — its daily token has
+    // lapsed, so a real order would fail. Prompt to re-connect first. Paper is
+    // fine (no real order); the global/operator session is unaffected.
+    if (session.mode === 'live' && accountExpired) {
+      setError(
+        `This broker account is EXPIRED — re-connect it first (Broker accounts → ` +
+        `Re-connect) before starting a LIVE session on it.`,
+      )
+      return
+    }
     setError(null); setBusy('start')
     try {
       const res = await AutoTradeAPI.startSession(session.session_id, when)
@@ -525,7 +692,7 @@ export function PortfolioAutoTrade() {
     } finally {
       setBusy(null)
     }
-  }, [session])
+  }, [session, accountExpired])
 
   const refreshStatus = useCallback(async (silent = false) => {
     if (!session) return
@@ -598,6 +765,8 @@ export function PortfolioAutoTrade() {
     setConfig(DEFAULT_CONFIG); setMode('paper'); setCountdown(null)
     setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
     setCreateSuggest(null)
+    // Reset universe filter + picker
+    setUniverseFilter('all500'); setPicks(null); setPicksErr(null); setCheckedSymbols(null)
   }
 
   // Return to the Your-Sessions list and refresh it (so a just-created/started
@@ -820,6 +989,51 @@ export function PortfolioAutoTrade() {
             </Field>
           </div>
 
+          {/* Broker account selector — Phase-2 multi-tenant. Optional; only shown
+              when a user context exists. '' = the global/operator session
+              (default, unchanged). An ACTIVE account runs the session on that
+              account; an EXPIRED account is selectable but blocks a LIVE start
+              until re-connected (paper is fine). */}
+          {userId != null && (
+            <div className="mb-5">
+              <Field
+                label="Broker account"
+                hint={selectedAccount
+                  ? (accountExpired
+                      ? 'This account is EXPIRED — re-connect it (Broker accounts tab) before a LIVE start. Paper is fine.'
+                      : 'This session will run on the selected connected account.')
+                  : 'Default — the global operator account. Pick a connected account to run this session on it.'}
+              >
+                <select
+                  value={brokerAccountId}
+                  onChange={(e) => setBrokerAccountId(e.target.value)}
+                  className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
+                  style={inputStyle}
+                >
+                  <option value="" style={{ background: '#0b1410', color: C.ink }}>
+                    Global account (operator default)
+                  </option>
+                  {accounts.map((a) => {
+                    const st = (a.status ?? '').toUpperCase()
+                    return (
+                      <option key={a.broker_account_id} value={a.broker_account_id}
+                        style={{ background: '#0b1410', color: C.ink }}>
+                        {a.account_label || a.broker_account_id} · {a.broker}{st ? ` · ${st}` : ''}
+                      </option>
+                    )
+                  })}
+                </select>
+              </Field>
+              {selectedAccount && accountExpired && (
+                <div className="mt-2 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px] leading-snug"
+                  style={{ borderColor: 'rgba(232,115,107,0.35)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
+                  <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(13)}</span>
+                  <span>This account&apos;s token is <b style={{ color: C.red }}>expired</b>. Re-connect it in the <b>Broker accounts</b> tab before starting a LIVE session on it.</span>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Mode selector */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-5">
             <span className="text-[11px] font-semibold uppercase tracking-[0.05em]" style={{ color: C.muted }}>Mode</span>
@@ -898,7 +1112,7 @@ export function PortfolioAutoTrade() {
               <Segmented
                 options={TOP_N_OPTIONS.map((n) => ({ id: n, label: String(n) }))}
                 value={config.top_n_stocks}
-                onChange={(v) => set('top_n_stocks', v)}
+                onChange={(v) => onTopNChange(v)}
               />
             </Field>
 
@@ -985,6 +1199,188 @@ export function PortfolioAutoTrade() {
                 onChange={(v) => set('on_missed_window', v)}
               />
             </Field>
+          </div>
+
+          {/* ── Universe filter + manual stock picker ───────────────────────────
+              Placed OUTSIDE the 2-col grid so it spans the full width.
+              Both controls are progressive-disclosure refinements above
+              the strategy section — the defaults (all500 + top-N) are
+              exactly current behaviour, so the form is backward-compatible. */}
+          <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.015)' }}>
+            <div className="flex items-center gap-2 mb-3">
+              {ICON.trend(15) /* reuse trend icon = filter context */}
+              <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Universe</span>
+              <span className="text-[10.5px]" style={{ color: C.faint }}>
+                Which index to draw picks from · default All 500
+              </span>
+            </div>
+
+            {/* Universe filter chips — same style as signals page Top20Filters */}
+            <div className="flex items-center gap-2 flex-wrap">
+              {UNIVERSE_OPTIONS.map((opt) => {
+                const active = opt.key === universeFilter
+                return (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    onClick={() => setUniverseFilter(opt.key)}
+                    className="px-3 py-1.5 rounded-full text-xs font-semibold uppercase tracking-wide border transition-colors"
+                    style={active ? {
+                      color: C.mint,
+                      background: 'rgba(63,227,164,0.12)',
+                      borderColor: 'rgba(63,227,164,0.4)',
+                    } : {
+                      color: 'rgba(255,255,255,0.7)',
+                      background: 'rgba(255,255,255,0.04)',
+                      borderColor: C.line2,
+                    }}
+                    aria-pressed={active}
+                  >
+                    {opt.label}
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* ── Manual stock picker ─────────────────────────────────────────── */}
+            <div className="mt-4">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-[11.5px] font-semibold uppercase tracking-[0.05em]" style={{ color: C.muted }}>
+                  Pick stocks
+                </span>
+                {checkedSymbols && (
+                  <span className="text-[11px]" style={{ color: C.mint }}>
+                    {checkedSymbols.size} selected
+                    {symbolWhitelist
+                      ? <span style={{ color: C.amber }}> · custom override</span>
+                      : <span style={{ color: C.faint }}> · default top {config.top_n_stocks}</span>}
+                  </span>
+                )}
+              </div>
+
+              {/* Loading skeleton */}
+              {picksLoading && (
+                <div className="flex flex-col gap-1.5">
+                  {[...Array(Math.min(config.top_n_stocks, 5))].map((_, i) => (
+                    <div key={i} className="h-8 rounded-lg animate-pulse" style={{ background: 'rgba(255,255,255,0.05)' }} />
+                  ))}
+                </div>
+              )}
+
+              {/* Graceful-degradation: endpoint not deployed yet */}
+              {!picksLoading && picksErr && (
+                <div className="flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px] leading-snug"
+                  style={{ borderColor: 'rgba(230,180,80,0.32)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+                  <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(13)}</span>
+                  <span>{picksErr}</span>
+                </div>
+              )}
+
+              {/* Picks list */}
+              {!picksLoading && !picksErr && picks && picks.length > 0 && checkedSymbols && (
+                <div className="flex flex-col gap-1">
+                  {picks.map((p) => {
+                    const checked = checkedSymbols.has(p.symbol)
+                    const isTopN = p.rank <= config.top_n_stocks
+                    return (
+                      <label
+                        key={p.symbol}
+                        className="flex items-center gap-3 rounded-lg px-3 py-2 cursor-pointer transition-colors"
+                        style={{
+                          background: checked ? 'rgba(63,227,164,0.07)' : 'rgba(255,255,255,0.02)',
+                          border: `1px solid ${checked ? 'rgba(63,227,164,0.28)' : C.line2}`,
+                        }}
+                      >
+                        {/* Rank badge */}
+                        <span
+                          className="shrink-0 w-5 h-5 rounded-md flex items-center justify-center text-[10px] font-bold tabular-nums"
+                          style={{
+                            background: isTopN ? 'rgba(63,227,164,0.18)' : 'rgba(255,255,255,0.06)',
+                            color: isTopN ? C.mint : C.faint,
+                          }}
+                        >
+                          {p.rank}
+                        </span>
+
+                        {/* Symbol + sector */}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>
+                              {p.symbol}
+                            </span>
+                            {p.sector && (
+                              <span
+                                className="text-[9.5px] uppercase tracking-[0.06em] rounded-full px-1.5 py-0.5"
+                                style={{ color: C.muted, background: 'rgba(255,255,255,0.06)', border: `1px solid ${C.line2}` }}
+                              >
+                                {p.sector}
+                              </span>
+                            )}
+                          </div>
+                          {/* Score in small type — secondary info */}
+                          <div className="text-[10px] tabular-nums mt-0.5" style={{ color: C.faint }}>
+                            score {p.score.toFixed ? p.score.toFixed(0) : p.score}
+                            {p.avg_lift != null && p.avg_lift !== 0
+                              ? ` · avg lift ${p.avg_lift > 0 ? '+' : ''}${typeof p.avg_lift === 'number' ? p.avg_lift.toFixed(1) : p.avg_lift}%`
+                              : ''}
+                          </div>
+                        </div>
+
+                        {/* Checkbox */}
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            setCheckedSymbols((prev) => {
+                              const next = new Set(prev ?? [])
+                              if (next.has(p.symbol)) next.delete(p.symbol)
+                              else next.add(p.symbol)
+                              return next
+                            })
+                          }}
+                          className="shrink-0 w-4 h-4 accent-mint cursor-pointer"
+                        />
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+
+              {/* Empty picks list (universe + date with no signals yet) */}
+              {!picksLoading && !picksErr && picks && picks.length === 0 && (
+                <p className="text-[11.5px]" style={{ color: C.muted }}>
+                  No picks available for the selected universe and date.
+                  Top N picks will be used by the engine as usual.
+                </p>
+              )}
+
+              {/* Summary line when a custom override is active */}
+              {symbolWhitelist && (
+                <div className="mt-2 flex items-center gap-2 text-[11px]" style={{ color: C.ink2 }}>
+                  <span style={{ color: C.amber }}>{ICON.info(12)}</span>
+                  <span>
+                    Custom selection: <b style={{ color: C.ink }}>{symbolWhitelist.join(', ')}</b>{' '}
+                    will be sent as <code style={{ color: C.mint }}>symbol_whitelist</code>.
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (picks) {
+                          setCheckedSymbols(new Set(
+                            picks.filter((p) => p.rank <= config.top_n_stocks).map((p) => p.symbol),
+                          ))
+                        } else {
+                          setCheckedSymbols(null)
+                        }
+                      }}
+                      className="ml-2 underline"
+                      style={{ color: C.mint }}
+                    >
+                      Reset to top {config.top_n_stocks}
+                    </button>
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Advanced — entry grace window (tucked away; backend default 120s). */}
