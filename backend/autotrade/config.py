@@ -163,6 +163,18 @@ class TradingSessionConfig:
     stop_pct: float = 0.015
     square_off_time: str = "15:29:00"
 
+    # ── Universe filter ──────────────────────────────────────────────────────
+    # Restricts the Falcon pick pool to a named index membership before ranking.
+    # Applied IN the SQL query (so ranked ordering respects the filtered set).
+    # "all500" (default) = no filter = identical to current behaviour.
+    universe_filter: str = "all500"
+
+    # ── Symbol whitelist ─────────────────────────────────────────────────────
+    # If set, only these symbols are traded (after the universe filter narrows
+    # the pool). top_n_stocks still acts as an upper cap.
+    # None (default) = no whitelist = current behaviour, unchanged.
+    symbol_whitelist: Optional[List[str]] = None
+
     # Broker routing
     broker_profiles: List[BrokerProfile] = field(default_factory=list)
 
@@ -272,6 +284,15 @@ class TradingSessionConfig:
             raise ValueError(
                 "invalid on_missed_window (expire | carry_next_trading_day): "
                 f"{self.on_missed_window}")
+        # Universe filter
+        _VALID_UNIVERSE_FILTERS = ("all500", "nifty50", "nifty100", "nifty200", "fno")
+        if self.universe_filter not in _VALID_UNIVERSE_FILTERS:
+            raise ValueError(
+                f"Invalid universe_filter: {self.universe_filter!r}. "
+                f"Must be one of {_VALID_UNIVERSE_FILTERS}")
+        # Symbol whitelist
+        if self.symbol_whitelist is not None and len(self.symbol_whitelist) == 0:
+            raise ValueError("symbol_whitelist cannot be empty if provided")
         # entry_time must parse (it does for intraday already; enforce always).
         try:
             _parse_clock_to_seconds(self.entry_time)
@@ -368,6 +389,8 @@ class TradingSessionConfig:
             entry_date=(d.get("entry_date") or None),
             on_missed_window=d.get("on_missed_window", "expire"),
             entry_grace_seconds=int(d.get("entry_grace_seconds", 120)),
+            universe_filter=d.get("universe_filter", "all500"),
+            symbol_whitelist=d.get("symbol_whitelist", None),
         )
         return cfg
 

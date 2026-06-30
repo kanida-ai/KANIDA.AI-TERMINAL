@@ -22,6 +22,10 @@ class Pick:
     score: float = 0.0
     sector: Optional[str] = None
     close_at_signal: Optional[float] = None
+    # Additive fields — populated by load_falcon_picks when fetched from DB.
+    # None when constructed manually (e.g. in tests / mock brokers).
+    n_fires: Optional[int] = None
+    avg_lift: Optional[float] = None
 
 
 @dataclass
