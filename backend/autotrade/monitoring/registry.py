@@ -235,3 +235,49 @@ class PositionRegistry:
                 (f"EXIT_FAILED: {error}", now, self.session_id, symbol),
             )
             con.commit()
+        # Release the exit gate so a future retry can reclaim it.
+        # Import here to avoid circular import at module level.
+        from autotrade.exit_gate import release_exit_session
+        release_exit_session(self.session_id, symbol)
+
+    def update_partial_exit(self, symbol: str, filled_qty: int,
+                            exit_price: Optional[float],
+                            broker_profile: Optional[str] = None) -> None:
+        """Record a partial fill on an exit — reduce qty and record partial P&L.
+
+        The position remains OPEN (status unchanged) so the remaining qty is still
+        tracked. The realised_pnl is updated to reflect the partial exit at
+        exit_price (or current ltp when exit_price is None/0).
+        Called by exit_poller.confirm_exit when Kite reports COMPLETE but filled_qty
+        < expected qty.
+        """
+        now = datetime.now(IST).isoformat()
+        log.warning(
+            "partial exit for %s/%s: filled=%d exit_price=%s",
+            self.session_id, symbol, filled_qty, exit_price)
+        with falcon_conn() as con:
+            row = con.execute(
+                """SELECT avg_price, qty FROM autotrade_positions
+                   WHERE session_id=? AND symbol=?""",
+                (self.session_id, symbol),
+            ).fetchone()
+            if row is None:
+                log.warning("update_partial_exit: no row for %s/%s",
+                            self.session_id, symbol)
+                return
+            avg_price = float(row["avg_price"] or 0)
+            orig_qty = int(row["qty"] or 0)
+            remaining_qty = max(0, orig_qty - filled_qty)
+            # Compute realised P&L for the filled portion only.
+            fill_price = float(exit_price) if exit_price else avg_price
+            partial_realised = (fill_price - avg_price) * filled_qty
+            con.execute(
+                """UPDATE autotrade_positions
+                   SET qty=?,
+                       realised_pnl=COALESCE(realised_pnl, 0.0) + ?,
+                       exit_price=COALESCE(?, exit_price)
+                   WHERE session_id=? AND symbol=?""",
+                (remaining_qty, partial_realised, exit_price,
+                 self.session_id, symbol),
+            )
+            con.commit()

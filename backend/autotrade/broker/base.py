@@ -126,6 +126,23 @@ class BrokerClient(ABC):
                                 instrument_type: str) -> OrderResult:
         ...
 
+    def get_order_status(self, order_id: str) -> dict:
+        """Return Kite order details dict for `order_id`.
+
+        Default (paper / mock): returns a synthetic COMPLETE result so
+        dry-run confirm_exit succeeds immediately without polling.
+        Live Zerodha adapter overrides with a real kite.orders() scan.
+        """
+        return {"status": "COMPLETE", "filled_quantity": 0, "average_price": 0.0}
+
+    def cancel_order_sync(self, order_id: str) -> bool:
+        """Synchronous cancel for the retry loop in exit_poller.
+
+        Default: returns True (safe no-op for paper / stub brokers).
+        Live Zerodha adapter overrides with kite.cancel_order().
+        """
+        return True
+
     # ── GTT-OCO (broker-held per-position backup floor) ───────────────────────
     # Default no-ops so stub brokers (fyers/upstox/angel/dhan) and dry-run never
     # place real GTTs — they return None. Only the live Zerodha adapter overrides

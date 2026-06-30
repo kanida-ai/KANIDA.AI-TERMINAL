@@ -50,6 +50,9 @@ VALID_REASONS = {
     # Map the existing trail_manager reasons onto the gate vocabulary too, so a
     # minimal wrap there can pass its native reason string through unchanged.
     "BREACHED_SL", "TIME_STOP", "TARGET_HIT",
+    # EXIT_FAILED retry path — tick() re-attempts exits whose gate was released
+    # by registry.mark_exit_failed after a prior placement failure.
+    "EXIT_RETRY",
 }
 
 

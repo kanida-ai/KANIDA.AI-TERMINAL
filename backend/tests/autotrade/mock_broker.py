@@ -16,7 +16,8 @@ class MockBroker(BrokerClient):
                  fail_symbols: Optional[set] = None,
                  lot_size: int = 50,
                  pending_orders: Optional[List[dict]] = None,
-                 partial_fills: Optional[Dict[str, int]] = None):
+                 partial_fills: Optional[Dict[str, int]] = None,
+                 order_statuses: Optional[Dict[str, dict]] = None):
         super().__init__(profile, dry_run=dry_run)
         self.ltps = ltps or {}
         self.exit_delay_sec = exit_delay_sec
@@ -24,9 +25,15 @@ class MockBroker(BrokerClient):
         self._lot_size = lot_size
         self._pending = pending_orders or []
         self.partial_fills = partial_fills or {}
+        # order_statuses: order_id -> list of status dicts (polled in sequence).
+        # When the list is exhausted the last entry is returned repeatedly.
+        # Default for unknown orders: COMPLETE with qty=0 (paper-safe assumption).
+        self._order_status_sequences: Dict[str, List[dict]] = order_statuses or {}
+        self._order_status_call_count: Dict[str, int] = {}
         self.placed: List[Any] = []
         self.exits: List[tuple] = []
         self.cancelled: List[str] = []
+        self.cancelled_sync: List[str] = []
         # GTT-OCO tracking (FEATURE 1/3). gtts: list of placed GTT param dicts;
         # cancelled_gtts: ids passed to cancel_gtt; gtt_states: id -> state dict
         # the test can pre-seed to simulate a fired/active GTT for get_gtt.
@@ -87,6 +94,37 @@ class MockBroker(BrokerClient):
                                symbol=symbol, qty=qty, error="mock failure")
         return OrderResult(status="PLACED", broker_order_id="exit-" + symbol,
                            symbol=symbol, qty=qty)
+
+    def get_order_status(self, order_id: str) -> dict:
+        """Return the next status from the pre-seeded sequence for order_id.
+
+        If no sequence was provided for this order_id, returns a synthetic
+        COMPLETE response (paper / dry-run safe assumption). This means that
+        tests that don't care about polling still get a COMPLETE result and
+        mark_closed is called normally.
+        """
+        seq = self._order_status_sequences.get(order_id)
+        if seq is None:
+            # Default: report COMPLETE with 0 filled_quantity so callers that
+            # check filled_qty >= qty get the expected qty from the position row.
+            # Use a large qty to ensure filled_qty >= any expected qty.
+            return {"status": "COMPLETE", "filled_quantity": 99999,
+                    "average_price": self.ltps.get(order_id.replace("exit-", ""), 100.0)}
+        call_n = self._order_status_call_count.get(order_id, 0)
+        idx = min(call_n, len(seq) - 1)
+        self._order_status_call_count[order_id] = call_n + 1
+        return seq[idx]
+
+    def cancel_order_sync(self, order_id: str) -> bool:
+        """Record the cancel for assertion in tests."""
+        self.cancelled_sync.append(order_id)
+        return True
+
+    def set_order_status_sequence(self, order_id: str,
+                                  statuses: List[dict]) -> None:
+        """Pre-seed a sequence of status dicts for order_id (used in tests)."""
+        self._order_status_sequences[order_id] = statuses
+        self._order_status_call_count[order_id] = 0
 
     # GTT-OCO (FEATURE 1/3). dry_run mirrors the real adapter: no real GTT.
     def place_gtt_oco(self, symbol, qty, stop_price, target_price, last_price,

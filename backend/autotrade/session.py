@@ -481,22 +481,51 @@ async def _exit_single_position(
         registry.mark_exit_failed(symbol, str(e), broker_profile=prof_id)
         return {"symbol": symbol, "status": "EXIT_FAILED", "error": str(e)}
 
-    # 4. Handle the result.
-    if res is not None and getattr(res, "status", None) not in (None, "FAILED"):
-        # Use fill price from the result if available, else fall back to current ltp.
-        exit_price = getattr(res, "avg_price", None) or position.get("ltp")
-        registry.mark_closed(symbol, reason, exit_price=exit_price,
-                             broker_profile=prof_id)
-        log.warning("per-stock stop FIRED %s/%s (reason=%s) exit_price=%s",
-                    session_id, symbol, reason, exit_price)
-        return {"symbol": symbol, "status": "EXITED", "reason": reason,
-                "exit_price": exit_price,
-                "broker_order_id": getattr(res, "broker_order_id", None)}
-    else:
+    # 4. Handle the placement result — then confirm the fill.
+    if res is None or getattr(res, "status", None) == "FAILED":
         err = getattr(res, "error", None) or "exit failed"
         registry.mark_exit_failed(symbol, err, broker_profile=prof_id)
         log.error("per-stock stop EXIT_FAILED %s/%s: %s", session_id, symbol, err)
         return {"symbol": symbol, "status": "EXIT_FAILED", "error": err}
+
+    order_id = getattr(res, "broker_order_id", None)
+    is_dry = (order_id is None or
+              str(order_id).upper() in ("DRY_RUN", "NONE", ""))
+
+    # Import here to avoid top-level circular dependency.
+    from autotrade.monitoring.exit_poller import confirm_exit as _confirm_exit
+
+    confirm_result = await _confirm_exit(
+        session_id=session_id,
+        symbol=symbol,
+        order_id=order_id,
+        qty=qty,
+        broker=broker,
+        registry=registry,
+        close_reason=reason,
+        max_wait_sec=60,
+        poll_interval_sec=5.0,
+    )
+    confirm_status = confirm_result.get("status", "UNKNOWN")
+    exit_price = confirm_result.get("exit_price") or position.get("ltp")
+
+    if confirm_status in ("COMPLETE", "DRY_RUN"):
+        log.warning("per-stock stop FIRED %s/%s (reason=%s) exit_price=%s",
+                    session_id, symbol, reason, exit_price)
+        return {"symbol": symbol, "status": "EXITED", "reason": reason,
+                "exit_price": exit_price,
+                "broker_order_id": order_id}
+    else:
+        # PARTIAL / TIMEOUT / REJECTED — mark_exit_failed already called by confirm_exit
+        # for REJECTED/CANCELLED. For PARTIAL/TIMEOUT the gate was NOT released by
+        # confirm_exit so we release it here to allow a future retry.
+        if confirm_status in ("PARTIAL", "TIMEOUT"):
+            from autotrade.exit_gate import release_exit_session as _release
+            _release(session_id, symbol)
+        log.error("per-stock stop EXIT_FAILED %s/%s (confirm_status=%s)",
+                  session_id, symbol, confirm_status)
+        return {"symbol": symbol, "status": "EXIT_FAILED",
+                "confirm_status": confirm_status}
 
 
 class TradingSession:
@@ -1038,6 +1067,29 @@ class TradingSession:
         except Exception as e:  # pragma: no cover - never block the tick
             log.warning("GTT reconcile failed for %s: %s", self.session_id, e)
         self.monitor.refresh_ltps(self.brokers)
+
+        # EXIT_FAILED RETRY: after the GTT reconcile step, re-attempt any
+        # position whose exit previously failed and whose exit_gate was
+        # released by registry.mark_exit_failed. Uses the same
+        # _exit_single_position path (which now calls confirm_exit).
+        # Fire-and-forget via create_task so we don't block the tick.
+        try:
+            failed_positions = self.monitor.get_exit_failed_positions()
+            for fp in failed_positions:
+                if _exit_gate_mod.claim_exit_session(
+                        self.session_id, fp["symbol"], "EXIT_RETRY"):
+                    asyncio.create_task(_exit_single_position(
+                        session_id=self.session_id,
+                        position=fp,
+                        reason="EXIT_RETRY",
+                        brokers=self.brokers,
+                        registry=self.registry,
+                        gtt_manager=self.gtt_manager,
+                    ))
+        except Exception as _efr_e:
+            log.warning("EXIT_FAILED retry sweep failed for %s: %s",
+                        self.session_id, _efr_e)
+
         snap = self.monitor.snapshot()
         # KILL BASIS: both strategies measure the INVESTED-basis gross return
         # (÷ frozen invested_basis), not the on-fund gross. snapshot() keeps the

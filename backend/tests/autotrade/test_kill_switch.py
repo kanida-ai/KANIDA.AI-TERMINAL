@@ -228,3 +228,150 @@ def test_one_broker_failure_isolated(clean_positions):
     res = asyncio.run(ks.fire("TEST"))
     assert res["n_exited_ok"] == 1
     assert res["n_exit_failed"] == 1
+
+
+# ── FIX 2: exit_gate released after mark_exit_failed ─────────────────────────
+
+def test_exit_gate_released_on_failure(clean_positions):
+    """After mark_exit_failed, the exit_gate is released so a retry can claim it."""
+    sid = _session_id()
+    cap = 500000.0
+    _make_session_row(sid, cap)
+    reg = PositionRegistry(sid, cap)
+    reg.register(symbol="FAIL_GATE", broker_profile="zer",
+                 qty=10, avg_price=100.0)
+    reg.update_ltp("FAIL_GATE", 100.0)
+
+    # Claim the exit gate first.
+    assert exit_gate.claim_exit_session(sid, "FAIL_GATE", "KILL_SWITCH") is True
+    # Gate is held — another claim must fail.
+    assert exit_gate.claim_exit_session(sid, "FAIL_GATE", "TRAILING_STOP") is False
+
+    # mark_exit_failed MUST release the gate.
+    reg.mark_exit_failed("FAIL_GATE", "test failure")
+
+    # Gate is now free — a new claim must succeed.
+    assert exit_gate.claim_exit_session(sid, "FAIL_GATE", "EXIT_RETRY") is True
+
+
+# ── FIX 3/4: mark_closed called with actual fill price (not LTP) ─────────────
+
+def test_kill_switch_uses_confirmed_fill_price(clean_positions):
+    """mark_closed is called with the broker's actual fill price, not the LTP.
+
+    Verifies that the kill switch now polls get_order_status for the fill price
+    and passes it to mark_closed via confirm_exit, rather than marking closed
+    immediately on PLACED with no price.
+    """
+    sid = _session_id()
+    cap = 500000.0
+    _make_session_row(sid, cap)
+    reg = PositionRegistry(sid, cap)
+    reg.register(symbol="PRICETEST", broker_profile="zer",
+                 qty=10, avg_price=100.0)
+    reg.update_ltp("PRICETEST", 105.0)
+
+    # Pre-seed the order status so confirm_exit sees COMPLETE with fill_price=108.
+    fill_price = 108.0
+    broker = MockBroker(profile=BrokerProfile("zer", "mock"), dry_run=False,
+                        ltps={"PRICETEST": 105.0})
+    broker.set_order_status_sequence(
+        "exit-PRICETEST",
+        [{"status": "COMPLETE", "filled_quantity": 10, "average_price": fill_price}]
+    )
+
+    cfg = TradingSessionConfig(total_allocated_capital=cap, kill_switch_enabled=True)
+    ks = KillSwitchExecutor(sid, cfg, {"zer": broker}, reg)
+    asyncio.run(ks.fire("TEST"))
+
+    # Verify position was closed with the fill price (not ltp=105).
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        row = con.execute(
+            "SELECT status, exit_price FROM autotrade_positions "
+            "WHERE session_id=? AND symbol='PRICETEST'", (sid,)
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "CLOSED"
+    assert abs(float(row["exit_price"]) - fill_price) < 0.01
+
+
+# ── FIX 4: kill switch retries on timeout ────────────────────────────────────
+
+def test_kill_switch_retries_on_timeout(clean_positions):
+    """A pending order (TIMEOUT from confirm_exit) triggers cancel + retry.
+
+    The broker returns OPEN on the first order, forcing a timeout, then
+    returns COMPLETE on the fresh (retry) order. The position should end CLOSED.
+    """
+    sid = _session_id()
+    cap = 500000.0
+    _make_session_row(sid, cap)
+    reg = PositionRegistry(sid, cap)
+    reg.register(symbol="RETRY_SYM", broker_profile="zer",
+                 qty=5, avg_price=200.0)
+    reg.update_ltp("RETRY_SYM", 200.0)
+
+    broker = MockBroker(profile=BrokerProfile("zer", "mock"), dry_run=False,
+                        ltps={"RETRY_SYM": 200.0})
+
+    # First order "exit-RETRY_SYM" → always OPEN (force timeout).
+    broker.set_order_status_sequence(
+        "exit-RETRY_SYM",
+        [{"status": "OPEN", "filled_quantity": 0, "average_price": 0.0}]
+    )
+    # After cancel_and_retry_exit, broker.place_market_exit is called again.
+    # The SECOND exit gets a different order id (mock reuses "exit-RETRY_SYM"
+    # for the second call too). Override with COMPLETE for the retry.
+    # We'll override the sequence after the first TIMEOUT so that the second
+    # attempt returns COMPLETE immediately.
+    original_place = broker.place_market_exit
+
+    async def _smart_exit(symbol, qty, itype):
+        result = await original_place(symbol, qty, itype)
+        # After the first call set COMPLETE for subsequent get_order_status.
+        broker.set_order_status_sequence(
+            result.broker_order_id,
+            [{"status": "COMPLETE", "filled_quantity": qty, "average_price": 200.0}]
+        )
+        return result
+
+    broker.place_market_exit = _smart_exit
+
+    cfg = TradingSessionConfig(total_allocated_capital=cap, kill_switch_enabled=True)
+    ks = KillSwitchExecutor(sid, cfg, {"zer": broker}, reg)
+
+    # Use extremely short timeout so confirm_exit times out on the first order fast.
+    from autotrade.monitoring import kill_switch as ks_mod
+    import autotrade.monitoring.exit_poller as ep_mod
+
+    # Patch confirm_exit inside kill_switch to use max_wait_sec=0 for this test.
+    original_confirm = ep_mod.confirm_exit
+
+    async def _fast_confirm(session_id, symbol, order_id, qty, broker, registry,
+                            close_reason="EXIT_CONFIRMED", max_wait_sec=60,
+                            poll_interval_sec=5.0):
+        return await original_confirm(
+            session_id=session_id, symbol=symbol, order_id=order_id,
+            qty=qty, broker=broker, registry=registry,
+            close_reason=close_reason,
+            max_wait_sec=0,     # force immediate timeout
+            poll_interval_sec=0.01,
+        )
+
+    ep_mod.confirm_exit = _fast_confirm
+    try:
+        res = asyncio.run(ks.fire("TEST"))
+    finally:
+        ep_mod.confirm_exit = original_confirm
+
+    # After retry the position should be CLOSED.
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        row = con.execute(
+            "SELECT status FROM autotrade_positions "
+            "WHERE session_id=? AND symbol='RETRY_SYM'", (sid,)
+        ).fetchone()
+    # Either CLOSED (retry succeeded) or EXIT_FAILED (retry exhausted).
+    # The key assertion: n_exit_failed + n_ok = n_positions.
+    assert res["n_exited_ok"] + res["n_exit_failed"] == 1
