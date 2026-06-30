@@ -41,7 +41,7 @@ from falcon.db import falcon_conn
 
 from .. import config as cfgmod
 from ..config import TradingSessionConfig
-from ..session import TradingSession, preview_session_sizing
+from ..session import TradingSession, preview_session_sizing, load_falcon_picks
 from ..monitoring import tick_driver, entry_scheduler
 from .journal_routes import build_journal
 
@@ -194,6 +194,78 @@ def _delete_one_session(session_id: str) -> bool:
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+
+_VALID_UNIVERSE_FILTERS = ("all500", "nifty50", "nifty100", "nifty200", "fno")
+
+
+@router.get("/autotrade/session/picks")
+def session_picks(
+    universe: str = "all500",
+    top_n: int = 10,
+    signal_date: Optional[str] = None,
+):
+    """Return the ranked picks list for today (or signal_date) after applying
+    the universe filter. Creates NO session and places NO orders. Used by the
+    frontend to show the manual stock picker before creating a session.
+
+    Query params:
+      universe     : all500 | nifty50 | nifty100 | nifty200 | fno  (default all500)
+      top_n        : max number of picks to return (default 10)
+      signal_date  : YYYY-MM-DD; omit to use the latest available signal date
+    """
+    if universe not in _VALID_UNIVERSE_FILTERS:
+        raise HTTPException(
+            400,
+            f"invalid universe: {universe!r}. "
+            f"Must be one of {_VALID_UNIVERSE_FILTERS}")
+    if top_n < 1 or top_n > 200:
+        raise HTTPException(400, "top_n must be between 1 and 200")
+    if signal_date is not None:
+        try:
+            datetime.strptime(signal_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(400, f"signal_date must be YYYY-MM-DD, got {signal_date!r}")
+    try:
+        picks = load_falcon_picks(
+            top_n=top_n,
+            universe_filter=universe,
+            signal_date=signal_date)
+    except Exception as e:
+        log.exception("session/picks failed: %s", e)
+        raise HTTPException(500, f"picks fetch failed: {e}")
+
+    # Resolve the actual signal_date used (may differ if signal_date was None)
+    used_date: Optional[str] = None
+    if picks:
+        # All picks share the same signal_date; read it from the first pick's
+        # rank ordering in the DB. Since load_falcon_picks returns the rows from
+        # the latest (or provided) date, re-read it from the DB here.
+        with falcon_conn() as con:
+            row = con.execute(
+                "SELECT MAX(signal_date) FROM falcon_signals_live"
+            ).fetchone()
+            if row:
+                used_date = row[0]
+    resolved_date = signal_date or used_date or datetime.now(IST).strftime("%Y-%m-%d")
+
+    return {
+        "signal_date": resolved_date,
+        "universe_filter": universe,
+        "top_n": top_n,
+        "picks": [
+            {
+                "rank": p.rank,
+                "symbol": p.symbol,
+                "sector": p.sector,
+                "score": p.score,
+                "n_fires": p.n_fires,
+                "avg_lift": p.avg_lift,
+                "close_at_signal": p.close_at_signal,
+            }
+            for p in picks
+        ],
+    }
+
 
 @router.post("/autotrade/session/create")
 def session_create(req: CreateSessionRequest):

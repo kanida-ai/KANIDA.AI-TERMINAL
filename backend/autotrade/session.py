@@ -276,23 +276,62 @@ def evaluate_fire_gate(config: TradingSessionConfig, now_ist: datetime,
 
 # ── Falcon picks (read-only consumer) ────────────────────────────────────────
 
-def load_falcon_picks(top_n: int = 100) -> List[Pick]:
-    """Read latest Falcon Top-N picks. NEVER writes to falcon_signals_live."""
+# Universe-filter SQL fragments — copied verbatim from the portal's
+# falcon_top20_explainer._UNIVERSE_WHERE_CLAUSE dict. Applied IN the SQL query
+# so the ranked ORDER BY respects the filtered universe, not post-fetch.
+# "all500" = no extra clause = identical to previous behaviour (default).
+_UNIVERSE_WHERE: dict = {
+    "all500":   "",
+    "nifty50":  "AND s.symbol IN (SELECT symbol FROM universe_master WHERE in_nifty50=1  AND is_active=1)",
+    "nifty100": "AND s.symbol IN (SELECT symbol FROM universe_master WHERE in_nifty100=1 AND is_active=1)",
+    "nifty200": "AND s.symbol IN (SELECT symbol FROM universe_master WHERE in_nifty200=1 AND is_active=1)",
+    "fno":      "AND s.symbol IN (SELECT symbol FROM universe_master WHERE in_nifty200=1 AND is_active=1)",
+}
+
+
+def load_falcon_picks(top_n: int = 100,
+                      universe_filter: str = "all500",
+                      signal_date: Optional[str] = None) -> List[Pick]:
+    """Read latest Falcon Top-N picks, optionally restricted to a universe
+    membership filter (applied in SQL so ranked ordering respects the filter).
+
+    NEVER writes to falcon_signals_live.
+
+    signal_date: if None, uses MAX(signal_date) (i.e. today's picks).
+    universe_filter: one of "all500"|"nifty50"|"nifty100"|"nifty200"|"fno".
+      "all500" is the default and produces IDENTICAL results to the old call.
+    """
+    where_universe = _UNIVERSE_WHERE.get(universe_filter, "")
     with falcon_conn() as con:
-        latest = con.execute(
-            "SELECT MAX(signal_date) FROM falcon_signals_live"
-        ).fetchone()[0]
+        if signal_date is None:
+            latest = con.execute(
+                "SELECT MAX(signal_date) FROM falcon_signals_live"
+            ).fetchone()[0]
+        else:
+            latest = signal_date
         if latest is None:
             return []
-        rows = con.execute(
-            """SELECT symbol, rank, score, sector, close_at_signal
-               FROM falcon_signals_live WHERE signal_date=?
-               ORDER BY rank ASC LIMIT ?""",
-            (latest, top_n),
-        ).fetchall()
-    return [Pick(symbol=r["symbol"], rank=r["rank"],
-                 score=r["score"] or 0.0, sector=r["sector"],
-                 close_at_signal=r["close_at_signal"]) for r in rows]
+        sql = f"""
+            SELECT s.symbol, s.rank, s.score, s.sector, s.close_at_signal,
+                   s.n_fires
+            FROM falcon_signals_live s
+            WHERE s.signal_date = ?
+              {where_universe}
+            ORDER BY s.rank ASC
+            LIMIT ?
+        """
+        rows = con.execute(sql, (latest, top_n)).fetchall()
+    result = []
+    for r in rows:
+        n_fires = r["n_fires"] if r["n_fires"] else None
+        avg_lift = (float(r["score"]) / float(n_fires)
+                    if (r["score"] and n_fires and n_fires > 0) else None)
+        result.append(Pick(
+            symbol=r["symbol"], rank=r["rank"],
+            score=r["score"] or 0.0, sector=r["sector"],
+            close_at_signal=r["close_at_signal"],
+            n_fires=n_fires, avg_lift=avg_lift))
+    return result
 
 
 def _preview_resolve_creds(prof, user_id: Optional[str]) -> None:
@@ -356,9 +395,19 @@ def preview_session_sizing(config: TradingSessionConfig,
     for _p in profiles:
         _preview_resolve_creds(_p, user_id)
 
-    falcon_picks = load_falcon_picks(top_n=max(config.top_n_stocks, 10))
+    falcon_picks = load_falcon_picks(
+        top_n=max(config.top_n_stocks, 10),
+        universe_filter=config.universe_filter)
     if config.rank_filter:
         falcon_picks = [p for p in falcon_picks if p.rank in config.rank_filter]
+    if config.symbol_whitelist is not None:
+        whitelist_set = set(config.symbol_whitelist)
+        found = {p.symbol for p in falcon_picks}
+        missing = whitelist_set - found
+        if missing:
+            log.warning("preview: whitelisted symbol(s) not in today's picks: %s",
+                        sorted(missing))
+        falcon_picks = [p for p in falcon_picks if p.symbol in whitelist_set]
 
     router = BrokerRouter(top_n_stocks=config.top_n_stocks)
     routed = router.route_picks(falcon_picks, profiles)
@@ -860,10 +909,20 @@ class TradingSession:
         self._build_brokers()
         self._set_status("RUNNING", started_at=_now_ist_iso())
 
-        falcon_picks = load_falcon_picks(top_n=max(self.config.top_n_stocks, 10))
+        falcon_picks = load_falcon_picks(
+            top_n=max(self.config.top_n_stocks, 10),
+            universe_filter=self.config.universe_filter)
         if self.config.rank_filter:
             falcon_picks = [p for p in falcon_picks
                             if p.rank in self.config.rank_filter]
+        if self.config.symbol_whitelist is not None:
+            whitelist_set = set(self.config.symbol_whitelist)
+            found = {p.symbol for p in falcon_picks}
+            missing = whitelist_set - found
+            if missing:
+                log.warning("session %s: whitelisted symbol(s) not in today's picks: %s",
+                            self.session_id, sorted(missing))
+            falcon_picks = [p for p in falcon_picks if p.symbol in whitelist_set]
 
         router = BrokerRouter(top_n_stocks=self.config.top_n_stocks)
         routed = router.route_picks(falcon_picks, self.config.broker_profiles)

@@ -62,6 +62,13 @@ def _seed_base_schema(path: str) -> None:
             kind TEXT, severity TEXT, detail TEXT, auto_action_taken INTEGER,
             related_kite_id TEXT
         );
+        CREATE TABLE IF NOT EXISTS universe_master (
+            symbol TEXT PRIMARY KEY,
+            is_active INTEGER DEFAULT 1,
+            in_nifty50 INTEGER DEFAULT 0,
+            in_nifty100 INTEGER DEFAULT 0,
+            in_nifty200 INTEGER DEFAULT 0
+        );
     """)
     con.commit()
     con.close()
@@ -164,5 +171,24 @@ def seed_signals(symbols_ranks):
                    VALUES ('2026-06-24','2026-06-25',?,?,?,?,?,?,?,?,?)""",
                 (rank, sym, "TEST", 10, score, close, 1e7, "7.1.0",
                  "2026-06-24T09:00:00"),
+            )
+        con.commit()
+
+
+def seed_universe(symbol_flags):
+    """Insert universe_master rows.
+
+    symbol_flags = [(symbol, in_nifty50, in_nifty100, in_nifty200), ...]
+    All rows are set is_active=1.
+    """
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        con.execute("DELETE FROM universe_master")
+        for sym, n50, n100, n200 in symbol_flags:
+            con.execute(
+                """INSERT INTO universe_master
+                   (symbol, is_active, in_nifty50, in_nifty100, in_nifty200)
+                   VALUES (?, 1, ?, ?, ?)""",
+                (sym, n50, n100, n200),
             )
         con.commit()
