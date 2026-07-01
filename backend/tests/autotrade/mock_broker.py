@@ -71,7 +71,10 @@ class MockBroker(BrokerClient):
         return {"status": "CANCELLED", "order_id": order_id}
 
     async def place_market_exit(self, symbol: str, qty: int,
-                                instrument_type: str) -> OrderResult:
+                                instrument_type: str,
+                                kite_product: str | None = None) -> OrderResult:
+        # kite_product accepted (and ignored) to match the real ZerodhaBroker
+        # signature after the MTF-exit-product fix; kill_switch/exit paths pass it.
         if self.exit_delay_sec:
             await asyncio.sleep(self.exit_delay_sec)
         self.exits.append((symbol, qty))

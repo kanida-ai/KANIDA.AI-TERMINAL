@@ -41,7 +41,7 @@ log = logging.getLogger("kanida.autotrade.vault")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-VALID_BROKERS = ("zerodha", "upstox", "angel", "dhan", "fyers")
+VALID_BROKERS = ("zerodha", "upstox", "angel", "dhan", "fyers", "rupeezy")
 # Status state machine for a broker account.
 STATUS_PENDING = "PENDING"   # account stored, no access token yet
 STATUS_ACTIVE = "ACTIVE"     # has a fresh access token (today)
@@ -372,23 +372,36 @@ def delete_account(broker_account_id: str, user_id: str,
 
 # ── token storage / refresh ──────────────────────────────────────────────────
 
-def store_access_token(broker_account_id: str, access_token: str,
-                       user_id: Optional[str] = None,
-                       token_date: Optional[str] = None,
-                       token_expiry: Optional[str] = None,
-                       provider: Optional[KeyProvider] = None
-                       ) -> Optional[Dict[str, Any]]:
-    """Encrypt + store a freshly-minted access_token for an account, set status
-    ACTIVE and stamp token_date (defaults to today IST). If user_id is given it
-    is enforced. Returns the public dict, or None if the account is absent.
+def store_tokens(broker_account_id: str, access_token: str,
+                 refresh_token: Optional[str] = None,
+                 expires_at: Optional[str] = None,
+                 user_id: Optional[str] = None,
+                 token_date: Optional[str] = None,
+                 provider: Optional[KeyProvider] = None,
+                 token_expiry: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """BROKER-AGNOSTIC token store. Encrypt + persist BOTH the access token AND
+    (when the broker supplies one) the refresh token, stamp status ACTIVE +
+    token_date (defaults to today IST), and record the absolute expiry.
 
-    Raises VaultDisabledError if no vault key is configured."""
+    Args:
+      access_token   the freshly-minted access token (encrypted at rest).
+      refresh_token  optional silent-renewal token (encrypted into
+                     refresh_token_enc); None leaves the column untouched-null.
+      expires_at     absolute ISO-IST expiry for non-daily brokers → written to
+                     token_expires_at. None → daily/broker-defined expiry.
+      token_date     IST date the token was minted (default today).
+      token_expiry   legacy per-broker expiry hint (kept for back-compat with
+                     store_access_token's signature; written to token_expiry).
+
+    Returns the account's PUBLIC dict (no secrets), or None if the account is
+    absent / not owned by user_id. Raises VaultDisabledError if no key."""
     provider = provider or _DEFAULT_PROVIDER
     if not provider.available():
         raise VaultDisabledError(
             "vault disabled — set FALCON_VAULT_KEY to store tokens")
     token_date = token_date or _today_ist()
-    enc = _encrypt(access_token, provider)
+    access_enc = _encrypt(access_token, provider)
+    refresh_enc = _encrypt(refresh_token, provider) if refresh_token else None
     now = _now_ist_iso()
     with falcon_conn() as con:
         if user_id is not None:
@@ -404,22 +417,90 @@ def store_access_token(broker_account_id: str, access_token: str,
             ).fetchone()
         if not row:
             return None
-        con.execute(
-            """UPDATE broker_accounts
-               SET access_token_enc=?, token_date=?, token_expiry=?,
-                   status=?, updated_at=?, last_login_at=?
-               WHERE broker_account_id=?""",
-            (enc, token_date, token_expiry, STATUS_ACTIVE, now, now,
-             broker_account_id),
-        )
+        # Only overwrite refresh_token_enc when a new refresh token is supplied;
+        # a plain access-token refresh must NOT wipe a still-valid refresh token.
+        if refresh_enc is not None:
+            con.execute(
+                """UPDATE broker_accounts
+                   SET access_token_enc=?, refresh_token_enc=?, token_date=?,
+                       token_expiry=?, token_expires_at=?, status=?,
+                       updated_at=?, last_login_at=?
+                   WHERE broker_account_id=?""",
+                (access_enc, refresh_enc, token_date, token_expiry, expires_at,
+                 STATUS_ACTIVE, now, now, broker_account_id),
+            )
+        else:
+            con.execute(
+                """UPDATE broker_accounts
+                   SET access_token_enc=?, token_date=?, token_expiry=?,
+                       token_expires_at=?, status=?, updated_at=?, last_login_at=?
+                   WHERE broker_account_id=?""",
+                (access_enc, token_date, token_expiry, expires_at,
+                 STATUS_ACTIVE, now, now, broker_account_id),
+            )
         con.commit()
         pub = con.execute(
             "SELECT * FROM broker_accounts WHERE broker_account_id=?",
             (broker_account_id,),
         ).fetchone()
-    log.info("vault: stored access token for account %s (token_date=%s)",
-             broker_account_id, token_date)
+    log.info("vault: stored tokens for account %s (token_date=%s, refresh=%s, "
+             "expires_at=%s)", broker_account_id, token_date,
+             bool(refresh_token), expires_at)
     return _row_to_public(pub, provider)
+
+
+def store_access_token(broker_account_id: str, access_token: str,
+                       user_id: Optional[str] = None,
+                       token_date: Optional[str] = None,
+                       token_expiry: Optional[str] = None,
+                       provider: Optional[KeyProvider] = None
+                       ) -> Optional[Dict[str, Any]]:
+    """BACK-COMPAT SHIM. Encrypt + store a freshly-minted access_token, set
+    status ACTIVE and stamp token_date. Delegates to store_tokens (no refresh
+    token, no absolute expiry) so the existing Kite exchange path is unchanged.
+
+    Raises VaultDisabledError if no vault key is configured."""
+    return store_tokens(
+        broker_account_id, access_token, refresh_token=None, expires_at=None,
+        user_id=user_id, token_date=token_date, provider=provider,
+        token_expiry=token_expiry)
+
+
+def record_health(broker_account_id: str, status: str, detail: str = "",
+                  user_id: Optional[str] = None,
+                  provider: Optional[KeyProvider] = None) -> bool:
+    """Record the result of a health probe (validate()) onto the account:
+    last_health_at (now IST), last_health_status, last_error. Does NOT change the
+    account's primary `status` column (that stays token-date-derived); this is
+    connection-health observability only.
+
+    Scoped to user_id when given. Returns True if a row was updated. Never
+    raises on a disabled vault (health recording is best-effort metadata)."""
+    now = _now_ist_iso()
+    with falcon_conn() as con:
+        if user_id is not None:
+            cur = con.execute(
+                """UPDATE broker_accounts
+                   SET last_health_at=?, last_health_status=?, last_error=?,
+                       updated_at=?
+                   WHERE broker_account_id=? AND user_id=?""",
+                (now, status, detail or None, now, broker_account_id, user_id),
+            )
+        else:
+            cur = con.execute(
+                """UPDATE broker_accounts
+                   SET last_health_at=?, last_health_status=?, last_error=?,
+                       updated_at=?
+                   WHERE broker_account_id=?""",
+                (now, status, detail or None, now, broker_account_id),
+            )
+        con.commit()
+        updated = cur.rowcount > 0
+    if updated:
+        log.info("vault: recorded health for account %s: %s%s",
+                 broker_account_id, status,
+                 f" ({detail})" if detail else "")
+    return updated
 
 
 # ── decrypted-cred resolution (in memory only; for the broker layer) ─────────
@@ -428,8 +509,8 @@ class DecryptedCreds:
     """In-memory-only decrypted credentials for one account. NEVER serialised,
     NEVER logged (repr hides the secrets)."""
     __slots__ = ("broker_account_id", "user_id", "broker", "account_label",
-                 "api_key", "api_secret", "access_token", "token_date",
-                 "status")
+                 "api_key", "api_secret", "access_token", "refresh_token",
+                 "token_date", "token_expires_at", "status")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -440,6 +521,7 @@ class DecryptedCreds:
                 f"broker={self.broker!r}, account_label={self.account_label!r}, "
                 f"api_key=<set:{bool(self.api_key)}>, "
                 f"api_secret=<redacted>, access_token=<redacted>, "
+                f"refresh_token=<set:{bool(self.refresh_token)}>, "
                 f"status={self.status!r})")
 
 
@@ -475,6 +557,8 @@ def get_decrypted_creds(broker_account_id: str, user_id: Optional[str] = None,
     d = dict(row)
     api_secret = _decrypt(d.get("api_secret_enc"), provider)
     access_token = _decrypt(d.get("access_token_enc"), provider)
+    # refresh_token_enc is an additive column; older rows / DBs may not have it.
+    refresh_token = _decrypt(d.get("refresh_token_enc"), provider)
     return DecryptedCreds(
         broker_account_id=d.get("broker_account_id"),
         user_id=d.get("user_id"),
@@ -483,7 +567,9 @@ def get_decrypted_creds(broker_account_id: str, user_id: Optional[str] = None,
         api_key=d.get("api_key"),
         api_secret=api_secret,
         access_token=access_token,
+        refresh_token=refresh_token,
         token_date=d.get("token_date"),
+        token_expires_at=d.get("token_expires_at"),
         status=_derive_status(d.get("status"), d.get("token_date")),
     )
 

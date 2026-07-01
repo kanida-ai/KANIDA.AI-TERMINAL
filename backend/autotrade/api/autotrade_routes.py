@@ -31,11 +31,12 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from pydantic import BaseModel, Field, field_validator
 
 from falcon.db import falcon_conn
 
@@ -71,7 +72,154 @@ def require_operator_token(x_operator_token: Optional[str] = Header(default=None
 router = APIRouter(dependencies=[Depends(require_operator_token)])
 
 
+# ── PER-USER TENANT IDENTITY (Phase-2 multi-tenant isolation) ─────────────────
+# The router-level operator-token gate above stays intact (server-to-server /
+# operator-console gate). On top of it we resolve WHO is calling from the
+# power-user JWT (Authorization: Bearer <jwt> OR the power_jwt cookie) and
+# enforce per-user ownership on every session/account endpoint.
+#
+# Backward-compatibility hinge: with NO user JWT and AUTOTRADE_PORTAL_STRICT
+# unset, resolve_caller() returns an ADMIN, UNAUTHENTICATED caller → the
+# operator console behaves EXACTLY as today (full view, all endpoints work).
+# Flip AUTOTRADE_PORTAL_STRICT=true once the frontend forwards the user JWT to
+# require a user identity on every call.
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+@dataclass
+class Caller:
+    """Resolved per-request identity.
+
+    user_id       : str | None — the authenticated portal user's id (as a STRING,
+                    to match autotrade_sessions.user_id which is stored as text),
+                    or None for the operator/server-to-server path.
+    is_admin      : bool — True for the operator (JWT role=='admin') OR the
+                    unauthenticated operator-console path (no user JWT, non-strict).
+    authenticated : bool — True only when a valid user JWT was presented.
+    """
+    user_id: Optional[str]
+    is_admin: bool
+    authenticated: bool
+
+
+def _extract_jwt(request: Request) -> Optional[str]:
+    """Pull the power-user JWT from 'Authorization: Bearer <jwt>' OR the
+    `power_jwt` cookie (browser session). Returns None if neither present."""
+    auth = request.headers.get("authorization")
+    if auth:
+        parts = auth.strip().split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            return parts[1]
+    cookie = request.cookies.get("power_jwt")
+    if cookie:
+        return cookie
+    return None
+
+
+def resolve_caller(request: Request) -> Caller:
+    """Resolve the calling identity for tenant isolation.
+
+    * Valid user JWT (Bearer header OR power_jwt cookie) →
+        Caller(user_id=str(payload.user_id),
+               is_admin=(role=='admin'), authenticated=True)
+    * No / invalid JWT (operator-console or server-to-server path, gated only by
+      the shared operator token) →
+        - default: Caller(user_id=None, is_admin=True, authenticated=False)
+          (operator console keeps working exactly as today)
+        - AUTOTRADE_PORTAL_STRICT truthy: raise 401 (force a user identity).
+
+    Defensive: any import/config problem in the power_user auth stack must NEVER
+    500 the whole router — it degrades to the unauthenticated operator path
+    (which is still rejected when strict is on).
+    """
+    token = _extract_jwt(request)
+    if token:
+        try:
+            from power_user.services.auth import verify_jwt  # lazy, defensive
+            payload = verify_jwt(token)
+            return Caller(
+                user_id=str(payload.user_id),
+                is_admin=(payload.role == "admin"),
+                authenticated=True,
+            )
+        except Exception as e:  # invalid/expired JWT OR auth-stack import problem
+            # Do NOT 500. Treat as unauthenticated → falls to the operator path
+            # below (still rejected if strict). An invalid token is not an
+            # authenticated user.
+            log.debug("resolve_caller: JWT not accepted (%s: %s) — "
+                      "falling back to operator path", type(e).__name__, e)
+
+    if _env_truthy("AUTOTRADE_PORTAL_STRICT"):
+        raise HTTPException(401, "user authentication required")
+    # Operator-console / server-to-server path: shared operator token only, no
+    # user JWT. Full admin view, unchanged from today.
+    return Caller(user_id=None, is_admin=True, authenticated=False)
+
+
+# Operator/admin default used when an endpoint function is invoked DIRECTLY
+# (e.g. unit tests, internal callers) without FastAPI resolving the dependency.
+# Under the real HTTP stack FastAPI always injects a resolved Caller, so this
+# only affects direct-function callers — which are the operator/admin path.
+_OPERATOR_CALLER = Caller(user_id=None, is_admin=True, authenticated=False)
+
+
+def _caller(caller: Any) -> Caller:
+    """Normalise the caller param. When an endpoint is called directly (not via
+    the HTTP DI stack) the default is FastAPI's Depends sentinel, not a Caller —
+    treat that as the operator/admin path (today's behaviour, backward-compat)."""
+    return caller if isinstance(caller, Caller) else _OPERATOR_CALLER
+
+
+def _assert_user_scope(param_user_id: Optional[str], caller: Any) -> str:
+    """Ownership gate for endpoints that take an explicit user_id (broker-account
+    vault endpoints). Admin → unrestricted (returns param as-is). Non-admin →
+    the param MUST equal the caller's user_id (else 404, no cross-user probing);
+    if the non-admin omitted it, default to the caller's own id."""
+    caller = _caller(caller)
+    if caller.is_admin:
+        return param_user_id  # operator/global path unchanged (may be None)
+    if param_user_id is None:
+        return caller.user_id
+    if str(param_user_id) != caller.user_id:
+        raise HTTPException(404, "broker account not found")
+    return caller.user_id
+
+
+def _assert_session_access(session_id: str, caller: Any) -> None:
+    """Ownership gate for a single session.
+
+    Reads autotrade_sessions.user_id for session_id (single query):
+      * row missing              → 404 "session not found"
+      * caller.is_admin          → allow (operator / admin sees everything)
+      * owner mismatch           → 404 "session not found"  (NOT 403: a non-owner
+                                    must not even be able to confirm the session
+                                    exists; NULL-owned sessions are invisible to
+                                    non-admin users)
+    """
+    caller = _caller(caller)
+    with falcon_conn() as con:
+        row = con.execute(
+            "SELECT user_id FROM autotrade_sessions WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "session not found")
+    if caller.is_admin:
+        return
+    owner = row["user_id"]
+    if owner is None or str(owner) != caller.user_id:
+        raise HTTPException(404, "session not found")
+
+
 # ── Request models ────────────────────────────────────────────────────────────
+
+def _coerce_id(v):
+    """Coerce numeric user/account IDs to str. Portal sends integers; backend stores strings."""
+    return None if v is None else str(v)
+
 
 class CreateSessionRequest(BaseModel):
     config: Dict[str, Any] = Field(..., description="TradingSessionConfig dict")
@@ -83,6 +231,10 @@ class CreateSessionRequest(BaseModel):
     broker_account_id: Optional[str] = Field(
         None, description="Vaulted broker account to trade (optional)")
 
+    @field_validator('user_id', 'broker_account_id', mode='before')
+    @classmethod
+    def _coerce_str(cls, v): return _coerce_id(v)
+
 
 class PreviewRequest(BaseModel):
     config: Dict[str, Any] = Field(..., description="TradingSessionConfig dict")
@@ -92,11 +244,19 @@ class PreviewRequest(BaseModel):
     broker_account_id: Optional[str] = Field(
         None, description="Vaulted broker account to size against (optional)")
 
+    @field_validator('user_id', 'broker_account_id', mode='before')
+    @classmethod
+    def _coerce_str(cls, v): return _coerce_id(v)
+
 
 # ── PHASE-2 MULTI-TENANT broker-account (vault) request models ───────────────
 
 class ConnectBrokerAccountRequest(BaseModel):
     user_id: str = Field(..., description="Portal user id (owner of the account)")
+
+    @field_validator('user_id', mode='before')
+    @classmethod
+    def _coerce_str(cls, v): return _coerce_id(v)
     broker: str = Field(..., description="zerodha|upstox|angel|dhan|fyers")
     account_label: str = Field(..., description="User-chosen label, e.g. 'Main Kite'")
     api_key: str = Field(..., description="Broker app api_key")
@@ -268,27 +428,34 @@ def session_picks(
 
 
 @router.post("/autotrade/session/create")
-def session_create(req: CreateSessionRequest):
+def session_create(req: CreateSessionRequest,
+                   caller: Caller = Depends(resolve_caller)):
+    caller = _caller(caller)
     try:
         cfg = TradingSessionConfig.from_dict(req.config)
         cfg.validate()
     except Exception as e:
         raise HTTPException(400, f"invalid config: {e}")
     mode = req.mode if req.mode in ("paper", "live") else "paper"
+    # TENANT ISOLATION: a non-admin user MUST own the session they create — the
+    # client-supplied user_id is ignored so a user can't create a session owned
+    # by someone else. Admin (operator) keeps full control of user_id.
+    owner_user_id = req.user_id if caller.is_admin else caller.user_id
     try:
         # PHASE-2: user_id/broker_account_id default None → operator/global
         # session, unchanged. A bound account is validated to exist + be owned.
         sess = TradingSession.create(
-            cfg, mode=mode, user_id=req.user_id,
+            cfg, mode=mode, user_id=owner_user_id,
             broker_account_id=req.broker_account_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"session_id": sess.session_id, "mode": mode, "status": "CREATED",
-            "user_id": req.user_id, "broker_account_id": req.broker_account_id}
+            "user_id": owner_user_id, "broker_account_id": req.broker_account_id}
 
 
 @router.post("/autotrade/preview")
-def autotrade_preview(req: PreviewRequest):
+def autotrade_preview(req: PreviewRequest,
+                      caller: Caller = Depends(resolve_caller)):
     """Config-time sizing preview — creates NO session and places NO orders.
 
     Sizes the Falcon picks exactly as session start would (CapitalAllocator +
@@ -302,10 +469,15 @@ def autotrade_preview(req: PreviewRequest):
         cfg.validate()
     except Exception as e:
         raise HTTPException(400, f"invalid config: {e}")
+    caller = _caller(caller)
     mode = req.mode if req.mode in ("paper", "live") else "paper"
+    # TENANT ISOLATION: a non-admin caller sizes against their OWN vaulted creds;
+    # a client-supplied user_id is ignored so a user can't preview/size against
+    # someone else's broker account. Admin keeps full control.
+    scope_user_id = req.user_id if caller.is_admin else caller.user_id
     try:
         return preview_session_sizing(
-            cfg, mode=mode, user_id=req.user_id,
+            cfg, mode=mode, user_id=scope_user_id,
             broker_account_id=req.broker_account_id)
     except Exception as e:
         log.exception("preview failed: %s", e)
@@ -314,9 +486,11 @@ def autotrade_preview(req: PreviewRequest):
 
 @router.post("/autotrade/session/{session_id}/start")
 async def session_start(session_id: str,
-                        req: Optional[StartSessionRequest] = None):
+                        req: Optional[StartSessionRequest] = None,
+                        caller: Caller = Depends(resolve_caller)):
     """Start a session. Optional JSON body {"when": "now" | "scheduled"};
     defaults to "now" for backward-compatibility when the body is omitted."""
+    _assert_session_access(session_id, caller)
     sess = TradingSession.load(session_id)
     if not sess:
         raise HTTPException(404, "session not found")
@@ -331,7 +505,9 @@ async def session_start(session_id: str,
 
 
 @router.get("/autotrade/session/{session_id}/status")
-def session_status(session_id: str):
+def session_status(session_id: str,
+                   caller: Caller = Depends(resolve_caller)):
+    _assert_session_access(session_id, caller)
     sess = TradingSession.load(session_id)
     if not sess:
         raise HTTPException(404, "session not found")
@@ -339,7 +515,9 @@ def session_status(session_id: str):
 
 
 @router.post("/autotrade/session/{session_id}/kill")
-async def session_kill(session_id: str):
+async def session_kill(session_id: str,
+                       caller: Caller = Depends(resolve_caller)):
+    _assert_session_access(session_id, caller)
     sess = TradingSession.load(session_id)
     if not sess:
         raise HTTPException(404, "session not found")
@@ -347,7 +525,9 @@ async def session_kill(session_id: str):
 
 
 @router.get("/autotrade/session/{session_id}/positions")
-def session_positions(session_id: str):
+def session_positions(session_id: str,
+                      caller: Caller = Depends(resolve_caller)):
+    _assert_session_access(session_id, caller)
     sess = TradingSession.load(session_id)
     if not sess:
         raise HTTPException(404, "session not found")
@@ -355,7 +535,8 @@ def session_positions(session_id: str):
 
 
 @router.get("/autotrade/session/{session_id}/journal")
-def session_journal(session_id: str):
+def session_journal(session_id: str,
+                    caller: Caller = Depends(resolve_caller)):
     """Daily Trade Journal for a session — available for CREATED/RUNNING/CLOSED.
 
     Builds a structured summary + per-position journal from autotrade_sessions
@@ -363,29 +544,49 @@ def session_journal(session_id: str):
     contribute unrealised_pnl; closed positions contribute realised_pnl.
     Returns 404 if the session_id is not found.
     """
+    _assert_session_access(session_id, caller)
     return build_journal(session_id)
 
 
 @router.get("/autotrade/sessions")
-def session_list(user_id: Optional[str] = None):
+def session_list(user_id: Optional[str] = None,
+                 caller: Caller = Depends(resolve_caller)):
     """List recent sessions (newest first) so the UI can show + resume them.
 
-    PHASE-2: pass ?user_id=<id> to scope to one user's sessions (per-user
-    isolation). Omit it for the full operator view (today's behaviour)."""
-    return {"sessions": TradingSession.list_sessions(user_id=user_id)}
+    TENANT ISOLATION:
+      * admin (operator) → full operator view. Honours an optional ?user_id=<id>
+        to scope to one user (today's behaviour), else all sessions.
+      * non-admin user   → ONLY sessions STRICTLY owned by the caller
+        (owner_user_id=caller.user_id → WHERE s.user_id = ?, with NO
+        'OR user_id IS NULL' branch). NULL-owned / other users' sessions are
+        never returned. A client-supplied ?user_id is ignored for non-admins."""
+    caller = _caller(caller)
+    if caller.is_admin:
+        return {"sessions": TradingSession.list_sessions(user_id=user_id)}
+    return {"sessions": TradingSession.list_sessions(
+        owner_user_id=caller.user_id)}
 
 
 @router.post("/autotrade/sessions/delete")
-def sessions_delete(req: DeleteSessionsRequest):
-    """Bulk-delete paper sessions. For each id: stop its tick driver + entry
-    scheduler, delete its autotrade_positions rows, delete the session row.
-    Operator-token gated (router-level dependency). Paper-safe: no real broker
-    orders are cancelled; live RUNNING sessions are still deleted with a logged
-    warning. Returns {deleted: n, ids: [...]} where ids are the rows actually
-    removed (missing ids are silently skipped)."""
+def sessions_delete(req: DeleteSessionsRequest,
+                    caller: Caller = Depends(resolve_caller)):
+    """Bulk-delete paper sessions. For each id: assert the caller owns it (admin
+    may delete any), then stop its tick driver + entry scheduler, delete its
+    autotrade_positions rows, delete the session row. Operator-token gated
+    (router-level dependency). Paper-safe: no real broker orders are cancelled;
+    live RUNNING sessions are still deleted with a logged warning. Returns
+    {deleted: n, ids: [...]} — ids the caller could NOT access (missing or not
+    owned) are silently skipped (no existence leak)."""
+    caller = _caller(caller)
     deleted: List[str] = []
     for sid in req.session_ids:
         try:
+            # Ownership gate: skip (don't raise) ids the caller can't access so a
+            # bulk request over a mix stays non-enumerating and best-effort.
+            try:
+                _assert_session_access(sid, caller)
+            except HTTPException:
+                continue
             if _delete_one_session(sid):
                 deleted.append(sid)
         except Exception as e:
@@ -394,8 +595,10 @@ def sessions_delete(req: DeleteSessionsRequest):
 
 
 @router.delete("/autotrade/session/{session_id}")
-def session_delete(session_id: str):
+def session_delete(session_id: str,
+                   caller: Caller = Depends(resolve_caller)):
     """Single-session delete — same logic as the bulk endpoint."""
+    _assert_session_access(session_id, caller)
     ok = _delete_one_session(session_id)
     if not ok:
         raise HTTPException(404, "session not found")
@@ -462,15 +665,21 @@ def broker_list():
 # FALCON_VAULT_KEY): connect/refresh return a clear 400; list returns [].
 
 @router.post("/autotrade/broker-account")
-def broker_account_connect(req: ConnectBrokerAccountRequest):
+def broker_account_connect(req: ConnectBrokerAccountRequest,
+                           caller: Caller = Depends(resolve_caller)):
     """Connect (store) a broker account: encrypt api_secret at rest under the
     vault, status PENDING (no token yet). Re-posting the same
     (user_id, broker, account_label) UPDATES the creds in place. Returns the
-    PUBLIC dict (no secrets). 400 if the vault is disabled."""
+    PUBLIC dict (no secrets). 400 if the vault is disabled.
+
+    TENANT ISOLATION: a non-admin caller may only connect an account under their
+    OWN user_id (client-supplied user_id is forced to the caller's id)."""
+    caller = _caller(caller)
     from .. import vault
+    owner = req.user_id if caller.is_admin else caller.user_id
     try:
         return vault.put_account(
-            user_id=req.user_id, broker=req.broker,
+            user_id=owner, broker=req.broker,
             account_label=req.account_label, api_key=req.api_key,
             api_secret=req.api_secret)
     except vault.VaultDisabledError as e:
@@ -480,63 +689,110 @@ def broker_account_connect(req: ConnectBrokerAccountRequest):
 
 
 @router.get("/autotrade/broker-accounts")
-def broker_accounts_list(user_id: str):
-    """List a user's broker accounts (masked, no secrets). Scoped to user_id."""
+def broker_accounts_list(user_id: str,
+                         caller: Caller = Depends(resolve_caller)):
+    """List a user's broker accounts (masked, no secrets). Scoped to user_id.
+
+    TENANT ISOLATION: a non-admin caller may only list their OWN accounts (a
+    user_id != caller → 404); admin unrestricted."""
+    scope = _assert_user_scope(user_id, caller)
     from .. import vault
-    return {"accounts": vault.list_accounts(user_id=user_id),
+    return {"accounts": vault.list_accounts(user_id=scope),
             "vault_enabled": vault.vault_enabled()}
 
 
 @router.delete("/autotrade/broker-account/{broker_account_id}")
-def broker_account_delete(broker_account_id: str, user_id: str):
-    """Delete a broker account, scoped to (broker_account_id, user_id)."""
+def broker_account_delete(broker_account_id: str, user_id: str,
+                          caller: Caller = Depends(resolve_caller)):
+    """Delete a broker account, scoped to (broker_account_id, user_id).
+
+    TENANT ISOLATION: a non-admin caller may only delete under their OWN user_id;
+    admin unrestricted."""
+    scope = _assert_user_scope(user_id, caller)
     from .. import vault
-    ok = vault.delete_account(broker_account_id, user_id=user_id)
+    ok = vault.delete_account(broker_account_id, user_id=scope)
     if not ok:
         raise HTTPException(404, "broker account not found")
     return {"deleted": 1, "broker_account_id": broker_account_id}
 
 
 @router.get("/autotrade/broker-account/{broker_account_id}/login-url")
-def broker_account_login_url(broker_account_id: str, user_id: Optional[str] = None):
+def broker_account_login_url(broker_account_id: str,
+                             user_id: Optional[str] = None,
+                             redirect_uri: str = "",
+                             state: str = "",
+                             caller: Caller = Depends(resolve_caller)):
     """Build the broker login URL for THIS account (so the user can mint a fresh
-    daily token). Zerodha implemented; other brokers' login flows are a
-    follow-up. 400 if the vault is disabled / account not found."""
-    from ..broker import zerodha_auth
+    token). BROKER-AGNOSTIC: routes through account_lifecycle → the registry's
+    auth provider for whatever broker this account uses (Zerodha, Rupeezy, …).
+    400 if the vault is disabled / account not found / adapter not certified.
+
+    TENANT ISOLATION: a non-admin caller is scoped to their OWN user_id (so an
+    account they don't own is 404-invisible)."""
+    scope = _assert_user_scope(user_id, caller)
     from .. import vault
-    acct = vault.get_account_public(broker_account_id, user_id=user_id)
+    from ..broker import account_lifecycle
+    acct = vault.get_account_public(broker_account_id, user_id=scope)
     if acct is None:
         raise HTTPException(404, "broker account not found")
-    if acct["broker"] != "zerodha":
-        raise HTTPException(
-            400, f"login-url not implemented for broker {acct['broker']!r} "
-            "(Zerodha verified; others are a follow-up)")
     try:
-        return {"broker_account_id": broker_account_id,
-                "login_url": zerodha_auth.login_url(broker_account_id,
-                                                    user_id=user_id)}
-    except zerodha_auth.AccountAuthError as e:
+        url = account_lifecycle.login_url(
+            scope, broker_account_id, redirect_uri=redirect_uri, state=state)
+        return {"broker_account_id": broker_account_id, "login_url": url}
+    except account_lifecycle.AccountLifecycleError as e:
         raise HTTPException(400, str(e))
 
 
 @router.post("/autotrade/broker-account/{broker_account_id}/refresh-token")
 def broker_account_refresh_token(broker_account_id: str,
-                                 req: RefreshTokenRequest):
+                                 req: RefreshTokenRequest,
+                                 caller: Caller = Depends(resolve_caller)):
     """Exchange a broker request_token for an access_token and store it
     (encrypted) in the vault → status ACTIVE, token_date today. Zerodha
     implemented; other brokers are a follow-up. Returns the PUBLIC account dict
-    (no secrets)."""
-    from ..broker import zerodha_auth
+    (no secrets).
+
+    TENANT ISOLATION: a non-admin caller is scoped to their OWN user_id."""
+    scope = _assert_user_scope(req.user_id, caller)
     from .. import vault
-    acct = vault.get_account_public(broker_account_id, user_id=req.user_id)
+    from ..broker import account_lifecycle
+    acct = vault.get_account_public(broker_account_id, user_id=scope)
     if acct is None:
         raise HTTPException(404, "broker account not found")
-    if acct["broker"] != "zerodha":
-        raise HTTPException(
-            400, f"refresh-token not implemented for broker {acct['broker']!r} "
-            "(Zerodha verified; others are a follow-up)")
     try:
-        return zerodha_auth.exchange_token(
-            broker_account_id, req.request_token, user_id=req.user_id)
-    except zerodha_auth.AccountAuthError as e:
+        # BROKER-AGNOSTIC: complete_connect resolves the account's broker via the
+        # registry, exchanges the request_token through THAT broker's auth
+        # provider, and stores the tokens (access + optional refresh) in the vault.
+        return account_lifecycle.complete_connect(
+            scope, broker_account_id, req.request_token)
+    except account_lifecycle.AccountLifecycleError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/autotrade/brokers/supported")
+def brokers_supported(caller: Caller = Depends(resolve_caller)):
+    """List brokers the platform can connect (for the onboarding dropdown) with
+    each broker's capabilities + whether it is live-certified. Broker-agnostic:
+    sourced from the registry, so adding a broker surfaces here automatically."""
+    from ..broker import registry
+    return {"brokers": registry.list_supported()}
+
+
+@router.get("/autotrade/broker-account/{broker_account_id}/health")
+def broker_account_health(broker_account_id: str,
+                          user_id: Optional[str] = None,
+                          caller: Caller = Depends(resolve_caller)):
+    """Live connection-health probe for an account (auth.validate → records
+    last_health_*). Broker-agnostic. Non-admin scoped to their own user_id."""
+    scope = _assert_user_scope(user_id, caller)
+    from .. import vault
+    from ..broker import account_lifecycle
+    acct = vault.get_account_public(broker_account_id, user_id=scope)
+    if acct is None:
+        raise HTTPException(404, "broker account not found")
+    try:
+        health = account_lifecycle.health_check(scope, broker_account_id)
+        return {"broker_account_id": broker_account_id,
+                "ok": health.ok, "status": health.status, "detail": health.detail}
+    except account_lifecycle.AccountLifecycleError as e:
         raise HTTPException(400, str(e))

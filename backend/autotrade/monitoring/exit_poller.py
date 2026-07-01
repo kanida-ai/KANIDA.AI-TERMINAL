@@ -86,7 +86,7 @@ async def confirm_exit(
 
     while datetime.now(IST) < deadline:
         try:
-            status_dict = broker.get_order_status(order_id)
+            status_dict = await asyncio.to_thread(broker.get_order_status, order_id)
         except Exception as e:
             log.warning("confirm_exit %s/%s: get_order_status error: %s — retrying",
                         session_id, symbol, e)
@@ -156,6 +156,7 @@ async def cancel_and_retry_exit(
     max_retries: int = 3,
     max_wait_sec: int = 60,
     poll_interval_sec: float = 5.0,
+    kite_product: str | None = None,
 ) -> Dict[str, Any]:
     """Cancel a pending exit order and place a fresh market sell, with retries.
 
@@ -188,9 +189,8 @@ async def cancel_and_retry_exit(
 
         # Step 2: fresh market sell.
         try:
-            # Resolve instrument_type from the registry (we only have qty here).
-            # Fall back to "EQ" (CNC) which is the safe default for a sell.
-            res = await broker.place_market_exit(symbol, qty, "EQ")
+            res = await broker.place_market_exit(symbol, qty, "EQ",
+                                                  kite_product=kite_product)
         except Exception as e:
             log.error(
                 "cancel_and_retry_exit %s/%s attempt %d: place_market_exit raised: %s",

@@ -179,19 +179,20 @@ class PortfolioMonitor:
         return [dict(r) for r in rows]
 
     def get_exit_failed_positions(self) -> List[Dict[str, Any]]:
-        """Return all EXIT_FAILED positions for this session.
+        """Return EXIT_FAILED positions whose exit gate is FREE (exit_lock=0).
 
-        Called by session.tick() to retry positions whose exits failed and
-        whose exit_gate was subsequently released by mark_exit_failed.
-        The gate release (in registry.mark_exit_failed) is the prerequisite
-        for claim_exit_session to succeed on the retry.
+        Only positions with exit_lock=0 are returned.  Once a retry task claims
+        the gate (exit_lock=1), this query won't surface the position again until
+        mark_exit_failed() releases it — preventing a new task from being spawned
+        on every tick while a retry is already in flight.
         """
         with falcon_conn() as con:
             rows = con.execute(
                 """SELECT symbol, qty, avg_price, ltp,
                           gtt_id, broker_profile, instrument_type
                    FROM autotrade_positions
-                   WHERE session_id=? AND status='EXIT_FAILED' AND qty > 0""",
+                   WHERE session_id=? AND status='EXIT_FAILED'
+                     AND qty > 0 AND exit_lock=0""",
                 (self.session_id,),
             ).fetchall()
         return [dict(r) for r in rows]

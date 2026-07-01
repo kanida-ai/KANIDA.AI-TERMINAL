@@ -13,6 +13,7 @@ Even when dry_run=False, the master env FALCON_AUTOTRADE_ENABLED must be 'true'
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, List, Optional
 
@@ -302,13 +303,17 @@ class ZerodhaBroker(BrokerClient):
         return prod
 
     async def place_market_exit(self, symbol: str, qty: int,
-                                instrument_type: str) -> OrderResult:
+                                instrument_type: str,
+                                kite_product: str | None = None) -> OrderResult:
         """Flatten one position with a direct Kite MARKET SELL.
 
-        Places the order directly via kite.place_order (VARIETY_REGULAR,
-        ORDER_TYPE_MARKET) rather than delegating to trail_manager so we own the
-        order_id and can poll its fill status via confirm_exit / exit_poller.
-        In dry-run we never touch Kite.
+        kite_product: explicit Kite product string (e.g. "MTF", "CNC", "MIS").
+        When provided it takes precedence over _resolve_product(instrument_type),
+        which maps security-type ("EQ") not trading-product — wrong for MTF sessions.
+
+        kite.place_order is a blocking HTTP call. Running it via asyncio.to_thread
+        keeps the event loop responsive so ticks, ws_driver, and other coroutines
+        continue while waiting for the Kite API response.
         """
         if not self._live_allowed():
             return OrderResult(status="DRY_RUN", broker_order_id=None,
@@ -317,15 +322,24 @@ class ZerodhaBroker(BrokerClient):
             kite = self.kite
             trading_symbol, exchange = self._resolve_symbol(symbol)
             kexch = getattr(kite, f"EXCHANGE_{exchange}", exchange)
-            order_id = kite.place_order(
-                variety=kite.VARIETY_REGULAR,
-                exchange=kexch,
-                tradingsymbol=trading_symbol,
-                transaction_type=kite.TRANSACTION_TYPE_SELL,
-                quantity=int(qty),
-                product=self._resolve_product(instrument_type),
-                order_type=kite.ORDER_TYPE_MARKET,
+            product = kite_product if kite_product else self._resolve_product(instrument_type)
+
+            order_id = await asyncio.to_thread(
+                lambda: kite.place_order(
+                    variety=kite.VARIETY_REGULAR,
+                    exchange=kexch,
+                    tradingsymbol=trading_symbol,
+                    transaction_type=kite.TRANSACTION_TYPE_SELL,
+                    quantity=int(qty),
+                    product=product,
+                    order_type=kite.ORDER_TYPE_MARKET,
+                    # Kite API rejects MARKET orders without market_protection.
+                    # 2.0 = allow up to 2% slippage from last traded price.
+                    market_protection=2.0,
+                )
             )
+            log.info("place_market_exit: %s qty=%d product=%s order_id=%s",
+                     symbol, qty, product, order_id)
             return OrderResult(status="PLACED", broker_order_id=str(order_id),
                                symbol=symbol, qty=qty)
         except Exception as e:

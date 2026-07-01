@@ -481,6 +481,7 @@ async def _exit_single_position(
         brokers: Dict[str, Any],
         registry: Any,
         gtt_manager: Any,
+        kite_product: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Our backend directly exits one position (per-stock software stop).
 
@@ -510,11 +511,21 @@ async def _exit_single_position(
         return {"symbol": symbol, "status": "BLOCKED"}
 
     # 2. Cancel the broker GTT for this position (best-effort, never block exit).
+    # asyncio.wait_for caps the wait at 5s — kiteconnect's default requests.Session
+    # has no timeout, so delete_gtt can hang indefinitely on a stale connection,
+    # preventing place_market_exit from ever running.  The underlying thread
+    # continues to completion (cannot be interrupted), but we stop waiting for it.
     gtt_id = position.get("gtt_id")
     if gtt_manager and gtt_id:
         try:
-            await asyncio.to_thread(broker.cancel_gtt, gtt_id)
+            await asyncio.wait_for(
+                asyncio.to_thread(broker.cancel_gtt, gtt_id),
+                timeout=5.0,
+            )
             log.info("per-stock stop %s/%s: GTT %s cancelled", session_id, symbol, gtt_id)
+        except asyncio.TimeoutError:
+            log.warning("per-stock stop %s/%s: GTT %s cancel timed out — proceeding to exit",
+                        session_id, symbol, gtt_id)
         except Exception as e:
             log.warning("per-stock stop %s/%s: GTT cancel failed (%s): %s",
                         session_id, symbol, gtt_id, e)
@@ -522,8 +533,13 @@ async def _exit_single_position(
     # 3. Place the market sell.
     qty = int(position.get("qty") or 0)
     itype = position.get("instrument_type") or "EQ"
+    # kite_product overrides instrument_type mapping: positions table stores security
+    # type ("EQ"), not the trading product ("MTF"/"CNC"). Without this, MTF exits
+    # become CNC sells and Kite rejects them with "Holding quantity: 0".
+    effective_product = kite_product or position.get("order_product")
     try:
-        res = await broker.place_market_exit(symbol, qty, itype)
+        res = await broker.place_market_exit(symbol, qty, itype,
+                                             kite_product=effective_product)
     except Exception as e:
         log.error("per-stock stop %s/%s: place_market_exit raised: %s",
                   session_id, symbol, e)
@@ -658,15 +674,25 @@ class TradingSession:
 
     @classmethod
     def list_sessions(cls, limit: int = 50,
-                      user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Recent sessions (newest first) for the operator UI session list.
+                      user_id: Optional[str] = None,
+                      owner_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Recent sessions (newest first) for the session list.
 
         This is what lets the panel SHOW existing sessions instead of resetting
         to a blank create form — a created session stays visible/resumable.
 
-        PHASE-2 MULTI-TENANT: when user_id is provided, ONLY that user's sessions
-        are returned (per-user isolation). When user_id is None the list is the
-        full operator view (today's behaviour) — used by the operator console.
+        PHASE-2 MULTI-TENANT scoping (two params, both strict — NO 'OR IS NULL'):
+          * owner_user_id (per-user portal isolation): return ONLY sessions
+            WHERE s.user_id = ? EXACTLY. NULL-owned (operator/legacy) sessions
+            are NOT returned. Use this for a non-admin portal user so they see
+            ONLY their own sessions.
+          * user_id (legacy operator-console scope): same strict WHERE s.user_id
+            = ? filter, kept UNCHANGED for the operator console's existing
+            ?user_id call. When None → the full operator view (all sessions,
+            today's behaviour).
+
+        NOTE: neither path uses an 'OR user_id IS NULL' branch, so no NULL-owned
+        session ever leaks into a scoped result.
         """
         base = (
             """SELECT s.session_id, s.created_at, s.started_at, s.closed_at,
@@ -679,11 +705,12 @@ class TradingSession:
                          AND p.status = 'OPEN') AS n_open_positions
                FROM autotrade_sessions s
             """)
+        scope_id = owner_user_id if owner_user_id is not None else user_id
         with falcon_conn() as con:
-            if user_id is not None:
+            if scope_id is not None:
                 rows = con.execute(
                     base + " WHERE s.user_id = ? ORDER BY s.created_at DESC "
-                    "LIMIT ?", (user_id, int(limit)),
+                    "LIMIT ?", (str(scope_id), int(limit)),
                 ).fetchall()
             else:
                 rows = con.execute(
@@ -906,6 +933,27 @@ class TradingSession:
             gate = evaluate_fire_gate(self.config, now, fire_dt=now)
             if not gate.allow:
                 return self._refuse_fire(gate, when="fire")
+        # BROKER-AGNOSTIC AUTH FOUNDATION (Stage 1): if this session is bound to a
+        # vaulted broker account AND the vault is enabled, the bound account MUST
+        # be ACTIVE before any order fires — a session never trades against a
+        # PENDING/EXPIRED/REVOKED/ERROR account. The NULL-account / disabled-vault
+        # (operator/global) path is UNCHANGED: no bound id → no check; a disabled
+        # vault clears the binding in _resolve_account_creds → global fallback.
+        if self.broker_account_id is not None:
+            from . import vault as _vault
+            if _vault.vault_enabled():
+                from .broker.account_lifecycle import (assert_account_tradeable,
+                                                       AccountNotTradeable)
+                try:
+                    assert_account_tradeable(self.user_id, self.broker_account_id)
+                except AccountNotTradeable as e:
+                    log.warning("session %s: bound account not tradeable — %s",
+                                self.session_id, e)
+                    self._set_status("FAILED", reason=str(e))
+                    return {"session_id": self.session_id, "status": "FAILED",
+                            "mode": self.mode, "when": "fire", "n_placed": 0,
+                            "orders": [], "error": str(e),
+                            "note": "bound broker account is not ACTIVE"}
         self._build_brokers()
         self._set_status("RUNNING", started_at=_now_ist_iso())
 
@@ -980,6 +1028,27 @@ class TradingSession:
             log.debug("entry_latency record failed for %s: %s", self.session_id, e)
         log.info("session %s entry fired %d legs in %dms (concurrency=%d)",
                  self.session_id, len(placed), entry_latency_ms, _ENTRY_CONCURRENCY)
+
+        # ENTRY-OUTCOME GATE (real-money safety). If NO leg produced a real
+        # filled position (all rejected/failed), the session has NOTHING to
+        # manage — mark it FAILED, not RUNNING, and place NO GTT / start NO
+        # drivers / arm NO square-off. Prevents a phantom-basket session that
+        # sits RUNNING and tries to square off non-existent positions.
+        # (2026-07-01 incident: all 5 NRML-on-equity legs rejected.)
+        n_filled = sum(1 for p in placed
+                       if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE"))
+        if placed and n_filled == 0:
+            reason = (f"all {len(placed)} entry legs rejected/failed at the "
+                      "broker — session marked FAILED (no positions placed)")
+            self._set_status("FAILED", reason=reason, closed_at=_now_ist_iso())
+            log.error("session %s: %s", self.session_id, reason)
+            return {"session_id": self.session_id, "status": "FAILED",
+                    "mode": self.mode, "n_placed": 0, "orders": placed,
+                    "reason": reason}
+        if placed and n_filled < len(placed):
+            log.warning("session %s: %d/%d entry legs failed — continuing with "
+                        "the %d filled legs", self.session_id,
+                        len(placed) - n_filled, len(placed), n_filled)
 
         # INVESTED-CAPITAL-BASIS: freeze Σ(qty*avg_price) across the positions
         # just placed. This is the product-aware capital actually put to work
@@ -1088,10 +1157,39 @@ class TradingSession:
             log.error("place failed %s: %s", symbol, e)
             return {"symbol": symbol, "status": "FAILED", "error": str(e)}
 
-        # Register the (paper or real) position. In dry-run we register the
-        # intended qty at the reference price so monitoring works in paper mode.
-        fill_price = res.avg_price or ref_price
-        fill_qty = res.filled_qty or qty
+        # REJECTION GUARD (real-money safety). A FAILED result — or, live, a
+        # missing broker_order_id — means the broker REJECTED the order (invalid
+        # product, margin, IP, market-hours…). It must NEVER be registered as a
+        # position: doing so creates a PHANTOM position + orphan GTT and falsely
+        # marks the session RUNNING. (2026-07-01 incident: NRML-on-equity rejected
+        # all legs, but they were registered anyway.)
+        if getattr(res, "status", None) == "FAILED" or (
+                not self.dry_run and not getattr(res, "broker_order_id", None)):
+            err = getattr(res, "error", None) or "order rejected by broker"
+            log.error("entry REJECTED %s: %s — NOT registering", symbol, err)
+            return {"symbol": symbol, "status": "FAILED", "error": err,
+                    "broker_profile": prof.profile_id}
+
+        # FILL RECONCILIATION (real-money accuracy). A live PLACED order returns
+        # no avg_price/filled_qty, so poll the broker for the ACTUAL fill and
+        # register the position at the REAL fill price — not the pre-trade 9:15
+        # reference mark. Registering at the mark mis-states P&L (can flip a loss
+        # into a shown win) AND feeds the trail engine inflated returns.
+        # (2026-07-01 incident: panel +₹2,298 vs broker +₹1,340.)
+        fill_price = res.avg_price
+        fill_qty = res.filled_qty
+        if not self.dry_run and res.broker_order_id and (
+                not fill_price or not fill_qty):
+            rec = await self._reconcile_entry_fill(
+                broker, res.broker_order_id, qty)
+            if rec:
+                fill_price = rec.get("avg_price") or fill_price
+                fill_qty = rec.get("filled_qty") or fill_qty
+        reconciled = bool(fill_price and fill_qty)
+        # Fall back to the reference mark ONLY when the broker gave no fill data
+        # (dry-run, or a still-pending order that never confirmed within the poll).
+        fill_price = fill_price or ref_price
+        fill_qty = fill_qty or qty
         acct_id = getattr(prof, "broker_account_id", None)
         if res.status == "PARTIAL":
             self.registry.register_partial(symbol, prof.profile_id,
@@ -1105,13 +1203,46 @@ class TradingSession:
                                    product=prof.order_product,
                                    instrument_type=prof.instrument_type,
                                    broker_account_id=acct_id)
-        if ref_price > 0 and res.avg_price:
-            record_slippage(symbol, ref_price, res.avg_price, fill_qty,
+        if ref_price > 0 and reconciled:
+            record_slippage(symbol, ref_price, fill_price, fill_qty,
                             session_id=self.session_id,
                             broker_profile=prof.profile_id)
         return {"symbol": symbol, "status": res.status, "qty": fill_qty,
                 "price": fill_price, "broker_order_id": res.broker_order_id,
-                "broker_profile": prof.profile_id, "order_type": order.order_type}
+                "broker_profile": prof.profile_id, "order_type": order.order_type,
+                "reconciled": reconciled}
+
+    async def _reconcile_entry_fill(self, broker, order_id: str,
+                                    expected_qty: int,
+                                    max_wait_sec: float = 8.0,
+                                    poll_interval: float = 1.0
+                                    ) -> Optional[Dict[str, Any]]:
+        """Poll the broker for an entry order's ACTUAL fill (avg_price + filled
+        qty). Market orders fill near-instantly; we poll briefly for COMPLETE so
+        the position's entry is the REAL fill, not the 9:15 mark. Returns
+        {'avg_price','filled_qty'} on a confirmed fill, else None (caller falls
+        back to the mark). get_order_status runs in a thread so the event loop is
+        never blocked."""
+        deadline = time.monotonic() + max_wait_sec
+        while time.monotonic() < deadline:
+            try:
+                st = await asyncio.to_thread(broker.get_order_status, order_id)
+            except Exception as e:  # pragma: no cover - defensive
+                log.debug("entry reconcile %s: get_order_status err %s",
+                          order_id, e)
+                await asyncio.sleep(poll_interval)
+                continue
+            status = str(st.get("status", "")).upper()
+            filled = int(st.get("filled_quantity") or 0)
+            avg = float(st.get("average_price") or 0.0)
+            if status == "COMPLETE" and filled > 0 and avg > 0:
+                return {"avg_price": avg, "filled_qty": filled}
+            if status in ("REJECTED", "CANCELLED"):
+                return None
+            await asyncio.sleep(poll_interval)
+        log.warning("entry reconcile %s: no confirmed fill within %.0fs — "
+                    "falling back to reference mark", order_id, max_wait_sec)
+        return None
 
     # ── Tick: monitor + GTT reconcile + kill switch / trail engine ─────────────
     async def tick(self) -> Dict[str, Any]:
@@ -1122,29 +1253,51 @@ class TradingSession:
         # remaining positions only (denominator stays total_allocated_capital).
         gtt_closed = []
         try:
-            gtt_closed = self.gtt_manager.reconcile_gtt_fills()
+            gtt_closed = await self.gtt_manager.reconcile_gtt_fills()
         except Exception as e:  # pragma: no cover - never block the tick
             log.warning("GTT reconcile failed for %s: %s", self.session_id, e)
         self.monitor.refresh_ltps(self.brokers)
+
+        # Market-hours guard: only fire software stops and retries during 09:15–15:29 IST.
+        # After-hours restarts read stale closing prices which falsely trigger exits.
+        _now_ist_tick = datetime.now(IST)
+        _in_market_hours = (
+            _now_ist_tick.replace(hour=9, minute=15, second=0, microsecond=0)
+            <= _now_ist_tick <=
+            _now_ist_tick.replace(hour=15, minute=29, second=0, microsecond=0)
+        )
 
         # EXIT_FAILED RETRY: after the GTT reconcile step, re-attempt any
         # position whose exit previously failed and whose exit_gate was
         # released by registry.mark_exit_failed. Uses the same
         # _exit_single_position path (which now calls confirm_exit).
-        # Fire-and-forget via create_task so we don't block the tick.
+        # Guard: skip retries outside market hours — market orders will be
+        # rejected by Kite and the retry will just keep failing until open.
         try:
             failed_positions = self.monitor.get_exit_failed_positions()
-            for fp in failed_positions:
-                if _exit_gate_mod.claim_exit_session(
-                        self.session_id, fp["symbol"], "EXIT_RETRY"):
-                    asyncio.create_task(_exit_single_position(
-                        session_id=self.session_id,
-                        position=fp,
-                        reason="EXIT_RETRY",
-                        brokers=self.brokers,
-                        registry=self.registry,
-                        gtt_manager=self.gtt_manager,
-                    ))
+            if failed_positions and not _in_market_hours:
+                log.debug("EXIT_RETRY suppressed outside market hours for %s (%d positions)",
+                          self.session_id, len(failed_positions))
+            elif failed_positions:
+                # Await all exit coroutines directly (not create_task) so they
+                # complete before tick() returns. asyncio.run() per tick cancels
+                # any pending tasks on tick completion, which would leave exit_lock=1
+                # permanently stuck if create_task were used here.
+                _exit_coros = []
+                for fp in failed_positions:
+                    if _exit_gate_mod.claim_exit_session(
+                            self.session_id, fp["symbol"], "EXIT_RETRY"):
+                        _exit_coros.append(_exit_single_position(
+                            session_id=self.session_id,
+                            position=fp,
+                            reason="EXIT_RETRY",
+                            brokers=self.brokers,
+                            registry=self.registry,
+                            gtt_manager=self.gtt_manager,
+                            kite_product=self.config.order_product,
+                        ))
+                if _exit_coros:
+                    await asyncio.gather(*_exit_coros, return_exceptions=True)
         except Exception as _efr_e:
             log.warning("EXIT_FAILED retry sweep failed for %s: %s",
                         self.session_id, _efr_e)
@@ -1198,6 +1351,12 @@ class TradingSession:
         # PER-STOCK SOFTWARE STOP LOOP.
         # Runs BEFORE the portfolio-level trail engine so the trail sees the
         # updated (smaller) basket on this same tick.
+        _now_ist_intraday = datetime.now(IST)
+        _in_market_hours = (
+            _now_ist_intraday.replace(hour=9, minute=15, second=0, microsecond=0)
+            <= _now_ist_intraday <=
+            _now_ist_intraday.replace(hour=15, minute=29, second=0, microsecond=0)
+        )
         per_stock_exits: List[Dict[str, Any]] = []
         try:
             stop_pct = float(getattr(self.config, "stop_pct", 0.015))
@@ -1208,7 +1367,7 @@ class TradingSession:
                 if ltp is None or avg_price <= 0:
                     continue
                 stock_return = (float(ltp) - avg_price) / avg_price
-                if stock_return <= -stop_pct:
+                if stock_return <= -stop_pct and _in_market_hours:
                     result = await _exit_single_position(
                         session_id=self.session_id,
                         position=pos,
@@ -1216,6 +1375,7 @@ class TradingSession:
                         brokers=self.brokers,
                         registry=self.registry,
                         gtt_manager=self.gtt_manager,
+                        kite_product=self.config.order_product,
                     )
                     per_stock_exits.append(result)
                     log.warning(

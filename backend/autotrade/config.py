@@ -213,6 +213,18 @@ class TradingSessionConfig:
             raise ValueError(f"invalid order_type: {self.order_type}")
         if self.instrument_type not in ("EQ", "FUT", "CE", "PE", "MTF"):
             raise ValueError(f"invalid instrument_type: {self.instrument_type}")
+        if self.order_product not in ("CNC", "MIS", "NRML", "MTF"):
+            raise ValueError(f"invalid order_product: {self.order_product}")
+        # PRODUCT × INSTRUMENT compatibility (real-money safety). NRML is an
+        # F&O / currency / commodity CARRY product — the broker REJECTS it on NSE
+        # cash equity ("Trading in NSE is not allowed using NRML product type").
+        # An equity session (EQ / MTF instrument) must use CNC / MIS / MTF, else
+        # every order is rejected at the broker (2026-07-01 incident: an EQ
+        # intraday_basket configured NRML → all 5 orders rejected).
+        if self.instrument_type in ("EQ", "MTF") and self.order_product == "NRML":
+            raise ValueError(
+                "order_product 'NRML' is invalid for equity (NSE cash) — the "
+                "broker rejects it. Use CNC (delivery), MIS (intraday), or MTF.")
         if self.kill_switch_direction not in ("profit", "loss", "both"):
             raise ValueError(f"invalid kill_switch_direction: {self.kill_switch_direction}")
         if self.top_n_stocks <= 0:

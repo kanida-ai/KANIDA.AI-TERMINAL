@@ -92,6 +92,19 @@ def _kite_proxies() -> Optional[dict]:
     return {"http": url, "https": url}
 
 
+def _apply_request_timeout(kite, timeout_sec: float = 10.0):
+    """Set kiteconnect's per-request timeout.
+
+    kiteconnect passes timeout=self.timeout explicitly to reqsession.request(),
+    so the correct fix is to set self.timeout directly — NOT to wrap reqsession.
+    Default kiteconnect timeout is 7s; we raise it to 10s for margin on slow links.
+    All blocking calls (place_order, get_gtt, orders) must additionally run inside
+    asyncio.to_thread so the event loop stays responsive during the HTTP wait.
+    """
+    kite.timeout = timeout_sec
+    return kite
+
+
 def _new_kite(api_key: str):
     """Construct a KiteConnect client, applying BROKER_PROXY_URL if set.
 
@@ -100,8 +113,10 @@ def _new_kite(api_key: str):
 
     proxies = _kite_proxies()
     if proxies is not None:
-        return KiteConnect(api_key=api_key, proxies=proxies)
-    return KiteConnect(api_key=api_key)
+        kite = KiteConnect(api_key=api_key, proxies=proxies)
+    else:
+        kite = KiteConnect(api_key=api_key)
+    return _apply_request_timeout(kite)
 
 
 # ── Error types ───────────────────────────────────────────────────────────────

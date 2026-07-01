@@ -206,9 +206,17 @@ class GTTManager:
 
         async def _one(t):
             try:
-                await asyncio.to_thread(t["broker"].cancel_gtt, t["gtt_id"])
+                await asyncio.wait_for(
+                    asyncio.to_thread(t["broker"].cancel_gtt, t["gtt_id"]),
+                    timeout=8.0,
+                )
                 return {"symbol": t["symbol"], "gtt_id": t["gtt_id"],
                         "status": "CANCELLED"}
+            except asyncio.TimeoutError:
+                log.warning("cancel_gtt timed out for %s (%s) — skipping",
+                            t["symbol"], t["gtt_id"])
+                return {"symbol": t["symbol"], "gtt_id": t["gtt_id"],
+                        "status": "CANCEL_TIMEOUT"}
             except Exception as e:  # never block the flatten on a GTT cancel
                 log.warning("cancel_gtt failed for %s (%s): %s",
                             t["symbol"], t["gtt_id"], e)
@@ -218,7 +226,7 @@ class GTTManager:
         return list(await asyncio.gather(*[_one(t) for t in targets]))
 
     # ── Reconcile GTT fills (a position closed externally by a fired GTT) ──────
-    def reconcile_gtt_fills(self) -> List[Dict[str, Any]]:
+    async def reconcile_gtt_fills(self) -> List[Dict[str, Any]]:
         """Detect positions whose broker-held GTT FIRED (position closed at the
         broker outside our software) and mark the row CLOSED (close_reason='GTT')
         ONLY when the underlying SELL order is confirmed COMPLETE.
@@ -245,7 +253,7 @@ class GTTManager:
             if broker is None:
                 continue
             try:
-                state = broker.get_gtt(gtt_id)
+                state = await asyncio.to_thread(broker.get_gtt, gtt_id)
             except Exception as e:  # pragma: no cover - defensive
                 log.debug("get_gtt failed for %s (%s): %s",
                           pos["symbol"], gtt_id, e)
@@ -265,10 +273,17 @@ class GTTManager:
             if result["status"] == "cancelled":
                 # GTT was cancelled/deleted/expired WITHOUT firing. Position is
                 # still open and now UNPROTECTED — log a warning but do not close.
+                # Clear gtt_id so this message doesn't repeat every tick.
                 log.warning(
                     "GTT CANCELLED without fill for %s/%s (gtt_id=%s) — "
                     "position unprotected, manual review required",
                     self.session_id, pos["symbol"], gtt_id)
+                try:
+                    self.registry.set_gtt(pos["symbol"], None,
+                                          broker_profile=prof_id)
+                except Exception as _gtt_clr_e:
+                    log.debug("gtt_id clear failed for %s: %s",
+                              pos["symbol"], _gtt_clr_e)
                 out.append({"symbol": pos["symbol"], "gtt_id": gtt_id,
                             "status": "GTT_CANCELLED_UNPROTECTED"})
                 continue

@@ -127,7 +127,8 @@ class BrokerClient(ABC):
 
     @abstractmethod
     async def place_market_exit(self, symbol: str, qty: int,
-                                instrument_type: str) -> OrderResult:
+                                instrument_type: str,
+                                kite_product: str | None = None) -> OrderResult:
         ...
 
     def get_order_status(self, order_id: str) -> dict:

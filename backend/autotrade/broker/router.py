@@ -60,4 +60,7 @@ def build_client(profile, dry_run: bool = True) -> BrokerClient:
     if name == "dhan":
         from .dhan import DhanBroker
         return DhanBroker(profile, dry_run=dry_run)
+    if name == "rupeezy":
+        from .rupeezy import RupeezyBroker
+        return RupeezyBroker(profile, dry_run=dry_run)
     raise ValueError(f"unknown broker: {profile.broker_name}")

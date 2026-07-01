@@ -124,7 +124,9 @@ class KillSwitchExecutor:
             qty = int(pos.get("qty") or 0)   # recompute open qty (spec rule)
             itype = pos.get("instrument_type") or "EQ"
             prof_id = pos.get("broker_profile")
-            exit_coros.append(broker.place_market_exit(symbol, qty, itype))
+            kite_product = getattr(self.config, "order_product", None)
+            exit_coros.append(broker.place_market_exit(symbol, qty, itype,
+                                                       kite_product=kite_product))
             exit_meta.append({"symbol": symbol, "claimed": True, "qty": qty,
                               "broker_profile": prof_id})
 

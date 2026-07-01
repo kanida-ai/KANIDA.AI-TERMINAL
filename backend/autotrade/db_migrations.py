@@ -35,6 +35,9 @@ This module ADDS the following without touching any existing table definition:
                                   session to a portal user + vaulted account;
                                   NULL = operator/global creds path (today)
   * autotrade_positions.broker_account_id  (TEXT, NULLABLE) — per-account audit
+  * broker_accounts.refresh_token_enc / token_expires_at / last_health_at /
+    last_health_status / last_error / redirect_state  — Stage-0 broker-agnostic
+    auth foundation (all NULLABLE; Kite path unchanged)
 """
 from __future__ import annotations
 
@@ -159,6 +162,28 @@ def run_migrations() -> dict:
                 con.execute(
                     "ALTER TABLE autotrade_positions ADD COLUMN broker_account_id TEXT")
                 added_cols.append("broker_account_id")
+
+        # ── 2e-vault. BROKER-AGNOSTIC AUTH FOUNDATION (Stage 0) ───────────────
+        # Additive, NULLABLE columns on broker_accounts for refresh-token brokers
+        # + connection health + the OAuth CSRF `state` round-trip. All nullable
+        # and default-absent → the existing Kite (request-token, no-refresh) path
+        # is byte-for-byte unchanged; these are populated only by brokers that use
+        # them. refresh_token_enc is FERNET-ENCRYPTED at rest (same as the other
+        # *_enc columns); token_expires_at is an absolute ISO-IST stamp for
+        # non-daily brokers; last_health_* record the most recent validate() ping.
+        if _table_exists(con, "broker_accounts"):
+            have = set(_existing_columns(con, "broker_accounts"))
+            for name, ddl_type in (
+                    ("refresh_token_enc", "BLOB"),
+                    ("token_expires_at", "TEXT"),
+                    ("last_health_at", "TEXT"),
+                    ("last_health_status", "TEXT"),
+                    ("last_error", "TEXT"),
+                    ("redirect_state", "TEXT")):
+                if name not in have:
+                    con.execute(
+                        f"ALTER TABLE broker_accounts ADD COLUMN {name} {ddl_type}")
+                    added_cols.append(name)
 
         # ── 2e. ALTER-guard the SPEED-PASS latency observability columns ──────
         # entry_latency_ms: fire start → all legs settled (asyncio.gather done).
@@ -340,6 +365,13 @@ CREATE TABLE IF NOT EXISTS broker_accounts (
     created_at        TEXT NOT NULL,              -- ISO IST
     updated_at        TEXT,
     last_login_at     TEXT,
+    -- BROKER-AGNOSTIC AUTH FOUNDATION (Stage 0), all NULLABLE / default-absent:
+    refresh_token_enc  BLOB,   -- Fernet-ENCRYPTED refresh token (brokers that have one)
+    token_expires_at   TEXT,   -- absolute ISO-IST expiry (non-daily brokers)
+    last_health_at     TEXT,   -- ISO-IST of the last validate() ping
+    last_health_status TEXT,   -- ACTIVE | EXPIRED | REVOKED | ERROR
+    last_error         TEXT,   -- last health/refresh error detail
+    redirect_state     TEXT,   -- CSRF `state` for the OAuth round-trip
     UNIQUE (user_id, broker, account_label)
 );
 CREATE INDEX IF NOT EXISTS idx_broker_accounts_user
