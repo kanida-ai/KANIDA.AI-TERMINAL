@@ -31,6 +31,17 @@ async function forward(req: NextRequest, path: string[]): Promise<NextResponse> 
   const ct = req.headers.get('content-type')
   if (ct) headers['content-type'] = ct
 
+  // TENANT ISOLATION: forward the signed-in user's identity so the backend can
+  // scope /api/autotrade/* to the caller (a Power User must only see/act on
+  // THEIR OWN sessions; the operator/admin sees all). The `power_jwt` cookie is
+  // same-origin, so the browser already sends it to this proxy — we relay it as
+  // a Bearer token (the backend accepts Authorization: Bearer OR the power_jwt
+  // cookie via resolve_caller). Absent (operator console with no power session)
+  // → backend falls back to the operator/admin view, unchanged. The operator
+  // token still gates transport; this only ADDS per-user identity.
+  const jwt = req.cookies.get('power_jwt')?.value
+  if (jwt) headers['authorization'] = `Bearer ${jwt}`
+
   const init: RequestInit = { method: req.method, headers, cache: 'no-store' }
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     init.body = await req.text()
