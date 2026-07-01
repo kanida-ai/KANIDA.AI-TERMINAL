@@ -27,6 +27,7 @@ import {
   C, ICON, TIER_STYLE, BAND_COLORKEY, tierBand, MechanismStrip,
   fmtINR, fmtNum, fmtCapital,
 } from '@/components/power/shared/cotrade-kit'
+import { BrokerAccountsPanel } from '@/components/power/autotrade/BrokerAccountsPanel'
 
 // ── Same fixed sizing model as Co-Trading (REAL math, no fabrication). ───────
 const BASE_CAPITAL = 500_000
@@ -54,10 +55,10 @@ function entryPriceOf(p: Top20Pick): number | null {
   return typeof v === 'number' && v > 0 ? v : null
 }
 
-type Props = { data: Top20Response | null; firstName: string }
+type Props = { data: Top20Response | null; firstName: string; userId: number | string }
 type Stage = 'setup' | 'preview'
 
-export function AutoTradeExperience({ data, firstName }: Props) {
+export function AutoTradeExperience({ data, firstName, userId }: Props) {
   const router = useRouter()
   const [stage, setStage] = useState<Stage>('setup')
   const [styleId, setStyleId] = useState<StyleId>('swing')
@@ -93,7 +94,7 @@ export function AutoTradeExperience({ data, firstName }: Props) {
          style={{ background: C.canvas, color: C.ink }}>
       {stage === 'setup' ? (
         <SetupStage
-          firstName={firstName} styleId={styleId} setStyleId={setStyleId}
+          firstName={firstName} userId={userId} styleId={styleId} setStyleId={setStyleId}
           capital={capital} setCapital={setCapital} perTrade={perTrade}
           plans={plans}
           onAddStyle={(sid) => { const s = STYLES.find(x => x.id === sid); if (s?.live) setStyleId(s.id) }}
@@ -120,17 +121,17 @@ export function AutoTradeExperience({ data, firstName }: Props) {
 //   → readiness checklist → "Join the AutoTrade waitlist".
 // ════════════════════════════════════════════════════════════════════════════
 function SetupStage({
-  firstName, styleId, setStyleId, capital, setCapital, perTrade,
+  firstName, userId, styleId, setStyleId, capital, setCapital, perTrade,
   plans, onAddStyle, onPreview, onCoTrade,
 }: {
-  firstName: string
+  firstName: string; userId: number | string
   styleId: StyleId; setStyleId: (s: StyleId) => void
   capital: number; setCapital: (n: number) => void; perTrade: number
   plans: Plan[]; onAddStyle: (sid: string) => void
   onPreview: () => void; onCoTrade: () => void
 }) {
   const READINESS: Readiness[] = [
-    { icon: 'link',   title: 'Broker connected',  body: 'Securely link your Zerodha account so Falcon can act on it.', state: 'soon' },
+    { icon: 'link',   title: 'Broker connected',  body: 'Securely link your broker account so Falcon can act on it.',   state: 'ok' },
     { icon: 'wallet', title: 'Funds available',   body: 'Enough cash/margin to place the day’s eligible entries.',     state: 'pending' },
     { icon: 'shield', title: 'Risk config',       body: 'Per-trade size, daily caps and the stop/trailing rules.',     state: 'pending' },
     { icon: 'clock',  title: 'Market hours',      body: 'Entries fire at 9:15 IST on trading days only.',              state: 'pending' },
@@ -202,10 +203,9 @@ function SetupStage({
           </p>
         </Step>
 
-        {/* STEP 2 + 3 side-by-side */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 items-start">
-          {/* STEP 2 — capital */}
-          <Step n={2} title="Set your capital">
+        {/* STEP 2 — capital */}
+        <Step n={2} title="Set your capital">
+          <div className="max-w-[520px]">
             <div className="flex items-center gap-2 rounded-xl px-3 py-2 border"
                  style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.03)' }}>
               <span className="text-[16px] font-semibold" style={{ color: C.muted }}>₹</span>
@@ -227,29 +227,22 @@ function SetupStage({
               Falcon would size <b style={{ color: C.muted }}>{fmtINR(perTrade)}</b> per pick (₹50k at ₹5 L, scaled). When live,
               this uses your real broker margin/cash.
             </p>
-          </Step>
+          </div>
+        </Step>
 
-          {/* STEP 3 — connect broker (LAUNCH-PENDING, disabled) */}
-          <Step n={3} title="Connect your broker">
-            <div className="rounded-2xl border p-3.5" style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.05)' }}>
-              <div className="flex items-center gap-2 mb-1.5">
-                <span className="grid place-items-center w-7 h-7 rounded-lg shrink-0" style={{ background: 'rgba(230,180,80,0.14)', color: C.amber }}>{ICON.link(15)}</span>
-                <span className="text-[13px] font-semibold" style={{ color: C.ink }}>Zerodha</span>
-                <span className="ml-auto text-[8.5px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
-                      style={{ color: C.amber, background: 'rgba(230,180,80,0.12)', boxShadow: 'inset 0 0 0 1px rgba(230,180,80,0.4)' }}>soon</span>
-              </div>
-              <p className="text-[11px] leading-snug mb-2.5" style={{ color: C.ink2 }}>
-                Per-user broker connect isn’t live yet. Automated execution runs today on the operator’s own
-                account only — we will never place an order on your behalf until your connect is built and verified.
-              </p>
-              <button type="button" disabled
-                      className="w-full rounded-xl px-4 py-2 text-[12.5px] font-semibold cursor-not-allowed opacity-60"
-                      style={{ border: `1px solid ${C.line2}`, color: C.muted }}>
-                Connect Zerodha (launching soon)
-              </button>
-            </div>
-          </Step>
-        </div>
+        {/* STEP 3 — connect your broker (REAL, per-user connect flow) */}
+        <Step n={3} title="Connect your broker">
+          <div className="rounded-2xl border p-3 sm:p-4 mb-3 flex items-start gap-2.5"
+               style={{ borderColor: 'rgba(63,227,164,0.3)', background: 'rgba(63,227,164,0.05)' }}>
+            <span className="shrink-0 mt-0.5" style={{ color: C.mint }}>{ICON.shield(16)}</span>
+            <p className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+              This connects your broker account only — it <b style={{ color: C.ink }}>never places a real order here</b>.
+              Automated execution is <b style={{ color: C.mint }}>paper by default</b> and live trading stays gated
+              server-side. Your API secret is sent once and stored encrypted; it&apos;s never shown again.
+            </p>
+          </div>
+          <BrokerAccountsPanel userId={userId} />
+        </Step>
 
         {/* READINESS CHECKLIST — structure with honest pending states */}
         <Step n={4} title="Readiness checklist">
@@ -257,8 +250,8 @@ function SetupStage({
             {READINESS.map(r => <ReadinessRow key={r.title} r={r} />)}
           </div>
           <p className="text-[10.5px] mt-2" style={{ color: C.faint }}>
-            This is the structure AutoTrade will check before every automated session — shown honestly as
-            pending until per-user automation is live.
+            This is the structure AutoTrade checks before every automated session. Broker connect is live above;
+            automated live execution stays gated server-side (paper by default) until enabled for your account.
           </p>
         </Step>
 

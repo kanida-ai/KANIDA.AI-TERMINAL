@@ -351,6 +351,47 @@ export type LoginUrlResponse = { login_url: string; [k: string]: unknown }
 // → the updated (now ACTIVE) masked account.
 export type RefreshTokenResponse = BrokerAccount
 
+// ── Supported-broker registry (GET /brokers/supported) ───────────────────────
+// The backend advertises which brokers exist and, per broker, whether the
+// integration is LIVE (selectable) and its capability flags (the AutoTrade
+// engine branches on THESE, never on the broker name). Non-live brokers are
+// shown disabled with a "coming soon" tag. All capability fields are optional
+// so a partial/renamed backend shape never crashes the UI.
+export type BrokerCapabilities = {
+  // How the daily auth is obtained (e.g. 'request_token', 'oauth2_flow').
+  auth_kind?: string
+  // Does the broker issue a long-lived refresh token (false → daily reconnect)?
+  has_refresh_token?: boolean
+  // Human token lifetime, e.g. 'daily ~06:00 IST' | 'session'.
+  token_lifetime?: string
+  supports_gtt?: boolean
+  supports_mtf?: boolean
+  // F&O supported?
+  fno?: boolean
+  [k: string]: unknown
+}
+export type SupportedBroker = {
+  broker: BrokerName
+  live: boolean
+  capabilities?: BrokerCapabilities
+  [k: string]: unknown
+}
+export type SupportedBrokersResponse = {
+  brokers?: SupportedBroker[]
+  [k: string]: unknown
+}
+
+// ── Per-account health (GET /broker-account/{id}/health) ─────────────────────
+// A live liveness ping for a connected account (e.g. kite.profile()). `ok` is
+// the boolean verdict; `status` mirrors the account status (ACTIVE/EXPIRED/…);
+// `detail` is a human string to surface verbatim. Any field may be absent.
+export type BrokerAccountHealth = {
+  ok?: boolean
+  status?: BrokerAccountStatus
+  detail?: string
+  [k: string]: unknown
+}
+
 // ── Trade Journal types ───────────────────────────────────────────────────────
 
 export type JournalPosition = {
@@ -527,6 +568,18 @@ export const AutoTradeAPI = {
       method: 'POST',
       body: JSON.stringify({ config, ...scopeBody(scope) }),
     }),
+
+  // ── Supported-broker registry ───────────────────────────────────────────────
+  // GET /brokers/supported → { brokers:[{ broker, live, capabilities }] }.
+  // Sources the broker dropdown: live brokers are selectable; non-live are shown
+  // disabled with "coming soon". Read-only; a 404/error surfaces normally so the
+  // caller can fall back to a static list without fabricating capabilities.
+  supportedBrokers: () => call<SupportedBrokersResponse>('/brokers/supported'),
+
+  // GET /broker-account/{id}/health → { ok, status, detail } — a live liveness
+  // ping for one account. Scoped by user_id so the backend authorises the read.
+  brokerAccountHealth: (id: string, userId: number | string) =>
+    call<BrokerAccountHealth>(`/broker-account/${encodeURIComponent(id)}/health${q({ user_id: userId })}`),
 
   // ── Broker accounts (connect-your-broker; operator-token-gated) ─────────────
   // List a user's connected broker accounts + whether the server vault is on.

@@ -60,5 +60,5 @@ export default async function AutoTradePage() {
     console.error('[/power/autotrade] falconTop20 fetch failed:', e)
   }
 
-  return <AutoTradeExperience data={data} firstName={firstName} />
+  return <AutoTradeExperience data={data} firstName={firstName} userId={user!.id} />
 }
