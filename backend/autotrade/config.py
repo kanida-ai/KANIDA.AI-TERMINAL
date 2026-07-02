@@ -148,6 +148,16 @@ class TradingSessionConfig:
     kill_switch_pct: float = 0.012
     kill_switch_direction: str = "both"    # profit | loss | both
     kill_switch_enabled: bool = False
+    # ── ASYMMETRIC kill switch (FEATURE B, additive + default-off) ────────────
+    # Separate profit-target vs stop-loss thresholds. Both are FRACTIONS
+    # (0.01 = 1%), validated in (0, 0.5] WHEN SET. Semantics:
+    #   kill_switch_target_pct : the PROFIT side fires at gross_return >= this.
+    #   kill_switch_stop_pct   : the LOSS   side fires at gross_return <= -this.
+    # When None (DEFAULT) each side falls back to the symmetric kill_switch_pct,
+    # so a session that sets neither behaves EXACTLY as today (byte-for-byte).
+    # kill_switch_direction still gates which side(s) are live.
+    kill_switch_target_pct: Optional[float] = None
+    kill_switch_stop_pct: Optional[float] = None
 
     # Per-position GTT-OCO broker backup (FEATURE 1). The portfolio kill switch
     # is the PRIMARY exit (software, ours); the per-position GTT is the broker-
@@ -173,6 +183,38 @@ class TradingSessionConfig:
     trail_giveback_pct: float = 0.0075
     stop_pct: float = 0.015
     square_off_time: str = "15:29:00"
+    # ── INTRADAY vs POSITIONAL trailing (additive, default-on = today) ────────
+    # Applies to strategy=="intraday_basket" only. Inert otherwise.
+    #   True  (DEFAULT) = INTRADAY: force a time-based square-off at
+    #                     square_off_time — today's behaviour, byte-for-byte.
+    #   False           = POSITIONAL: NO forced time square-off; the trailing
+    #                     floor + peak ratchet + downside hard stop + giveback
+    #                     exit PERSIST across days (state on the session row).
+    #                     Never an unprotected overnight position — STOP and
+    #                     TRAIL/FLOOR exits stay fully active. Positional is
+    #                     rejected for MIS (MIS must square off intraday); the
+    #                     MIS defensive square-off (FEATURE A) always applies.
+    square_off_enabled: bool = True
+
+    # ── MIS DEFENSIVE SQUARE-OFF (FEATURE A, SAFETY) ──────────────────────────
+    # Any session whose effective product is MIS (intraday) is squared off BY US
+    # at this IST clock time — BEFORE the broker's compulsory ~15:20 auto-square
+    # — REGARDLESS of strategy (portfolio_kill_switch OR intraday_basket). This
+    # closes the hole where a MIS kill-switch session was never squared off by us
+    # and rode to the broker's uncontrolled auto-square. Must be a parseable IST
+    # clock AND strictly BEFORE square_off_time (so it fires ahead of the
+    # intraday_basket 15:29). Inert for CNC/MTF/NRML sessions. Reuses the existing
+    # square-off scheduler + kill_switch.fire flatten (close_reason MIS_SQUARE_OFF).
+    mis_square_off_time: str = "15:12:00"
+
+    # ── CAPITAL UTILIZATION (FEATURE C) ───────────────────────────────────────
+    # After the initial equal/pct-cap allocation + integer share/lot rounding,
+    # top up the AFFORDABLE picks with the unspent remainder (deterministic,
+    # cheapest-first) so a floored slice doesn't strand cash, and SKIP a pick
+    # whose single unit costs more than its slice (freeing its slice into the
+    # top-up pass). NEVER over-deploys the total budget. Default ON; set False to
+    # restore today's plain floor-each-slice behaviour exactly.
+    redistribute_unused_capital: bool = True
 
     # ── Universe filter ──────────────────────────────────────────────────────
     # Restricts the Falcon pick pool to a named index membership before ranking.
@@ -264,6 +306,14 @@ class TradingSessionConfig:
                     "kill_switch_pct must be a fraction (e.g. 0.01 = 1%), "
                     f"got {self.kill_switch_pct}"
                 )
+        # ── ASYMMETRIC kill switch (FEATURE B): validate each override WHEN SET,
+        # regardless of enabled (a saved preset must round-trip valid values).
+        for _nm, _v in (("kill_switch_target_pct", self.kill_switch_target_pct),
+                        ("kill_switch_stop_pct", self.kill_switch_stop_pct)):
+            if _v is not None and not (0.0 < float(_v) <= 0.5):
+                raise ValueError(
+                    f"{_nm} must be a fraction in (0, 0.5] (e.g. 0.01 = 1%) "
+                    f"when set, got {_v}")
         if self.per_position_gtt_enabled:
             if not (0.0 < self.per_position_stop_pct <= 0.5):
                 raise ValueError(
@@ -307,6 +357,15 @@ class TradingSessionConfig:
                 raise ValueError(
                     "intraday_basket basket_size (top_n_stocks) must be 3..10, "
                     f"got {self.top_n_stocks}")
+            # POSITIONAL (no forced square-off) is incompatible with MIS: an MIS
+            # position CANNOT be carried overnight — the broker compulsorily
+            # squares it off intraday — so a "positional MIS" is a contradiction
+            # that would strand the session expecting a carry that can't happen.
+            # (The MIS defensive square-off from FEATURE A still always applies.)
+            if self.square_off_enabled is False and self.is_intraday_product():
+                raise ValueError(
+                    "positional (no square-off) is not allowed for MIS — MIS "
+                    "must square off intraday")
         if self.sizing_mode == "manual":
             total = sum(self.manual_amounts.values())
             if total > self.total_allocated_capital + 1e-6:
@@ -328,6 +387,23 @@ class TradingSessionConfig:
         # Symbol whitelist
         if self.symbol_whitelist is not None and len(self.symbol_whitelist) == 0:
             raise ValueError("symbol_whitelist cannot be empty if provided")
+        # ── MIS DEFENSIVE SQUARE-OFF (FEATURE A): the mis_square_off_time must
+        # parse and, for an intraday_basket session, must be strictly BEFORE the
+        # basket square_off_time so the MIS defensive flatten fires ahead of the
+        # 15:29 basket flatten (and always ahead of the broker's ~15:20 window).
+        try:
+            _mis_s = _parse_clock_to_seconds(self.mis_square_off_time)
+        except ValueError as e:
+            raise ValueError(f"mis_square_off_time {e}")
+        if self.strategy == "intraday_basket":
+            try:
+                _sq_s = _parse_clock_to_seconds(self.square_off_time)
+            except ValueError:
+                _sq_s = None
+            if _sq_s is not None and _mis_s >= _sq_s:
+                raise ValueError(
+                    f"mis_square_off_time ({self.mis_square_off_time}) must be "
+                    f"strictly before square_off_time ({self.square_off_time})")
         # entry_time must parse (it does for intraday already; enforce always).
         try:
             _parse_clock_to_seconds(self.entry_time)
@@ -380,6 +456,21 @@ class TradingSessionConfig:
             return _at(today)
         return _at(_cal.next_trading_day(today))
 
+    # ── MIS product detection (FEATURE A) ─────────────────────────────────────
+    def is_intraday_product(self) -> bool:
+        """True when this session's EFFECTIVE product is MIS (intraday), on EITHER
+        the session-level order_product OR ANY enabled broker_profile's
+        order_product. MIS sessions are squared off defensively before the broker
+        window regardless of strategy. CNC/MTF/NRML → False (unchanged)."""
+        if str(getattr(self, "order_product", "")).upper() == "MIS":
+            return True
+        for bp in (self.broker_profiles or []):
+            if not getattr(bp, "enabled", True):
+                continue
+            if str(getattr(bp, "order_product", "")).upper() == "MIS":
+                return True
+        return False
+
     # ── (de)serialisation (secrets stripped) ─────────────────────────────────
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -411,6 +502,12 @@ class TradingSessionConfig:
             kill_switch_pct=float(d.get("kill_switch_pct", 0.012)),
             kill_switch_direction=d.get("kill_switch_direction", "both"),
             kill_switch_enabled=bool(d.get("kill_switch_enabled", False)),
+            kill_switch_target_pct=(
+                float(d["kill_switch_target_pct"])
+                if d.get("kill_switch_target_pct") is not None else None),
+            kill_switch_stop_pct=(
+                float(d["kill_switch_stop_pct"])
+                if d.get("kill_switch_stop_pct") is not None else None),
             per_position_gtt_enabled=bool(d.get("per_position_gtt_enabled", True)),
             per_position_stop_pct=float(d.get("per_position_stop_pct", 0.03)),
             per_position_target_pct=float(d.get("per_position_target_pct", 0.06)),
@@ -419,6 +516,10 @@ class TradingSessionConfig:
             trail_giveback_pct=float(d.get("trail_giveback_pct", 0.0075)),
             stop_pct=float(d.get("stop_pct", 0.015)),
             square_off_time=d.get("square_off_time", "15:29:00"),
+            square_off_enabled=bool(d.get("square_off_enabled", True)),
+            mis_square_off_time=d.get("mis_square_off_time", "15:12:00"),
+            redistribute_unused_capital=bool(
+                d.get("redistribute_unused_capital", True)),
             broker_profiles=[BrokerProfile.from_public_dict(b) for b in bps],
             entry_time=d.get("entry_time", "09:15:00"),
             entry_window_seconds=int(d.get("entry_window_seconds", 60)),

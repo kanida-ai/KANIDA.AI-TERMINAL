@@ -18,9 +18,16 @@ class MockBroker(BrokerClient):
                  pending_orders: Optional[List[dict]] = None,
                  partial_fills: Optional[Dict[str, int]] = None,
                  fut_margin_per_lot: Optional[float] = None,
-                 no_future_symbols: Optional[set] = None):
+                 no_future_symbols: Optional[set] = None,
+                 margins: Optional[Dict[str, float]] = None,
+                 margins_available: bool = True):
         super().__init__(profile, dry_run=dry_run)
         self.ltps = ltps or {}
+        # FEATURE C: per-share MTF/MIS margin the mock reports (leverage). When
+        # margins_available is False the margin API is simulated as DOWN → the
+        # allocator must cash-fall-back (never over-deploy).
+        self.margins = margins or {}
+        self.margins_available = margins_available
         self.exit_delay_sec = exit_delay_sec
         self.fail_symbols = fail_symbols or set()
         self._lot_size = lot_size
@@ -42,6 +49,17 @@ class MockBroker(BrokerClient):
 
     def set_ltp(self, symbol: str, price: float) -> None:
         self.ltps[symbol] = price
+
+    # margin (MTF / MIS leverage sizing)
+    def get_margin_per_share(self, symbol: str, product: str = "MTF"):
+        if not self.margins_available:
+            return None
+        return self.margins.get(symbol)
+
+    def get_margins_batch(self, symbols, product: str = "MTF") -> dict:
+        if not self.margins_available:
+            return {}
+        return {s: self.margins[s] for s in symbols if s in self.margins}
 
     # instrument master
     def get_lot_size(self, contract: str) -> int:
@@ -88,6 +106,19 @@ class MockBroker(BrokerClient):
     async def cancel_order(self, order_id: str) -> Any:
         self.cancelled.append(order_id)
         return {"status": "CANCELLED", "order_id": order_id}
+
+    def get_order_status(self, order_id: str) -> dict:
+        # Synthetic COMPLETE fill for the exit order the confirm poller checks.
+        # order_id shape is "exit-<SYMBOL>" (see place_market_exit). Report the
+        # placed exit qty as fully filled so confirm_exit resolves COMPLETE for
+        # non-dry mock brokers (matches a real broker's near-instant MARKET fill).
+        sym = order_id[len("exit-"):] if str(order_id).startswith("exit-") else None
+        if sym is not None:
+            total = sum(q for s, q in self.exits if s == sym)
+            if total > 0:
+                return {"status": "COMPLETE", "filled_quantity": int(total),
+                        "average_price": float(self.ltps.get(sym) or 0.0)}
+        return {"status": "COMPLETE", "filled_quantity": 0, "average_price": 0.0}
 
     async def place_market_exit(self, symbol: str, qty: int,
                                 instrument_type: str,

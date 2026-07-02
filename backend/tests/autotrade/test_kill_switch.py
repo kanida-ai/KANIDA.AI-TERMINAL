@@ -163,6 +163,65 @@ def test_check_threshold_profit_loss_both():
     assert ks.check_threshold(-0.013) is not None
 
 
+# ── FEATURE B: asymmetric target/stop ────────────────────────────────────────
+
+def test_asymmetric_target_and_stop_fire_at_distinct_levels():
+    cfg = TradingSessionConfig(
+        total_allocated_capital=1.0, kill_switch_enabled=True,
+        kill_switch_pct=0.012, kill_switch_direction="both",
+        kill_switch_target_pct=0.01, kill_switch_stop_pct=0.015)
+    ks = KillSwitchExecutor("s", cfg, {}, None)
+    # Profit fires at +1% (the target), not the symmetric 1.2%.
+    assert ks.check_threshold(0.010) is not None
+    assert ks.check_threshold(0.009) is None
+    # Loss fires only at -1.5% (the stop), NOT at -1%.
+    assert ks.check_threshold(-0.010) is None
+    assert ks.check_threshold(-0.015) is not None
+
+
+def test_asymmetric_direction_profit_ignores_stop():
+    cfg = TradingSessionConfig(
+        total_allocated_capital=1.0, kill_switch_enabled=True,
+        kill_switch_pct=0.012, kill_switch_direction="profit",
+        kill_switch_target_pct=0.01, kill_switch_stop_pct=0.015)
+    ks = KillSwitchExecutor("s", cfg, {}, None)
+    assert ks.check_threshold(0.010) is not None    # target fires
+    assert ks.check_threshold(-0.05) is None        # profit-only ignores the stop
+
+
+def test_asymmetric_none_none_is_symmetric_backcompat():
+    # Both overrides None → byte-for-byte the old symmetric kill_switch_pct.
+    cfg = TradingSessionConfig(
+        total_allocated_capital=1.0, kill_switch_enabled=True,
+        kill_switch_pct=0.012, kill_switch_direction="both")
+    ks = KillSwitchExecutor("s", cfg, {}, None)
+    assert ks.check_threshold(0.012) is not None
+    assert ks.check_threshold(0.011) is None
+    assert ks.check_threshold(-0.012) is not None
+    assert ks.check_threshold(-0.011) is None
+
+
+def test_asymmetric_kill_preview_distinct_target_stop():
+    from autotrade.monitoring.monitor import compute_kill_preview
+    prev = compute_kill_preview(
+        kill_switch_enabled=True, kill_switch_pct=0.012,
+        kill_switch_direction="both", invested_basis=100000.0,
+        total_allocated_capital=100000.0,
+        kill_switch_target_pct=0.01, kill_switch_stop_pct=0.015)
+    assert abs(prev["target"]["pct"] - 0.01) < 1e-12
+    assert abs(prev["stop"]["pct"] - (-0.015)) < 1e-12
+    assert abs(prev["target"]["basis_value_rs"] - 1000.0) < 1e-6
+    assert abs(prev["stop"]["basis_value_rs"] - (-1500.0)) < 1e-6
+
+
+def test_asymmetric_validation_rejects_out_of_range():
+    import pytest
+    cfg = TradingSessionConfig(total_allocated_capital=1.0,
+                               kill_switch_target_pct=0.9)  # > 0.5
+    with pytest.raises(ValueError, match="kill_switch_target_pct"):
+        cfg.validate()
+
+
 # ── Kill switch cancels pending orders before exits ─────────────────────────
 
 def test_kill_switch_cancels_pending_first(clean_positions):

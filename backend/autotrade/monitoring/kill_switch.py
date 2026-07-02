@@ -45,13 +45,20 @@ class KillSwitchExecutor:
         # `gross_return` is the INVESTED-basis gross (÷ frozen invested_basis) —
         # the callers (session.tick / ws_driver / manual kill) pass that value.
         # kill_switch_pct is a validated FRACTION (0.012 = 1.2%).
+        #
+        # ASYMMETRIC (FEATURE B): the PROFIT side fires at target_pct and the LOSS
+        # side at stop_pct when those overrides are set; each falls back to the
+        # symmetric kill_switch_pct when None (so None/None is byte-for-byte the
+        # old behaviour). kill_switch_direction still gates which side(s) are live.
         if not self.config.kill_switch_enabled:
             return None
         d = self.config.kill_switch_direction
         pct = self.config.kill_switch_pct
-        if d in ("profit", "both") and gross_return >= pct:
+        target = getattr(self.config, "kill_switch_target_pct", None) or pct
+        stop = getattr(self.config, "kill_switch_stop_pct", None) or pct
+        if d in ("profit", "both") and gross_return >= target:
             return f"PROFIT_TARGET gross_return={gross_return:.4f}"
-        if d in ("loss", "both") and gross_return <= -abs(pct):
+        if d in ("loss", "both") and gross_return <= -abs(stop):
             return f"LOSS_LIMIT gross_return={gross_return:.4f}"
         return None
 

@@ -65,6 +65,12 @@ class TrailParams:
     trail_giveback_pct: float = 0.0075
     stop_pct: float = 0.015
     square_off_time: str = "15:29:00"
+    # True (DEFAULT) = INTRADAY: the time-based SQUARE_OFF branch is active
+    #   (today's behaviour, byte-for-byte). False = POSITIONAL: the SQUARE_OFF
+    #   branch is SKIPPED entirely so the ratchet/floor/hard-stop carry across
+    #   days. ALL other branches (STOP, ARM, peak-ratchet, TRAIL/FLOOR) are
+    #   UNCHANGED regardless of this flag.
+    square_off_enabled: bool = True
 
 
 @dataclass
@@ -127,11 +133,14 @@ def decide(g: float, state: TrailState, params: TrailParams,
     now_ist = now or datetime.now(IST)
 
     # 1. SQUARE-OFF — time-based flatten takes precedence over everything.
-    sq = _parse_square_off_today_ist(params.square_off_time, now_ist)
-    if sq is not None and now_ist >= sq:
-        return TrailDecision(action="EXIT", reason="SQUARE_OFF", state=state,
-                             state_changed=False,
-                             trigger=compute_trigger(state, params))
+    # POSITIONAL (square_off_enabled False): skip this branch entirely so the
+    # ratchet/floor/hard-stop carry across days. All other branches unchanged.
+    if params.square_off_enabled:
+        sq = _parse_square_off_today_ist(params.square_off_time, now_ist)
+        if sq is not None and now_ist >= sq:
+            return TrailDecision(action="EXIT", reason="SQUARE_OFF", state=state,
+                                 state_changed=False,
+                                 trigger=compute_trigger(state, params))
 
     # 2. STOP — downside hard stop, always active (in practice pre-arm only).
     if g <= -abs(params.stop_pct):
@@ -177,6 +186,7 @@ def params_from_config(config) -> TrailParams:
         trail_giveback_pct=float(config.trail_giveback_pct),
         stop_pct=float(config.stop_pct),
         square_off_time=config.square_off_time,
+        square_off_enabled=bool(getattr(config, "square_off_enabled", True)),
     )
 
 

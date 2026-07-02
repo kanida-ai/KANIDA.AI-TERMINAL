@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .config import TradingSessionConfig
 
@@ -27,6 +27,22 @@ log = logging.getLogger("kanida.autotrade.capital")
 
 class InsufficientCapitalError(Exception):
     """Raised when the allocated amount cannot fund even one share / lot."""
+
+
+def _margin_product(cfg) -> Optional[str]:
+    """The broker margin PRODUCT to size equity quantity against, or None to
+    cash-size on LTP.
+
+    MTF  → "MTF" (delivery leverage; UNCHANGED — matches the legacy engine).
+    MIS  → "MIS" (intraday leverage; FEATURE C — previously cash-sized).
+    Anything else (CNC / NRML) → None (cash-size on LTP, unchanged)."""
+    itype = getattr(cfg, "instrument_type", "EQ")
+    product = str(getattr(cfg, "order_product", "") or "").upper()
+    if itype == "MTF" or product == "MTF":
+        return "MTF"
+    if product == "MIS":
+        return "MIS"
+    return None
 
 
 class CapitalAllocator:
@@ -81,10 +97,13 @@ class CapitalAllocator:
         except Exception as e:  # pragma: no cover - defensive; per-symbol fallback
             log.warning("batch LTP prefetch failed (%s) — per-symbol fallback", e)
         margins: Dict[str, float] = {}
-        use_mtf = (cfg.instrument_type == "MTF") or (cfg.order_product == "MTF")
-        if use_mtf and cfg.instrument_type in ("EQ", "MTF"):
+        # MTF and MIS both size off broker MARGIN (leverage), not full cash. The
+        # margin PRODUCT differs (MTF carry vs MIS intraday) so probe the right one.
+        margin_product = _margin_product(cfg)
+        if margin_product and cfg.instrument_type in ("EQ", "MTF"):
             try:
-                margins = broker.get_margins_batch(list(symbols), "MTF") or {}
+                margins = broker.get_margins_batch(list(symbols),
+                                                   margin_product) or {}
             except Exception as e:  # pragma: no cover
                 log.warning("batch margin prefetch failed (%s) — per-symbol "
                             "fallback", e)
@@ -123,23 +142,23 @@ class CapitalAllocator:
             raise InsufficientCapitalError(
                 f"{symbol}: no valid LTP from broker (got {ltp})")
 
-        use_mtf_margin = (itype == "MTF") or (cfg.order_product == "MTF")
+        margin_product = _margin_product(cfg)
         per_unit = ltp
-        if use_mtf_margin:
+        if margin_product:
             mps = c.get("margin")
             if mps is None or mps <= 0:
                 # Cache miss — per-symbol probe (never over-deploy on a miss).
                 try:
-                    mps = broker.get_margin_per_share(symbol, "MTF")
+                    mps = broker.get_margin_per_share(symbol, margin_product)
                 except Exception as e:  # pragma: no cover
-                    log.warning("%s: MTF margin lookup error (%s) — cash fallback",
-                                symbol, e)
+                    log.warning("%s: %s margin lookup error (%s) — cash fallback",
+                                symbol, margin_product, e)
                     mps = None
             if mps and mps > 0:
                 per_unit = mps
             else:
-                log.warning("%s: MTF margin unavailable — cash-sizing fallback",
-                            symbol)
+                log.warning("%s: %s margin unavailable — cash-sizing fallback",
+                            symbol, margin_product)
         qty = math.floor(amount / per_unit)
         if qty < 1:
             raise InsufficientCapitalError(
@@ -170,18 +189,22 @@ class CapitalAllocator:
             # MTF leverage is driven by the ORDER PRODUCT (MTF), which applies to
             # equity (instrument_type EQ) — not a separate instrument type. Trigger
             # margin-based sizing whenever the product is MTF (or itype==MTF).
-            use_mtf_margin = (itype == "MTF") or (cfg.order_product == "MTF")
+            # MTF (delivery) AND MIS (intraday) both leverage — size off the
+            # broker per-share MARGIN for the right product. CNC/NRML cash-size.
+            margin_product = _margin_product(cfg)
             per_unit = ltp
-            if use_mtf_margin:
+            if margin_product:
                 mps = None
                 try:
-                    mps = broker.get_margin_per_share(symbol, "MTF")
+                    mps = broker.get_margin_per_share(symbol, margin_product)
                 except Exception as e:  # pragma: no cover
-                    log.warning("%s: MTF margin lookup error (%s) — cash fallback", symbol, e)
+                    log.warning("%s: %s margin lookup error (%s) — cash fallback",
+                                symbol, margin_product, e)
                 if mps and mps > 0:
                     per_unit = mps
                 else:
-                    log.warning("%s: MTF margin unavailable — cash-sizing fallback", symbol)
+                    log.warning("%s: %s margin unavailable — cash-sizing fallback",
+                                symbol, margin_product)
             qty = math.floor(amount / per_unit)
             if qty < 1:
                 raise InsufficientCapitalError(
@@ -239,6 +262,168 @@ class CapitalAllocator:
             return lots * lot_size
 
         raise ValueError(f"unknown instrument_type: {itype}")
+
+    # ── Unit economics (budget + qty per one tradeable increment) ─────────────
+    def _unit_info(self, symbol: str, broker,
+                   cache: Optional[Dict[str, Dict[str, float]]] = None
+                   ) -> Optional[Dict[str, Any]]:
+        """Return {"unit_budget", "unit_qty"} for ONE tradeable increment of
+        `symbol`, or None when the broker gives no usable price/margin (caller
+        SKIPS — never fabricates, never over-deploys).
+
+          unit_budget = ₹ of the capital BUDGET consumed by one increment
+                        (margin_per_share for MTF/MIS, LTP for cash EQ;
+                         margin_per_lot for FUT; premium*lot for options).
+          unit_qty    = the QUANTITY (shares) one increment adds
+                        (1 for EQ/MTF/MIS; the broker lot_size for FUT/options).
+
+        These match calculate_quantity(_cached) exactly (qty = floor(amount /
+        unit_budget) * unit_qty), so plan_quantities rounds identically."""
+        cfg = self.config
+        itype = cfg.instrument_type
+        c = (cache or {}).get(symbol, {}) if cache else {}
+        if itype in ("EQ", "MTF"):
+            ltp = c.get("ltp")
+            if ltp is None or ltp <= 0:
+                try:
+                    ltp = broker.get_ltp(symbol)
+                except Exception:  # pragma: no cover - defensive
+                    ltp = None
+            if not ltp or ltp <= 0:
+                return None
+            per_unit = float(ltp)
+            margin_product = _margin_product(cfg)
+            if margin_product:
+                mps = c.get("margin")
+                if mps is None or mps <= 0:
+                    try:
+                        mps = broker.get_margin_per_share(symbol, margin_product)
+                    except Exception:  # pragma: no cover
+                        mps = None
+                if mps and mps > 0:
+                    per_unit = float(mps)
+                # else: cash-size fallback (per_unit stays = LTP) — never over-deploy
+            return {"unit_budget": per_unit, "unit_qty": 1}
+        if itype == "FUT":
+            try:
+                contract = broker.get_active_futures(symbol, cfg.expiry_preference)
+                lot_size = int(broker.get_lot_size(contract))
+                mpl = broker.get_fut_margin_per_lot(symbol, cfg.expiry_preference)
+            except Exception:  # pragma: no cover - defensive
+                return None
+            if not mpl or mpl <= 0 or lot_size <= 0:
+                return None  # refuse to notional-size (matches calculate_quantity)
+            return {"unit_budget": float(mpl), "unit_qty": lot_size}
+        if itype in ("CE", "PE"):
+            try:
+                ltp = broker.get_ltp(symbol)
+                chain = broker.get_option_chain(symbol)
+                strike = _select_atm_strike(chain, itype, ltp)
+                contract = broker.get_option_contract(
+                    symbol, strike, cfg.expiry_preference)
+                lot_size = int(broker.get_lot_size(contract))
+                premium = broker.get_ltp(contract)
+            except Exception:  # pragma: no cover - defensive
+                return None
+            if not premium or premium <= 0 or lot_size <= 0:
+                return None
+            return {"unit_budget": float(premium) * lot_size, "unit_qty": lot_size}
+        return None
+
+    # ── Whole-portfolio quantity plan (FEATURE C) ─────────────────────────────
+    def plan_quantities(self, symbols: List[str], broker,
+                        cache: Optional[Dict[str, Dict[str, float]]] = None
+                        ) -> Dict[str, Any]:
+        """Size the WHOLE pick list with stranded-cash redistribution +
+        unaffordable-pick skipping. Returns:
+            {"quantities": {symbol: qty>0}, "skipped": [{symbol, reason}],
+             "deployed": <Σ increments*unit_budget>, "remainder": <unspent>}
+
+        Algorithm (deterministic + capped, never over-deploys):
+          1. allocate() the per-symbol ₹ slice (equal / pct_cap / manual).
+          2. Per symbol probe unit economics (unit_budget = ₹/increment,
+             unit_qty = shares/increment). A symbol whose ONE increment's budget
+             costs MORE than its slice is SKIPPED + logged; its whole slice is
+             freed into the redistribution pool (never stranded). A symbol with no
+             usable price/margin is skipped too.
+          3. Floor each affordable pick to whole increments within its slice.
+          4. remainder = budget_cap - Σ(deployed). While remainder can buy one
+             more increment of the CHEAPEST affordable pick, buy it (cheapest
+             unit_budget first, tie-break by symbol). Stops when the remainder is
+             smaller than the cheapest increment OR the budget would be exceeded —
+             so we NEVER over-deploy.
+
+        redistribute_unused_capital=False → skip step 4 entirely (plain floor of
+        each slice = today's behaviour). Unaffordable picks are STILL skipped (an
+        unaffordable slice was a hard skip before too — it raised
+        InsufficientCapitalError in calculate_quantity). manual sizing_mode uses
+        the exact per-symbol amounts and does NOT redistribute across symbols
+        (manual intent is explicit)."""
+        cfg = self.config
+        amounts = self.allocate(list(symbols))
+        # Budget ceiling: manual mode caps at Σ(manual_amounts); every other mode
+        # caps at the total allocated capital. Redistribution/top-up is bounded by
+        # this so we can never exceed the operator's committed capital.
+        if cfg.sizing_mode == "manual":
+            budget_cap = float(sum(amounts.values()))
+            allow_redistribute = False  # explicit per-symbol intent — do not shuffle
+        else:
+            budget_cap = float(cfg.total_allocated_capital)
+            allow_redistribute = bool(
+                getattr(cfg, "redistribute_unused_capital", True))
+
+        quantities: Dict[str, int] = {}
+        skipped: List[Dict[str, Any]] = []
+        units: Dict[str, Dict[str, Any]] = {}   # symbol -> {unit_budget, unit_qty}
+        deployed = 0.0
+
+        for sym in symbols:
+            slice_amt = float(amounts.get(sym, 0.0))
+            if slice_amt <= 0:
+                continue  # unfunded (e.g. manual with no amount) — not "skipped"
+            info = self._unit_info(sym, broker, cache=cache)
+            if info is None:
+                skipped.append({"symbol": sym,
+                                "reason": "no usable price/margin from broker"})
+                log.warning("plan: %s skipped — no usable price/margin", sym)
+                continue
+            unit_budget = float(info["unit_budget"])
+            unit_qty = int(info["unit_qty"])
+            if unit_budget > slice_amt + 1e-6:
+                # Unaffordable: one increment's budget > this pick's slice. SKIP +
+                # free the whole slice into the redistribution pool (never strand).
+                skipped.append({
+                    "symbol": sym,
+                    "reason": (f"1 unit ₹{unit_budget:.0f} > slice "
+                               f"₹{slice_amt:.0f} (too high-priced for slice)")})
+                log.info("plan: %s skipped — 1 unit ₹%.0f > slice ₹%.0f",
+                         sym, unit_budget, slice_amt)
+                continue
+            n_inc = math.floor(slice_amt / unit_budget)
+            quantities[sym] = n_inc * unit_qty
+            units[sym] = {"unit_budget": unit_budget, "unit_qty": unit_qty}
+            deployed += n_inc * unit_budget
+
+        # ── Redistribution pass (cheapest-first, capped) ──────────────────────
+        if allow_redistribute and quantities:
+            # Deterministic order: cheapest increment budget first, then symbol.
+            order = sorted(units.keys(),
+                           key=lambda s: (units[s]["unit_budget"], s))
+            progressed = True
+            while progressed:
+                progressed = False
+                for sym in order:
+                    step = units[sym]["unit_budget"]
+                    if deployed + step <= budget_cap + 1e-6:
+                        quantities[sym] += units[sym]["unit_qty"]
+                        deployed += step
+                        progressed = True
+            # Loop halts when no affordable pick can absorb one more increment
+            # within the budget — remainder < cheapest increment. Deterministic.
+
+        remainder = budget_cap - deployed
+        return {"quantities": quantities, "skipped": skipped,
+                "deployed": deployed, "remainder": remainder}
 
 
 def _select_atm_strike(chain, option_type: str, spot: float) -> float:

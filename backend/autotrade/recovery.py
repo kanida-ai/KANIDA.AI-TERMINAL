@@ -97,6 +97,11 @@ def _rearm_square_off(session_id: str) -> None:
     sess = TradingSession.load(session_id)
     if sess is None or sess.config.strategy != "intraday_basket":
         return
+    # POSITIONAL (square_off_enabled False): no forced square-off — the tick/ws
+    # drivers (already re-armed by _resume_running) keep the trail alive across
+    # days; there is deliberately NO overnight flatten to re-arm.
+    if not getattr(sess.config, "square_off_enabled", True):
+        return
     try:
         target = _parse_entry_time_today_ist(sess.config.square_off_time)
     except ValueError:

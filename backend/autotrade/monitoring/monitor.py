@@ -42,14 +42,23 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 def compute_kill_preview(*, kill_switch_enabled: bool, kill_switch_pct: float,
                          kill_switch_direction: str, invested_basis: float,
-                         total_allocated_capital: float) -> Optional[Dict[str, Any]]:
+                         total_allocated_capital: float,
+                         kill_switch_target_pct: Optional[float] = None,
+                         kill_switch_stop_pct: Optional[float] = None
+                         ) -> Optional[Dict[str, Any]]:
     """Build the kill_preview object: the ₹ you'd make/lose at the kill
     thresholds, plus the equivalent % on your fund.
 
     The kill switch measures gross_return on the INVESTED basis, so:
-      target/stop ₹ = ±kill_switch_pct * invested_basis
-      fund_pct      = that ₹ / total_allocated_capital
+      target ₹ = +target_pct * invested_basis   (target_pct or kill_switch_pct)
+      stop   ₹ = -stop_pct   * invested_basis   (stop_pct   or kill_switch_pct)
+      fund_pct = that ₹ / total_allocated_capital
     `target` is present when direction is profit/both; `stop` when loss/both.
+
+    ASYMMETRIC (FEATURE B): kill_switch_target_pct / kill_switch_stop_pct, when
+    set, OVERRIDE the symmetric kill_switch_pct on their respective side so the
+    UI can render distinct +target / -stop distances. When both are None this is
+    byte-for-byte the old symmetric preview.
     Returns None when the kill switch is disabled (nothing to preview).
 
     Shared by TradingSession.status() and the /preview endpoint so both surface
@@ -62,14 +71,18 @@ def compute_kill_preview(*, kill_switch_enabled: bool, kill_switch_pct: float,
     fund = total_allocated_capital if total_allocated_capital and \
         total_allocated_capital > 0 else basis
     pct = float(kill_switch_pct)
+    target_pct = float(kill_switch_target_pct) \
+        if kill_switch_target_pct is not None else pct
+    stop_pct = float(kill_switch_stop_pct) \
+        if kill_switch_stop_pct is not None else pct
     out: Dict[str, Any] = {}
     if kill_switch_direction in ("profit", "both"):
-        rs = pct * basis
-        out["target"] = {"pct": pct, "basis_value_rs": rs,
+        rs = target_pct * basis
+        out["target"] = {"pct": target_pct, "basis_value_rs": rs,
                          "fund_pct": rs / fund if fund else 0.0}
     if kill_switch_direction in ("loss", "both"):
-        rs = -abs(pct) * basis
-        out["stop"] = {"pct": -abs(pct), "basis_value_rs": rs,
+        rs = -abs(stop_pct) * basis
+        out["stop"] = {"pct": -abs(stop_pct), "basis_value_rs": rs,
                        "fund_pct": rs / fund if fund else 0.0}
     return out
 

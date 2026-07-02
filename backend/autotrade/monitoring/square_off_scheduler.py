@@ -128,8 +128,19 @@ class _Scheduler:
             sess._build_brokers()
             sess.monitor.refresh_ltps(sess.brokers)
             gr = sess.monitor.compute_gross_return_invested()
-            log.info("square_off_scheduler: SQUARING OFF %s (gross_return=%.4f)",
-                     self.session_id, gr)
+            # FEATURE A: a MIS session (either strategy) squares off as a
+            # defensive MIS flatten; an intraday_basket (non-MIS) uses the basket
+            # SQUARE_OFF tag. The flatten path is identical.
+            is_mis = False
+            try:
+                is_mis = sess.config.is_intraday_product()
+            except Exception:  # pragma: no cover - defensive
+                is_mis = False
+            close_reason = "MIS_SQUARE_OFF" if is_mis else "SQUARE_OFF"
+            trigger_prefix = ("MIS_SQUARE_OFF" if is_mis
+                              else "INTRADAY_BASKET SQUARE_OFF")
+            log.info("square_off_scheduler: SQUARING OFF %s (%s, gross_return=%.4f)",
+                     self.session_id, close_reason, gr)
             # Single-fire guard so the precise-time square-off and the tick-driver
             # backstop (or a manual kill) can never double-fire.
             with fire_guard.claim_fire(self.session_id) as won:
@@ -139,8 +150,8 @@ class _Scheduler:
                     return
                 try:
                     asyncio.run(sess.kill_switch.fire(
-                        f"INTRADAY_BASKET SQUARE_OFF gross_return={gr:.4f}",
-                        gross_return=gr, close_reason="SQUARE_OFF"))
+                        f"{trigger_prefix} gross_return={gr:.4f}",
+                        gross_return=gr, close_reason=close_reason))
                 except Exception as e:  # pragma: no cover - never crash thread
                     log.exception("square_off_scheduler: fire failed for %s: %s",
                                   self.session_id, e)

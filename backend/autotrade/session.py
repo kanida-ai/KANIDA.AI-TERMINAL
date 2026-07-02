@@ -457,23 +457,23 @@ def preview_session_sizing(config: TradingSessionConfig,
             picks = _filter_fno_eligible(
                 picks, broker, config.expiry_preference)
         amounts = allocator.allocate([p.symbol for p in picks])
-        # SPEED PASS: ONE batched LTP + MTF-margin prefetch for the preview too.
+        # SPEED PASS: ONE batched LTP + MTF/MIS-margin prefetch for the preview.
         fund_syms = [p.symbol for p in picks if amounts.get(p.symbol, 0.0) > 0]
         try:
             pcache = allocator.prefetch(fund_syms, broker)
         except Exception:  # pragma: no cover - per-symbol fallback inside
             pcache = {}
+        # FEATURE C: preview mirrors fire — the whole-portfolio plan (redistribute
+        # + skip) so the preview count / invested_basis MATCH what will fire.
+        plan = allocator.plan_quantities(fund_syms, broker, cache=pcache)
+        plan_qtys = plan["quantities"]
+        for sk in plan["skipped"]:
+            positions.append({"symbol": sk["symbol"],
+                              "broker_profile": prof.profile_id,
+                              "status": "SKIPPED", "reason": sk["reason"]})
         for pick in picks:
-            amount = amounts.get(pick.symbol, 0.0)
-            if amount <= 0:
-                continue
-            try:
-                qty = allocator.calculate_quantity_cached(
-                    pick.symbol, amount, broker, cache=pcache)
-            except InsufficientCapitalError as e:
-                positions.append({"symbol": pick.symbol,
-                                  "broker_profile": prof.profile_id,
-                                  "status": "SKIPPED", "reason": str(e)})
+            qty = plan_qtys.get(pick.symbol)
+            if not qty or qty <= 0:
                 continue
             _c = pcache.get(pick.symbol, {})
             ref_price = float(_c.get("ltp") or 0.0) or (broker.get_ltp(pick.symbol) or 0.0)
@@ -500,7 +500,10 @@ def preview_session_sizing(config: TradingSessionConfig,
             kill_switch_pct=config.kill_switch_pct,
             kill_switch_direction=config.kill_switch_direction,
             invested_basis=basis,
-            total_allocated_capital=total_alloc),
+            total_allocated_capital=total_alloc,
+            kill_switch_target_pct=config.kill_switch_target_pct,
+            kill_switch_stop_pct=config.kill_switch_stop_pct),
+        "skipped_picks": [p for p in positions if p.get("status") == "SKIPPED"],
     }
 
 
@@ -1023,17 +1026,20 @@ class TradingSession:
         # never abort the others. invested_basis is frozen AFTER all legs settle.
         sem = asyncio.Semaphore(_ENTRY_CONCURRENCY)
 
-        async def _guarded_place(broker, prof, pick, amount, allocator, cache):
+        async def _guarded_place(broker, prof, pick, amount, allocator, cache,
+                                 forced_qty=None):
             async with sem:
                 try:
                     return await self._place_one(
-                        broker, prof, pick, amount, allocator, prefetch=cache)
+                        broker, prof, pick, amount, allocator, prefetch=cache,
+                        forced_qty=forced_qty)
                 except Exception as e:  # belt-and-braces leg isolation
                     log.error("entry leg crashed for %s: %s", pick.symbol, e)
                     return {"symbol": pick.symbol, "status": "FAILED",
                             "error": str(e)}
 
         leg_coros = []
+        skipped_picks: List[Dict[str, Any]] = []
         for prof in self.config.broker_profiles:
             if not prof.enabled:
                 continue
@@ -1048,17 +1054,30 @@ class TradingSession:
             allocator = CapitalAllocator(self.config)
             amounts = allocator.allocate([p.symbol for p in picks])
             fund_picks = [p for p in picks if amounts.get(p.symbol, 0.0) > 0]
-            # ONE batched prefetch per profile (LTP + MTF margin for all picks).
+            # ONE batched prefetch per profile (LTP + MTF/MIS margin for all picks).
             try:
                 cache = allocator.prefetch([p.symbol for p in fund_picks], broker)
             except Exception as e:  # pragma: no cover - per-symbol fallback inside
                 log.warning("prefetch failed for %s (%s) — per-symbol fallback",
                             prof.profile_id, e)
                 cache = {}
+            # FEATURE C: whole-portfolio plan — floors each slice, SKIPS a pick
+            # whose 1 unit > slice (logged + slice freed), and (default on)
+            # redistributes the stranded remainder to affordable picks. Never
+            # over-deploys. redistribute_unused_capital=False → plain floor.
+            plan = allocator.plan_quantities(
+                [p.symbol for p in fund_picks], broker, cache=cache)
+            plan_qtys = plan["quantities"]
+            for sk in plan["skipped"]:
+                skipped_picks.append({**sk, "broker_profile": prof.profile_id})
             for pick in fund_picks:
+                qty = plan_qtys.get(pick.symbol)
+                if not qty or qty <= 0:
+                    continue  # skipped/unaffordable — logged in plan["skipped"]
                 amount = amounts.get(pick.symbol, 0.0)
                 leg_coros.append(_guarded_place(
-                    broker, prof, pick, amount, allocator, cache))
+                    broker, prof, pick, amount, allocator, cache,
+                    forced_qty=qty))
 
         placed: List[Dict[str, Any]] = list(
             await asyncio.gather(*leg_coros)) if leg_coros else []
@@ -1133,49 +1152,83 @@ class TradingSession:
         except Exception as e:  # never block start on the WS driver
             log.warning("ws driver start failed for %s: %s", self.session_id, e)
 
-        # INTRADAY BASKET: arm the precise-time square-off scheduler so the basket
-        # is flattened at config.square_off_time (never overnight). The tick
-        # driver's in-tick square-off (trail_engine.decide) is the restart-safe
-        # backstop; this is the on-the-second path. Future time only — if
-        # square_off_time has already passed the next tick squares off. Best-
-        # effort, never blocks the start.
+        # SQUARE-OFF ARMING (intraday_basket 15:29 AND/OR the MIS defensive time).
+        # FEATURE A: a MIS session on EITHER strategy is squared off BY US before
+        # the broker's ~15:20 compulsory auto-square. intraday_basket also arms at
+        # its own square_off_time. When both apply we arm ONE scheduler at the
+        # EARLIEST of the two (don't double-arm; the MIS time is validated < the
+        # basket time). The tick-driver backstops both if this timer is dropped.
+        # Best-effort, never blocks the start.
         try:
-            if self.config.strategy == "intraday_basket":
-                self._arm_square_off()
+            self._arm_square_off()
         except Exception as e:  # never block start on the square-off scheduler
             log.warning("square-off arm failed for %s: %s", self.session_id, e)
 
         return {"session_id": self.session_id, "status": "RUNNING",
                 "mode": self.mode, "n_placed": len(placed), "orders": placed,
-                "gtt": gtt_results}
+                "gtt": gtt_results, "skipped_picks": skipped_picks}
 
     def _arm_square_off(self) -> bool:
-        """Arm the per-session square-off scheduler at config.square_off_time
-        (today, IST). No-op if the time is unparseable or already past (the tick
-        driver squares off defensively in that case). Returns True if armed."""
-        try:
-            target = _parse_entry_time_today_ist(self.config.square_off_time)
-        except ValueError:
-            log.warning("session %s: unparseable square_off_time %r — relying on "
-                        "in-tick square-off", self.session_id,
-                        self.config.square_off_time)
-            return False
+        """Arm the per-session square-off scheduler at the EARLIEST applicable
+        square-off time TODAY (IST):
+          * intraday_basket → config.square_off_time (the 15:29 basket flatten).
+          * MIS product (either strategy) → config.mis_square_off_time (FEATURE A
+            defensive flatten, before the broker's ~15:20 window).
+        When both apply, the earlier time wins (single scheduler, no double-arm).
+        No-op if no time applies, the time is unparseable, or it is already past
+        (the tick driver squares off defensively in that case). Returns True if a
+        scheduler was armed."""
+        candidates: List[datetime] = []
+        # POSITIONAL (square_off_enabled False): do NOT arm the basket square-off
+        # — the trail carries across days. The MIS defensive candidate below is
+        # unaffected (positional can't be MIS per validate(), so no collision).
+        if (self.config.strategy == "intraday_basket"
+                and getattr(self.config, "square_off_enabled", True)):
+            try:
+                candidates.append(
+                    _parse_entry_time_today_ist(self.config.square_off_time))
+            except ValueError:
+                log.warning("session %s: unparseable square_off_time %r",
+                            self.session_id, self.config.square_off_time)
+        if self.config.is_intraday_product():
+            try:
+                candidates.append(_parse_entry_time_today_ist(
+                    self.config.mis_square_off_time))
+            except ValueError:
+                log.warning("session %s: unparseable mis_square_off_time %r",
+                            self.session_id, self.config.mis_square_off_time)
+        if not candidates:
+            return False  # not intraday_basket and not MIS → no square-off (unchanged)
+        target = min(candidates)
         if datetime.now(IST) >= target:
-            log.info("session %s: square_off_time %s already passed — in-tick "
+            log.info("session %s: square-off time %s already passed — in-tick "
                      "square-off will fire", self.session_id, target.isoformat())
             return False
+        log.info("session %s: arming square-off at %s (MIS=%s, strategy=%s)",
+                 self.session_id, target.isoformat(),
+                 self.config.is_intraday_product(), self.config.strategy)
         return square_off_scheduler.start_for_session(self.session_id, target)
 
     async def _place_one(self, broker, prof, pick: Pick, amount: float,
                          allocator: CapitalAllocator,
-                         prefetch: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                         prefetch: Optional[Dict[str, Any]] = None,
+                         forced_qty: Optional[int] = None) -> Dict[str, Any]:
         symbol = pick.symbol
-        try:
-            qty = allocator.calculate_quantity_cached(
-                symbol, amount, broker, cache=prefetch)
-        except InsufficientCapitalError as e:
-            log.warning("skip %s: %s", symbol, e)
-            return {"symbol": symbol, "status": "SKIPPED", "reason": str(e)}
+        # FEATURE C: when the whole-portfolio planner already computed the qty
+        # (with redistribution / skip), use it verbatim so the placed size matches
+        # the plan. Otherwise size this leg on its own (unchanged path).
+        if forced_qty is not None:
+            if forced_qty <= 0:
+                return {"symbol": symbol, "status": "SKIPPED",
+                        "reason": "planned qty 0"}
+            qty = int(forced_qty)
+        else:
+            try:
+                qty = allocator.calculate_quantity_cached(
+                    symbol, amount, broker, cache=prefetch)
+            except InsufficientCapitalError as e:
+                log.warning("skip %s: %s", symbol, e)
+                return {"symbol": symbol, "status": "SKIPPED", "reason": str(e)}
 
         # Reuse the prefetched LTP (the entry mark) when present; else one lookup.
         ref_price = 0.0
@@ -1365,6 +1418,21 @@ class TradingSession:
         # DEFAULT strategy: portfolio_kill_switch (UNCHANGED).
         reason = (self.kill_switch.check_threshold(gr_invested)
                   if self.kill_switch else None)
+        # FEATURE A — MIS DEFENSIVE SQUARE-OFF TICK BACKSTOP. A MIS session must be
+        # flattened BEFORE the broker's ~15:20 auto-square even on the kill-switch
+        # strategy. The precise-time square_off_scheduler is the primary path; this
+        # backstop fires if that in-memory timer was dropped (e.g. restart). Only
+        # applies to MIS sessions; CNC/MTF/NRML are UNCHANGED. Single-fire-guarded
+        # (shared with the kill switch + scheduler) so it can never double-fire.
+        mis_square_off = False
+        if reason is None and self.kill_switch and self.config.is_intraday_product():
+            try:
+                mis_t = _parse_entry_time_today_ist(self.config.mis_square_off_time)
+                if datetime.now(IST) >= mis_t:
+                    reason = "MIS_SQUARE_OFF (tick backstop)"
+                    mis_square_off = True
+            except ValueError:  # pragma: no cover - validate() rejects unparseable
+                pass
         fired = None
         if reason:
             # Single-fire guard: the 5s poll and the sub-second WS path must
@@ -1372,7 +1440,9 @@ class TradingSession:
             with fire_guard.claim_fire(self.session_id) as won:
                 if won:
                     fired = await self.kill_switch.fire(
-                        reason, gross_return=gr_invested)
+                        reason, gross_return=gr_invested,
+                        close_reason=("MIS_SQUARE_OFF" if mis_square_off
+                                      else "KILL_SWITCH"))
                 else:
                     reason = None  # another path already fired/is firing
         return {"gross_return": gr_invested, "gross_return_fund": snap["gross_return"],
@@ -1538,7 +1608,9 @@ class TradingSession:
                 kill_switch_pct=self.config.kill_switch_pct,
                 kill_switch_direction=self.config.kill_switch_direction,
                 invested_basis=invested_basis,
-                total_allocated_capital=self.config.total_allocated_capital),
+                total_allocated_capital=self.config.total_allocated_capital,
+                kill_switch_target_pct=self.config.kill_switch_target_pct,
+                kill_switch_stop_pct=self.config.kill_switch_stop_pct),
             "n_open_positions": len(positions),
             "open_positions": positions,
             # SPEED-PASS observability so the operator can SEE the latency.
@@ -1608,6 +1680,14 @@ class TradingSession:
                 "trail_giveback_pct": self.config.trail_giveback_pct,
                 "stop_pct": self.config.stop_pct,
                 "square_off_time": self.config.square_off_time,
+                # INTRADAY (True) vs POSITIONAL (False). When False the basket
+                # carries across days; seconds_to_square_off / square_off_armed
+                # are inert (no forced flatten).
+                "square_off_enabled": bool(
+                    getattr(self.config, "square_off_enabled", True)),
+                "trail_mode": ("intraday"
+                               if getattr(self.config, "square_off_enabled", True)
+                               else "positional"),
                 "seconds_to_square_off": trail_engine.seconds_to_square_off(
                     self.config.square_off_time),
                 "square_off_armed": square_off_scheduler.is_running(
