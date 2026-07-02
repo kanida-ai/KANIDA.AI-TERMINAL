@@ -215,7 +215,7 @@ export function BrokerAccountsPanel({ userId }: { userId: number | string }) {
   const [creating, setCreating] = useState(false)
   const [createErr, setCreateErr] = useState<string | null>(null)
   const [createOk, setCreateOk] = useState<string | null>(null)
-  const [showGuide, setShowGuide] = useState(true)
+  const [showGuide, setShowGuide] = useState(false)
 
   // Per-row connect (login URL → paste request_token → refresh)
   const [connectId, setConnectId] = useState<string | null>(null)  // which row is mid-connect
@@ -276,17 +276,33 @@ export function BrokerAccountsPanel({ userId }: { userId: number | string }) {
     // lingers in React state / the DOM after this tick.
     const secret = apiSecret
     setApiSecret('')
+    const savedLabel = label.trim()
     try {
-      await AutoTradeAPI.createBrokerAccount({
+      const acct = await AutoTradeAPI.createBrokerAccount({
         user_id: userId,
         broker,
-        account_label: label.trim(),
+        account_label: savedLabel,
         api_key: apiKey.trim(),
         api_secret: secret,
       })
-      setCreateOk(`Connected ${brokerLabel(broker)} · ${label.trim()}. Now use “Connect” on the account card to log in and activate.`)
       setLabel(''); setApiKey('')  // secret already cleared
       await load()
+      // SEAMLESS: immediately open the broker login for the just-created account
+      // and reveal the paste-token step — so it's one flow (enter keys → sign in
+      // → paste token) instead of a separate "Connect" click on the card.
+      try {
+        const res = await AutoTradeAPI.brokerLoginUrl(acct.broker_account_id, userId)
+        if (res.login_url) {
+          window.open(res.login_url, '_blank', 'noopener,noreferrer,width=520,height=720')
+        }
+        setConnectId(acct.broker_account_id)
+        setRequestToken('')
+        setCreateOk(`Saved ${brokerLabel(broker)}. A login window opened — sign in there, then paste the token below to finish.`)
+      } catch {
+        // Login-URL fetch failed — the account is still saved; the user can use
+        // “Log in” on its card. Don't lose their work over this.
+        setCreateOk(`Saved ${brokerLabel(broker)} · ${savedLabel}. Use “Log in” on the account card below to sign in and activate.`)
+      }
     } catch (e) {
       setCreateErr(e instanceof Error ? e.message : 'Could not connect the broker account.')
     } finally {
@@ -364,7 +380,7 @@ export function BrokerAccountsPanel({ userId }: { userId: number | string }) {
         <span style={{ color: C.mint }}>{ICON.link(16)}</span>
         <span className="text-[14px] font-semibold" style={{ color: C.ink }}>Broker accounts</span>
         <span className="text-[11px]" style={{ color: C.faint }}>
-          Connect a broker, then activate it daily with a login token.
+          Enter your broker keys once, sign in, and you&apos;re connected.
         </span>
         <button type="button" disabled={loading} onClick={load}
           className="ml-auto text-[11.5px] px-2.5 py-1.5 rounded-lg transition-colors disabled:opacity-40"
@@ -483,10 +499,10 @@ export function BrokerAccountsPanel({ userId }: { userId: number | string }) {
               <button type="button" disabled={creating || !selectedLive} onClick={onCreate}
                 className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-semibold transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{ color: '#06130c', background: C.mint }}>
-                {creating ? 'Connecting…' : <>{ICON.link(14)} Connect account</>}
+                {creating ? 'Connecting…' : <>{ICON.link(14)} Connect &amp; log in</>}
               </button>
               <span className="text-[11px]" style={{ color: C.faint }}>
-                The secret is stored encrypted on the server and never returned to the browser.
+                One step: we save your keys (encrypted), then open your broker login to finish.
               </span>
             </div>
           </div>
@@ -569,7 +585,7 @@ export function BrokerAccountsPanel({ userId }: { userId: number | string }) {
                           <button type="button" disabled={busy} onClick={() => onConnect(a)}
                             className="flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-40"
                             style={{ color: '#06130c', background: C.mint }}>
-                            {ICON.link(12)} {busy && !isConnecting ? 'Working…' : (a.has_token ? 'Reconnect' : 'Connect')}
+                            {ICON.link(12)} {busy && !isConnecting ? 'Working…' : (a.has_token ? 'Reconnect' : 'Log in')}
                           </button>
                           <button type="button" disabled={busy} onClick={() => onHealth(a)}
                             className="flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-40"
@@ -589,8 +605,9 @@ export function BrokerAccountsPanel({ userId }: { userId: number | string }) {
                         <div className="mt-3 rounded-lg border px-3 py-3"
                           style={{ borderColor: 'rgba(63,227,164,0.3)', background: 'rgba(63,227,164,0.05)' }}>
                           <p className="text-[11.5px] leading-snug mb-2" style={{ color: C.ink2 }}>
-                            A broker login opened in a new tab. After you log in, copy the{' '}
-                            <code style={{ color: C.ink }}>request_token</code> from the redirect URL and paste it here.
+                            Signed in on the broker page? Copy the{' '}
+                            <code style={{ color: C.ink }}>token</code> from that page&apos;s address bar
+                            (the <code style={{ color: C.ink }}>request_token=…</code> part) and paste it here to finish.
                           </p>
                           <div className="flex items-center gap-2 flex-wrap">
                             <input value={requestToken} onChange={(e) => setRequestToken(e.target.value)}
