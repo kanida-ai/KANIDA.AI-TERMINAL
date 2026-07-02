@@ -75,7 +75,24 @@ export type SessionConfig = {
   kill_switch_enabled: boolean
   kill_switch_pct: number
   kill_switch_direction: KillDirection
+  // ── ASYMMETRIC kill switch ── (optional; both FRACTIONS on the wire, send ÷100,
+  // display ×100). When set they OVERRIDE the single kill_switch_pct for that side:
+  //   • kill_switch_target_pct → the PROFIT-side exit threshold.
+  //   • kill_switch_stop_pct   → the LOSS-side exit threshold.
+  // When a side's field is unset the backend falls back to kill_switch_pct
+  // (symmetric — today's behaviour). kill_switch_direction still gates which
+  // side(s) are armed (loss / profit / both).
+  kill_switch_target_pct?: number
+  kill_switch_stop_pct?: number
   entry_time: string
+  // ── A · MIS defensive square-off ── (optional, "HH:MM:SS" IST; backend default
+  // "15:12:00", must be < square_off_time). For MIS sessions the backend force-
+  // squares intraday at this time, ahead of the broker's own square-off window.
+  mis_square_off_time?: string
+  // ── C · leftover-capital redistribution ── (optional, default true). When true
+  // the backend redistributes capital freed by skipped picks (a pick whose 1 unit
+  // costs more than its per-slice budget) across the remaining picks.
+  redistribute_unused_capital?: boolean
   // ── Execution-date / trading-day rule ── (applies to BOTH strategies)
   // entry_date: optional "YYYY-MM-DD" the session should fire on; empty/omitted
   //   → the backend resolves to the next valid trading session.
@@ -94,12 +111,33 @@ export type SessionConfig = {
   trail_giveback_pct?: number
   stop_pct?: number
   square_off_time?: string
+  // ── D · dynamic Hold mode ── (optional, default true; only meaningful for
+  // 'intraday_basket'). true = INTRADAY — force a square-off at square_off_time.
+  // false = POSITIONAL — the trailing floor + hard stop persist ACROSS days with
+  // NO forced square-off. The backend REJECTS positional (square_off_enabled=false)
+  // when order_product is MIS (HTTP 400 "positional (no square-off) is not allowed
+  // for MIS…"), since MIS must square off intraday.
+  square_off_enabled?: boolean
+}
+
+// A pick the backend SKIPPED because one unit of it costs more than its per-slice
+// budget (e.g. a high-priced name like PAGEIND vs a small slice). Returned on
+// create/preview/status so the UI can name what was dropped. Any field may be
+// absent — render honestly.
+export type SkippedPick = {
+  symbol?: string
+  broker_profile?: string
+  reason?: string
+  [k: string]: unknown
 }
 
 export type CreateResponse = {
   session_id: string
   status: string
   mode: Mode
+  // Picks dropped at sizing time (1 unit > their per-slice budget). Present when
+  // the config would skip one or more names; absent/[] otherwise.
+  skipped_picks?: SkippedPick[]
 }
 
 export type PlacedOrder = {
@@ -231,6 +269,9 @@ export type StatusResponse = {
   trail_trigger?: number
   square_off_time?: string
   seconds_to_square_off?: number
+  // Picks skipped for this session (1 unit > per-slice budget). Present when the
+  // running/created session dropped one or more names.
+  skipped_picks?: SkippedPick[]
   // ── intraday_basket close summary ── (present on a CLOSED session).
   exit_reason?: ExitReason
   notional_return?: number    // FRACTION — final return on the invested/notional basis
@@ -251,6 +292,9 @@ export type PreviewResponse = {
   total_allocated_capital: number // ₹ — your fund
   leverage: number                // ~×N (MTF leverage; ~1 for CNC)
   kill_preview: KillPreview
+  // Picks that WOULD be skipped for this config (1 unit > per-slice budget), so
+  // the operator sees them before committing. Absent/[] when nothing is skipped.
+  skipped_picks?: SkippedPick[]
 }
 
 export type KillResponse = {

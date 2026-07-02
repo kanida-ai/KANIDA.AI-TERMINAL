@@ -33,7 +33,7 @@ import {
   type OnMissedWindow,
   type Strategy, type SessionConfig, type CreateResponse, type StartResponse,
   type StatusResponse, type SavedConfig, type Broker, type SessionSummary,
-  type OpenPosition, type PreviewResponse, type KillPreview,
+  type OpenPosition, type PreviewResponse, type KillPreview, type SkippedPick,
   type BrokerAccount, type SessionScope,
   type UniverseFilter, type PickItem, type PicksResponse,
 } from '@/lib/autotrade-api'
@@ -52,7 +52,15 @@ const DEFAULT_CONFIG: SessionConfig = {
   kill_switch_enabled: false,
   kill_switch_pct: 5,
   kill_switch_direction: 'loss',
+  // Asymmetric kill switch — blank (undefined) = fall back to kill_switch_pct
+  // (symmetric, today's behaviour). Captured as PERCENTS; sent ÷100.
+  kill_switch_target_pct: undefined,
+  kill_switch_stop_pct: undefined,
   entry_time: '09:15',
+  // MIS defensive square-off — backend default; only sent for MIS sessions.
+  mis_square_off_time: '15:12:00',
+  // Leftover-capital redistribution — on by default (backend default true).
+  redistribute_unused_capital: true,
   // Execution-date / trading-day rule — empty entry_date = backend resolves to
   // the next valid trading session; expire = drop a missed/non-trading-day fire.
   entry_date: '',
@@ -73,11 +81,15 @@ const INTRADAY_PRESET: Partial<SessionConfig> = {
   trail_giveback_pct: 0.75,
   stop_pct: 1.5,
   square_off_time: '15:29:00',
+  // Hold mode — default INTRADAY (force square-off). Positional = false.
+  square_off_enabled: true,
 }
 
+// Protection mode = the exit engine. 'Fixed' is the flat ±% kill switch;
+// 'Dynamic (Trailing)' is the arm-and-trail intraday basket.
 const STRATEGY_OPTIONS: { id: Strategy; label: string }[] = [
-  { id: 'portfolio_kill_switch', label: 'Portfolio Kill Switch — flat ±% basket exit' },
-  { id: 'intraday_basket',       label: 'Falcon Intraday Basket — arm & trail, square-off' },
+  { id: 'portfolio_kill_switch', label: 'Fixed — flat ±% basket exit (kill switch)' },
+  { id: 'intraday_basket',       label: 'Dynamic (Trailing) — arm, lock a floor & trail, square-off' },
 ]
 
 // A SCHEDULED session that lost its in-memory timer (backend restart) reports
@@ -165,6 +177,12 @@ const INSTRUMENT_OPTIONS: { id: InstrumentType; label: string }[] = [
 const DIRECTION_OPTIONS: { id: TradeDirection; label: string }[] = [
   { id: 'long',  label: 'Buy'          },
   { id: 'short', label: 'Sell (Short)' },
+]
+// D · Hold mode for the Dynamic (Trailing) basket. Intraday forces a square-off
+// at square_off_time; Positional carries the floor + hard stop across days.
+const HOLD_OPTIONS: { id: 'intraday' | 'positional'; label: string }[] = [
+  { id: 'intraday',   label: 'Intraday'   },
+  { id: 'positional', label: 'Positional' },
 ]
 const KILL_DIR_OPTIONS: { id: KillDirection; label: string }[] = [
   { id: 'loss',   label: 'Loss only' },
@@ -396,6 +414,8 @@ export function PortfolioAutoTrade({
         kill_switch_enabled: DEFAULT_CONFIG.kill_switch_enabled,
         kill_switch_pct: DEFAULT_CONFIG.kill_switch_pct,
         kill_switch_direction: DEFAULT_CONFIG.kill_switch_direction,
+        kill_switch_target_pct: DEFAULT_CONFIG.kill_switch_target_pct,
+        kill_switch_stop_pct: DEFAULT_CONFIG.kill_switch_stop_pct,
       }
     })
   }
@@ -428,20 +448,57 @@ export function PortfolioAutoTrade({
     if (opts?.symbolWhitelist && opts.symbolWhitelist.length > 0) {
       universeExtra.symbol_whitelist = opts.symbolWhitelist
     }
+    // C · leftover-capital redistribution — always sent (default true). A boolean
+    // is cheap and unambiguous; the backend defaults to true when absent anyway.
+    const capitalExtra: Partial<SessionConfig> = {
+      redistribute_unused_capital: c.redistribute_unused_capital !== false,
+    }
+    // A · MIS defensive square-off — only meaningful for MIS equity sessions; send
+    // it only then so non-MIS sessions carry no spurious field.
+    const misExtra: Partial<SessionConfig> = {}
+    if (c.order_product === 'MIS' && c.mis_square_off_time) {
+      misExtra.mis_square_off_time = c.mis_square_off_time
+    }
     if (c.strategy === 'intraday_basket') {
       return {
         ...c,
         ...exec,
         ...universeExtra,
+        ...capitalExtra,
+        ...misExtra,
         arm_pct: (Number(c.arm_pct) || 0) / 100,
         floor_pct: (Number(c.floor_pct) || 0) / 100,
         trail_giveback_pct: (Number(c.trail_giveback_pct) || 0) / 100,
         stop_pct: (Number(c.stop_pct) || 0) / 100,
+        // D · Hold mode — INTRADAY (true, default) forces a square-off; POSITIONAL
+        // (false) carries the floor + hard stop across days. MIS cannot be
+        // positional (backend rejects it), so force INTRADAY for MIS.
+        square_off_enabled: c.order_product === 'MIS' ? true : (c.square_off_enabled !== false),
         // intraday_basket exits via the trail, not the flat kill switch
         kill_switch_enabled: false,
       }
     }
-    return { ...c, ...exec, ...universeExtra, kill_switch_pct: (Number(c.kill_switch_pct) || 0) / 100 }
+    // B · asymmetric kill switch — send the per-side thresholds as FRACTIONS ONLY
+    // when the operator set them (a positive number); leave them omitted otherwise
+    // so the backend falls back to the single symmetric kill_switch_pct.
+    const killExtra: Partial<SessionConfig> = {}
+    const tgt = Number(c.kill_switch_target_pct)
+    const stp = Number(c.kill_switch_stop_pct)
+    if (c.kill_switch_target_pct != null && Number.isFinite(tgt) && tgt > 0) {
+      killExtra.kill_switch_target_pct = tgt / 100
+    }
+    if (c.kill_switch_stop_pct != null && Number.isFinite(stp) && stp > 0) {
+      killExtra.kill_switch_stop_pct = stp / 100
+    }
+    return {
+      ...c,
+      ...exec,
+      ...universeExtra,
+      ...capitalExtra,
+      ...misExtra,
+      ...killExtra,
+      kill_switch_pct: (Number(c.kill_switch_pct) || 0) / 100,
+    }
   }, [])
 
   // ── Load picks when the config form is open (universe or top_n changes) ──────
@@ -553,12 +610,17 @@ export function PortfolioAutoTrade({
     config.direction,
     config.kill_switch_pct,
     config.kill_switch_direction,
+    config.kill_switch_target_pct,
+    config.kill_switch_stop_pct,
     config.max_pct_per_position,
     config.arm_pct,
     config.floor_pct,
     config.trail_giveback_pct,
     config.stop_pct,
     config.square_off_time,
+    config.square_off_enabled,
+    config.redistribute_unused_capital,
+    config.mis_square_off_time,
     universeFilter,
     symbolWhitelist,
     userId,
@@ -1447,7 +1509,48 @@ export function PortfolioAutoTrade({
                 </div>
               )}
             </div>
+
+            {/* ── C · Use leftover capital ── redistribute the capital freed by any
+                skipped pick (1 unit > its slice) across the remaining picks. On by
+                default; toggling off leaves that capital idle. */}
+            <div className="mt-4 flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5"
+              style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+              <div className="min-w-0">
+                <div className="text-[12px] font-semibold" style={{ color: C.ink }}>Use leftover capital</div>
+                <div className="text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>
+                  Redistribute capital freed by skipped picks across the remaining names.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => set('redistribute_unused_capital', !(config.redistribute_unused_capital !== false))}
+                className="relative shrink-0 w-11 h-6 rounded-full transition-colors"
+                style={{ background: config.redistribute_unused_capital !== false ? C.mint : 'rgba(255,255,255,0.12)' }}
+                aria-pressed={config.redistribute_unused_capital !== false}
+              >
+                <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all"
+                  style={{ left: config.redistribute_unused_capital !== false ? '22px' : '2px' }} />
+              </button>
+            </div>
+
+            {/* Skipped-picks banner — names dropped because 1 unit > their slice
+                budget (from the live preview estimate). Amber; honest. */}
+            <SkippedPicksBanner picks={preview?.skipped_picks} redistribute={config.redistribute_unused_capital !== false} />
           </div>
+
+          {/* A · MIS defensive square-off note — for MIS sessions, the backend
+              force-squares at ~15:12 IST (before the broker's window). Read-only
+              note; applies to both strategies. */}
+          {config.order_product === 'MIS' && config.strategy !== 'intraday_basket' && (
+            <div className="mt-3 flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
+              style={{ borderColor: 'rgba(230,180,80,0.32)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+              <span>
+                <b>MIS session</b> — positions auto-square at ~<b>15:12 IST</b> (defensive),
+                ahead of the broker&apos;s own intraday square-off window.
+              </span>
+            </div>
+          )}
 
           {/* Advanced — entry grace window (tucked away; backend default 120s). */}
           <details className="mt-3 group">
@@ -1515,13 +1618,80 @@ export function PortfolioAutoTrade({
                     onChange={(e) => set('stop_pct', Number(e.target.value) || 0)}
                     className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
                 </Field>
-                <Field label="Square-off time (IST)" hint="Forces a flat basket at this time (HH:MM).">
-                  <input type="time"
-                    value={(config.square_off_time ?? '15:29:00').slice(0, 5)}
-                    onChange={(e) => set('square_off_time', `${e.target.value}:00`)}
-                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
-                </Field>
+
+                {/* ── D · Hold mode ── Intraday forces a square-off at the set time;
+                    Positional carries the floor + hard stop across days (no forced
+                    square-off). MIS MUST be intraday — the backend rejects positional
+                    for MIS, so it's forced + Positional is disabled with a tooltip. */}
+                {(() => {
+                  const isMis = config.order_product === 'MIS'
+                  // With MIS, always show Intraday selected (the wire also forces it).
+                  const holdValue: 'intraday' | 'positional' =
+                    isMis ? 'intraday' : (config.square_off_enabled === false ? 'positional' : 'intraday')
+                  return (
+                    <Field
+                      label="Hold"
+                      hint={holdValue === 'positional'
+                        ? 'Positional — the trailing floor + hard stop carry across days. No forced square-off.'
+                        : 'Intraday — the basket is force-squared-off at the square-off time.'}
+                    >
+                      <div className="inline-flex rounded-xl border p-0.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                        {HOLD_OPTIONS.map((o) => {
+                          const active = o.id === holdValue
+                          const disabled = isMis && o.id === 'positional'
+                          return (
+                            <button
+                              key={o.id}
+                              type="button"
+                              disabled={disabled}
+                              title={disabled ? 'MIS must square off intraday' : undefined}
+                              onClick={() => !disabled && set('square_off_enabled', o.id === 'intraday')}
+                              className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors disabled:cursor-not-allowed"
+                              style={{
+                                color: active ? '#06130c' : (disabled ? C.faint : C.ink2),
+                                background: active ? C.mint : 'transparent',
+                                opacity: disabled ? 0.5 : 1,
+                              }}
+                            >
+                              {o.label}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </Field>
+                  )
+                })()}
+
+                {/* Square-off time — shown for Intraday; hidden for Positional. */}
+                {(config.order_product === 'MIS' || config.square_off_enabled !== false) ? (
+                  <Field label="Square-off time (IST)" hint="Forces a flat basket at this time (HH:MM).">
+                    <input type="time"
+                      value={(config.square_off_time ?? '15:29:00').slice(0, 5)}
+                      onChange={(e) => set('square_off_time', `${e.target.value}:00`)}
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                  </Field>
+                ) : (
+                  <Field label="Square-off">
+                    <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-[11.5px] leading-snug"
+                      style={{ border: `1px solid ${C.line2}`, background: 'rgba(255,255,255,0.02)', color: C.muted }}>
+                      <span className="shrink-0" style={{ color: C.mint }}>{ICON.info(13)}</span>
+                      <span>Positional — the floor + hard stop carry across days. No forced square-off.</span>
+                    </div>
+                  </Field>
+                )}
               </div>
+
+              {/* MIS forces intraday — surface the rule when MIS is the product. */}
+              {config.order_product === 'MIS' && (
+                <div className="mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11px] leading-snug"
+                  style={{ borderColor: 'rgba(230,180,80,0.32)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+                  <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(13)}</span>
+                  <span>
+                    <b>MIS must square off intraday</b> — Positional is disabled, and MIS auto-squares
+                    at ~<b>15:12 IST</b> (defensive), ahead of the broker&apos;s own square-off window.
+                  </span>
+                </div>
+              )}
 
               <IntradayStrategySummary
                 config={config}
@@ -1559,8 +1729,16 @@ export function PortfolioAutoTrade({
             </div>
 
             {config.kill_switch_enabled && (
+              <>
               <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Field label="Trigger at (%)" hint="Auto-exits when this threshold is hit (on INVESTED return).">
+                <Field label="Direction" hint="Which side(s) trigger the flat basket exit.">
+                  <Segmented
+                    options={KILL_DIR_OPTIONS}
+                    value={config.kill_switch_direction}
+                    onChange={(v) => set('kill_switch_direction', v)}
+                  />
+                </Field>
+                <Field label="Trigger at (%)" hint="Fallback threshold used for any side left blank below (on INVESTED return).">
                   <input
                     type="number" min={0} step={0.5}
                     value={config.kill_switch_pct}
@@ -1569,14 +1747,44 @@ export function PortfolioAutoTrade({
                     style={inputStyle}
                   />
                 </Field>
-                <Field label="Direction">
-                  <Segmented
-                    options={KILL_DIR_OPTIONS}
-                    value={config.kill_switch_direction}
-                    onChange={(v) => set('kill_switch_direction', v)}
-                  />
-                </Field>
               </div>
+
+              {/* ── B · Asymmetric thresholds ── separate Target +% (profit side)
+                  and Stop −% (loss side). Blank → the single Trigger above is used
+                  for that side (symmetric, today's behaviour). Shown per direction. */}
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {(config.kill_switch_direction === 'profit' || config.kill_switch_direction === 'both') && (
+                  <Field label="Target +% (profit exit)" hint="Optional. Overrides the fallback on the profit side. Blank = use Trigger at (%).">
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[13px] font-semibold" style={{ color: C.mint }}>+</span>
+                      <input
+                        type="number" min={0} step={0.5}
+                        value={config.kill_switch_target_pct ?? ''}
+                        placeholder={`${config.kill_switch_pct}`}
+                        onChange={(e) => set('kill_switch_target_pct', e.target.value === '' ? undefined : (Number(e.target.value) || 0))}
+                        className="w-full rounded-lg pl-7 pr-3 py-2 text-[13px] outline-none"
+                        style={inputStyle}
+                      />
+                    </div>
+                  </Field>
+                )}
+                {(config.kill_switch_direction === 'loss' || config.kill_switch_direction === 'both') && (
+                  <Field label="Stop −% (loss exit)" hint="Optional. Overrides the fallback on the loss side. Blank = use Trigger at (%).">
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[13px] font-semibold" style={{ color: C.red }}>−</span>
+                      <input
+                        type="number" min={0} step={0.5}
+                        value={config.kill_switch_stop_pct ?? ''}
+                        placeholder={`${config.kill_switch_pct}`}
+                        onChange={(e) => set('kill_switch_stop_pct', e.target.value === '' ? undefined : (Number(e.target.value) || 0))}
+                        className="w-full rounded-lg pl-7 pr-3 py-2 text-[13px] outline-none"
+                        style={inputStyle}
+                      />
+                    </div>
+                  </Field>
+                )}
+              </div>
+              </>
             )}
 
             {/* ── Potential outcome (P&L preview) — only when the kill switch is on ── */}
@@ -1667,6 +1875,11 @@ export function PortfolioAutoTrade({
               {config.entry_date ? `${config.entry_date} ` : ''}{(config.entry_time ?? '').slice(0, 5)} IST
             </span>
             {!config.entry_date && <span style={{ color: C.faint }}> · next valid session</span>}
+          </div>
+
+          {/* Skipped-picks banner (create response) — names dropped at sizing. */}
+          <div className="mb-4">
+            <SkippedPicksBanner picks={session.skipped_picks} redistribute={config.redistribute_unused_capital !== false} />
           </div>
 
           {/* TWO clear ways to begin — fire now, or arm for the entry time. */}
@@ -1907,6 +2120,11 @@ export function PortfolioAutoTrade({
                   </span>
                 </div>
 
+                {/* Skipped-picks banner — names dropped at sizing (live). */}
+                <div className="mb-3">
+                  <SkippedPicksBanner picks={status.skipped_picks} redistribute />
+                </div>
+
                 {/* Resolved fire moment + trading-day / market state. Shown when
                     the backend reports it (degrades to nothing when absent). */}
                 <ResolvedFireLine status={status} className="mb-3" />
@@ -2104,6 +2322,32 @@ function StrategyPill({ strategy }: { strategy: Strategy }) {
       style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
       {label}
     </span>
+  )
+}
+
+// ── Skipped-picks banner (C · leftover capital) ──────────────────────────────
+// Renders an amber banner when the backend skipped one or more picks because a
+// single unit of the name costs more than its per-slice budget (e.g. a high-
+// priced stock like PAGEIND). Names the symbols; notes whether their freed
+// capital is being redistributed. Renders nothing when there are no skips.
+function SkippedPicksBanner({ picks, redistribute }: { picks?: SkippedPick[]; redistribute?: boolean }) {
+  if (!picks || picks.length === 0) return null
+  const syms = picks.map((p) => p.symbol).filter(Boolean) as string[]
+  const n = picks.length
+  return (
+    <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
+      style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+      <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+      <span>
+        <b style={{ color: C.amber }}>{n} pick{n > 1 ? 's' : ''} skipped</b>
+        {' '}— priced above their per-slice budget
+        {syms.length ? <>: <b style={{ color: C.ink }}>{syms.join(', ')}</b></> : null}.
+        {' '}
+        {redistribute
+          ? 'Their capital is redistributed across the remaining picks.'
+          : 'Their capital is left idle (Use leftover capital is off).'}
+      </span>
+    </div>
   )
 }
 
