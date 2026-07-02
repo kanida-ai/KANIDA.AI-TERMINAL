@@ -178,9 +178,15 @@ class TradingSessionConfig:
     #   stop_pct           : downside hard stop, applied as -stop_pct (pre-arm).
     #   square_off_time    : IST clock time to flatten the basket (never overnight).
     # Inert when strategy != "intraday_basket".
-    arm_pct: float = 0.01
+    # Defaults updated 2026-07-02 from a 517-day walk-forward sweep (train/test
+    # validated OOS): arm 2% / floor 1% / giveback 0.5% / stop 1.5%. The higher
+    # arm skips early +1% blips that caused premature floor-exits; the tighter
+    # giveback locks gains once armed. OOS median uplift ~+0.44%/day vs the prior
+    # arm1/floor1/give0.75 defaults. (stop kept at 1.5% per operator — the sweep's
+    # wider 2% stop is marginally better on median but 1.5% is the tighter risk cap.)
+    arm_pct: float = 0.02
     floor_pct: float = 0.01
-    trail_giveback_pct: float = 0.0075
+    trail_giveback_pct: float = 0.005
     stop_pct: float = 0.015
     square_off_time: str = "15:29:00"
     # ── INTRADAY vs POSITIONAL trailing (additive, default-on = today) ────────
@@ -511,9 +517,9 @@ class TradingSessionConfig:
             per_position_gtt_enabled=bool(d.get("per_position_gtt_enabled", True)),
             per_position_stop_pct=float(d.get("per_position_stop_pct", 0.03)),
             per_position_target_pct=float(d.get("per_position_target_pct", 0.06)),
-            arm_pct=float(d.get("arm_pct", 0.01)),
+            arm_pct=float(d.get("arm_pct", 0.02)),
             floor_pct=float(d.get("floor_pct", 0.01)),
-            trail_giveback_pct=float(d.get("trail_giveback_pct", 0.0075)),
+            trail_giveback_pct=float(d.get("trail_giveback_pct", 0.005)),
             stop_pct=float(d.get("stop_pct", 0.015)),
             square_off_time=d.get("square_off_time", "15:29:00"),
             square_off_enabled=bool(d.get("square_off_enabled", True)),
