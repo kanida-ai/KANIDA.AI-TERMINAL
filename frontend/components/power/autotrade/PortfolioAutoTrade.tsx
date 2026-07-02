@@ -76,9 +76,11 @@ const INTRADAY_PRESET: Partial<SessionConfig> = {
   top_n_stocks: 5,
   entry_time: '09:15:00',
   order_product: 'MTF',
-  arm_pct: 1.0,
+  // Defaults from the 517-day walk-forward sweep (OOS-validated 2026-07-02):
+  // arm 2% / floor 1% / giveback 0.5% / stop 1.5%.
+  arm_pct: 2.0,
   floor_pct: 1.0,
-  trail_giveback_pct: 0.75,
+  trail_giveback_pct: 0.5,
   stop_pct: 1.5,
   square_off_time: '15:29:00',
   // Hold mode — default INTRADAY (force square-off). Positional = false.
