@@ -29,6 +29,7 @@ import {
 import {
   AutoTradeAPI,
   type Mode, type StartWhen, type SizingMode, type OrderProduct, type KillDirection,
+  type InstrumentType, type TradeDirection,
   type OnMissedWindow,
   type Strategy, type SessionConfig, type CreateResponse, type StartResponse,
   type StatusResponse, type SavedConfig, type Broker, type SessionSummary,
@@ -45,6 +46,9 @@ const DEFAULT_CONFIG: SessionConfig = {
   sizing_mode: 'equal',
   max_pct_per_position: 25,
   order_product: 'CNC',
+  // Instrument / direction — default to the existing equity long behaviour.
+  instrument_type: 'EQ',
+  direction: 'long',
   kill_switch_enabled: false,
   kill_switch_pct: 5,
   kill_switch_direction: 'loss',
@@ -145,7 +149,23 @@ const SIZING_OPTIONS: { id: SizingMode; label: string; hint: string }[] = [
   { id: 'pct_cap', label: '% cap',   hint: 'Cap each position at a max % of capital' },
   { id: 'manual',  label: 'Manual',  hint: 'Per-symbol amounts (advanced)' },
 ]
-const PRODUCT_OPTIONS: OrderProduct[] = ['CNC', 'MIS', 'MTF', 'NRML']
+// NRML is an F&O / currency / commodity CARRY product — the broker REJECTS it on
+// NSE cash equity, and the backend now rejects it at session creation. So it is
+// NOT offered for equity sessions. (Futures sessions will send NRML themselves,
+// server-side, via the FUT order builder — the user never picks it here.)
+const PRODUCT_OPTIONS: OrderProduct[] = ['CNC', 'MIS', 'MTF']
+// Instrument: Equity (the existing cash path) | Futures (current-month, NRML set
+// server-side). CE/PE are NOT offered — futures-only this pass.
+const INSTRUMENT_OPTIONS: { id: InstrumentType; label: string }[] = [
+  { id: 'EQ',  label: 'Equity'   },
+  { id: 'FUT', label: 'Futures'  },
+]
+// Direction for a FUT session: Buy (long) | Sell / Short. 'short' is FUT-only
+// (backend rejects it on equity). Equity always runs long.
+const DIRECTION_OPTIONS: { id: TradeDirection; label: string }[] = [
+  { id: 'long',  label: 'Buy'          },
+  { id: 'short', label: 'Sell (Short)' },
+]
 const KILL_DIR_OPTIONS: { id: KillDirection; label: string }[] = [
   { id: 'loss',   label: 'Loss only' },
   { id: 'profit', label: 'Profit only' },
@@ -329,6 +349,16 @@ export function PortfolioAutoTrade({
 
   const set = <K extends keyof SessionConfig>(k: K, v: SessionConfig[K]) =>
     setConfig((c) => ({ ...c, [k]: v }))
+
+  // Switch instrument. Selecting Equity forces direction back to 'long' (short is
+  // FUT-only; the backend rejects a short equity order). Selecting Futures keeps
+  // the current direction (defaults to 'long').
+  const onInstrumentChange = (next: InstrumentType) =>
+    setConfig((c) => ({
+      ...c,
+      instrument_type: next,
+      direction: next === 'EQ' ? 'long' : (c.direction ?? 'long'),
+    }))
 
   // The selected account object (if any) + the scope to send on create/preview/list.
   // scope is omitted entirely when no user context exists (default global session).
@@ -519,6 +549,8 @@ export function PortfolioAutoTrade({
     config.top_n_stocks,
     config.sizing_mode,
     config.order_product,
+    config.instrument_type,
+    config.direction,
     config.kill_switch_pct,
     config.kill_switch_direction,
     config.max_pct_per_position,
@@ -1124,6 +1156,16 @@ export function PortfolioAutoTrade({
               />
             </Field>
 
+            {/* Instrument — Equity (existing cash path) | Futures (current-month,
+                NRML set server-side). Default Equity keeps the equity flow intact. */}
+            <Field label="Instrument" hint="Equity trades cash; Futures trades the current-month contract (product set automatically).">
+              <Segmented
+                options={INSTRUMENT_OPTIONS.map((o) => ({ id: o.id, label: o.label }))}
+                value={config.instrument_type ?? 'EQ'}
+                onChange={(v) => onInstrumentChange(v)}
+              />
+            </Field>
+
             {config.sizing_mode === 'pct_cap' ? (
               <Field label="Max % per position" hint="Cap on any single position.">
                 <input
@@ -1134,7 +1176,7 @@ export function PortfolioAutoTrade({
                   style={inputStyle}
                 />
               </Field>
-            ) : (
+            ) : (config.instrument_type ?? 'EQ') !== 'FUT' ? (
               <Field label="Order product" hint="Broker product type for entries.">
                 <Segmented
                   options={PRODUCT_OPTIONS.map((p) => ({ id: p, label: p }))}
@@ -1142,9 +1184,33 @@ export function PortfolioAutoTrade({
                   onChange={(v) => set('order_product', v)}
                 />
               </Field>
+            ) : null}
+
+            {/* Futures: hide the equity product row; instead pick Buy / Sell (Short)
+                and show the auto-product note. Product = NRML is set server-side. */}
+            {(config.instrument_type ?? 'EQ') === 'FUT' && (
+              <Field label="Direction" hint="Current-month futures · product set automatically (NRML).">
+                <Segmented
+                  options={DIRECTION_OPTIONS.map((d) => ({ id: d.id, label: d.label }))}
+                  value={config.direction ?? 'long'}
+                  onChange={(v) => set('direction', v)}
+                />
+                {(config.direction ?? 'long') === 'short' && (
+                  <div
+                    className="mt-2 flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-snug"
+                    style={{ color: C.amber, border: `1px solid ${C.amber}`, background: 'rgba(230,180,80,0.10)' }}
+                    role="note"
+                  >
+                    <span className="shrink-0 mt-0.5">{ICON.shield(13)}</span>
+                    <span>
+                      <b>Short futures</b> — margin + unbounded-loss risk; runs in paper until certified.
+                    </span>
+                  </div>
+                )}
+              </Field>
             )}
 
-            {config.sizing_mode === 'pct_cap' && (
+            {config.sizing_mode === 'pct_cap' && (config.instrument_type ?? 'EQ') !== 'FUT' && (
               <Field label="Order product" hint="Broker product type for entries.">
                 <Segmented
                   options={PRODUCT_OPTIONS.map((p) => ({ id: p, label: p }))}

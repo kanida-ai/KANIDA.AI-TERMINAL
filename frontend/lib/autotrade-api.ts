@@ -26,6 +26,16 @@ export type SizingMode = 'equal' | 'pct_cap' | 'manual'
 export type OrderProduct = 'CNC' | 'MIS' | 'MTF' | 'NRML'
 export type KillDirection = 'profit' | 'loss' | 'both'
 
+// Instrument the session trades. 'EQ' (default) = the existing cash-equity path
+// (order_product CNC/MIS/MTF). 'FUT' = current-month futures — the backend sets
+// the product to NRML server-side and the user does NOT pick CNC/MIS/MTF. (CE/PE
+// are NOT supported yet.)
+export type InstrumentType = 'EQ' | 'FUT'
+// Trade side. 'long' (default) = buy. 'short' = sell — the backend REJECTS
+// direction='short' with HTTP 400 "short is currently supported only for FUT"
+// unless instrument_type=='FUT'.
+export type TradeDirection = 'long' | 'short'
+
 // Execution-date / trading-day rule. What to do if the fire moment is missed or
 // lands on a non-trading day: drop it ('expire', the default) or roll it forward
 // to the next valid trading session ('carry_next_trading_day').
@@ -54,6 +64,13 @@ export type SessionConfig = {
   max_pct_per_position?: number
   manual_amounts?: Record<string, number>
   order_product: OrderProduct
+  // ── Instrument / direction ── (optional; both default server-side to EQ/long,
+  // i.e. the existing equity behaviour when omitted). For FUT the backend uses
+  // the current-month expiry (expiry_preference="near") and sets product=NRML;
+  // the user does not pick CNC/MIS/MTF. direction='short' is FUT-only (backend
+  // returns HTTP 400 "short is currently supported only for FUT" otherwise).
+  instrument_type?: InstrumentType
+  direction?: TradeDirection
   // ── portfolio_kill_switch strategy ──
   kill_switch_enabled: boolean
   kill_switch_pct: number
