@@ -2691,7 +2691,7 @@ function PotentialOutcome({
           <KillPreviewCard kill={preview.kill_preview} direction={direction} />
           <p className="text-[10.5px] leading-snug mt-2.5" style={{ color: C.faint }}>
             on <b style={{ color: C.ink2 }}>{fmtINR(preview.invested_basis)}</b> invested
-            {' '}· ~{(preview.leverage ?? 1).toFixed(preview.leverage % 1 === 0 ? 0 : 2)}× MTF
+            {' '}· ~{(preview.leverage ?? 1).toFixed(preview.leverage % 1 === 0 ? 0 : 2)}× ({config.order_product})
             {' '}· fund <b style={{ color: C.ink2 }}>{fmtCapital(preview.total_allocated_capital)}</b>
           </p>
         </>
