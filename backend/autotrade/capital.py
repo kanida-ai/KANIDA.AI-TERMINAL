@@ -8,7 +8,8 @@ Sizing modes (select via TradingSessionConfig.sizing_mode):
 calculate_quantity fetches live LTP + lot size from the broker at entry time:
   EQ / CNC       : floor(amount / ltp)
   MTF            : floor(amount / margin_per_share)  [leveraged; cash fallback]
-  FUT            : floor(amount / (ltp * lot_size)) * lot_size
+  FUT            : floor(amount / margin_per_lot) * lot_size  [margin, long+short;
+                   refuses if margin API unavailable — never notional-sizes]
   CE / PE        : floor(amount / (premium * lot_size)) * lot_size
 Never returns 0 — raises InsufficientCapitalError when amount < one lot value.
 Lot sizes ALWAYS come from the broker instrument master (never hardcoded).
@@ -193,11 +194,29 @@ class CapitalAllocator:
             lot_size = broker.get_lot_size(contract)
             if lot_size <= 0:
                 raise InsufficientCapitalError(f"{symbol}: invalid lot_size {lot_size}")
-            lots = math.floor(amount / (ltp * lot_size))
+            # RETAIL FUTURES SIZING (long AND short): size lots on the per-LOT
+            # MARGIN the broker locks, NOT the full notional (ltp*lot). Sizing on
+            # notional would UNDER-buy ~5-10x for a leveraged product. Fall back
+            # SAFELY: if the margin lookup is unavailable we refuse rather than
+            # silently notional-size (never over-size). direction does NOT affect
+            # sizing — a short lot needs the same initial margin as a long lot.
+            margin_per_lot = None
+            try:
+                margin_per_lot = broker.get_fut_margin_per_lot(
+                    symbol, cfg.expiry_preference)
+            except Exception as e:  # pragma: no cover - defensive
+                log.warning("%s: FUT margin lookup error (%s)", symbol, e)
+                margin_per_lot = None
+            if not margin_per_lot or margin_per_lot <= 0:
+                raise InsufficientCapitalError(
+                    f"{symbol}: FUT per-lot margin unavailable — refusing to "
+                    "size on notional (would over-deploy). Retry when the "
+                    "broker margin API is reachable.")
+            lots = math.floor(amount / margin_per_lot)
             if lots < 1:
                 raise InsufficientCapitalError(
-                    f"{symbol}: amount ₹{amount:.0f} < 1 FUT lot "
-                    f"(₹{ltp * lot_size:.0f}/lot)"
+                    f"{symbol}: amount ₹{amount:.0f} < 1 FUT lot margin "
+                    f"(₹{margin_per_lot:.0f}/lot)"
                 )
             return lots * lot_size
 

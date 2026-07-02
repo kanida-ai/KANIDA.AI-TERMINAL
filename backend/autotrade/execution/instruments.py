@@ -34,9 +34,13 @@ def build_fut_order(symbol: str, qty: int, config, broker) -> "Order":
     contract = broker.get_active_futures(symbol, config.expiry_preference)
     lot_size = broker.get_lot_size(contract)
     lots = qty // lot_size if lot_size else 0
+    # FUTURES long/short: entry side. direction=="short" → SELL to open;
+    # direction=="long" (default) → BUY (unchanged). Equity never reaches here.
+    txn = "SELL" if getattr(config, "direction", "long") == "short" else "BUY"
     return Order(symbol=contract, qty=lots * lot_size, exchange="NFO",
                  product="NRML", order_type=config.order_type,
-                 instrument_type="FUT", lot_size=lot_size, lots=lots,
+                 instrument_type="FUT", transaction_type=txn,
+                 lot_size=lot_size, lots=lots,
                  limit_offset_pct=config.limit_offset_pct,
                  vwap_window_seconds=config.vwap_window_seconds)
 

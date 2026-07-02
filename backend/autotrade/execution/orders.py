@@ -56,6 +56,15 @@ class Order:
             "CNC": kite.PRODUCT_CNC, "MIS": kite.PRODUCT_MIS,
             "NRML": kite.PRODUCT_NRML, "MTF": "MTF",
         }
+        # NO SILENT DEFAULT (real-money safety): an unrecognised product must
+        # RAISE, never fall back to CNC — a wrong product silently placed at the
+        # broker is exactly the "UI shows one product, broker gets another" bug
+        # class. config.validate() already restricts order_product to the four
+        # keys above, so reaching here with anything else is a code bug to surface.
+        if self.product not in product_map:
+            raise ValueError(
+                f"unmapped order product {self.product!r} (expected one of "
+                f"{sorted(product_map)}) — refusing to default to CNC")
         # VWAP resolves to a MARKET order at the end of its window.
         kite_otype = (kite.ORDER_TYPE_LIMIT if self.order_type == "LIMIT"
                       else kite.ORDER_TYPE_MARKET)
@@ -67,7 +76,7 @@ class Order:
                               if self.transaction_type == "BUY"
                               else kite.TRANSACTION_TYPE_SELL),
             quantity=self.qty,
-            product=product_map.get(self.product, kite.PRODUCT_CNC),
+            product=product_map[self.product],
             order_type=kite_otype,
             tag=f"at-{self.symbol[:10].lower()}"[:20],
         )

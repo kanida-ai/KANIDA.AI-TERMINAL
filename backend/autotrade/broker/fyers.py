@@ -168,11 +168,16 @@ class FyersBroker(BrokerClient):
             return {"status": "FAILED", "error": str(e)}
 
     async def place_market_exit(self, symbol: str, qty: int,
-                                instrument_type: str) -> OrderResult:
+                                instrument_type: str,
+                                kite_product: str | None = None,
+                                direction: str = "long") -> OrderResult:
+        # kite_product accepted (ignored) + direction for FUTURES cover. Fyers
+        # side: -1 = SELL (long exit, default), 1 = BUY-to-cover (short exit).
         if not self._live_allowed():
             return OrderResult(status="DRY_RUN", broker_order_id=None,
                                symbol=symbol, qty=qty, raw={"dry_run": True})
-        body = self._order_body(symbol, qty, -1, 2, 0.0)
+        _side = 1 if str(direction).lower() == "short" else -1
+        body = self._order_body(symbol, qty, _side, 2, 0.0)
         try:
             import requests
             r = requests.post(f"{_API_BASE}/orders/sync", json=body,

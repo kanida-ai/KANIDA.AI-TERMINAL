@@ -205,11 +205,16 @@ class AngelBroker(BrokerClient):
             return {"status": "FAILED", "error": str(e)}
 
     async def place_market_exit(self, symbol: str, qty: int,
-                                instrument_type: str) -> OrderResult:
+                                instrument_type: str,
+                                kite_product: str | None = None,
+                                direction: str = "long") -> OrderResult:
+        # kite_product accepted (ignored here) + direction for FUTURES cover:
+        # long→SELL (default), short→BUY-to-cover.
         if not self._live_allowed():
             return OrderResult(status="DRY_RUN", broker_order_id=None,
                                symbol=symbol, qty=qty, raw={"dry_run": True})
-        body = self._order_body(symbol, qty, "SELL", "MARKET", 0.0)
+        _side = "BUY" if str(direction).lower() == "short" else "SELL"
+        body = self._order_body(symbol, qty, _side, "MARKET", 0.0)
         if body is None:
             return OrderResult(status="FAILED", broker_order_id=None,
                                symbol=symbol, qty=qty,

@@ -133,6 +133,17 @@ class TradingSessionConfig:
     instrument_type: str = "EQ"            # EQ | FUT | CE | PE
     expiry_preference: str = "near"        # near | next | far
 
+    # ── Trade direction (FUTURES long/short) ──────────────────────────────────
+    # "long"  (DEFAULT, UNCHANGED) — entry BUY, exit SELL, P&L (ltp-avg)*qty,
+    #         stop BELOW entry / target ABOVE. EVERY existing/equity session is
+    #         "long" and behaves EXACTLY as before (byte-for-byte).
+    # "short" (FUTURES ONLY, current phase) — entry SELL, exit BUY-to-cover,
+    #         P&L (avg-ltp)*qty (profit when price falls), stop ABOVE entry /
+    #         target BELOW. validate() rejects "short" unless instrument_type=="FUT".
+    # NOTE: invested_basis (Σ qty*avg_price) stays POSITIVE for both directions;
+    # only the P&L sign + order sides + stop/target orientation invert for short.
+    direction: str = "long"                # long | short
+
     # Kill switch  (DISABLED by default — fail safe)
     kill_switch_pct: float = 0.012
     kill_switch_direction: str = "both"    # profit | loss | both
@@ -213,6 +224,18 @@ class TradingSessionConfig:
             raise ValueError(f"invalid order_type: {self.order_type}")
         if self.instrument_type not in ("EQ", "FUT", "CE", "PE", "MTF"):
             raise ValueError(f"invalid instrument_type: {self.instrument_type}")
+        # ── Trade direction (FUTURES long/short) ──────────────────────────────
+        if self.direction not in ("long", "short"):
+            raise ValueError(
+                f"invalid direction (long | short): {self.direction}")
+        # SHORT is currently supported for FUTURES only. Options short + equity
+        # short are later phases; reject them at the door so we never place a
+        # sell-to-open on an instrument whose margin / cover semantics we haven't
+        # certified.
+        if self.direction == "short" and self.instrument_type != "FUT":
+            raise ValueError(
+                "short is currently supported only for FUT "
+                f"(got instrument_type={self.instrument_type})")
         if self.order_product not in ("CNC", "MIS", "NRML", "MTF"):
             raise ValueError(f"invalid order_product: {self.order_product}")
         # PRODUCT × INSTRUMENT compatibility (real-money safety). NRML is an
@@ -384,6 +407,7 @@ class TradingSessionConfig:
             vwap_window_seconds=int(d.get("vwap_window_seconds", 60)),
             instrument_type=d.get("instrument_type", "EQ"),
             expiry_preference=d.get("expiry_preference", "near"),
+            direction=d.get("direction", "long"),
             kill_switch_pct=float(d.get("kill_switch_pct", 0.012)),
             kill_switch_direction=d.get("kill_switch_direction", "both"),
             kill_switch_enabled=bool(d.get("kill_switch_enabled", False)),

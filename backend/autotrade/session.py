@@ -334,6 +334,31 @@ def load_falcon_picks(top_n: int = 100,
     return result
 
 
+def _filter_fno_eligible(picks: List[Pick], broker, expiry_preference: str,
+                         session_id: str = "") -> List[Pick]:
+    """FUTURES symbol eligibility: keep ONLY picks that HAVE a tradeable
+    current-month future. Names without a future are logged + SKIPPED — we never
+    fabricate a contract. Returns the filtered pick list (order preserved).
+
+    Uses broker.get_active_futures_or_none (None → no future → drop). Best-effort:
+    a broker/lookup error for one symbol drops that symbol, never aborts the set.
+    Equity/MTF sessions never call this (their picks are always eligible)."""
+    out: List[Pick] = []
+    for p in picks:
+        try:
+            contract = broker.get_active_futures_or_none(p.symbol, expiry_preference)
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("session %s: F&O eligibility lookup failed for %s (%s) "
+                        "— skipping", session_id, p.symbol, e)
+            contract = None
+        if contract:
+            out.append(p)
+        else:
+            log.info("session %s: %s has no tradeable current-month future — "
+                     "skipping (F&O-ineligible)", session_id, p.symbol)
+    return out
+
+
 def _preview_resolve_creds(prof, user_id: Optional[str]) -> None:
     """Best-effort vault cred resolution for the PREVIEW path (paper-only).
 
@@ -426,6 +451,11 @@ def preview_session_sizing(config: TradingSessionConfig,
                         prof.profile_id, e)
             continue
         picks = routed.get(prof.profile_id, [])
+        # FUTURES symbol eligibility (preview mirrors fire): drop picks with no
+        # tradeable current-month future so the preview count matches what fires.
+        if prof.instrument_type == "FUT":
+            picks = _filter_fno_eligible(
+                picks, broker, config.expiry_preference)
         amounts = allocator.allocate([p.symbol for p in picks])
         # SPEED PASS: ONE batched LTP + MTF-margin prefetch for the preview too.
         fund_syms = [p.symbol for p in picks if amounts.get(p.symbol, 0.0) > 0]
@@ -530,16 +560,21 @@ async def _exit_single_position(
             log.warning("per-stock stop %s/%s: GTT cancel failed (%s): %s",
                         session_id, symbol, gtt_id, e)
 
-    # 3. Place the market sell.
+    # 3. Place the market exit in the CLOSING side.
     qty = int(position.get("qty") or 0)
     itype = position.get("instrument_type") or "EQ"
+    # FUTURES long/short: long→SELL (unchanged), short→BUY-to-cover. Threaded
+    # from the position's stored direction so a per-stock stop / retry can never
+    # place a wrong-side order that would DOUBLE a short instead of covering it.
+    direction = position.get("direction") or "long"
     # kite_product overrides instrument_type mapping: positions table stores security
     # type ("EQ"), not the trading product ("MTF"/"CNC"). Without this, MTF exits
     # become CNC sells and Kite rejects them with "Holding quantity: 0".
     effective_product = kite_product or position.get("order_product")
     try:
         res = await broker.place_market_exit(symbol, qty, itype,
-                                             kite_product=effective_product)
+                                             kite_product=effective_product,
+                                             direction=direction)
     except Exception as e:
         log.error("per-stock stop %s/%s: place_market_exit raised: %s",
                   session_id, symbol, e)
@@ -1004,6 +1039,12 @@ class TradingSession:
                 continue
             broker = self.brokers[prof.profile_id]
             picks = routed.get(prof.profile_id, [])
+            # FUTURES symbol eligibility: a futures session may only trade Falcon
+            # picks that HAVE a tradeable current-month future. Names without one
+            # are logged + skipped (never fabricated). Equity/MTF unaffected.
+            if prof.instrument_type == "FUT":
+                picks = _filter_fno_eligible(
+                    picks, broker, self.config.expiry_preference, self.session_id)
             allocator = CapitalAllocator(self.config)
             amounts = allocator.allocate([p.symbol for p in picks])
             fund_picks = [p for p in picks if amounts.get(p.symbol, 0.0) > 0]
@@ -1191,18 +1232,28 @@ class TradingSession:
         fill_price = fill_price or ref_price
         fill_qty = fill_qty or qty
         acct_id = getattr(prof, "broker_account_id", None)
+        # FUTURES long/short: persist the session direction on the position so
+        # the P&L sign, exit side, and GTT orientation invert ONLY for shorts.
+        _direction = getattr(self.config, "direction", "long")
+        # For a FUT SHORT the position symbol is the FUT contract (order.symbol),
+        # not the bare underlying — register under the contract so the exit /
+        # GTT / mark refer to the same tradeable instrument.
+        register_symbol = order.symbol if prof.instrument_type == "FUT" else symbol
         if res.status == "PARTIAL":
-            self.registry.register_partial(symbol, prof.profile_id,
+            self.registry.register_partial(register_symbol, prof.profile_id,
                                            fill_qty, fill_price,
                                            product=prof.order_product,
                                            instrument_type=prof.instrument_type,
-                                           broker_account_id=acct_id)
+                                           broker_account_id=acct_id,
+                                           direction=_direction)
         else:
-            self.registry.register(symbol=symbol, broker_profile=prof.profile_id,
+            self.registry.register(symbol=register_symbol,
+                                   broker_profile=prof.profile_id,
                                    qty=fill_qty, avg_price=fill_price,
                                    product=prof.order_product,
                                    instrument_type=prof.instrument_type,
-                                   broker_account_id=acct_id)
+                                   broker_account_id=acct_id,
+                                   direction=_direction)
         if ref_price > 0 and reconciled:
             record_slippage(symbol, ref_price, fill_price, fill_qty,
                             session_id=self.session_id,

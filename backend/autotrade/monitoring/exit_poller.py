@@ -157,6 +157,7 @@ async def cancel_and_retry_exit(
     max_wait_sec: int = 60,
     poll_interval_sec: float = 5.0,
     kite_product: str | None = None,
+    direction: str = "long",
 ) -> Dict[str, Any]:
     """Cancel a pending exit order and place a fresh market sell, with retries.
 
@@ -187,10 +188,11 @@ async def cancel_and_retry_exit(
         # Brief pause to allow the cancel to propagate on the exchange.
         await asyncio.sleep(1.0)
 
-        # Step 2: fresh market sell.
+        # Step 2: fresh market exit in the CLOSING side (long→SELL, short→BUY).
         try:
             res = await broker.place_market_exit(symbol, qty, "EQ",
-                                                  kite_product=kite_product)
+                                                  kite_product=kite_product,
+                                                  direction=direction)
         except Exception as e:
             log.error(
                 "cancel_and_retry_exit %s/%s attempt %d: place_market_exit raised: %s",

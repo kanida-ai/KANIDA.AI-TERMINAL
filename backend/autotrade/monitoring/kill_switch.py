@@ -124,11 +124,15 @@ class KillSwitchExecutor:
             qty = int(pos.get("qty") or 0)   # recompute open qty (spec rule)
             itype = pos.get("instrument_type") or "EQ"
             prof_id = pos.get("broker_profile")
+            # FUTURES long/short: exit the CLOSING side. long→SELL (unchanged),
+            # short→BUY-to-cover. Threaded from the position's stored direction.
+            direction = pos.get("direction") or "long"
             kite_product = getattr(self.config, "order_product", None)
             exit_coros.append(broker.place_market_exit(symbol, qty, itype,
-                                                       kite_product=kite_product))
+                                                       kite_product=kite_product,
+                                                       direction=direction))
             exit_meta.append({"symbol": symbol, "claimed": True, "qty": qty,
-                              "broker_profile": prof_id})
+                              "broker_profile": prof_id, "direction": direction})
 
         results = await asyncio.gather(*exit_coros, return_exceptions=True)
 
@@ -225,6 +229,7 @@ class KillSwitchExecutor:
                         registry=self.registry,
                         close_reason=close_reason,
                         max_retries=3,
+                        direction=meta.get("direction", "long"),
                     )
                     if retry_result.get("status") == "COMPLETE":
                         n_ok += 1
@@ -254,6 +259,7 @@ class KillSwitchExecutor:
                     registry=self.registry,
                     close_reason=close_reason,
                     max_retries=3,
+                    direction=meta.get("direction", "long"),
                 )
                 if retry_result.get("status") == "COMPLETE":
                     n_ok += 1

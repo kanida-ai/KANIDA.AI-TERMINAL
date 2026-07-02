@@ -278,19 +278,23 @@ class RupeezyBroker(BrokerClient):
 
     async def place_market_exit(self, symbol: str, qty: int,
                                 instrument_type: str,
-                                kite_product: str | None = None) -> OrderResult:
-        """Flatten one position with a Vortex MARKET SELL (variety=RL-MKT).
+                                kite_product: str | None = None,
+                                direction: str = "long") -> OrderResult:
+        """Flatten one position with a Vortex MARKET order (variety=RL-MKT).
 
         kite_product: explicit trading-product override (e.g. "MTF", "CNC", "MIS")
         — takes precedence over instrument_type (which is the security type "EQ",
         not the trading product; wrong for MTF sessions). Mirrors the Zerodha
-        adapter's kite_product precedence."""
+        adapter's kite_product precedence.
+
+        direction: FUTURES cover side — long→SELL (default), short→BUY-to-cover."""
         if not self._live_allowed():
             return OrderResult(status="DRY_RUN", broker_order_id=None,
                                symbol=symbol, qty=qty, raw={"dry_run": True})
         product = kite_product if kite_product else instrument_type
+        _side = "BUY" if str(direction).lower() == "short" else "SELL"
         try:
-            body = self._order_body(symbol, qty, "SELL", order_type="MARKET",
+            body = self._order_body(symbol, qty, _side, order_type="MARKET",
                                     product=product or "CNC", exchange="NSE")
         except Exception as e:
             log.error("rupeezy place_market_exit body build failed for %s: %s",
@@ -468,16 +472,27 @@ class RupeezyBroker(BrokerClient):
                       target_price: float, last_price: float,
                       product: str = "CNC", exchange: str = "NSE",
                       order_type: str = "LIMIT",
-                      stop_limit_price: Optional[float] = None) -> Optional[str]:
+                      stop_limit_price: Optional[float] = None,
+                      direction: str = "long") -> Optional[str]:
         """Place a two-leg OCO GTT via the inline `gtt` object on a regular order
         (reference §Orders `gtt`). Returns the broker GTT/order id, or None when
         not placed (dry-run / unsupported) so the SOFTWARE stop still protects.
+
+        direction: for a SHORT the OCO would need BUY-to-cover legs with an
+        inverted stop/target. That shape is UNVERIFIED on Vortex, so we place
+        NONE for a short here (never a wrong-direction GTT) — the software stop
+        protects. long is unchanged.
 
         TODO(certify): the exact inline `gtt` object shape + whether OCO is one
         object or two legs (reference CONFIRM #8). This best-effort attempt builds
         a plausible {stop_loss, profit} shape; any error → None (entry/protection
         is never blocked on the GTT)."""
         if not self._live_allowed():
+            return None
+        if str(direction).lower() == "short":
+            # Never place a wrong-direction GTT on an unverified broker OCO shape.
+            log.info("rupeezy: short GTT-OCO shape unverified — placing NONE "
+                     "(software stop protects) for %s", symbol)
             return None
         try:
             seg = self._map_exchange(exchange)

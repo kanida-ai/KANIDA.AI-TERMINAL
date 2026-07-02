@@ -60,25 +60,38 @@ def _gtt_stop_buffer() -> float:
 
 
 def compute_levels(entry_price: float, stop_pct: float,
-                   target_pct: float) -> Tuple[float, float, float, float]:
+                   target_pct: float,
+                   direction: str = "long"
+                   ) -> Tuple[float, float, float, float]:
     """Return (stop_trigger, stop_limit, target_trigger, target_limit) rounded
     to tick-friendly 2dp.
 
-    stop_trigger  = entry * (1 - stop_pct)
-    stop_limit    = stop_trigger * (1 - GTT_STOP_LIMIT_BUFFER)   ← NEW
-                    Limit set BELOW trigger so a gap-down still fills the order.
+    LONG (default, UNCHANGED — byte-for-byte):
+      stop_trigger   = entry * (1 - stop_pct)     (below entry; a SELL stop)
+      stop_limit     = stop_trigger * (1 - buffer)  (below trigger, fills a gap-down)
+      target_trigger = entry * (1 + target_pct)   (above entry; a SELL limit)
+      target_limit   = target_trigger
 
-    target_trigger = entry * (1 + target_pct)
-    target_limit   = target_trigger  (sell-limit AT or above trigger is safe)
+    SHORT (FUTURES): everything INVERTS — the position profits when price falls,
+    so the STOP is ABOVE entry (a BUY-to-cover stop) and the TARGET is BELOW:
+      stop_trigger   = entry * (1 + stop_pct)     (above entry; a BUY stop)
+      stop_limit     = stop_trigger * (1 + buffer)  (ABOVE trigger, fills a gap-up)
+      target_trigger = entry * (1 - target_pct)   (below entry; a BUY limit)
+      target_limit   = target_trigger
 
     Legacy callers that unpacked only two values still work because they only
-    see (stop_trigger, target_trigger) in positions [0] and [2].  Any code
-    that unpacked exactly 2 values — ``stop, target = compute_levels(...)`` —
-    will get a ValueError at runtime; those sites have been updated to unpack
-    all four or to use the convenience wrappers below.
+    see (stop_trigger, target_trigger) in positions [0] and [2].
     """
     buf = _gtt_stop_buffer()
     e = float(entry_price)
+    if str(direction).lower() == "short":
+        # Stop ABOVE, target BELOW; both are BUY-to-cover legs.
+        stop_trig = round(e * (1.0 + float(stop_pct)), 2)
+        stop_lim  = round(stop_trig * (1.0 + buf), 2)   # above trigger, fills gap-up
+        tgt_trig  = round(e * (1.0 - float(target_pct)), 2)
+        tgt_lim   = tgt_trig
+        return stop_trig, stop_lim, tgt_trig, tgt_lim
+    # LONG (unchanged).
     stop_trig  = round(e * (1.0 - float(stop_pct)), 2)
     stop_lim   = round(stop_trig * (1.0 - buf), 2)
     tgt_trig   = round(e * (1.0 + float(target_pct)), 2)
@@ -103,12 +116,15 @@ class GTTManager:
         prof_id = pos.get("broker_profile")
         qty = int(pos.get("qty") or 0)
         entry = float(pos.get("avg_price") or 0.0)
+        direction = pos.get("direction") or "long"
         if qty <= 0 or entry <= 0:
             return {"symbol": symbol, "status": "SKIPPED_NO_QTY_OR_PRICE"}
 
+        # FUTURES long/short: for a short the STOP is ABOVE entry (buy-stop) and
+        # the TARGET is BELOW (buy-limit). compute_levels inverts on direction.
         stop_trig, stop_lim, tgt_trig, tgt_lim = compute_levels(
             entry, self.config.per_position_stop_pct,
-            self.config.per_position_target_pct)
+            self.config.per_position_target_pct, direction=direction)
 
         broker = self.brokers.get(prof_id) or next(iter(self.brokers.values()), None)
         gtt_id: Optional[str] = None
@@ -126,7 +142,8 @@ class GTTManager:
                     stop_price=stop_trig, stop_limit_price=stop_lim,
                     target_price=tgt_trig,
                     last_price=last, product=product,
-                    exchange=pos.get("exchange") or "NSE")
+                    exchange=pos.get("exchange") or "NSE",
+                    direction=direction)
             except Exception as e:  # best-effort — never block on the backup
                 log.error("place_gtt_oco raised for %s: %s", symbol, e)
                 gtt_id = None

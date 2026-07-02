@@ -103,6 +103,30 @@ class BrokerClient(ABC):
     def get_active_futures(self, symbol: str, expiry_preference: str) -> str:
         ...
 
+    def get_active_futures_or_none(self, symbol: str,
+                                   expiry_preference: str) -> Optional[str]:
+        """Return the tradeable current-month future contract for `symbol`, or
+        None when the symbol has NO active future (never fabricate a contract).
+
+        Used by the futures symbol-eligibility filter to drop Falcon picks that
+        aren't F&O-eligible. The default wraps get_active_futures + swallows the
+        ValueError it raises when no future exists; live adapters may override."""
+        try:
+            return self.get_active_futures(symbol, expiry_preference)
+        except Exception:
+            return None
+
+    def get_fut_margin_per_lot(self, symbol: str,
+                               expiry_preference: str = "near") -> Optional[float]:
+        """Per-LOT initial margin the broker locks to carry ONE lot of `symbol`'s
+        current-month future (product NRML). Retail futures are sized on THIS
+        margin, NOT the full notional (ltp*lot). Long and short both margin-size.
+
+        Default None → the caller must NOT over-size (it should raise
+        InsufficientCapital rather than silently fall back to notional). Live
+        adapters override via kite.order_margins on the FUT contract."""
+        return None
+
     @abstractmethod
     def get_option_chain(self, symbol: str) -> List[Any]:
         ...
@@ -128,7 +152,14 @@ class BrokerClient(ABC):
     @abstractmethod
     async def place_market_exit(self, symbol: str, qty: int,
                                 instrument_type: str,
-                                kite_product: str | None = None) -> OrderResult:
+                                kite_product: str | None = None,
+                                direction: str = "long") -> OrderResult:
+        """Flatten one position with a MARKET order in the CLOSING direction.
+
+        direction=="long"  (default) → SELL  (today's behaviour, unchanged).
+        direction=="short" → BUY-to-cover (close a short future).
+        A wrong-direction exit would DOUBLE the position instead of closing it,
+        so every caller MUST pass the position's stored direction for shorts."""
         ...
 
     def get_order_status(self, order_id: str) -> dict:
@@ -156,14 +187,21 @@ class BrokerClient(ABC):
                       target_price: float, last_price: float,
                       product: str = "CNC", exchange: str = "NSE",
                       order_type: str = "LIMIT",
-                      stop_limit_price: Optional[float] = None) -> Optional[str]:
-        """Place a two-leg OCO GTT (STOP + TARGET sell). Returns the broker GTT
-        id, or None when not placed (dry-run / unsupported broker).
+                      stop_limit_price: Optional[float] = None,
+                      direction: str = "long") -> Optional[str]:
+        """Place a two-leg OCO GTT. Returns the broker GTT id, or None when not
+        placed (dry-run / unsupported broker).
 
-        stop_limit_price: limit price for the stop leg. When set it should be
-        slightly below stop_price (the trigger) so the sell order fills even if
-        price gaps below the trigger. Defaults to stop_price when None
-        (backward-compatible — stub implementations ignore it)."""
+        direction=="long" (default) → both legs are SELL; stop is BELOW / target
+        ABOVE (today's behaviour, unchanged).
+        direction=="short" (FUTURES) → both legs are BUY-to-cover; stop is ABOVE
+        entry / target BELOW. A broker that can't express a short OCO returns
+        None (place NONE) — the software stop still protects; NEVER place a
+        wrong-direction GTT.
+
+        stop_limit_price: limit price for the stop leg. For a long it sits BELOW
+        the trigger (fills a gap-down); for a short ABOVE (fills a gap-up).
+        Defaults to stop_price when None (stub implementations ignore it)."""
         return None
 
     def cancel_gtt(self, gtt_id: str) -> Any:

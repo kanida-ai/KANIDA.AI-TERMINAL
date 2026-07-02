@@ -201,6 +201,56 @@ class ZerodhaBroker(BrokerClient):
         idx = min(offset, len(futs) - 1)
         return futs[idx]["tradingsymbol"]
 
+    def get_active_futures_or_none(self, symbol: str,
+                                   expiry_preference: str) -> Optional[str]:
+        """The current-month (near) FUT contract for `symbol`, or None when the
+        symbol has NO tradeable future — used by the F&O symbol-eligibility
+        filter. NEVER fabricates a contract; a lookup error → None (skip)."""
+        try:
+            return self.get_active_futures(symbol, expiry_preference)
+        except Exception as e:
+            log.debug("no active future for %s (%s)", symbol, e)
+            return None
+
+    def get_fut_margin_per_lot(self, symbol: str,
+                               expiry_preference: str = "near") -> Optional[float]:
+        """Per-LOT NRML margin Zerodha locks to carry ONE lot of `symbol`'s
+        current-month future, via kite.order_margins on the FUT contract (NFO).
+
+        Retail futures are sized on THIS margin, not the full notional. Returns
+        None on any failure so the caller REFUSES to size (never over-deploys on
+        notional). Long + short both use the same initial margin (a probe uses
+        BUY qty=lot; SPAN+exposure is symmetric for our sizing purposes)."""
+        try:
+            contract = self.get_active_futures(symbol, expiry_preference)
+            lot = self.get_lot_size(contract)
+            if not lot or lot <= 0:
+                return None
+            kite = self.kite
+            payload = [{
+                "exchange": "NFO",
+                "tradingsymbol": contract,
+                "transaction_type": "BUY",
+                "variety": "regular",
+                "product": "NRML",
+                "order_type": "MARKET",
+                "quantity": int(lot),
+            }]
+            resp = kite.order_margins(payload)
+            if not isinstance(resp, list) or not resp:
+                return None
+            row = resp[0]
+            total = row.get("total")
+            if total is None:
+                components = ("span", "exposure", "var", "additional", "bo", "cash")
+                total = sum(float(row.get(k) or 0) for k in components)
+            total = float(total)
+            return total if total > 0 else None
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("FUT margin lookup failed for %s (%s) — refusing to "
+                        "notional-size", symbol, e)
+            return None
+
     def get_option_chain(self, symbol: str) -> List[Any]:
         chain = []
         for ins in self.kite.instruments("NFO"):
@@ -304,12 +354,20 @@ class ZerodhaBroker(BrokerClient):
 
     async def place_market_exit(self, symbol: str, qty: int,
                                 instrument_type: str,
-                                kite_product: str | None = None) -> OrderResult:
-        """Flatten one position with a direct Kite MARKET SELL.
+                                kite_product: str | None = None,
+                                direction: str = "long") -> OrderResult:
+        """Flatten one position with a direct Kite MARKET order in the CLOSING
+        side.
 
-        kite_product: explicit Kite product string (e.g. "MTF", "CNC", "MIS").
-        When provided it takes precedence over _resolve_product(instrument_type),
-        which maps security-type ("EQ") not trading-product — wrong for MTF sessions.
+        direction=="long"  (default) → SELL  (today's behaviour, unchanged).
+        direction=="short" → BUY-to-cover (close a short future). A wrong side
+        would DOUBLE the position, so the position's stored direction is threaded
+        here by every exit path.
+
+        kite_product: explicit Kite product string (e.g. "MTF", "CNC", "MIS",
+        "NRML"). When provided it takes precedence over
+        _resolve_product(instrument_type), which maps security-type ("EQ") not
+        trading-product — wrong for MTF/FUT sessions.
 
         kite.place_order is a blocking HTTP call. Running it via asyncio.to_thread
         keeps the event loop responsive so ticks, ws_driver, and other coroutines
@@ -321,15 +379,22 @@ class ZerodhaBroker(BrokerClient):
         try:
             kite = self.kite
             trading_symbol, exchange = self._resolve_symbol(symbol)
+            # FUT contracts live on NFO; default equity NSE (unchanged).
+            if exchange == "NSE" and str(instrument_type).upper() == "FUT":
+                exchange = "NFO"
             kexch = getattr(kite, f"EXCHANGE_{exchange}", exchange)
             product = kite_product if kite_product else self._resolve_product(instrument_type)
+            # CLOSING side: long→SELL (unchanged), short→BUY-to-cover.
+            closing_txn = (kite.TRANSACTION_TYPE_BUY
+                           if str(direction).lower() == "short"
+                           else kite.TRANSACTION_TYPE_SELL)
 
             order_id = await asyncio.to_thread(
                 lambda: kite.place_order(
                     variety=kite.VARIETY_REGULAR,
                     exchange=kexch,
                     tradingsymbol=trading_symbol,
-                    transaction_type=kite.TRANSACTION_TYPE_SELL,
+                    transaction_type=closing_txn,
                     quantity=int(qty),
                     product=product,
                     order_type=kite.ORDER_TYPE_MARKET,
@@ -338,8 +403,8 @@ class ZerodhaBroker(BrokerClient):
                     market_protection=2.0,
                 )
             )
-            log.info("place_market_exit: %s qty=%d product=%s order_id=%s",
-                     symbol, qty, product, order_id)
+            log.info("place_market_exit: %s qty=%d product=%s side=%s order_id=%s",
+                     symbol, qty, product, closing_txn, order_id)
             return OrderResult(status="PLACED", broker_order_id=str(order_id),
                                symbol=symbol, qty=qty)
         except Exception as e:
@@ -384,15 +449,23 @@ class ZerodhaBroker(BrokerClient):
                       target_price: float, last_price: float,
                       product: str = "CNC", exchange: str = "NSE",
                       order_type: str = "LIMIT",
-                      stop_limit_price: Optional[float] = None) -> Optional[str]:
-        """Place a two-leg OCO GTT on Kite: a STOP leg (SELL when price <= stop)
-        and a TARGET leg (SELL when price >= target). The broker holds it so a
-        position is protected even if our software is down — the BACKUP floor
-        under the portfolio kill switch.
+                      stop_limit_price: Optional[float] = None,
+                      direction: str = "long") -> Optional[str]:
+        """Place a two-leg OCO GTT on Kite.
 
-        stop_limit_price: limit price for the stop leg's order. When provided it
-        is set BELOW stop_price (the trigger) so the sell order fills even when
-        price gaps below the trigger. Falls back to stop_price when None.
+        LONG (default, UNCHANGED): a STOP leg (SELL when price <= stop, BELOW
+        entry) + a TARGET leg (SELL when price >= target, ABOVE entry). Kite OCO
+        trigger_values are [lower, upper] = [stop, target] and the leg order
+        matches.
+
+        SHORT (FUTURES): both legs are BUY-to-cover; the STOP is ABOVE entry
+        (cover when price rises) and the TARGET is BELOW (cover when price falls).
+        trigger_values sorted [lower, upper] = [target(below), stop(above)] and
+        the legs are re-ordered to match. NEVER place a wrong-direction GTT.
+
+        stop_limit_price: limit price for the stop leg's order — BELOW the trigger
+        for a long (gap-down fill), ABOVE for a short (gap-up fill). Falls back to
+        stop_price when None.
 
         Dry-run / live-disabled → returns None (no real GTT). On any error →
         logs + returns None (best-effort; entry is never blocked on the GTT).
@@ -409,22 +482,31 @@ class ZerodhaBroker(BrokerClient):
                       else kite.ORDER_TYPE_MARKET)
             kexch = getattr(kite, f"EXCHANGE_{exchange}", exchange)
             stop_price = round(float(stop_price), 2)
-            # Stop leg: use stop_limit_price (below trigger) when provided,
-            # otherwise fall back to the trigger price itself.
+            # Stop leg limit: stop_limit_price when provided (below trigger for a
+            # long, above for a short), otherwise the trigger itself.
             stop_lim = round(float(stop_limit_price), 2) if stop_limit_price is not None \
                 else stop_price
             target_price = round(float(target_price), 2)
-            # Kite OCO trigger_values must be [lower, upper]; leg order matches.
-            orders = [
-                {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": int(qty),
-                 "order_type": kotype, "product": kprod, "price": stop_lim},
-                {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": int(qty),
-                 "order_type": kotype, "product": kprod, "price": target_price},
-            ]
+            is_short = str(direction).lower() == "short"
+            txn = (kite.TRANSACTION_TYPE_BUY if is_short
+                   else kite.TRANSACTION_TYPE_SELL)
+            stop_leg = {"transaction_type": txn, "quantity": int(qty),
+                        "order_type": kotype, "product": kprod, "price": stop_lim}
+            target_leg = {"transaction_type": txn, "quantity": int(qty),
+                          "order_type": kotype, "product": kprod, "price": target_price}
+            if is_short:
+                # SHORT: target(below) < stop(above). trigger_values must be
+                # [lower, upper] and legs must match that order.
+                trigger_values = [target_price, stop_price]
+                orders = [target_leg, stop_leg]
+            else:
+                # LONG (unchanged): stop(below) < target(above).
+                trigger_values = [stop_price, target_price]
+                orders = [stop_leg, target_leg]
             gid = _retry_kite_call(
                 lambda: kite.place_gtt(
                     trigger_type=kite.GTT_TYPE_OCO, tradingsymbol=symbol,
-                    exchange=kexch, trigger_values=[stop_price, target_price],
+                    exchange=kexch, trigger_values=trigger_values,
                     last_price=round(float(last_price), 2), orders=orders),
                 "place_gtt(autotrade)", symbol)
             # Kite returns {"trigger_id": <id>} or the id directly depending on ver.

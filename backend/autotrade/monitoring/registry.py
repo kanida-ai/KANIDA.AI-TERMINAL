@@ -35,7 +35,8 @@ class PositionRegistry:
                  sl_level: Optional[float] = None,
                  target_price: Optional[float] = None,
                  entry_date: Optional[str] = None,
-                 broker_account_id: Optional[str] = None) -> None:
+                 broker_account_id: Optional[str] = None,
+                 direction: str = "long") -> None:
         """Insert or update a session position in autotrade_positions.
 
         Keyed by (session_id, symbol, broker_profile). Seeds the mark (ltp) to
@@ -44,8 +45,13 @@ class PositionRegistry:
         PHASE-2 MULTI-TENANT: broker_account_id (NULLABLE) records WHICH vaulted
         account this position was opened through, for per-account audit. NULL =
         the operator/global account (today's behaviour).
+
+        FUTURES long/short: `direction` ('long' default | 'short') is persisted
+        so the P&L sign + exit side invert ONLY for shorts. 'long' is byte-for-
+        byte unchanged.
         """
         now = datetime.now(IST).isoformat()
+        direction = "short" if str(direction).lower() == "short" else "long"
         with falcon_conn() as con:
             existing = con.execute(
                 """SELECT id FROM autotrade_positions
@@ -57,12 +63,13 @@ class PositionRegistry:
                 con.execute(
                     """UPDATE autotrade_positions
                        SET qty=?, avg_price=?, instrument_type=?, exchange=?,
+                           direction=?,
                            sl_level=COALESCE(?, sl_level),
                            target_price=COALESCE(?, target_price),
                            ltp=COALESCE(ltp, ?),
                            status='OPEN'
                        WHERE id=?""",
-                    (qty, avg_price, instrument_type, exchange,
+                    (qty, avg_price, instrument_type, exchange, direction,
                      sl_level, target_price, avg_price, existing[0]),
                 )
             else:
@@ -71,11 +78,11 @@ class PositionRegistry:
                        (session_id, broker_profile, broker_account_id, symbol,
                         instrument_type, exchange, qty, avg_price, sl_level,
                         target_price, ltp, unrealised_pnl, status, exit_lock,
-                        opened_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN', 0, ?)""",
+                        opened_at, direction)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN', 0, ?, ?)""",
                     (self.session_id, broker_profile, broker_account_id, symbol,
                      instrument_type, exchange, qty, avg_price, sl_level,
-                     target_price, avg_price, 0.0, now),
+                     target_price, avg_price, 0.0, now, direction),
                 )
             con.commit()
 
@@ -83,14 +90,16 @@ class PositionRegistry:
                          filled_qty: int, avg_price: float,
                          product: str = "CNC",
                          instrument_type: str = "EQ",
-                         broker_account_id: Optional[str] = None) -> None:
+                         broker_account_id: Optional[str] = None,
+                         direction: str = "long") -> None:
         """Partial fill: register the FILLED qty (spec parity check #3 — 80 not
         0/100)."""
         log.warning("Partial fill registered: %s filled=%d", symbol, filled_qty)
         self.register(symbol=symbol, broker_profile=broker_profile,
                       qty=filled_qty, avg_price=avg_price, product=product,
                       instrument_type=instrument_type,
-                      broker_account_id=broker_account_id)
+                      broker_account_id=broker_account_id,
+                      direction=direction)
 
     # ── Reads ─────────────────────────────────────────────────────────────────
     def get_open_positions(self) -> List[Dict[str, Any]]:
@@ -140,9 +149,14 @@ class PositionRegistry:
                                   fallback_entry=row["avg_price"])
             if ltp is None:
                 return
+            # FUTURES long/short: sign-aware uPnL. For 'long' the CASE is +1 so
+            # this is byte-identical to (ltp-avg)*qty; for 'short' it is
+            # (avg-ltp)*qty (profit when price falls).
             con.execute(
                 """UPDATE autotrade_positions
-                   SET ltp=?, unrealised_pnl=(? - avg_price) * qty
+                   SET ltp=?,
+                       unrealised_pnl=(CASE WHEN direction='short' THEN -1
+                                            ELSE 1 END) * (? - avg_price) * qty
                    WHERE id=?""",
                 (ltp, ltp, row["id"]),
             )
@@ -153,12 +167,16 @@ class PositionRegistry:
                     broker_profile: Optional[str] = None) -> None:
         now = datetime.now(IST).isoformat()
         with falcon_conn() as con:
+            # FUTURES long/short: sign-aware realised P&L. 'long' CASE = +1 →
+            # byte-identical to (exit-avg)*qty; 'short' = (avg-exit)*qty.
             if broker_profile is not None:
                 con.execute(
                     """UPDATE autotrade_positions
                        SET status='CLOSED', close_reason=?, closed_at=?,
                            exit_price=COALESCE(?, ltp),
-                           realised_pnl=(COALESCE(?, ltp, avg_price) - avg_price)*qty
+                           realised_pnl=(CASE WHEN direction='short' THEN -1
+                                              ELSE 1 END)
+                                        * (COALESCE(?, ltp, avg_price) - avg_price)*qty
                        WHERE session_id=? AND symbol=?
                          AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
                     (reason, now, exit_price, exit_price,
@@ -169,7 +187,9 @@ class PositionRegistry:
                     """UPDATE autotrade_positions
                        SET status='CLOSED', close_reason=?, closed_at=?,
                            exit_price=COALESCE(?, ltp),
-                           realised_pnl=(COALESCE(?, ltp, avg_price) - avg_price)*qty
+                           realised_pnl=(CASE WHEN direction='short' THEN -1
+                                              ELSE 1 END)
+                                        * (COALESCE(?, ltp, avg_price) - avg_price)*qty
                        WHERE session_id=? AND symbol=?""",
                     (reason, now, exit_price, exit_price,
                      self.session_id, symbol),
@@ -257,7 +277,7 @@ class PositionRegistry:
             self.session_id, symbol, filled_qty, exit_price)
         with falcon_conn() as con:
             row = con.execute(
-                """SELECT avg_price, qty FROM autotrade_positions
+                """SELECT avg_price, qty, direction FROM autotrade_positions
                    WHERE session_id=? AND symbol=?""",
                 (self.session_id, symbol),
             ).fetchone()
@@ -268,9 +288,11 @@ class PositionRegistry:
             avg_price = float(row["avg_price"] or 0)
             orig_qty = int(row["qty"] or 0)
             remaining_qty = max(0, orig_qty - filled_qty)
-            # Compute realised P&L for the filled portion only.
+            # Compute realised P&L for the filled portion only. FUTURES
+            # long/short: sign +1 for long (byte-identical), -1 for short.
             fill_price = float(exit_price) if exit_price else avg_price
-            partial_realised = (fill_price - avg_price) * filled_qty
+            _sign = -1.0 if str(row["direction"]).lower() == "short" else 1.0
+            partial_realised = _sign * (fill_price - avg_price) * filled_qty
             con.execute(
                 """UPDATE autotrade_positions
                    SET qty=?,

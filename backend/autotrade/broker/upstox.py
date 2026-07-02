@@ -207,7 +207,11 @@ class UpstoxBroker(BrokerClient):
             return {"status": "FAILED", "error": str(e)}
 
     async def place_market_exit(self, symbol: str, qty: int,
-                                instrument_type: str) -> OrderResult:
+                                instrument_type: str,
+                                kite_product: str | None = None,
+                                direction: str = "long") -> OrderResult:
+        # kite_product accepted (ignored) + direction for FUTURES cover:
+        # long→SELL (default), short→BUY-to-cover.
         if not self._live_allowed():
             return OrderResult(status="DRY_RUN", broker_order_id=None,
                                symbol=symbol, qty=qty, raw={"dry_run": True})
@@ -218,10 +222,11 @@ class UpstoxBroker(BrokerClient):
                                error="instrument_key not resolved")
         product = _PRODUCT_MAP.get(getattr(self.profile, "order_product", "CNC"),
                                    "D")
+        _side = "BUY" if str(direction).lower() == "short" else "SELL"
         body = {
             "quantity": int(qty), "product": product, "validity": "DAY",
             "price": 0, "instrument_token": ikey, "order_type": "MARKET",
-            "transaction_type": "SELL", "disclosed_quantity": 0,
+            "transaction_type": _side, "disclosed_quantity": 0,
             "trigger_price": 0, "is_amo": False,
         }
         try:

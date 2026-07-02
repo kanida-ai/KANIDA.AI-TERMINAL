@@ -63,9 +63,11 @@ def test_quantity_never_zero_raises():
 
 
 def test_quantity_fut_lot_rounding():
+    # FUTURES sizing is now MARGIN-based (retail), not notional. Supply a per-lot
+    # margin so the mock reports it; qty must still round to whole lots.
     cfg = _cfg(sizing_mode="equal", instrument_type="FUT", expiry_preference="near")
     alloc = CapitalAllocator(cfg)
     b = MockBroker(profile=None, ltps={"NIFTYW": 200.0, "NIFTYWFUT": 200.0},
-                   lot_size=50)
+                   lot_size=50, fut_margin_per_lot=40_000.0)
     qty = alloc.calculate_quantity("NIFTYW", 1_000_000.0, b)
     assert qty % 50 == 0 and qty > 0

@@ -171,7 +171,7 @@ class PortfolioMonitor:
         with falcon_conn() as con:
             rows = con.execute(
                 """SELECT symbol, qty, avg_price, ltp, unrealised_pnl,
-                          gtt_id, broker_profile, instrument_type
+                          gtt_id, broker_profile, instrument_type, direction
                    FROM autotrade_positions
                    WHERE session_id=? AND status='OPEN' AND qty > 0""",
                 (self.session_id,),
@@ -189,7 +189,7 @@ class PortfolioMonitor:
         with falcon_conn() as con:
             rows = con.execute(
                 """SELECT symbol, qty, avg_price, ltp,
-                          gtt_id, broker_profile, instrument_type
+                          gtt_id, broker_profile, instrument_type, direction
                    FROM autotrade_positions
                    WHERE session_id=? AND status='EXIT_FAILED'
                      AND qty > 0 AND exit_lock=0""",
@@ -221,7 +221,11 @@ class PortfolioMonitor:
             ltp = p.get("ltp")
             if ltp is None:
                 continue
-            total += (ltp - (p.get("avg_price") or 0)) * (p.get("qty") or 0)
+            # FUTURES long/short: sign +1 for long (byte-identical to before),
+            # -1 for short (profit when price falls). invested_basis stays
+            # positive for both — only the numerator sign flips.
+            sign = -1.0 if str(p.get("direction")).lower() == "short" else 1.0
+            total += sign * (ltp - (p.get("avg_price") or 0)) * (p.get("qty") or 0)
         return total
 
     def compute_gross_return(self) -> float:
@@ -268,9 +272,14 @@ class PortfolioMonitor:
             if ltp is None:
                 continue
             with falcon_conn() as con:
+                # FUTURES long/short: sign-aware persisted uPnL so the trail /
+                # kill see profit correctly for shorts. 'long' CASE = +1 →
+                # byte-identical to (ltp-avg)*qty.
                 con.execute(
                     """UPDATE autotrade_positions
-                       SET ltp=?, unrealised_pnl=(? - avg_price)*qty
+                       SET ltp=?,
+                           unrealised_pnl=(CASE WHEN direction='short' THEN -1
+                                                ELSE 1 END) * (? - avg_price)*qty
                        WHERE id=?""",
                     (ltp, ltp, r["id"]),
                 )

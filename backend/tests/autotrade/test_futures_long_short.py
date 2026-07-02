@@ -1,0 +1,474 @@
+"""FUTURES long/short support — additive, PAPER-SAFE, direction-aware.
+
+Covers every place `direction` / P&L sign / exit-side / GTT orientation is
+threaded, PLUS a hard regression assert that a direction="long" (default /
+equity) session is byte-for-byte unchanged.
+
+Everything runs against MockBroker (no real Kite, no network, no real orders).
+"""
+import asyncio
+
+import pytest
+
+import autotrade.broker.router as router_mod
+import autotrade.session as sess_mod
+from autotrade.capital import CapitalAllocator, InsufficientCapitalError
+from autotrade.config import TradingSessionConfig
+from autotrade.execution.orders import build_order
+from autotrade.monitoring.gtt_manager import compute_levels
+from autotrade.monitoring.monitor import PortfolioMonitor
+from autotrade.monitoring.registry import PositionRegistry
+from autotrade.session import TradingSession
+from tests.autotrade.conftest import seed_signals
+from tests.autotrade.mock_broker import MockBroker
+
+
+# ── Config validation ─────────────────────────────────────────────────────────
+
+def test_direction_defaults_long():
+    cfg = TradingSessionConfig(total_allocated_capital=100000.0)
+    assert cfg.direction == "long"
+    cfg.validate()  # must not raise
+
+
+def test_short_requires_fut():
+    cfg = TradingSessionConfig(total_allocated_capital=100000.0,
+                               instrument_type="EQ", direction="short")
+    with pytest.raises(ValueError, match="short is currently supported only for FUT"):
+        cfg.validate()
+
+
+def test_short_fut_valid():
+    cfg = TradingSessionConfig(total_allocated_capital=1_000_000.0,
+                               instrument_type="FUT", direction="short")
+    cfg.validate()  # allowed
+
+
+def test_invalid_direction_rejected():
+    cfg = TradingSessionConfig(total_allocated_capital=100000.0,
+                               direction="sideways")
+    with pytest.raises(ValueError, match="invalid direction"):
+        cfg.validate()
+
+
+def test_direction_round_trips_through_json():
+    cfg = TradingSessionConfig(total_allocated_capital=1_000_000.0,
+                               instrument_type="FUT", direction="short")
+    cfg2 = TradingSessionConfig.from_json(cfg.to_json())
+    assert cfg2.direction == "short"
+
+
+def test_legacy_config_json_defaults_long():
+    # A config_json written before this feature has no `direction` key.
+    cfg = TradingSessionConfig.from_dict(
+        {"total_allocated_capital": 100000.0, "instrument_type": "EQ"})
+    assert cfg.direction == "long"
+
+
+# ── Entry side (build_fut_order transaction_type) ──────────────────────────────
+
+def test_fut_long_entry_is_buy():
+    cfg = TradingSessionConfig(total_allocated_capital=1_000_000.0,
+                               instrument_type="FUT", direction="long")
+    b = MockBroker(profile=None, ltps={"NIFTYW": 200.0}, lot_size=50)
+    order = build_order("NIFTYW", 100, cfg, b)
+    assert order.transaction_type == "BUY"
+    assert order.instrument_type == "FUT"
+    assert order.exchange == "NFO"
+    assert order.product == "NRML"
+
+
+def test_fut_short_entry_is_sell():
+    cfg = TradingSessionConfig(total_allocated_capital=1_000_000.0,
+                               instrument_type="FUT", direction="short")
+    b = MockBroker(profile=None, ltps={"NIFTYW": 200.0}, lot_size=50)
+    order = build_order("NIFTYW", 100, cfg, b)
+    assert order.transaction_type == "SELL"  # sell to OPEN a short
+
+
+def test_equity_entry_always_buy():
+    cfg = TradingSessionConfig(total_allocated_capital=100000.0,
+                               instrument_type="EQ")
+    b = MockBroker(profile=None, ltps={"A": 100.0})
+    order = build_order("A", 10, cfg, b)
+    assert order.transaction_type == "BUY"
+
+
+# ── Futures MARGIN sizing (long AND short) ─────────────────────────────────────
+
+def _fut_cfg(direction="long"):
+    return TradingSessionConfig(total_allocated_capital=1_000_000.0,
+                                top_n_stocks=5, sizing_mode="equal",
+                                instrument_type="FUT", direction=direction)
+
+
+def test_fut_margin_sizing_uses_margin_not_notional():
+    cfg = _fut_cfg("long")
+    alloc = CapitalAllocator(cfg)
+    # notional per lot = ltp*lot = 200*50 = 10,000; margin per lot = 40,000.
+    b = MockBroker(profile=None, ltps={"NIFTYW": 200.0}, lot_size=50,
+                   fut_margin_per_lot=40_000.0)
+    qty = alloc.calculate_quantity("NIFTYW", 200_000.0, b)
+    # margin-sized: floor(200k / 40k) = 5 lots * 50 = 250. (notional would give
+    # floor(200k/10k)=20 lots=1000 — proving we size on margin, not notional.)
+    assert qty == 250
+
+
+def test_fut_short_margin_sizing_same_as_long():
+    long_alloc = CapitalAllocator(_fut_cfg("long"))
+    short_alloc = CapitalAllocator(_fut_cfg("short"))
+    b = MockBroker(profile=None, ltps={"NIFTYW": 200.0}, lot_size=50,
+                   fut_margin_per_lot=40_000.0)
+    q_long = long_alloc.calculate_quantity("NIFTYW", 200_000.0, b)
+    q_short = short_alloc.calculate_quantity("NIFTYW", 200_000.0, b)
+    assert q_long == q_short == 250  # direction does NOT change sizing
+
+
+def test_fut_refuses_when_no_margin_api():
+    cfg = _fut_cfg("long")
+    alloc = CapitalAllocator(cfg)
+    # No fut_margin_per_lot → base default None → must REFUSE (never notional).
+    b = MockBroker(profile=None, ltps={"NIFTYW": 200.0}, lot_size=50)
+    with pytest.raises(InsufficientCapitalError, match="margin unavailable"):
+        alloc.calculate_quantity("NIFTYW", 1_000_000.0, b)
+
+
+def test_fut_insufficient_for_one_lot_margin():
+    cfg = _fut_cfg("long")
+    alloc = CapitalAllocator(cfg)
+    b = MockBroker(profile=None, ltps={"NIFTYW": 200.0}, lot_size=50,
+                   fut_margin_per_lot=40_000.0)
+    with pytest.raises(InsufficientCapitalError, match="1 FUT lot margin"):
+        alloc.calculate_quantity("NIFTYW", 10_000.0, b)
+
+
+# ── P&L sign (registry + monitor) ──────────────────────────────────────────────
+
+def _register(session_id, symbol, qty, avg_price, direction):
+    reg = PositionRegistry(session_id, 1_000_000.0)
+    reg.register(symbol=symbol, broker_profile="p", qty=qty, avg_price=avg_price,
+                 instrument_type="FUT", direction=direction)
+    return reg
+
+
+def test_long_pnl_positive_when_price_rises(clean_positions):
+    sid = "s_long_up"
+    reg = _register(sid, "XFUT", 50, 100.0, "long")
+    reg.update_ltp("XFUT", ltp=110.0, broker_profile="p")
+    mon = PortfolioMonitor(sid, 1_000_000.0)
+    # (110-100)*50 = +500
+    assert abs(mon.total_unrealised() - 500.0) < 1e-6
+
+
+def test_short_pnl_positive_when_price_FALLS(clean_positions):
+    sid = "s_short_down"
+    reg = _register(sid, "XFUT", 50, 100.0, "short")
+    reg.update_ltp("XFUT", ltp=90.0, broker_profile="p")
+    mon = PortfolioMonitor(sid, 1_000_000.0)
+    # short: (avg-ltp)*qty = (100-90)*50 = +500 (profit when price falls)
+    assert abs(mon.total_unrealised() - 500.0) < 1e-6
+
+
+def test_short_pnl_negative_when_price_rises(clean_positions):
+    sid = "s_short_up"
+    reg = _register(sid, "XFUT", 50, 100.0, "short")
+    reg.update_ltp("XFUT", ltp=110.0, broker_profile="p")
+    mon = PortfolioMonitor(sid, 1_000_000.0)
+    # short: (100-110)*50 = -500 (loss when price rises)
+    assert abs(mon.total_unrealised() - (-500.0)) < 1e-6
+
+
+def test_short_realised_pnl_sign_on_close(clean_positions):
+    sid = "s_short_close"
+    reg = _register(sid, "XFUT", 50, 100.0, "short")
+    reg.update_ltp("XFUT", ltp=90.0, broker_profile="p")
+    reg.mark_closed("XFUT", "TRAIL_EXIT", exit_price=90.0, broker_profile="p")
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        row = con.execute(
+            "SELECT realised_pnl FROM autotrade_positions WHERE session_id=? "
+            "AND symbol='XFUT'", (sid,)).fetchone()
+    # covered at 90 having shorted at 100 → +500 realised.
+    assert abs(row["realised_pnl"] - 500.0) < 1e-6
+
+
+def test_short_kill_basis_gross_return_positive_on_fall(clean_positions):
+    sid = "s_short_gr"
+    # A session row is required for invested_basis to persist/read.
+    from falcon.db import falcon_conn
+    from datetime import datetime, timezone, timedelta
+    _ist = datetime.now(timezone(timedelta(hours=5, minutes=30))).isoformat()
+    with falcon_conn() as con:
+        con.execute(
+            """INSERT INTO autotrade_sessions
+               (session_id, created_at, status, mode, total_allocated_capital,
+                config_json)
+               VALUES (?,?,?,?,?,?)""",
+            (sid, _ist, "RUNNING", "paper", 1_000_000.0, "{}"))
+        con.commit()
+    reg = _register(sid, "XFUT", 50, 100.0, "short")
+    # invested_basis = 50*100 = 5000 (POSITIVE for a short too).
+    mon = PortfolioMonitor(sid, 1_000_000.0)
+    assert mon.freeze_invested_basis() == 5000.0
+    assert mon.invested_basis() == 5000.0  # POSITIVE notional
+    reg.update_ltp("XFUT", ltp=95.0, broker_profile="p")
+    gr = mon.compute_gross_return_invested()
+    # uPnL = (100-95)*50 = +250; basis 5000 → +0.05
+    assert abs(gr - 0.05) < 1e-9
+
+
+# ── GTT-OCO direction (compute_levels) ─────────────────────────────────────────
+
+def test_gtt_levels_long_stop_below_target_above():
+    stop_t, stop_l, tgt_t, tgt_l = compute_levels(100.0, 0.03, 0.06,
+                                                  direction="long")
+    assert stop_t == 97.0        # below entry
+    assert tgt_t == 106.0        # above entry
+    assert stop_l < stop_t       # long stop limit below trigger
+
+
+def test_gtt_levels_short_stop_above_target_below():
+    stop_t, stop_l, tgt_t, tgt_l = compute_levels(100.0, 0.03, 0.06,
+                                                  direction="short")
+    assert stop_t == 103.0       # ABOVE entry (buy-stop to cover)
+    assert tgt_t == 94.0         # BELOW entry (buy-limit to cover)
+    assert stop_l > stop_t       # short stop limit ABOVE trigger (gap-up fill)
+
+
+def test_gtt_levels_default_is_long():
+    a = compute_levels(100.0, 0.03, 0.06)
+    b = compute_levels(100.0, 0.03, 0.06, direction="long")
+    assert a == b  # default byte-identical to long
+
+
+# ── GTT-OCO leg construction (place_gtt_oco on ZerodhaBroker) ──────────────────
+
+class _FakeKite:
+    """Minimal Kite surface to capture place_gtt args (never hits network)."""
+    PRODUCT_CNC = "CNC"; PRODUCT_MIS = "MIS"; PRODUCT_NRML = "NRML"
+    ORDER_TYPE_LIMIT = "LIMIT"; ORDER_TYPE_MARKET = "MARKET"
+    TRANSACTION_TYPE_BUY = "BUY"; TRANSACTION_TYPE_SELL = "SELL"
+    GTT_TYPE_OCO = "two-leg"; EXCHANGE_NFO = "NFO"; EXCHANGE_NSE = "NSE"
+
+    def __init__(self):
+        self.gtt_args = None
+
+    def place_gtt(self, **kw):
+        self.gtt_args = kw
+        return {"trigger_id": 111}
+
+
+def _zerodha_with_fake_kite():
+    from autotrade.broker.zerodha import ZerodhaBroker
+    b = ZerodhaBroker(profile=None, dry_run=False)
+    fk = _FakeKite()
+    b._kite = fk
+    # Force the live gate open WITHOUT touching env/order_executor.
+    b._live_allowed = lambda: True
+    return b, fk
+
+
+def test_place_gtt_short_uses_buy_legs_and_sorted_triggers():
+    b, fk = _zerodha_with_fake_kite()
+    b.place_gtt_oco(symbol="XFUT", qty=50, stop_price=103.0, target_price=94.0,
+                    last_price=100.0, product="NRML", exchange="NFO",
+                    stop_limit_price=103.5, direction="short")
+    assert fk.gtt_args is not None
+    # trigger_values must be [lower, upper] = [target(94), stop(103)].
+    assert fk.gtt_args["trigger_values"] == [94.0, 103.0]
+    legs = fk.gtt_args["orders"]
+    # both legs BUY-to-cover for a short.
+    assert all(leg["transaction_type"] == "BUY" for leg in legs)
+
+
+def test_place_gtt_long_unchanged_sell_legs():
+    b, fk = _zerodha_with_fake_kite()
+    b.place_gtt_oco(symbol="A", qty=10, stop_price=97.0, target_price=106.0,
+                    last_price=100.0, product="CNC", exchange="NSE",
+                    stop_limit_price=96.7, direction="long")
+    assert fk.gtt_args["trigger_values"] == [97.0, 106.0]
+    legs = fk.gtt_args["orders"]
+    assert all(leg["transaction_type"] == "SELL" for leg in legs)
+
+
+# ── Exit side (buy-to-cover) via kill switch ───────────────────────────────────
+
+@pytest.fixture
+def patched_fut_brokers(monkeypatch):
+    created = {}
+    shared_ltps = {"A": 100.0, "B": 200.0, "C": 50.0}
+
+    def fake_build_client(profile, dry_run=True):
+        mb = MockBroker(profile=profile, dry_run=False, ltps=shared_ltps,
+                        lot_size=50, fut_margin_per_lot=40_000.0)
+        created[profile.profile_id] = mb
+        return mb
+
+    monkeypatch.setattr(router_mod, "build_client", fake_build_client)
+    monkeypatch.setattr(sess_mod, "build_client", fake_build_client)
+    return created
+
+
+def test_fut_short_session_exit_is_buy_to_cover(clean_positions,
+                                                patched_fut_brokers):
+    seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=1_000_000.0, top_n_stocks=2,
+                               sizing_mode="equal", instrument_type="FUT",
+                               direction="short", kill_switch_enabled=False,
+                               per_position_gtt_enabled=False)
+    sess = TradingSession.create(cfg, mode="paper")
+    res = asyncio.run(sess.start())
+    assert res["status"] == "RUNNING"
+    assert res["n_placed"] == 2
+    # positions registered under the FUT contract, direction short.
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        rows = con.execute(
+            "SELECT symbol, direction FROM autotrade_positions WHERE session_id=?",
+            (sess.session_id,)).fetchall()
+    assert {r["symbol"] for r in rows} == {"AFUT", "BFUT"}
+    assert all(r["direction"] == "short" for r in rows)
+    # Manual kill → every exit is a BUY-to-cover.
+    asyncio.run(sess.kill(reason="OPERATOR"))
+    for mb in patched_fut_brokers.values():
+        for call in mb.exit_calls:
+            assert call["direction"] == "short"
+    assert sess.status()["n_open_positions"] == 0
+
+
+def test_fut_short_kill_fires_when_price_rises(clean_positions,
+                                               patched_fut_brokers):
+    # A short LOSES when price rises → loss-limit kill must fire on a rise.
+    seed_signals([("A", 1, 9.0, 100.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=1_000_000.0, top_n_stocks=1,
+                               sizing_mode="equal", instrument_type="FUT",
+                               direction="short", kill_switch_enabled=True,
+                               kill_switch_pct=0.01, kill_switch_direction="loss",
+                               per_position_gtt_enabled=False)
+    sess = TradingSession.create(cfg, mode="paper")
+    asyncio.run(sess.start())
+    # Price RISES → short loses.
+    for mb in patched_fut_brokers.values():
+        mb.set_ltp("AFUT", 110.0)
+    out = asyncio.run(sess.tick())
+    assert out["kill_switch_fired"] is True
+    assert sess.status()["n_open_positions"] == 0
+
+
+def test_fut_short_kill_NO_fire_when_price_falls(clean_positions,
+                                                 patched_fut_brokers):
+    # A short PROFITS when price falls → a loss-limit must NOT fire (no-fire case).
+    seed_signals([("A", 1, 9.0, 100.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=1_000_000.0, top_n_stocks=1,
+                               sizing_mode="equal", instrument_type="FUT",
+                               direction="short", kill_switch_enabled=True,
+                               kill_switch_pct=0.01, kill_switch_direction="loss",
+                               per_position_gtt_enabled=False)
+    sess = TradingSession.create(cfg, mode="paper")
+    asyncio.run(sess.start())
+    for mb in patched_fut_brokers.values():
+        mb.set_ltp("AFUT", 90.0)   # price falls → short is IN PROFIT
+    out = asyncio.run(sess.tick())
+    assert out["kill_switch_fired"] is False    # loss limit must NOT fire
+    assert out["gross_return"] > 0              # short is profitable
+    assert sess.status()["n_open_positions"] == 1
+
+
+# ── Symbol eligibility filter ──────────────────────────────────────────────────
+
+@pytest.fixture
+def patched_fut_brokers_missing_future(monkeypatch):
+    created = {}
+    shared_ltps = {"A": 100.0, "B": 200.0, "C": 50.0}
+
+    def fake_build_client(profile, dry_run=True):
+        mb = MockBroker(profile=profile, dry_run=False, ltps=shared_ltps,
+                        lot_size=50, fut_margin_per_lot=40_000.0,
+                        no_future_symbols={"B"})   # B has no tradeable future
+        created[profile.profile_id] = mb
+        return mb
+
+    monkeypatch.setattr(router_mod, "build_client", fake_build_client)
+    monkeypatch.setattr(sess_mod, "build_client", fake_build_client)
+    return created
+
+
+def test_fut_session_skips_symbols_without_a_future(
+        clean_positions, patched_fut_brokers_missing_future):
+    seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0),
+                  ("C", 3, 7.0, 50.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=1_500_000.0, top_n_stocks=3,
+                               sizing_mode="equal", instrument_type="FUT",
+                               direction="long", kill_switch_enabled=False,
+                               per_position_gtt_enabled=False)
+    sess = TradingSession.create(cfg, mode="paper")
+    res = asyncio.run(sess.start())
+    # B is F&O-ineligible → only A + C placed (never fabricated).
+    assert res["status"] == "RUNNING"
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        rows = con.execute(
+            "SELECT symbol FROM autotrade_positions WHERE session_id=?",
+            (sess.session_id,)).fetchall()
+    syms = {r["symbol"] for r in rows}
+    assert syms == {"AFUT", "CFUT"}
+    assert "BFUT" not in syms
+
+
+# ── REGRESSION: equity long path is byte-for-byte unchanged ────────────────────
+
+@pytest.fixture
+def patched_eq_brokers(monkeypatch):
+    created = {}
+    shared_ltps = {"A": 100.0, "B": 200.0}
+
+    def fake_build_client(profile, dry_run=True):
+        mb = MockBroker(profile=profile, dry_run=False, ltps=shared_ltps)
+        created[profile.profile_id] = mb
+        return mb
+
+    monkeypatch.setattr(router_mod, "build_client", fake_build_client)
+    monkeypatch.setattr(sess_mod, "build_client", fake_build_client)
+    return created
+
+
+def test_equity_long_session_order_pnl_exit_unchanged(clean_positions,
+                                                      patched_eq_brokers):
+    seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=100000.0, top_n_stocks=2,
+                               sizing_mode="equal", kill_switch_enabled=False,
+                               per_position_gtt_enabled=False)
+    assert cfg.direction == "long"
+    sess = TradingSession.create(cfg, mode="paper")
+    asyncio.run(sess.start())
+    # positions registered under the BARE symbol (not a FUT contract), long.
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        rows = con.execute(
+            "SELECT symbol, direction FROM autotrade_positions WHERE session_id=?",
+            (sess.session_id,)).fetchall()
+    assert {r["symbol"] for r in rows} == {"A", "B"}
+    assert all(r["direction"] == "long" for r in rows)
+    # P&L sign: price rises → long profits.
+    for mb in patched_eq_brokers.values():
+        mb.set_ltp("A", 110.0)
+        mb.set_ltp("B", 210.0)
+    out = asyncio.run(sess.tick())
+    assert out["gross_return"] > 0          # long profits on a rise (unchanged)
+    # Exit side: long → SELL (default).
+    asyncio.run(sess.kill(reason="OPERATOR"))
+    for mb in patched_eq_brokers.values():
+        for call in mb.exit_calls:
+            assert call["direction"] == "long"
+    assert sess.status()["n_open_positions"] == 0
+
+
+def test_equity_long_pnl_math_byte_identical(clean_positions):
+    # Direct registry/monitor check: long uPnL == (ltp-avg)*qty exactly.
+    sid = "s_eq_long"
+    reg = PositionRegistry(sid, 100000.0)
+    reg.register(symbol="A", broker_profile="p", qty=10, avg_price=100.0,
+                 instrument_type="EQ")   # no direction arg → defaults long
+    reg.update_ltp("A", ltp=105.0, broker_profile="p")
+    mon = PortfolioMonitor(sid, 100000.0)
+    assert abs(mon.total_unrealised() - 50.0) < 1e-9   # (105-100)*10
