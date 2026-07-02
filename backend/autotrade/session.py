@@ -1095,16 +1095,39 @@ class TradingSession:
         # drivers / arm NO square-off. Prevents a phantom-basket session that
         # sits RUNNING and tries to square off non-existent positions.
         # (2026-07-01 incident: all 5 NRML-on-equity legs rejected.)
+        # DRY_RUN counts as a (paper) fill — a paper session places DRY_RUN legs
+        # and must go RUNNING to monitor its paper positions, NOT be failed.
+        # (2026-07-02: the gate was marking paper sessions FAILED because DRY_RUN
+        # was excluded here.)
         n_filled = sum(1 for p in placed
-                       if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE"))
-        if placed and n_filled == 0:
-            reason = (f"all {len(placed)} entry legs rejected/failed at the "
-                      "broker — session marked FAILED (no positions placed)")
+                       if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE",
+                                               "DRY_RUN"))
+        # A session with ZERO filled legs has NOTHING to manage → mark FAILED,
+        # not RUNNING. This covers BOTH cases: (a) legs were attempted but all
+        # rejected/failed at the broker, and (b) NO leg was even attempted because
+        # every pick was skipped upstream (unaffordable / not F&O-eligible), which
+        # leaves `placed` EMPTY — the earlier `if placed and …` guard missed this
+        # and left the session RUNNING with 0 positions (2026-07-02 paper-FUT bug:
+        # a ₹1L futures session skipped all picks — futures margins exceeded each
+        # slice — yet showed RUNNING). No GTT / drivers / square-off armed here.
+        if n_filled == 0:
+            if skipped_picks:
+                syms = ", ".join(str(s.get("symbol")) for s in skipped_picks[:8])
+                reason = (f"no positions placed — all {len(skipped_picks)} pick(s) "
+                          f"were skipped (unaffordable for the per-slice budget or "
+                          f"not F&O-eligible): {syms}. Increase capital or narrow "
+                          f"the basket.")
+            elif placed:
+                reason = (f"all {len(placed)} entry legs rejected/failed at the "
+                          "broker — no positions placed")
+            else:
+                reason = ("no positions placed — no tradeable picks for this "
+                          "session (empty universe/whitelist or none eligible)")
             self._set_status("FAILED", reason=reason, closed_at=_now_ist_iso())
-            log.error("session %s: %s", self.session_id, reason)
+            log.error("session %s marked FAILED: %s", self.session_id, reason)
             return {"session_id": self.session_id, "status": "FAILED",
                     "mode": self.mode, "n_placed": 0, "orders": placed,
-                    "reason": reason}
+                    "skipped_picks": skipped_picks, "reason": reason}
         if placed and n_filled < len(placed):
             log.warning("session %s: %d/%d entry legs failed — continuing with "
                         "the %d filled legs", self.session_id,
