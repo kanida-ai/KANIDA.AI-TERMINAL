@@ -34,14 +34,17 @@ def _margin_product(cfg) -> Optional[str]:
     cash-size on LTP.
 
     MTF  → "MTF" (delivery leverage; UNCHANGED — matches the legacy engine).
-    MIS  → "MIS" (intraday leverage; FEATURE C — previously cash-sized).
+    MIS  → None  (CASH-sized: deploy the ALLOCATED CAPITAL, NOT the broker's
+                  ~5x intraday-margin max). MIS intraday leverage is deliberately
+                  NOT auto-applied — sizing MIS off intraday margin turned a ₹1L
+                  session into ~₹5L notional, which the operator did not intend.
+                  The capital fix (redistribute unused cash + skip unaffordable)
+                  still uses the FULL ₹1L cash; it just doesn't multiply it.
     Anything else (CNC / NRML) → None (cash-size on LTP, unchanged)."""
     itype = getattr(cfg, "instrument_type", "EQ")
     product = str(getattr(cfg, "order_product", "") or "").upper()
     if itype == "MTF" or product == "MTF":
         return "MTF"
-    if product == "MIS":
-        return "MIS"
     return None
 
 

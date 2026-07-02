@@ -75,14 +75,16 @@ def test_quantity_fut_lot_rounding():
 
 # ── FEATURE C: MIS intraday leverage sizing ──────────────────────────────────
 
-def test_mis_sizes_on_margin_leveraged():
-    # MIS now leverages (sizes on intraday MIS margin), like MTF. LTP=100 but the
-    # MIS margin is 20/share (5x) → floor(20000/20)=1000 vs cash floor(20000/100)=200.
+def test_mis_cash_sized_not_leveraged():
+    # MIS is CASH-sized (deploy the allocated capital, NOT the broker's ~5x
+    # intraday-margin max). Even when a MIS margin (20/share, 5x) is available it
+    # is IGNORED — floor(20000/100 LTP)=200, NOT floor(20000/20 margin)=1000.
+    # (MIS auto-leverage was deliberately removed — a ₹1L session must stay ~₹1L.)
     cfg = _cfg(sizing_mode="equal", instrument_type="EQ", order_product="MIS")
     alloc = CapitalAllocator(cfg)
     b = MockBroker(profile=None, ltps={"A": 100.0}, margins={"A": 20.0})
     qty = alloc.calculate_quantity("A", 20000.0, b)
-    assert qty == 1000  # leveraged on the MIS margin, not cash LTP
+    assert qty == 200  # cash-sized on LTP; MIS margin ignored (no auto-leverage)
 
 
 def test_mis_refuses_to_overdeploy_when_margin_api_down():
@@ -94,13 +96,14 @@ def test_mis_refuses_to_overdeploy_when_margin_api_down():
     assert qty == 200  # cash-sized on LTP (safe fallback), NOT leveraged
 
 
-def test_mis_cached_path_leverages_too():
+def test_mis_cached_path_cash_sized_too():
+    # Cached path also CASH-sizes MIS (margin ignored) — parity with the direct path.
     cfg = _cfg(sizing_mode="equal", instrument_type="EQ", order_product="MIS")
     alloc = CapitalAllocator(cfg)
     b = MockBroker(profile=None, ltps={"A": 100.0}, margins={"A": 20.0})
     cache = alloc.prefetch(["A"], b)
     qty = alloc.calculate_quantity_cached("A", 20000.0, b, cache=cache)
-    assert qty == 1000
+    assert qty == 200
 
 
 def test_cnc_unchanged_by_margin_product_helper():
