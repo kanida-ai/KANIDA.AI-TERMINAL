@@ -1794,6 +1794,7 @@ export function PortfolioAutoTrade({
                 loading={previewLoading}
                 err={previewErr}
                 direction={config.kill_switch_direction}
+                orderProduct={config.order_product}
               />
             )}
           </div>
@@ -2669,8 +2670,8 @@ function Stat({ label, value, valueColor, sub }: { label: string; value: string;
 // Honest "—" / loading / error states; nothing is fabricated. UNITS: every pct
 // from the backend is a FRACTION (×100 to display); ₹ via fmtINR/signedINR.
 function PotentialOutcome({
-  preview, loading, err, direction,
-}: { preview: PreviewResponse | null; loading: boolean; err: string | null; direction: KillDirection }) {
+  preview, loading, err, direction, orderProduct,
+}: { preview: PreviewResponse | null; loading: boolean; err: string | null; direction: KillDirection; orderProduct: OrderProduct }) {
   return (
     <div className="mt-4 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.04)' }}>
       <div className="flex items-center gap-2 mb-2">
@@ -2691,7 +2692,7 @@ function PotentialOutcome({
           <KillPreviewCard kill={preview.kill_preview} direction={direction} />
           <p className="text-[10.5px] leading-snug mt-2.5" style={{ color: C.faint }}>
             on <b style={{ color: C.ink2 }}>{fmtINR(preview.invested_basis)}</b> invested
-            {' '}· ~{(preview.leverage ?? 1).toFixed(preview.leverage % 1 === 0 ? 0 : 2)}× ({config.order_product})
+            {' '}· ~{(preview.leverage ?? 1).toFixed(preview.leverage % 1 === 0 ? 0 : 2)}× ({orderProduct})
             {' '}· fund <b style={{ color: C.ink2 }}>{fmtCapital(preview.total_allocated_capital)}</b>
           </p>
         </>
