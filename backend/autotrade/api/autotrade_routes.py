@@ -267,6 +267,14 @@ class RefreshTokenRequest(BaseModel):
     user_id: Optional[str] = Field(None, description="Portal user id (enforced if given)")
     request_token: str = Field(..., description="Broker request_token from the login redirect")
 
+    # The portal sends user_id as an INTEGER (user.id); the backend stores/compares
+    # it as text. Coerce before validation — WITHOUT this, a numeric user_id fails
+    # the `str` type check with HTTP 422 and the token exchange never runs (this is
+    # the Activate-step 422 bug). Mirrors ConnectBrokerAccountRequest / *Session.
+    @field_validator('user_id', mode='before')
+    @classmethod
+    def _coerce_str(cls, v): return _coerce_id(v)
+
 
 class StartSessionRequest(BaseModel):
     when: str = Field(
