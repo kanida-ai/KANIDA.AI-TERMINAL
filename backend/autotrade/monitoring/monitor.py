@@ -130,13 +130,33 @@ class PortfolioMonitor:
             total += float(p.get("qty") or 0) * float(p.get("avg_price") or 0)
         return total
 
+    @staticmethod
+    def _is_fno(positions: List[Dict[str, Any]]) -> bool:
+        """True if the basket is F&O (any FUT/OPT leg). For F&O, qty*avg_price is
+        NOTIONAL exposure (~4-5x the margin), not capital deployed."""
+        return any(
+            (p.get("instrument_type") or "EQ").upper() in ("FUT", "OPT", "CE", "PE")
+            for p in positions)
+
     def freeze_invested_basis(self) -> float:
-        """Capture Σ(qty*avg_price) across the session's OPEN positions and
-        persist it on the session row (FROZEN). Idempotent — call once after
-        entries are placed. Returns the value stored (falls back to
-        total_allocated_capital when there are no positions, to avoid a 0/div)."""
+        """Capture and FREEZE the trailing/kill capital basis on the session row.
+        Idempotent — call once after entries are placed. Falls back to
+        total_allocated_capital when there are no positions (avoids 0/div).
+
+        Product-aware:
+          * cash equity     -> Σ(qty*avg_price): the real position value (CNC cash
+            / MTF leveraged value), as before.
+          * FUTURES/OPTIONS -> total_allocated_capital (the allocated capital ≈ the
+            margin at risk). qty*avg_price for F&O is NOTIONAL exposure (~4-5x the
+            margin), so trailing % MUST key off the capital deployed, not the
+            notional — else arm/floor/stop are measured against a ~5x-too-large
+            number and the trail barely reacts to the money actually at risk.
+        """
         positions = self._open_positions()
-        ib = self.compute_invested_basis(positions)
+        if self._is_fno(positions):
+            ib = self._total_allocated_capital
+        else:
+            ib = self.compute_invested_basis(positions)
         stored = ib if ib > 0 else self._total_allocated_capital
         with falcon_conn() as con:
             con.execute(
