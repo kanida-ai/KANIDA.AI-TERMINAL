@@ -471,6 +471,7 @@ def preview_session_sizing(config: TradingSessionConfig,
             positions.append({"symbol": sk["symbol"],
                               "broker_profile": prof.profile_id,
                               "status": "SKIPPED", "reason": sk["reason"]})
+        plan_units = plan.get("units", {})
         for pick in picks:
             qty = plan_qtys.get(pick.symbol)
             if not qty or qty <= 0:
@@ -479,19 +480,38 @@ def preview_session_sizing(config: TradingSessionConfig,
             ref_price = float(_c.get("ltp") or 0.0) or (broker.get_ltp(pick.symbol) or 0.0)
             invested = qty * ref_price
             invested_basis += invested
-            positions.append({"symbol": pick.symbol,
-                              "broker_profile": prof.profile_id,
-                              "qty": qty, "ref_price": ref_price,
-                              "invested_value": invested,
-                              "order_product": prof.order_product,
-                              "instrument_type": prof.instrument_type})
+            row = {"symbol": pick.symbol,
+                   "broker_profile": prof.profile_id,
+                   "qty": qty, "ref_price": ref_price,
+                   "invested_value": invested,
+                   "order_product": prof.order_product,
+                   "instrument_type": prof.instrument_type}
+            # SIZING TRANSPARENCY: surface lots + margin per position. unit_budget =
+            # ₹ per increment (margin_per_lot for FUT / margin_per_share for MTF);
+            # unit_qty = shares per increment (lot_size for F&O, 1 for cash equity).
+            _u = plan_units.get(pick.symbol) or {}
+            _ub = float(_u.get("unit_budget") or 0.0)
+            _uq = int(_u.get("unit_qty") or 1) or 1
+            _n_units = (qty // _uq) if _uq > 0 else 0
+            row["margin"] = _n_units * _ub          # ₹ capital/margin deployed here
+            if prof.instrument_type in ("FUT", "CE", "PE"):
+                row["lots"] = _n_units
+                row["lot_size"] = _uq
+                row["margin_per_lot"] = _ub
+                row["notional"] = invested          # qty * price = contract exposure
+            positions.append(row)
 
     total_alloc = float(config.total_allocated_capital)
     basis = invested_basis if invested_basis > 0 else total_alloc
     leverage = (invested_basis / total_alloc) if total_alloc > 0 else 0.0
+    # Total ₹ margin/capital actually deployed across sized positions (F&O margin /
+    # MTF margin). For cash CNC this ≈ invested_basis.
+    total_margin = sum(float(p.get("margin") or 0.0)
+                       for p in positions if p.get("status") != "SKIPPED")
     return {
         "invested_basis": invested_basis,
         "total_allocated_capital": total_alloc,
+        "total_margin": total_margin,
         "leverage": leverage,
         "n_positions": len([p for p in positions if p.get("status") != "SKIPPED"]),
         "positions": positions,

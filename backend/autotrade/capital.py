@@ -425,8 +425,13 @@ class CapitalAllocator:
             # within the budget — remainder < cheapest increment. Deterministic.
 
         remainder = budget_cap - deployed
+        # `units` = per-symbol economics of ONE increment (unit_budget = ₹/increment
+        # = margin_per_lot for FUT / margin_per_share for MTF / premium*lot for
+        # options; unit_qty = shares per increment = lot_size for F&O, 1 for cash).
+        # Exposed so the preview can show lots + margin transparently. Additive —
+        # existing callers read only quantities/skipped.
         return {"quantities": quantities, "skipped": skipped,
-                "deployed": deployed, "remainder": remainder}
+                "deployed": deployed, "remainder": remainder, "units": units}
 
 
 def _select_atm_strike(chain, option_type: str, spot: float) -> float:
