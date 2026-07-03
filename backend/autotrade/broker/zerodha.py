@@ -15,11 +15,41 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, List, Optional
 
 from .base import BrokerClient, OrderResult
 
 log = logging.getLogger("kanida.autotrade.broker.zerodha")
+
+# ── Process-wide caches for the (slow) NFO instrument master + derived contract
+# facts. kite.instruments("NFO") downloads + parses ~34k rows (~2s) and was called
+# ~10× per futures preview (get_active_futures + get_lot_size + get_fut_margin_per_lot,
+# each per symbol) → ~20s previews. These facts are BROKER-WIDE (not per-account)
+# and change ~daily, so cache them process-wide. Result: FUT preview ~20s → ~1s,
+# and re-previewing after a capital change is ~instant (pure arithmetic, no I/O).
+_NFO_MASTER: dict = {"rows": None, "ts": 0.0}
+_NFO_MASTER_TTL = 6 * 3600.0     # instrument master rolls ~daily
+_FUT_CONTRACT: dict = {}          # (name, offset) -> (tradingsymbol, ts)
+_FUT_LOT: dict = {}               # contract -> (lot_size, ts)
+_FUT_MARGIN: dict = {}            # (name, expiry_pref) -> (margin_per_lot, ts)
+_FUT_FACT_TTL = 6 * 3600.0        # contract + lot size (daily)
+_FUT_MARGIN_TTL = 3600.0          # per-lot margin drifts slowly; 1h fresh enough for a preview
+_LTP_CACHE: dict = {}             # symbol -> (last_price, ts) — REST-fallback prices
+_LTP_TTL = 8.0                    # brief; a config-time PREVIEW estimate tolerates ~8s staleness
+
+
+def _nfo_instruments(kite):
+    """The NFO instrument master, cached process-wide (TTL) so repeated
+    contract/lot lookups don't re-download the ~34k-row dump each time."""
+    now = time.time()
+    rows = _NFO_MASTER["rows"]
+    if rows is not None and (now - _NFO_MASTER["ts"]) < _NFO_MASTER_TTL:
+        return rows
+    rows = kite.instruments("NFO")
+    _NFO_MASTER["rows"] = rows
+    _NFO_MASTER["ts"] = now
+    return rows
 
 
 class ZerodhaBroker(BrokerClient):
@@ -148,17 +178,32 @@ class ZerodhaBroker(BrokerClient):
                 misses.append(s)
         if not misses:
             return out
-        # Pass 2: ONE batched REST call for the misses — exchange-aware per symbol
-        # (NSE cash / NFO F&O), so futures resolve instead of silently failing.
+        # Pass 1b: short-TTL REST-price cache — so re-previewing after a CAPITAL
+        # change (same symbols) doesn't re-hit the REST quote API. A preview is an
+        # estimate; ~8s staleness is fine. Live monitoring never uses this path (it
+        # reads the WS tick cache in Pass 1).
+        now = time.time()
+        cold: List[str] = []
+        for s in misses:
+            hit = _LTP_CACHE.get(s)
+            if hit and (now - hit[1]) < _LTP_TTL:
+                out[s] = hit[0]
+            else:
+                cold.append(s)
+        if not cold:
+            return out
+        # Pass 2: ONE batched REST call for the cold misses — exchange-aware per
+        # symbol (NSE cash / NFO F&O), so futures resolve instead of silently failing.
         try:
-            key_of = {s: self._rest_key(s) for s in misses}
+            key_of = {s: self._rest_key(s) for s in cold}
             data = self.kite.ltp(list(key_of.values()))
-            for s in misses:
+            for s in cold:
                 row = data.get(key_of[s])
                 if row and row.get("last_price"):
                     out[s] = float(row["last_price"])
+                    _LTP_CACHE[s] = (out[s], now)
         except Exception as e:
-            log.warning("batch REST ltp failed for %d syms: %s", len(misses), e)
+            log.warning("batch REST ltp failed for %d syms: %s", len(cold), e)
         return out
 
     # ── MTF margin (leverage) — reuse the legacy order_margins lookup ─────────
@@ -194,18 +239,26 @@ class ZerodhaBroker(BrokerClient):
 
     # ── Instrument master (F&O) — always runtime, never hardcoded ────────────
     def get_lot_size(self, contract: str) -> int:
+        now = time.time()
+        hit = _FUT_LOT.get(contract)
+        if hit and (now - hit[1]) < _FUT_FACT_TTL:
+            return hit[0]
         try:
             from falcon.trade.services import mtf_eligibility
             fn = getattr(mtf_eligibility, "get_lot_size", None)
             if fn:
-                return int(fn(self.kite, contract))
+                val = int(fn(self.kite, contract))
+                _FUT_LOT[contract] = (val, now)
+                return val
         except Exception as e:  # pragma: no cover
             log.debug("mtf_eligibility lot_size miss for %s: %s", contract, e)
-        # Fallback: scan the instrument dump for the contract's lot_size.
+        # Fallback: scan the CACHED instrument dump for the contract's lot_size.
         try:
-            for ins in self.kite.instruments("NFO"):
+            for ins in _nfo_instruments(self.kite):
                 if ins.get("tradingsymbol") == contract:
-                    return int(ins["lot_size"])
+                    val = int(ins["lot_size"])
+                    _FUT_LOT[contract] = (val, now)
+                    return val
         except Exception as e:
             log.warning("instrument master lot_size lookup failed for %s: %s",
                         contract, e)
@@ -213,15 +266,22 @@ class ZerodhaBroker(BrokerClient):
 
     def get_active_futures(self, symbol: str, expiry_preference: str) -> str:
         offset = {"near": 0, "next": 1, "far": 2}.get(expiry_preference, 0)
+        now = time.time()
+        key = (symbol, offset)
+        hit = _FUT_CONTRACT.get(key)
+        if hit and (now - hit[1]) < _FUT_FACT_TTL:
+            return hit[0]
         futs = []
-        for ins in self.kite.instruments("NFO"):
+        for ins in _nfo_instruments(self.kite):
             if ins.get("name") == symbol and ins.get("instrument_type") == "FUT":
                 futs.append(ins)
         if not futs:
             raise ValueError(f"no active futures for {symbol}")
         futs.sort(key=lambda i: i["expiry"])
         idx = min(offset, len(futs) - 1)
-        return futs[idx]["tradingsymbol"]
+        ts = futs[idx]["tradingsymbol"]
+        _FUT_CONTRACT[key] = (ts, now)
+        return ts
 
     def get_active_futures_or_none(self, symbol: str,
                                    expiry_preference: str) -> Optional[str]:
@@ -242,7 +302,15 @@ class ZerodhaBroker(BrokerClient):
         Retail futures are sized on THIS margin, not the full notional. Returns
         None on any failure so the caller REFUSES to size (never over-deploys on
         notional). Long + short both use the same initial margin (a probe uses
-        BUY qty=lot; SPAN+exposure is symmetric for our sizing purposes)."""
+        BUY qty=lot; SPAN+exposure is symmetric for our sizing purposes).
+
+        Cached per (symbol, expiry) with a short TTL so re-previewing after a
+        capital change is instant (the margin doesn't change when the fund does)."""
+        now = time.time()
+        mkey = (symbol, expiry_preference)
+        mhit = _FUT_MARGIN.get(mkey)
+        if mhit and (now - mhit[1]) < _FUT_MARGIN_TTL:
+            return mhit[0]
         try:
             contract = self.get_active_futures(symbol, expiry_preference)
             lot = self.get_lot_size(contract)
@@ -267,7 +335,10 @@ class ZerodhaBroker(BrokerClient):
                 components = ("span", "exposure", "var", "additional", "bo", "cash")
                 total = sum(float(row.get(k) or 0) for k in components)
             total = float(total)
-            return total if total > 0 else None
+            result = total if total > 0 else None
+            if result is not None:
+                _FUT_MARGIN[mkey] = (result, now)   # cache only successful probes
+            return result
         except Exception as e:  # pragma: no cover - defensive
             log.warning("FUT margin lookup failed for %s (%s) — refusing to "
                         "notional-size", symbol, e)
