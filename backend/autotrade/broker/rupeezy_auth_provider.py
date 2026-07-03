@@ -120,6 +120,9 @@ class RupeezyAuth(BrokerAuthProvider):
             raise ValueError(
                 "rupeezy auth: account missing application_id (api_key) / "
                 "x-api-key (api_secret)")
+        # Defensive: strip stray whitespace/newline a copy-paste may append — a
+        # trailing char breaks BOTH the checksum and the token Vortex validates.
+        request_token = (request_token or "").strip()
         checksum = self.compute_checksum(application_id, request_token, x_api_key)
         body = {
             "checksum": checksum,
@@ -127,6 +130,11 @@ class RupeezyAuth(BrokerAuthProvider):
             "token": request_token,
         }
         url = f"{_api_base()}/user/session"
+        # Diagnostics (no secrets): confirms the token actually arrived + its shape,
+        # so a truncated/mis-copied token is visible in logs.
+        log.info("rupeezy exchange: app_id=%s token_len=%d token_preview=%s…%s",
+                 application_id, len(request_token),
+                 request_token[:6], request_token[-4:] if len(request_token) > 10 else "")
         r = requests.post(url, json=body, timeout=_HTTP_TIMEOUT,
                           proxies=_proxies() or None)
         r.raise_for_status()
@@ -134,9 +142,22 @@ class RupeezyAuth(BrokerAuthProvider):
         data = payload.get("data") or {}
         access_token = data.get("access_token")
         if not access_token:
-            raise ValueError(
-                f"rupeezy auth: no access_token in exchange response "
-                f"(keys={list(payload.keys())})")
+            # Surface Rupeezy's OWN reason (message/status) instead of an opaque
+            # "no access_token", and log the full body so we can diagnose. Common
+            # causes: token expired/already-used, or checksum (app_id/secret) off.
+            vmsg = (payload.get("message") or payload.get("error")
+                    or payload.get("errorMessage") or "")
+            vstatus = payload.get("status") or ""
+            log.warning("rupeezy exchange REJECTED: http=%s status=%r message=%r "
+                        "body=%.600s", r.status_code, vstatus, vmsg, str(payload))
+            detail = "rupeezy rejected the login token"
+            if vmsg:
+                detail += f" — {vmsg}"
+            if vstatus:
+                detail += f" (status: {vstatus})"
+            detail += (". If it says invalid/expired, click Log in again for a "
+                       "fresh token and paste it right away.")
+            raise ValueError(detail)
         return TokenSet(access_token=str(access_token), refresh_token=None,
                         expires_at=None)  # session-scoped; health-ping drives EXPIRED
 
