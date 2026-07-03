@@ -82,19 +82,75 @@ def _default_ltp_source(symbol: str) -> Optional[float]:
         return None
 
 
+# ── F&O instrument-token cache (NFO) ─────────────────────────────────────────
+# The legacy mtf_eligibility cache pulls ONLY kite.instruments("NSE") (cash
+# equity), so its get_instrument_token returns None for any FUT/OPT contract
+# symbol (e.g. "INFY26JULFUT"). Without a token the WS never subscribes the
+# contract → F&O positions get NO live ticks and the sub-second kill/trail path
+# is blind to them (it silently falls back to the 5s REST poll). We resolve the
+# NFO token ourselves here, NEVER modifying the legacy service.
+_NFO_TOKENS: Dict[str, int] = {}
+_NFO_FETCHED_AT: Optional[float] = None
+_NFO_TTL_SEC = 6 * 3600  # F&O contracts are added/expire; refresh a few times/day.
+
+
+def _nfo_token(kite, symbol: str) -> Optional[int]:
+    """instrument_token for an NFO contract tradingsymbol, or None. Cached with a
+    TTL; a refresh failure returns None (caller skips → poll-only for that
+    symbol, never crashes)."""
+    global _NFO_TOKENS, _NFO_FETCHED_AT
+    import time as _time
+    now = _time.monotonic()
+    if _NFO_FETCHED_AT is None or (now - _NFO_FETCHED_AT) > _NFO_TTL_SEC:
+        try:
+            fresh: Dict[str, int] = {}
+            for ins in kite.instruments("NFO"):
+                ts = ins.get("tradingsymbol")
+                tok = int(ins.get("instrument_token") or 0)
+                if ts and tok > 0:
+                    fresh[ts] = tok
+            _NFO_TOKENS = fresh
+            _NFO_FETCHED_AT = now
+        except Exception as e:  # pragma: no cover - defensive
+            log.debug("ws_driver: NFO instrument dump failed: %s", e)
+            return _NFO_TOKENS.get(symbol)
+    return _NFO_TOKENS.get(symbol)
+
+
+def _resolve_token(kite, sym: str):
+    """Resolve a WS instrument token for `sym`: try the legacy NSE-cash cache
+    first (equity), then the NFO master (F&O contracts)."""
+    from falcon.trade.services import mtf_eligibility
+    tok = mtf_eligibility.get_instrument_token(kite, sym)
+    if tok and tok > 0:
+        return int(tok)
+    # F&O contract symbols (…FUT / …<strike>CE|PE) live on NFO, not in the cash
+    # cache. Only probe NFO when the symbol shape looks like a contract so we
+    # don't pull the (large) NFO dump for a plain equity typo.
+    su = sym.upper()
+    looks_fno = su.endswith("FUT") or (
+        (su.endswith("CE") or su.endswith("PE"))
+        and len(su) >= 3 and su[-3].isdigit())
+    if looks_fno:
+        ntok = _nfo_token(kite, sym)
+        if ntok and ntok > 0:
+            return int(ntok)
+    return None
+
+
 def _subscribe_session_symbols(symbols) -> None:
     """Best-effort subscribe the session's symbols on the shared KiteTicker so
-    the LTP cache fills for them. No-op if the ticker isn't connected."""
+    the LTP cache fills for them. No-op if the ticker isn't connected. Resolves
+    both cash-equity (NSE) and F&O contract (NFO) tokens."""
     try:
         from falcon.trade.services import kite_ticker
         if not kite_ticker.is_connected():
             return
         from services.kite_auth import get_kite_client
-        from falcon.trade.services import mtf_eligibility
         kite = get_kite_client(check=False)
         tokens = []
         for sym in symbols:
-            tok = mtf_eligibility.get_instrument_token(kite, sym)
+            tok = _resolve_token(kite, sym)
             if tok and tok > 0:
                 tokens.append(int(tok))
                 with kite_ticker._state.lock:

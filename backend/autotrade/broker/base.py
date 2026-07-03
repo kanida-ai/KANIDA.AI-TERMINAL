@@ -179,6 +179,24 @@ class BrokerClient(ABC):
         """
         return True
 
+    def get_net_position_qty(self, symbol: str,
+                             instrument_type: str = "EQ") -> Optional[int]:
+        """Signed net traded quantity the BROKER currently holds for `symbol`
+        (positive = net long, negative = net short, 0 = flat), or None when the
+        broker can't answer (unknown / API error) — in which case the caller must
+        NOT assume flat and should proceed with its normal exit.
+
+        Used as a PRE-EXIT reconciliation guard: if the operator (or a fired
+        broker SL/GTT) already closed the position outside our software, our DB
+        still shows it OPEN and a blind exit would place a NAKED order (a fresh
+        short on a flat book / doubling on the other side). Checking the broker's
+        live net first lets us skip that.
+
+        Default (paper / stub / no live creds): None — do NOT reconcile in paper
+        (there is no real broker book), so the exit path is byte-for-byte
+        unchanged. Only the live Zerodha adapter returns a real number."""
+        return None
+
     # ── GTT-OCO (broker-held per-position backup floor) ───────────────────────
     # Default no-ops so stub brokers (fyers/upstox/angel/dhan) and dry-run never
     # place real GTTs — they return None. Only the live Zerodha adapter overrides

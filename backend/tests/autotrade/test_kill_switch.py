@@ -129,6 +129,55 @@ def test_exit_lock_prevents_double_exit(clean_positions):
     assert res["n_exited_ok"] == 0
 
 
+def test_kill_reconciles_leg_already_flat_at_broker(clean_positions):
+    """Pre-exit reconciliation (2026-07-02): if the broker reports a leg is
+    already flat (operator closed it), the kill switch places NO order for that
+    leg, reconciles the row CLOSED, and still flattens the rest of the basket.
+    Also proves the STEP-3 result iterator stays aligned with exit_coros."""
+    sid = _session_id()
+    cap = 1_000_000.0
+    _make_session_row(sid, cap)
+    reg = PositionRegistry(sid, cap)
+    for s in ("X", "Y"):
+        reg.register(symbol=s, broker_profile="zer", qty=10, avg_price=100.0)
+        reg.update_ltp(s, 100.0)
+    # Broker: X already FLAT (0), Y still held (10).
+    broker = MockBroker(profile=BrokerProfile("zer", "mock"), dry_run=False,
+                        ltps={"X": 100.0, "Y": 100.0},
+                        net_positions={"X": 0, "Y": 10})
+    cfg = TradingSessionConfig(total_allocated_capital=cap, kill_switch_enabled=True)
+    ks = KillSwitchExecutor(sid, cfg, {"zer": broker}, reg)
+    res = asyncio.run(ks.fire("TEST"))
+    # Only Y got a real exit order; X was reconciled (no naked order).
+    assert [e[0] for e in broker.exits] == ["Y"]
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        rows = {r["symbol"]: r["close_reason"] for r in con.execute(
+            "SELECT symbol, close_reason FROM autotrade_positions "
+            "WHERE session_id=?", (sid,)).fetchall()}
+    assert "RECONCILED_FLAT" in rows["X"]
+
+
+def test_kill_paper_broker_no_reconcile_unchanged(clean_positions):
+    """Paper / broker that can't answer the net probe → kill path unchanged
+    (both legs get exit orders)."""
+    sid = _session_id()
+    cap = 1_000_000.0
+    _make_session_row(sid, cap)
+    reg = PositionRegistry(sid, cap)
+    for s in ("X", "Y"):
+        reg.register(symbol=s, broker_profile="zer", qty=10, avg_price=100.0)
+        reg.update_ltp(s, 100.0)
+    # net_positions=None (default) → get_net_position_qty returns None.
+    broker = MockBroker(profile=BrokerProfile("zer", "mock"), dry_run=False,
+                        ltps={"X": 100.0, "Y": 100.0})
+    cfg = TradingSessionConfig(total_allocated_capital=cap, kill_switch_enabled=True)
+    ks = KillSwitchExecutor(sid, cfg, {"zer": broker}, reg)
+    res = asyncio.run(ks.fire("TEST"))
+    assert sorted(e[0] for e in broker.exits) == ["X", "Y"]
+    assert res["n_exited_ok"] == 2
+
+
 def test_exit_lock_reentrant_same_reason(clean_positions):
     sid = _session_id()
     cap = 500000.0

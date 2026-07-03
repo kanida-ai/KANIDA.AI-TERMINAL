@@ -450,6 +450,41 @@ class ZerodhaBroker(BrokerClient):
             log.warning("get_order_status failed for order %s: %s", order_id, e)
             raise
 
+    def get_net_position_qty(self, symbol: str,
+                             instrument_type: str = "EQ"):
+        """Signed net quantity Kite currently holds for `symbol` (via
+        kite.positions()['net']), or None when unknown / not live.
+
+        Matches on tradingsymbol AND (for F&O) the NFO exchange, so a FUT contract
+        isn't confused with a cash symbol. Returns 0 when the symbol is genuinely
+        flat at the broker. Used as a pre-exit reconciliation guard so we never
+        place a naked order on a position the operator already closed.
+
+        Paper / live-disabled → None (no real broker book to reconcile against;
+        the caller then proceeds with its normal exit — paper is unchanged)."""
+        if not self._live_allowed():
+            return None
+        try:
+            trading_symbol, exchange = self._resolve_symbol(symbol)
+            if exchange == "NSE" and str(instrument_type).upper() in (
+                    "FUT", "OPT", "CE", "PE"):
+                exchange = "NFO"
+            pos = self.kite.positions() or {}
+            net = pos.get("net") or []
+            for row in net:
+                if str(row.get("tradingsymbol")) != trading_symbol:
+                    continue
+                # When we know the F&O segment, require it to match so a cash
+                # row can't shadow a contract of the same name.
+                rexch = str(row.get("exchange") or "").upper()
+                if exchange in ("NSE", "NFO") and rexch and rexch != exchange:
+                    continue
+                return int(row.get("quantity") or 0)
+            return 0  # not in the net book → flat at the broker
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("get_net_position_qty failed for %s: %s", symbol, e)
+            return None
+
     def cancel_order_sync(self, order_id: str) -> bool:
         """Synchronously cancel a regular Kite order.
 

@@ -570,6 +570,33 @@ async def _exit_single_position(
     # from the position's stored direction so a per-stock stop / retry can never
     # place a wrong-side order that would DOUBLE a short instead of covering it.
     direction = position.get("direction") or "long"
+
+    # PRE-EXIT RECONCILIATION GUARD (real-money safety — 2026-07-02 incident).
+    # If the operator (or a fired broker SL/GTT) already closed this position at
+    # the broker, our DB still shows it OPEN and a blind market exit would place a
+    # NAKED order (a fresh short on a flat book, or a cover that opens the other
+    # side). Ask the broker for its live net qty FIRST: when it reports the
+    # position is already flat, mark our row CLOSED (reconcile) and place NOTHING.
+    # This is the fix for the EXIT_FAILED retry loop that kept re-attempting an
+    # already-closed FUT. Returns None in paper / when the broker can't answer →
+    # we then proceed with the normal exit (paper is byte-for-byte unchanged).
+    try:
+        net_qty = broker.get_net_position_qty(position.get("symbol"), itype)
+    except Exception as _net_e:  # never block the exit on the reconcile probe
+        log.debug("pre-exit net-position probe failed %s/%s: %s",
+                  session_id, symbol, _net_e)
+        net_qty = None
+    if net_qty is not None and net_qty == 0:
+        log.warning(
+            "pre-exit reconcile %s/%s: broker net qty is 0 (already closed "
+            "externally) — marking CLOSED, placing NO order", session_id, symbol)
+        try:
+            registry.mark_closed(symbol, f"{reason}_RECONCILED_FLAT",
+                                 exit_price=position.get("ltp"),
+                                 broker_profile=prof_id)
+        finally:
+            _exit_gate_mod.release_exit_session(session_id, symbol)
+        return {"symbol": symbol, "status": "RECONCILED_FLAT", "reason": reason}
     # kite_product overrides instrument_type mapping: positions table stores security
     # type ("EQ"), not the trading product ("MTF"/"CNC"). Without this, MTF exits
     # become CNC sells and Kite rejects them with "Holding quantity: 0".
@@ -1315,11 +1342,19 @@ class TradingSession:
         # not the bare underlying — register under the contract so the exit /
         # GTT / mark refer to the same tradeable instrument.
         register_symbol = order.symbol if prof.instrument_type == "FUT" else symbol
+        # EXCHANGE-CONSISTENCY (F&O): persist the ORDER's exchange (NFO for
+        # FUT/CE/PE, NSE for cash) on the position row. Downstream paths that key
+        # off the stored exchange — notably GTTManager.place_for_position, which
+        # passes pos["exchange"] straight to kite.place_gtt — would otherwise
+        # default a FUT contract to NSE and place the OCO on the wrong segment
+        # (Kite rejects it → the F&O position runs with NO broker-held backup).
+        _exchange = getattr(order, "exchange", None)
         if res.status == "PARTIAL":
             self.registry.register_partial(register_symbol, prof.profile_id,
                                            fill_qty, fill_price,
                                            product=prof.order_product,
                                            instrument_type=prof.instrument_type,
+                                           exchange=_exchange,
                                            broker_account_id=acct_id,
                                            direction=_direction)
         else:
@@ -1328,6 +1363,7 @@ class TradingSession:
                                    qty=fill_qty, avg_price=fill_price,
                                    product=prof.order_product,
                                    instrument_type=prof.instrument_type,
+                                   exchange=_exchange,
                                    broker_account_id=acct_id,
                                    direction=_direction)
         if ref_price > 0 and reconciled:

@@ -136,13 +136,22 @@ class GTTManager:
                 last = entry
             product = (pos.get("instrument_type") and self.config.order_product) \
                 or self.config.order_product
+            # EXCHANGE-CONSISTENCY (F&O): the GTT must be placed on the SAME
+            # segment the contract trades. Prefer the exchange persisted on the
+            # position row; but never let a missing/legacy NULL default a FUT/OPT
+            # contract to NSE (Kite would reject the OCO). Derive NFO from the
+            # instrument_type as a hard fallback for F&O instruments.
+            _itype = str(pos.get("instrument_type") or "EQ").upper()
+            _exch = pos.get("exchange")
+            if not _exch:
+                _exch = "NFO" if _itype in ("FUT", "OPT", "CE", "PE") else "NSE"
             try:
                 gtt_id = broker.place_gtt_oco(
                     symbol=symbol, qty=qty,
                     stop_price=stop_trig, stop_limit_price=stop_lim,
                     target_price=tgt_trig,
                     last_price=last, product=product,
-                    exchange=pos.get("exchange") or "NSE",
+                    exchange=_exch,
                     direction=direction)
             except Exception as e:  # best-effort — never block on the backup
                 log.error("place_gtt_oco raised for %s: %s", symbol, e)
@@ -376,8 +385,15 @@ class GTTManager:
                           "treating as pending (conservative)")
                 return {"status": "pending"}
 
-            # Find the SELL leg that is COMPLETE. In a OCO there are two legs;
-            # only one fires (stop or target). We look for ANY SELL that is COMPLETE.
+            # Find the CLOSING leg that is COMPLETE. In an OCO there are two legs;
+            # only one fires (stop or target). Both legs share the SAME closing
+            # side: SELL for a LONG position (default), BUY-to-cover for a SHORT
+            # FUTURE. We accept EITHER a COMPLETE SELL or a COMPLETE BUY so a
+            # fired short-future GTT is recognised — otherwise the position would
+            # stay OPEN in our DB while closed at the broker, and the monitor
+            # would keep trying to exit an already-flat position (the naked-order
+            # / EXIT_FAILED loop). A GTT only ever holds closing legs, so matching
+            # both sides cannot mistake an entry for an exit here.
             for leg in orders:
                 if isinstance(leg, dict):
                     tx = str(leg.get("transaction_type") or "").upper()
@@ -393,7 +409,7 @@ class GTTManager:
                            or getattr(leg, "qty", None)
                            or getattr(leg, "filled_qty", None))
 
-                if tx == "SELL" and leg_status == "COMPLETE":
+                if tx in ("SELL", "BUY") and leg_status == "COMPLETE":
                     return {
                         "status": "complete",
                         "exit_price": float(avg_price) if avg_price is not None else None,
@@ -401,7 +417,7 @@ class GTTManager:
                         "close_reason": "GTT",
                     }
 
-            # Triggered + orders present but no COMPLETE SELL leg yet → pending.
+            # Triggered + orders present but no COMPLETE closing leg yet → pending.
             return {"status": "pending"}
 
         # Unknown status string — conservative: treat as pending (don't close).

@@ -20,8 +20,14 @@ class MockBroker(BrokerClient):
                  fut_margin_per_lot: Optional[float] = None,
                  no_future_symbols: Optional[set] = None,
                  margins: Optional[Dict[str, float]] = None,
-                 margins_available: bool = True):
+                 margins_available: bool = True,
+                 net_positions: Optional[Dict[str, int]] = None):
         super().__init__(profile, dry_run=dry_run)
+        # Pre-exit reconciliation guard: simulate the broker's live net book.
+        # {symbol: signed_qty}. None (default) means the mock does NOT answer the
+        # net-position probe → the base default (None) is used and the exit path
+        # is unchanged. A dict entry of 0 = flat at the broker (already closed).
+        self._net_positions = net_positions
         self.ltps = ltps or {}
         # FEATURE C: per-share MTF/MIS margin the mock reports (leverage). When
         # margins_available is False the margin API is simulated as DOWN → the
@@ -78,6 +84,13 @@ class MockBroker(BrokerClient):
     def get_fut_margin_per_lot(self, symbol: str,
                                expiry_preference: str = "near"):
         return self._fut_margin_per_lot
+
+    def get_net_position_qty(self, symbol: str, instrument_type: str = "EQ"):
+        # None (default) → don't reconcile (base behaviour). A configured dict
+        # answers the live net book for the pre-exit reconciliation guard.
+        if self._net_positions is None:
+            return None
+        return self._net_positions.get(symbol)
 
     def get_option_chain(self, symbol: str) -> List[Any]:
         spot = self.ltps.get(symbol, 100.0)

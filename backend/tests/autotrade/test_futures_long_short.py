@@ -198,23 +198,52 @@ def test_short_kill_basis_gross_return_positive_on_fall(clean_positions):
     from falcon.db import falcon_conn
     from datetime import datetime, timezone, timedelta
     _ist = datetime.now(timezone(timedelta(hours=5, minutes=30))).isoformat()
+    # CAPITAL BASIS (commit b3fbb0c): for an F&O basket the kill/return basis is
+    # the ALLOCATED CAPITAL (≈ margin at risk), NOT the notional Σ(qty*avg_price)
+    # (~4-5x the margin). Use allocated=5000 here so the short-profit-on-fall sign
+    # is checked cleanly. The POINT of this test is the SIGN (a short profits when
+    # price falls), not the denominator choice — that is covered by the basis
+    # test below.
+    alloc = 5000.0
     with falcon_conn() as con:
         con.execute(
             """INSERT INTO autotrade_sessions
                (session_id, created_at, status, mode, total_allocated_capital,
                 config_json)
                VALUES (?,?,?,?,?,?)""",
-            (sid, _ist, "RUNNING", "paper", 1_000_000.0, "{}"))
+            (sid, _ist, "RUNNING", "paper", alloc, "{}"))
         con.commit()
     reg = _register(sid, "XFUT", 50, 100.0, "short")
-    # invested_basis = 50*100 = 5000 (POSITIVE for a short too).
-    mon = PortfolioMonitor(sid, 1_000_000.0)
-    assert mon.freeze_invested_basis() == 5000.0
-    assert mon.invested_basis() == 5000.0  # POSITIVE notional
+    mon = PortfolioMonitor(sid, alloc)
+    # F&O basis = allocated capital (not notional).
+    assert mon.freeze_invested_basis() == alloc
+    assert mon.invested_basis() == alloc
     reg.update_ltp("XFUT", ltp=95.0, broker_profile="p")
     gr = mon.compute_gross_return_invested()
-    # uPnL = (100-95)*50 = +250; basis 5000 → +0.05
+    # uPnL = (100-95)*50 = +250 (POSITIVE — short gains when price falls);
+    # basis 5000 → +0.05.
     assert abs(gr - 0.05) < 1e-9
+
+
+def test_fno_basis_is_allocated_not_notional(clean_positions):
+    """Regression lock for commit b3fbb0c: an F&O basket freezes the invested
+    basis to the ALLOCATED CAPITAL, never Σ(qty*avg_price) notional."""
+    from falcon.db import falcon_conn
+    from datetime import datetime, timezone, timedelta
+    sid = "s_fno_basis"
+    _ist = datetime.now(timezone(timedelta(hours=5, minutes=30))).isoformat()
+    alloc = 1_000_000.0
+    with falcon_conn() as con:
+        con.execute(
+            """INSERT INTO autotrade_sessions
+               (session_id, created_at, status, mode, total_allocated_capital,
+                config_json) VALUES (?,?,?,?,?,?)""",
+            (sid, _ist, "RUNNING", "paper", alloc, "{}"))
+        con.commit()
+    _register(sid, "XFUT", 50, 100.0, "long")  # notional = 5000
+    mon = PortfolioMonitor(sid, alloc)
+    # NOT 5000 (notional) — the F&O basis is the allocated capital.
+    assert mon.freeze_invested_basis() == alloc
 
 
 # ── GTT-OCO direction (compute_levels) ─────────────────────────────────────────
@@ -472,3 +501,260 @@ def test_equity_long_pnl_math_byte_identical(clean_positions):
     reg.update_ltp("A", ltp=105.0, broker_profile="p")
     mon = PortfolioMonitor(sid, 100000.0)
     assert abs(mon.total_unrealised() - 50.0) < 1e-9   # (105-100)*10
+
+
+# ── EXCHANGE-CONSISTENCY (2026-07-02 F&O audit) ────────────────────────────────
+
+def test_fut_position_row_persists_nfo_exchange(clean_positions,
+                                                 patched_fut_brokers):
+    """A FUT entry must persist exchange='NFO' on its position row so the GTT
+    (and any exchange-keyed path) routes to the F&O segment, not NSE cash."""
+    seed_signals([("A", 1, 9.0, 100.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=1_000_000.0, top_n_stocks=1,
+                               sizing_mode="equal", instrument_type="FUT",
+                               direction="long", kill_switch_enabled=False,
+                               per_position_gtt_enabled=False)
+    sess = TradingSession.create(cfg, mode="paper")
+    asyncio.run(sess.start())
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        row = con.execute(
+            "SELECT symbol, exchange, instrument_type FROM autotrade_positions "
+            "WHERE session_id=?", (sess.session_id,)).fetchone()
+    assert row["symbol"] == "AFUT"
+    assert row["instrument_type"] == "FUT"
+    assert row["exchange"] == "NFO"          # not NSE
+
+
+def test_equity_position_row_exchange_is_nse(clean_positions, patched_eq_brokers):
+    """Regression: equity entry still persists exchange='NSE' (unchanged)."""
+    seed_signals([("A", 1, 9.0, 100.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=100000.0, top_n_stocks=1,
+                               sizing_mode="equal", kill_switch_enabled=False,
+                               per_position_gtt_enabled=False)
+    sess = TradingSession.create(cfg, mode="paper")
+    asyncio.run(sess.start())
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        row = con.execute(
+            "SELECT exchange FROM autotrade_positions WHERE session_id=?",
+            (sess.session_id,)).fetchone()
+    assert row["exchange"] == "NSE"
+
+
+def test_gtt_manager_routes_fut_to_nfo_even_when_row_exchange_missing():
+    """GTTManager.place_for_position must never place a FUT OCO on NSE. Even when
+    the stored exchange is NULL (legacy rows / backfill) it derives NFO from the
+    instrument_type. Captures the exchange passed to broker.place_gtt_oco."""
+    from autotrade.monitoring.gtt_manager import GTTManager
+
+    captured = {}
+
+    class _CaptureBroker:
+        dry_run = False
+        def get_ltp(self, s): return 100.0
+        def place_gtt_oco(self, **kw):
+            captured.update(kw)
+            return "gid-1"
+
+    class _Cfg:
+        per_position_stop_pct = 0.03
+        per_position_target_pct = 0.06
+        order_product = "NRML"
+        per_position_gtt_enabled = True
+
+    class _Reg:
+        def set_gtt(self, *a, **k): pass
+
+    gm = GTTManager("s_gtt", _Cfg(), {"p": _CaptureBroker()}, _Reg())
+    # exchange deliberately absent → must be derived as NFO from FUT.
+    pos = {"symbol": "AFUT", "broker_profile": "p", "qty": 50,
+           "avg_price": 100.0, "direction": "long", "instrument_type": "FUT",
+           "exchange": None}
+    gm.place_for_position(pos)
+    assert captured.get("exchange") == "NFO"
+
+
+def test_gtt_manager_equity_still_nse():
+    from autotrade.monitoring.gtt_manager import GTTManager
+    captured = {}
+
+    class _CaptureBroker:
+        dry_run = False
+        def get_ltp(self, s): return 100.0
+        def place_gtt_oco(self, **kw):
+            captured.update(kw)
+            return "gid-2"
+
+    class _Cfg:
+        per_position_stop_pct = 0.03
+        per_position_target_pct = 0.06
+        order_product = "CNC"
+        per_position_gtt_enabled = True
+
+    class _Reg:
+        def set_gtt(self, *a, **k): pass
+
+    gm = GTTManager("s_gtt2", _Cfg(), {"p": _CaptureBroker()}, _Reg())
+    pos = {"symbol": "A", "broker_profile": "p", "qty": 10, "avg_price": 100.0,
+           "direction": "long", "instrument_type": "EQ", "exchange": "NSE"}
+    gm.place_for_position(pos)
+    assert captured.get("exchange") == "NSE"
+
+
+# ── GTT fill detection for a SHORT future (BUY-to-cover leg) ────────────────────
+
+def test_gtt_execution_result_detects_short_buy_cover_fill():
+    """A fired SHORT-future GTT closes via a BUY-to-cover leg. _gtt_execution_
+    result must recognise a COMPLETE BUY as a confirmed fill — otherwise the
+    position stays OPEN in our DB while flat at the broker and the monitor keeps
+    retrying (naked-order loop)."""
+    from autotrade.monitoring.gtt_manager import GTTManager
+    state = {
+        "status": "triggered",
+        "orders": [
+            {"transaction_type": "BUY", "status": "COMPLETE",
+             "average_price": 103.0, "quantity": 50},
+        ],
+    }
+    res = GTTManager._gtt_execution_result(state)
+    assert res is not None
+    assert res["status"] == "complete"
+    assert res["exit_price"] == 103.0
+    assert res["filled_qty"] == 50
+
+
+def test_gtt_execution_result_long_sell_still_complete():
+    """Regression: a long SELL-leg COMPLETE fill is still detected (unchanged)."""
+    from autotrade.monitoring.gtt_manager import GTTManager
+    state = {
+        "status": "triggered",
+        "orders": [
+            {"transaction_type": "SELL", "status": "COMPLETE",
+             "average_price": 97.0, "quantity": 10},
+        ],
+    }
+    res = GTTManager._gtt_execution_result(state)
+    assert res["status"] == "complete"
+    assert res["exit_price"] == 97.0
+
+
+def test_gtt_execution_result_triggered_but_pending_not_complete():
+    """Regression: a triggered GTT whose closing leg is still OPEN stays pending
+    (never closes prematurely) — for either side."""
+    from autotrade.monitoring.gtt_manager import GTTManager
+    state = {"status": "triggered",
+             "orders": [{"transaction_type": "BUY", "status": "OPEN"}]}
+    res = GTTManager._gtt_execution_result(state)
+    assert res == {"status": "pending"}
+
+
+# ── PRE-EXIT RECONCILIATION GUARD (2026-07-02 incident) ────────────────────────
+
+def _patched_reconcile_brokers(monkeypatch, net_positions):
+    created = {}
+    shared_ltps = {"A": 100.0}
+
+    def fake_build_client(profile, dry_run=True):
+        mb = MockBroker(profile=profile, dry_run=False, ltps=shared_ltps,
+                        lot_size=50, fut_margin_per_lot=40_000.0,
+                        net_positions=net_positions)
+        created[profile.profile_id] = mb
+        return mb
+
+    monkeypatch.setattr(router_mod, "build_client", fake_build_client)
+    monkeypatch.setattr(sess_mod, "build_client", fake_build_client)
+    return created
+
+
+def test_exit_single_reconciles_when_broker_already_flat(clean_positions,
+                                                         monkeypatch):
+    """If the broker reports the position is already flat (operator closed it),
+    _exit_single_position must place NO order and mark the row CLOSED_RECONCILED,
+    instead of firing a naked exit that keeps failing on retry."""
+    from autotrade.session import _exit_single_position
+    # Broker says AFUT is FLAT (0) — already closed externally.
+    _patched_reconcile_brokers(monkeypatch, {"AFUT": 0})
+    sid = "s_reconcile_flat"
+    reg = PositionRegistry(sid, 1_000_000.0)
+    reg.register(symbol="AFUT", broker_profile="p", qty=50, avg_price=100.0,
+                 instrument_type="FUT", exchange="NFO", direction="long")
+    # Build the (patched) mock broker for the unit exit path.
+    from autotrade.config import BrokerProfile
+    from autotrade.broker.router import build_client
+    prof = BrokerProfile(profile_id="p", broker_name="zerodha",
+                         allocated_capital=1_000_000.0, order_product="NRML",
+                         instrument_type="FUT")
+    broker = build_client(prof, dry_run=False)
+    pos = {"symbol": "AFUT", "broker_profile": "p", "qty": 50,
+           "avg_price": 100.0, "ltp": 100.0, "instrument_type": "FUT",
+           "direction": "long", "gtt_id": None}
+    res = asyncio.run(_exit_single_position(
+        session_id=sid, position=pos, reason="STOP_STOCK",
+        brokers={"p": broker}, registry=reg, gtt_manager=None,
+        kite_product="NRML"))
+    assert res["status"] == "RECONCILED_FLAT"
+    # NO exit order was placed.
+    assert broker.exits == []
+    # Row is CLOSED (reconciled), not EXIT_FAILED.
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        row = con.execute(
+            "SELECT status, close_reason FROM autotrade_positions "
+            "WHERE session_id=? AND symbol='AFUT'", (sid,)).fetchone()
+    assert row["status"] == "CLOSED"
+    assert "RECONCILED_FLAT" in row["close_reason"]
+
+
+def test_exit_single_proceeds_when_broker_still_holds(clean_positions,
+                                                      monkeypatch):
+    """When the broker still shows the position OPEN (net qty != 0), the exit
+    proceeds normally (an order IS placed)."""
+    from autotrade.session import _exit_single_position
+    _patched_reconcile_brokers(monkeypatch, {"AFUT": 50})   # still 50 long
+    sid = "s_reconcile_hold"
+    reg = PositionRegistry(sid, 1_000_000.0)
+    reg.register(symbol="AFUT", broker_profile="p", qty=50, avg_price=100.0,
+                 instrument_type="FUT", exchange="NFO", direction="long")
+    from autotrade.config import BrokerProfile
+    from autotrade.broker.router import build_client
+    prof = BrokerProfile(profile_id="p", broker_name="zerodha",
+                         allocated_capital=1_000_000.0, order_product="NRML",
+                         instrument_type="FUT")
+    broker = build_client(prof, dry_run=False)
+    pos = {"symbol": "AFUT", "broker_profile": "p", "qty": 50,
+           "avg_price": 100.0, "ltp": 100.0, "instrument_type": "FUT",
+           "direction": "long", "gtt_id": None}
+    res = asyncio.run(_exit_single_position(
+        session_id=sid, position=pos, reason="STOP_STOCK",
+        brokers={"p": broker}, registry=reg, gtt_manager=None,
+        kite_product="NRML"))
+    assert res["status"] != "RECONCILED_FLAT"
+    assert broker.exits and broker.exits[0][0] == "AFUT"
+
+
+def test_exit_single_paper_unchanged_no_reconcile(clean_positions, monkeypatch):
+    """Paper / broker that can't answer the net probe (returns None) → the exit
+    path is byte-for-byte unchanged (an order is placed)."""
+    from autotrade.session import _exit_single_position
+    # net_positions=None → MockBroker.get_net_position_qty returns None.
+    _patched_reconcile_brokers(monkeypatch, None)
+    sid = "s_reconcile_none"
+    reg = PositionRegistry(sid, 1_000_000.0)
+    reg.register(symbol="AFUT", broker_profile="p", qty=50, avg_price=100.0,
+                 instrument_type="FUT", exchange="NFO", direction="long")
+    from autotrade.config import BrokerProfile
+    from autotrade.broker.router import build_client
+    prof = BrokerProfile(profile_id="p", broker_name="zerodha",
+                         allocated_capital=1_000_000.0, order_product="NRML",
+                         instrument_type="FUT")
+    broker = build_client(prof, dry_run=False)
+    pos = {"symbol": "AFUT", "broker_profile": "p", "qty": 50,
+           "avg_price": 100.0, "ltp": 100.0, "instrument_type": "FUT",
+           "direction": "long", "gtt_id": None}
+    res = asyncio.run(_exit_single_position(
+        session_id=sid, position=pos, reason="STOP_STOCK",
+        brokers={"p": broker}, registry=reg, gtt_manager=None,
+        kite_product="NRML"))
+    assert res["status"] != "RECONCILED_FLAT"
+    assert broker.exits and broker.exits[0][0] == "AFUT"

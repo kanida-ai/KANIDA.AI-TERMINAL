@@ -135,6 +135,25 @@ class KillSwitchExecutor:
             # short→BUY-to-cover. Threaded from the position's stored direction.
             direction = pos.get("direction") or "long"
             kite_product = getattr(self.config, "order_product", None)
+            # PRE-EXIT RECONCILIATION GUARD (real-money safety): if the broker
+            # already shows this leg flat (operator closed it, or a broker SL/GTT
+            # fired), skip the market exit — a blind order would go NAKED. Returns
+            # None in paper / when unknown → we proceed with the normal exit
+            # (paper unchanged). Best-effort: a probe error never blocks the kill.
+            try:
+                net_qty = broker.get_net_position_qty(symbol, itype)
+            except Exception as _net_e:  # pragma: no cover - defensive
+                log.debug("kill: net-position probe failed %s: %s", symbol, _net_e)
+                net_qty = None
+            if net_qty is not None and net_qty == 0:
+                log.warning("kill: %s/%s already flat at broker — reconciling, "
+                            "no exit order", self.session_id, symbol)
+                self.registry.mark_closed(symbol, f"{close_reason}_RECONCILED_FLAT",
+                                          broker_profile=prof_id)
+                exit_gate.release_exit_session(self.session_id, symbol)
+                exit_meta.append({"symbol": symbol, "claimed": False,
+                                  "reconciled_flat": True})
+                continue
             exit_coros.append(broker.place_market_exit(symbol, qty, itype,
                                                        kite_product=kite_product,
                                                        direction=direction))

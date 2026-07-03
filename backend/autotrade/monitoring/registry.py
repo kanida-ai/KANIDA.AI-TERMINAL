@@ -90,6 +90,7 @@ class PositionRegistry:
                          filled_qty: int, avg_price: float,
                          product: str = "CNC",
                          instrument_type: str = "EQ",
+                         exchange: Optional[str] = None,
                          broker_account_id: Optional[str] = None,
                          direction: str = "long") -> None:
         """Partial fill: register the FILLED qty (spec parity check #3 — 80 not
@@ -97,7 +98,7 @@ class PositionRegistry:
         log.warning("Partial fill registered: %s filled=%d", symbol, filled_qty)
         self.register(symbol=symbol, broker_profile=broker_profile,
                       qty=filled_qty, avg_price=avg_price, product=product,
-                      instrument_type=instrument_type,
+                      instrument_type=instrument_type, exchange=exchange,
                       broker_account_id=broker_account_id,
                       direction=direction)
 
