@@ -287,10 +287,33 @@ export type StatusResponse = {
 // POST /api/autotrade/preview — an ESTIMATE before Start. Creates no session and
 // places nothing; it just reports the bases + the kill-switch outcome for the
 // given config so the operator can see "+₹X / −₹Y" before committing.
+// One sized (or skipped) position row in the preview. For F&O the lots/lot_size/
+// margin_per_lot/notional fields are present; for cash/MTF `margin` is the deployed
+// margin and the F&O fields are absent. A skipped row has status==='SKIPPED'+reason.
+export type PreviewPosition = {
+  symbol: string
+  qty?: number
+  ref_price?: number
+  invested_value?: number
+  order_product?: string
+  instrument_type?: string        // 'EQ' | 'FUT' | 'CE' | 'PE'
+  margin?: number                 // ₹ capital/margin deployed for THIS position
+  lots?: number                   // F&O: number of lots placed
+  lot_size?: number               // F&O: contract lot size (shares per lot)
+  margin_per_lot?: number         // F&O: ₹ margin per lot
+  notional?: number               // F&O: qty × price = contract exposure
+  status?: string                 // 'SKIPPED' when dropped
+  reason?: string                 // skip reason (e.g. 1 lot margin > slice)
+  [k: string]: unknown
+}
+
 export type PreviewResponse = {
-  invested_basis: number          // ₹ — the kill basis (product-aware)
+  invested_basis: number          // ₹ — the kill basis (product-aware; notional for F&O)
   total_allocated_capital: number // ₹ — your fund
-  leverage: number                // ~×N (MTF leverage; ~1 for CNC)
+  total_margin?: number           // ₹ — total margin/capital deployed (F&O / MTF margin)
+  leverage: number                // ~×N (MTF/F&O leverage; ~1 for CNC)
+  n_positions?: number
+  positions?: PreviewPosition[]    // per-name sized rows (+ skipped rows) with lots/margin
   kill_preview: KillPreview
   // Picks that WOULD be skipped for this config (1 unit > per-slice budget), so
   // the operator sees them before committing. Absent/[] when nothing is skipped.
