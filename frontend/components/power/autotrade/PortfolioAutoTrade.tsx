@@ -33,7 +33,7 @@ import {
   type OnMissedWindow,
   type Strategy, type SessionConfig, type CreateResponse, type StartResponse,
   type StatusResponse, type SavedConfig, type Broker, type SessionSummary,
-  type OpenPosition, type PreviewResponse, type KillPreview, type SkippedPick,
+  type OpenPosition, type PreviewResponse, type PreviewPosition, type KillPreview, type SkippedPick,
   type BrokerAccount, type SessionScope,
   type UniverseFilter, type PickItem, type PicksResponse,
 } from '@/lib/autotrade-api'
@@ -1539,9 +1539,9 @@ export function PortfolioAutoTrade({
                 budget (from the live preview estimate). Amber; honest. */}
             <SkippedPicksBanner picks={preview?.skipped_picks} redistribute={config.redistribute_unused_capital !== false} />
 
-            {/* F&O SIZING TRANSPARENCY — lots + margin per name (FUT/CE/PE only), so
-                it's clear how many lots, what margin, and the notional/leverage. */}
-            <FnoSizingBreakdown config={config} preview={preview} />
+            {/* SIZING TRANSPARENCY — per-name qty/lots + margin/value for EVERY
+                product & instrument (CNC cash · MTF/MIS margin · FUT lots+margin). */}
+            <SizingBreakdown config={config} preview={preview} />
           </div>
 
           {/* A · MIS defensive square-off note — for MIS sessions, the backend
@@ -2713,27 +2713,57 @@ function PotentialOutcome({
 // A single legible line describing the configured trail, on the ESTIMATED bases
 // from POST /api/autotrade/preview (invested_basis + leverage). The pct fields
 // come from the config in PERCENTS (display as-is). Honest "—"/loading/error.
-// F&O sizing transparency — for FUT/CE/PE, show per-name LOTS × lot-size = qty,
-// margin/lot, margin, and notional, plus the totals (margin of fund → notional →
-// leverage). Renders nothing for cash equity or before a preview lands. Reads the
-// preview.positions rows the backend fills with lots/lot_size/margin_per_lot.
-function FnoSizingBreakdown({ config, preview }: { config: SessionConfig; preview: PreviewResponse | null }) {
-  // Only FUT is wired in the UI (InstrumentType = 'EQ' | 'FUT'); options aren't
-  // selectable yet, so this renders for futures sessions only.
-  if (config.instrument_type !== 'FUT' || !preview) return null
+// Sizing transparency — per-name breakdown for ANY product/instrument, so it's
+// clear exactly what will be placed before you deploy. Adapts columns by type:
+//   • Futures      → Lots · Lot size · Qty · Margin/lot · Margin · Notional
+//   • MTF / MIS    → Qty · Price · Margin · Value   (leveraged; margin < value)
+//   • CNC (cash)   → Qty · Price · Amount           (1×; no separate margin)
+// Reads preview.positions (qty/ref_price/margin/invested_value + lots/lot_size/
+// margin_per_lot for FUT). Renders nothing before a preview lands.
+type SizeCol = { label: string; get: (p: PreviewPosition) => string | number; strong?: boolean; tone?: string }
+function SizingBreakdown({ config, preview }: { config: SessionConfig; preview: PreviewResponse | null }) {
+  if (!preview) return null
   const rows = (preview.positions ?? []).filter(
-    (p) => p.status !== 'SKIPPED' && (p.lots ?? 0) > 0)
+    (p) => p.status !== 'SKIPPED' && (p.qty ?? 0) > 0)
   if (rows.length === 0) return null
-  const totalMargin = preview.total_margin ?? rows.reduce((s, p) => s + (p.margin ?? 0), 0)
-  const totalNotional = preview.invested_basis
+
+  const isFut = config.instrument_type === 'FUT'
+  const product = String(config.order_product ?? 'CNC')
+  const isCash = !isFut && product === 'CNC'
   const lev = preview.leverage ?? 1
-  const kind = 'Futures'
+  const totalMargin = preview.total_margin ?? rows.reduce((s, p) => s + (p.margin ?? 0), 0)
+  const totalValue = preview.invested_basis
+  const inr = (v: number | undefined) => fmtINR(v ?? 0)
+
+  const title = isFut ? 'Futures sizing — lots & margin'
+    : isCash ? 'Sizing — shares & cash'
+    : `${product} sizing — margin & value`
+
+  // Columns after "Name" (adaptive). `total` = which footer total to place here.
+  const cols: (SizeCol & { total?: 'margin' | 'value' })[] = isFut ? [
+    { label: 'Lots', get: (p) => p.lots ?? 0, tone: C.mint },
+    { label: 'Lot size', get: (p) => p.lot_size ?? 0 },
+    { label: 'Qty', get: (p) => p.qty ?? 0 },
+    { label: 'Margin/lot', get: (p) => inr(p.margin_per_lot) },
+    { label: 'Margin', get: (p) => inr(p.margin), strong: true, tone: C.mint, total: 'margin' },
+    { label: 'Notional', get: (p) => inr(p.notional ?? p.invested_value), tone: C.faint, total: 'value' },
+  ] : isCash ? [
+    { label: 'Qty', get: (p) => p.qty ?? 0 },
+    { label: 'Price', get: (p) => inr(p.ref_price) },
+    { label: 'Amount', get: (p) => inr(p.margin ?? p.invested_value), strong: true, tone: C.mint, total: 'margin' },
+  ] : [
+    { label: 'Qty', get: (p) => p.qty ?? 0 },
+    { label: 'Price', get: (p) => inr(p.ref_price) },
+    { label: 'Margin', get: (p) => inr(p.margin), strong: true, tone: C.mint, total: 'margin' },
+    { label: 'Value', get: (p) => inr(p.invested_value), tone: C.faint, total: 'value' },
+  ]
   const cell = 'text-right tabular-nums py-1.5 px-2'
+
   return (
     <div className="mt-3 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.05)' }}>
       <div className="flex items-center gap-2 mb-2.5">
         <span style={{ color: C.mint }}>{ICON.info(14)}</span>
-        <span className="text-[12px] font-semibold" style={{ color: C.ink }}>{kind} sizing — lots &amp; margin</span>
+        <span className="text-[12px] font-semibold" style={{ color: C.ink }}>{title}</span>
         <span className="ml-auto text-[10px]" style={{ color: C.faint }}>estimate — places nothing</span>
       </div>
       <div className="overflow-x-auto">
@@ -2741,42 +2771,43 @@ function FnoSizingBreakdown({ config, preview }: { config: SessionConfig; previe
           <thead>
             <tr style={{ color: C.faint }}>
               <th className="text-left font-medium py-1 px-2">Name</th>
-              <th className="text-right font-medium py-1 px-2">Lots</th>
-              <th className="text-right font-medium py-1 px-2">Lot size</th>
-              <th className="text-right font-medium py-1 px-2">Qty</th>
-              <th className="text-right font-medium py-1 px-2">Margin/lot</th>
-              <th className="text-right font-medium py-1 px-2">Margin</th>
-              <th className="text-right font-medium py-1 px-2">Notional</th>
+              {cols.map((c) => <th key={c.label} className="text-right font-medium py-1 px-2">{c.label}</th>)}
             </tr>
           </thead>
           <tbody>
             {rows.map((p) => (
               <tr key={p.symbol} style={{ borderTop: `1px solid ${C.line2}` }}>
                 <td className="text-left py-1.5 px-2 font-semibold" style={{ color: C.ink }}>{p.symbol}</td>
-                <td className={cell} style={{ color: C.mint }}>{p.lots}</td>
-                <td className={cell} style={{ color: C.ink2 }}>{p.lot_size}</td>
-                <td className={cell} style={{ color: C.ink2 }}>{p.qty}</td>
-                <td className={cell} style={{ color: C.ink2 }}>{fmtINR(p.margin_per_lot ?? 0)}</td>
-                <td className={cell + ' font-semibold'} style={{ color: C.ink }}>{fmtINR(p.margin ?? 0)}</td>
-                <td className={cell} style={{ color: C.faint }}>{fmtINR(p.notional ?? 0)}</td>
+                {cols.map((c) => (
+                  <td key={c.label} className={cell + (c.strong ? ' font-semibold' : '')}
+                      style={{ color: c.tone ?? C.ink2 }}>{c.get(p)}</td>
+                ))}
               </tr>
             ))}
           </tbody>
           <tfoot>
             <tr style={{ borderTop: `1px solid ${C.line}` }}>
               <td className="text-left py-1.5 px-2 font-semibold" style={{ color: C.ink }}>Total</td>
-              <td colSpan={4} />
-              <td className={cell + ' font-semibold'} style={{ color: C.mint }}>{fmtINR(totalMargin)}</td>
-              <td className={cell} style={{ color: C.faint }}>{fmtINR(totalNotional)}</td>
+              {cols.map((c) => (
+                <td key={c.label} className={cell + (c.total ? ' font-semibold' : '')}
+                    style={{ color: c.total === 'margin' ? C.mint : c.total === 'value' ? C.faint : 'transparent' }}>
+                  {c.total === 'margin' ? fmtINR(totalMargin) : c.total === 'value' ? fmtINR(totalValue) : ''}
+                </td>
+              ))}
             </tr>
           </tfoot>
         </table>
       </div>
       <p className="text-[10.5px] leading-snug mt-2" style={{ color: C.faint }}>
-        Margin <b style={{ color: C.ink2 }}>{fmtINR(totalMargin)}</b> of your{' '}
-        <b style={{ color: C.ink2 }}>{fmtCapital(preview.total_allocated_capital)}</b> fund controls{' '}
-        <b style={{ color: C.ink2 }}>{fmtINR(totalNotional)}</b> notional (~{lev.toFixed(lev % 1 === 0 ? 0 : 2)}× leverage).
-        Trailing % is measured on your capital.
+        {isCash ? (
+          <>Deploys <b style={{ color: C.ink2 }}>{fmtINR(totalMargin)}</b> of your{' '}
+            <b style={{ color: C.ink2 }}>{fmtCapital(preview.total_allocated_capital)}</b> fund (cash — no leverage).</>
+        ) : (
+          <>Margin <b style={{ color: C.ink2 }}>{fmtINR(totalMargin)}</b> of your{' '}
+            <b style={{ color: C.ink2 }}>{fmtCapital(preview.total_allocated_capital)}</b> fund controls{' '}
+            <b style={{ color: C.ink2 }}>{fmtINR(totalValue)}</b> {isFut ? 'notional' : 'value'} (~{lev.toFixed(lev % 1 === 0 ? 0 : 2)}× leverage).
+            {isFut ? ' Trailing % is measured on your capital.' : ''}</>
+        )}
       </p>
     </div>
   )
