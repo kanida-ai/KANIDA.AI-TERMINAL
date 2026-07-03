@@ -80,6 +80,27 @@ class ZerodhaBroker(BrokerClient):
         return _autotrade_enabled()
 
     # ── Market data ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _rest_key(symbol: str) -> str:
+        """Kite instrument key 'EXCHANGE:TRADINGSYMBOL' for a REST ltp/quote call.
+
+        Futures + options trade on NFO, cash equity on NSE. A hardcoded 'NSE:'
+        made EVERY futures LTP fetch fail ('NSE:XYZ26JULFUT' doesn't exist), so
+        FUT positions were never priced (trail/kill blind to the market) AND the
+        failed REST calls hammered the broker API (slow portal). Detect the
+        segment from the trading-symbol shape:
+          * ends in 'FUT'                          -> NFO (futures)
+          * ends in 'CE'/'PE' AFTER a strike digit -> NFO (options; the digit
+            guard avoids mis-routing cash names that also end 'CE'/'PE', e.g.
+            RELIANCE, ACE)
+        """
+        s = (symbol or "").upper()
+        if s.endswith("FUT"):
+            return f"NFO:{symbol}"
+        if (s.endswith("CE") or s.endswith("PE")) and len(s) >= 3 and s[-3].isdigit():
+            return f"NFO:{symbol}"
+        return f"NSE:{symbol}"
+
     def get_ltp(self, symbol: str) -> Optional[float]:
         # 1. Fast WS tick cache (reuse existing ticker).
         try:
@@ -89,9 +110,9 @@ class ZerodhaBroker(BrokerClient):
                 return float(v)
         except Exception as e:  # pragma: no cover - defensive
             log.debug("ws get_ltp failed for %s: %s", symbol, e)
-        # 2. REST fallback via kite.ltp().
+        # 2. REST fallback via kite.ltp() — exchange-aware (NSE cash / NFO F&O).
         try:
-            key = f"NSE:{symbol}"
+            key = self._rest_key(symbol)
             data = self.kite.ltp([key])
             return float(data[key]["last_price"])
         except Exception as e:
@@ -127,12 +148,13 @@ class ZerodhaBroker(BrokerClient):
                 misses.append(s)
         if not misses:
             return out
-        # Pass 2: ONE batched REST call for the misses.
+        # Pass 2: ONE batched REST call for the misses — exchange-aware per symbol
+        # (NSE cash / NFO F&O), so futures resolve instead of silently failing.
         try:
-            keys = [f"NSE:{s}" for s in misses]
-            data = self.kite.ltp(keys)
+            key_of = {s: self._rest_key(s) for s in misses}
+            data = self.kite.ltp(list(key_of.values()))
             for s in misses:
-                row = data.get(f"NSE:{s}")
+                row = data.get(key_of[s])
                 if row and row.get("last_price"):
                     out[s] = float(row["last_price"])
         except Exception as e:
