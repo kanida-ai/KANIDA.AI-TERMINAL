@@ -11,6 +11,7 @@ session layer. A freshly-constructed config places no real orders.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -282,6 +283,17 @@ class TradingSessionConfig:
             raise ValueError(f"invalid order_type: {self.order_type}")
         if self.instrument_type not in ("EQ", "FUT", "CE", "PE", "MTF"):
             raise ValueError(f"invalid instrument_type: {self.instrument_type}")
+        # OPTIONS (CE/PE) are half-wired but NOT certified — the ATM-strike /
+        # premium / options-margin sizing path is unvalidated. Hard-block them at
+        # the door (default off) so a raw operator-token API call or a rehydrated
+        # preset can never create an options session. Mirrors the short-requires-FUT
+        # gate. Flip FALCON_AUTOTRADE_OPTIONS_ENABLED=true only once certified.
+        if self.instrument_type in ("CE", "PE") and \
+                os.environ.get("FALCON_AUTOTRADE_OPTIONS_ENABLED", "").strip().lower() \
+                not in ("1", "true", "yes", "on"):
+            raise ValueError(
+                "options (CE/PE) are not yet certified — set "
+                "FALCON_AUTOTRADE_OPTIONS_ENABLED=true to enable once validated")
         # ── Trade direction (FUTURES long/short) ──────────────────────────────
         if self.direction not in ("long", "short"):
             raise ValueError(

@@ -75,9 +75,10 @@ def test_denominator_unchanged_after_position_exit(clean_positions):
     reg.mark_closed("C", "TRAILING_STOP")
     gr_after = mon.compute_gross_return()
     assert mon.total_allocated_capital == cap     # denominator frozen
-    assert gr_after < gr_before                    # numerator shrank only
-    # numerator dropped by exactly C's uPnL (1000) / cap
-    assert abs((gr_before - gr_after) - (1000.0 / cap)) < 1e-9
+    # Realised P&L is KEPT in the numerator (since 73619c4): closing C at its current
+    # LTP moves its +1000 from unrealised → realised with NO change to the total
+    # return. Denominator frozen + numerator preserved ⇒ gross_return unchanged.
+    assert abs(gr_after - gr_before) < 1e-9
 
 
 # ── Parity check: parallel kill < 500ms with a 500ms-per-broker mock ─────────

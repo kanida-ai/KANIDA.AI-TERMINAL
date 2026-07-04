@@ -45,3 +45,22 @@ def test_from_dict_preserves_basket_only_and_parses_flag():
 def test_new_params_pass_validation_and_floor_le_arm():
     # floor (1%) <= arm (2.5%) and all four in (0, 0.5] — no ValueError.
     _cfg().validate()
+
+
+def test_options_ce_pe_hard_blocked_by_default(monkeypatch):
+    # Options (CE/PE) are uncertified — validate() must reject them unless the
+    # explicit env flag is set. Equity + futures are unaffected.
+    monkeypatch.delenv("FALCON_AUTOTRADE_OPTIONS_ENABLED", raising=False)
+    for it in ("CE", "PE"):
+        try:
+            TradingSessionConfig(total_allocated_capital=500000.0, strategy="intraday_basket",
+                                 instrument_type=it, order_product="NRML", direction="long",
+                                 top_n_stocks=5).validate()
+            assert False, f"{it} should be blocked by default"
+        except ValueError as e:
+            assert "options" in str(e).lower()
+    # The env flag unlocks it (for the certification phase).
+    monkeypatch.setenv("FALCON_AUTOTRADE_OPTIONS_ENABLED", "true")
+    TradingSessionConfig(total_allocated_capital=500000.0, strategy="intraday_basket",
+                         instrument_type="CE", order_product="NRML", direction="long",
+                         top_n_stocks=5).validate()

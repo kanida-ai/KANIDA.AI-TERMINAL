@@ -190,10 +190,11 @@ def test_gross_return_from_isolated_table_frozen_denominator(clean_positions,
     # qty A = 50000/100 = 500 → uPnL 5000; qty B = 50000/200 = 250 → uPnL 5000.
     assert abs(gr - (10000.0 / cap)) < 1e-9
     assert sess.monitor.total_allocated_capital == cap
-    # Denominator frozen even after closing a position.
+    # Denominator frozen even after closing a position. Realised P&L stays in the
+    # numerator (73619c4), so closing A at its LTP leaves the return unchanged.
     sess.registry.mark_closed("A", "TRAILING_STOP")
     assert sess.monitor.total_allocated_capital == cap
-    assert sess.monitor.compute_gross_return() < gr
+    assert abs(sess.monitor.compute_gross_return() - gr) < 1e-9
 
 
 def test_kill_switch_autofires_via_tick_driver(clean_positions, patched_brokers):

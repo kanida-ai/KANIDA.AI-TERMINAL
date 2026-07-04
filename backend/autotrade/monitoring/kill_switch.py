@@ -158,7 +158,8 @@ class KillSwitchExecutor:
                                                        kite_product=kite_product,
                                                        direction=direction))
             exit_meta.append({"symbol": symbol, "claimed": True, "qty": qty,
-                              "broker_profile": prof_id, "direction": direction})
+                              "broker_profile": prof_id, "direction": direction,
+                              "instrument_type": itype, "kite_product": kite_product})
 
         results = await asyncio.gather(*exit_coros, return_exceptions=True)
 
@@ -256,6 +257,8 @@ class KillSwitchExecutor:
                         close_reason=close_reason,
                         max_retries=3,
                         direction=meta.get("direction", "long"),
+                        instrument_type=meta.get("instrument_type", "EQ"),
+                        kite_product=meta.get("kite_product"),
                     )
                     if retry_result.get("status") == "COMPLETE":
                         n_ok += 1
@@ -286,6 +289,8 @@ class KillSwitchExecutor:
                     close_reason=close_reason,
                     max_retries=3,
                     direction=meta.get("direction", "long"),
+                    instrument_type=meta.get("instrument_type", "EQ"),
+                    kite_product=meta.get("kite_product"),
                 )
                 if retry_result.get("status") == "COMPLETE":
                     n_ok += 1
