@@ -22,7 +22,7 @@
  * Reuses the cotrade-kit F2 palette + icon set so it reads as one product family
  * with Co-Trading / the existing AutoTrade console.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   C, ICON, Gear, MECHANISM_CSS, fmtCapital, fmtPct, pctTone, fmtINR, signedINR,
 } from '@/components/power/shared/cotrade-kit'
@@ -594,7 +594,10 @@ export function PortfolioAutoTrade({
         )
         if (!cancelled) { setPreview(res); setPreviewErr(null) }
       } catch (e) {
-        if (!cancelled) { setPreview(null); setPreviewErr(e instanceof Error ? e.message : 'Could not estimate the outcome.') }
+        // Keep the LAST-GOOD preview visible on a transient error (don't blank the
+        // sizing table) — just surface the error. Only a strategy switch (above)
+        // clears it. This fixes the "table sometimes disappears" flicker.
+        if (!cancelled) setPreviewErr(e instanceof Error ? e.message : 'Could not estimate the outcome.')
       } finally {
         if (!cancelled) setPreviewLoading(false)
       }
@@ -1542,7 +1545,7 @@ export function PortfolioAutoTrade({
 
             {/* SIZING TRANSPARENCY — per-name qty/lots + margin/value for EVERY
                 product & instrument (CNC cash · MTF/MIS margin · FUT lots+margin). */}
-            <SizingBreakdown config={config} preview={preview} />
+            <SizingBreakdown config={config} preview={preview} loading={previewLoading} err={previewErr} />
           </div>
 
           {/* A · MIS defensive square-off note — for MIS sessions, the backend
@@ -2714,59 +2717,75 @@ function PotentialOutcome({
 // A single legible line describing the configured trail, on the ESTIMATED bases
 // from POST /api/autotrade/preview (invested_basis + leverage). The pct fields
 // come from the config in PERCENTS (display as-is). Honest "—"/loading/error.
-// Sizing transparency — per-name breakdown for ANY product/instrument, so it's
-// clear exactly what will be placed before you deploy. Adapts columns by type:
-//   • Futures      → Lots · Lot size · Qty · Margin/lot · Margin · Notional
-//   • MTF / MIS    → Qty · Price · Margin · Value   (leveraged; margin < value)
-//   • CNC (cash)   → Qty · Price · Amount           (1×; no separate margin)
+// Sizing transparency — per-name breakdown for ANY product/instrument, showing the
+// FUNDING split so it's clear how much is YOUR money vs the broker's:
+//   Your margin  = capital you put up      (Σ = your money in)
+//   Broker funds = leverage the broker adds (deployed − your margin; 0 for cash)
+//   Deployed     = total position value    (your margin + broker funds)
 // Reads preview.positions (qty/ref_price/margin/invested_value + lots/lot_size/
-// margin_per_lot for FUT). Renders nothing before a preview lands.
-type SizeCol = { label: string; get: (p: PreviewPosition) => string | number; strong?: boolean; tone?: string }
-function SizingBreakdown({ config, preview }: { config: SessionConfig; preview: PreviewResponse | null }) {
-  if (!preview) return null
-  const rows = (preview.positions ?? []).filter(
-    (p) => p.status !== 'SKIPPED' && (p.qty ?? 0) > 0)
-  if (rows.length === 0) return null
-
+// margin_per_lot for FUT). ALWAYS renders a state — loading / error / empty /
+// table — so the panel never silently disappears.
+type SizeCol = { label: string; get: (p: PreviewPosition) => string | number; strong?: boolean; tone?: string; total?: 'margin' | 'broker' | 'deployed' }
+function SizingBreakdown({ config, preview, loading, err }:
+    { config: SessionConfig; preview: PreviewResponse | null; loading?: boolean; err?: string | null }) {
   const isFut = config.instrument_type === 'FUT'
   const product = String(config.order_product ?? 'CNC')
-  const isCash = !isFut && product === 'CNC'
-  const lev = preview.leverage ?? 1
-  const totalMargin = preview.total_margin ?? rows.reduce((s, p) => s + (p.margin ?? 0), 0)
-  const totalValue = preview.invested_basis
-  const inr = (v: number | undefined) => fmtINR(v ?? 0)
+  const title = isFut ? 'Futures sizing — margin & buying power'
+    : `${product} sizing — margin & buying power`
 
-  const title = isFut ? 'Futures sizing — lots & margin'
-    : isCash ? 'Sizing — shares & cash'
-    : `${product} sizing — margin & value`
-
-  // Columns after "Name" (adaptive). `total` = which footer total to place here.
-  const cols: (SizeCol & { total?: 'margin' | 'value' })[] = isFut ? [
-    { label: 'Lots', get: (p) => p.lots ?? 0, tone: C.mint },
-    { label: 'Lot size', get: (p) => p.lot_size ?? 0 },
-    { label: 'Qty', get: (p) => p.qty ?? 0 },
-    { label: 'Margin/lot', get: (p) => inr(p.margin_per_lot) },
-    { label: 'Margin', get: (p) => inr(p.margin), strong: true, tone: C.mint, total: 'margin' },
-    { label: 'Notional', get: (p) => inr(p.notional ?? p.invested_value), tone: C.faint, total: 'value' },
-  ] : isCash ? [
-    { label: 'Qty', get: (p) => p.qty ?? 0 },
-    { label: 'Price', get: (p) => inr(p.ref_price) },
-    { label: 'Amount', get: (p) => inr(p.margin ?? p.invested_value), strong: true, tone: C.mint, total: 'margin' },
-  ] : [
-    { label: 'Qty', get: (p) => p.qty ?? 0 },
-    { label: 'Price', get: (p) => inr(p.ref_price) },
-    { label: 'Margin', get: (p) => inr(p.margin), strong: true, tone: C.mint, total: 'margin' },
-    { label: 'Value', get: (p) => inr(p.invested_value), tone: C.faint, total: 'value' },
-  ]
-  const cell = 'text-right tabular-nums py-1.5 px-2'
-
-  return (
+  // One shell so EVERY state (loading / error / empty / table) shows the header —
+  // the panel is never a mysterious blank.
+  const wrap = (inner: ReactNode) => (
     <div className="mt-3 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.05)' }}>
       <div className="flex items-center gap-2 mb-2.5">
         <span style={{ color: C.mint }}>{ICON.info(14)}</span>
         <span className="text-[12px] font-semibold" style={{ color: C.ink }}>{title}</span>
         <span className="ml-auto text-[10px]" style={{ color: C.faint }}>estimate — places nothing</span>
       </div>
+      {inner}
+    </div>
+  )
+
+  const rows = (preview?.positions ?? []).filter((p) => p.status !== 'SKIPPED' && (p.qty ?? 0) > 0)
+  if (!preview || rows.length === 0) {
+    if (loading) return wrap(<p className="text-[11.5px]" style={{ color: C.muted }}>Estimating sizing…</p>)
+    if (err) return wrap(
+      <p className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+        <span style={{ color: C.amber }}>Couldn&apos;t estimate sizing</span>{' '}
+        <span style={{ color: C.faint }}>({err}). It will refresh on your next change.</span>
+      </p>)
+    if (preview) return wrap(<p className="text-[11.5px]" style={{ color: C.faint }}>No sizable positions for this capital / universe.</p>)
+    return wrap(<p className="text-[11.5px]" style={{ color: C.muted }}>Estimating sizing…</p>)
+  }
+
+  const inr = (v: number | undefined) => fmtINR(v ?? 0)
+  const lev = preview.leverage ?? 1
+  const myFund = preview.total_allocated_capital
+  const totalMargin = preview.total_margin ?? rows.reduce((s, p) => s + (p.margin ?? 0), 0)
+  const totalDeployed = preview.invested_basis
+  const totalBroker = Math.max(0, totalDeployed - totalMargin)
+  const deployedOf = (p: PreviewPosition) => ((isFut ? (p.notional ?? p.invested_value) : p.invested_value) ?? 0)
+  const brokerOf = (p: PreviewPosition) => Math.max(0, deployedOf(p) - (p.margin ?? 0))
+  const totalFor = (t?: string) =>
+    t === 'margin' ? fmtINR(totalMargin)
+    : t === 'broker' ? (totalBroker > 1 ? fmtINR(totalBroker) : '—')
+    : t === 'deployed' ? fmtINR(totalDeployed) : ''
+
+  // Funding columns shown for EVERY product, so switching MIS↔MTF↔CNC makes the
+  // difference obvious (Broker funds lights up only when the product leverages).
+  const fundingCols: SizeCol[] = [
+    { label: 'Your margin', get: (p) => inr(p.margin), strong: true, tone: C.mint, total: 'margin' },
+    { label: 'Broker funds', get: (p) => { const b = brokerOf(p); return b > 1 ? inr(b) : '—' }, tone: C.amber, total: 'broker' },
+    { label: 'Deployed', get: (p) => inr(deployedOf(p)), tone: C.ink2, total: 'deployed' },
+  ]
+  const cols: SizeCol[] = isFut
+    ? [{ label: 'Lots', get: (p) => p.lots ?? 0, tone: C.mint }, { label: 'Lot size', get: (p) => p.lot_size ?? 0 },
+       { label: 'Qty', get: (p) => p.qty ?? 0 }, { label: 'Margin/lot', get: (p) => inr(p.margin_per_lot) }, ...fundingCols]
+    : [{ label: 'Qty', get: (p) => p.qty ?? 0 }, { label: 'Price', get: (p) => inr(p.ref_price) }, ...fundingCols]
+  const cell = 'text-right tabular-nums py-1.5 px-2'
+
+  return wrap(
+    <>
       <div className="overflow-x-auto">
         <table className="w-full text-[11.5px]" style={{ borderCollapse: 'collapse' }}>
           <thead>
@@ -2791,8 +2810,8 @@ function SizingBreakdown({ config, preview }: { config: SessionConfig; preview: 
               <td className="text-left py-1.5 px-2 font-semibold" style={{ color: C.ink }}>Total</td>
               {cols.map((c) => (
                 <td key={c.label} className={cell + (c.total ? ' font-semibold' : '')}
-                    style={{ color: c.total === 'margin' ? C.mint : c.total === 'value' ? C.faint : 'transparent' }}>
-                  {c.total === 'margin' ? fmtINR(totalMargin) : c.total === 'value' ? fmtINR(totalValue) : ''}
+                    style={{ color: c.total === 'margin' ? C.mint : c.total === 'broker' ? C.amber : c.total === 'deployed' ? C.ink : 'transparent' }}>
+                  {totalFor(c.total)}
                 </td>
               ))}
             </tr>
@@ -2800,17 +2819,16 @@ function SizingBreakdown({ config, preview }: { config: SessionConfig; preview: 
         </table>
       </div>
       <p className="text-[10.5px] leading-snug mt-2" style={{ color: C.faint }}>
-        {isCash ? (
-          <>Deploys <b style={{ color: C.ink2 }}>{fmtINR(totalMargin)}</b> of your{' '}
-            <b style={{ color: C.ink2 }}>{fmtCapital(preview.total_allocated_capital)}</b> fund (cash — no leverage).</>
+        {totalBroker > 1 ? (
+          <>You put in <b style={{ color: C.mint }}>{fmtINR(totalMargin)}</b>, the broker funds{' '}
+            <b style={{ color: C.amber }}>{fmtINR(totalBroker)}</b> → <b style={{ color: C.ink2 }}>{fmtINR(totalDeployed)}</b> deployed
+            {' '}(~{lev.toFixed(lev % 1 === 0 ? 0 : 2)}× buying power). Your fund: <b style={{ color: C.ink2 }}>{fmtCapital(myFund)}</b>.</>
         ) : (
-          <>Margin <b style={{ color: C.ink2 }}>{fmtINR(totalMargin)}</b> of your{' '}
-            <b style={{ color: C.ink2 }}>{fmtCapital(preview.total_allocated_capital)}</b> fund controls{' '}
-            <b style={{ color: C.ink2 }}>{fmtINR(totalValue)}</b> {isFut ? 'notional' : 'value'} (~{lev.toFixed(lev % 1 === 0 ? 0 : 2)}× leverage).
-            {isFut ? ' Trailing % is measured on your capital.' : ''}</>
+          <>You put in <b style={{ color: C.mint }}>{fmtINR(totalMargin)}</b> → <b style={{ color: C.ink2 }}>{fmtINR(totalDeployed)}</b> deployed
+            {' '}(<b style={{ color: C.ink2 }}>no broker margin, 1×</b>). Your fund: <b style={{ color: C.ink2 }}>{fmtCapital(myFund)}</b>.</>
         )}
       </p>
-    </div>
+    </>
   )
 }
 
