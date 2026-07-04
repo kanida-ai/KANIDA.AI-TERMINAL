@@ -75,13 +75,14 @@ const DEFAULT_CONFIG: SessionConfig = {
 const INTRADAY_PRESET: Partial<SessionConfig> = {
   top_n_stocks: 5,
   entry_time: '09:15:00',
-  order_product: 'MTF',
-  // Defaults from the 517-day walk-forward sweep (OOS-validated 2026-07-02):
-  // arm 2% / floor 1% / giveback 0.5% / stop 1.5%.
-  arm_pct: 2.0,
+  order_product: 'MIS',
+  // Validated basket-only config (2026-07-04, 530-day backtest + MAE/MFE + param
+  // grid): arm 2.5% / floor 1% / giveback 1.5% / stop 3%. Wide giveback rides the
+  // +2-3% runner days; -3% basket hard stop; per-stock stop is OFF server-side.
+  arm_pct: 2.5,
   floor_pct: 1.0,
-  trail_giveback_pct: 0.5,
-  stop_pct: 1.5,
+  trail_giveback_pct: 1.5,
+  stop_pct: 3.0,
   square_off_time: '15:29:00',
   // Hold mode — default INTRADAY (force square-off). Positional = false.
   square_off_enabled: true,
