@@ -33,18 +33,21 @@ def _margin_product(cfg) -> Optional[str]:
     """The broker margin PRODUCT to size equity quantity against, or None to
     cash-size on LTP.
 
-    MTF  → "MTF" (delivery leverage; UNCHANGED — matches the legacy engine).
-    MIS  → None  (CASH-sized: deploy the ALLOCATED CAPITAL, NOT the broker's
-                  ~5x intraday-margin max). MIS intraday leverage is deliberately
-                  NOT auto-applied — sizing MIS off intraday margin turned a ₹1L
-                  session into ~₹5L notional, which the operator did not intend.
-                  The capital fix (redistribute unused cash + skip unaffordable)
-                  still uses the FULL ₹1L cash; it just doesn't multiply it.
-    Anything else (CNC / NRML) → None (cash-size on LTP, unchanged)."""
+    EQUITY sizes off the BROKER'S real leverage (operator directive 2026-07-04):
+    whatever intraday/delivery leverage the broker grants for the selected product
+    is used for the quantity, and the exit/trail then keys off the leveraged
+    (notional) invested basis — see monitor.freeze_invested_basis.
+      MTF → "MTF" (delivery margin leverage)
+      MIS → "MIS" (intraday margin leverage — the broker's ~2-5x)
+    (Derivatives are the opposite: FUT/OPT size off margin but the exit/trail keys
+    off the trader's FUND, because notional dwarfs the margin — handled in monitor.)
+    CNC / NRML → None (cash-size on LTP; 1x)."""
     itype = getattr(cfg, "instrument_type", "EQ")
     product = str(getattr(cfg, "order_product", "") or "").upper()
     if itype == "MTF" or product == "MTF":
         return "MTF"
+    if product == "MIS":
+        return "MIS"
     return None
 
 
