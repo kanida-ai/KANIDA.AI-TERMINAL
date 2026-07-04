@@ -165,7 +165,11 @@ class TradingSessionConfig:
     # portfolio target usually fires first. LIVE-only: in paper mode no real GTT
     # is placed (the intended levels are still recorded for the UI).
     per_position_gtt_enabled: bool = True
-    per_position_stop_pct: float = 0.03    # stop  = entry * (1 - this)
+    # Per-position broker GTT-OCO backstop. WIDENED to -5% (was -3%) per the
+    # validated basket-only strategy doc (2026-07-04): the GTT is a rare CATASTROPHE
+    # backstop only — a tight -3% GTT dragged live toward the (worse) two-layer
+    # numbers. Basket-level exits (arm/trail/stop) do the real work.
+    per_position_stop_pct: float = 0.05    # stop  = entry * (1 - this)
     per_position_target_pct: float = 0.06  # target = entry * (1 + this)
 
     # ── INTRADAY BASKET trailing engine (strategy=="intraday_basket" only) ────
@@ -178,16 +182,22 @@ class TradingSessionConfig:
     #   stop_pct           : downside hard stop, applied as -stop_pct (pre-arm).
     #   square_off_time    : IST clock time to flatten the basket (never overnight).
     # Inert when strategy != "intraday_basket".
-    # Defaults updated 2026-07-02 from a 517-day walk-forward sweep (train/test
-    # validated OOS): arm 2% / floor 1% / giveback 0.5% / stop 1.5%. The higher
-    # arm skips early +1% blips that caused premature floor-exits; the tighter
-    # giveback locks gains once armed. OOS median uplift ~+0.44%/day vs the prior
-    # arm1/floor1/give0.75 defaults. (stop kept at 1.5% per operator — the sweep's
-    # wider 2% stop is marginally better on median but 1.5% is the tighter risk cap.)
-    arm_pct: float = 0.02
+    # Defaults updated 2026-07-04 to the VALIDATED basket-only config (530-day
+    # backtest + MAE/MFE + 100-combo param grid): arm 2.5% / floor 1% /
+    # giveback 1.5% / stop 3%. The WIDE 1.5% giveback lets winners ride to the
+    # close (capturing the +2-3% runner days that carry the edge — ~80% of exits
+    # are EOD); the higher 2.5% arm skips small blips; the -3% basket hard stop
+    # replaces the whipsaw-prone tight/per-stock stops. Return-maximizing choice
+    # per the doc; superseded the earlier arm2/floor1/give0.5/stop1.5 sweep values.
+    arm_pct: float = 0.025
     floor_pct: float = 0.01
-    trail_giveback_pct: float = 0.005
-    stop_pct: float = 0.015
+    trail_giveback_pct: float = 0.015
+    stop_pct: float = 0.03
+    # Layer A — per-stock software stop (session.py _tick_intraday). OFF by default:
+    # the validated config is BASKET-ONLY. Across 530 days a per-stock stop whipsawed
+    # (cut a name at its stop that then recovered inside the basket), reducing return
+    # at EVERY level. Set True only to run the (worse-returning) two-layer variant.
+    per_stock_stop_enabled: bool = False
     square_off_time: str = "15:29:00"
     # ── INTRADAY vs POSITIONAL trailing (additive, default-on = today) ────────
     # Applies to strategy=="intraday_basket" only. Inert otherwise.
@@ -515,12 +525,13 @@ class TradingSessionConfig:
                 float(d["kill_switch_stop_pct"])
                 if d.get("kill_switch_stop_pct") is not None else None),
             per_position_gtt_enabled=bool(d.get("per_position_gtt_enabled", True)),
-            per_position_stop_pct=float(d.get("per_position_stop_pct", 0.03)),
+            per_position_stop_pct=float(d.get("per_position_stop_pct", 0.05)),
             per_position_target_pct=float(d.get("per_position_target_pct", 0.06)),
-            arm_pct=float(d.get("arm_pct", 0.02)),
+            arm_pct=float(d.get("arm_pct", 0.025)),
             floor_pct=float(d.get("floor_pct", 0.01)),
-            trail_giveback_pct=float(d.get("trail_giveback_pct", 0.005)),
-            stop_pct=float(d.get("stop_pct", 0.015)),
+            trail_giveback_pct=float(d.get("trail_giveback_pct", 0.015)),
+            stop_pct=float(d.get("stop_pct", 0.03)),
+            per_stock_stop_enabled=bool(d.get("per_stock_stop_enabled", False)),
             square_off_time=d.get("square_off_time", "15:29:00"),
             square_off_enabled=bool(d.get("square_off_enabled", True)),
             mis_square_off_time=d.get("mis_square_off_time", "15:12:00"),

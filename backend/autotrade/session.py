@@ -1558,31 +1558,37 @@ class TradingSession:
             _now_ist_intraday.replace(hour=15, minute=29, second=0, microsecond=0)
         )
         per_stock_exits: List[Dict[str, Any]] = []
-        try:
-            stop_pct = float(getattr(self.config, "stop_pct", 0.015))
-            open_positions = self.monitor._open_positions()
-            for pos in open_positions:
-                ltp = pos.get("ltp")
-                avg_price = float(pos.get("avg_price") or 0)
-                if ltp is None or avg_price <= 0:
-                    continue
-                stock_return = (float(ltp) - avg_price) / avg_price
-                if stock_return <= -stop_pct and _in_market_hours:
-                    result = await _exit_single_position(
-                        session_id=self.session_id,
-                        position=pos,
-                        reason="STOP_STOCK",
-                        brokers=self.brokers,
-                        registry=self.registry,
-                        gtt_manager=self.gtt_manager,
-                        kite_product=self.config.order_product,
-                    )
-                    per_stock_exits.append(result)
-                    log.warning(
-                        "per-stock stop TRIGGERED %s/%s: return=%.4f <= -%.4f",
-                        self.session_id, pos["symbol"], stock_return, stop_pct)
-        except Exception as e:  # never block the tick on per-stock stop errors
-            log.error("per-stock stop loop error for %s: %s", self.session_id, e)
+        # Layer A — per-stock software stop. OFF by default: the validated config is
+        # BASKET-ONLY (config.per_stock_stop_enabled=False). Across 530 days a
+        # per-stock stop whipsawed (cut a name at its stop that then recovered inside
+        # the basket), reducing return at every level — so we skip it entirely unless
+        # explicitly enabled for the (worse-returning) two-layer variant.
+        if getattr(self.config, "per_stock_stop_enabled", False):
+            try:
+                stop_pct = float(getattr(self.config, "stop_pct", 0.015))
+                open_positions = self.monitor._open_positions()
+                for pos in open_positions:
+                    ltp = pos.get("ltp")
+                    avg_price = float(pos.get("avg_price") or 0)
+                    if ltp is None or avg_price <= 0:
+                        continue
+                    stock_return = (float(ltp) - avg_price) / avg_price
+                    if stock_return <= -stop_pct and _in_market_hours:
+                        result = await _exit_single_position(
+                            session_id=self.session_id,
+                            position=pos,
+                            reason="STOP_STOCK",
+                            brokers=self.brokers,
+                            registry=self.registry,
+                            gtt_manager=self.gtt_manager,
+                            kite_product=self.config.order_product,
+                        )
+                        per_stock_exits.append(result)
+                        log.warning(
+                            "per-stock stop TRIGGERED %s/%s: return=%.4f <= -%.4f",
+                            self.session_id, pos["symbol"], stock_return, stop_pct)
+            except Exception as e:  # never block the tick on per-stock stop errors
+                log.error("per-stock stop loop error for %s: %s", self.session_id, e)
 
         state = self.monitor.load_trail_state()
         params = trail_engine.params_from_config(self.config)
