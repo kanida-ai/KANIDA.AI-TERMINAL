@@ -227,8 +227,9 @@ def test_start_scheduled_missed_carries_to_next_day(clean_positions,
     res = asyncio.run(sess.start(when="scheduled"))
     assert res["status"] == "SCHEDULED"
     assert res["n_placed"] == 0
-    # 2026-06-25 Thu → next trading day is 2026-06-26 Fri.
-    assert res["entry_date"] == "2026-06-26"
+    # 2026-06-25 Thu → next trading day is Mon 2026-06-29
+    # (Fri 06-26 is the Muharram holiday, 06-27/28 weekend).
+    assert res["entry_date"] == "2026-06-29"
 
 
 # ── 6. cancel/kill a SCHEDULED session stops it + places nothing ──────────────

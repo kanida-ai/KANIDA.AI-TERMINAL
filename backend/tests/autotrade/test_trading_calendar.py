@@ -9,10 +9,11 @@ DETERMINISM: 'now' is always passed explicitly (frozen) — never the wall clock
 
 Calendar anchors used:
   2026-06-25 Thu  → trading day, mid-session at 10:00 IST
-  2026-06-26 Fri  → trading day (the day after)
+  2026-06-26 Fri  → NSE HOLIDAY (Muharram, via the override file)
   2026-06-27 Sat  → weekend
   2026-06-28 Sun  → weekend
   2026-06-29 Mon  → trading day
+  2026-07-02 Thu / 2026-07-03 Fri → consecutive trading days
   2026-01-26 Mon  → Republic Day (in NSE_HOLIDAYS)
 """
 from datetime import datetime, timedelta, timezone
@@ -35,8 +36,8 @@ def _cfg(**kw) -> TradingSessionConfig:
 # ── trading_calendar primitives ───────────────────────────────────────────────
 
 def test_is_trading_day_weekday_vs_weekend():
+    assert cal.is_trading_day("2026-06-24") is True   # Wed
     assert cal.is_trading_day("2026-06-25") is True   # Thu
-    assert cal.is_trading_day("2026-06-26") is True   # Fri
     assert cal.is_trading_day("2026-06-27") is False  # Sat
     assert cal.is_trading_day("2026-06-28") is False  # Sun
     assert cal.is_trading_day("2026-06-29") is True   # Mon
@@ -45,6 +46,7 @@ def test_is_trading_day_weekday_vs_weekend():
 def test_is_trading_day_holiday():
     assert cal.is_trading_day("2026-01-26") is False  # Republic Day
     assert cal.is_trading_day("2026-04-03") is False  # Good Friday
+    assert cal.is_trading_day("2026-06-26") is False  # Muharram (override file)
 
 
 def test_next_trading_day_skips_weekend_and_holiday():
@@ -96,9 +98,9 @@ def test_validate_bad_on_missed_window():
 # ── config.resolve_fire_datetime ──────────────────────────────────────────────
 
 def test_resolve_explicit_entry_date():
-    cfg = _cfg(entry_date="2026-06-26", entry_time="09:15:00")
-    fdt = cfg.resolve_fire_datetime(datetime(2026, 6, 25, 10, 0, tzinfo=IST))
-    assert fdt == datetime(2026, 6, 26, 9, 15, tzinfo=IST)
+    cfg = _cfg(entry_date="2026-07-03", entry_time="09:15:00")
+    fdt = cfg.resolve_fire_datetime(datetime(2026, 7, 2, 10, 0, tzinfo=IST))
+    assert fdt == datetime(2026, 7, 3, 9, 15, tzinfo=IST)
 
 
 def test_resolve_unset_today_future_clock():
@@ -111,8 +113,8 @@ def test_resolve_unset_today_future_clock():
 def test_resolve_unset_today_past_clock_rolls_next_day():
     # Today is a trading day but entry_time already passed → next trading day.
     cfg = _cfg(entry_time="09:15:00")
-    now = datetime(2026, 6, 25, 10, 0, tzinfo=IST)
-    assert cfg.resolve_fire_datetime(now) == datetime(2026, 6, 26, 9, 15, tzinfo=IST)
+    now = datetime(2026, 7, 2, 10, 0, tzinfo=IST)
+    assert cfg.resolve_fire_datetime(now) == datetime(2026, 7, 3, 9, 15, tzinfo=IST)
 
 
 def test_resolve_unset_on_weekend_rolls_to_monday():
@@ -188,9 +190,9 @@ def test_gate_non_trading_day_carry():
 
 
 def test_gate_missed_window_carry_rolls_forward():
-    cfg = _cfg(entry_date="2026-06-25", entry_time="09:15:00",
+    cfg = _cfg(entry_date="2026-07-02", entry_time="09:15:00",
                on_missed_window="carry_next_trading_day")
-    now = datetime(2026, 6, 25, 10, 0, tzinfo=IST)  # 09:15 missed
+    now = datetime(2026, 7, 2, 10, 0, tzinfo=IST)  # 09:15 missed
     g = evaluate_fire_gate(cfg, now)
     assert g.allow is False
-    assert g.carry_to == "2026-06-26"  # Fri (next trading day)
+    assert g.carry_to == "2026-07-03"  # Fri (next trading day)

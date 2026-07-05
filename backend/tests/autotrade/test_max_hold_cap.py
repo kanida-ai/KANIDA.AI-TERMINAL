@@ -52,12 +52,12 @@ def test_cap_date_across_weekend():
 
 
 def test_cap_date_across_holiday():
-    # Entry Fri 2026-07-03 (session 1). Next trading days skip Sat 07-04, Sun
-    # 07-05, and the NSE holiday Mon 07-06 (Muharram) → Tue 07-07 (2) →
-    # Wed 07-08 (3).
-    started = "2026-07-03T09:15:00+05:30"
+    # Entry Thu 2026-06-25 (session 1). Next trading days skip the NSE holiday
+    # Fri 2026-06-26 (Muharram) + Sat/Sun 06-27/28 → Mon 06-29 (2) →
+    # Tue 06-30 (3).
+    started = "2026-06-25T09:15:00+05:30"
     cap = compute_max_hold_cap_datetime(started, 3, "15:29:00")
-    assert cap == _iso(2026, 7, 8, 15, 29, 0)
+    assert cap == _iso(2026, 6, 30, 15, 29, 0)
 
 
 def test_cap_session_1_is_entry_day():
@@ -183,14 +183,14 @@ def test_max_hold_fires_on_day_n_even_unarmed(clean_positions, patched_brokers):
     sess = TradingSession.create(_positional_cfg(3), mode="paper")
     asyncio.run(sess.start())
     sid = sess.session_id
-    # Anchor entry on Thu 07-02 (S1) → Fri 07-03 (2) → Tue 07-07 (3, skips
-    # weekend + the Mon 07-06 Muharram holiday). Cap = Tue 07-07 @ 15:29.
+    # Anchor entry on Thu 07-02 (S1) → Fri 07-03 (2) → Mon 07-06 (3; 07-06 is a
+    # normal trading day, weekend 07-04/05 skipped). Cap = Mon 07-06 @ 15:29.
     _set_started_at(sid, "2026-07-02T09:15:00+05:30")
     assert _open_count(sid) == 3
 
     # The trail is UNARMED (never save_trail_state). Freeze "now" to the cap
     # moment and tick.
-    sess_mod.set_fake_now(_iso(2026, 7, 7, 15, 29, 0))
+    sess_mod.set_fake_now(_iso(2026, 7, 6, 15, 29, 0))
     try:
         # fresh object to prove nothing in-memory carries the cap.
         s2 = TradingSession.load(sid)
@@ -217,7 +217,7 @@ def test_max_hold_does_not_fire_before_cap(clean_positions, patched_brokers):
     sess = TradingSession.create(_positional_cfg(3), mode="paper")
     asyncio.run(sess.start())
     sid = sess.session_id
-    _set_started_at(sid, "2026-07-02T09:15:00+05:30")   # cap N=3 = Tue 07-07
+    _set_started_at(sid, "2026-07-02T09:15:00+05:30")   # cap N=3 = Mon 07-06
 
     # Fri 07-03 @ 15:29 = session 2 — before the cap → no MAX_HOLD_EXIT.
     sess_mod.set_fake_now(_iso(2026, 7, 3, 15, 29, 0))
@@ -283,4 +283,4 @@ def test_status_surfaces_cap(clean_positions, patched_brokers):
     st = TradingSession.load(sess.session_id).status()
     assert st["trail"]["max_hold_sessions"] == 3
     assert st["trail"]["max_hold_cap_datetime"] == _iso(
-        2026, 7, 7, 15, 29, 0).isoformat()
+        2026, 7, 6, 15, 29, 0).isoformat()
