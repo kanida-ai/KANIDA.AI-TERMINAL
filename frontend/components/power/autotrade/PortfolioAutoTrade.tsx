@@ -86,6 +86,22 @@ const INTRADAY_PRESET: Partial<SessionConfig> = {
   square_off_time: '15:29:00',
   // Hold mode — default INTRADAY (force square-off). Positional = false.
   square_off_enabled: true,
+  max_hold_sessions: 0,   // intraday has no multi-session cap
+}
+
+// ── Hold-mode TRAIL presets (params only — product/entry/capital untouched) ────
+// Switching the Hold toggle re-seeds the validated trail params for that mode:
+//   INTRADAY  — arm 2.5 / floor 1 / giveback 1.5 / stop 3, square-off ON, no cap.
+//   POSITIONAL — the Falcon Positional strategy (2026-07-04 doc, 519-day NET sim):
+//     arm 3 / floor 1 / giveback 4 (wide, for multi-day swings) / stop 6 (wide,
+//     for overnight gaps), carry overnight (square-off OFF), 3-session max-hold.
+const INTRADAY_TRAIL: Partial<SessionConfig> = {
+  arm_pct: 2.5, floor_pct: 1.0, trail_giveback_pct: 1.5, stop_pct: 3.0,
+  square_off_enabled: true, max_hold_sessions: 0,
+}
+const POSITIONAL_TRAIL: Partial<SessionConfig> = {
+  arm_pct: 3.0, floor_pct: 1.0, trail_giveback_pct: 4.0, stop_pct: 6.0,
+  square_off_enabled: false, max_hold_sessions: 3,
 }
 
 // Protection mode = the exit engine. 'Fixed' is the flat ±% kill switch;
@@ -423,6 +439,13 @@ export function PortfolioAutoTrade({
     })
   }
 
+  // Switch Hold mode (Intraday ↔ Positional). Re-seeds that mode's validated
+  // trail preset (arm/floor/giveback/stop + square-off + max-hold) — product,
+  // capital and entry are untouched. The operator can still edit every field.
+  const onHoldChange = (hold: 'intraday' | 'positional') => {
+    setConfig((c) => ({ ...c, ...(hold === 'positional' ? POSITIONAL_TRAIL : INTRADAY_TRAIL) }))
+  }
+
   // Build the wire payload for a config: percents → fractions, exactly at the
   // send boundary (state stays in percents so the inputs read naturally). Both
   // create + preview use this so there is one conversion site per strategy.
@@ -477,6 +500,10 @@ export function PortfolioAutoTrade({
         // (false) carries the floor + hard stop across days. MIS cannot be
         // positional (backend rejects it), so force INTRADAY for MIS.
         square_off_enabled: c.order_product === 'MIS' ? true : (c.square_off_enabled !== false),
+        // D · positional max-hold cap — sent only for a positional (carry-overnight)
+        // session; MIS + intraday never carry a cap. Int, 0 = no cap.
+        max_hold_sessions: (c.order_product !== 'MIS' && c.square_off_enabled === false)
+          ? Math.max(0, Math.floor(Number(c.max_hold_sessions) || 0)) : 0,
         // intraday_basket exits via the trail, not the flat kill switch
         kill_switch_enabled: false,
       }
@@ -1655,7 +1682,7 @@ export function PortfolioAutoTrade({
                               type="button"
                               disabled={disabled}
                               title={disabled ? 'MIS must square off intraday' : undefined}
-                              onClick={() => !disabled && set('square_off_enabled', o.id === 'intraday')}
+                              onClick={() => !disabled && onHoldChange(o.id)}
                               className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors disabled:cursor-not-allowed"
                               style={{
                                 color: active ? '#06130c' : (disabled ? C.faint : C.ink2),
@@ -1681,11 +1708,16 @@ export function PortfolioAutoTrade({
                       className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
                   </Field>
                 ) : (
-                  <Field label="Square-off">
-                    <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-[11.5px] leading-snug"
+                  <Field label="Max hold (trading sessions)"
+                    hint={`Force-close the basket at ${(config.square_off_time ?? '15:29:00').slice(0, 5)} on the Nth trading session (entry day = 1; weekends & NSE holidays skipped). 0 = no cap. Falcon Positional uses 3.`}>
+                    <input type="number" min={0} step={1}
+                      value={config.max_hold_sessions ?? 3}
+                      onChange={(e) => set('max_hold_sessions', Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                    <div className="mt-1.5 flex items-start gap-2 rounded-lg px-2.5 py-1.5 text-[11px] leading-snug"
                       style={{ border: `1px solid ${C.line2}`, background: 'rgba(255,255,255,0.02)', color: C.muted }}>
-                      <span className="shrink-0" style={{ color: C.mint }}>{ICON.info(13)}</span>
-                      <span>Positional — the floor + hard stop carry across days. No forced square-off.</span>
+                      <span className="shrink-0 mt-px" style={{ color: C.mint }}>{ICON.info(12)}</span>
+                      <span>Positional — the floor + hard stop carry <b style={{ color: C.ink2 }}>across days</b>; the basket force-closes on the max-hold session (or earlier on trail/stop).</span>
                     </div>
                   </Field>
                 )}

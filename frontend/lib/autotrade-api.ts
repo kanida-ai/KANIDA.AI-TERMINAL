@@ -118,6 +118,12 @@ export type SessionConfig = {
   // when order_product is MIS (HTTP 400 "positional (no square-off) is not allowed
   // for MIS…"), since MIS must square off intraday.
   square_off_enabled?: boolean
+  // ── Positional MAX-HOLD cap ── (only meaningful for intraday_basket +
+  // square_off_enabled=false). Square off the whole basket at square_off_time on
+  // the Nth trading session (entry day = session 1); weekends/NSE holidays are
+  // skipped. 0 / absent = NO cap (today's behaviour). e.g. 3 = the Falcon
+  // Positional strategy's 3-session hold.
+  max_hold_sessions?: number
 }
 
 // A pick the backend SKIPPED because one unit of it costs more than its per-slice
@@ -202,6 +208,9 @@ export type TrailState = {
   square_off_time?: string        // "HH:MM:SS" IST
   seconds_to_square_off?: number  // seconds until square-off
   square_off_armed?: boolean      // is the square-off timer armed?
+  // ── Positional max-hold cap (present when max_hold_sessions>0) ──
+  max_hold_sessions?: number             // configured N-session cap (0 = none)
+  max_hold_cap_datetime?: string | null  // ISO IST — when the force-close fires
 }
 
 // Session status. `status` is permissive (backend may report PAPER/RUNNING/
