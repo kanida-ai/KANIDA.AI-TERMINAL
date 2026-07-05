@@ -422,6 +422,9 @@ export function PortfolioAutoTrade({
   const [ladderStatuses, setLadderStatuses] = useState<Record<string, LadderStatus>>({})
   const [ladderBusy, setLadderBusy] = useState<Record<string, 'pause' | 'resume' | 'kill'>>({})
   const [ladderErr, setLadderErr] = useState<string | null>(null)
+  // Confirmation banner shown after a campaign is created + started (parity with
+  // the session "scheduled" confirmation — otherwise the user gets no feedback).
+  const [ladderNotice, setLadderNotice] = useState<string | null>(null)
   // Kill modal — mode is REQUIRED (starts unset so the trader must choose).
   const [killLadderId, setKillLadderId] = useState<string | null>(null)
   const [ladderKillMode, setLadderKillMode] = useState<LadderKillMode | null>(null)
@@ -941,7 +944,14 @@ export function PortfolioAutoTrade({
         kill_mode: 'flatten_now',
       })
       await AutoTradeAPI.ladderStart(created.ladder_id)
-      // Return to the list — the new campaign shows as a summary card atop it.
+      // Confirmation (parity with the session 'scheduled' feedback) + the campaign
+      // shows as a summary card atop the list. A campaign has no 'now vs schedule'
+      // choice like a single session — it ALWAYS deploys at 09:15 each trading day,
+      // so the confirmation states that explicitly.
+      setLadderNotice(
+        'Campaign started ✓ — it opens its first Falcon Top-5 basket at 09:15 on the '
+        + 'next trading day, then automatically ladders a new basket every trading day. '
+        + "It's shown below and runs on its own until it ends or you stop it.")
       backToList()
       loadLadders()
     } catch (e) {
@@ -1154,6 +1164,18 @@ export function PortfolioAutoTrade({
               </button>
             </div>
           </div>
+
+          {/* Campaign-created confirmation (parity with the session scheduled note). */}
+          {ladderNotice && (
+            <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[12px] leading-snug"
+              style={{ borderColor: 'rgba(63,227,164,0.4)', background: 'rgba(63,227,164,0.07)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.mint }}>{ICON.check(14)}</span>
+              <span className="flex-1">{ladderNotice}</span>
+              <button type="button" onClick={() => setLadderNotice(null)} className="shrink-0" style={{ color: C.faint }}>
+                {ICON.close(13)}
+              </button>
+            </div>
+          )}
 
           {/* ── Running Auto-Ladder campaigns — summary cards ATOP the list ─────
               One card per running/paused campaign, from the ~5s ladderStatus
@@ -2194,7 +2216,7 @@ export function PortfolioAutoTrade({
               {mode === 'live' && !liveReady
                 ? 'Type LIVE above to enable.'
                 : isLadder
-                ? `Creates the ${mode} campaign and starts it — Falcon then rolls baskets daily.`
+                ? `Creates + starts the ${mode} campaign. Baskets auto-deploy at 09:15 each trading day — there's no separate now/schedule step; the first opens next trading morning.`
                 : `Creates a ${mode} session — no orders are placed yet.`}
             </span>
           </div>
