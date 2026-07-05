@@ -91,7 +91,10 @@ NSE_HOLIDAYS: Set[str] = {
     "2026-04-14",  # Dr. Ambedkar Jayanti
     "2026-05-01",  # Maharashtra Day
     "2026-05-27",  # Bakri Id (observed)        [verify against NSE circular]
-    "2026-07-06",  # Muharram (observed)        [verify against NSE circular]
+    # 2026-07-06 REMOVED 2026-07-04: was the 2025 Muharram date carried over in
+    # error. Muharram 2026 = 2026-06-26 (confirmed vs NSE circular + web check),
+    # already marked via the operator override file. 2026-07-06 (Mon) is a NORMAL
+    # trading day — leaving it here wrongly blocked scheduling for it.
     "2026-08-15",  # Independence Day (Saturday — already non-trading)
     "2026-08-28",  # Ganesh Chaturthi (observed) [verify]
     "2026-10-02",  # Gandhi Jayanti
