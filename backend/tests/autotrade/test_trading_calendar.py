@@ -54,7 +54,7 @@ def test_is_trading_day_holiday():
 # calendar can NEVER silently drift again — if someone edits a date, this fails.
 # Weekend-only festivals are intentionally excluded (already non-trading).
 NSE_2026_HOLIDAYS = [
-    "2026-01-15", "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31",
+    "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31",
     "2026-04-03", "2026-04-14", "2026-05-01", "2026-05-28", "2026-06-26",
     "2026-09-14", "2026-10-02", "2026-10-20", "2026-11-10", "2026-11-24",
     "2026-12-25",

@@ -89,7 +89,8 @@ NSE_HOLIDAYS: Set[str] = {
     # session (Sun 2026-11-08) is a trading session, NOT a full closure, so it is
     # not listed. Prior list had several wrong dates (Holi/Bakri/Ganesh/Dussehra/
     # Diwali off by days→weeks, a bogus 04-01, missing Ram Navami) — corrected here.
-    "2026-01-15",  # Municipal Election, Maharashtra
+    # (2026-01-15 "Municipal Election" was in some public lists but the market
+    #  actually traded that day per ohlc_daily — NOT a holiday; omitted.)
     "2026-01-26",  # Republic Day
     "2026-03-03",  # Holi
     "2026-03-26",  # Shri Ram Navami
