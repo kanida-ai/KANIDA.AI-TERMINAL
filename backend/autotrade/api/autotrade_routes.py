@@ -327,6 +327,15 @@ class CreateLadderRequest(BaseModel):
     def _coerce_str(cls, v): return _coerce_id(v)
 
 
+class StartLadderRequest(BaseModel):
+    # Optional. Omit / null → start NOW (RUNNING today, backward-compatible).
+    # A future YYYY-MM-DD (IST) → SCHEDULED to auto-activate on that trading day.
+    # A weekend/holiday is rejected 400 with a suggested next trading day.
+    start_date: Optional[str] = Field(
+        None, description="YYYY-MM-DD (IST). Omit → start now (RUNNING). "
+                          "Future trading day → SCHEDULED.")
+
+
 class KillLadderRequest(BaseModel):
     mode: str = Field(...,
                       description="flatten_now | stop_new_let_finish")
@@ -681,16 +690,35 @@ def ladder_create(req: CreateLadderRequest,
 
 
 @router.post("/autotrade/ladder/{ladder_id}/start")
-def ladder_start(ladder_id: str, caller: Caller = Depends(resolve_caller)):
+def ladder_start(ladder_id: str,
+                 req: Optional[StartLadderRequest] = None,
+                 caller: Caller = Depends(resolve_caller)):
+    """Start a campaign. Optional JSON body {"start_date": "YYYY-MM-DD"}:
+      * omitted / null → start NOW → RUNNING (backward-compatible one-step).
+      * future trading day → SCHEDULED (auto-activates on that day).
+    A weekend/holiday start_date returns HTTP 400 with a structured `detail`
+    carrying the human message + the suggested next trading day, so the frontend
+    can offer "did you mean {suggested_date}?".
+    """
     from ..ladder import LadderCampaign
     _assert_ladder_access(ladder_id, caller)
     lad = LadderCampaign.load(ladder_id)
     if not lad:
         raise HTTPException(404, "ladder not found")
+    start_date = req.start_date if req else None
     try:
-        lad.start()
+        lad.start(start_date=start_date)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        # The engine embeds a "||suggested=YYYY-MM-DD" sentinel on the
+        # non-trading-day rejection. Split it off, surface a structured 400.
+        raw = str(e)
+        message, _, tail = raw.partition("||suggested=")
+        suggested = tail.strip() or None
+        detail: Dict[str, Any] = {"message": message.strip()}
+        if suggested:
+            detail["suggested_date"] = suggested
+            detail["code"] = "NON_TRADING_START_DATE"
+        raise HTTPException(400, detail)
     return lad.to_status()
 
 

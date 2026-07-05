@@ -23,8 +23,9 @@ import autotrade.broker.router as router_mod
 import autotrade.session as sess_mod
 import autotrade.ladder as ladder_mod
 from autotrade.ladder import (
-    LadderCampaign, STATUS_RUNNING, STATUS_PAUSED, STATUS_ENDED,
-    STATUS_COMPLETED, KILL_FLATTEN_NOW, KILL_STOP_NEW_LET_FINISH,
+    LadderCampaign, STATUS_CREATED, STATUS_SCHEDULED, STATUS_RUNNING,
+    STATUS_PAUSED, STATUS_ENDED, STATUS_COMPLETED, KILL_FLATTEN_NOW,
+    KILL_STOP_NEW_LET_FINISH,
 )
 from falcon.db import falcon_conn
 from tests.autotrade.conftest import seed_signals
@@ -67,10 +68,12 @@ def _trading_day_now():
 def test_per_basket_is_total_over_three(clean_positions):
     lad = LadderCampaign.create(total_capital=900000.0, order_product="CNC")
     assert lad.per_basket_capital == pytest.approx(300000.0)
-    assert lad.status == STATUS_RUNNING
-    # persisted frozen value
+    # create() is a DRAFT — CREATED, not RUNNING (mirrors session create→start).
+    assert lad.status == STATUS_CREATED
+    # persisted frozen value + persisted status
     got = LadderCampaign.load(lad.ladder_id)
     assert got.per_basket_capital == pytest.approx(300000.0)
+    assert got.status == STATUS_CREATED
 
 
 def test_create_rejects_mis(clean_positions):
@@ -180,6 +183,7 @@ def _open_positions(ladder_id):
 def test_daily_tick_opens_one_basket(clean_positions, patched_brokers):
     _basket_signals()
     lad = LadderCampaign.create(total_capital=900000.0)  # per_basket 300k
+    lad.start()  # now RUNNING (draft → started)
     res = lad.daily_tick(ref_now=_trading_day_now())
     assert res["opened"] is True
     assert lad.n_active_baskets() == 1
@@ -191,6 +195,7 @@ def test_daily_tick_opens_one_basket(clean_positions, patched_brokers):
 def test_daily_tick_idempotent_same_day(clean_positions, patched_brokers):
     _basket_signals()
     lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start()
     lad.daily_tick(ref_now=_trading_day_now())
     n1 = lad.n_active_baskets()
     # second tick SAME day opens nothing (last_tick_date guard).
@@ -203,6 +208,7 @@ def test_daily_tick_idempotent_same_day(clean_positions, patched_brokers):
 def test_daily_tick_skips_when_full(clean_positions, patched_brokers):
     """3 open children (= total) → free < per_basket → open nothing."""
     lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start()
     for _ in range(3):
         _insert_child(lad.ladder_id, status="RUNNING", capital=300000.0)
     assert lad.free_capital() == pytest.approx(0.0)
@@ -224,11 +230,201 @@ def test_daily_tick_paused_opens_nothing(clean_positions, patched_brokers):
 def test_daily_tick_non_trading_day(clean_positions, patched_brokers):
     _basket_signals()
     lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start()
     # Sun 2026-06-28.
     sunday = datetime(2026, 6, 28, 10, 0, 0, tzinfo=IST)
     res = lad.daily_tick(ref_now=sunday)
     assert res["opened"] is False
     assert "trading day" in (res["reason"] or "")
+
+
+# ── START-NOW / SCHEDULE lifecycle (mirrors single-session create→start) ──────
+
+def _future_trading_day():
+    # Mon 2026-06-29 — the next NSE trading day after the frozen "today"
+    # (Thu 2026-06-25); Fri 06-26 is a holiday, 27/28 weekend.
+    return "2026-06-29"
+
+
+def _future_trading_day_now():
+    return datetime(2026, 6, 29, 10, 0, 0, tzinfo=IST)
+
+
+def test_create_is_draft_spawns_nothing(clean_positions, patched_brokers):
+    """create() → CREATED draft; a tick on the create-day opens nothing."""
+    _basket_signals()
+    lad = LadderCampaign.create(total_capital=900000.0)
+    assert lad.status == STATUS_CREATED
+    res = lad.daily_tick(ref_now=_trading_day_now())
+    assert res["opened"] is False
+    assert "CREATED" in (res["reason"] or "")
+    assert lad.n_active_baskets() == 0
+    assert _open_positions(lad.ladder_id) == 0
+
+
+def test_start_no_date_runs_immediately(clean_positions):
+    lad = LadderCampaign.create(total_capital=900000.0)
+    out = lad.start()  # no date → RUNNING now
+    assert out["status"] == STATUS_RUNNING
+    assert out["when"] == "now"
+    reloaded = LadderCampaign.load(lad.ladder_id)
+    assert reloaded.status == STATUS_RUNNING
+    # start_date pinned to today (frozen 2026-06-25).
+    assert reloaded.start_date == "2026-06-25"
+
+
+def test_start_past_date_runs_immediately(clean_positions):
+    """A start_date <= today behaves like start-now (RUNNING today)."""
+    lad = LadderCampaign.create(total_capital=900000.0)
+    out = lad.start(start_date="2026-06-01")  # in the past
+    assert out["status"] == STATUS_RUNNING
+    assert LadderCampaign.load(lad.ladder_id).start_date == "2026-06-25"
+
+
+def test_start_future_date_schedules(clean_positions):
+    lad = LadderCampaign.create(total_capital=900000.0)
+    out = lad.start(start_date=_future_trading_day())
+    assert out["status"] == STATUS_SCHEDULED
+    assert out["when"] == "scheduled"
+    assert out["start_date"] == _future_trading_day()
+    reloaded = LadderCampaign.load(lad.ladder_id)
+    assert reloaded.status == STATUS_SCHEDULED
+    assert reloaded.start_date == _future_trading_day()
+
+
+def test_scheduled_tick_before_start_date_spawns_nothing(clean_positions,
+                                                         patched_brokers):
+    _basket_signals()
+    lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start(start_date=_future_trading_day())
+    # Tick on TODAY (06-25) — before the scheduled 06-29 start.
+    res = lad.daily_tick(ref_now=_trading_day_now())
+    assert res["opened"] is False
+    assert "scheduled" in (res["reason"] or "").lower()
+    assert LadderCampaign.load(lad.ladder_id).status == STATUS_SCHEDULED
+    assert lad.n_active_baskets() == 0
+    assert _open_positions(lad.ladder_id) == 0
+
+
+def test_scheduled_tick_on_start_date_activates_and_spawns(clean_positions,
+                                                           patched_brokers):
+    _basket_signals()
+    lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start(start_date=_future_trading_day())
+    # Tick ON the scheduled trading day → activates to RUNNING + opens a basket.
+    res = lad.daily_tick(ref_now=_future_trading_day_now())
+    assert res.get("activated") is True
+    assert res["opened"] is True
+    reloaded = LadderCampaign.load(lad.ladder_id)
+    assert reloaded.status == STATUS_RUNNING
+    assert reloaded.n_active_baskets() == 1
+    assert _open_positions(lad.ladder_id) == 5
+
+
+def test_start_weekend_rejected_with_suggestion(clean_positions):
+    lad = LadderCampaign.create(total_capital=900000.0)
+    # Sat 2026-06-27 → not a trading day; suggested next = Mon 2026-06-29.
+    with pytest.raises(ValueError) as e:
+        lad.start(start_date="2026-06-27")
+    msg = str(e.value)
+    assert "not an NSE trading day" in msg
+    assert "2026-06-29" in msg
+    assert "||suggested=2026-06-29" in msg  # route parses this sentinel
+    # Unchanged — still a draft.
+    assert LadderCampaign.load(lad.ladder_id).status == STATUS_CREATED
+
+
+def test_reschedule_a_scheduled_campaign(clean_positions):
+    """A SCHEDULED campaign may be re-scheduled to a new future date."""
+    lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start(start_date="2026-06-29")
+    assert LadderCampaign.load(lad.ladder_id).start_date == "2026-06-29"
+    lad = LadderCampaign.load(lad.ladder_id)
+    lad.start(start_date="2026-06-30")  # re-schedule
+    reloaded = LadderCampaign.load(lad.ladder_id)
+    assert reloaded.status == STATUS_SCHEDULED
+    assert reloaded.start_date == "2026-06-30"
+
+
+def test_start_rejected_from_running(clean_positions):
+    lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start()  # RUNNING
+    with pytest.raises(ValueError) as e:
+        lad.start()
+    assert "RUNNING" in str(e.value)
+
+
+def test_start_rejected_from_completed(clean_positions):
+    lad = LadderCampaign.create(total_capital=900000.0)
+    asyncio.run(lad.kill(mode=KILL_STOP_NEW_LET_FINISH))  # → COMPLETED (flat)
+    assert LadderCampaign.load(lad.ladder_id).status == STATUS_COMPLETED
+    lad = LadderCampaign.load(lad.ladder_id)
+    with pytest.raises(ValueError):
+        lad.start()
+
+
+def test_start_future_after_end_date_rejected(clean_positions):
+    """A start_date after end_date would never open a basket → rejected."""
+    lad = LadderCampaign.create(total_capital=900000.0)
+    lad._update(end_date="2026-06-29")
+    lad = LadderCampaign.load(lad.ladder_id)
+    with pytest.raises(ValueError) as e:
+        lad.start(start_date="2026-06-30")  # after end
+    assert "end_date" in str(e.value)
+
+
+def test_scheduled_survives_restart_and_activates(clean_positions,
+                                                  patched_brokers):
+    """A SCHEDULED campaign is included in resume, stays SCHEDULED before its
+    date, and auto-activates + spawns via resume ON its start_date."""
+    _basket_signals()
+    lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start(start_date=_future_trading_day())  # SCHEDULED for 06-29
+
+    # Restart #1: it's still 06-25 (before start) → resume ticks it but it stays
+    # SCHEDULED and opens nothing.
+    sess_mod.set_fake_now(_trading_day_now())
+    try:
+        s1 = ladder_mod.resume_active_ladders()
+        assert s1["resumed"] == 1          # SCHEDULED IS included in resume
+        assert s1["opened"] == 0
+    finally:
+        sess_mod.set_fake_now(None)
+    assert LadderCampaign.load(lad.ladder_id).status == STATUS_SCHEDULED
+
+    # Restart #2: now it's 06-29 (the start day) → resume activates + opens.
+    sess_mod.set_fake_now(_future_trading_day_now())
+    try:
+        s2 = ladder_mod.resume_active_ladders()
+        assert s2["opened"] == 1
+    finally:
+        sess_mod.set_fake_now(None)
+    reloaded = LadderCampaign.load(lad.ladder_id)
+    assert reloaded.status == STATUS_RUNNING
+    assert reloaded.n_active_baskets() == 1
+
+
+def test_created_draft_not_resumed(clean_positions, patched_brokers):
+    """A CREATED draft is NOT ticked/resumed (excluded from the scheduler set)."""
+    _basket_signals()
+    lad = LadderCampaign.create(total_capital=900000.0)  # CREATED, never started
+    sess_mod.set_fake_now(_trading_day_now())
+    try:
+        s = ladder_mod.resume_active_ladders()
+        assert s["resumed"] == 0           # draft excluded
+        assert s["opened"] == 0
+    finally:
+        sess_mod.set_fake_now(None)
+    assert LadderCampaign.load(lad.ladder_id).status == STATUS_CREATED
+    assert lad.n_active_baskets() == 0
+
+
+def test_status_surfaces_scheduled_state(clean_positions):
+    lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start(start_date=_future_trading_day())
+    st = LadderCampaign.load(lad.ladder_id).to_status()
+    assert st["status"] == STATUS_SCHEDULED
+    assert st["start_date"] == _future_trading_day()
 
 
 # ── lifecycle: pause / resume ─────────────────────────────────────────────────
@@ -246,6 +442,7 @@ def test_pause_resume(clean_positions):
 def test_kill_flatten_now(clean_positions, patched_brokers):
     _basket_signals()
     lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start()
     lad.daily_tick(ref_now=_trading_day_now())
     assert _open_positions(lad.ladder_id) == 5
     res = asyncio.run(lad.kill(mode=KILL_FLATTEN_NOW))
@@ -258,6 +455,7 @@ def test_kill_flatten_now(clean_positions, patched_brokers):
 def test_kill_stop_new_let_finish_leaves_open(clean_positions, patched_brokers):
     _basket_signals()
     lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start()
     lad.daily_tick(ref_now=_trading_day_now())
     assert _open_positions(lad.ladder_id) == 5
     res = asyncio.run(lad.kill(mode=KILL_STOP_NEW_LET_FINISH))
@@ -282,6 +480,7 @@ def test_kill_rejects_bad_mode(clean_positions):
 def test_month_end_stops_new(clean_positions, patched_brokers):
     _basket_signals()
     lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start()
     # Force end_date into the past.
     lad._update(end_date="2026-06-24")
     lad = LadderCampaign.load(lad.ladder_id)
@@ -292,6 +491,7 @@ def test_month_end_stops_new(clean_positions, patched_brokers):
 
 def test_auto_completes_when_last_child_closes(clean_positions, patched_brokers):
     lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start()
     lad._update(end_date="2026-06-24")  # already past on the 06-25 tick
     cid = _insert_child(lad.ladder_id, status="RUNNING", capital=300000.0)
     # First tick past end with an OPEN child → stays not-completed.
@@ -392,6 +592,7 @@ def test_alert_needs_full_window(clean_positions):
 def test_restart_rederives_state(clean_positions, patched_brokers):
     _basket_signals()
     lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start()
     lad.daily_tick(ref_now=_trading_day_now())
     assert lad.n_active_baskets() == 1
     # Simulate a restart: a fresh object loaded purely from the DB re-derives
@@ -410,6 +611,7 @@ def test_resume_active_ladders_reopens_idempotent(clean_positions,
                                                   patched_brokers):
     _basket_signals()
     lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start()  # RUNNING → included in resume
     # Freeze the module clock so resume's internal now() is a trading day.
     sess_mod.set_fake_now(_trading_day_now())
     try:
@@ -428,6 +630,7 @@ def test_resume_active_ladders_reopens_idempotent(clean_positions,
 def test_status_trader_facing_fields(clean_positions, patched_brokers):
     _basket_signals()
     lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start()
     lad.daily_tick(ref_now=_trading_day_now())
     st = lad.to_status()
     for key in ("total_capital", "capital_deployed", "capital_free",

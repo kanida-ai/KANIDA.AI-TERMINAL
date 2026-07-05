@@ -61,6 +61,8 @@ log = logging.getLogger("kanida.autotrade.ladder")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # Campaign statuses.
+STATUS_CREATED = "CREATED"      # created, NOT started — a draft; spawns nothing
+STATUS_SCHEDULED = "SCHEDULED"  # armed for a FUTURE start_date; auto-activates
 STATUS_RUNNING = "RUNNING"
 STATUS_PAUSED = "PAUSED"
 STATUS_ENDED = "ENDED"          # past end_date, still winding down open children
@@ -133,8 +135,10 @@ class LadderCampaign:
                broker_account_id: Optional[str] = None,
                end_date: Optional[str] = None,
                end_date_mode: str = "month_end") -> "LadderCampaign":
-        """Create a campaign (status RUNNING is set by start(); create leaves it
-        RUNNING-capable but does NOT open anything).
+        """Create a campaign as a DRAFT (status CREATED). create() places nothing
+        and spawns nothing — it just registers the plan. start() then transitions
+        it to RUNNING (start now) or SCHEDULED (future start_date). This mirrors
+        the single-session create→start lifecycle.
 
         end_date_mode:
           * "month_end" (default) → end_date = last NSE trading day of the start
@@ -187,7 +191,7 @@ class LadderCampaign:
         row = cls(
             ladder_id=ladder_id, total_capital=float(total_capital),
             order_product=prod, per_basket_capital=per_basket,
-            status=STATUS_RUNNING, mode=mode, user_id=user_id,
+            status=STATUS_CREATED, mode=mode, user_id=user_id,
             broker_account_id=broker_account_id, start_date=start,
             end_date=resolved_end, mode_kill=None, daily_returns_json="[]",
             alert_active=0, last_tick_date=None)
@@ -200,13 +204,13 @@ class LadderCampaign:
                     last_tick_date, created_at, updated_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (ladder_id, user_id, broker_account_id, mode,
-                 float(total_capital), prod, per_basket, STATUS_RUNNING, start,
+                 float(total_capital), prod, per_basket, STATUS_CREATED, start,
                  resolved_end, None, "[]", 0, None, _now_iso(), _now_iso()),
             )
             con.commit()
-        log.info("ladder %s created (capital=%.2f product=%s per_basket=%.2f "
-                 "mode=%s end=%s user=%s)", ladder_id, total_capital, prod,
-                 per_basket, mode, resolved_end, user_id)
+        log.info("ladder %s created (DRAFT/CREATED; capital=%.2f product=%s "
+                 "per_basket=%.2f mode=%s end=%s user=%s)", ladder_id,
+                 total_capital, prod, per_basket, mode, resolved_end, user_id)
         return row
 
     @classmethod
@@ -322,16 +326,74 @@ class LadderCampaign:
         return len(self._open_children())
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
-    def start(self) -> Dict[str, Any]:
-        """Arm the campaign. Idempotent: RUNNING stays RUNNING. The first child
-        opens on the next daily tick (09:15 on the next trading day, or now via a
-        manual/immediate tick if it's a trading day and there's a free slice)."""
-        if self.status in (STATUS_ENDED, STATUS_COMPLETED):
+    def start(self, start_date: Optional[str] = None) -> Dict[str, Any]:
+        """Arm the campaign — mirrors the single-session start(when=...) lifecycle.
+
+        start_date (YYYY-MM-DD, IST):
+          * None, or <= today → status RUNNING, start_date=today. Starts
+            immediately; the first positional basket opens on the next daily tick
+            (09:15 on the next trading day / now via an immediate tick when it's a
+            trading day with a free slice). This is the DEFAULT so today's
+            one-step create+start still lands RUNNING (additive, backward-compat).
+          * a FUTURE trading day → status SCHEDULED, start_date=that date. The
+            daily tick auto-activates it to RUNNING on/after start_date. Survives a
+            restart (resume includes SCHEDULED).
+
+        A future start_date on a weekend/holiday is REJECTED with a ValueError
+        carrying the suggested next NSE trading day (route → 400 with a
+        suggestion), mirroring the session non-trading-day rejection.
+
+        Only startable from CREATED or SCHEDULED (re-scheduling a SCHEDULED
+        campaign to a new date is allowed). RUNNING / ENDED / COMPLETED are
+        rejected with a clear message.
+        """
+        if self.status not in (STATUS_CREATED, STATUS_SCHEDULED):
+            if self.status == STATUS_RUNNING:
+                raise ValueError(
+                    f"ladder {self.ladder_id} is already RUNNING; use "
+                    "pause/resume to control it")
             raise ValueError(f"ladder {self.ladder_id} is {self.status}; "
                              "create a new campaign")
-        self._update(status=STATUS_RUNNING)
-        log.info("ladder %s started (RUNNING)", self.ladder_id)
-        return {"ladder_id": self.ladder_id, "status": STATUS_RUNNING}
+
+        today = now_ist().date()
+
+        # No date / empty → start immediately (RUNNING today).
+        target: Optional[date] = None
+        if start_date is not None and str(start_date).strip():
+            try:
+                target = datetime.strptime(
+                    str(start_date).strip(), "%Y-%m-%d").date()
+            except ValueError:
+                raise ValueError(
+                    f"start_date must be YYYY-MM-DD, got {start_date!r}")
+
+        if target is None or target <= today:
+            # Start now → RUNNING, start_date pinned to today.
+            self._update(status=STATUS_RUNNING, start_date=today.isoformat())
+            log.info("ladder %s started NOW (RUNNING, start_date=%s)",
+                     self.ladder_id, today.isoformat())
+            return {"ladder_id": self.ladder_id, "status": STATUS_RUNNING,
+                    "start_date": today.isoformat(), "when": "now"}
+
+        # Future start_date → must be an NSE trading day.
+        if not _cal.is_trading_day(target):
+            suggested = _cal.next_trading_day(target, inclusive=True).isoformat()
+            raise ValueError(
+                f"{target.isoformat()} is not an NSE trading day "
+                f"(weekend/holiday); next trading day is {suggested}"
+                f"||suggested={suggested}")
+
+        # A start_date strictly after end_date would never open a single basket.
+        if self._past_end_date(target):
+            raise ValueError(
+                f"start_date {target.isoformat()} is after the campaign end_date "
+                f"{self.end_date}; pick a start on or before the end date")
+
+        self._update(status=STATUS_SCHEDULED, start_date=target.isoformat())
+        log.info("ladder %s SCHEDULED to start %s", self.ladder_id,
+                 target.isoformat())
+        return {"ladder_id": self.ladder_id, "status": STATUS_SCHEDULED,
+                "start_date": target.isoformat(), "when": "scheduled"}
 
     def pause(self) -> Dict[str, Any]:
         """Stop opening NEW baskets; keep managing the open children (their trail
@@ -436,6 +498,18 @@ class LadderCampaign:
             return False
         return today > ed
 
+    def _start_date_reached(self, today: date) -> bool:
+        """True when today (IST) >= start_date. A SCHEDULED campaign activates on
+        or after this. A missing/unparseable start_date is treated as reached (so
+        we never leave a campaign stuck armed forever)."""
+        if not self.start_date:
+            return True
+        try:
+            sd = datetime.strptime(self.start_date, "%Y-%m-%d").date()
+        except ValueError:
+            return True
+        return today >= sd
+
     def _on_or_before_end_date(self, today: date) -> bool:
         """True when today <= end_date (or end_date is NULL = manual-only)."""
         if not self.end_date:
@@ -453,15 +527,49 @@ class LadderCampaign:
         For a RUNNING ladder, if today is a trading day AND (end_date is NULL OR
         today <= end_date) AND free_capital >= per_basket_capital: create + start
         ONE positional child sized to per_basket_capital, tagged with this
-        ladder_id. Idempotent per ladder+day (last_tick_date guard). PAUSED /
-        ENDED / COMPLETED ladders open nothing. Also runs the 5-day realized-
-        return alert and the month-end auto-complete each call.
+        ladder_id. Idempotent per ladder+day (last_tick_date guard).
+
+        State handling:
+          * CREATED (draft) → opens nothing, ever (never started).
+          * SCHEDULED → if today (IST) >= start_date AND today is a trading day,
+            transition to RUNNING and proceed to spawn; else stay SCHEDULED and
+            open nothing.
+          * PAUSED / ENDED / COMPLETED → open nothing.
+
+        Also runs the 5-day realized-return alert and the month-end auto-complete
+        each call.
         """
         now = ref_now or now_ist()
         today = now.date()
         out: Dict[str, Any] = {"ladder_id": self.ladder_id, "date": today.isoformat(),
                                "opened": False, "reason": None}
         try:
+            # CREATED drafts do NOTHING (never started, never spawn, no alert
+            # window to keep). Return before any accounting.
+            if self.status == STATUS_CREATED:
+                out["reason"] = "status=CREATED (draft; opens nothing)"
+                return out
+
+            # SCHEDULED: activate to RUNNING on/after start_date on a trading day;
+            # otherwise stay armed and open nothing. Do this BEFORE the alert /
+            # complete checks so the rest of the tick runs as RUNNING once armed.
+            if self.status == STATUS_SCHEDULED:
+                if not self._start_date_reached(today):
+                    out["reason"] = (f"scheduled — starts {self.start_date} "
+                                     f"(not yet reached)")
+                    return out
+                if not _cal.is_trading_day(today):
+                    out["reason"] = (f"scheduled start {self.start_date} reached "
+                                     "but today is not a trading day")
+                    return out
+                # Activate. Pin start_date to today (the actual activation day) so
+                # the campaign's lifetime + end-date gate reason from here.
+                self._update(status=STATUS_RUNNING,
+                             start_date=today.isoformat())
+                log.info("ladder %s SCHEDULED→RUNNING (activated on %s)",
+                         self.ladder_id, today.isoformat())
+                out["activated"] = True
+
             # Refresh the alert window + fire on a down-crossing (every tick,
             # regardless of whether we open — informational only).
             self._refresh_alert(today)
@@ -738,8 +846,10 @@ class LadderCampaign:
 # ── Boot-durable resume (mirrors recovery.resume_active_sessions) ─────────────
 
 def resume_active_ladders() -> Dict[str, Any]:
-    """On boot: run one daily_tick for every non-terminal ladder so the campaign
-    picks up where it left off (open today's basket if due, refresh the alert,
+    """On boot: run one daily_tick for every non-terminal, non-draft ladder
+    (SCHEDULED / RUNNING / PAUSED / ENDED — CREATED drafts are skipped) so the
+    campaign picks up where it left off (activate a SCHEDULED campaign whose
+    start_date has arrived, open today's basket if due, refresh the alert,
     auto-complete if the last child has closed). Idempotent (last_tick_date guards
     a same-day re-open). NEVER raises. The recurring 09:15 scheduler
     (ladder_scheduler) is armed separately in main.py.
@@ -750,8 +860,9 @@ def resume_active_ladders() -> Dict[str, Any]:
         with falcon_conn() as con:
             rows = con.execute(
                 "SELECT ladder_id FROM autotrade_ladders "
-                "WHERE status IN (?,?,?) ORDER BY created_at ASC",
-                (STATUS_RUNNING, STATUS_PAUSED, STATUS_ENDED)).fetchall()
+                "WHERE status IN (?,?,?,?) ORDER BY created_at ASC",
+                (STATUS_SCHEDULED, STATUS_RUNNING, STATUS_PAUSED,
+                 STATUS_ENDED)).fetchall()
     except Exception as e:  # pragma: no cover - DB unavailable at boot
         log.exception("ladder resume: query failed: %s", e)
         return summary
@@ -779,15 +890,18 @@ def resume_active_ladders() -> Dict[str, Any]:
 
 
 def tick_all_running(ref_now: Optional[datetime] = None) -> Dict[str, Any]:
-    """Run daily_tick for every non-terminal ladder — the body of the recurring
-    09:15 scheduler. Idempotent + never raises."""
+    """Run daily_tick for every non-terminal, non-draft ladder (SCHEDULED /
+    RUNNING / PAUSED / ENDED — CREATED drafts excluded) — the body of the
+    recurring 09:15 scheduler. This is what auto-activates a SCHEDULED campaign on
+    its start_date. Idempotent + never raises."""
     summary: Dict[str, Any] = {"ticked": 0, "opened": 0, "errors": 0}
     try:
         with falcon_conn() as con:
             rows = con.execute(
                 "SELECT ladder_id FROM autotrade_ladders "
-                "WHERE status IN (?,?,?) ORDER BY created_at ASC",
-                (STATUS_RUNNING, STATUS_PAUSED, STATUS_ENDED)).fetchall()
+                "WHERE status IN (?,?,?,?) ORDER BY created_at ASC",
+                (STATUS_SCHEDULED, STATUS_RUNNING, STATUS_PAUSED,
+                 STATUS_ENDED)).fetchall()
     except Exception as e:  # pragma: no cover
         log.exception("ladder tick_all: query failed: %s", e)
         return summary
