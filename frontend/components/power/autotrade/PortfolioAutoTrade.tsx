@@ -971,6 +971,11 @@ export function PortfolioAutoTrade({
         mode,
         end_date_mode: ladderEndMode,
         kill_mode: 'flatten_now',
+        // PARITY FIX: scope the campaign to this user exactly like createSession,
+        // so it lands with the same user_id and appears in the ?user_id-scoped
+        // Sessions list (a SCHEDULED campaign was being dropped by WHERE user_id=?).
+        ...(userId != null ? { user_id: userId } : {}),
+        ...(brokerAccountId ? { broker_account_id: brokerAccountId } : {}),
       })
       // Hold the draft, clear the picked date, and move to the campaign CREATED
       // phase (Start-now / Schedule). Nothing has been placed or armed yet.

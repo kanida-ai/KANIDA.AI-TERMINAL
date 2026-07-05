@@ -629,6 +629,12 @@ export type LadderCreateBody = {
   end_date_mode: LadderEndMode
   end_date?: string
   kill_mode?: LadderKillMode
+  // Ownership scope — MUST be sent (same as createSession) so the campaign is
+  // created with the caller's user_id. Otherwise the ?user_id-scoped /ladders
+  // list filters it out (WHERE user_id = ?) and a SCHEDULED campaign never
+  // appears in the Sessions list. This is the Positional-parity fix.
+  user_id?: number | string
+  broker_account_id?: string
 }
 
 export type LadderCreateResponse = {
