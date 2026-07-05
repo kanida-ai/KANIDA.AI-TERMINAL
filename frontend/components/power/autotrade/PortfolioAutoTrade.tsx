@@ -3005,6 +3005,23 @@ function LadderCampaignCard({
   const perBasket = status?.per_basket_capital
   const endDate = status?.end_date ?? summary.end_date
   const startDate = status?.start_date ?? summary.start_date
+  // Live countdown to the campaign's first-basket time (09:15 IST on start_date) —
+  // parity with the single-session scheduled countdown. Ticks every 1s while
+  // SCHEDULED; computed client-side from start_date (no backend seconds needed).
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    if (!scheduled || !startDate) return
+    const id = setInterval(() => setNowMs(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [scheduled, startDate])
+  const fireMs = scheduled && startDate ? Date.parse(`${startDate}T09:15:00+05:30`) : NaN
+  const remainMs = Number.isFinite(fireMs) ? Math.max(0, fireMs - nowMs) : null
+  const fmtCountdown = (ms: number) => {
+    const s = Math.floor(ms / 1000)
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600)
+    const m = Math.floor((s % 3600) / 60), sec = s % 60
+    return d > 0 ? `${d}d ${h}h ${m}m` : `${h}h ${m}m ${sec}s`
+  }
 
   return (
     <div className="rounded-2xl border overflow-hidden"
@@ -3035,6 +3052,21 @@ function LadderCampaignCard({
           </span>
         )}
       </div>
+
+      {/* Live countdown to the first-basket time — parity with the single-session
+          scheduled view. Client-computed from start_date @ 09:15 IST. */}
+      {scheduled && remainMs != null && (
+        <div className="mx-4 mb-2 flex items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5"
+          style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
+          <div className="flex items-center gap-2 text-[11.5px]" style={{ color: C.ink2 }}>
+            <span style={{ color: C.amber }}>{ICON.clock(14)}</span>
+            <span>Fires <b style={{ color: C.ink }}>{startDate} 09:15</b> IST — its first Falcon Top-5 basket</span>
+          </div>
+          <span className="text-[15px] font-semibold tabular-nums shrink-0" style={{ color: C.mint }}>
+            {remainMs === 0 ? 'starting…' : fmtCountdown(remainMs)}
+          </span>
+        </div>
+      )}
 
       {/* Verbatim downturn alert — calm amber, informational (NOT an error). */}
       {status?.alert?.active && (
