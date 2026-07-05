@@ -27,6 +27,7 @@ Security invariants:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import sqlite3
 import time
@@ -342,6 +343,16 @@ def _normalize_email(email: str) -> str:
     return e
 
 
+def _consteq(a: str, b: str) -> bool:
+    """Constant-time compare for secrets/invite-codes (no timing side-channel).
+    False for empty inputs so an unset admin secret / blank code never matches."""
+    a = a or ""
+    b = b or ""
+    if not a or not b:
+        return False
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
 def bootstrap_admin_user(con: sqlite3.Connection) -> Dict[str, Any]:
     """Idempotent: ensure the admin user row exists with role='admin'.
 
@@ -395,22 +406,15 @@ def sign_in_with_email_and_code(
 ) -> Dict[str, Any]:
     """End-to-end invite-code sign-in (Phase 1b).
 
-    Two paths:
-      1. ADMIN: if email == POWER_ADMIN_EMAIL AND code == POWER_ADMIN_SECRET,
-         bypass the invite_codes table entirely. The admin row is bootstrapped
-         on startup; we just issue an admin JWT.
-
-      2. REGULAR: invite_codes lookup + atomic redeem (or re-login if the
-         user already exists). For existing users, we accept any unused valid
-         code as "proof of identity continuity" — but they can also re-login
-         with the same code they redeemed originally (idempotent on second
-         use is fine since the user row already exists).
-
-         Actually: existing users don't need a code at all on subsequent
-         logins — they just type their email. Their existence in the DB IS
-         their authentication for v1 (this is invite-only; the bar is "did
-         the admin already create this row?"). New users need a fresh unused
-         code, which gets consumed on first login.
+    A CREDENTIAL IS REQUIRED ON EVERY LOGIN (security fix — email alone is
+    never sufficient):
+      1. ADMIN (email == POWER_ADMIN_EMAIL): must supply POWER_ADMIN_SECRET.
+         The admin email is handled here exclusively and never falls through
+         to the existing-user path, so it can't be logged in without the secret.
+      2. EXISTING user: must supply the invite code they redeemed (stored on
+         their row as invite_code). Blank / wrong code → rejected.
+      3. NEW user: must supply a fresh, unused, valid invite code, which is
+         consumed on first login.
 
     Returns:
         {"status": "ok", "jwt": "...", "user": {...}}
@@ -426,12 +430,17 @@ def sign_in_with_email_and_code(
     email = _normalize_email(email)
     code = (code or "").strip()
 
-    # ── Path 1: admin bypass ────────────────────────────────────────────
-    if (config.POWER_ADMIN_EMAIL
-            and email == config.POWER_ADMIN_EMAIL
-            and code
-            and config.POWER_ADMIN_SECRET
-            and code == config.POWER_ADMIN_SECRET):
+    # ── Path 1: ADMIN — the admin email authenticates ONLY with the admin
+    #    secret and NEVER falls through to the email-only existing-user path
+    #    below. Handling the admin email HERE (not just on secret-match) is the
+    #    fix for the critical bypass: previously admin-email + no/wrong secret
+    #    fell to Path 2 and was handed an admin JWT with no credential. The
+    #    admin email is public knowledge; the secret is the sole credential.
+    if config.POWER_ADMIN_EMAIL and email == config.POWER_ADMIN_EMAIL:
+        if not _consteq(code, config.POWER_ADMIN_SECRET):
+            # Covers: unset POWER_ADMIN_SECRET, blank code, or wrong secret.
+            raise AuthError("ADMIN_SECRET_REQUIRED",
+                            "Admin sign-in requires the admin secret")
         # Make sure the admin row exists + is admin (defence in depth — startup
         # bootstrap should already have done this).
         admin = bootstrap_admin_user(con)
@@ -458,12 +467,21 @@ def sign_in_with_email_and_code(
             },
         }
 
-    # ── Path 2: existing user re-login (no code needed) ─────────────────
+    # ── Path 2: EXISTING user re-login — MUST supply their invite code. ─────
+    #    SECURITY FIX: an account's mere existence is NOT proof of identity.
+    #    The invite code the user redeemed is stored on their row and is their
+    #    re-login credential; a blank or wrong code is rejected. Users whose row
+    #    has no stored code (e.g. Google-provisioned, or the admin row) can't use
+    #    this path — they sign in via Google, or the admin assigns them a code.
     existing = find_user_by_email(con, email)
     if existing is not None:
         if not existing.get("is_active"):
             raise AuthError("USER_INACTIVE",
                              f"Account is deactivated; contact admin")
+        stored_code = (existing.get("invite_code") or "").strip()
+        if not _consteq(code, stored_code):
+            raise AuthError("CODE_REQUIRED",
+                            "Your invite code is required to sign in")
         token = issue_jwt(
             user_id    = int(existing["id"]),
             email      = existing["email"],

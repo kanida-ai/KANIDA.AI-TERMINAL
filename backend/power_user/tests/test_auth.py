@@ -25,10 +25,12 @@ from power_user.services.auth import (
     find_user_by_email,
     find_user_by_google_sub,
     issue_jwt,
+    sign_in_with_email_and_code,
     sign_in_with_google,
     touch_last_seen,
     verify_jwt,
 )
+from power_user import config as pu_config
 from power_user.db_init import init_power_user_schema
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -313,3 +315,107 @@ class TestSignInFlow:
                 "SELECT last_seen_at FROM power_user_users WHERE id=?", (user["id"],)
             ).fetchone()
         assert row[0] is not None
+
+
+# ───────────────────────────────────────────────────────────────────
+# SECURITY: email alone must NEVER authenticate (invite-login fix)
+# ───────────────────────────────────────────────────────────────────
+
+def _seed_user(con, email, invite_code=None, role="user", is_active=1):
+    con.execute(
+        """INSERT INTO power_user_users
+             (email, google_sub, display_name, invite_code, role, is_active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (email, f"sub_{email}", email.split("@")[0], invite_code, role, is_active,
+         datetime.now(IST).isoformat()),
+    )
+    con.commit()
+
+
+class TestInviteLoginRequiresCredential:
+    """A credential is required on EVERY login: admin → admin secret,
+    existing user → their stored invite code. Email alone never suffices."""
+
+    def _con(self, tmp_db):
+        con = sqlite3.connect(tmp_db)
+        con.row_factory = sqlite3.Row
+        return con
+
+    # ── Admin: secret always required, never falls through to email-only ──
+    def test_admin_email_no_code_rejected(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_EMAIL", "admin@kanida.ai")
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_SECRET", "s3cr3t")
+        with pytest.raises(AuthError) as e:
+            sign_in_with_email_and_code(self._con(tmp_db), "admin@kanida.ai", "")
+        assert e.value.code == "ADMIN_SECRET_REQUIRED"
+
+    def test_admin_email_wrong_secret_rejected(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_EMAIL", "admin@kanida.ai")
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_SECRET", "s3cr3t")
+        with pytest.raises(AuthError):
+            sign_in_with_email_and_code(self._con(tmp_db), "admin@kanida.ai", "nope")
+
+    def test_admin_unset_secret_cannot_login(self, tmp_db, monkeypatch):
+        # The real-world hole: POWER_ADMIN_SECRET empty → admin must NOT get in.
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_EMAIL", "admin@kanida.ai")
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_SECRET", "")
+        with pytest.raises(AuthError) as e:
+            sign_in_with_email_and_code(self._con(tmp_db), "admin@kanida.ai", "")
+        assert e.value.code == "ADMIN_SECRET_REQUIRED"
+
+    def test_admin_existing_row_still_needs_secret(self, tmp_db, monkeypatch):
+        # Even with an admin row present, email-only must NOT grant admin.
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_EMAIL", "admin@kanida.ai")
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_SECRET", "s3cr3t")
+        con = self._con(tmp_db)
+        _seed_user(con, "admin@kanida.ai", invite_code=None, role="admin")
+        with pytest.raises(AuthError) as e:
+            sign_in_with_email_and_code(con, "admin@kanida.ai", "")
+        assert e.value.code == "ADMIN_SECRET_REQUIRED"
+
+    def test_admin_correct_secret_ok(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_EMAIL", "admin@kanida.ai")
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_SECRET", "s3cr3t")
+        res = sign_in_with_email_and_code(self._con(tmp_db), "admin@kanida.ai", "s3cr3t")
+        assert res["status"] == "ok"
+        assert res["user"]["role"] == "admin"
+
+    # ── Existing user: their stored invite code required ──
+    def test_existing_user_no_code_rejected(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_EMAIL", "admin@kanida.ai")
+        con = self._con(tmp_db)
+        _seed_user(con, "bob@example.com", invite_code="kn-2026-abc123")
+        with pytest.raises(AuthError) as e:
+            sign_in_with_email_and_code(con, "bob@example.com", "")
+        assert e.value.code == "CODE_REQUIRED"
+
+    def test_existing_user_wrong_code_rejected(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_EMAIL", "admin@kanida.ai")
+        con = self._con(tmp_db)
+        _seed_user(con, "bob@example.com", invite_code="kn-2026-abc123")
+        with pytest.raises(AuthError):
+            sign_in_with_email_and_code(con, "bob@example.com", "kn-2026-WRONG9")
+
+    def test_existing_user_correct_code_ok(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_EMAIL", "admin@kanida.ai")
+        con = self._con(tmp_db)
+        _seed_user(con, "bob@example.com", invite_code="kn-2026-abc123")
+        res = sign_in_with_email_and_code(con, "bob@example.com", "kn-2026-abc123")
+        assert res["status"] == "ok"
+        assert res["user"]["email"] == "bob@example.com"
+
+    def test_existing_user_null_stored_code_cannot_login(self, tmp_db, monkeypatch):
+        # A row with no stored code (e.g. Google-provisioned) can't use email+code.
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_EMAIL", "admin@kanida.ai")
+        con = self._con(tmp_db)
+        _seed_user(con, "goog@example.com", invite_code=None)
+        with pytest.raises(AuthError) as e:
+            sign_in_with_email_and_code(con, "goog@example.com", "anything")
+        assert e.value.code == "CODE_REQUIRED"
+
+    # ── New user: no code → rejected (must supply a valid unused code) ──
+    def test_new_user_no_code_rejected(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(pu_config, "POWER_ADMIN_EMAIL", "admin@kanida.ai")
+        with pytest.raises(AuthError) as e:
+            sign_in_with_email_and_code(self._con(tmp_db), "new@example.com", "")
+        assert e.value.code == "CODE_REQUIRED"

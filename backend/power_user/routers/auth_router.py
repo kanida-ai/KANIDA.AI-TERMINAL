@@ -71,9 +71,9 @@ class LogoutResponse(BaseModel):
 # unknown" from "code invalid"; both look identical to the caller.
 GENERIC_LOGIN_FAIL = {
     "code":    "LOGIN_INVALID",
-    "message": "Email or invite code is not valid. New users need an unused "
-                "invite code; existing users only need their email. "
-                "If you believe this is wrong, ask the admin.",
+    "message": "Email or invite code is not valid. Enter the invite code your "
+                "admin gave you (required on every sign-in). Admins sign in with "
+                "the admin secret. If you believe this is wrong, ask the admin.",
 }
 
 
