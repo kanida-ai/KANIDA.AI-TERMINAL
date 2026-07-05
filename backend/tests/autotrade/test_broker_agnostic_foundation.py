@@ -121,7 +121,8 @@ def test_registry_unknown_broker_raises():
 
 def test_list_supported_complete():
     rows = {r["broker"]: r for r in registry.list_supported()}
-    assert set(rows) == {"zerodha", "fyers", "upstox", "angel", "dhan", "rupeezy"}
+    assert set(rows) == {"zerodha", "fyers", "upstox", "angel", "dhan",
+                         "rupeezy", "fivepaisa"}
     assert rows["zerodha"]["live"] is True
     assert rows["fyers"]["live"] is False
     # rupeezy is a real (Stage-2) adapter → live=True (certification pending).

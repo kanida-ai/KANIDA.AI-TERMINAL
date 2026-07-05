@@ -41,7 +41,8 @@ log = logging.getLogger("kanida.autotrade.vault")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-VALID_BROKERS = ("zerodha", "upstox", "angel", "dhan", "fyers", "rupeezy")
+VALID_BROKERS = ("zerodha", "upstox", "angel", "dhan", "fyers", "rupeezy",
+                 "fivepaisa")
 # Status state machine for a broker account.
 STATUS_PENDING = "PENDING"   # account stored, no access token yet
 STATUS_ACTIVE = "ACTIVE"     # has a fresh access token (today)
@@ -237,6 +238,10 @@ def _row_to_public(row, provider: KeyProvider) -> Dict[str, Any]:
         "created_at": d.get("created_at"),
         "updated_at": d.get("updated_at"),
         "last_login_at": d.get("last_login_at"),
+        # Health observability — powers the "Last verified" line on the connection
+        # card + the Admin all-users monitoring table. No secrets.
+        "last_health_at": d.get("last_health_at"),
+        "last_health_status": d.get("last_health_status"),
     }
 
 

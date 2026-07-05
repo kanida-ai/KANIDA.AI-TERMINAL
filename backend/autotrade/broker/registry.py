@@ -11,12 +11,13 @@ never silently succeed.
 Adding a broker = one `_register(...)` line + the two adapter classes. Zero
 changes to strategy code (kill switch / trail / sizing / monitor).
 
-NOTE ON BROKER SET: the current stub adapters are fyers/upstox/angel/dhan (the
-brokers with existing BrokerClient stubs and vault VALID_BROKERS entries). The
-build brief also mentioned "fivepaisa"/"rupeezy"; there are no adapters or vault
-broker entries for those yet, so they are intentionally NOT registered here (a
-placeholder that isn't in vault.VALID_BROKERS couldn't even store creds). Add
-them by shipping a stub client + adding them to vault.VALID_BROKERS first.
+NOTE ON BROKER SET: LIVE adapters are zerodha + rupeezy (real client + real
+auth). fyers/upstox/angel are placeholder stubs with NotImplementedAuth. dhan +
+fivepaisa are COMING-SOON shells (live=False): dhan has a stub client, fivepaisa
+reuses the dhan stub purely to satisfy the abstract client surface (its 4-field
+creds don't map to the 2-field vault yet — display-only until certified). Every
+registered broker also gets rich onboarding metadata via broker_metadata.py, so
+list_supported() returns a full BrokerMeta card per broker.
 """
 from __future__ import annotations
 
@@ -88,6 +89,9 @@ _PLACEHOLDER_CAPS = {
     "upstox": BrokerCapabilities("oauth2_code", True, "until_revoked", False, True, True),
     "angel":  BrokerCapabilities("oauth2_code", True, "until_revoked", False, True, True),
     "dhan":   BrokerCapabilities("api_key_token", False, "until_revoked", False, True, True),
+    # 5Paisa: coming-soon shell only. Multi-field creds don't map to the 2-field
+    # vault yet, so its auth is a NotImplementedAuth placeholder (live=False).
+    "fivepaisa": BrokerCapabilities("api_key_token", False, "session", False, False, True),
 }
 
 
@@ -119,8 +123,10 @@ def _build_registry() -> None:
     from .upstox import UpstoxBroker
     from .angel import AngelBroker
     from .dhan import DhanBroker
+    from .fivepaisa import FivePaisaBroker
     for name, client_cls in (("fyers", FyersBroker), ("upstox", UpstoxBroker),
-                             ("angel", AngelBroker), ("dhan", DhanBroker)):
+                             ("angel", AngelBroker), ("dhan", DhanBroker),
+                             ("fivepaisa", FivePaisaBroker)):
         caps = _PLACEHOLDER_CAPS[name]
         # Bind a NotImplementedAuth CLASS carrying this broker's name+caps.
         auth_cls = _make_placeholder_auth_cls(name, caps)
@@ -165,23 +171,30 @@ def is_live(name: str) -> bool:
 
 
 def list_supported() -> List[dict]:
-    """Enumerate every registered broker with its capabilities + live flag (for
-    the connect UI)."""
+    """Enumerate every registered broker as a full BrokerMeta for the guided
+    "add a broker" UI — broker + live + capabilities (functional facts from this
+    registry) MERGED with the declarative onboarding metadata (display_name,
+    brand chip, exchanges, credential fields, setup steps) from
+    broker_metadata.py. Data-driven: adding a broker surfaces its whole onboarding
+    card here with no frontend redeploy."""
+    from . import broker_metadata
     _build_registry()
     out: List[dict] = []
     for name in sorted(_REGISTRY):
         e = _REGISTRY[name]
         c = e.capabilities
-        out.append({
-            "broker": e.broker,
-            "live": e.live,
-            "capabilities": {
-                "auth_kind": c.auth_kind,
-                "has_refresh_token": c.has_refresh_token,
-                "token_lifetime": c.token_lifetime,
-                "supports_gtt": c.supports_gtt,
-                "supports_mtf": c.supports_mtf,
-                "fno": c.fno,
-            },
-        })
+        caps = {
+            "auth_kind": c.auth_kind,
+            "has_refresh_token": c.has_refresh_token,
+            "token_lifetime": c.token_lifetime,
+            "supports_gtt": c.supports_gtt,
+            "supports_mtf": c.supports_mtf,
+            "fno": c.fno,
+        }
+        entry = {"broker": e.broker, "live": e.live, "capabilities": caps}
+        # Merge presentation + onboarding metadata (brand/display_name/exchanges/
+        # fields/setup). Never overrides the functional broker/live/capabilities.
+        entry.update(broker_metadata.meta_dict(
+            e.broker, live=e.live, capabilities=caps))
+        out.append(entry)
     return out
