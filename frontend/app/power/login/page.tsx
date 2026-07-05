@@ -62,7 +62,7 @@ export default function LoginPage() {
       <h1 className="text-2xl md:text-3xl font-bold mb-2">Sign in</h1>
       <p className="text-sm text-neutral-400 mb-6">
         Power User beta {'—'} invite only. Enter your email and the invite code your admin shared.
-        Returning users can leave the code field blank.
+        Your invite code is required every time you sign in. Admins sign in with the admin secret.
       </p>
 
       {expired && (
@@ -87,7 +87,7 @@ export default function LoginPage() {
           />
         </Field>
 
-        <Field label="Invite code" hint="kn-2026-xxxxxx (leave blank if you're a returning user)">
+        <Field label="Invite code" hint="kn-2026-xxxxxx — required every sign-in (admins: enter the admin secret)">
           <input
             type="text"
             inputMode="text"
