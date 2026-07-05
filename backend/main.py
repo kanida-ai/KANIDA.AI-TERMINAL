@@ -473,6 +473,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.exception("AutoTrade resume crashed at boot (non-fatal): %s", e)
 
+    # AutoTrade LADDER ORCHESTRATOR: resume campaign state from persisted
+    # autotrade_ladders rows (open today's basket if due, refresh the 5-day alert,
+    # auto-complete month-end) then arm the process-wide daily-tick scheduler so
+    # every SUBSEQUENT trading day opens a basket with no operator input. Both are
+    # idempotent + restart-durable + paper-safe (children inherit the ladder mode;
+    # live stays gated by FALCON_AUTOTRADE_ENABLED). Wrapped so it can't block boot.
+    try:
+        from autotrade.ladder import resume_active_ladders
+        from autotrade.monitoring import ladder_scheduler
+        _lad_resume = resume_active_ladders()
+        _lad_armed = ladder_scheduler.start()
+        log.info("AutoTrade ladder resume: resumed=%d opened=%d completed=%d "
+                 "errors=%d scheduler_armed=%s",
+                 _lad_resume.get("resumed", 0), _lad_resume.get("opened", 0),
+                 _lad_resume.get("completed", 0), _lad_resume.get("errors", 0),
+                 _lad_armed)
+    except Exception as e:
+        log.exception("AutoTrade ladder resume crashed at boot (non-fatal): %s", e)
+
     yield
 
 

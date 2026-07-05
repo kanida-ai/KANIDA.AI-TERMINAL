@@ -212,12 +212,29 @@ def run_migrations() -> dict:
                         f"ALTER TABLE autotrade_sessions ADD COLUMN {name} INTEGER")
                     added_cols.append(name)
 
+        # ── 2f. LADDER ORCHESTRATOR — tag each spawned child session with its
+        # parent campaign. NULLABLE ladder_id on autotrade_sessions: NULL (the
+        # default for every existing/standalone session) means "not part of a
+        # ladder" → byte-for-byte unchanged. Set only on children the ladder
+        # daily-tick spawns. Additive + idempotent.
+        if _table_exists(con, "autotrade_sessions"):
+            have = set(_existing_columns(con, "autotrade_sessions"))
+            if "ladder_id" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_sessions ADD COLUMN ladder_id TEXT")
+                added_cols.append("ladder_id")
+            # Index the ladder tag AFTER the column exists (executescript above
+            # runs before this ALTER, so the index can't live in _SCHEMA_SQL).
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_autotrade_sessions_ladder "
+                "ON autotrade_sessions(ladder_id)")
+
         for t in (
             "autotrade_positions",
             "autotrade_sessions", "autotrade_config_presets",
             "autotrade_broker_profiles", "autotrade_slippage",
             "autotrade_portfolio_snapshots", "autotrade_kill_switch_log",
-            "broker_accounts",
+            "broker_accounts", "autotrade_ladders",
         ):
             if _table_exists(con, t):
                 created_tables.append(t)
@@ -407,6 +424,42 @@ CREATE TABLE IF NOT EXISTS autotrade_kill_switch_log (
     mode            TEXT NOT NULL DEFAULT 'paper',
     detail_json     TEXT
 );
+
+-- ── LADDER ORCHESTRATOR (campaign layer) ────────────────────────────────────
+-- A "set once, run for a month" campaign that opens/manages/rolls positional
+-- baskets every trading day with no further operator input. Each opened basket
+-- is a normal positional AutoTrade session (autotrade_sessions) TAGGED with this
+-- ladder's ladder_id. This table holds ONLY the campaign-level state; the child
+-- sessions + their positions live in the existing isolated tables (never
+-- falcon_position_state). per_basket_capital is FROZEN at create (= total/3).
+-- Capital accounting is on the TRADER-MONEY (margin) basis: free capital =
+-- total_capital − Σ(child.total_allocated_capital of OPEN children); MTF leverage
+-- lives INSIDE each child and never inflates this ceiling.
+CREATE TABLE IF NOT EXISTS autotrade_ladders (
+    ladder_id           TEXT PRIMARY KEY,             -- uuid4 hex
+    user_id             TEXT,                         -- portal user (NULL = operator)
+    broker_account_id   TEXT,                         -- vaulted account (NULL = global)
+    mode                TEXT NOT NULL DEFAULT 'paper', -- 'paper' | 'live' (children inherit)
+    total_capital       REAL NOT NULL,                -- the deployed-capital ceiling
+    order_product       TEXT NOT NULL DEFAULT 'CNC',  -- CNC | MTF only (MIS rejected)
+    per_basket_capital  REAL NOT NULL,                -- FROZEN at create = total/3
+    status              TEXT NOT NULL DEFAULT 'RUNNING',
+        -- RUNNING | PAUSED | ENDED | COMPLETED
+    start_date          TEXT,                         -- ISO date the campaign began
+    end_date            TEXT,                         -- ISO date (last trading day of
+                                                      -- start month) or NULL = manual-only
+    mode_kill           TEXT,                         -- flatten_now | stop_new_let_finish (on KILL)
+    -- 5-DAY DOWNTURN ALERT state. rolling window of per-trading-day realized
+    -- returns (JSON list of {date, ret}); alert_active latches on a down-crossing
+    -- so we fire alerts.send() at most once per crossing (surfaced in status()).
+    daily_returns_json  TEXT,                         -- JSON [{"date","ret"}, ...]
+    alert_active        INTEGER NOT NULL DEFAULT 0,   -- 0/1 down-crossing latch
+    last_tick_date      TEXT,                         -- ISO date of the last daily tick (idempotency)
+    created_at          TEXT NOT NULL,                -- ISO IST
+    updated_at          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_autotrade_ladders_user
+    ON autotrade_ladders(user_id, status);
 """
 
 

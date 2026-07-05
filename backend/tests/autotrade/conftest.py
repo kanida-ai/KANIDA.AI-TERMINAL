@@ -146,6 +146,7 @@ def clean_positions():
         con.execute("DELETE FROM autotrade_sessions")
         con.execute("DELETE FROM autotrade_portfolio_snapshots")
         con.execute("DELETE FROM autotrade_kill_switch_log")
+        con.execute("DELETE FROM autotrade_ladders")
         con.commit()
     yield
     _stop_all_drivers()

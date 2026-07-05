@@ -214,6 +214,24 @@ def _assert_session_access(session_id: str, caller: Any) -> None:
         raise HTTPException(404, "session not found")
 
 
+def _assert_ladder_access(ladder_id: str, caller: Any) -> None:
+    """Ownership gate for a ladder campaign — same semantics as
+    _assert_session_access (admin sees all; non-owner → 404, no existence leak)."""
+    caller = _caller(caller)
+    with falcon_conn() as con:
+        row = con.execute(
+            "SELECT user_id FROM autotrade_ladders WHERE ladder_id=?",
+            (ladder_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "ladder not found")
+    if caller.is_admin:
+        return
+    owner = row["user_id"]
+    if owner is None or str(owner) != caller.user_id:
+        raise HTTPException(404, "ladder not found")
+
+
 # ── Request models ────────────────────────────────────────────────────────────
 
 def _coerce_id(v):
@@ -286,6 +304,32 @@ class StartSessionRequest(BaseModel):
 class SavePresetRequest(BaseModel):
     name: str
     config: Dict[str, Any]
+
+
+# ── LADDER ORCHESTRATOR request models ────────────────────────────────────────
+
+class CreateLadderRequest(BaseModel):
+    total_capital: float = Field(..., description="Deployed-capital ceiling (₹)")
+    order_product: str = Field("CNC", description="CNC | MTF (MIS rejected)")
+    mode: str = Field("paper", description="'paper' (default) | 'live'")
+    user_id: Optional[str] = Field(None, description="Portal user id (optional)")
+    broker_account_id: Optional[str] = Field(
+        None, description="Vaulted broker account (optional)")
+    # Duration: month_end (default = last trading day of the start month) |
+    # manual (runs until killed, end_date NULL) | an explicit YYYY-MM-DD.
+    end_date_mode: str = Field(
+        "month_end", description="month_end | manual")
+    end_date: Optional[str] = Field(
+        None, description="Explicit end date YYYY-MM-DD (overrides end_date_mode)")
+
+    @field_validator('user_id', 'broker_account_id', mode='before')
+    @classmethod
+    def _coerce_str(cls, v): return _coerce_id(v)
+
+
+class KillLadderRequest(BaseModel):
+    mode: str = Field(...,
+                      description="flatten_now | stop_new_let_finish")
 
 
 class DeleteSessionsRequest(BaseModel):
@@ -611,6 +655,110 @@ def session_delete(session_id: str,
     if not ok:
         raise HTTPException(404, "session not found")
     return {"deleted": 1, "ids": [session_id]}
+
+
+# ── LADDER ORCHESTRATOR endpoints (operator-token gated + per-user ownership) ──
+
+@router.post("/autotrade/ladder/create")
+def ladder_create(req: CreateLadderRequest,
+                  caller: Caller = Depends(resolve_caller)):
+    """Create a positional auto-ladder campaign (RUNNING-capable; opens nothing
+    until started + the daily tick). Rejects MIS / non-CNC-MTF products. Freezes
+    per_basket_capital = total_capital / 3."""
+    from ..ladder import LadderCampaign
+    caller = _caller(caller)
+    mode = req.mode if req.mode in ("paper", "live") else "paper"
+    owner_user_id = req.user_id if caller.is_admin else caller.user_id
+    try:
+        lad = LadderCampaign.create(
+            total_capital=req.total_capital, order_product=req.order_product,
+            mode=mode, user_id=owner_user_id,
+            broker_account_id=req.broker_account_id,
+            end_date=req.end_date, end_date_mode=req.end_date_mode)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return lad.to_status()
+
+
+@router.post("/autotrade/ladder/{ladder_id}/start")
+def ladder_start(ladder_id: str, caller: Caller = Depends(resolve_caller)):
+    from ..ladder import LadderCampaign
+    _assert_ladder_access(ladder_id, caller)
+    lad = LadderCampaign.load(ladder_id)
+    if not lad:
+        raise HTTPException(404, "ladder not found")
+    try:
+        lad.start()
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return lad.to_status()
+
+
+@router.post("/autotrade/ladder/{ladder_id}/pause")
+def ladder_pause(ladder_id: str, caller: Caller = Depends(resolve_caller)):
+    from ..ladder import LadderCampaign
+    _assert_ladder_access(ladder_id, caller)
+    lad = LadderCampaign.load(ladder_id)
+    if not lad:
+        raise HTTPException(404, "ladder not found")
+    try:
+        lad.pause()
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return lad.to_status()
+
+
+@router.post("/autotrade/ladder/{ladder_id}/resume")
+def ladder_resume(ladder_id: str, caller: Caller = Depends(resolve_caller)):
+    from ..ladder import LadderCampaign
+    _assert_ladder_access(ladder_id, caller)
+    lad = LadderCampaign.load(ladder_id)
+    if not lad:
+        raise HTTPException(404, "ladder not found")
+    try:
+        lad.resume()
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return lad.to_status()
+
+
+@router.post("/autotrade/ladder/{ladder_id}/kill")
+async def ladder_kill(ladder_id: str, req: KillLadderRequest,
+                      caller: Caller = Depends(resolve_caller)):
+    """Kill a campaign with a MODE: flatten_now (immediately flatten every open
+    basket) OR stop_new_let_finish (stop opening new, let open baskets exit
+    naturally)."""
+    from ..ladder import LadderCampaign
+    _assert_ladder_access(ladder_id, caller)
+    lad = LadderCampaign.load(ladder_id)
+    if not lad:
+        raise HTTPException(404, "ladder not found")
+    try:
+        return await lad.kill(mode=req.mode)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/autotrade/ladder/{ladder_id}/status")
+def ladder_status(ladder_id: str, caller: Caller = Depends(resolve_caller)):
+    from ..ladder import LadderCampaign
+    _assert_ladder_access(ladder_id, caller)
+    lad = LadderCampaign.load(ladder_id)
+    if not lad:
+        raise HTTPException(404, "ladder not found")
+    return lad.to_status()
+
+
+@router.get("/autotrade/ladders")
+def ladders_list(user_id: Optional[str] = None,
+                 caller: Caller = Depends(resolve_caller)):
+    """List campaigns (newest first). Admin → all (honours ?user_id); non-admin →
+    only the caller's own ladders."""
+    from ..ladder import LadderCampaign
+    caller = _caller(caller)
+    if caller.is_admin:
+        return {"ladders": LadderCampaign.list_ladders(user_id=user_id)}
+    return {"ladders": LadderCampaign.list_ladders(user_id=caller.user_id)}
 
 
 @router.post("/autotrade/config/save")
