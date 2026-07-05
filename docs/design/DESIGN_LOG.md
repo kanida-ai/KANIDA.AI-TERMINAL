@@ -1391,3 +1391,35 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
   the word "sleeve"/internal terms never appear (capital deployed / active baskets / open
   positions / daily P&L). SAFETY: UI/transport only; no execution/backend logic touched. Verify:
   `npx tsc --noEmit` clean; ESLint clean on the three touched files.
+
+- 2026-07-04 — **Auto-Ladder MERGED INTO Sessions — separate tab REMOVED (supersedes the
+  entry above).** Operator feedback: no separate UI surface — Auto-Ladder must be a STRATEGY
+  option inside the existing Sessions create form (reuse the config form the trader already
+  knows; new UI has caused bugs). Changes: (1) `components/power/autotrade/AutoTradePanel.tsx`
+  — deleted the "Auto-Ladder" tab + its `AutoLadderPanel` import/render; Sessions is the single
+  home. `AutoLadderPanel.tsx` DELETED (its card/controls rendering re-created inside Sessions).
+  (2) `components/power/autotrade/PortfolioAutoTrade.tsx` — added a 3rd dropdown option **"Falcon
+  Positional — Auto-Ladder (monthly campaign)"** as a UI CONSTRUCT (UiStrategy `'auto_ladder'`;
+  NOT a backend strategy). Selecting it maps internally to a POSITIONAL `intraday_basket`
+  (POSITIONAL_TRAIL preset arm3/floor1/give4/stop6, square_off_enabled:false, max_hold 3, EQ,
+  CNC/MTF) and REUSES the existing config form with only the specified deltas: capital relabelled
+  "Total campaign capital" + live "Each basket ≈ ₹{total÷3}" helper; product restricted to
+  CNC|MTF (no MIS); the SAME arm/floor/giveback/stop inputs seeded to the positional preset;
+  NO Hold toggle / NO square-off / NO max-hold surfaced; Instrument/Direction/Entry-time/Entry-
+  date/Missed-window hidden; NEW **Duration** control (This month → month_end / Until I stop →
+  manual); SizingBreakdown/preview computed on the PER-BASKET slice (total÷3) so the trader sees
+  one day's basket. Primary button becomes **"Start campaign"** → `ladderCreate({total_capital,
+  order_product, mode, end_date_mode, kill_mode:'flatten_now'})` then `ladderStart(id)` (NOT
+  session/create); on success returns to the list. (3) Running campaigns render as **summary
+  cards ATOP the same Sessions list** (one per running/paused ladder from `ladders(userId)`,
+  each polling `ladderStatus` ~5s): deployed/free/total (+per-basket), active baskets, open
+  positions, daily/realized/unrealized P&L (theme +/- coloured), status pill, "runs to
+  {end_date}", the VERBATIM amber downturn banner when `alert.active`, and Pause/Resume + Stop
+  (kill modal that REQUIRES flatten_now vs stop_new_let_finish — no silent default). (4) The
+  campaign's child baskets appear as NORMAL rows in the Sessions list, each tagged with a small
+  mint "Campaign" chip (read from the new `ladder_id?` field added to `SessionSummary` in
+  `lib/autotrade-api.ts`). HONESTY held: all numbers from live status, "—" on missing, calm
+  retry on error (mirrors the sessions list), no fabricated P&L. TRADER TERMS ONLY — "sleeve"/
+  internal terms never appear. Fixed + Dynamic-Trailing flows unchanged. SAFETY: UI/types only;
+  no execution/backend logic touched. Verify: `npx tsc --noEmit` clean; `next build` — "Compiled
+  successfully", no errors/warnings.

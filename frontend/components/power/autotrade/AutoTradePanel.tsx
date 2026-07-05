@@ -9,6 +9,11 @@
  *   1. Sessions  (HOME)  — the NEW multi-broker /api/autotrade/* system
  *                          (PortfolioAutoTrade): list your sessions → resume a
  *                          live session OR create a new one → status / kill.
+ *                          The Falcon Positional Auto-Ladder ("monthly campaign")
+ *                          is a STRATEGY option inside this tab's create form —
+ *                          NOT a separate surface. Its running campaigns show as a
+ *                          summary card atop the same sessions list; the campaign's
+ *                          child baskets appear as ordinary tagged rows below.
  *   2. Pre-Market        — the LIVE legacy screen (app/falcon/premarket): stage /
  *                          confirm / 9:15 deploy queue. Reused verbatim.
  *   3. Positions         — the LIVE legacy screen (app/falcon/positions): held
@@ -33,7 +38,6 @@
 import { useState } from 'react'
 import { C, ICON, Gear, MECHANISM_CSS } from '@/components/power/shared/cotrade-kit'
 import { PortfolioAutoTrade } from '@/components/power/autotrade/PortfolioAutoTrade'
-import { AutoLadderPanel } from '@/components/power/autotrade/AutoLadderPanel'
 import { BrokerAccountsPanel } from '@/components/power/autotrade/BrokerAccountsPanel'
 import { TradeJournalPanel } from '@/components/power/autotrade/TradeJournalPanel'
 
@@ -44,11 +48,10 @@ import TrailConfigPage from '@/app/falcon/config/page'
 import FalconAdminPage from '@/app/falcon/admin/page'
 import FalconTradePage from '@/app/falcon/trade/page'
 
-type Tab = 'sessions' | 'ladder' | 'journal' | 'brokers' | 'trade' | 'premarket' | 'positions' | 'config' | 'engine'
+type Tab = 'sessions' | 'journal' | 'brokers' | 'trade' | 'premarket' | 'positions' | 'config' | 'engine'
 
 const TABS: { id: Tab; label: string; icon: (n: number) => React.ReactNode }[] = [
   { id: 'sessions',  label: 'Sessions',       icon: ICON.bolt },
-  { id: 'ladder',    label: 'Auto-Ladder',    icon: ICON.loop },
   { id: 'journal',   label: 'Journal',        icon: ICON.book },
   { id: 'brokers',   label: 'Broker accounts', icon: ICON.link },
   { id: 'trade',     label: 'Trade',          icon: ICON.arrow },
@@ -58,9 +61,10 @@ const TABS: { id: Tab; label: string; icon: (n: number) => React.ReactNode }[] =
   { id: 'engine',    label: 'Engine',         icon: ICON.bot },
 ]
 
-// Read the initial tab from ?attab= (used by the Auto-Ladder child-basket deep
-// links, which point at ?attab=sessions&session=…). Falls back to 'sessions'.
-const VALID_TABS: Tab[] = ['sessions', 'ladder', 'journal', 'brokers', 'trade', 'premarket', 'positions', 'config', 'engine']
+// Read the initial tab from ?attab= (deep links point at ?attab=sessions&…).
+// Falls back to 'sessions'. Auto-Ladder is now a strategy INSIDE Sessions — it
+// is no longer a tab of its own.
+const VALID_TABS: Tab[] = ['sessions', 'journal', 'brokers', 'trade', 'premarket', 'positions', 'config', 'engine']
 function initialTab(): Tab {
   if (typeof window === 'undefined') return 'sessions'
   const t = new URLSearchParams(window.location.search).get('attab')
@@ -123,12 +127,6 @@ export function AutoTradePanel({ firstName, userId }: { firstName: string; userI
         {tab === 'sessions' && (
           <div className="mx-auto w-full max-w-4xl px-5 pb-10 sm:px-8">
             <PortfolioAutoTrade userId={userId} onSessionChange={setActiveSessionId} />
-          </div>
-        )}
-
-        {tab === 'ladder' && (
-          <div className="mx-auto w-full max-w-4xl px-5 pb-10 sm:px-8 pt-4">
-            <AutoLadderPanel userId={userId} />
           </div>
         )}
 

@@ -372,6 +372,10 @@ export type SessionSummary = {
   fires_at?: string
   seconds_remaining?: number
   scheduler_armed?: boolean
+  // Set when this session is a CHILD BASKET of a running Auto-Ladder campaign.
+  // The Sessions list tags such rows with a small "Campaign" chip; the row is
+  // otherwise an ordinary session. Absent for standalone sessions.
+  ladder_id?: string | null
   [k: string]: unknown
 }
 export type SessionsListResponse = {

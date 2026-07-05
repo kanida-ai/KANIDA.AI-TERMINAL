@@ -36,6 +36,8 @@ import {
   type OpenPosition, type PreviewResponse, type PreviewPosition, type KillPreview, type SkippedPick,
   type BrokerAccount, type SessionScope,
   type UniverseFilter, type PickItem, type PicksResponse,
+  type LadderProduct, type LadderEndMode, type LadderKillMode, type LadderStatusName,
+  type LadderStatus, type LadderSummary,
 } from '@/lib/autotrade-api'
 
 // ── Safe defaults — paper + kill switch OFF, per the ships-disabled contract ──
@@ -104,11 +106,32 @@ const POSITIONAL_TRAIL: Partial<SessionConfig> = {
   square_off_enabled: false, max_hold_sessions: 3,
 }
 
+// UI-level strategy choices for the create form's dropdown. The first two map
+// 1:1 to a backend Strategy enum. 'auto_ladder' is a UI CONSTRUCT ONLY — it is
+// NOT a backend strategy: selecting it builds a Falcon Positional Auto-Ladder
+// (a monthly campaign) whose children are positional intraday_basket sessions,
+// created via the LADDER API (ladderCreate → ladderStart), never session/create.
+type UiStrategy = Strategy | 'auto_ladder'
+
 // Protection mode = the exit engine. 'Fixed' is the flat ±% kill switch;
-// 'Dynamic (Trailing)' is the arm-and-trail intraday basket.
-const STRATEGY_OPTIONS: { id: Strategy; label: string }[] = [
+// 'Dynamic (Trailing)' is the arm-and-trail intraday basket; 'Auto-Ladder' is
+// the set-once monthly campaign (positional baskets rolled daily by the backend).
+const STRATEGY_OPTIONS: { id: UiStrategy; label: string }[] = [
   { id: 'portfolio_kill_switch', label: 'Fixed — flat ±% basket exit (kill switch)' },
   { id: 'intraday_basket',       label: 'Dynamic (Trailing) — arm, lock a floor & trail, square-off' },
+  { id: 'auto_ladder',           label: 'Falcon Positional — Auto-Ladder (monthly campaign)' },
+]
+
+// Campaign Duration options (Auto-Ladder only). Maps to LadderEndMode on the wire.
+const LADDER_DURATION_OPTIONS: { id: LadderEndMode; label: string; hint: string }[] = [
+  { id: 'month_end', label: 'This month (auto)', hint: 'Runs to the end of this month, then stops' },
+  { id: 'manual',    label: 'Until I stop',      hint: 'Runs every trading day until you stop it' },
+]
+
+// Kill modes for a running campaign (the confirm modal REQUIRES one — no default).
+const LADDER_KILL_OPTIONS: { id: LadderKillMode; label: string; line: string }[] = [
+  { id: 'flatten_now',        label: 'Flatten everything now',                    line: 'Exit every open basket immediately and stop the campaign.' },
+  { id: 'stop_new_let_finish', label: 'Stop opening new — let open baskets finish', line: 'Open no new baskets; let the already-open ones finish their normal exits.' },
 ]
 
 // A SCHEDULED session that lost its in-memory timer (backend restart) reports
@@ -384,6 +407,26 @@ export function PortfolioAutoTrade({
   const [countdown, setCountdown] = useState<number | null>(null)
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  // UI-level strategy for the create form (see UiStrategy). 'auto_ladder' drives
+  // the campaign create path; the other two map 1:1 to config.strategy.
+  const [uiStrategy, setUiStrategy] = useState<UiStrategy>('portfolio_kill_switch')
+  const isLadder = uiStrategy === 'auto_ladder'
+
+  // Campaign Duration (Auto-Ladder only) → LadderEndMode on the wire.
+  const [ladderEndMode, setLadderEndMode] = useState<LadderEndMode>('month_end')
+
+  // ── Running campaigns (Auto-Ladder) — shown ATOP the sessions list ───────────
+  // ladders = the user's campaigns; ladderStatuses = the live per-campaign poll
+  // keyed by ladder_id (~5s). Both degrade to "—" on missing fields, never crash.
+  const [ladders, setLadders] = useState<LadderSummary[] | null>(null)
+  const [ladderStatuses, setLadderStatuses] = useState<Record<string, LadderStatus>>({})
+  const [ladderBusy, setLadderBusy] = useState<Record<string, 'pause' | 'resume' | 'kill'>>({})
+  const [ladderErr, setLadderErr] = useState<string | null>(null)
+  // Kill modal — mode is REQUIRED (starts unset so the trader must choose).
+  const [killLadderId, setKillLadderId] = useState<string | null>(null)
+  const [ladderKillMode, setLadderKillMode] = useState<LadderKillMode | null>(null)
+  const ladderPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
   const set = <K extends keyof SessionConfig>(k: K, v: SessionConfig[K]) =>
     setConfig((c) => ({ ...c, [k]: v }))
 
@@ -417,10 +460,27 @@ export function PortfolioAutoTrade({
     return () => { cancelled = true }
   }, [userId])
 
-  // Switch strategy. For intraday_basket, SEED the validated preset (operator can
-  // still edit). For portfolio_kill_switch, fall back to the safe defaults so the
-  // existing kill-switch UX is byte-for-byte unchanged.
-  const onStrategyChange = (next: Strategy) => {
+  // Switch strategy (UI level). For intraday_basket, SEED the validated preset.
+  // For auto_ladder (UI construct), map to a POSITIONAL intraday_basket under the
+  // hood — CNC product, the positional trail preset (arm3/floor1/give4/stop6),
+  // carry-overnight (square_off_enabled:false) + 3-session hold — so the reused
+  // preview/wire path produces a correct one-basket estimate. For
+  // portfolio_kill_switch, restore the safe kill-switch defaults (byte-for-byte).
+  const onStrategyChange = (next: UiStrategy) => {
+    setUiStrategy(next)
+    if (next === 'auto_ladder') {
+      setConfig((c) => ({
+        ...c,
+        strategy: 'intraday_basket',
+        ...POSITIONAL_TRAIL,                 // arm3/floor1/give4/stop6, off, hold 3
+        order_product: c.order_product === 'MTF' ? 'MTF' : 'CNC', // CNC|MTF only
+        instrument_type: 'EQ',
+        direction: 'long',
+        entry_time: INTRADAY_PRESET.entry_time ?? '09:15:00',
+        kill_switch_enabled: false,
+      }))
+      return
+    }
     setConfig((c) => {
       if (next === 'intraday_basket') {
         return { ...c, ...INTRADAY_PRESET, strategy: next }
@@ -595,6 +655,12 @@ export function PortfolioAutoTrade({
 
   const liveReady = mode === 'paper' || liveConfirm.trim().toUpperCase() === 'LIVE'
 
+  // Auto-Ladder splits the total campaign capital across ~3 baskets. The sizing
+  // preview must reflect what ONE day's basket buys, so we preview on total ÷ 3.
+  const perBasketCapital = isLadder
+    ? Math.max(0, Math.floor((config.total_allocated_capital || 0) / 3))
+    : config.total_allocated_capital
+
   // ── Debounced P&L preview (CONFIG form, kill switch enabled) ──────────────────
   // Re-estimate the invested basis + kill outcome whenever a config field that
   // moves them changes. Debounced 450ms so typing in the capital/threshold inputs
@@ -615,8 +681,14 @@ export function PortfolioAutoTrade({
     setPreviewLoading(true)
     const t = setTimeout(async () => {
       try {
+        // Auto-Ladder previews the PER-BASKET slice (total ÷ 3) so the trader
+        // sees exactly what one day's basket buys; other strategies preview the
+        // full capital, unchanged.
+        const previewConfig = isLadder
+          ? { ...config, total_allocated_capital: perBasketCapital }
+          : config
         const res = await AutoTradeAPI.preview(
-          toWireConfig(config, { universeFilter, symbolWhitelist }),
+          toWireConfig(previewConfig, { universeFilter, symbolWhitelist }),
           scope,
         )
         if (!cancelled) { setPreview(res); setPreviewErr(null) }
@@ -659,6 +731,8 @@ export function PortfolioAutoTrade({
     userId,
     brokerAccountId,
     toWireConfig,
+    isLadder,
+    perBasketCapital,
   ])
 
   // ── Your Sessions (list + resume) ────────────────────────────────────────────
@@ -683,6 +757,102 @@ export function PortfolioAutoTrade({
   // Fetch the list once on mount so a reload RESTORES your sessions (the
   // "session disappears" fix) instead of dumping you on a blank form.
   useEffect(() => { loadSessions() }, [loadSessions])
+
+  // ── Running campaigns (Auto-Ladder) — a summary card ATOP the sessions list ──
+  // Load the user's campaigns; best-effort (a missing endpoint leaves the section
+  // absent, never blocking the sessions list). Only fetched with a user context.
+  const loadLadders = useCallback(async () => {
+    if (userId == null) { setLadders([]); return }
+    setLadderErr(null)
+    try {
+      const res = await AutoTradeAPI.ladders(userId)
+      const list = (res.ladders ?? []).slice().sort((a, b) => {
+        const ta = a.created_at ? Date.parse(a.created_at) : 0
+        const tb = b.created_at ? Date.parse(b.created_at) : 0
+        return tb - ta
+      })
+      setLadders(list)
+    } catch (e) {
+      // Calm degrade — surface a retry note; never crash the sessions list.
+      setLadders([])
+      setLadderErr(e instanceof Error ? e.message : 'Could not load your campaigns.')
+    }
+  }, [userId])
+
+  useEffect(() => { loadLadders() }, [loadLadders])
+
+  // The LIVE (running/paused) campaigns we render + poll a status for.
+  const liveLadders = (ladders ?? []).filter((l) => {
+    const s = (l.status ?? '').toUpperCase()
+    return s === 'RUNNING' || s === 'PAUSED'
+  })
+  const liveLadderIds = liveLadders.map((l) => l.ladder_id).join(',')
+
+  // Poll each live campaign's status (~5s). Keeps last-good numbers on a transient
+  // error (calm retry, mirroring the sessions list). Depends on the id set only.
+  useEffect(() => {
+    if (ladderPollRef.current) { clearInterval(ladderPollRef.current); ladderPollRef.current = null }
+    const ids = liveLadderIds ? liveLadderIds.split(',').filter(Boolean) : []
+    if (ids.length === 0) return
+    let cancelled = false
+    const tick = async () => {
+      await Promise.all(ids.map(async (id) => {
+        try {
+          const res = await AutoTradeAPI.ladderStatus(id)
+          if (!cancelled) setLadderStatuses((prev) => ({ ...prev, [id]: res }))
+        } catch { /* keep last-good; next tick retries */ }
+      }))
+    }
+    tick()
+    ladderPollRef.current = setInterval(tick, 5_000)
+    return () => { cancelled = true; if (ladderPollRef.current) clearInterval(ladderPollRef.current) }
+  }, [liveLadderIds])
+
+  // ── Campaign controls (pause / resume / kill) ────────────────────────────────
+  const onLadderPause = useCallback(async (id: string) => {
+    setLadderErr(null); setLadderBusy((b) => ({ ...b, [id]: 'pause' }))
+    try {
+      await AutoTradeAPI.ladderPause(id)
+      const res = await AutoTradeAPI.ladderStatus(id)
+      setLadderStatuses((prev) => ({ ...prev, [id]: res }))
+      loadLadders()
+    } catch (e) {
+      setLadderErr(e instanceof Error ? e.message : 'Could not pause the campaign.')
+    } finally {
+      setLadderBusy((b) => { const n = { ...b }; delete n[id]; return n })
+    }
+  }, [loadLadders])
+
+  const onLadderResume = useCallback(async (id: string) => {
+    setLadderErr(null); setLadderBusy((b) => ({ ...b, [id]: 'resume' }))
+    try {
+      await AutoTradeAPI.ladderResume(id)
+      const res = await AutoTradeAPI.ladderStatus(id)
+      setLadderStatuses((prev) => ({ ...prev, [id]: res }))
+      loadLadders()
+    } catch (e) {
+      setLadderErr(e instanceof Error ? e.message : 'Could not resume the campaign.')
+    } finally {
+      setLadderBusy((b) => { const n = { ...b }; delete n[id]; return n })
+    }
+  }, [loadLadders])
+
+  const onLadderKill = useCallback(async () => {
+    if (!killLadderId || !ladderKillMode) return
+    const id = killLadderId
+    setLadderErr(null); setLadderBusy((b) => ({ ...b, [id]: 'kill' }))
+    try {
+      await AutoTradeAPI.ladderKill(id, ladderKillMode)
+      setKillLadderId(null); setLadderKillMode(null)
+      const res = await AutoTradeAPI.ladderStatus(id).catch(() => null)
+      if (res) setLadderStatuses((prev) => ({ ...prev, [id]: res }))
+      loadLadders()
+    } catch (e) {
+      setLadderErr(e instanceof Error ? e.message : 'Could not stop the campaign.')
+    } finally {
+      setLadderBusy((b) => { const n = { ...b }; delete n[id]; return n })
+    }
+  }, [killLadderId, ladderKillMode, loadLadders])
 
   // ── Multi-select delete (paper/test housekeeping) ────────────────────────────
   const toggleSelect = useCallback((id: string) => {
@@ -756,6 +926,32 @@ export function PortfolioAutoTrade({
   }, [onSessionChange])
 
   // ── Actions ────────────────────────────────────────────────────────────────
+  // Auto-Ladder: create the campaign (ladderCreate) then start it (ladderStart),
+  // NOT session/create. The campaign then autonomously rolls positional baskets
+  // daily; its running summary + tagged child rows appear back in this list.
+  const onStartCampaign = useCallback(async () => {
+    setError(null); setBusy('create')
+    try {
+      const product: LadderProduct = config.order_product === 'MTF' ? 'MTF' : 'CNC'
+      const created = await AutoTradeAPI.ladderCreate({
+        total_capital: config.total_allocated_capital || 0,
+        order_product: product,
+        mode,
+        end_date_mode: ladderEndMode,
+        kill_mode: 'flatten_now',
+      })
+      await AutoTradeAPI.ladderStart(created.ladder_id)
+      // Return to the list — the new campaign shows as a summary card atop it.
+      backToList()
+      loadLadders()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not start the campaign.')
+    } finally {
+      setBusy(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, config.total_allocated_capital, config.order_product, ladderEndMode, loadLadders])
+
   const onCreate = useCallback(async () => {
     setError(null); setCreateSuggest(null); setBusy('create')
     try {
@@ -892,6 +1088,8 @@ export function PortfolioAutoTrade({
     setConfig(DEFAULT_CONFIG); setMode('paper'); setCountdown(null)
     setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
     setCreateSuggest(null)
+    // Reset the strategy dropdown + campaign duration to defaults.
+    setUiStrategy('portfolio_kill_switch'); setLadderEndMode('month_end')
     // Reset universe filter + picker
     setUniverseFilter('all500'); setPicks(null); setPicksErr(null); setCheckedSymbols(null)
   }
@@ -957,6 +1155,31 @@ export function PortfolioAutoTrade({
             </div>
           </div>
 
+          {/* ── Running Auto-Ladder campaigns — summary cards ATOP the list ─────
+              One card per running/paused campaign, from the ~5s ladderStatus
+              poll. The campaign's child baskets appear below as ordinary session
+              rows tagged with a "Campaign" chip. */}
+          {ladderErr && (ladders?.length ?? 0) === 0 && (
+            <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
+              style={{ borderColor: 'rgba(230,180,80,0.35)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+              <span>{ladderErr}{' '}
+                <button type="button" onClick={loadLadders} className="underline" style={{ color: C.mint }}>Retry</button>
+              </span>
+            </div>
+          )}
+          {liveLadders.map((l) => (
+            <LadderCampaignCard
+              key={l.ladder_id}
+              summary={l}
+              status={ladderStatuses[l.ladder_id]}
+              busy={ladderBusy[l.ladder_id]}
+              onPause={() => onLadderPause(l.ladder_id)}
+              onResume={() => onLadderResume(l.ladder_id)}
+              onKill={() => { setLadderKillMode(null); setKillLadderId(l.ladder_id) }}
+            />
+          ))}
+
           <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
             {sessionsLoading && sessions === null ? (
               <p className="text-[12px]" style={{ color: C.muted }}>Loading your sessions…</p>
@@ -1010,6 +1233,9 @@ export function PortfolioAutoTrade({
                   const running = (s.status ?? '').toUpperCase() === 'RUNNING'
                   const nOpen = typeof s.n_open_positions === 'number' ? s.n_open_positions : null
                   const checked = selected.has(s.session_id)
+                  // A child basket of an Auto-Ladder campaign carries ladder_id —
+                  // tag it with a "Campaign" chip so it's clearly part of a ladder.
+                  const isCampaignChild = s.ladder_id != null && s.ladder_id !== ''
                   return (
                     <li key={s.session_id ?? i}>
                       <div
@@ -1036,6 +1262,7 @@ export function PortfolioAutoTrade({
                                 </span>
                               )}
                               {s.mode && <ModePill mode={s.mode} />}
+                              {isCampaignChild && <CampaignChip />}
                             </div>
                             <div className="text-[10.5px] mt-0.5 font-mono truncate" style={{ color: C.faint }}>
                               {sched && s.fires_at
@@ -1091,19 +1318,22 @@ export function PortfolioAutoTrade({
             ← Your sessions
           </button>
 
-          {/* Strategy selector — picks the exit engine. Switching to the
-              intraday basket seeds its validated preset (operator can still
-              edit); switching back restores the kill-switch defaults. */}
+          {/* Strategy selector — picks the exit engine. Intraday basket seeds its
+              validated preset; Auto-Ladder builds a monthly positional campaign
+              (the same form, restricted to the campaign deltas); the kill switch
+              is the default flat ±% exit. */}
           <div className="mb-5">
             <Field
               label="Strategy"
-              hint={config.strategy === 'intraday_basket'
+              hint={isLadder
+                ? 'Set it once — Falcon opens, manages and rolls a positional basket every trading day for the whole campaign. You never manage a basket.'
+                : config.strategy === 'intraday_basket'
                 ? 'Arms a trailing exit once the basket profits, locks a floor, trails a giveback %, hard-stops, and squares off at a set time.'
                 : 'A single flat ±% basket exit on the invested return (the kill switch).'}
             >
               <select
-                value={config.strategy}
-                onChange={(e) => onStrategyChange(e.target.value as Strategy)}
+                value={uiStrategy}
+                onChange={(e) => onStrategyChange(e.target.value as UiStrategy)}
                 className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
                 style={inputStyle}
               >
@@ -1114,6 +1344,19 @@ export function PortfolioAutoTrade({
                 ))}
               </select>
             </Field>
+
+            {/* Auto-Ladder intro strip — "set once, runs the month" (trader terms). */}
+            {isLadder && (
+              <div className="mt-3 flex items-start gap-2.5 rounded-xl border px-3.5 py-3"
+                style={{ borderColor: 'rgba(63,227,164,0.22)', background: 'linear-gradient(180deg, rgba(63,227,164,0.06), rgba(255,255,255,0.015))' }}>
+                <span className="shrink-0 mt-0.5" style={{ color: C.mint }}>{ICON.loop(16)}</span>
+                <div className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+                  <b style={{ color: C.ink }}>Monthly campaign.</b>{' '}
+                  Falcon splits your capital across ~3 baskets and rolls them every trading day
+                  — each basket is held positional (a fixed 3-session hold), and you never manage one.
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Broker account selector — Phase-2 multi-tenant. Optional; only shown
@@ -1216,7 +1459,12 @@ export function PortfolioAutoTrade({
 
           {/* Config grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="Allocated capital" hint="Total capital this session may deploy.">
+            <Field
+              label={isLadder ? 'Total campaign capital' : 'Allocated capital'}
+              hint={isLadder
+                ? `Falcon splits this across ~3 baskets. Each basket ≈ ${fmtINR(perBasketCapital)}`
+                : 'Total capital this session may deploy.'}
+            >
               <input
                 type="number" min={0} step={10000}
                 value={config.total_allocated_capital}
@@ -1252,7 +1500,8 @@ export function PortfolioAutoTrade({
             </Field>
 
             {/* Instrument — Equity (existing cash path) | Futures (current-month,
-                NRML set server-side). Default Equity keeps the equity flow intact. */}
+                NRML set server-side). Hidden for Auto-Ladder (always Equity). */}
+            {!isLadder && (
             <Field label="Instrument" hint="Equity trades cash; Futures trades the current-month contract (product set automatically).">
               <Segmented
                 options={INSTRUMENT_OPTIONS.map((o) => ({ id: o.id, label: o.label }))}
@@ -1260,6 +1509,7 @@ export function PortfolioAutoTrade({
                 onChange={(v) => onInstrumentChange(v)}
               />
             </Field>
+            )}
 
             {config.sizing_mode === 'pct_cap' ? (
               <Field label="Max % per position" hint="Cap on any single position.">
@@ -1272,18 +1522,19 @@ export function PortfolioAutoTrade({
                 />
               </Field>
             ) : (config.instrument_type ?? 'EQ') !== 'FUT' ? (
-              <Field label="Order product" hint="Broker product type for entries.">
+              <Field label="Order product" hint={isLadder ? 'Campaign product — Cash (CNC) or Margin (MTF).' : 'Broker product type for entries.'}>
                 <Segmented
-                  options={PRODUCT_OPTIONS.map((p) => ({ id: p, label: p }))}
-                  value={config.order_product}
+                  options={(isLadder ? (['CNC', 'MTF'] as OrderProduct[]) : PRODUCT_OPTIONS).map((p) => ({ id: p, label: p }))}
+                  value={config.order_product === 'MIS' && isLadder ? 'CNC' : config.order_product}
                   onChange={(v) => set('order_product', v)}
                 />
               </Field>
             ) : null}
 
             {/* Futures: hide the equity product row; instead pick Buy / Sell (Short)
-                and show the auto-product note. Product = NRML is set server-side. */}
-            {(config.instrument_type ?? 'EQ') === 'FUT' && (
+                and show the auto-product note. Product = NRML is set server-side.
+                Never shown for Auto-Ladder (equity-only). */}
+            {!isLadder && (config.instrument_type ?? 'EQ') === 'FUT' && (
               <Field label="Direction" hint="Current-month futures · product set automatically (NRML).">
                 <Segmented
                   options={DIRECTION_OPTIONS.map((d) => ({ id: d.id, label: d.label }))}
@@ -1315,6 +1566,10 @@ export function PortfolioAutoTrade({
               </Field>
             )}
 
+            {/* Entry time / date / missed-window are managed by the campaign
+                engine for Auto-Ladder — hidden there; a Duration control takes
+                their place. Shown unchanged for the two session strategies. */}
+            {!isLadder && (
             <Field label="Entry time (IST)" hint="When the session places entries.">
               <input
                 type="time"
@@ -1324,9 +1579,11 @@ export function PortfolioAutoTrade({
                 style={inputStyle}
               />
             </Field>
+            )}
 
             {/* Execution date — optional. Empty = the backend resolves to the
                 next valid trading session. Clearing it is one tap (the chip). */}
+            {!isLadder && (
             <Field label="Entry date (IST)" hint="Optional. Leave empty to fire on the next valid trading session.">
               <div className="flex items-center gap-2">
                 <input
@@ -1348,8 +1605,10 @@ export function PortfolioAutoTrade({
                 )}
               </div>
             </Field>
+            )}
 
             {/* On missed window — drop or roll forward. */}
+            {!isLadder && (
             <Field
               label="If the fire moment is missed"
               hint="If the fire moment is missed or lands on a non-trading day: drop it, or roll to the next trading day."
@@ -1360,6 +1619,25 @@ export function PortfolioAutoTrade({
                 onChange={(v) => set('on_missed_window', v)}
               />
             </Field>
+            )}
+
+            {/* Duration (Auto-Ladder only) — when the campaign ends. */}
+            {isLadder && (
+            <Field label="Duration" hint={LADDER_DURATION_OPTIONS.find((o) => o.id === ladderEndMode)?.hint}>
+              <div className="inline-flex rounded-xl border p-0.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                {LADDER_DURATION_OPTIONS.map((o) => {
+                  const active = o.id === ladderEndMode
+                  return (
+                    <button key={o.id} type="button" onClick={() => setLadderEndMode(o.id)}
+                      className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors"
+                      style={{ color: active ? '#06130c' : C.ink2, background: active ? C.mint : 'transparent' }}>
+                      {o.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </Field>
+            )}
           </div>
 
           {/* ── Universe filter + manual stock picker ───────────────────────────
@@ -1623,44 +1901,55 @@ export function PortfolioAutoTrade({
             <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.04)' }}>
               <div className="flex items-center gap-2 mb-3">
                 <span style={{ color: C.mint }}>{ICON.trend(15)}</span>
-                <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Trailing exit (intraday basket)</span>
+                <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>
+                  {isLadder ? 'Trailing exit (per basket)' : 'Trailing exit (intraday basket)'}
+                </span>
                 <span className="ml-auto text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
                   style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
-                  Preset loaded
+                  {isLadder ? 'Positional preset' : 'Preset loaded'}
                 </span>
               </div>
+              {isLadder && (
+                <div className="mb-3 flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-snug"
+                  style={{ border: `1px solid ${C.line2}`, background: 'rgba(255,255,255,0.02)', color: C.muted }}>
+                  <span className="shrink-0 mt-px" style={{ color: C.mint }}>{ICON.info(12)}</span>
+                  <span>Each basket runs the <b style={{ color: C.ink2 }}>validated positional config</b> below — held positional with a fixed 3-session hold; the floor + hard stop carry across days. These values are <b style={{ color: C.ink2 }}>fixed for the campaign</b> (shown for reference).</span>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Field label="Arm / profit (%)" hint="Arms trailing once the basket hits this on notional.">
-                  <input type="number" min={0} step={0.05}
+                <Field label="Arm / profit (%)" hint={isLadder ? 'Validated positional value (fixed).' : 'Arms trailing once the basket hits this on notional.'}>
+                  <input type="number" min={0} step={0.05} disabled={isLadder} readOnly={isLadder}
                     value={config.arm_pct ?? ''}
                     onChange={(e) => set('arm_pct', Number(e.target.value) || 0)}
-                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none disabled:opacity-60 disabled:cursor-not-allowed" style={inputStyle} />
                 </Field>
-                <Field label="Lock floor (%)" hint="Locks in at least this profit once armed.">
-                  <input type="number" min={0} step={0.05}
+                <Field label="Lock floor (%)" hint={isLadder ? 'Validated positional value (fixed).' : 'Locks in at least this profit once armed.'}>
+                  <input type="number" min={0} step={0.05} disabled={isLadder} readOnly={isLadder}
                     value={config.floor_pct ?? ''}
                     onChange={(e) => set('floor_pct', Number(e.target.value) || 0)}
-                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none disabled:opacity-60 disabled:cursor-not-allowed" style={inputStyle} />
                 </Field>
-                <Field label="Trail giveback (%)" hint="Exits if the basket gives back this much from its peak.">
-                  <input type="number" min={0} step={0.05}
+                <Field label="Trail giveback (%)" hint={isLadder ? 'Validated positional value (fixed).' : 'Exits if the basket gives back this much from its peak.'}>
+                  <input type="number" min={0} step={0.05} disabled={isLadder} readOnly={isLadder}
                     value={config.trail_giveback_pct ?? ''}
                     onChange={(e) => set('trail_giveback_pct', Number(e.target.value) || 0)}
-                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none disabled:opacity-60 disabled:cursor-not-allowed" style={inputStyle} />
                 </Field>
-                <Field label="Stop loss (%)" hint="Hard exit if the basket drops this much on notional.">
-                  <input type="number" min={0} step={0.05}
+                <Field label="Stop loss (%)" hint={isLadder ? 'Validated positional value (fixed).' : 'Hard exit if the basket drops this much on notional.'}>
+                  <input type="number" min={0} step={0.05} disabled={isLadder} readOnly={isLadder}
                     value={config.stop_pct ?? ''}
                     onChange={(e) => set('stop_pct', Number(e.target.value) || 0)}
-                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none disabled:opacity-60 disabled:cursor-not-allowed" style={inputStyle} />
                 </Field>
 
                 {/* ── D · Hold mode ── Intraday forces a square-off at the set time;
                     Positional carries the floor + hard stop across days (no forced
                     square-off). MIS MUST be intraday — the backend rejects positional
-                    for MIS, so it's forced + Positional is disabled with a tooltip. */}
-                {(() => {
+                    for MIS, so it's forced + Positional is disabled with a tooltip.
+                    HIDDEN for Auto-Ladder: it is always positional with a fixed
+                    3-session hold (sent under the hood), so no toggle is surfaced. */}
+                {!isLadder && (() => {
                   const isMis = config.order_product === 'MIS'
                   // With MIS, always show Intraday selected (the wire also forces it).
                   const holdValue: 'intraday' | 'positional' =
@@ -1699,8 +1988,10 @@ export function PortfolioAutoTrade({
                   )
                 })()}
 
-                {/* Square-off time — shown for Intraday; hidden for Positional. */}
-                {(config.order_product === 'MIS' || config.square_off_enabled !== false) ? (
+                {/* Square-off time / max-hold — HIDDEN for Auto-Ladder (fixed
+                    3-session positional hold under the hood). Shown for Intraday;
+                    max-hold for Positional in the two session strategies. */}
+                {isLadder ? null : (config.order_product === 'MIS' || config.square_off_enabled !== false) ? (
                   <Field label="Square-off time (IST)" hint="Forces a flat basket at this time (HH:MM).">
                     <input type="time"
                       value={(config.square_off_time ?? '15:29:00').slice(0, 5)}
@@ -1885,19 +2176,26 @@ export function PortfolioAutoTrade({
             </div>
           )}
 
-          {/* Create CTA */}
+          {/* Primary CTA — "Start campaign" for Auto-Ladder (ladderCreate →
+              ladderStart); "Create session" for the two session strategies. */}
           <div className="mt-5 flex items-center gap-3">
             <button
               type="button"
-              disabled={busy === 'create' || !liveReady}
-              onClick={onCreate}
+              disabled={busy === 'create' || !liveReady || (isLadder && (config.total_allocated_capital || 0) <= 0)}
+              onClick={isLadder ? onStartCampaign : onCreate}
               className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-semibold transition-opacity disabled:opacity-40"
               style={{ color: '#06130c', background: C.mint }}
             >
-              {busy === 'create' ? 'Creating…' : <>Create {mode} session {ICON.arrow(13)}</>}
+              {isLadder
+                ? (busy === 'create' ? 'Starting…' : <>{ICON.loop(14)} Start campaign</>)
+                : (busy === 'create' ? 'Creating…' : <>Create {mode} session {ICON.arrow(13)}</>)}
             </button>
             <span className="text-[11px]" style={{ color: C.muted }}>
-              {mode === 'live' && !liveReady ? 'Type LIVE above to enable.' : `Creates a ${mode} session — no orders are placed yet.`}
+              {mode === 'live' && !liveReady
+                ? 'Type LIVE above to enable.'
+                : isLadder
+                ? `Creates the ${mode} campaign and starts it — Falcon then rolls baskets daily.`
+                : `Creates a ${mode} session — no orders are placed yet.`}
             </span>
           </div>
         </div>
@@ -2334,12 +2632,236 @@ export function PortfolioAutoTrade({
         </div>
       )}
 
+      {/* ── Campaign action error (pause/resume/kill) — calm, dismissible ─────── */}
+      {ladderErr && (ladders?.length ?? 0) > 0 && (
+        <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
+          style={{ borderColor: 'rgba(232,115,107,0.35)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
+          <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(14)}</span>
+          <span>{ladderErr}</span>
+          <button type="button" onClick={() => setLadderErr(null)} className="ml-auto shrink-0" style={{ color: C.faint }}>
+            {ICON.close(13)}
+          </button>
+        </div>
+      )}
+
+      {/* ── Campaign KILL modal — mode is REQUIRED (no silent default) ───────── */}
+      {killLadderId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4"
+          style={{ background: 'rgba(0,0,0,0.6)' }}
+          onClick={() => (ladderBusy[killLadderId] == null) && setKillLadderId(null)}>
+          <div className="w-full max-w-md rounded-2xl border p-5"
+            style={{ borderColor: 'rgba(232,115,107,0.4)', background: C.panel }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-2 mb-2">
+              <span style={{ color: C.red }}>{ICON.shield(16)}</span>
+              <span className="text-[14px] font-semibold" style={{ color: C.ink }}>Stop the campaign</span>
+              <button type="button" onClick={() => setKillLadderId(null)} className="ml-auto shrink-0" style={{ color: C.faint }}>
+                {ICON.close(14)}
+              </button>
+            </div>
+            <p className="text-[11.5px] leading-snug mb-3" style={{ color: C.muted }}>
+              Choose how to wind the campaign down — this is required.
+            </p>
+            <div className="flex flex-col gap-2">
+              {LADDER_KILL_OPTIONS.map((o) => {
+                const active = ladderKillMode === o.id
+                return (
+                  <button key={o.id} type="button" onClick={() => setLadderKillMode(o.id)}
+                    className="flex items-start gap-2.5 rounded-xl border px-3.5 py-3 text-left transition-colors"
+                    style={{
+                      borderColor: active ? 'rgba(232,115,107,0.55)' : C.line2,
+                      background: active ? 'rgba(232,115,107,0.07)' : 'rgba(255,255,255,0.015)',
+                    }}>
+                    <span className="shrink-0 mt-0.5 grid place-items-center w-4 h-4 rounded-full"
+                      style={{ boxShadow: `inset 0 0 0 1.5px ${active ? C.red : C.line2}` }}>
+                      {active && <span className="w-2 h-2 rounded-full" style={{ background: C.red }} />}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-[12.5px] font-semibold" style={{ color: active ? C.ink : C.ink2 }}>{o.label}</span>
+                      <span className="block text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>{o.line}</span>
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+            <div className="flex items-center gap-2.5 mt-4">
+              <button type="button"
+                disabled={ladderBusy[killLadderId] != null || ladderKillMode == null}
+                onClick={onLadderKill}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+                style={{ color: '#fff', background: C.red }}>
+                {ladderBusy[killLadderId] === 'kill' ? 'Stopping…' : 'Confirm stop'}
+              </button>
+              <button type="button" disabled={ladderBusy[killLadderId] != null} onClick={() => setKillLadderId(null)}
+                className="px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors disabled:opacity-40"
+                style={{ color: C.ink2, border: `1px solid ${C.line2}` }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Broker allowlist (egress IP self-service) ────────────────────────── */}
       <EgressIpCard />
 
       {/* ── Read-only saved configs + brokers ────────────────────────────────── */}
       <ReferenceLists />
     </div>
+  )
+}
+
+// ── Campaign chip — tags a session row that is a child basket of a running
+// Auto-Ladder campaign. Trader-term "Campaign"; never surfaces internal words.
+function CampaignChip() {
+  return (
+    <span className="inline-flex items-center gap-1 text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+      style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+      {ICON.loop(9)} Campaign
+    </span>
+  )
+}
+
+// ── Ladder campaign summary card — reuses the AutoLadderPanel card/controls
+// rendering, rendered ATOP the sessions list. Every number comes from the live
+// ladderStatus poll (falls back to the list summary), missing → "—". Controls:
+// Pause / Resume + Stop (opens the required-mode kill modal). Trader terms only.
+function LadderCampaignCard({
+  summary, status, busy, onPause, onResume, onKill,
+}: {
+  summary: LadderSummary
+  status?: LadderStatus
+  busy?: 'pause' | 'resume' | 'kill'
+  onPause: () => void
+  onResume: () => void
+  onKill: () => void
+}) {
+  const st: LadderStatusName | undefined = status?.status ?? summary.status
+  const upper = (s?: string | null) => (s ?? '').toUpperCase()
+  const running = upper(st) === 'RUNNING'
+  const paused = upper(st) === 'PAUSED'
+  // ₹ or "—"
+  const rs = (v?: number) => (typeof v === 'number' && Number.isFinite(v) ? fmtINR(v) : '—')
+  const signed = (v?: number) => (typeof v === 'number' && Number.isFinite(v) ? signedINR(v) : '—')
+  const num = (v?: number) => (typeof v === 'number' && Number.isFinite(v) ? String(v) : '—')
+  const product = status?.order_product ?? summary.order_product
+  const totalCapital = status?.total_capital ?? summary.total_capital
+  const perBasket = status?.per_basket_capital
+  const endDate = status?.end_date ?? summary.end_date
+  const startDate = status?.start_date ?? summary.start_date
+
+  return (
+    <div className="rounded-2xl border overflow-hidden"
+      style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'linear-gradient(180deg, rgba(63,227,164,0.05), rgba(255,255,255,0.012))' }}>
+      {/* Header */}
+      <div className="flex items-center gap-2 flex-wrap px-4 pt-3.5 pb-2">
+        <span style={{ color: C.mint }}>{ICON.loop(15)}</span>
+        <span className="text-[13.5px] font-semibold" style={{ color: C.ink }}>Monthly campaign</span>
+        <LadderStatusPill status={st} />
+        {product && (
+          <span className="text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+            style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+            {product}
+          </span>
+        )}
+        {(startDate || endDate) && (
+          <span className="ml-auto text-[10.5px]" style={{ color: C.muted }}>
+            {startDate ? `started ${startDate}` : 'running'}{endDate ? ` · runs to ${endDate}` : ''}
+          </span>
+        )}
+      </div>
+
+      {/* Verbatim downturn alert — calm amber, informational (NOT an error). */}
+      {status?.alert?.active && (
+        <div className="mx-4 mb-2 flex items-start gap-2.5 rounded-xl border px-3.5 py-2.5"
+          style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
+          <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+          <div className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+            <div>{status.alert.message}</div>
+            {typeof status.alert.trailing_5d_avg_return === 'number' && (
+              <div className="text-[10.5px] mt-1" style={{ color: C.faint }}>
+                Trailing 5-day average return:{' '}
+                <b style={{ color: pctTone(status.alert.trailing_5d_avg_return) }}>
+                  {fracPct(status.alert.trailing_5d_avg_return)}
+                </b>
+                {typeof status.alert.n_days_in_window === 'number' ? ` · over ${status.alert.n_days_in_window} days` : ''}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Capital row */}
+      <div className="grid grid-cols-3 gap-3 px-4 pb-2">
+        <MiniStat label="Deployed" value={rs(status?.capital_deployed)} />
+        <MiniStat label="Free" value={rs(status?.capital_free)} />
+        <MiniStat label="Total" value={rs(totalCapital)} sub={typeof perBasket === 'number' ? `per basket ${fmtINR(perBasket)}` : undefined} />
+      </div>
+
+      {/* Activity + P&L row */}
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 px-4 pb-3">
+        <MiniStat label="Active baskets" value={num(status?.n_active_baskets)} />
+        <MiniStat label="Open positions" value={num(status?.n_open_positions)} />
+        <MiniStat label="Daily P&L" value={signed(status?.today_pnl)} valueColor={typeof status?.today_pnl === 'number' ? pctTone(status.today_pnl) : C.faint} />
+        <MiniStat label="Realized" value={signed(status?.realized_pnl)} valueColor={typeof status?.realized_pnl === 'number' ? pctTone(status.realized_pnl) : C.faint} />
+        <MiniStat label="Unrealized" value={signed(status?.unrealized_pnl)} valueColor={typeof status?.unrealized_pnl === 'number' ? pctTone(status.unrealized_pnl) : C.faint} />
+      </div>
+
+      {/* Controls */}
+      <div className="flex items-center gap-2.5 flex-wrap px-4 pb-3.5">
+        {paused ? (
+          <button type="button" disabled={busy != null} onClick={onResume}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+            style={{ color: '#06130c', background: C.mint }}>
+            {ICON.bolt(14)} {busy === 'resume' ? 'Resuming…' : 'Resume'}
+          </button>
+        ) : (
+          <button type="button" disabled={busy != null} onClick={onPause}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+            style={{ color: C.ink2, border: `1px solid ${C.line2}` }}>
+            {ICON.clock(14)} {busy === 'pause' ? 'Pausing…' : 'Pause'}
+          </button>
+        )}
+        {(running || paused) && (
+          <button type="button" disabled={busy != null} onClick={onKill}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+            style={{ color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}>
+            {ICON.close(13)} Stop campaign
+          </button>
+        )}
+        <span className="ml-auto text-[10.5px]" style={{ color: C.faint }}>
+          Its baskets appear below, tagged “Campaign”.
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// Small labelled stat used inside the campaign card.
+function MiniStat({ label, value, valueColor, sub }: { label: string; value: string; valueColor?: string; sub?: string }) {
+  return (
+    <div className="rounded-xl border px-3 py-2" style={{ borderColor: C.line, background: 'rgba(255,255,255,0.015)' }}>
+      <div className="text-[9.5px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>{label}</div>
+      <div className="text-[14px] font-semibold mt-0.5 tabular-nums" style={{ color: valueColor ?? C.ink }}>{value}</div>
+      {sub && <div className="text-[9px] mt-0.5" style={{ color: C.faint }}>{sub}</div>}
+    </div>
+  )
+}
+
+// Campaign status pill (running pulses mint; paused amber; done/other muted).
+function LadderStatusPill({ status }: { status?: LadderStatusName }) {
+  const s = (status ?? '').toUpperCase()
+  const running = s === 'RUNNING'
+  const paused = s === 'PAUSED'
+  const done = s === 'COMPLETED' || s === 'ENDED'
+  const tone = running ? C.mint : paused ? C.amber : done ? C.mint : C.muted
+  const bg = running || done ? 'rgba(63,227,164,0.12)' : paused ? 'rgba(230,180,80,0.12)' : 'rgba(133,153,144,0.13)'
+  const ring = running || done ? 'rgba(63,227,164,0.4)' : paused ? 'rgba(230,180,80,0.4)' : 'rgba(133,153,144,0.4)'
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+      style={{ color: tone, background: bg, boxShadow: `inset 0 0 0 1px ${ring}` }}>
+      {running && <span className="inline-block w-1.5 h-1.5 rounded-full live-dot" style={{ background: C.mint }} />}
+      {s || 'campaign'}
+    </span>
   )
 }
 
