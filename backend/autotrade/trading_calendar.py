@@ -119,12 +119,12 @@ NSE_HOLIDAYS: Set[str] = {
 # correction ship without a code deploy).
 
 
-def _override_holidays() -> Set[str]:
-    """Merge in any operator-supplied holiday overrides (one YYYY-MM-DD per line)
-    from FALCON_NSE_HOLIDAYS_FILE or data/config/nse_holidays.txt. Lets a
-    newly-announced holiday be patched WITHOUT a code deploy. Best-effort: a
-    missing/garbled file is ignored (returns the seeded set unchanged)."""
-    out: Set[str] = set(NSE_HOLIDAYS)
+def _override_file_holidays() -> Set[str]:
+    """ONLY the operator-supplied overrides (one YYYY-MM-DD per line) from
+    FALCON_NSE_HOLIDAYS_FILE or data/config/nse_holidays.txt — WITHOUT the seed.
+    Lets a newly-announced holiday be patched WITHOUT a code deploy. Best-effort:
+    a missing/garbled file is ignored (returns an empty set)."""
+    out: Set[str] = set()
     candidates = []
     env_path = os.environ.get("FALCON_NSE_HOLIDAYS_FILE", "").strip()
     if env_path:
@@ -151,6 +151,27 @@ def _override_holidays() -> Set[str]:
         except Exception:  # pragma: no cover - never let a file break the gate
             continue
     return out
+
+
+def _fetched_holidays() -> Set[str]:
+    """The auto-fetched NSE holidays from the on-disk cache (nse_holiday_source).
+    Read PER-CALL (cheap, small file) exactly like the override file, so a
+    background refresh takes effect with no restart. Best-effort — any error
+    returns an empty set (the seed + override still apply)."""
+    try:
+        from . import nse_holiday_source
+        return nse_holiday_source.load_cached_holidays()
+    except Exception as e:  # pragma: no cover - never let the cache break the gate
+        log.debug("fetched holiday cache unavailable (%s)", e)
+        return set()
+
+
+def _override_holidays() -> Set[str]:
+    """The EFFECTIVE holiday set = hardcoded seed ∪ operator override file ∪
+    auto-fetched NSE cache. All three layers merge; each is best-effort so a
+    missing file / empty cache degrades to the layers that ARE present. Named
+    `_override_holidays` for backward-compat (existing callers unchanged)."""
+    return set(NSE_HOLIDAYS) | _override_file_holidays() | _fetched_holidays()
 
 
 # ── date coercion ────────────────────────────────────────────────────────────
@@ -213,6 +234,88 @@ def _ohlc_has_trading_day(iso_day: str) -> Optional[bool]:
     except Exception as e:  # pragma: no cover - never let confirmation crash
         log.debug("ohlc_daily confirm failed for %s (%s)", iso_day, e)
         return None
+
+
+# ── COVERAGE GUARD (the safety piece) ───────────────────────────────────────────
+# THE HOLE THIS CLOSES: is_trading_day() answers "not weekend AND not in the
+# holiday set" for ANY date, including a year for which we hold NO holiday data.
+# In such a year every real NSE holiday is silently reported as a TRADING day →
+# the scheduler could fire real trades on a holiday. is_trading_day() stays
+# NON-THROWING (back-compat); instead we expose a coverage query + a hard guard
+# that the SCHEDULING / FIRE decision points call, so a wrong "trading day"
+# answer for an uncovered year can never cause a real trade.
+
+
+class CalendarCoverageError(Exception):
+    """Raised at a scheduling/fire decision when the target date falls in a year
+    for which we hold NO authoritative NSE holiday coverage (no seed, no override,
+    no fetched cache, and outside ohlc_daily coverage). Fail SAFE — refuse to
+    schedule/fire rather than trust a possibly-wrong is_trading_day() answer."""
+
+
+def _ohlc_covered_years() -> Set[int]:
+    """Years SPANNED by ohlc_daily coverage (min..max, inclusive). Empty when
+    coverage is unavailable. ohlc_daily is authoritative for PAST in-coverage
+    dates, so any year it spans is covered even without an explicit holiday seed."""
+    lo, hi = _ohlc_coverage()
+    if not lo or not hi:
+        return set()
+    try:
+        y0, y1 = int(lo[:4]), int(hi[:4])
+        return set(range(min(y0, y1), max(y0, y1) + 1))
+    except Exception:  # pragma: no cover - defensive
+        return set()
+
+
+def covered_years() -> Set[int]:
+    """The set of years for which the calendar is AUTHORITATIVE =
+        years present in (seed ∪ override file ∪ fetched cache)
+      ∪ years spanned by ohlc_daily coverage.
+    A date whose year is in this set is trusted; a date outside it (and outside
+    ohlc coverage) is NOT — see assert_calendar_covers()."""
+    yrs: Set[int] = set()
+    for iso in _override_holidays():  # seed ∪ override ∪ fetched cache
+        try:
+            yrs.add(int(iso[:4]))
+        except Exception:  # pragma: no cover
+            continue
+    yrs |= _ohlc_covered_years()
+    return yrs
+
+
+def is_calendar_authoritative(d: Union[str, date, datetime]) -> bool:
+    """True iff we can TRUST is_trading_day(d): d.year is a covered year OR d
+    falls within ohlc_daily coverage (which is authoritative for in-coverage
+    dates regardless of the holiday seed)."""
+    dd = _to_date(d)
+    if dd.year in covered_years():
+        return True
+    # Within ohlc coverage the presence/absence of a bar is authoritative even if
+    # the year itself wasn't otherwise enumerated.
+    lo, hi = _ohlc_coverage()
+    if lo and hi and lo <= dd.isoformat() <= hi:
+        return True
+    return False
+
+
+def assert_calendar_covers(d: Union[str, date, datetime]) -> None:
+    """Raise CalendarCoverageError if the calendar is NOT authoritative for `d`.
+
+    Called at the SCHEDULING / FIRE decision points (config.validate on a set
+    entry_date, the fire gate, the max-hold cap, the ladder spawn) so a real
+    trade can never be scheduled/fired into a year whose holidays we don't know.
+    NO-OP for currently-covered years (2025/2026 today) — existing flows are
+    unaffected."""
+    dd = _to_date(d)
+    if is_calendar_authoritative(dd):
+        return
+    raise CalendarCoverageError(
+        f"No authoritative NSE holiday coverage for {dd.year} "
+        f"(date {dd.isoformat()}). Refusing to schedule/fire into a year whose "
+        f"holidays are unknown — a wrong 'trading day' answer could place a real "
+        f"trade on a holiday. NSE holiday auto-fetch may have failed; it will "
+        f"retry, or add {dd.year}'s holidays to data/config/nse_holidays.txt "
+        f"(one YYYY-MM-DD per line).")
 
 
 # ── PUBLIC API ─────────────────────────────────────────────────────────────────

@@ -478,6 +478,12 @@ class TradingSessionConfig:
             except ValueError:
                 raise ValueError(
                     f"entry_date must be YYYY-MM-DD, got {self.entry_date!r}")
+            # COVERAGE GUARD (real-money safety): refuse to SCHEDULE into a year
+            # whose NSE holidays we don't authoritatively know — else
+            # is_trading_day() could wrongly call a holiday a trading day and we'd
+            # schedule a real trade on it. Raises CalendarCoverageError (a clear,
+            # distinct type) naming the year + the remedy. NO-OP for covered years.
+            _cal.assert_calendar_covers(_d)
             if not _cal.is_trading_day(_d):
                 nxt = _cal.next_trading_day(_d, inclusive=True)
                 raise ValueError(

@@ -456,6 +456,49 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.exception("Boot catch-up crashed (non-fatal): %s", e)
 
+    # NSE HOLIDAY AUTO-FETCH (real-money safety): kick a BACKGROUND best-effort
+    # refresh of the self-updating NSE holiday cache so the trading calendar stays
+    # authoritative for the current year (and the next year near year-end). This
+    # closes the hole where an un-seeded future year would silently treat every
+    # NSE holiday as a trading day. MUST NOT block or crash boot — it runs on a
+    # daemon thread, is fully wrapped, and only re-fetches when the cache is stale.
+    try:
+        import threading as _threading
+        from datetime import datetime as _dt
+
+        def _nse_holiday_boot_refresh():
+            try:
+                from autotrade import nse_holiday_source as _nse
+                from autotrade import trading_calendar as _cal
+                _IST = timezone(timedelta(hours=5, minutes=30))
+                now = _dt.now(_IST)
+                # Always ensure the CURRENT year and — within ~8 weeks of year-end
+                # — the NEXT year are covered (the daily ladder + scheduled entries
+                # can roll into next year). refresh_if_stale is cheap when fresh.
+                _nse.refresh_if_stale(max_age_days=7)
+                need_years = [now.year]
+                # ~8 weeks before Dec 31 → start pulling next year's circular.
+                if (_dt(now.year, 12, 31, tzinfo=_IST) - now).days <= 56:
+                    need_years.append(now.year + 1)
+                uncovered = _nse.ensure_years_covered(need_years, max_age_days=7)
+                covered = _cal.covered_years()
+                if uncovered:
+                    log.error(
+                        "NSE HOLIDAY COVERAGE GAP after fetch: years %s still "
+                        "uncovered — scheduling/firing into them will be REFUSED. "
+                        "Add them to data/config/nse_holidays.txt. (covered=%s)",
+                        sorted(uncovered), sorted(covered))
+                else:
+                    log.info("NSE holiday auto-fetch OK — covered years=%s",
+                             sorted(covered))
+            except Exception as e:  # never let the refresh crash anything
+                log.warning("NSE holiday boot refresh failed (non-fatal): %s", e)
+
+        _threading.Thread(target=_nse_holiday_boot_refresh,
+                          name="nse-holiday-boot-refresh", daemon=True).start()
+    except Exception as e:
+        log.warning("NSE holiday boot refresh could not start (non-fatal): %s", e)
+
     # AutoTrade: resume active paper/live sessions after a restart. The per-
     # session tick driver + entry scheduler are in-memory daemon threads that
     # die on restart, so RUNNING sessions stop refreshing LTP/gross_return and

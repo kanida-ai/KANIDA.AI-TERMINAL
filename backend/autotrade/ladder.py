@@ -375,6 +375,12 @@ class LadderCampaign:
             return {"ladder_id": self.ladder_id, "status": STATUS_RUNNING,
                     "start_date": today.isoformat(), "when": "now"}
 
+        # COVERAGE GUARD (real-money safety): refuse to SCHEDULE a campaign start
+        # into a year whose NSE holidays we don't authoritatively know — else the
+        # trading-day gate is untrustworthy and a basket could open on a holiday.
+        # Raises CalendarCoverageError naming the year + remedy. NO-OP for covered
+        # years (2025/2026 today).
+        _cal.assert_calendar_covers(target)
         # Future start_date → must be an NSE trading day.
         if not _cal.is_trading_day(target):
             suggested = _cal.next_trading_day(target, inclusive=True).isoformat()
@@ -643,6 +649,17 @@ class LadderCampaign:
         Started with when='now' so it fires this day's Falcon Top-5 immediately
         (the tick runs at/after 09:15 on a trading day → the fire gate passes)."""
         import asyncio
+
+        # COVERAGE GUARD (real-money safety): never open a basket for a day in a
+        # year whose NSE holidays we don't authoritatively know (the trading-day
+        # gate + the child's max-hold cap would be untrustworthy). Fail SAFE:
+        # don't spawn, report the reason (daily_tick surfaces it), retry next day.
+        try:
+            _cal.assert_calendar_covers(today)
+        except _cal.CalendarCoverageError as e:
+            log.warning("ladder %s: refusing to open %s — %s",
+                        self.ladder_id, today.isoformat(), e)
+            return {"opened": False, "reason": f"calendar coverage gap: {e}"}
 
         cfg = self._build_child_config()
         try:

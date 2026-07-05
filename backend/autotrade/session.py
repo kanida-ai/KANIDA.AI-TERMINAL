@@ -208,11 +208,18 @@ def compute_max_hold_cap_datetime(started_at_iso: Optional[str],
     except ValueError:
         return None
     entry_date = entry_dt.date()
+    # COVERAGE GUARD (real-money safety): the max-hold cap walks trading days
+    # forward from entry; if EITHER the entry day or the computed cap day lands in
+    # a year whose NSE holidays we don't authoritatively know, the trading-day
+    # walk is untrustworthy (a holiday could be miscounted as a session) → refuse
+    # rather than compute a wrong flatten date. NO-OP for covered years.
+    _cal.assert_calendar_covers(entry_date)
     # Session 1 = the entry day if it is a trading day, else the next trading day.
     session1 = _cal.next_trading_day(entry_date, inclusive=True)
     cap_date = session1
     for _ in range(int(max_hold_sessions) - 1):
         cap_date = _cal.next_trading_day(cap_date, inclusive=False)
+    _cal.assert_calendar_covers(cap_date)
     try:
         hh, mm, ss = _parse_clock_hms(square_off_time)
     except ValueError:
@@ -271,6 +278,19 @@ def evaluate_fire_gate(config: TradingSessionConfig, now_ist: datetime,
     fire_date = fdt.date()
     grace = max(0, int(getattr(config, "entry_grace_seconds", 120)))
     policy = getattr(config, "on_missed_window", "expire")
+
+    # COVERAGE GUARD (real-money safety): if the resolved fire date lands in a
+    # year whose NSE holidays we don't authoritatively know, DO NOT fire — a wrong
+    # "trading day" answer could place a real trade on a holiday. Refuse rather
+    # than trust the heuristic. NO-OP for covered years (2025/2026 today).
+    if not trading_calendar.is_calendar_authoritative(fire_date):
+        return FireGate(
+            False, status=STATUS_REJECTED_NON_TRADING_DAY,
+            reason=(f"no authoritative NSE holiday coverage for "
+                    f"{fire_date.year} — refusing to fire (auto-fetch may have "
+                    f"failed; add {fire_date.year} to data/config/"
+                    f"nse_holidays.txt)"),
+            fire_dt=fdt)
 
     def _missed(reason: str) -> FireGate:
         if policy == "carry_next_trading_day":
@@ -562,18 +582,27 @@ def preview_session_sizing(config: TradingSessionConfig,
             positions.append(row)
 
     total_alloc = float(config.total_allocated_capital)
-    basis = invested_basis if invested_basis > 0 else total_alloc
-    leverage = (invested_basis / total_alloc) if total_alloc > 0 else 0.0
+    non_skipped = [p for p in positions if p.get("status") != "SKIPPED"]
+    # F&O PARITY with the LIVE frozen basis: freeze_invested_basis() stores the
+    # FUND (total_allocated_capital) for F&O, NOT the Σ(qty*price) notional. Mirror
+    # that here so /preview's invested_basis, leverage and kill_preview MATCH what
+    # the session reports once running (each F&O row keeps its contract exposure on
+    # its own "notional" field). Equity (EQ/MTF/CNC) is unchanged — leveraged
+    # notional, so preview already equals the frozen basis there.
+    is_fno = any(str(p.get("instrument_type", "")).upper() in ("FUT", "CE", "PE")
+                 for p in non_skipped)
+    reported_basis = total_alloc if is_fno else invested_basis
+    basis = reported_basis if reported_basis > 0 else total_alloc
+    leverage = (basis / total_alloc) if total_alloc > 0 else 0.0
     # Total ₹ margin/capital actually deployed across sized positions (F&O margin /
     # MTF margin). For cash CNC this ≈ invested_basis.
-    total_margin = sum(float(p.get("margin") or 0.0)
-                       for p in positions if p.get("status") != "SKIPPED")
+    total_margin = sum(float(p.get("margin") or 0.0) for p in non_skipped)
     return {
-        "invested_basis": invested_basis,
+        "invested_basis": reported_basis,
         "total_allocated_capital": total_alloc,
         "total_margin": total_margin,
         "leverage": leverage,
-        "n_positions": len([p for p in positions if p.get("status") != "SKIPPED"]),
+        "n_positions": len(non_skipped),
         "positions": positions,
         "kill_preview": compute_kill_preview(
             kill_switch_enabled=config.kill_switch_enabled,

@@ -68,13 +68,35 @@ def _now() -> datetime:
 def _run() -> None:
     from .. import ladder as _ladder
     from .. import trading_calendar as _cal
+    from .. import nse_holiday_source as _nse
     hh, mm, ss = _parse_clock(_OPEN_CLOCK)
     log.info("ladder_scheduler started (open=%s poll=%.0fs)", _OPEN_CLOCK,
              _POLL_SECONDS)
+    _last_holiday_refresh_date = None  # dedupe the daily NSE holiday refresh
     while not _stop.is_set():
         try:
             now = _now()
             today = now.date()
+            # DAILY NSE HOLIDAY REFRESH (real-money safety): once per calendar day
+            # keep the self-updating holiday cache fresh so the trading calendar
+            # stays authoritative for the current (and, near year-end, next) year.
+            # Cheap when fresh (refresh_if_stale no-ops); wrapped so it can never
+            # break the scheduler. Reuses this existing daily daemon = least-
+            # invasive wiring (no new thread).
+            if _last_holiday_refresh_date != today:
+                try:
+                    _nse.refresh_if_stale(max_age_days=7)
+                    need = [today.year]
+                    if (datetime(today.year, 12, 31, tzinfo=IST) - now).days <= 56:
+                        need.append(today.year + 1)
+                    uncovered = _nse.ensure_years_covered(need, max_age_days=7)
+                    if uncovered:
+                        log.error("NSE HOLIDAY COVERAGE GAP: years %s uncovered "
+                                  "— add them to data/config/nse_holidays.txt",
+                                  sorted(uncovered))
+                except Exception as e:
+                    log.warning("daily NSE holiday refresh failed: %s", e)
+                _last_holiday_refresh_date = today
             target = now.replace(hour=hh, minute=mm, second=ss, microsecond=0)
             # Fire the day's tick once we're on a trading day, at/after the open
             # target. daily_tick is idempotent per ladder+day, so a re-check after
