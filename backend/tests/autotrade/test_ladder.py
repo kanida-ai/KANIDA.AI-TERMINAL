@@ -646,3 +646,37 @@ def test_status_trader_facing_fields(clean_positions, patched_brokers):
     assert len(st["sessions"]) == 1
     # No leakage of internal jargon in the serialized status.
     assert "sleeve" not in json.dumps(st).lower()
+
+
+# ── Market-open TIME gate (a campaign must not activate/open before 09:15) ──
+
+def _premarket_start_day_now():
+    # 08:00 IST on the scheduled start day (Mon 06-29) — BEFORE the 09:15 open.
+    return datetime(2026, 6, 29, 8, 0, 0, tzinfo=IST)
+
+
+def test_scheduled_tick_premarket_stays_scheduled(clean_positions, patched_brokers):
+    """On the start DAY but BEFORE the 09:15 open (e.g. a pre-market restart's
+    resume tick), a scheduled campaign stays SCHEDULED and opens nothing — it must
+    NOT flip to RUNNING. This is the reported bug."""
+    _basket_signals()
+    lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start(start_date=_future_trading_day())
+    res = lad.daily_tick(ref_now=_premarket_start_day_now())
+    assert res["opened"] is False
+    assert res.get("activated") is not True
+    reloaded = LadderCampaign.load(lad.ladder_id)
+    assert reloaded.status == STATUS_SCHEDULED
+    assert reloaded.n_active_baskets() == 0
+    assert _open_positions(lad.ladder_id) == 0
+
+
+def test_scheduled_tick_at_open_activates(clean_positions, patched_brokers):
+    """At exactly 09:15 on the start day the campaign activates to RUNNING."""
+    _basket_signals()
+    lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start(start_date=_future_trading_day())
+    at_open = datetime(2026, 6, 29, 9, 15, 0, tzinfo=IST)
+    res = lad.daily_tick(ref_now=at_open)
+    assert res.get("activated") is True
+    assert LadderCampaign.load(lad.ladder_id).status == STATUS_RUNNING

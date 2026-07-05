@@ -44,9 +44,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from falcon.db import falcon_conn
@@ -57,6 +58,22 @@ from .config import TradingSessionConfig
 from .session import TradingSession, now_ist
 
 log = logging.getLogger("kanida.autotrade.ladder")
+
+
+def _ladder_open_time() -> time:
+    """Daily market-open / activation clock (IST). Shared with ladder_scheduler
+    (env FALCON_LADDER_OPEN_TIME, default 09:15:00) so a campaign activates AND
+    opens baskets AT the open — never merely because the calendar date arrived.
+    A tick BEFORE this time (e.g. a pre-market restart's resume) leaves a
+    SCHEDULED campaign SCHEDULED (with its countdown), matching single sessions."""
+    raw = os.environ.get("FALCON_LADDER_OPEN_TIME", "09:15:00")
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            t = datetime.strptime(raw, fmt)
+            return time(t.hour, t.minute, t.second)
+        except ValueError:
+            continue
+    return time(9, 15, 0)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -547,6 +564,11 @@ class LadderCampaign:
         """
         now = ref_now or now_ist()
         today = now.date()
+        # MARKET-OPEN TIME GATE: the campaign activates + opens baskets at the
+        # daily open (09:15 IST), NOT merely because the date arrived. Before the
+        # open (e.g. a pre-market restart's resume tick) it must stay SCHEDULED
+        # and open nothing — parity with a single scheduled session's countdown.
+        market_open = now.time() >= _ladder_open_time()
         out: Dict[str, Any] = {"ladder_id": self.ladder_id, "date": today.isoformat(),
                                "opened": False, "reason": None}
         try:
@@ -567,6 +589,13 @@ class LadderCampaign:
                 if not _cal.is_trading_day(today):
                     out["reason"] = (f"scheduled start {self.start_date} reached "
                                      "but today is not a trading day")
+                    return out
+                if not market_open:
+                    # Start day + trading day, but market not open yet → STAY
+                    # SCHEDULED (the UI keeps its countdown). Activates at 09:15.
+                    out["reason"] = (f"scheduled start {self.start_date} reached "
+                                     f"but before the daily open ({_ladder_open_time()}) "
+                                     "— staying SCHEDULED")
                     return out
                 # Activate. Pin start_date to today (the actual activation day) so
                 # the campaign's lifetime + end-date gate reason from here.
@@ -595,6 +624,13 @@ class LadderCampaign:
                 out["reason"] = "past end_date (no new baskets)"
                 # Past end with nothing open → complete.
                 self._maybe_complete()
+                return out
+            if not market_open:
+                # A RUNNING campaign still opens its daily basket only AT the open
+                # (09:15) — a pre-market tick must not spawn early. Do NOT stamp
+                # last_tick_date, so the 09:15 scheduler beat opens it on time.
+                out["reason"] = (f"before the daily open ({_ladder_open_time()}) "
+                                 "— no basket opened yet today")
                 return out
             # Idempotency: at most one basket per ladder per day.
             if self.last_tick_date == today.isoformat():
