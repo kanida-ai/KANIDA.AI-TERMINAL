@@ -871,12 +871,15 @@ export function PortfolioAutoTrade({
     }
   }, [loadLadders])
 
-  const onLadderKill = useCallback(async () => {
-    if (!killLadderId || !ladderKillMode) return
+  const onLadderKill = useCallback(async (modeArg?: LadderKillMode) => {
+    // modeArg lets a SCHEDULED-campaign cancel skip the wind-down question and
+    // pass a mode directly (nothing is open, so flatten_now just marks it done).
+    const mode = modeArg ?? ladderKillMode
+    if (!killLadderId || !mode) return
     const id = killLadderId
     setLadderErr(null); setLadderBusy((b) => ({ ...b, [id]: 'kill' }))
     try {
-      await AutoTradeAPI.ladderKill(id, ladderKillMode)
+      await AutoTradeAPI.ladderKill(id, mode)
       setKillLadderId(null); setLadderKillMode(null)
       const res = await AutoTradeAPI.ladderStatus(id).catch(() => null)
       if (res) setLadderStatuses((prev) => ({ ...prev, [id]: res }))
@@ -2899,7 +2902,14 @@ export function PortfolioAutoTrade({
       )}
 
       {/* ── Campaign KILL modal — mode is REQUIRED (no silent default) ───────── */}
-      {killLadderId && (
+      {killLadderId && (() => {
+        // SCHEDULED / CREATED campaigns have NOTHING deployed yet, so the
+        // flatten-now vs let-open-baskets-finish choice is meaningless — show a
+        // plain confirm instead. RUNNING / PAUSED keep the wind-down modes.
+        const _kl = (ladders ?? []).find((l) => l.ladder_id === killLadderId)
+        const _st = (_kl?.status ?? '').toUpperCase()
+        const killScheduled = _st === 'SCHEDULED' || _st === 'CREATED'
+        return (
         <div className="fixed inset-0 z-50 flex items-center justify-center px-4"
           style={{ background: 'rgba(0,0,0,0.6)' }}
           onClick={() => (ladderBusy[killLadderId] == null) && setKillLadderId(null)}>
@@ -2907,53 +2917,82 @@ export function PortfolioAutoTrade({
             style={{ borderColor: 'rgba(232,115,107,0.4)', background: C.panel }} onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center gap-2 mb-2">
               <span style={{ color: C.red }}>{ICON.shield(16)}</span>
-              <span className="text-[14px] font-semibold" style={{ color: C.ink }}>Stop the campaign</span>
+              <span className="text-[14px] font-semibold" style={{ color: C.ink }}>
+                {killScheduled ? 'Cancel scheduled campaign' : 'Stop the campaign'}
+              </span>
               <button type="button" onClick={() => setKillLadderId(null)} className="ml-auto shrink-0" style={{ color: C.faint }}>
                 {ICON.close(14)}
               </button>
             </div>
-            <p className="text-[11.5px] leading-snug mb-3" style={{ color: C.muted }}>
-              Choose how to wind the campaign down — this is required.
-            </p>
-            <div className="flex flex-col gap-2">
-              {LADDER_KILL_OPTIONS.map((o) => {
-                const active = ladderKillMode === o.id
-                return (
-                  <button key={o.id} type="button" onClick={() => setLadderKillMode(o.id)}
-                    className="flex items-start gap-2.5 rounded-xl border px-3.5 py-3 text-left transition-colors"
-                    style={{
-                      borderColor: active ? 'rgba(232,115,107,0.55)' : C.line2,
-                      background: active ? 'rgba(232,115,107,0.07)' : 'rgba(255,255,255,0.015)',
-                    }}>
-                    <span className="shrink-0 mt-0.5 grid place-items-center w-4 h-4 rounded-full"
-                      style={{ boxShadow: `inset 0 0 0 1.5px ${active ? C.red : C.line2}` }}>
-                      {active && <span className="w-2 h-2 rounded-full" style={{ background: C.red }} />}
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block text-[12.5px] font-semibold" style={{ color: active ? C.ink : C.ink2 }}>{o.label}</span>
-                      <span className="block text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>{o.line}</span>
-                    </span>
+
+            {killScheduled ? (
+              <>
+                <p className="text-[11.5px] leading-snug mb-4" style={{ color: C.muted }}>
+                  This campaign hasn’t opened anything yet — cancelling just removes it.
+                  There are no open baskets to exit.
+                </p>
+                <div className="flex items-center gap-2.5">
+                  <button type="button"
+                    disabled={ladderBusy[killLadderId] != null}
+                    onClick={() => onLadderKill('flatten_now')}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+                    style={{ color: '#fff', background: C.red }}>
+                    {ladderBusy[killLadderId] === 'kill' ? 'Cancelling…' : 'Cancel campaign'}
                   </button>
-                )
-              })}
-            </div>
-            <div className="flex items-center gap-2.5 mt-4">
-              <button type="button"
-                disabled={ladderBusy[killLadderId] != null || ladderKillMode == null}
-                onClick={onLadderKill}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
-                style={{ color: '#fff', background: C.red }}>
-                {ladderBusy[killLadderId] === 'kill' ? 'Stopping…' : 'Confirm stop'}
-              </button>
-              <button type="button" disabled={ladderBusy[killLadderId] != null} onClick={() => setKillLadderId(null)}
-                className="px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors disabled:opacity-40"
-                style={{ color: C.ink2, border: `1px solid ${C.line2}` }}>
-                Cancel
-              </button>
-            </div>
+                  <button type="button" disabled={ladderBusy[killLadderId] != null} onClick={() => setKillLadderId(null)}
+                    className="px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors disabled:opacity-40"
+                    style={{ color: C.ink2, border: `1px solid ${C.line2}` }}>
+                    Keep it
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-[11.5px] leading-snug mb-3" style={{ color: C.muted }}>
+                  Choose how to wind the campaign down — this is required.
+                </p>
+                <div className="flex flex-col gap-2">
+                  {LADDER_KILL_OPTIONS.map((o) => {
+                    const active = ladderKillMode === o.id
+                    return (
+                      <button key={o.id} type="button" onClick={() => setLadderKillMode(o.id)}
+                        className="flex items-start gap-2.5 rounded-xl border px-3.5 py-3 text-left transition-colors"
+                        style={{
+                          borderColor: active ? 'rgba(232,115,107,0.55)' : C.line2,
+                          background: active ? 'rgba(232,115,107,0.07)' : 'rgba(255,255,255,0.015)',
+                        }}>
+                        <span className="shrink-0 mt-0.5 grid place-items-center w-4 h-4 rounded-full"
+                          style={{ boxShadow: `inset 0 0 0 1.5px ${active ? C.red : C.line2}` }}>
+                          {active && <span className="w-2 h-2 rounded-full" style={{ background: C.red }} />}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-[12.5px] font-semibold" style={{ color: active ? C.ink : C.ink2 }}>{o.label}</span>
+                          <span className="block text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>{o.line}</span>
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+                <div className="flex items-center gap-2.5 mt-4">
+                  <button type="button"
+                    disabled={ladderBusy[killLadderId] != null || ladderKillMode == null}
+                    onClick={() => onLadderKill()}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+                    style={{ color: '#fff', background: C.red }}>
+                    {ladderBusy[killLadderId] === 'kill' ? 'Stopping…' : 'Confirm stop'}
+                  </button>
+                  <button type="button" disabled={ladderBusy[killLadderId] != null} onClick={() => setKillLadderId(null)}
+                    className="px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors disabled:opacity-40"
+                    style={{ color: C.ink2, border: `1px solid ${C.line2}` }}>
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
-      )}
+        )
+      })()}
 
       {/* ── Broker allowlist (egress IP self-service) ────────────────────────── */}
       <EgressIpCard />
