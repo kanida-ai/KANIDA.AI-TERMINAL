@@ -269,6 +269,16 @@ function nonPlacedLabel(status: string): string {
   }
 }
 
+// Tomorrow's date (IST) as "YYYY-MM-DD" — the min for the campaign Schedule date
+// picker (a campaign can only be scheduled for a FUTURE trading day; the backend
+// validates the actual trading-day rule and 400s a weekend/holiday).
+function tomorrowIST(): string {
+  const now = new Date()
+  // Shift to IST (UTC+05:30), add one day, then take the date part.
+  const ist = new Date(now.getTime() + (5 * 60 + 30) * 60_000 + 24 * 60 * 60_000)
+  return ist.toISOString().slice(0, 10)
+}
+
 // 'list' is the HOME phase: your saved sessions (newest first). 'config' is the
 // explicit New-Session form. 'created'/'running' are the live session views,
 // reached either by creating one OR by RESUMING an existing one from the list.
@@ -429,6 +439,21 @@ export function PortfolioAutoTrade({
   const [killLadderId, setKillLadderId] = useState<string | null>(null)
   const [ladderKillMode, setLadderKillMode] = useState<LadderKillMode | null>(null)
   const ladderPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // ── Auto-Ladder create→start two-step (mirrors the session created-phase) ────
+  // createdLadder holds the just-created CREATED (draft) campaign, awaiting a
+  // Start-now / Schedule choice. It is rendered by the campaign CREATED phase
+  // (phase==='created' && createdLadder && !session), parallel to the session
+  // created-phase (phase==='created' && session).
+  const [createdLadder, setCreatedLadder] = useState<{ ladder_id: string; mode: Mode; product: LadderProduct } | null>(null)
+  // campaignDate — the picked future start day for Schedule (YYYY-MM-DD; '' = none).
+  const [campaignDate, setCampaignDate] = useState<string>('')
+  // busy flag for the campaign Start/Schedule action (parallel to `busy`).
+  const [campaignBusy, setCampaignBusy] = useState<null | 'now' | 'scheduled'>(null)
+  const [campaignErr, setCampaignErr] = useState<string | null>(null)
+  // A non-trading-day 400 on Schedule → the backend's suggested_date, offered as a
+  // one-click apply (mirrors the session createSuggest pattern).
+  const [campaignSuggest, setCampaignSuggest] = useState<string | null>(null)
 
   const set = <K extends keyof SessionConfig>(k: K, v: SessionConfig[K]) =>
     setConfig((c) => ({ ...c, [k]: v }))
@@ -784,10 +809,13 @@ export function PortfolioAutoTrade({
 
   useEffect(() => { loadLadders() }, [loadLadders])
 
-  // The LIVE (running/paused) campaigns we render + poll a status for.
+  // The LIVE campaigns we render atop the list: RUNNING / PAUSED and now also
+  // SCHEDULED (armed for a future start_date). CREATED drafts are deliberately
+  // excluded — a draft lives only in the transient created-phase card until the
+  // trader Starts or Schedules it.
   const liveLadders = (ladders ?? []).filter((l) => {
     const s = (l.status ?? '').toUpperCase()
-    return s === 'RUNNING' || s === 'PAUSED'
+    return s === 'RUNNING' || s === 'PAUSED' || s === 'SCHEDULED'
   })
   const liveLadderIds = liveLadders.map((l) => l.ladder_id).join(',')
 
@@ -929,11 +957,12 @@ export function PortfolioAutoTrade({
   }, [onSessionChange])
 
   // ── Actions ────────────────────────────────────────────────────────────────
-  // Auto-Ladder: create the campaign (ladderCreate) then start it (ladderStart),
-  // NOT session/create. The campaign then autonomously rolls positional baskets
-  // daily; its running summary + tagged child rows appear back in this list.
-  const onStartCampaign = useCallback(async () => {
-    setError(null); setBusy('create')
+  // Auto-Ladder — STEP 1: create the campaign only (ladderCreate → CREATED draft;
+  // spawns nothing). This MIRRORS the session two-step: create here, then the
+  // campaign CREATED phase offers Start-now / Schedule. The created draft is held
+  // in `createdLadder` and rendered by phase==='created' && createdLadder.
+  const onCreateCampaign = useCallback(async () => {
+    setError(null); setCampaignErr(null); setCampaignSuggest(null); setBusy('create')
     try {
       const product: LadderProduct = config.order_product === 'MTF' ? 'MTF' : 'CNC'
       const created = await AutoTradeAPI.ladderCreate({
@@ -943,24 +972,61 @@ export function PortfolioAutoTrade({
         end_date_mode: ladderEndMode,
         kill_mode: 'flatten_now',
       })
-      await AutoTradeAPI.ladderStart(created.ladder_id)
-      // Confirmation (parity with the session 'scheduled' feedback) + the campaign
-      // shows as a summary card atop the list. A campaign has no 'now vs schedule'
-      // choice like a single session — it ALWAYS deploys at 09:15 each trading day,
-      // so the confirmation states that explicitly.
-      setLadderNotice(
-        'Campaign started ✓ — it opens its first Falcon Top-5 basket at 09:15 on the '
-        + 'next trading day, then automatically ladders a new basket every trading day. '
-        + "It's shown below and runs on its own until it ends or you stop it.")
-      backToList()
+      // Hold the draft, clear the picked date, and move to the campaign CREATED
+      // phase (Start-now / Schedule). Nothing has been placed or armed yet.
+      setCreatedLadder({ ladder_id: created.ladder_id, mode, product })
+      setCampaignDate('')
+      setSession(null)   // ensure the SESSION created-phase doesn't also render
+      setPhase('created')
       loadLadders()
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not start the campaign.')
+      setError(e instanceof Error ? e.message : 'Could not create the campaign.')
     } finally {
       setBusy(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, config.total_allocated_capital, config.order_product, ladderEndMode, loadLadders])
+
+  // Auto-Ladder — STEP 2: start the held draft. `when==='now'` → ladderStart(id)
+  // → RUNNING (first basket next trading morning). `when==='scheduled'` →
+  // ladderStart(id, startDate) → SCHEDULED (auto-activates on that date). A
+  // non-trading-day 400 surfaces the backend's suggested_date as a one-click apply.
+  const onCampaignStart = useCallback(async (when: StartWhen) => {
+    if (!createdLadder) return
+    if (when === 'scheduled' && !campaignDate) {
+      setCampaignErr('Pick a start date first.')
+      return
+    }
+    setCampaignErr(null); setCampaignSuggest(null); setCampaignBusy(when)
+    try {
+      if (when === 'now') {
+        await AutoTradeAPI.ladderStart(createdLadder.ladder_id)
+        setLadderNotice(
+          'Campaign started ✓ — it opens its first Falcon Top-5 basket at 09:15 on the '
+          + 'next trading day, then automatically ladders a new basket every trading day. '
+          + "It's shown below and runs on its own until it ends or you stop it.")
+      } else {
+        await AutoTradeAPI.ladderStart(createdLadder.ladder_id, campaignDate)
+        setLadderNotice(
+          `Campaign scheduled ✓ — it arms for ${campaignDate} and opens its first `
+          + 'Falcon Top-5 basket at 09:15 that morning, then ladders a new basket every '
+          + "trading day. It's shown below until it activates.")
+      }
+      setCreatedLadder(null)
+      setCampaignDate('')
+      backToList()
+      loadLadders()
+    } catch (e) {
+      // A weekend/holiday start → HTTP 400 whose detail is an object carrying a
+      // suggested_date. The shared call<>() helper attached it to the Error.
+      const suggested = (e as { suggested_date?: string })?.suggested_date
+      if (suggested) setCampaignSuggest(suggested)
+      setCampaignErr(e instanceof Error ? e.message : 'Could not start the campaign.')
+    } finally {
+      setCampaignBusy(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createdLadder, campaignDate, loadLadders])
 
   const onCreate = useCallback(async () => {
     setError(null); setCreateSuggest(null); setBusy('create')
@@ -1098,6 +1164,8 @@ export function PortfolioAutoTrade({
     setConfig(DEFAULT_CONFIG); setMode('paper'); setCountdown(null)
     setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
     setCreateSuggest(null)
+    // Clear any in-flight campaign draft (Auto-Ladder two-step).
+    setCreatedLadder(null); setCampaignDate(''); setCampaignErr(null); setCampaignSuggest(null)
     // Reset the strategy dropdown + campaign duration to defaults.
     setUiStrategy('portfolio_kill_switch'); setLadderEndMode('month_end')
     // Reset universe filter + picker
@@ -1111,6 +1179,8 @@ export function PortfolioAutoTrade({
     setCountdown(null)
     setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
     setCreateSuggest(null)
+    // Clear any in-flight campaign draft (Auto-Ladder two-step).
+    setCreatedLadder(null); setCampaignDate(''); setCampaignErr(null); setCampaignSuggest(null)
     loadSessions()
   }
 
@@ -2198,27 +2268,151 @@ export function PortfolioAutoTrade({
             </div>
           )}
 
-          {/* Primary CTA — "Start campaign" for Auto-Ladder (ladderCreate →
-              ladderStart); "Create session" for the two session strategies. */}
+          {/* Primary CTA — "Create campaign" for Auto-Ladder (ladderCreate → a
+              CREATED draft; the campaign CREATED phase then offers Start-now /
+              Schedule, mirroring the session flow). "Create session" otherwise. */}
           <div className="mt-5 flex items-center gap-3">
             <button
               type="button"
               disabled={busy === 'create' || !liveReady || (isLadder && (config.total_allocated_capital || 0) <= 0)}
-              onClick={isLadder ? onStartCampaign : onCreate}
+              onClick={isLadder ? onCreateCampaign : onCreate}
               className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-semibold transition-opacity disabled:opacity-40"
               style={{ color: '#06130c', background: C.mint }}
             >
               {isLadder
-                ? (busy === 'create' ? 'Starting…' : <>{ICON.loop(14)} Start campaign</>)
+                ? (busy === 'create' ? 'Creating…' : <>{ICON.loop(14)} Create campaign</>)
                 : (busy === 'create' ? 'Creating…' : <>Create {mode} session {ICON.arrow(13)}</>)}
             </button>
             <span className="text-[11px]" style={{ color: C.muted }}>
               {mode === 'live' && !liveReady
                 ? 'Type LIVE above to enable.'
                 : isLadder
-                ? `Creates + starts the ${mode} campaign. Baskets auto-deploy at 09:15 each trading day — there's no separate now/schedule step; the first opens next trading morning.`
+                ? `Creates the ${mode} campaign as a draft — next you choose Start now or Schedule for a future date. No baskets open yet.`
                 : `Creates a ${mode} session — no orders are placed yet.`}
             </span>
+          </div>
+        </div>
+      )}
+
+      {/* ── CAMPAIGN CREATED PHASE — confirm then Start now / Schedule ────────────
+          Mirrors the session created-phase, but for an Auto-Ladder draft: a
+          "Campaign created" card + Start now (RUNNING) / Schedule for a future
+          trading day (SCHEDULED, via an inline date picker). A non-trading-day
+          400 offers the backend's suggested_date as a one-click apply. */}
+      {phase === 'created' && createdLadder && !session && (
+        <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+          <div className="flex items-center gap-2 mb-1">
+            <span style={{ color: C.mint }}>{ICON.check(16)}</span>
+            <span className="text-[14px] font-semibold" style={{ color: C.ink }}>Campaign created</span>
+            <ModePill mode={createdLadder.mode} />
+            <span className="text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+              style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+              {createdLadder.product}
+            </span>
+          </div>
+          <div className="text-[11.5px] mb-4" style={{ color: C.muted }}>
+            ID <code style={{ color: C.ink2 }}>{createdLadder.ladder_id}</code> · status{' '}
+            <span style={{ color: C.ink2 }}>CREATED (draft)</span> — nothing is placed or armed yet.
+          </div>
+
+          {/* Calm retry note (parity with the session error line). */}
+          {campaignErr && !campaignSuggest && (
+            <div className="mb-4 flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
+              style={{ borderColor: 'rgba(232,115,107,0.4)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(14)}</span>
+              <span>{campaignErr}</span>
+            </div>
+          )}
+
+          {/* Non-trading-day suggestion (Schedule 400) — one-click apply the
+              backend's suggested_date, mirroring the session createSuggest UI. */}
+          {campaignSuggest && (
+            <div className="mb-4 rounded-xl border px-3.5 py-3"
+              style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
+              <div className="flex items-start gap-2 text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+                <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(15)}</span>
+                <span>
+                  <b style={{ color: C.amber }}>That&apos;s not a trading day.</b>{' '}
+                  Use <b style={{ color: C.ink }}>{campaignSuggest}</b> instead?
+                </span>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2.5">
+                <button type="button"
+                  onClick={() => { setCampaignDate(campaignSuggest); setCampaignSuggest(null); setCampaignErr(null) }}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[12px] font-semibold transition-opacity"
+                  style={{ color: '#06130c', background: C.mint }}>
+                  {ICON.check(13)} Use {campaignSuggest}
+                </button>
+                <button type="button" onClick={() => { setCampaignSuggest(null); setCampaignErr(null) }}
+                  className="text-[11.5px]" style={{ color: C.faint }}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* TWO clear ways to begin — start now, or schedule for a future day. */}
+          <div className="flex flex-col sm:flex-row sm:items-stretch gap-3">
+            {/* Start now → RUNNING (first basket next trading morning). */}
+            <button
+              type="button"
+              disabled={campaignBusy != null}
+              onClick={() => onCampaignStart('now')}
+              className="flex-1 flex flex-col items-start gap-1 px-4 py-3 rounded-xl text-left transition-opacity disabled:opacity-40"
+              style={createdLadder.mode === 'live'
+                ? { color: '#1a0908', background: C.red }
+                : { color: '#06130c', background: C.mint }}
+            >
+              <span className="flex items-center gap-2 text-[13px] font-semibold">
+                {ICON.bolt(14)} {campaignBusy === 'now' ? 'Starting…' : 'Start now'}
+              </span>
+              <span className="text-[10.5px] leading-snug opacity-80">
+                First Falcon Top-5 basket opens at 09:15 next trading morning.
+              </span>
+            </button>
+
+            {/* Schedule → SCHEDULED: pick a future trading day, then arm it. */}
+            <div className="flex-1 flex flex-col gap-2 px-4 py-3 rounded-xl"
+              style={{ background: 'rgba(63,227,164,0.10)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+              <span className="flex items-center gap-2 text-[13px] font-semibold" style={{ color: C.mint }}>
+                {ICON.clock(14)} Schedule for a future date
+              </span>
+              <input
+                type="date"
+                min={tomorrowIST()}
+                value={campaignDate}
+                onChange={(e) => { setCampaignDate(e.target.value); setCampaignSuggest(null); setCampaignErr(null) }}
+                className="w-full rounded-lg px-2.5 py-1.5 text-[12px] tabular-nums outline-none"
+                style={{ color: C.ink, background: 'rgba(0,0,0,0.25)', border: `1px solid ${C.line2}`, colorScheme: 'dark' }}
+              />
+              <button
+                type="button"
+                disabled={campaignBusy != null || !campaignDate}
+                onClick={() => onCampaignStart('scheduled')}
+                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[12px] font-semibold transition-opacity disabled:opacity-40"
+                style={{ color: '#06130c', background: C.mint }}
+              >
+                {ICON.clock(13)} {campaignBusy === 'scheduled'
+                  ? 'Scheduling…'
+                  : campaignDate ? `Schedule for ${campaignDate}` : 'Pick a date'}
+              </button>
+              <span className="text-[10.5px] leading-snug" style={{ color: C.muted }}>
+                Arms the campaign for that day — nothing is placed until then.
+              </span>
+            </div>
+          </div>
+
+          <div className="mt-3 flex items-center gap-3">
+            <button type="button" onClick={backToList}
+              className="text-[12px] px-3 py-2 rounded-lg transition-colors"
+              style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+              Discard
+            </button>
+            <p className="text-[11px] leading-snug" style={{ color: C.faint }}>
+              {createdLadder.mode === 'paper'
+                ? 'Paper simulates the daily baskets — no broker orders are sent.'
+                : 'Live attempts real broker orders, but only if the server flag FALCON_AUTOTRADE_ENABLED is set; otherwise it reports skipped.'}
+            </p>
           </div>
         </div>
       )}
@@ -2761,6 +2955,9 @@ function LadderCampaignCard({
   const upper = (s?: string | null) => (s ?? '').toUpperCase()
   const running = upper(st) === 'RUNNING'
   const paused = upper(st) === 'PAUSED'
+  // SCHEDULED = armed for a future start_date; nothing deployed yet. Its card
+  // shows "starts {start_date}" and offers Cancel (kill) but no Pause.
+  const scheduled = upper(st) === 'SCHEDULED'
   // ₹ or "—"
   const rs = (v?: number) => (typeof v === 'number' && Number.isFinite(v) ? fmtINR(v) : '—')
   const signed = (v?: number) => (typeof v === 'number' && Number.isFinite(v) ? signedINR(v) : '—')
@@ -2786,8 +2983,11 @@ function LadderCampaignCard({
           </span>
         )}
         {(startDate || endDate) && (
-          <span className="ml-auto text-[10.5px]" style={{ color: C.muted }}>
-            {startDate ? `started ${startDate}` : 'running'}{endDate ? ` · runs to ${endDate}` : ''}
+          <span className="ml-auto text-[10.5px]" style={{ color: scheduled ? C.amber : C.muted }}>
+            {scheduled
+              ? (startDate ? `starts ${startDate}` : 'scheduled')
+              : (startDate ? `started ${startDate}` : 'running')}
+            {endDate ? ` · runs to ${endDate}` : ''}
           </span>
         )}
       </div>
@@ -2830,7 +3030,9 @@ function LadderCampaignCard({
 
       {/* Controls */}
       <div className="flex items-center gap-2.5 flex-wrap px-4 pb-3.5">
-        {paused ? (
+        {/* Pause/Resume only make sense once the campaign is live. A SCHEDULED
+            campaign has nothing to pause — it only offers Cancel. */}
+        {!scheduled && (paused ? (
           <button type="button" disabled={busy != null} onClick={onResume}
             className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
             style={{ color: '#06130c', background: C.mint }}>
@@ -2842,16 +3044,18 @@ function LadderCampaignCard({
             style={{ color: C.ink2, border: `1px solid ${C.line2}` }}>
             {ICON.clock(14)} {busy === 'pause' ? 'Pausing…' : 'Pause'}
           </button>
-        )}
-        {(running || paused) && (
+        ))}
+        {(running || paused || scheduled) && (
           <button type="button" disabled={busy != null} onClick={onKill}
             className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
             style={{ color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}>
-            {ICON.close(13)} Stop campaign
+            {ICON.close(13)} {scheduled ? 'Cancel campaign' : 'Stop campaign'}
           </button>
         )}
         <span className="ml-auto text-[10.5px]" style={{ color: C.faint }}>
-          Its baskets appear below, tagged “Campaign”.
+          {scheduled
+            ? 'It activates on its start date — its baskets will appear below then.'
+            : 'Its baskets appear below, tagged “Campaign”.'}
         </span>
       </div>
     </div>
@@ -2874,10 +3078,14 @@ function LadderStatusPill({ status }: { status?: LadderStatusName }) {
   const s = (status ?? '').toUpperCase()
   const running = s === 'RUNNING'
   const paused = s === 'PAUSED'
+  // SCHEDULED (armed, not yet live) reads amber like Paused — a calm "waiting"
+  // state, not the live-green look.
+  const scheduled = s === 'SCHEDULED'
   const done = s === 'COMPLETED' || s === 'ENDED'
-  const tone = running ? C.mint : paused ? C.amber : done ? C.mint : C.muted
-  const bg = running || done ? 'rgba(63,227,164,0.12)' : paused ? 'rgba(230,180,80,0.12)' : 'rgba(133,153,144,0.13)'
-  const ring = running || done ? 'rgba(63,227,164,0.4)' : paused ? 'rgba(230,180,80,0.4)' : 'rgba(133,153,144,0.4)'
+  const amberTone = paused || scheduled
+  const tone = running ? C.mint : amberTone ? C.amber : done ? C.mint : C.muted
+  const bg = running || done ? 'rgba(63,227,164,0.12)' : amberTone ? 'rgba(230,180,80,0.12)' : 'rgba(133,153,144,0.13)'
+  const ring = running || done ? 'rgba(63,227,164,0.4)' : amberTone ? 'rgba(230,180,80,0.4)' : 'rgba(133,153,144,0.4)'
   return (
     <span className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
       style={{ color: tone, background: bg, boxShadow: `inset 0 0 0 1px ${ring}` }}>

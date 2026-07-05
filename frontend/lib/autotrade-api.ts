@@ -614,7 +614,10 @@ export type LadderEndMode = 'month_end' | 'manual'
 // is no silent default, so the UI forces the trader to choose.
 export type LadderKillMode = 'flatten_now' | 'stop_new_let_finish'
 
-export type LadderStatusName = 'RUNNING' | 'PAUSED' | 'ENDED' | 'COMPLETED' | string
+// CREATED = a draft campaign (created but not started; spawns nothing).
+// SCHEDULED = armed for a future start_date (auto-activates on that date).
+export type LadderStatusName =
+  | 'CREATED' | 'SCHEDULED' | 'RUNNING' | 'PAUSED' | 'ENDED' | 'COMPLETED' | string
 
 // POST /ladder/create body. total_capital is ₹; the backend derives the per-
 // basket budget (~total/3). mode defaults paper (no real orders). end_date is
@@ -721,6 +724,20 @@ async function call<T>(path: string, init?: RequestInit & { base?: string }): Pr
       (body && typeof body === 'object' && 'detail' in body && (body as { detail?: unknown }).detail) ||
       (body && typeof body === 'object' && 'error' in body && (body as { error?: unknown }).error) ||
       `HTTP ${r.status}`
+    // Structured `detail` OBJECTS (e.g. the non-trading-day rejection:
+    // { message, suggested_date, code }) carry a human message plus fields the
+    // caller can act on. Surface `.message` and attach the extras onto the Error
+    // so a caller can read e.g. `(err as any).suggested_date`. String details
+    // keep their existing behaviour verbatim.
+    if (detail && typeof detail === 'object') {
+      const d = detail as { message?: unknown; suggested_date?: unknown; code?: unknown }
+      const msg = typeof d.message === 'string' ? d.message : `HTTP ${r.status}`
+      const err = new Error(msg) as Error & { suggested_date?: string; code?: string; detail?: unknown }
+      if (typeof d.suggested_date === 'string') err.suggested_date = d.suggested_date
+      if (typeof d.code === 'string') err.code = d.code
+      err.detail = detail
+      throw err
+    }
     throw new Error(typeof detail === 'string' ? detail : `HTTP ${r.status}`)
   }
   return body as T
@@ -889,9 +906,21 @@ export const AutoTradeAPI = {
       body: JSON.stringify(body),
     }),
 
-  // Start a created campaign → RUNNING (the daily basket engine takes over).
-  ladderStart: (id: string) =>
-    call<LadderCreateResponse>(`/ladder/${encodeURIComponent(id)}/start`, { method: 'POST' }),
+  // Start a created (CREATED/draft) campaign. Backward-compatible:
+  //   • ladderStart(id)            → no body → RUNNING now (first basket next
+  //                                   trading morning). Existing callers unchanged.
+  //   • ladderStart(id, startDate) → POSTs { start_date }. A FUTURE trading day →
+  //                                   SCHEDULED (auto-activates on that date). A
+  //                                   weekend/holiday → HTTP 400 whose detail is an
+  //                                   OBJECT { message, suggested_date, code:
+  //                                   'NON_TRADING_START_DATE' }; the shared call<>()
+  //                                   helper surfaces .message and attaches
+  //                                   (err as any).suggested_date for the caller.
+  ladderStart: (id: string, startDate?: string) =>
+    call<LadderCreateResponse>(`/ladder/${encodeURIComponent(id)}/start`, {
+      method: 'POST',
+      ...(startDate ? { body: JSON.stringify({ start_date: startDate }) } : {}),
+    }),
 
   // Pause the campaign — stops opening new baskets; open baskets keep running.
   ladderPause: (id: string) =>

@@ -1423,3 +1423,34 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
   internal terms never appear. Fixed + Dynamic-Trailing flows unchanged. SAFETY: UI/types only;
   no execution/backend logic touched. Verify: `npx tsc --noEmit` clean; `next build` — "Compiled
   successfully", no errors/warnings.
+
+- 2026-07-04 · **Auto-Ladder campaign: split into create → Start-now / Schedule two-step**
+  (mirrors the single-session created-phase). Acting on the backend contract where
+  `POST /ladder/create` now yields a **CREATED** draft (spawns nothing) and
+  `POST /ladder/{id}/start` accepts an OPTIONAL `{ start_date }` (omit → RUNNING;
+  future trading day → SCHEDULED; weekend/holiday → HTTP 400 with an OBJECT detail
+  `{ message, suggested_date, code:'NON_TRADING_START_DATE' }`). Changes: (1)
+  `lib/autotrade-api.ts` — `ladderStart(id, startDate?)` POSTs `{ start_date }` only
+  when a date is passed (no-body call unchanged, backward-compatible); the shared
+  `call<>()` error path now handles an OBJECT `detail` — throws `Error(detail.message)`
+  and attaches `(err as any).suggested_date`/`.code`/`.detail` (STRING details behave
+  exactly as before); added CREATED/SCHEDULED to `LadderStatusName`. (2)
+  `PortfolioAutoTrade.tsx` — the Auto-Ladder primary button is now **"Create campaign"**
+  → `onCreateCampaign` (ladderCreate ONLY → CREATED draft held in new `createdLadder`
+  state → `phase==='created'` campaign card, guarded `!session` so it never collides with
+  the session created-phase). New **campaign CREATED phase**: "Campaign created" card +
+  **Start now** (`ladderStart(id)` → RUNNING) and a **Schedule** column with an inline
+  `<input type="date" min={tomorrowIST()}>` + **"Schedule for {date}"** (`ladderStart(id,
+  date)` → SCHEDULED); a non-trading-day 400 shows an amber "That's not a trading day —
+  use {suggested_date}?" with one-click apply (mirrors `createSuggest`). On success sets
+  `ladderNotice` (RUNNING → "Campaign started…"; SCHEDULED → "Campaign scheduled — first
+  basket 09:15 on {date}"), `backToList()`, `loadLadders()`, clears `createdLadder`;
+  Discard/Back resets the draft. (3) `liveLadders` filter widened to include **SCHEDULED**
+  (CREATED drafts deliberately excluded — a draft lives only in the transient created-phase
+  card). (4) `LadderCampaignCard` renders SCHEDULED clearly: amber "Scheduled" pill (via
+  `LadderStatusPill`) + "starts {start_date}" header line; Pause/Resume hidden for SCHEDULED,
+  **Cancel campaign** (kill) still offered; footer note explains it activates on its start
+  date. TRADER TERMS ONLY; all numbers from live status; calm retry on error. Fixed +
+  Dynamic-Trailing + the campaign config form unchanged. SAFETY: front-end/types only — no
+  execution/backend logic touched. Verify: `npx tsc --noEmit` clean; `next build` — compiled
+  successfully, no errors.
