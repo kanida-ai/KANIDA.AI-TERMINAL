@@ -1454,3 +1454,68 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
   Dynamic-Trailing + the campaign config form unchanged. SAFETY: front-end/types only — no
   execution/backend logic touched. Verify: `npx tsc --noEmit` clean; `next build` — compiled
   successfully, no errors.
+
+- **2026-07-05 — Broker onboarding rebuilt into a guided, data-driven 3-screen flow
+  (AlgoTest-style; replaces the single dropdown+form).** Acting on the operator brief to
+  make broker-connect "as easy as eating a donut" and to consume the extended
+  `GET /brokers/supported` CONTRACT. (1) `lib/autotrade-api.ts` — added `FieldDef`
+  (`name/label/type/secret/required/placeholder/maps_to`), `BrokerBrand`, `BrokerSetup`
+  (`docs_url/callback_url/steps/token_note`), and extended `SupportedBroker` with
+  `display_name/brand/exchanges/fields/setup`; exported `BrokerMeta` alias. Every field
+  OPTIONAL-safe. NO API client method or lifecycle changed. (2)
+  `components/power/autotrade/BrokerAccountsPanel.tsx` — full rewrite. SCREEN 1 GALLERY:
+  searchable grid of broker cards (CSS brand chip from `brand.color`+`initial`,
+  display_name, exchange chips, "Connected: N" from `brokerAccounts`, Set up/Add account
+  for live, muted "Coming soon" for `live:false`) + a "N connections" count. SCREEN 2
+  GUIDED SETUP: two-pane — LEFT numbered `setup.steps`, copyable `callback_url`, "View
+  docs", `token_note`, and the egress/allowlist IP helper (self-contained
+  `EgressIpHelper`, since the exported one lives inside PortfolioAutoTrade); RIGHT
+  Connection name + DYNAMIC `fields` from the schema (secret fields get a Show/Hide toggle),
+  one "Test & Connect" running the UNCHANGED create→login-popup→paste request_token→activate
+  lifecycle with step-by-step inline status (Saving… → Opening broker login… → paste-token →
+  Activating… → back to gallery). Coming-soon brokers render steps but disable connect.
+  SCREEN 3 YOUR CONNECTIONS: per-account cards (brand chip + label + status pill ACTIVE mint/
+  EXPIRED·ERROR·REVOKED red/PENDING amber, "Last verified …") with Generate token/Reconnect
+  (EXPIRED → prominent mint CTA + "Token expired — one click to renew."), Health-check,
+  Delete. ADMIN: new `isAdmin` prop (threaded from `AutoTradePanel`; power users default
+  false → own accounts only) adds an "All users" toggle → compact table (broker · user ·
+  label · status · last verified) with per-row Health-check + Delete, using the unscoped
+  admin list (empty `user_id` → `q()` drops it). Defensive: partial/absent contract falls
+  back to a static enrich registry + the legacy API-key + API-secret schema; `fields` never
+  empty for live brokers. api_secret stays WRITE-ONLY — snapshotted, sent once, cleared from
+  state on submit, never rendered. Vault-disabled empty state preserved. (3)
+  `AutoTradePanel.tsx` — passes `isAdmin` to the panel. Mint/F2 theme; no new accent colours.
+  SAFETY: front-end + types only — no execution/backend logic touched. Verify: `npx tsc
+  --noEmit` clean; `next build` — compiled successfully, no errors.
+
+## 2026-07-05 — Broker OAuth auto-capture landing (no more copy-paste)
+- **What:** Replaced the manual `request_token` copy-paste in the broker connect flow
+  with an auto-capture redirect landing, keeping the manual paste as a visible FALLBACK
+  (never regressed the working flow).
+- **New route `/power/autotrade/connect`** (`app/power/autotrade/connect/page.tsx`, client).
+  DELIBERATELY placed OUTSIDE the `app/power/(app)/*` route group so it does NOT inherit
+  the AppShell left-rail or the hard login redirect — an OAuth popup landing must be a
+  calm, self-contained page that runs → reports to its opener → closes. Parent
+  `app/power/layout.tsx` already passes `/power/autotrade/*` through without TopBar/Footer.
+  On mount: reads token (`request_token`|`auth`|`code`|`token`) + `status` from the URL and
+  the pending `{broker_account_id,user_id,broker}` from `localStorage['kanida.brokerConnect']`,
+  calls `AutoTradeAPI.refreshBrokerToken`. SUCCESS → `postMessage` opener (explicit origin,
+  never `'*'`), "Connected ✓", clear LS, `window.close()` after ~1.2s (or a "Back to
+  AutoTrade" link if opened directly with no opener). ERROR → clear message + read-only token
+  box with Copy + "paste this back in AutoTrade" so a failed auto-activate still recovers
+  manually. Missing token/id → friendly guidance, no crash. Never renders/logs secrets beyond
+  the one-time token.
+- **Panel wiring** (`components/power/autotrade/BrokerAccountsPanel.tsx`): in `onConnect`,
+  right before `window.open(login_url…)`, writes the pending handshake to `localStorage`
+  (ids + broker name, no secret). Added a mount/unmount `message` listener that trusts the
+  event ONLY when `event.origin === window.location.origin` and
+  `data.type === 'kanida-broker-connected'`: `ok:true` → clear LS + run existing success path
+  (`onConnected()`+`onBack()`); `ok:false` → reveal the manual paste box + surface the error.
+  Refs keep the once-registered listener pointing at the latest handlers. Reworded the paste
+  box as "Didn't connect automatically? Paste the request_token here" — auto is the happy
+  path, manual is the safety net.
+- **Security:** opener listener rejects cross-origin; landing posts with explicit target origin.
+- Mint/F2 theme, reused `C`/`ICON` from `cotrade-kit`; no new accent colours. Front-end +
+  types only — no execution/backend logic touched. Verify: `npx tsc --noEmit` clean;
+  `next build` compiled successfully, `/power/autotrade/connect` present in route manifest,
+  no collision with `/power/autotrade`.

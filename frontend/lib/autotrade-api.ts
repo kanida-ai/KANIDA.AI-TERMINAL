@@ -467,12 +467,51 @@ export type BrokerCapabilities = {
   fno?: boolean
   [k: string]: unknown
 }
+// ── Extended broker metadata (the /brokers/supported CONTRACT) ───────────────
+// The backend is being extended to return, per broker: brand chip, capability
+// map, exchanges, a dynamic credential FIELD schema, and setup guidance (docs,
+// redirect/callback URL, numbered steps, token note). EVERY field is optional so
+// a partial/older backend shape (e.g. no `fields`, no `setup`) never crashes the
+// UI — the panel falls back to the legacy api_key + api_secret inputs and static
+// copy. FieldDef.maps_to tells the client which create-request key the value goes
+// to (api_key / api_secret); `secret` toggles a show/hide eye + write-only handling.
+export type FieldMapsTo = 'api_key' | 'api_secret'
+export type FieldDef = {
+  name: string
+  label: string
+  type: 'text' | 'password'
+  secret: boolean
+  required: boolean
+  placeholder?: string
+  maps_to: FieldMapsTo
+  [k: string]: unknown
+}
+export type BrokerBrand = {
+  color?: string    // hex/CSS colour for the brand chip background
+  initial?: string  // 1–2 char glyph shown in the chip
+  [k: string]: unknown
+}
+export type BrokerSetup = {
+  docs_url?: string      // "View docs" link target
+  callback_url?: string  // the Redirect/Callback URL the user must set on the broker
+  steps?: string[]       // numbered setup steps (rendered 1,2,3…)
+  token_note?: string    // calm note about daily token / lifetime
+  [k: string]: unknown
+}
 export type SupportedBroker = {
   broker: BrokerName
   live: boolean
   capabilities?: BrokerCapabilities
+  // ── Extended contract (all optional — degrade gracefully when absent) ──
+  display_name?: string
+  brand?: BrokerBrand
+  exchanges?: string[]
+  fields?: FieldDef[]
+  setup?: BrokerSetup
   [k: string]: unknown
 }
+// Alias matching the backend contract name used in the design/handoff docs.
+export type BrokerMeta = SupportedBroker
 export type SupportedBrokersResponse = {
   brokers?: SupportedBroker[]
   [k: string]: unknown

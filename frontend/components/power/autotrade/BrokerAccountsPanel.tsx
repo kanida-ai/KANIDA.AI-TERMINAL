@@ -1,42 +1,44 @@
 'use client'
 
 /**
- * BrokerAccountsPanel — Tradetron-style, per-user "connect your broker" flow.
+ * BrokerAccountsPanel — AlgoTest-style guided broker onboarding (3 screens).
  *
- * The guided onboarding for the (now-deployed) broker-AGNOSTIC AutoTrade backend.
- * A user picks a broker → sees THAT broker's step guide + capability badges →
- * enters credentials once → authorizes on the broker's own site → pastes the
- * returned request_token → the account goes PENDING → ACTIVE. Daily-expiry
- * brokers (Kite) surface a one-click Reconnect each morning; every account has a
- * live Health-check.
+ *   SCREEN 1 · GALLERY   — a searchable grid of broker cards (brand chip, name,
+ *                          exchange chips, "Connected: N"). LIVE → Set up / Add
+ *                          account; coming-soon → muted chip. A "Your connections"
+ *                          count. This is the front door.
+ *   SCREEN 2 · SETUP     — a two-pane guided card for the chosen broker. LEFT:
+ *                          numbered setup.steps, a copyable callback/redirect URL,
+ *                          a docs link, a token note, and the egress-IP allowlist
+ *                          helper. RIGHT: a Connection name + the DYNAMIC field
+ *                          schema (secret fields get an eye toggle) and a single
+ *                          "Test & Connect" that runs the create → login-popup →
+ *                          paste request_token → activate lifecycle with inline,
+ *                          step-by-step status. Coming-soon brokers render the
+ *                          steps but disable connect.
+ *   SCREEN 3 · CONNECTED — per-account cards (brand chip + label + status pill;
+ *                          "Last verified …"): Generate token / Reconnect,
+ *                          Health-check, Delete. EXPIRED → Reconnect is the CTA.
  *
- * HARD HONESTY / SECURITY:
- *   • api_secret is WRITE-ONLY — sent ONCE on connect, consumed server-side,
- *     never read back by any endpoint, and CLEARED from React state the instant
- *     the create call resolves (success or fail). We never display a secret.
- *   • We only ever show the masked api_key, whether a secret/token is on file, the
- *     account status, and a live health string. No secret ever lives in the DOM.
- *   • The broker dropdown is sourced from GET /brokers/supported — live brokers
- *     are selectable, non-live are shown disabled with a "coming soon" tag +
- *     their capability badges. A backend miss falls back to a static registry.
- *   • vault_enabled=false → a calm, friendly empty state (the operator must set
- *     the server vault key). NOT an error.
- *   • Every backend field degrades to "—"; nothing is fabricated. This panel
- *     places NO order and changes NO trading logic — it manages broker-account
- *     records + their daily login token only. Live trading stays gated
- *     server-side by FALCON_AUTOTRADE_ENABLED.
+ *   ADMIN — when isAdmin, an "All users" toggle lists EVERY broker connection in a
+ *   compact table (broker · user · label · status · last verified) with
+ *   Health-check + Delete per row, for monitoring. (Backend returns all accounts
+ *   for admin when no user_id filter is passed.)
  *
- * Transport: lib/autotrade-api.ts → same-origin /api/falcon-proxy (the proxy
- * forwards the user's power_jwt / injects the operator token server-side).
+ * The API client + connect lifecycle in lib/autotrade-api.ts are UNCHANGED — this
+ * file only reshapes the UX around them. Contract fields (brand/fields/setup) are
+ * optional-safe: a partial backend falls back to a static registry + the legacy
+ * API-key + API-secret inputs. api_secret stays WRITE-ONLY — snapshotted, sent
+ * once, cleared from state the instant create resolves; never rendered.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { C, ICON } from '@/components/power/shared/cotrade-kit'
 import {
   AutoTradeAPI,
   type BrokerAccount,
   type BrokerAccountHealth,
-  type BrokerCapabilities,
   type BrokerName,
+  type FieldDef,
   type SupportedBroker,
 } from '@/lib/autotrade-api'
 
@@ -47,197 +49,277 @@ const inputStyle: React.CSSProperties = {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// PER-BROKER ONBOARDING GUIDES — mirrors docs/design/BROKER_ONBOARDING_GUIDES.md.
-// A small config map keyed by broker name: friendly label, whether API access is
-// paid/required, how to get creds, the connect steps, the daily-login/refresh
-// note, how to confirm active, and MTF/GTT limits. Rendered after broker select.
-// This is STATIC explanatory content; the live/disabled state + capability
-// badges come from the backend registry (GET /brokers/supported).
+// STATIC FALLBACK REGISTRY — used ONLY when GET /brokers/supported is missing or
+// returns a partial shape (no display_name/brand/fields/setup). It carries just
+// enough (display_name, brand chip, exchanges, the standard 2-field key/secret
+// schema, and step copy) so the guided flow always works. Live/coming-soon still
+// comes from the backend when present; here it mirrors the deployed backend
+// (zerodha + rupeezy live). This is presentation metadata only.
 // ════════════════════════════════════════════════════════════════════════════
-type BrokerGuide = {
-  label: string
-  // The developer console where creds are created.
-  console?: { label: string; url: string }
-  // API-access note (paid? free? enable where?).
-  apiAccess: string
-  // How to obtain api_key / api_secret.
-  getCreds: string
-  // Ordered connect/authorize steps (rendered as a numbered list).
-  connectSteps: string[]
-  // Daily-login / token-refresh behaviour.
-  refreshNote: string
-  // How the user confirms the account is ACTIVE.
-  confirmActive: string
-  // Capability / limitation prose (MTF / GTT / order types).
-  limits: string
-}
-
-const GUIDES: Record<string, BrokerGuide> = {
-  zerodha: {
-    label: 'Zerodha (Kite Connect)',
-    console: { label: 'developers.kite.trade', url: 'https://developers.kite.trade' },
-    apiAccess: 'Required. Kite Connect is a paid developer add-on (subscription per app).',
-    getCreds: 'Create a Kite Connect app → note the API Key and API Secret. Set the app’s redirect URL to our callback.',
-    connectSteps: [
-      'Enter your API Key + API Secret below and Connect the account (it starts PENDING).',
-      'Click Connect on the account card → we open the Kite login in a new tab.',
-      'Log in + authorize on Kite → it redirects back with a request_token in the URL.',
-      'Copy that request_token, paste it here → we exchange it for the daily access token.',
-    ],
-    refreshNote: 'Daily login required. Kite access tokens expire every morning (~06:00 IST) and there is no refresh token — reconnect each trading day (one click). The card shows EXPIRED → Reconnect each morning.',
-    confirmActive: 'Green ACTIVE badge on the account card, backed by a live kite.profile() ping (use Health-check any time).',
-    limits: 'MTF ✓, GTT-OCO ✓ (broker-held stop/target backup), SL/SL-M ✓. Live orders also require our SEBI-registered static egress IP on the app’s allowed-IPs. AutoTrade fully supported.',
-  },
-  fivepaisa: {
-    label: 'FivePaisa (5paisa Xstream)',
-    console: { label: '5paisa developer portal', url: 'https://xstream.5paisa.com/dev-docs/user-authentication-system/access-token' },
-    apiAccess: 'Required. 5paisa Developer / Xstream API — enable it in your 5paisa account and create an API app.',
-    getCreds: 'From the 5paisa developer portal, obtain App/User Key + Encryption Key + Client/User ID. TOTP two-factor must be enabled (Security Settings → Enable TOTP).',
-    connectSteps: [
-      'Enable TOTP in 5paisa and create your API app to get your keys.',
-      'Enter your credentials below and Connect the account.',
-      'Click Connect on the card → complete the OAuth login (with TOTP) on 5paisa.',
-      'A request token is returned → paste it here → we exchange it for the access token.',
-    ],
-    refreshNote: 'Daily. The access token is valid through the day (expires daily), so a daily reconnect is required (similar to Kite). No long-lived refresh token (to be certified).',
-    confirmActive: 'ACTIVE badge, backed by a lightweight authenticated call (e.g. margin/holdings).',
-    limits: 'Orders reference ScripCode (numeric), not symbol — the adapter maps symbols → 5paisa ScripCodes. MTF / GTT / basket / SL support to be certified.',
-  },
-  rupeezy: {
-    label: 'Rupeezy (Vortex API)',
-    console: { label: 'Vortex developer portal', url: 'https://vortex.rupeezy.in/docs/1.0/authentication/' },
-    apiAccess: 'Required. Vortex API is a free trading API — register an application on the Vortex developer portal.',
-    getCreds: 'Create your app → get application_id and x-api-key (keep the x-api-key secret). Configure the redirect URL (and optionally a postback/webhook URL).',
-    connectSteps: [
-      'Register a Vortex app and note application_id + x-api-key.',
-      'Enter your credentials below and Connect the account.',
-      'Click Connect on the card → you’re sent to flow.rupeezy.in to log in.',
-      'We receive the auth artifact → paste the returned token here → we exchange it for the access token.',
-    ],
-    refreshNote: 'Session-based token in the Authorization header; exact lifetime/refresh to be certified — the lifecycle layer detects expiry via a health ping and prompts reconnect if needed.',
-    confirmActive: 'ACTIVE badge, backed by a Portfolio/positions ping. Rupeezy also pushes postbacks (webhooks) for fills.',
-    limits: 'Order management supports all exchanges + order types incl. stop-loss. MTF / GTT / basket support to be certified.',
-  },
-  upstox:  { label: 'Upstox',   apiAccess: 'Coming soon — integration not yet live.', getCreds: '', connectSteps: [], refreshNote: '', confirmActive: '', limits: '' },
-  angel:   { label: 'Angel One', apiAccess: 'Coming soon — integration not yet live.', getCreds: '', connectSteps: [], refreshNote: '', confirmActive: '', limits: '' },
-  dhan:    { label: 'Dhan',     apiAccess: 'Coming soon — integration not yet live.', getCreds: '', connectSteps: [], refreshNote: '', confirmActive: '', limits: '' },
-}
-
-// Static fallback registry — used ONLY if GET /brokers/supported fails, so the
-// panel still works. Matches the deployed backend (zerodha + rupeezy live).
-const FALLBACK_BROKERS: SupportedBroker[] = [
-  { broker: 'zerodha',   live: true,  capabilities: { auth_kind: 'request_token', has_refresh_token: false, token_lifetime: 'daily ~06:00 IST', supports_gtt: true, supports_mtf: true } },
-  { broker: 'rupeezy',   live: true,  capabilities: { auth_kind: 'oauth2_flow', token_lifetime: 'session' } },
-  { broker: 'fivepaisa', live: false, capabilities: { auth_kind: 'oauth_request_token', token_lifetime: 'daily' } },
-  { broker: 'upstox',    live: false },
-  { broker: 'angel',     live: false },
-  { broker: 'dhan',      live: false },
+const LEGACY_FIELDS: FieldDef[] = [
+  { name: 'api_key',    label: 'API key',    type: 'text',     secret: false, required: true, placeholder: 'api_key',    maps_to: 'api_key' },
+  { name: 'api_secret', label: 'API secret', type: 'password', secret: true,  required: true, placeholder: 'api_secret', maps_to: 'api_secret' },
 ]
 
-const guideFor = (b: BrokerName): BrokerGuide =>
-  GUIDES[String(b).toLowerCase()] ?? { label: String(b), apiAccess: 'Coming soon.', getCreds: '', connectSteps: [], refreshNote: '', confirmActive: '', limits: '' }
-const brokerLabel = (b: BrokerName) => guideFor(b).label
+const FALLBACK: Record<string, SupportedBroker> = {
+  zerodha: {
+    broker: 'zerodha', live: true, display_name: 'Zerodha (Kite Connect)',
+    brand: { color: '#387ED1', initial: 'Z' },
+    exchanges: ['NSE', 'BSE', 'NFO', 'MCX'],
+    capabilities: { auth_kind: 'request_token', has_refresh_token: false, token_lifetime: 'daily ~06:00 IST', supports_gtt: true, supports_mtf: true },
+    fields: LEGACY_FIELDS,
+    setup: {
+      docs_url: 'https://developers.kite.trade',
+      steps: [
+        'Create a Kite Connect app at developers.kite.trade (paid developer add-on).',
+        'Set the app’s Redirect URL to the callback URL shown on the left.',
+        'Copy your API Key + API Secret into the fields on the right.',
+        'Add our egress IP (below) to the app’s Allowed IPs so live orders don’t error.',
+        'Test & Connect → sign in on Kite → paste the returned request_token to finish.',
+      ],
+      token_note: 'Kite tokens expire every morning (~06:00 IST) with no refresh token — one-click Reconnect each trading day.',
+    },
+  },
+  rupeezy: {
+    broker: 'rupeezy', live: true, display_name: 'Rupeezy (Vortex API)',
+    brand: { color: '#F04E30', initial: 'R' },
+    exchanges: ['NSE', 'BSE', 'NFO'],
+    capabilities: { auth_kind: 'oauth2_flow', token_lifetime: 'session' },
+    fields: [
+      { name: 'application_id', label: 'Application ID', type: 'text',     secret: false, required: true, placeholder: 'application_id', maps_to: 'api_key' },
+      { name: 'x_api_key',      label: 'x-api-key',      type: 'password', secret: true,  required: true, placeholder: 'x-api-key',      maps_to: 'api_secret' },
+    ],
+    setup: {
+      docs_url: 'https://vortex.rupeezy.in/docs/1.0/authentication/',
+      steps: [
+        'Register a Vortex app (free) at the Vortex developer portal.',
+        'Set the Redirect URL to the callback URL shown on the left.',
+        'Copy your application_id + x-api-key into the fields on the right.',
+        'Test & Connect → log in at flow.rupeezy.in → paste the returned token.',
+      ],
+      token_note: 'Session-based token; the lifecycle layer detects expiry via a health ping and prompts a reconnect if needed.',
+    },
+  },
+  fivepaisa: {
+    broker: 'fivepaisa', live: false, display_name: 'FivePaisa (5paisa Xstream)',
+    brand: { color: '#0072BC', initial: '5' },
+    exchanges: ['NSE', 'BSE'],
+    capabilities: { auth_kind: 'oauth_request_token', token_lifetime: 'daily' },
+    fields: LEGACY_FIELDS,
+    setup: {
+      docs_url: 'https://xstream.5paisa.com/dev-docs/user-authentication-system/access-token',
+      steps: [
+        'Enable TOTP two-factor in your 5paisa account.',
+        'Create an API app in the 5paisa developer portal to get your keys.',
+        'Complete the OAuth login (with TOTP) when connecting.',
+      ],
+      token_note: 'Daily token (similar to Kite) — reconnect each trading day.',
+    },
+  },
+  upstox: { broker: 'upstox', live: false, display_name: 'Upstox', brand: { color: '#5A31F4', initial: 'U' }, exchanges: ['NSE', 'BSE', 'NFO'] },
+  angel:  { broker: 'angel',  live: false, display_name: 'Angel One', brand: { color: '#3E4C9A', initial: 'A' }, exchanges: ['NSE', 'BSE', 'NFO'] },
+  dhan:   { broker: 'dhan',   live: false, display_name: 'Dhan', brand: { color: '#1FB574', initial: 'D' }, exchanges: ['NSE', 'BSE', 'NFO'] },
+}
+const FALLBACK_LIST: SupportedBroker[] = Object.values(FALLBACK)
 
-type StatusTone = { color: string; bg: string; ring: string; label: string }
-function statusTone(status?: string): StatusTone {
-  switch ((status ?? '').toUpperCase()) {
-    case 'ACTIVE':
-      return { color: C.mint, bg: 'rgba(63,227,164,0.12)', ring: 'rgba(63,227,164,0.42)', label: 'Active' }
-    case 'EXPIRED':
-      return { color: C.red, bg: 'rgba(232,115,107,0.12)', ring: 'rgba(232,115,107,0.42)', label: 'Expired' }
-    case 'REVOKED':
-    case 'ERROR':
-      return { color: C.red, bg: 'rgba(232,115,107,0.12)', ring: 'rgba(232,115,107,0.42)', label: (status || 'Error') }
-    case 'PENDING':
-      return { color: C.amber, bg: 'rgba(230,180,80,0.12)', ring: 'rgba(230,180,80,0.42)', label: 'Pending' }
-    default:
-      return { color: C.muted, bg: 'rgba(255,255,255,0.04)', ring: C.line2, label: status || 'Unknown' }
+// Merge the backend broker with our static fallback so every field is present.
+// The backend ALWAYS wins where it provides a value; the fallback only fills gaps.
+function enrich(b: SupportedBroker): SupportedBroker {
+  const key = String(b.broker).toLowerCase()
+  const fb = FALLBACK[key]
+  if (!fb) return b
+  return {
+    ...fb, ...b,
+    brand: { ...fb.brand, ...b.brand },
+    capabilities: { ...fb.capabilities, ...b.capabilities },
+    setup: { ...fb.setup, ...b.setup },
+    exchanges: b.exchanges?.length ? b.exchanges : fb.exchanges,
+    fields: b.fields?.length ? b.fields : fb.fields,
+    display_name: b.display_name || fb.display_name,
   }
 }
 
-function StatusBadge({ status }: { status?: string }) {
-  const t = statusTone(status)
+const displayName = (b: SupportedBroker | undefined, name?: BrokerName) =>
+  b?.display_name || FALLBACK[String(name ?? b?.broker).toLowerCase()]?.display_name || String(name ?? b?.broker ?? '—')
+
+// The credential field schema for a broker: the backend fields, else the merged
+// fallback, else the legacy 2-field key/secret schema (never empty for live).
+function fieldsFor(b: SupportedBroker | undefined): FieldDef[] {
+  if (b?.fields?.length) return b.fields
+  const fb = FALLBACK[String(b?.broker).toLowerCase()]
+  if (fb?.fields?.length) return fb.fields
+  return LEGACY_FIELDS
+}
+
+// ── Brand chip (CSS only — no external assets) ───────────────────────────────
+function BrandChip({ broker, size = 40 }: { broker?: SupportedBroker; size?: number }) {
+  const color = broker?.brand?.color || C.mint
+  const initial = (broker?.brand?.initial || String(broker?.broker ?? '?')[0] || '?').toUpperCase().slice(0, 2)
   return (
     <span
-      className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2.5 py-1"
-      style={{ color: t.color, background: t.bg, boxShadow: `inset 0 0 0 1px ${t.ring}` }}
+      className="inline-grid place-items-center rounded-xl font-bold shrink-0"
+      style={{
+        width: size, height: size,
+        background: `${color}22`,
+        color, boxShadow: `inset 0 0 0 1px ${color}55`,
+        fontSize: size * 0.42,
+      }}
     >
+      {initial}
+    </span>
+  )
+}
+
+// ── Status pill (ACTIVE mint / EXPIRED·ERROR·REVOKED red / PENDING amber) ─────
+type Tone = { color: string; bg: string; ring: string; label: string }
+function statusTone(status?: string): Tone {
+  switch ((status ?? '').toUpperCase()) {
+    case 'ACTIVE':  return { color: C.mint,  bg: 'rgba(63,227,164,0.12)',  ring: 'rgba(63,227,164,0.42)',  label: 'Active' }
+    case 'EXPIRED': return { color: C.red,   bg: 'rgba(232,115,107,0.12)', ring: 'rgba(232,115,107,0.42)', label: 'Expired' }
+    case 'REVOKED': return { color: C.red,   bg: 'rgba(232,115,107,0.12)', ring: 'rgba(232,115,107,0.42)', label: 'Revoked' }
+    case 'ERROR':   return { color: C.red,   bg: 'rgba(232,115,107,0.12)', ring: 'rgba(232,115,107,0.42)', label: 'Error' }
+    case 'PENDING': return { color: C.amber, bg: 'rgba(230,180,80,0.12)',  ring: 'rgba(230,180,80,0.42)',  label: 'Pending' }
+    default:        return { color: C.muted, bg: 'rgba(255,255,255,0.04)', ring: C.line2, label: status || 'Unknown' }
+  }
+}
+function StatusPill({ status }: { status?: string }) {
+  const t = statusTone(status)
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2.5 py-1"
+      style={{ color: t.color, background: t.bg, boxShadow: `inset 0 0 0 1px ${t.ring}` }}>
       <span className="w-1.5 h-1.5 rounded-full" style={{ background: t.color }} />
       {t.label}
     </span>
   )
 }
 
-// A capability pill (MTF / GTT / F&O / refresh). Present = mint, absent = faint.
-function CapBadge({ on, label, title }: { on: boolean | undefined; label: string; title?: string }) {
+function ExchangeChips({ list }: { list?: string[] }) {
+  if (!list?.length) return null
   return (
-    <span title={title}
-      className="inline-flex items-center gap-1 text-[9.5px] font-semibold uppercase tracking-[0.05em] rounded px-1.5 py-0.5"
-      style={on
-        ? { color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.35)' }
-        : { color: C.faint, background: 'rgba(255,255,255,0.03)', boxShadow: `inset 0 0 0 1px ${C.line2}` }}>
-      {label}
-    </span>
+    <div className="flex items-center gap-1 flex-wrap">
+      {list.slice(0, 5).map((x) => (
+        <span key={x} className="text-[9.5px] font-semibold uppercase tracking-[0.04em] rounded px-1.5 py-0.5"
+          style={{ color: C.muted, background: 'rgba(255,255,255,0.03)', boxShadow: `inset 0 0 0 1px ${C.line2}` }}>
+          {x}
+        </span>
+      ))}
+    </div>
   )
 }
 
-function CapabilityBadges({ caps }: { caps?: BrokerCapabilities }) {
-  if (!caps) return null
+// A copyable read-only value (callback URL / egress IP).
+function CopyBox({ value, label }: { value: string; label?: string }) {
+  const [copied, setCopied] = useState(false)
+  const onCopy = useCallback(async () => {
+    try { await navigator.clipboard.writeText(value); setCopied(true); setTimeout(() => setCopied(false), 1600) }
+    catch { /* clipboard blocked — value is shown for manual copy */ }
+  }, [value])
   return (
-    <div className="flex items-center gap-1.5 flex-wrap">
-      <CapBadge on={caps.supports_mtf} label="MTF" title="Margin Trading Facility" />
-      <CapBadge on={caps.supports_gtt} label="GTT" title="Broker-held Good-Till-Triggered stop/target" />
-      {caps.fno !== undefined && <CapBadge on={caps.fno} label="F&O" title="Futures & Options" />}
-      <CapBadge on={caps.has_refresh_token} label="refresh"
-        title={caps.has_refresh_token ? 'Long-lived refresh token' : 'No refresh token — daily reconnect'} />
-      {caps.token_lifetime && (
-        <span className="text-[9.5px]" style={{ color: C.faint }} title="Token lifetime">· {caps.token_lifetime}</span>
+    <div className="flex items-stretch gap-2">
+      <code className="flex-1 min-w-0 text-[11.5px] font-mono rounded-lg px-2.5 py-2 truncate"
+        style={{ color: C.ink2, background: 'rgba(255,255,255,0.03)', border: `1px solid ${C.line2}` }}
+        title={value}>
+        {value}
+      </code>
+      <button type="button" onClick={onCopy}
+        className="shrink-0 inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-3 rounded-lg transition-colors"
+        style={{ color: C.mint, border: '1px solid rgba(63,227,164,0.3)' }}
+        aria-label={label ? `Copy ${label}` : 'Copy'}>
+        {copied ? ICON.check(13) : ICON.book(13)} {copied ? 'Copied' : 'Copy'}
+      </button>
+    </div>
+  )
+}
+
+function ErrorNote({ children, onClose }: { children: React.ReactNode; onClose?: () => void }) {
+  return (
+    <div className="flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px] leading-snug"
+      style={{ borderColor: 'rgba(232,115,107,0.35)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
+      <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(13)}</span>
+      <span className="min-w-0">{children}</span>
+      {onClose && (
+        <button type="button" onClick={onClose} className="ml-auto shrink-0" style={{ color: C.faint }} aria-label="Dismiss">
+          {ICON.close(12)}
+        </button>
       )}
     </div>
   )
 }
 
-export function BrokerAccountsPanel({ userId }: { userId: number | string }) {
-  // Supported-broker registry (dropdown source)
-  const [registry, setRegistry] = useState<SupportedBroker[]>(FALLBACK_BROKERS)
+// ── Egress / allowlist IP helper (self-contained; the exported one lives inside
+//    PortfolioAutoTrade). Brokers need our outbound IP allowlisted for live orders.
+function EgressIpHelper() {
+  const [ip, setIp] = useState<string | null>(null)
+  const [asOf, setAsOf] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const load = useCallback(async () => {
+    setLoading(true); setErr(null)
+    try {
+      const res = await AutoTradeAPI.egressIp()
+      setIp(typeof res.ip === 'string' && res.ip ? res.ip : null)
+      setAsOf(typeof res.as_of === 'string' ? res.as_of : null)
+    } catch (e) {
+      setIp(null); setErr(e instanceof Error ? e.message : 'unavailable')
+    } finally { setLoading(false) }
+  }, [])
+  useEffect(() => { load() }, [load])
+  return (
+    <div className="rounded-xl border px-3.5 py-3" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+      <div className="flex items-center gap-2 mb-1.5">
+        <span style={{ color: C.mint }}>{ICON.shield(14)}</span>
+        <span className="text-[11.5px] font-semibold" style={{ color: C.ink }}>Add our IP to your broker allowlist</span>
+        {asOf && <span className="ml-auto text-[9.5px]" style={{ color: C.faint }}>as of {asOf}</span>}
+      </div>
+      {loading ? (
+        <p className="text-[11px]" style={{ color: C.muted }}>Reading our egress IP…</p>
+      ) : ip ? (
+        <CopyBox value={ip} label="egress IP" />
+      ) : (
+        <div className="flex items-center gap-2 text-[11px]" style={{ color: C.faint }}>
+          <span>Egress IP not reporting yet{err ? ` (${err})` : ''} — showing “—”.</span>
+          <button type="button" onClick={load} className="underline" style={{ color: C.mint }}>Retry</button>
+        </div>
+      )}
+      <p className="text-[10.5px] leading-snug mt-1.5" style={{ color: C.muted }}>
+        Some brokers require the server’s outbound IP on their Allowed-IPs list or live orders error.
+      </p>
+    </div>
+  )
+}
 
-  // List + vault state
+// ════════════════════════════════════════════════════════════════════════════
+// The panel — a small screen state machine (gallery ⇄ setup) over one loaded list.
+// ════════════════════════════════════════════════════════════════════════════
+type Screen = { name: 'gallery' } | { name: 'setup'; broker: BrokerName }
+
+export function BrokerAccountsPanel({ userId, isAdmin = false }: { userId: number | string; isAdmin?: boolean }) {
+  // Registry (gallery source) + accounts + vault state.
+  const [registry, setRegistry] = useState<SupportedBroker[]>(FALLBACK_LIST)
   const [accounts, setAccounts] = useState<BrokerAccount[] | null>(null)
   const [vaultEnabled, setVaultEnabled] = useState<boolean | null>(null)
   const [loading, setLoading] = useState(false)
   const [listErr, setListErr] = useState<string | null>(null)
 
-  // Connect form
-  const [broker, setBroker] = useState<BrokerName>('zerodha')
-  const [label, setLabel] = useState('')
-  const [apiKey, setApiKey] = useState('')
-  const [apiSecret, setApiSecret] = useState('')  // WRITE-ONLY — cleared after submit
-  const [creating, setCreating] = useState(false)
-  const [createErr, setCreateErr] = useState<string | null>(null)
-  const [createOk, setCreateOk] = useState<string | null>(null)
-  const [showGuide, setShowGuide] = useState(false)
+  // Admin "All users" view (unscoped list) — only fetched when toggled on.
+  const [allView, setAllView] = useState(false)
+  const [allAccounts, setAllAccounts] = useState<BrokerAccount[] | null>(null)
+  const [allErr, setAllErr] = useState<string | null>(null)
+  const [allLoading, setAllLoading] = useState(false)
 
-  // Per-row connect (login URL → paste request_token → refresh)
-  const [connectId, setConnectId] = useState<string | null>(null)  // which row is mid-connect
-  const [requestToken, setRequestToken] = useState('')
-  const [rowBusy, setRowBusy] = useState<string | null>(null)       // id currently working
-  const [rowErr, setRowErr] = useState<string | null>(null)
-  // Per-row health results (id → last health), so cards show a live liveness read.
-  const [health, setHealth] = useState<Record<string, BrokerAccountHealth | { error: string }>>({})
+  const [screen, setScreen] = useState<Screen>({ name: 'gallery' })
+  const [search, setSearch] = useState('')
 
-  // ── Load the supported-broker registry (dropdown). Falls back on error. ──────
+  // ── Load the supported-broker registry (enriched with static fallback). ──────
   useEffect(() => {
     let alive = true
     AutoTradeAPI.supportedBrokers()
       .then((res) => {
         if (!alive) return
-        const list = res.brokers?.length ? res.brokers : FALLBACK_BROKERS
+        const list = res.brokers?.length ? res.brokers.map(enrich) : FALLBACK_LIST
         setRegistry(list)
-        // Default the dropdown to the first LIVE broker.
-        const firstLive = list.find((b) => b.live)
-        if (firstLive) setBroker(firstLive.broker)
       })
-      .catch(() => { if (alive) setRegistry(FALLBACK_BROKERS) })
+      .catch(() => { if (alive) setRegistry(FALLBACK_LIST) })
     return () => { alive = false }
   }, [])
 
@@ -253,436 +335,798 @@ export function BrokerAccountsPanel({ userId }: { userId: number | string }) {
       setLoading(false)
     }
   }, [userId])
-
   useEffect(() => { load() }, [load])
 
-  const selected = useMemo(
-    () => registry.find((b) => b.broker === broker),
-    [registry, broker],
+  // Admin: fetch ALL accounts (no user_id filter → backend returns every account).
+  const loadAll = useCallback(async () => {
+    setAllLoading(true); setAllErr(null)
+    try {
+      // Passing '' → the q() helper drops the empty user_id → unscoped admin list.
+      const res = await AutoTradeAPI.brokerAccounts('')
+      setAllAccounts(res.accounts ?? [])
+    } catch (e) {
+      setAllErr(e instanceof Error ? e.message : 'Could not load all broker connections.')
+    } finally {
+      setAllLoading(false)
+    }
+  }, [])
+  useEffect(() => { if (isAdmin && allView) loadAll() }, [isAdmin, allView, loadAll])
+
+  const countFor = useCallback(
+    (name: BrokerName) => (accounts ?? []).filter((a) => String(a.broker).toLowerCase() === String(name).toLowerCase()).length,
+    [accounts],
   )
-  const selectedLive = selected?.live ?? false
-  const guide = guideFor(broker)
 
-  // ── Connect a new account — api_secret is WRITE-ONLY and cleared immediately ──
-  const onCreate = useCallback(async () => {
-    setCreateErr(null); setCreateOk(null)
-    if (!selectedLive) { setCreateErr('This broker isn’t live yet — pick a live broker to connect.'); return }
-    if (!label.trim() || !apiKey.trim() || !apiSecret.trim()) {
-      setCreateErr('Account label, API key and API secret are all required.')
-      return
-    }
-    setCreating(true)
-    // Snapshot the secret locally, then CLEAR it from state right away so it never
-    // lingers in React state / the DOM after this tick.
-    const secret = apiSecret
-    setApiSecret('')
-    const savedLabel = label.trim()
-    try {
-      const acct = await AutoTradeAPI.createBrokerAccount({
-        user_id: userId,
-        broker,
-        account_label: savedLabel,
-        api_key: apiKey.trim(),
-        api_secret: secret,
-      })
-      setLabel(''); setApiKey('')  // secret already cleared
-      await load()
-      // SEAMLESS: immediately open the broker login for the just-created account
-      // and reveal the paste-token step — so it's one flow (enter keys → sign in
-      // → paste token) instead of a separate "Connect" click on the card.
-      try {
-        const res = await AutoTradeAPI.brokerLoginUrl(acct.broker_account_id, userId)
-        if (res.login_url) {
-          window.open(res.login_url, '_blank', 'noopener,noreferrer,width=520,height=720')
-        }
-        setConnectId(acct.broker_account_id)
-        setRequestToken('')
-        setCreateOk(`Saved ${brokerLabel(broker)}. A login window opened — sign in there, then paste the token below to finish.`)
-      } catch {
-        // Login-URL fetch failed — the account is still saved; the user can use
-        // “Log in” on its card. Don't lose their work over this.
-        setCreateOk(`Saved ${brokerLabel(broker)} · ${savedLabel}. Use “Log in” on the account card below to sign in and activate.`)
-      }
-    } catch (e) {
-      setCreateErr(e instanceof Error ? e.message : 'Could not connect the broker account.')
-    } finally {
-      setCreating(false)
-    }
-  }, [userId, broker, label, apiKey, apiSecret, selectedLive, load])
+  const filtered = useMemo(() => {
+    const s = search.trim().toLowerCase()
+    if (!s) return registry
+    return registry.filter((b) => displayName(b).toLowerCase().includes(s) || String(b.broker).toLowerCase().includes(s))
+  }, [registry, search])
 
-  // ── Per-row: open the broker login in a popup, then paste request_token ───────
-  const onConnect = useCallback(async (acct: BrokerAccount) => {
-    setRowErr(null); setRowBusy(acct.broker_account_id); setRequestToken('')
-    try {
-      const res = await AutoTradeAPI.brokerLoginUrl(acct.broker_account_id, userId)
-      if (res.login_url) {
-        // Open the broker's login in a new tab/popup; the user logs in there and
-        // copies the request_token from the redirect URL back into the input.
-        window.open(res.login_url, '_blank', 'noopener,noreferrer,width=520,height=720')
-      }
-      setConnectId(acct.broker_account_id)
-    } catch (e) {
-      setRowErr(e instanceof Error ? e.message : 'Could not get the broker login URL.')
-    } finally {
-      setRowBusy(null)
-    }
-  }, [userId])
+  const selectedBroker = screen.name === 'setup'
+    ? (registry.find((b) => b.broker === screen.broker) ?? FALLBACK[String(screen.broker).toLowerCase()])
+    : undefined
 
-  const onSubmitToken = useCallback(async (acct: BrokerAccount) => {
-    if (!requestToken.trim()) { setRowErr('Paste the request_token from the broker login first.'); return }
-    setRowErr(null); setRowBusy(acct.broker_account_id)
-    try {
-      await AutoTradeAPI.refreshBrokerToken(acct.broker_account_id, requestToken.trim(), userId)
-      setConnectId(null); setRequestToken('')
-      await load()
-    } catch (e) {
-      setRowErr(e instanceof Error ? e.message : 'Could not activate the account. Check the request_token and try again.')
-    } finally {
-      setRowBusy(null)
-    }
-  }, [requestToken, userId, load])
-
-  // ── Per-row: live health ping (does not mutate the account). ─────────────────
-  const onHealth = useCallback(async (acct: BrokerAccount) => {
-    setRowErr(null); setRowBusy(acct.broker_account_id)
-    try {
-      const res = await AutoTradeAPI.brokerAccountHealth(acct.broker_account_id, userId)
-      setHealth((h) => ({ ...h, [acct.broker_account_id]: res }))
-    } catch (e) {
-      setHealth((h) => ({ ...h, [acct.broker_account_id]: { error: e instanceof Error ? e.message : 'Health check failed.' } }))
-    } finally {
-      setRowBusy(null)
-    }
-  }, [userId])
-
-  const onDelete = useCallback(async (acct: BrokerAccount) => {
-    if (!window.confirm(
-      `Remove the broker account "${acct.account_label}" (${brokerLabel(acct.broker)})? ` +
-      `This deletes its stored key/secret/token. This cannot be undone.`,
-    )) return
-    setRowErr(null); setRowBusy(acct.broker_account_id)
-    try {
-      await AutoTradeAPI.deleteBrokerAccount(acct.broker_account_id, userId)
-      if (connectId === acct.broker_account_id) { setConnectId(null); setRequestToken('') }
-      setHealth((h) => { const n = { ...h }; delete n[acct.broker_account_id]; return n })
-      await load()
-    } catch (e) {
-      setRowErr(e instanceof Error ? e.message : 'Could not remove the account.')
-    } finally {
-      setRowBusy(null)
-    }
-  }, [userId, connectId, load])
-
-  return (
-    <div className="flex flex-col gap-4">
-      {/* ── Header ───────────────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <span style={{ color: C.mint }}>{ICON.link(16)}</span>
-        <span className="text-[14px] font-semibold" style={{ color: C.ink }}>Broker accounts</span>
-        <span className="text-[11px]" style={{ color: C.faint }}>
-          Enter your broker keys once, sign in, and you&apos;re connected.
-        </span>
-        <button type="button" disabled={loading} onClick={load}
-          className="ml-auto text-[11.5px] px-2.5 py-1.5 rounded-lg transition-colors disabled:opacity-40"
-          style={{ color: C.muted, border: `1px solid ${C.line}` }}>
-          {loading ? 'Refreshing…' : 'Refresh'}
-        </button>
-      </div>
-
-      {/* ── Vault-disabled friendly empty state ──────────────────────────────── */}
-      {vaultEnabled === false ? (
+  // ── Vault-disabled friendly empty state ────────────────────────────────────
+  if (vaultEnabled === false) {
+    return (
+      <div className="flex flex-col gap-4">
+        <Header loading={loading} onRefresh={load} />
         <div className="rounded-2xl border p-5 flex items-start gap-3"
           style={{ borderColor: 'rgba(230,180,80,0.32)', background: 'rgba(230,180,80,0.06)' }}>
           <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.shield(18)}</span>
           <div className="text-[12.5px] leading-relaxed" style={{ color: C.ink2 }}>
-            <b style={{ color: C.amber }}>Broker connect isn&apos;t enabled yet.</b>{' '}
-            Connecting a broker account needs the server vault key so credentials can
-            be stored encrypted. The operator must set the vault key on the backend —
-            once that&apos;s done, this panel will let you connect and activate accounts here.
-            <div className="mt-2 text-[11px]" style={{ color: C.faint }}>
-              Nothing to do from the UI until then.
-            </div>
+            <b style={{ color: C.amber }}>Broker connect isn’t enabled yet.</b>{' '}
+            Connecting a broker needs the server vault key so credentials store encrypted.
+            Once the operator sets it, this panel will let you connect and activate accounts.
+            <div className="mt-2 text-[11px]" style={{ color: C.faint }}>Nothing to do from the UI until then.</div>
           </div>
         </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <Header loading={loading} onRefresh={load} />
+
+      {screen.name === 'setup' ? (
+        <GuidedSetup
+          broker={selectedBroker}
+          userId={userId}
+          onBack={() => setScreen({ name: 'gallery' })}
+          onConnected={load}
+        />
       ) : (
         <>
-          {/* ── Connect form + per-broker onboarding guide ───────────────────── */}
+          {/* ── SCREEN 1 · GALLERY ──────────────────────────────────────────── */}
           <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
-            <div className="flex items-center gap-2 mb-3">
-              <span style={{ color: C.mint }}>{ICON.bolt(15)}</span>
-              <span className="text-[13px] font-semibold" style={{ color: C.ink }}>Connect a broker account</span>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Field label="Broker" hint={selectedLive
-                ? 'Live integration — selectable and production-wired.'
-                : 'Coming soon — not selectable yet.'}>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <select
-                    value={broker}
-                    onChange={(e) => setBroker(e.target.value as BrokerName)}
-                    className="flex-1 min-w-[160px] rounded-lg px-3 py-2 text-[13px] outline-none"
-                    style={inputStyle}
-                  >
-                    {registry.map((b) => (
-                      <option key={b.broker} value={b.broker} disabled={!b.live}
-                        style={{ background: '#0b1410', color: b.live ? C.ink : C.faint }}>
-                        {brokerLabel(b.broker)}{b.live ? '' : ' — coming soon'}
-                      </option>
-                    ))}
-                  </select>
-                  {selectedLive ? (
-                    <span className="shrink-0 inline-flex items-center gap-1 text-[10px] font-semibold rounded-full px-2 py-1"
-                      style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
-                      {ICON.check(11)} live
-                    </span>
-                  ) : (
-                    <span className="shrink-0 inline-flex items-center text-[10px] font-semibold rounded-full px-2 py-1"
-                      style={{ color: C.amber, background: 'rgba(230,180,80,0.12)', boxShadow: 'inset 0 0 0 1px rgba(230,180,80,0.4)' }}>
-                      coming soon
-                    </span>
-                  )}
-                </div>
-                {selected?.capabilities && (
-                  <div className="mt-1.5"><CapabilityBadges caps={selected.capabilities} /></div>
-                )}
-              </Field>
-
-              <Field label="Account label" hint="A name to recognise this account.">
-                <input value={label} onChange={(e) => setLabel(e.target.value)}
-                  placeholder="e.g. My Zerodha" disabled={!selectedLive}
-                  className="w-full rounded-lg px-3 py-2 text-[13px] outline-none disabled:opacity-50" style={inputStyle} />
-              </Field>
-
-              <Field label="API key" hint="From your broker's developer console.">
-                <input value={apiKey} onChange={(e) => setApiKey(e.target.value)}
-                  autoComplete="off" disabled={!selectedLive}
-                  placeholder="api_key"
-                  className="w-full rounded-lg px-3 py-2 text-[13px] outline-none font-mono disabled:opacity-50" style={inputStyle} />
-              </Field>
-
-              <Field label="API secret" hint="Write-only — sent once, never shown again or read back.">
-                <input value={apiSecret} onChange={(e) => setApiSecret(e.target.value)}
-                  type="password" autoComplete="new-password" disabled={!selectedLive}
-                  placeholder="api_secret"
-                  className="w-full rounded-lg px-3 py-2 text-[13px] outline-none font-mono disabled:opacity-50" style={inputStyle} />
-              </Field>
-            </div>
-
-            {/* Per-broker onboarding guide (collapsible) */}
-            <div className="mt-4">
-              <button type="button" onClick={() => setShowGuide((v) => !v)}
-                className="flex items-center gap-2 text-[12px] font-semibold"
-                style={{ color: C.mint }}>
-                {ICON.book(14)} {showGuide ? 'Hide' : 'Show'} the {guide.label} setup guide
-                <span style={{ color: C.faint }}>{showGuide ? ICON.chevron(13) : ICON.chevronR(13)}</span>
-              </button>
-              {showGuide && <OnboardingGuide guide={guide} live={selectedLive} />}
-            </div>
-
-            {createErr && (
-              <div className="mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px] leading-snug"
-                style={{ borderColor: 'rgba(232,115,107,0.35)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
-                <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(13)}</span>
-                <span>{createErr}</span>
-              </div>
-            )}
-            {createOk && (
-              <div className="mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px] leading-snug"
-                style={{ borderColor: 'rgba(63,227,164,0.35)', background: 'rgba(63,227,164,0.06)', color: C.ink2 }}>
-                <span className="shrink-0 mt-0.5" style={{ color: C.mint }}>{ICON.check(13)}</span>
-                <span>{createOk}</span>
-              </div>
-            )}
-
-            <div className="mt-4 flex items-center gap-3 flex-wrap">
-              <button type="button" disabled={creating || !selectedLive} onClick={onCreate}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-semibold transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ color: '#06130c', background: C.mint }}>
-                {creating ? 'Connecting…' : <>{ICON.link(14)} Connect &amp; log in</>}
-              </button>
+            <div className="flex items-center gap-2 flex-wrap mb-3.5">
+              <span className="text-[13px] font-semibold" style={{ color: C.ink }}>Choose your broker</span>
               <span className="text-[11px]" style={{ color: C.faint }}>
-                One step: we save your keys (encrypted), then open your broker login to finish.
+                {(accounts?.length ?? 0)} connection{(accounts?.length ?? 0) === 1 ? '' : 's'}
               </span>
-            </div>
-          </div>
-
-          {/* ── Accounts list ────────────────────────────────────────────────── */}
-          <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
-            <div className="flex items-center gap-2 mb-3">
-              <span style={{ color: C.mint }}>{ICON.user(15)}</span>
-              <span className="text-[13px] font-semibold" style={{ color: C.ink }}>Your connected accounts</span>
+              <div className="ml-auto relative">
+                <span className="absolute left-2.5 top-1/2 -translate-y-1/2" style={{ color: C.faint }}>{ICON.info(13)}</span>
+                <input value={search} onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search brokers…"
+                  className="rounded-lg pl-8 pr-3 py-2 text-[12.5px] outline-none w-[180px]" style={inputStyle} />
+              </div>
             </div>
 
-            {rowErr && (
-              <div className="mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px] leading-snug"
-                style={{ borderColor: 'rgba(232,115,107,0.35)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
-                <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(13)}</span>
-                <span>{rowErr}</span>
-                <button type="button" onClick={() => setRowErr(null)} className="ml-auto shrink-0" style={{ color: C.faint }}>
-                  {ICON.close(12)}
-                </button>
-              </div>
-            )}
-
-            {loading && accounts === null ? (
-              <p className="text-[12px]" style={{ color: C.muted }}>Loading your broker accounts…</p>
-            ) : listErr ? (
-              <div className="flex items-start gap-2 text-[12px] leading-snug" style={{ color: C.ink2 }}>
-                <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
-                <span>{listErr} <button type="button" onClick={load} className="underline" style={{ color: C.mint }}>Retry</button></span>
-              </div>
-            ) : !accounts?.length ? (
-              <p className="text-[12.5px]" style={{ color: C.muted }}>
-                No broker accounts connected yet. Use the form above to connect one.
-              </p>
-            ) : (
-              <ul className="flex flex-col gap-2.5">
-                {accounts.map((a) => {
-                  const isConnecting = connectId === a.broker_account_id
-                  const busy = rowBusy === a.broker_account_id
-                  const st = (a.status ?? '').toUpperCase()
-                  const expired = st === 'EXPIRED' || st === 'REVOKED' || st === 'ERROR'
-                  const h = health[a.broker_account_id]
-                  return (
-                    <li key={a.broker_account_id}
-                      className="rounded-xl border p-3.5"
-                      style={{ borderColor: expired ? 'rgba(232,115,107,0.3)' : C.line2, background: 'rgba(255,255,255,0.02)' }}>
-                      <div className="flex items-start gap-3 flex-wrap">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-[13px] font-semibold" style={{ color: C.ink }}>{a.account_label || '—'}</span>
-                            <span className="text-[11px]" style={{ color: C.muted }}>· {brokerLabel(a.broker)}</span>
-                            <StatusBadge status={a.status} />
-                          </div>
-                          <div className="mt-1 flex items-center gap-3 flex-wrap text-[11px]" style={{ color: C.faint }}>
-                            <span>key <code style={{ color: C.ink2 }}>{a.api_key_masked || '—'}</code></span>
-                            <span>secret {a.has_secret ? <b style={{ color: C.mint }}>on file</b> : '—'}</span>
-                            <span>token {a.has_token ? <b style={{ color: C.mint }}>active</b> : '—'}</span>
-                          </div>
-                          {h && (
-                            <div className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-snug">
-                              {'error' in h ? (
-                                <>
-                                  <span className="shrink-0 mt-px" style={{ color: C.red }}>{ICON.info(12)}</span>
-                                  <span style={{ color: C.ink2 }}>Health: {String((h as { error: string }).error)}</span>
-                                </>
-                              ) : (
-                                <>
-                                  <span className="shrink-0 mt-px" style={{ color: h.ok ? C.mint : C.amber }}>
-                                    {h.ok ? ICON.check(12) : ICON.info(12)}
-                                  </span>
-                                  <span style={{ color: C.ink2 }}>
-                                    Health: <b style={{ color: h.ok ? C.mint : C.amber }}>{h.ok ? 'OK' : (h.status || 'not ready')}</b>
-                                    {h.detail ? ` — ${h.detail}` : ''}
-                                  </span>
-                                </>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
-                          <button type="button" disabled={busy} onClick={() => onConnect(a)}
-                            className="flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-40"
-                            style={{ color: '#06130c', background: C.mint }}>
-                            {ICON.link(12)} {busy && !isConnecting ? 'Working…' : (a.has_token ? 'Reconnect' : 'Log in')}
-                          </button>
-                          <button type="button" disabled={busy} onClick={() => onHealth(a)}
-                            className="flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-40"
-                            style={{ color: C.mint, background: 'rgba(63,227,164,0.10)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.35)' }}>
-                            {ICON.shield(12)} Health-check
-                          </button>
-                          <button type="button" disabled={busy} onClick={() => onDelete(a)}
-                            className="flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-40"
-                            style={{ color: C.red, background: 'rgba(232,115,107,0.10)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}>
-                            {ICON.close(12)} Delete
-                          </button>
-                        </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {filtered.map((b) => {
+                const n = countFor(b.broker)
+                return (
+                  <button key={b.broker} type="button"
+                    onClick={() => setScreen({ name: 'setup', broker: b.broker })}
+                    className="text-left rounded-xl border p-3.5 flex flex-col gap-2.5 transition-colors hover:border-[rgba(63,227,164,0.4)]"
+                    style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                    <div className="flex items-start gap-3">
+                      <BrandChip broker={b} />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[13px] font-semibold truncate" style={{ color: C.ink }}>{displayName(b)}</div>
+                        <div className="mt-1"><ExchangeChips list={b.exchanges} /></div>
                       </div>
-
-                      {/* Paste-back request_token step (after the login popup opened) */}
-                      {isConnecting && (
-                        <div className="mt-3 rounded-lg border px-3 py-3"
-                          style={{ borderColor: 'rgba(63,227,164,0.3)', background: 'rgba(63,227,164,0.05)' }}>
-                          <p className="text-[11.5px] leading-snug mb-2" style={{ color: C.ink2 }}>
-                            Signed in on the broker page? Copy the{' '}
-                            <code style={{ color: C.ink }}>token</code> from that page&apos;s address bar
-                            (the <code style={{ color: C.ink }}>request_token=…</code> part) and paste it here to finish.
-                          </p>
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <input value={requestToken} onChange={(e) => setRequestToken(e.target.value)}
-                              placeholder="request_token"
-                              className="flex-1 min-w-[180px] rounded-lg px-3 py-2 text-[12.5px] outline-none font-mono" style={inputStyle} />
-                            <button type="button" disabled={busy} onClick={() => onSubmitToken(a)}
-                              className="flex items-center gap-1.5 text-[12px] font-semibold px-3.5 py-2 rounded-lg transition-opacity disabled:opacity-40"
-                              style={{ color: '#06130c', background: C.mint }}>
-                              {ICON.check(13)} {busy ? 'Activating…' : 'Activate'}
-                            </button>
-                            <button type="button" onClick={() => { setConnectId(null); setRequestToken('') }}
-                              className="text-[11.5px] px-3 py-2 rounded-lg" style={{ color: C.muted, border: `1px solid ${C.line}` }}>
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
+                    </div>
+                    <div className="flex items-center gap-2 mt-auto">
+                      {b.live ? (
+                        <span className="text-[11px] font-semibold inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1"
+                          style={{ color: '#06130c', background: C.mint }}>
+                          {ICON.link(12)} {n > 0 ? 'Add account' : 'Set up'}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-semibold uppercase tracking-[0.05em] rounded-full px-2.5 py-1"
+                          style={{ color: C.amber, background: 'rgba(230,180,80,0.12)', boxShadow: 'inset 0 0 0 1px rgba(230,180,80,0.4)' }}>
+                          Coming soon
+                        </span>
                       )}
-                    </li>
-                  )
-                })}
-              </ul>
-            )}
+                      {n > 0 && (
+                        <span className="ml-auto text-[10.5px] font-semibold" style={{ color: C.mint }}>Connected: {n}</span>
+                      )}
+                    </div>
+                  </button>
+                )
+              })}
+              {!filtered.length && (
+                <p className="col-span-full text-[12px] py-6 text-center" style={{ color: C.muted }}>
+                  No brokers match “{search}”.
+                </p>
+              )}
+            </div>
           </div>
+
+          {/* ── SCREEN 3 · YOUR CONNECTIONS ─────────────────────────────────── */}
+          <YourConnections
+            accounts={accounts} loading={loading} listErr={listErr} registry={registry}
+            userId={userId} onReload={load} onRetry={load}
+          />
+
+          {/* ── ADMIN · all-users monitoring table ──────────────────────────── */}
+          {isAdmin && (
+            <AdminAllUsers
+              on={allView} onToggle={() => setAllView((v) => !v)}
+              accounts={allAccounts} loading={allLoading} err={allErr}
+              registry={registry} onReload={loadAll}
+            />
+          )}
         </>
       )}
     </div>
   )
 }
 
-// ── The per-broker onboarding guide (Tradetron-style step list). ──────────────
-function OnboardingGuide({ guide, live }: { guide: BrokerGuide; live: boolean }) {
-  if (!live) {
-    return (
-      <div className="mt-2.5 rounded-xl border px-3.5 py-3 text-[11.5px] leading-snug"
-        style={{ borderColor: 'rgba(230,180,80,0.35)', background: 'rgba(230,180,80,0.05)', color: C.ink2 }}>
-        <b style={{ color: C.amber }}>{guide.label}</b> — {guide.apiAccess}
-      </div>
-    )
-  }
+// ── Header ───────────────────────────────────────────────────────────────────
+function Header({ loading, onRefresh }: { loading: boolean; onRefresh: () => void }) {
   return (
-    <div className="mt-2.5 rounded-xl border px-3.5 py-3.5"
-      style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
-      <dl className="flex flex-col gap-2.5 text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
-        <GuideRow term="API access">{guide.apiAccess}{guide.console && (
-          <> {' '}<a href={guide.console.url} target="_blank" rel="noopener noreferrer"
-            className="underline" style={{ color: C.mint }}>{guide.console.label}</a>.</>
-        )}</GuideRow>
-        {guide.getCreds && <GuideRow term="Get credentials">{guide.getCreds}</GuideRow>}
-        {guide.connectSteps.length > 0 && (
-          <div>
-            <dt className="text-[10px] font-semibold uppercase tracking-[0.05em] mb-1" style={{ color: C.muted }}>Connect steps</dt>
-            <ol className="flex flex-col gap-1 list-none">
-              {guide.connectSteps.map((s, i) => (
-                <li key={i} className="flex items-start gap-2">
-                  <span className="grid place-items-center w-4 h-4 rounded-full text-[9px] font-mono font-semibold shrink-0 mt-px"
-                    style={{ background: C.mintDim, color: C.mint }}>{i + 1}</span>
-                  <span>{s}</span>
-                </li>
-              ))}
-            </ol>
-          </div>
-        )}
-        {guide.refreshNote && <GuideRow term="Daily login / refresh">{guide.refreshNote}</GuideRow>}
-        {guide.confirmActive && <GuideRow term="Confirm active">{guide.confirmActive}</GuideRow>}
-        {guide.limits && <GuideRow term="MTF / GTT / limits">{guide.limits}</GuideRow>}
-      </dl>
+    <div className="flex items-center gap-2 flex-wrap">
+      <span style={{ color: C.mint }}>{ICON.link(16)}</span>
+      <span className="text-[14px] font-semibold" style={{ color: C.ink }}>Broker accounts</span>
+      <span className="text-[11px]" style={{ color: C.faint }}>
+        Pick a broker, follow the steps, connect — as easy as eating a donut.
+      </span>
+      <button type="button" disabled={loading} onClick={onRefresh}
+        className="ml-auto text-[11.5px] px-2.5 py-1.5 rounded-lg transition-colors disabled:opacity-40"
+        style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+        {loading ? 'Refreshing…' : 'Refresh'}
+      </button>
     </div>
   )
 }
 
-function GuideRow({ term, children }: { term: string; children: React.ReactNode }) {
+// ════════════════════════════════════════════════════════════════════════════
+// SCREEN 2 · GUIDED SETUP — two-pane. Runs the create → login → paste → activate
+// lifecycle with step-by-step inline status. Coming-soon → steps shown, connect
+// disabled. api_secret write-only: snapshot → send once → clear from state.
+// ════════════════════════════════════════════════════════════════════════════
+type Phase = 'idle' | 'saving' | 'awaiting_token' | 'activating'
+
+function GuidedSetup({
+  broker, userId, onBack, onConnected,
+}: {
+  broker?: SupportedBroker; userId: number | string; onBack: () => void; onConnected: () => void
+}) {
+  const live = broker?.live ?? false
+  const fields = useMemo(() => fieldsFor(broker), [broker])
+  const setup = broker?.setup
+
+  const [label, setLabel] = useState('')
+  const [values, setValues] = useState<Record<string, string>>({})
+  const [reveal, setReveal] = useState<Record<string, boolean>>({})
+  const [phase, setPhase] = useState<Phase>('idle')
+  const [requestToken, setRequestToken] = useState('')
+  const [err, setErr] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+  // The just-created account id, used for the login-url + token-refresh steps.
+  const acctIdRef = useRef<string | null>(null)
+
+  const setVal = (name: string, v: string) => setValues((s) => ({ ...s, [name]: v }))
+
+  const busy = phase === 'saving' || phase === 'activating'
+
+  // Map the dynamic field values → the create-request api_key / api_secret keys.
+  const mapped = useCallback(() => {
+    let api_key = '', api_secret = ''
+    for (const f of fields) {
+      const v = (values[f.name] ?? '').trim()
+      if (f.maps_to === 'api_key') api_key = api_key || v
+      if (f.maps_to === 'api_secret') api_secret = api_secret || v
+    }
+    return { api_key, api_secret }
+  }, [fields, values])
+
+  const onConnect = useCallback(async () => {
+    setErr(null); setNote(null)
+    if (!broker) { setErr('Pick a broker first.'); return }
+    if (!live) { setErr('This broker isn’t live yet — we’ll enable it soon.'); return }
+    if (!label.trim()) { setErr('Give this connection a name first.'); return }
+    for (const f of fields) {
+      if (f.required && !(values[f.name] ?? '').trim()) { setErr(`${f.label} is required.`); return }
+    }
+    const { api_key, api_secret } = mapped()
+    if (!api_key || !api_secret) { setErr('API key and secret are both required.'); return }
+
+    setPhase('saving'); setNote('Saving your keys (encrypted)…')
+    // Snapshot + CLEAR every secret field from state right away so it never
+    // lingers in React state / the DOM after this tick.
+    const secretNames = fields.filter((f) => f.secret).map((f) => f.name)
+    setValues((s) => { const n = { ...s }; for (const k of secretNames) n[k] = ''; return n })
+    const savedLabel = label.trim()
+    try {
+      const acct = await AutoTradeAPI.createBrokerAccount({
+        user_id: userId, broker: broker.broker, account_label: savedLabel, api_key, api_secret,
+      })
+      acctIdRef.current = acct.broker_account_id
+      // Non-secret fields cleared too (keys aren’t needed again).
+      setValues((s) => { const n = { ...s }; for (const f of fields) n[f.name] = ''; return n })
+      setNote('Opening broker login…')
+      // Auto-capture handshake: record the pending connection so the redirect
+      // landing at /power/autotrade/connect can finish it without copy-paste.
+      // Written right before opening the login popup; the listener below clears
+      // it on success. Contains no secret — just ids + broker name.
+      try {
+        localStorage.setItem('kanida.brokerConnect', JSON.stringify({
+          broker_account_id: acct.broker_account_id,
+          user_id: userId,
+          broker: broker.broker,
+        }))
+      } catch { /* storage blocked — manual paste fallback still works */ }
+      try {
+        const res = await AutoTradeAPI.brokerLoginUrl(acct.broker_account_id, userId)
+        if (res.login_url) window.open(res.login_url, '_blank', 'noopener,noreferrer,width=520,height=720')
+        setPhase('awaiting_token')
+        setNote('Sign in on the broker page — we’ll finish automatically. Or paste the request_token below if it doesn’t.')
+      } catch {
+        setPhase('awaiting_token')
+        setNote('Saved. We couldn’t auto-open the login — the connection is below; paste your request_token to finish.')
+      }
+    } catch (e) {
+      setPhase('idle')
+      setErr(e instanceof Error ? e.message : 'Could not save the broker account.')
+    }
+  }, [broker, live, label, fields, values, mapped, userId])
+
+  const onActivate = useCallback(async () => {
+    if (!acctIdRef.current) { setErr('No pending connection to activate.'); return }
+    if (!requestToken.trim()) { setErr('Paste the request_token from the broker login first.'); return }
+    setErr(null); setPhase('activating'); setNote('Activating…')
+    try {
+      await AutoTradeAPI.refreshBrokerToken(acctIdRef.current, requestToken.trim(), userId)
+      setPhase('idle'); setRequestToken(''); setNote(null)
+      setLabel('')
+      onConnected()
+      onBack()  // back to the gallery → the new ACTIVE card shows in Your connections
+    } catch (e) {
+      setPhase('awaiting_token')
+      setErr(e instanceof Error ? e.message : 'Could not activate. Check the request_token and try again.')
+    }
+  }, [requestToken, userId, onConnected, onBack])
+
+  // ── Auto-capture handshake ─────────────────────────────────────────────────
+  // The /power/autotrade/connect landing (opened as the broker popup's redirect
+  // target) postMessages the result back here. We trust it ONLY when it comes
+  // from our own origin. ok:true → run the same success path as the manual
+  // Activate. ok:false → reveal the manual paste box as the safety net.
+  // Refs keep this once-registered listener pointing at the latest handlers.
+  const onConnectedRef = useRef(onConnected)
+  const onBackRef = useRef(onBack)
+  useEffect(() => { onConnectedRef.current = onConnected }, [onConnected])
+  useEffect(() => { onBackRef.current = onBack }, [onBack])
+
+  useEffect(() => {
+    function onMessage(event: MessageEvent) {
+      // SECURITY: reject anything not from our own origin.
+      if (event.origin !== window.location.origin) return
+      const data = event.data as { type?: string; ok?: boolean; error?: string } | null
+      if (!data || data.type !== 'kanida-broker-connected') return
+      if (data.ok) {
+        try { localStorage.removeItem('kanida.brokerConnect') } catch { /* ignore */ }
+        setPhase('idle'); setRequestToken(''); setErr(null); setNote(null); setLabel('')
+        onConnectedRef.current()
+        onBackRef.current()  // back to the gallery → new ACTIVE card shows
+      } else {
+        // Auto-activate failed → reveal the manual paste box as the fallback.
+        setPhase('awaiting_token')
+        setErr(data.error || 'Automatic connect didn’t complete — paste the request_token below to finish.')
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
+
   return (
-    <div>
-      <dt className="text-[10px] font-semibold uppercase tracking-[0.05em] mb-0.5" style={{ color: C.muted }}>{term}</dt>
-      <dd>{children}</dd>
+    <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+      {/* header */}
+      <div className="flex items-center gap-3 mb-4">
+        <button type="button" onClick={onBack}
+          className="inline-flex items-center gap-1 text-[11.5px] font-semibold px-2.5 py-1.5 rounded-lg transition-colors"
+          style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+          {ICON.back(13)} Brokers
+        </button>
+        <BrandChip broker={broker} size={34} />
+        <div className="min-w-0">
+          <div className="text-[14px] font-semibold truncate" style={{ color: C.ink }}>{displayName(broker)}</div>
+          <div className="mt-0.5"><ExchangeChips list={broker?.exchanges} /></div>
+        </div>
+        {!live && (
+          <span className="ml-auto shrink-0 text-[10px] font-semibold uppercase tracking-[0.05em] rounded-full px-2.5 py-1"
+            style={{ color: C.amber, background: 'rgba(230,180,80,0.12)', boxShadow: 'inset 0 0 0 1px rgba(230,180,80,0.4)' }}>
+            Coming soon
+          </span>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* ── LEFT: steps + callback + docs + token note + egress IP ──────────── */}
+        <div className="flex flex-col gap-3">
+          {setup?.steps?.length ? (
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-[0.05em] mb-2" style={{ color: C.muted }}>Setup steps</div>
+              <ol className="flex flex-col gap-2">
+                {setup.steps.map((s, i) => (
+                  <li key={i} className="flex items-start gap-2.5 text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+                    <span className="grid place-items-center w-5 h-5 rounded-full text-[10px] font-mono font-semibold shrink-0"
+                      style={{ background: C.mintDim, color: C.mint }}>{i + 1}</span>
+                    <span>{s}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ) : (
+            <p className="text-[11.5px] leading-snug" style={{ color: C.muted }}>
+              Enter your broker API key + secret on the right, then Test &amp; Connect to sign in.
+            </p>
+          )}
+
+          {setup?.callback_url && (
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-[0.05em] mb-1.5" style={{ color: C.muted }}>
+                Redirect / Callback URL
+              </div>
+              <CopyBox value={setup.callback_url} label="callback URL" />
+              <p className="text-[10.5px] leading-snug mt-1" style={{ color: C.faint }}>
+                Set this as your Redirect URL on the broker’s developer console.
+              </p>
+            </div>
+          )}
+
+          <div className="flex items-center gap-3 flex-wrap">
+            {setup?.docs_url && (
+              <a href={setup.docs_url} target="_blank" rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold" style={{ color: C.mint }}>
+                {ICON.book(13)} View docs
+              </a>
+            )}
+          </div>
+
+          {setup?.token_note && (
+            <div className="flex items-start gap-2 rounded-xl border px-3 py-2.5 text-[11px] leading-snug"
+              style={{ borderColor: 'rgba(230,180,80,0.28)', background: 'rgba(230,180,80,0.05)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.clock(13)}</span>
+              <span>{setup.token_note}</span>
+            </div>
+          )}
+
+          <EgressIpHelper />
+        </div>
+
+        {/* ── RIGHT: connection name + dynamic fields + Test & Connect ─────────── */}
+        <div className="flex flex-col gap-3 rounded-xl border p-3.5"
+          style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+          <Field label="Connection name" hint="A name to recognise this account — you can add several.">
+            <input value={label} onChange={(e) => setLabel(e.target.value)}
+              placeholder={`e.g. My ${displayName(broker)}`} disabled={!live || busy}
+              className="w-full rounded-lg px-3 py-2 text-[13px] outline-none disabled:opacity-50" style={inputStyle} />
+          </Field>
+
+          {fields.map((f) => {
+            const shown = !f.secret || reveal[f.name]
+            return (
+              <Field key={f.name} label={f.label + (f.required ? '' : ' (optional)')}
+                hint={f.secret ? 'Write-only — sent once, never shown again.' : undefined}>
+                <div className="relative">
+                  <input
+                    value={values[f.name] ?? ''}
+                    onChange={(e) => setVal(f.name, e.target.value)}
+                    type={shown ? 'text' : 'password'}
+                    autoComplete={f.secret ? 'new-password' : 'off'}
+                    placeholder={f.placeholder}
+                    disabled={!live || busy}
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none font-mono disabled:opacity-50"
+                    style={{ ...inputStyle, paddingRight: f.secret ? 40 : undefined }}
+                  />
+                  {f.secret && (
+                    <button type="button" onClick={() => setReveal((s) => ({ ...s, [f.name]: !s[f.name] }))}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-semibold uppercase"
+                      style={{ color: C.muted }} aria-label={shown ? 'Hide' : 'Show'} tabIndex={-1}>
+                      {shown ? 'Hide' : 'Show'}
+                    </button>
+                  )}
+                </div>
+              </Field>
+            )
+          })}
+
+          {err && <ErrorNote onClose={() => setErr(null)}>{err}</ErrorNote>}
+          {note && !err && (
+            <div className="flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px] leading-snug"
+              style={{ borderColor: 'rgba(63,227,164,0.35)', background: 'rgba(63,227,164,0.06)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.mint }}>
+                {phase === 'awaiting_token' ? ICON.link(13) : ICON.check(13)}
+              </span>
+              <span>{note}</span>
+            </div>
+          )}
+
+          {phase === 'awaiting_token' ? (
+            <div className="flex flex-col gap-2">
+              <span className="text-[11px] leading-snug" style={{ color: C.faint }}>
+                Didn’t connect automatically? Paste the <code style={{ color: C.ink2 }}>request_token</code> from the broker page here.
+              </span>
+              <input value={requestToken} onChange={(e) => setRequestToken(e.target.value)}
+                placeholder="request_token"
+                className="w-full rounded-lg px-3 py-2 text-[12.5px] outline-none font-mono" style={inputStyle} />
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={onActivate}
+                  className="flex-1 flex items-center justify-center gap-1.5 text-[13px] font-semibold px-4 py-2.5 rounded-xl transition-opacity"
+                  style={{ color: '#06130c', background: C.mint }}>
+                  {ICON.check(14)} Finish &amp; connect
+                </button>
+                <button type="button" onClick={() => { setPhase('idle'); setNote(null); setRequestToken('') }}
+                  className="text-[11.5px] px-3 py-2.5 rounded-xl" style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button type="button" disabled={!live || busy} onClick={onConnect}
+              className="flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-semibold transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ color: '#06130c', background: C.mint }}>
+              {phase === 'saving' ? 'Saving…' : <>{ICON.link(14)} Test &amp; Connect</>}
+            </button>
+          )}
+
+          {!live && (
+            <p className="text-[11px] leading-snug" style={{ color: C.amber }}>
+              This broker isn’t live yet — we’ll enable it soon.
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SCREEN 3 · YOUR CONNECTIONS — per-account cards with lifecycle actions.
+// ════════════════════════════════════════════════════════════════════════════
+function YourConnections({
+  accounts, loading, listErr, registry, userId, onReload, onRetry,
+}: {
+  accounts: BrokerAccount[] | null; loading: boolean; listErr: string | null
+  registry: SupportedBroker[]; userId: number | string; onReload: () => void; onRetry: () => void
+}) {
+  const [rowBusy, setRowBusy] = useState<string | null>(null)
+  const [rowErr, setRowErr] = useState<string | null>(null)
+  const [connectId, setConnectId] = useState<string | null>(null)
+  const [requestToken, setRequestToken] = useState('')
+  const [health, setHealth] = useState<Record<string, BrokerAccountHealth | { error: string }>>({})
+
+  const metaFor = useCallback(
+    (name: BrokerName) => registry.find((b) => String(b.broker).toLowerCase() === String(name).toLowerCase())
+      ?? FALLBACK[String(name).toLowerCase()],
+    [registry],
+  )
+
+  const onReconnect = useCallback(async (a: BrokerAccount) => {
+    setRowErr(null); setRowBusy(a.broker_account_id); setRequestToken('')
+    try {
+      const res = await AutoTradeAPI.brokerLoginUrl(a.broker_account_id, userId)
+      if (res.login_url) window.open(res.login_url, '_blank', 'noopener,noreferrer,width=520,height=720')
+      setConnectId(a.broker_account_id)
+    } catch (e) {
+      setRowErr(e instanceof Error ? e.message : 'Could not get the broker login URL.')
+    } finally { setRowBusy(null) }
+  }, [userId])
+
+  const onSubmitToken = useCallback(async (a: BrokerAccount) => {
+    if (!requestToken.trim()) { setRowErr('Paste the request_token from the broker login first.'); return }
+    setRowErr(null); setRowBusy(a.broker_account_id)
+    try {
+      await AutoTradeAPI.refreshBrokerToken(a.broker_account_id, requestToken.trim(), userId)
+      setConnectId(null); setRequestToken(''); onReload()
+    } catch (e) {
+      setRowErr(e instanceof Error ? e.message : 'Could not activate. Check the request_token and try again.')
+    } finally { setRowBusy(null) }
+  }, [requestToken, userId, onReload])
+
+  const onHealth = useCallback(async (a: BrokerAccount) => {
+    setRowErr(null); setRowBusy(a.broker_account_id)
+    try {
+      const res = await AutoTradeAPI.brokerAccountHealth(a.broker_account_id, userId)
+      setHealth((h) => ({ ...h, [a.broker_account_id]: res }))
+    } catch (e) {
+      setHealth((h) => ({ ...h, [a.broker_account_id]: { error: e instanceof Error ? e.message : 'Health check failed.' } }))
+    } finally { setRowBusy(null) }
+  }, [userId])
+
+  const onDelete = useCallback(async (a: BrokerAccount) => {
+    if (!window.confirm(
+      `Remove "${a.account_label}" (${displayName(metaFor(a.broker), a.broker)})? ` +
+      `This deletes its stored key/secret/token and cannot be undone.`,
+    )) return
+    setRowErr(null); setRowBusy(a.broker_account_id)
+    try {
+      await AutoTradeAPI.deleteBrokerAccount(a.broker_account_id, userId)
+      if (connectId === a.broker_account_id) { setConnectId(null); setRequestToken('') }
+      setHealth((h) => { const n = { ...h }; delete n[a.broker_account_id]; return n })
+      onReload()
+    } catch (e) {
+      setRowErr(e instanceof Error ? e.message : 'Could not remove the account.')
+    } finally { setRowBusy(null) }
+  }, [userId, connectId, onReload, metaFor])
+
+  return (
+    <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+      <div className="flex items-center gap-2 mb-3">
+        <span style={{ color: C.mint }}>{ICON.user(15)}</span>
+        <span className="text-[13px] font-semibold" style={{ color: C.ink }}>Your connections</span>
+      </div>
+
+      {rowErr && <div className="mb-3"><ErrorNote onClose={() => setRowErr(null)}>{rowErr}</ErrorNote></div>}
+
+      {loading && accounts === null ? (
+        <p className="text-[12px]" style={{ color: C.muted }}>Loading your broker accounts…</p>
+      ) : listErr ? (
+        <div className="flex items-start gap-2 text-[12px] leading-snug" style={{ color: C.ink2 }}>
+          <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+          <span>{listErr} <button type="button" onClick={onRetry} className="underline" style={{ color: C.mint }}>Retry</button></span>
+        </div>
+      ) : !accounts?.length ? (
+        <p className="text-[12.5px]" style={{ color: C.muted }}>
+          No connections yet. Pick a broker above to set one up.
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-2.5">
+          {accounts.map((a) => {
+            const meta = metaFor(a.broker)
+            const busy = rowBusy === a.broker_account_id
+            const st = (a.status ?? '').toUpperCase()
+            const expired = st === 'EXPIRED' || st === 'REVOKED' || st === 'ERROR'
+            const isConnecting = connectId === a.broker_account_id
+            const h = health[a.broker_account_id]
+            const lastVerified = typeof a.last_health_at === 'string' ? a.last_health_at
+              : typeof a.last_verified_at === 'string' ? a.last_verified_at : null
+            return (
+              <li key={a.broker_account_id} className="rounded-xl border p-3.5"
+                style={{ borderColor: expired ? 'rgba(232,115,107,0.3)' : C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                <div className="flex items-start gap-3 flex-wrap">
+                  <BrandChip broker={meta} size={38} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[13px] font-semibold" style={{ color: C.ink }}>{a.account_label || '—'}</span>
+                      <span className="text-[11px]" style={{ color: C.muted }}>· {displayName(meta, a.broker)}</span>
+                      <StatusPill status={a.status} />
+                    </div>
+                    <div className="mt-1 flex items-center gap-3 flex-wrap text-[11px]" style={{ color: C.faint }}>
+                      <span>key <code style={{ color: C.ink2 }}>{a.api_key_masked || '—'}</code></span>
+                      <span>token {a.has_token ? <b style={{ color: C.mint }}>active</b> : '—'}</span>
+                      {lastVerified && <span>Last verified {lastVerified}</span>}
+                    </div>
+                    {expired && (
+                      <p className="mt-1.5 text-[11px]" style={{ color: C.red }}>
+                        Token expired — one click to renew.
+                      </p>
+                    )}
+                    {h && (
+                      <div className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-snug">
+                        {'error' in h ? (
+                          <>
+                            <span className="shrink-0 mt-px" style={{ color: C.red }}>{ICON.info(12)}</span>
+                            <span style={{ color: C.ink2 }}>Health: {String((h as { error: string }).error)}</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="shrink-0 mt-px" style={{ color: h.ok ? C.mint : C.amber }}>
+                              {h.ok ? ICON.check(12) : ICON.info(12)}
+                            </span>
+                            <span style={{ color: C.ink2 }}>
+                              Health: <b style={{ color: h.ok ? C.mint : C.amber }}>{h.ok ? 'OK' : (h.status || 'not ready')}</b>
+                              {h.detail ? ` — ${h.detail}` : ''}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+                    <button type="button" disabled={busy} onClick={() => onReconnect(a)}
+                      className="flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-40"
+                      style={expired
+                        ? { color: '#06130c', background: C.mint }
+                        : { color: C.mint, background: 'rgba(63,227,164,0.10)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.35)' }}>
+                      {ICON.link(12)} {busy && !isConnecting ? 'Working…' : (a.has_token ? 'Reconnect' : 'Generate token')}
+                    </button>
+                    <button type="button" disabled={busy} onClick={() => onHealth(a)}
+                      className="flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-40"
+                      style={{ color: C.ink2, background: 'rgba(255,255,255,0.03)', boxShadow: `inset 0 0 0 1px ${C.line2}` }}>
+                      {ICON.shield(12)} Health-check
+                    </button>
+                    <button type="button" disabled={busy} onClick={() => onDelete(a)}
+                      className="flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-40"
+                      style={{ color: C.red, background: 'rgba(232,115,107,0.10)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}>
+                      {ICON.close(12)} Delete
+                    </button>
+                  </div>
+                </div>
+
+                {isConnecting && (
+                  <div className="mt-3 rounded-lg border px-3 py-3"
+                    style={{ borderColor: 'rgba(63,227,164,0.3)', background: 'rgba(63,227,164,0.05)' }}>
+                    <p className="text-[11.5px] leading-snug mb-2" style={{ color: C.ink2 }}>
+                      Signed in on the broker page? Copy the{' '}
+                      <code style={{ color: C.ink }}>request_token=…</code> from that page’s address bar and paste it here.
+                    </p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <input value={requestToken} onChange={(e) => setRequestToken(e.target.value)}
+                        placeholder="request_token"
+                        className="flex-1 min-w-[180px] rounded-lg px-3 py-2 text-[12.5px] outline-none font-mono" style={inputStyle} />
+                      <button type="button" disabled={busy} onClick={() => onSubmitToken(a)}
+                        className="flex items-center gap-1.5 text-[12px] font-semibold px-3.5 py-2 rounded-lg transition-opacity disabled:opacity-40"
+                        style={{ color: '#06130c', background: C.mint }}>
+                        {ICON.check(13)} {busy ? 'Activating…' : 'Activate'}
+                      </button>
+                      <button type="button" onClick={() => { setConnectId(null); setRequestToken('') }}
+                        className="text-[11.5px] px-3 py-2 rounded-lg" style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ADMIN · ALL-USERS — compact monitoring table (broker · user · label · status ·
+// last verified) with Health-check + Delete per row. Backend returns all accounts
+// for admin when no user_id filter is passed.
+// ════════════════════════════════════════════════════════════════════════════
+function AdminAllUsers({
+  on, onToggle, accounts, loading, err, registry, onReload,
+}: {
+  on: boolean; onToggle: () => void
+  accounts: BrokerAccount[] | null; loading: boolean; err: string | null
+  registry: SupportedBroker[]; onReload: () => void
+}) {
+  const [rowBusy, setRowBusy] = useState<string | null>(null)
+  const [rowErr, setRowErr] = useState<string | null>(null)
+  const [health, setHealth] = useState<Record<string, boolean | string>>({})
+
+  const metaFor = useCallback(
+    (name: BrokerName) => registry.find((b) => String(b.broker).toLowerCase() === String(name).toLowerCase())
+      ?? FALLBACK[String(name).toLowerCase()],
+    [registry],
+  )
+  const ownerOf = (a: BrokerAccount) =>
+    a.user_id != null ? String(a.user_id) : a.owner_user_id != null ? String(a.owner_user_id) : '—'
+
+  const onHealth = useCallback(async (a: BrokerAccount) => {
+    setRowErr(null); setRowBusy(a.broker_account_id)
+    const uid = a.user_id ?? a.owner_user_id ?? ''
+    try {
+      const res = await AutoTradeAPI.brokerAccountHealth(a.broker_account_id, uid as number | string)
+      setHealth((h) => ({ ...h, [a.broker_account_id]: res.ok ? true : (res.status || 'not ready') }))
+    } catch (e) {
+      setHealth((h) => ({ ...h, [a.broker_account_id]: e instanceof Error ? e.message : 'failed' }))
+    } finally { setRowBusy(null) }
+  }, [])
+
+  const onDelete = useCallback(async (a: BrokerAccount) => {
+    if (!window.confirm(`ADMIN: remove "${a.account_label}" (${a.broker}, user ${ownerOf(a)})? This cannot be undone.`)) return
+    setRowErr(null); setRowBusy(a.broker_account_id)
+    const uid = a.user_id ?? a.owner_user_id ?? ''
+    try {
+      await AutoTradeAPI.deleteBrokerAccount(a.broker_account_id, uid as number | string)
+      onReload()
+    } catch (e) {
+      setRowErr(e instanceof Error ? e.message : 'Could not remove the account.')
+    } finally { setRowBusy(null) }
+  }, [onReload])
+
+  return (
+    <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span style={{ color: C.amber }}>{ICON.shield(15)}</span>
+        <span className="text-[13px] font-semibold" style={{ color: C.ink }}>All users</span>
+        <span className="text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+          style={{ color: C.amber, background: 'rgba(230,180,80,0.12)', boxShadow: 'inset 0 0 0 1px rgba(230,180,80,0.4)' }}>
+          Admin
+        </span>
+        <span className="text-[11px]" style={{ color: C.faint }}>Every broker connection, for monitoring.</span>
+        <button type="button" onClick={onToggle}
+          className="ml-auto text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-colors"
+          style={on ? { color: '#06130c', background: C.mint } : { color: C.muted, border: `1px solid ${C.line}` }}>
+          {on ? 'Hide' : 'Show all connections'}
+        </button>
+      </div>
+
+      {on && (
+        <div className="mt-3">
+          {rowErr && <div className="mb-3"><ErrorNote onClose={() => setRowErr(null)}>{rowErr}</ErrorNote></div>}
+          {loading && accounts === null ? (
+            <p className="text-[12px]" style={{ color: C.muted }}>Loading all connections…</p>
+          ) : err ? (
+            <div className="flex items-start gap-2 text-[12px]" style={{ color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+              <span>{err} <button type="button" onClick={onReload} className="underline" style={{ color: C.mint }}>Retry</button></span>
+            </div>
+          ) : !accounts?.length ? (
+            <p className="text-[12.5px]" style={{ color: C.muted }}>No broker connections across users yet.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11.5px]" style={{ color: C.ink2 }}>
+                <thead>
+                  <tr className="text-left" style={{ color: C.muted }}>
+                    <th className="font-semibold uppercase tracking-[0.04em] text-[10px] py-1.5 pr-3">Broker</th>
+                    <th className="font-semibold uppercase tracking-[0.04em] text-[10px] py-1.5 pr-3">User</th>
+                    <th className="font-semibold uppercase tracking-[0.04em] text-[10px] py-1.5 pr-3">Label</th>
+                    <th className="font-semibold uppercase tracking-[0.04em] text-[10px] py-1.5 pr-3">Status</th>
+                    <th className="font-semibold uppercase tracking-[0.04em] text-[10px] py-1.5 pr-3">Last verified</th>
+                    <th className="font-semibold uppercase tracking-[0.04em] text-[10px] py-1.5">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {accounts.map((a) => {
+                    const busy = rowBusy === a.broker_account_id
+                    const hv = health[a.broker_account_id]
+                    const lastVerified = typeof a.last_health_at === 'string' ? a.last_health_at
+                      : typeof a.last_verified_at === 'string' ? a.last_verified_at : '—'
+                    return (
+                      <tr key={a.broker_account_id} className="border-t" style={{ borderColor: C.line2 }}>
+                        <td className="py-2 pr-3">
+                          <span className="inline-flex items-center gap-1.5">
+                            <BrandChip broker={metaFor(a.broker)} size={20} />
+                            {displayName(metaFor(a.broker), a.broker)}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-3 font-mono">{ownerOf(a)}</td>
+                        <td className="py-2 pr-3">{a.account_label || '—'}</td>
+                        <td className="py-2 pr-3"><StatusPill status={a.status} /></td>
+                        <td className="py-2 pr-3">{lastVerified}</td>
+                        <td className="py-2">
+                          <div className="flex items-center gap-1.5">
+                            <button type="button" disabled={busy} onClick={() => onHealth(a)}
+                              className="text-[10.5px] font-semibold px-2 py-1 rounded-md transition-opacity disabled:opacity-40"
+                              style={{ color: C.ink2, background: 'rgba(255,255,255,0.03)', boxShadow: `inset 0 0 0 1px ${C.line2}` }}>
+                              Health
+                            </button>
+                            <button type="button" disabled={busy} onClick={() => onDelete(a)}
+                              className="text-[10.5px] font-semibold px-2 py-1 rounded-md transition-opacity disabled:opacity-40"
+                              style={{ color: C.red, background: 'rgba(232,115,107,0.10)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}>
+                              Delete
+                            </button>
+                            {hv !== undefined && (
+                              <span className="text-[10px]" style={{ color: hv === true ? C.mint : C.amber }}>
+                                {hv === true ? 'OK' : String(hv)}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -690,9 +1134,7 @@ function GuideRow({ term, children }: { term: string; children: React.ReactNode 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="text-[11px] font-semibold uppercase tracking-[0.05em]" style={{ color: C.muted }}>
-        {label}
-      </label>
+      <label className="text-[11px] font-semibold uppercase tracking-[0.05em]" style={{ color: C.muted }}>{label}</label>
       {children}
       {hint && <span className="text-[10.5px] leading-snug" style={{ color: C.faint }}>{hint}</span>}
     </div>

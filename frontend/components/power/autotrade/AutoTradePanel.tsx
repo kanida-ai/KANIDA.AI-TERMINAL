@@ -150,7 +150,7 @@ export function AutoTradePanel({ firstName, userId }: { firstName: string; userI
 
         {tab === 'brokers' && (
           <div className="mx-auto w-full max-w-4xl px-5 pb-10 sm:px-8">
-            <BrokerAccountsPanel userId={userId} />
+            <BrokerAccountsPanel userId={userId} isAdmin />
           </div>
         )}
 
