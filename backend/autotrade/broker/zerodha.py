@@ -81,6 +81,26 @@ class ZerodhaBroker(BrokerClient):
         api_key = getattr(prof, "api_key", "") or ""
         access_token = getattr(prof, "access_token", "") or ""
         bound = getattr(prof, "broker_account_id", None)
+        # FIX A (real-money isolation): a USER-OWNED LIVE session must NEVER fall
+        # back to the operator's PROCESS-GLOBAL Kite client. owner_user_id is
+        # threaded onto the profile at build time from the session's user_id.
+        # When it is set AND this adapter is LIVE (dry_run off), a client is only
+        # permitted if the session resolved to an OWNED account with valid creds
+        # (bound is not None → the per-account branch below, which itself requires
+        # both api_key + access_token). If the binding was cleared (vault
+        # disabled / account absent / not-owned / decrypt fail → session.py sets
+        # broker_account_id=None), REFUSE rather than trade the operator's book.
+        # OPERATOR/global sessions (owner_user_id None) keep the global fallback.
+        # Paper (dry_run) is unaffected — the mock/dry path never places real
+        # orders, and market-data reads must still work.
+        owner_user_id = getattr(prof, "owner_user_id", None)
+        if owner_user_id is not None and not self.dry_run and bound is None:
+            raise ValueError(
+                "NO_OWNED_BROKER_ACCOUNT: user-owned live session did not resolve "
+                "to an ACTIVE, owned broker account with valid creds (vault "
+                "disabled, account absent / not-owned, or token expired) — "
+                "refusing to build a live client (never the operator's global "
+                "account). Re-connect a broker account for this user.")
         # Per-account path: explicit creds supplied (vault-resolved) → build a
         # dedicated client. Requires BOTH api_key and access_token; a bound
         # account missing a token is a real error (caller should re-login), but
@@ -108,6 +128,36 @@ class ZerodhaBroker(BrokerClient):
             return False
         from falcon.trade.services.order_executor import _autotrade_enabled
         return _autotrade_enabled()
+
+    def _preflight_block_reason(self) -> Optional[str]:
+        """FIX B (reliability gate): mirror the legacy /place path — before any
+        LIVE order, the falcon.preflight 13-check gate must be GREEN. Returns a
+        named block reason string ("PREFLIGHT_BLOCKED (<action>): <check names>")
+        if any RED check fires, else None.
+
+        LATENCY: uses the HOT cached preflight (get_cached, 60s TTL) so this adds
+        ~0ms per order once warm; only a cold cache runs preflight once (~<3s,
+        then cached). This is the same cache the boot/token-refresh/preview paths
+        already populate, so the per-order cost is negligible. Callers gate this
+        ONLY when _live_allowed() is true → paper/dry_run never touches preflight.
+
+        Fail-safe: any error resolving preflight is treated as NON-blocking
+        (degraded, matching legacy /place which logs + proceeds) so a preflight
+        bug can never wedge a live exit."""
+        try:
+            from falcon import preflight as _pf
+            r = _pf.get_cached()
+            if r is None:
+                # Cold cache: run once (uses the 60s cache thereafter). Not
+                # force=True so concurrent legs share the single computed result.
+                r = _pf.run()
+            if r.ok:
+                return None
+            names = ", ".join(c.name for c in r.checks if c.status == _pf.RED)
+            return f"PREFLIGHT_BLOCKED (autotrade): {names}"
+        except Exception as e:  # pragma: no cover - defensive, fail-open like legacy
+            log.warning("preflight gate raised — proceeding (degraded): %s", e)
+            return None
 
     # ── Market data ──────────────────────────────────────────────────────────
     @staticmethod
@@ -375,9 +425,19 @@ class ZerodhaBroker(BrokerClient):
             return OrderResult(status="DRY_RUN", broker_order_id=None,
                                symbol=order.symbol, qty=order.qty,
                                error=None, raw={"dry_run": True})
+        # FIX B: reliability preflight gate on the LIVE path (paper bypassed
+        # above). RED → refuse, no kite call, named reason.
+        block = self._preflight_block_reason()
+        if block:
+            log.error("place_order REFUSED for %s: %s", order.symbol, block)
+            return OrderResult(status="FAILED", broker_order_id=None,
+                               symbol=order.symbol, qty=order.qty, error=block)
         from falcon.trade.services.order_executor import _retry_kite_call
-        kite = self.kite
         try:
+            # self.kite triggers _build_kite, which (FIX A) RAISES rather than
+            # fall back to the operator's global client for a user-owned live
+            # session with no resolved account — caught here → FAILED leg.
+            kite = self.kite
             params = order.to_kite_params(kite)
             oid = _retry_kite_call(lambda: kite.place_order(**params),
                                    "place_order(autotrade)", order.symbol)
@@ -469,6 +529,15 @@ class ZerodhaBroker(BrokerClient):
         if not self._live_allowed():
             return OrderResult(status="DRY_RUN", broker_order_id=None,
                                symbol=symbol, qty=qty, raw={"dry_run": True})
+        # FIX B scope — EXITS deliberately DO NOT gate on preflight. An exit
+        # protects capital and must ALWAYS attempt: the preflight RED set includes
+        # daily signal/data-freshness checks (stale ohlc, no fresh signals, 0
+        # promoted patterns, entry_date NULL) that have nothing to do with whether
+        # a broker EXIT can execute. Blocking an exit on those could strand a live
+        # position — e.g. the kill switch / stop-loss could not flatten on a day
+        # the daily signals are stale. Genuine broker-side failures here are
+        # handled by the exit-retry / mark_exit_failed / alert path. Only ENTRIES
+        # (place_order) gate on preflight, where refusing is fail-safe.
         try:
             kite = self.kite
             trading_symbol, exchange = self._resolve_symbol(symbol)

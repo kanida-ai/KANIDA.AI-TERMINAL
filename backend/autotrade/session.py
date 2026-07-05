@@ -886,6 +886,15 @@ class TradingSession:
             # this profile (in memory only). No-op when the profile has no bound
             # account / the vault is disabled → the adapter uses the global path.
             self._resolve_account_creds(prof)
+            # FIX A (real-money isolation): stamp the OWNING user_id onto the
+            # profile so the broker adapter can enforce "a user-owned LIVE session
+            # never falls back to the operator's global Kite client". Note this is
+            # threaded AFTER _resolve_account_creds, which may have CLEARED a bad
+            # binding (vault disabled / account absent / not-owned / decrypt fail)
+            # → owner_user_id set + broker_account_id None makes the adapter REFUSE
+            # a live build instead of silently going global. None (operator/global
+            # session) leaves today's global-fallback behaviour unchanged.
+            prof.owner_user_id = self.user_id
             self.brokers[prof.profile_id] = build_client(prof, dry_run=self.dry_run)
         self.gtt_manager = GTTManager(
             self.session_id, self.config, self.brokers, self.registry)

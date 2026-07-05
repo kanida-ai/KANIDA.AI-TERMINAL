@@ -65,6 +65,12 @@ class BrokerProfile:
     api_key: str = field(default="", repr=False)
     api_secret: str = field(default="", repr=False)
     access_token: str = field(default="", repr=False)
+    # FIX A (real-money isolation, additive, in-memory only, NEVER persisted):
+    # the OWNING portal user_id, stamped onto the profile at _build_brokers time
+    # from the session's user_id. None → operator/global session (today's
+    # global-fallback path). When set, the broker adapter refuses to build a LIVE
+    # client that would fall back to the operator's global Kite account.
+    owner_user_id: Optional[str] = field(default=None)
 
     def to_public_dict(self) -> Dict[str, Any]:
         """Serialisable form WITHOUT secrets."""
