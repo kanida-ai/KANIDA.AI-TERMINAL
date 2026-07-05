@@ -44,7 +44,7 @@ import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from falcon.db import falcon_conn
 
@@ -159,6 +159,66 @@ def _parse_entry_time_today_ist(entry_time: str) -> datetime:
     now = datetime.now(IST)
     return now.replace(hour=parsed.hour, minute=parsed.minute,
                        second=parsed.second, microsecond=0)
+
+
+def _parse_clock_hms(clock: str) -> Tuple[int, int, int]:
+    """Parse an IST clock ("HH:MM"/"HH:MM:SS") to (h, m, s). Raises ValueError."""
+    s = (clock or "").strip()
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            p = datetime.strptime(s, fmt)
+            return p.hour, p.minute, p.second
+        except ValueError:
+            continue
+    raise ValueError(f"unparseable clock time: {clock!r}")
+
+
+def compute_max_hold_cap_datetime(started_at_iso: Optional[str],
+                                  max_hold_sessions: int,
+                                  square_off_time: str) -> Optional[datetime]:
+    """The IST-aware datetime at which a POSITIONAL basket must be squared off by
+    the multi-session max-hold cap, or None when there is no cap / no anchor.
+
+    The cap fires at square_off_time on the Nth NSE trading day counting the
+    ENTRY day (the calendar date of started_at) as SESSION 1. Weekends + NSE
+    holidays are SKIPPED via trading_calendar. Pure + deterministic: derived
+    ENTIRELY from the persisted started_at, so it recomputes identically after a
+    backend restart (no in-memory timer).
+
+      max_hold_sessions <= 0      → None (no cap).
+      started_at missing/garbled  → None (cannot anchor — never guess).
+      N == 1                      → cap on the entry day itself.
+      N  > 1                      → walk N-1 trading days forward from the entry
+                                    day (entry-day-if-a-trading-day counts as 1).
+
+    EDGE CASE — entry day is itself a non-trading day (e.g. started_at stamped on
+    a weekend by a manual/paper action): we ANCHOR session 1 on the next trading
+    day (inclusive), so the cap never lands on a closed market. The entry day
+    almost always IS a trading day (entries only fire through the market-open
+    gate), but this keeps the math total and safe.
+    """
+    from . import trading_calendar as _cal
+
+    if max_hold_sessions is None or int(max_hold_sessions) <= 0:
+        return None
+    if not started_at_iso or not str(started_at_iso).strip():
+        return None
+    try:
+        entry_dt = datetime.fromisoformat(str(started_at_iso).strip())
+    except ValueError:
+        return None
+    entry_date = entry_dt.date()
+    # Session 1 = the entry day if it is a trading day, else the next trading day.
+    session1 = _cal.next_trading_day(entry_date, inclusive=True)
+    cap_date = session1
+    for _ in range(int(max_hold_sessions) - 1):
+        cap_date = _cal.next_trading_day(cap_date, inclusive=False)
+    try:
+        hh, mm, ss = _parse_clock_hms(square_off_time)
+    except ValueError:
+        hh, mm, ss = 15, 29, 0   # safe default flatten time
+    return datetime(cap_date.year, cap_date.month, cap_date.day,
+                    hh, mm, ss, tzinfo=IST)
 
 
 # ── EXECUTION-DATE / TRADING-DAY fire gate ───────────────────────────────────
@@ -1548,6 +1608,52 @@ class TradingSession:
         After per-stock exits the trail engine runs on the remaining positions."""
         from .monitoring import trail_engine
 
+        # ── MULTI-SESSION MAX-HOLD CAP (positional) ───────────────────────────
+        # A positional basket (square_off_enabled=False, max_hold_sessions>0) is
+        # squared off at square_off_time on the Nth trading session — regardless
+        # of trail arm/peak state. This is the durable, restart-safe enforcement:
+        # the cap datetime is recomputed from the PERSISTED started_at every tick,
+        # so a restart re-derives it identically (no in-memory timer). Takes
+        # precedence over the per-stock stop + trail engine. Single-fire-guarded
+        # so it can never double-fire with a trail exit / manual kill. INERT when
+        # the cap is 0, when intraday (the daily square-off fires first), or before
+        # the cap moment. Uses the SAME flatten path (kill_switch.fire) as every
+        # other basket exit → same GTT-cancel-before-exit + fill-confirm guarantees.
+        try:
+            if (int(getattr(self.config, "max_hold_sessions", 0)) > 0
+                    and not getattr(self.config, "square_off_enabled", True)):
+                cap_dt = compute_max_hold_cap_datetime(
+                    self._started_at(),
+                    int(self.config.max_hold_sessions),
+                    self.config.square_off_time)
+                if cap_dt is not None and now_ist() >= cap_dt:
+                    with fire_guard.claim_fire(self.session_id) as won:
+                        if won:
+                            log.warning(
+                                "MAX_HOLD_EXIT %s: cap %s reached (sessions=%d) "
+                                "— flattening basket regardless of trail state",
+                                self.session_id, cap_dt.isoformat(),
+                                self.config.max_hold_sessions)
+                            fired = await self.kill_switch.fire(
+                                f"MAX_HOLD_EXIT max_hold_sessions="
+                                f"{self.config.max_hold_sessions} "
+                                f"gross_return={gr_invested:.4f}",
+                                gross_return=gr_invested,
+                                close_reason="MAX_HOLD_EXIT")
+                            return {"gross_return": gr_invested,
+                                    "gross_return_fund": snap["gross_return"],
+                                    "snapshot": snap,
+                                    "strategy": "intraday_basket",
+                                    "trail_action": "EXIT",
+                                    "kill_switch_fired": bool(fired),
+                                    "kill_reason": "MAX_HOLD_EXIT",
+                                    "fire_result": fired,
+                                    "gtt_closed": gtt_closed,
+                                    "per_stock_exits": []}
+                        # Another path is firing this same tick — let it win.
+        except Exception as e:  # never block the tick on the max-hold check
+            log.error("max-hold cap check failed for %s: %s", self.session_id, e)
+
         # PER-STOCK SOFTWARE STOP LOOP.
         # Runs BEFORE the portfolio-level trail engine so the trail sees the
         # updated (smaller) basket on this same tick.
@@ -1777,6 +1883,18 @@ class TradingSession:
                     self.config.square_off_time),
                 "square_off_armed": square_off_scheduler.is_running(
                     self.session_id),
+                # POSITIONAL max-hold cap: 0 = no cap. When set, expose the
+                # resolved cap datetime (Nth trading session @ square_off_time,
+                # computed from started_at) so the UI can show "Force-close on
+                # <date>". None until the session has an entry timestamp.
+                "max_hold_sessions": int(
+                    getattr(self.config, "max_hold_sessions", 0)),
+                "max_hold_cap_datetime": (
+                    lambda dt: dt.isoformat() if dt else None)(
+                    compute_max_hold_cap_datetime(
+                        sess.get("started_at"),
+                        int(getattr(self.config, "max_hold_sessions", 0)),
+                        self.config.square_off_time)),
             }
             # Flat aliases (handy for the frontend + matches the spec wording).
             out["trail_armed"] = state.armed
@@ -1813,6 +1931,18 @@ class TradingSession:
                 (self.session_id,),
             ).fetchone()
         return row["kill_reason"] if row and row["kill_reason"] else None
+
+    def _started_at(self) -> Optional[str]:
+        """The persisted ISO-IST entry timestamp (autotrade_sessions.started_at),
+        set when entries fire (RUNNING transition). The DURABLE anchor for the
+        multi-session max-hold cap — read fresh each call so the cap survives a
+        restart. None until the session has fired."""
+        with falcon_conn() as con:
+            row = con.execute(
+                "SELECT started_at FROM autotrade_sessions WHERE session_id=?",
+                (self.session_id,),
+            ).fetchone()
+        return row["started_at"] if row and row["started_at"] else None
 
     def positions(self) -> List[Dict[str, Any]]:
         return self.registry.get_all_positions()

@@ -213,6 +213,22 @@ class TradingSessionConfig:
     #                     MIS defensive square-off (FEATURE A) always applies.
     square_off_enabled: bool = True
 
+    # ── MULTI-SESSION MAX-HOLD CAP (positional only) ──────────────────────────
+    # The Nth trading-session hard cap for a POSITIONAL basket
+    # (strategy=="intraday_basket" + square_off_enabled=False). On the Nth NSE
+    # trading day counting the ENTRY day as session 1, the WHOLE basket is
+    # squared off at square_off_time REGARDLESS of trail arm/peak state — the one
+    # deliberate deviation from "carry until the trail exits". Computed from the
+    # PERSISTED entry timestamp (started_at) so it is durable across a restart.
+    #   0 (DEFAULT) = NO cap = today's behaviour, byte-for-byte backward-compatible.
+    #   1           = square off on the ENTRY day itself at square_off_time.
+    #   3           = e.g. entry Fri (session 1) → Mon (2) → Tue (3) → flatten Tue.
+    # Only meaningful for positional; on an INTRADAY (square_off_enabled=True)
+    # session the daily square-off already flattens each day, so a >0 cap is
+    # redundant — validate() ALLOWS it (int >= 0) but it is IGNORED by the
+    # enforcement path (the intraday square-off fires first, well before day N).
+    max_hold_sessions: int = 0
+
     # ── MIS DEFENSIVE SQUARE-OFF (FEATURE A, SAFETY) ──────────────────────────
     # Any session whose effective product is MIS (intraday) is squared off BY US
     # at this IST clock time — BEFORE the broker's compulsory ~15:20 auto-square
@@ -394,6 +410,14 @@ class TradingSessionConfig:
                 raise ValueError(
                     "positional (no square-off) is not allowed for MIS — MIS "
                     "must square off intraday")
+        # MULTI-SESSION MAX-HOLD CAP: a non-negative integer (0 = no cap).
+        # Meaningful only for a POSITIONAL intraday_basket; on an intraday
+        # (square_off_enabled=True) session it is redundant (the daily square-off
+        # flattens first) — ALLOWED but IGNORED there, per the design note.
+        if int(self.max_hold_sessions) < 0:
+            raise ValueError(
+                "max_hold_sessions must be an integer >= 0 "
+                f"(0 = no cap), got {self.max_hold_sessions}")
         if self.sizing_mode == "manual":
             total = sum(self.manual_amounts.values())
             if total > self.total_allocated_capital + 1e-6:
@@ -546,6 +570,7 @@ class TradingSessionConfig:
             per_stock_stop_enabled=bool(d.get("per_stock_stop_enabled", False)),
             square_off_time=d.get("square_off_time", "15:29:00"),
             square_off_enabled=bool(d.get("square_off_enabled", True)),
+            max_hold_sessions=int(d.get("max_hold_sessions", 0)),
             mis_square_off_time=d.get("mis_square_off_time", "15:12:00"),
             redistribute_unused_capital=bool(
                 d.get("redistribute_unused_capital", True)),
