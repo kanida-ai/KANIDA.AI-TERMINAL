@@ -694,6 +694,7 @@ export type LadderStatus = {
 export type LadderSummary = {
   ladder_id: string
   status?: LadderStatusName
+  mode?: Mode
   total_capital?: number
   order_product?: LadderProduct
   start_date?: string

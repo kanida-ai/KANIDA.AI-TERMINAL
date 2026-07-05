@@ -454,6 +454,9 @@ export function PortfolioAutoTrade({
   // A non-trading-day 400 on Schedule → the backend's suggested_date, offered as a
   // one-click apply (mirrors the session createSuggest pattern).
   const [campaignSuggest, setCampaignSuggest] = useState<string | null>(null)
+  // Duplicate-campaign soft guard: holds the product:capital:mode signature the
+  // user was just warned about, so a second "Create campaign" click proceeds.
+  const [dupConfirm, setDupConfirm] = useState<string | null>(null)
 
   const set = <K extends keyof SessionConfig>(k: K, v: SessionConfig[K]) =>
     setConfig((c) => ({ ...c, [k]: v }))
@@ -962,11 +965,29 @@ export function PortfolioAutoTrade({
   // campaign CREATED phase offers Start-now / Schedule. The created draft is held
   // in `createdLadder` and rendered by phase==='created' && createdLadder.
   const onCreateCampaign = useCallback(async () => {
-    setError(null); setCampaignErr(null); setCampaignSuggest(null); setBusy('create')
+    setError(null); setCampaignErr(null); setCampaignSuggest(null)
+    const product: LadderProduct = config.order_product === 'MTF' ? 'MTF' : 'CNC'
+    const cap = config.total_allocated_capital || 0
+    // DUPLICATE GUARD: don't silently create an identical active campaign. Warn
+    // once (the button re-arms); a second click creates it anyway for the rare
+    // case a duplicate is genuinely intended.
+    const sig = `${product}:${cap}:${mode}`
+    const isDup = (ladders ?? []).some((l) => {
+      const s = (l.status ?? '').toUpperCase()
+      return (s === 'RUNNING' || s === 'PAUSED' || s === 'SCHEDULED')
+        && l.order_product === product
+        && Number(l.total_capital) === Number(cap)
+        && (l.mode ?? 'paper') === mode
+    })
+    if (isDup && dupConfirm !== sig) {
+      setDupConfirm(sig)
+      setError(`You already have an active ${product} ${fmtINR(cap)} campaign. Click “Create campaign” again to create another anyway.`)
+      return
+    }
+    setDupConfirm(null); setBusy('create')
     try {
-      const product: LadderProduct = config.order_product === 'MTF' ? 'MTF' : 'CNC'
       const created = await AutoTradeAPI.ladderCreate({
-        total_capital: config.total_allocated_capital || 0,
+        total_capital: cap,
         order_product: product,
         mode,
         end_date_mode: ladderEndMode,
@@ -990,7 +1011,7 @@ export function PortfolioAutoTrade({
       setBusy(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, config.total_allocated_capital, config.order_product, ladderEndMode, loadLadders])
+  }, [mode, config.total_allocated_capital, config.order_product, ladderEndMode, loadLadders, ladders, dupConfirm, userId, brokerAccountId])
 
   // Auto-Ladder — STEP 2: start the held draft. `when==='now'` → ladderStart(id)
   // → RUNNING (first basket next trading morning). `when==='scheduled'` →
@@ -1170,7 +1191,7 @@ export function PortfolioAutoTrade({
     setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
     setCreateSuggest(null)
     // Clear any in-flight campaign draft (Auto-Ladder two-step).
-    setCreatedLadder(null); setCampaignDate(''); setCampaignErr(null); setCampaignSuggest(null)
+    setCreatedLadder(null); setCampaignDate(''); setCampaignErr(null); setCampaignSuggest(null); setDupConfirm(null)
     // Reset the strategy dropdown + campaign duration to defaults.
     setUiStrategy('portfolio_kill_switch'); setLadderEndMode('month_end')
     // Reset universe filter + picker
@@ -1185,7 +1206,7 @@ export function PortfolioAutoTrade({
     setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
     setCreateSuggest(null)
     // Clear any in-flight campaign draft (Auto-Ladder two-step).
-    setCreatedLadder(null); setCampaignDate(''); setCampaignErr(null); setCampaignSuggest(null)
+    setCreatedLadder(null); setCampaignDate(''); setCampaignErr(null); setCampaignSuggest(null); setDupConfirm(null)
     loadSessions()
   }
 
@@ -1265,6 +1286,12 @@ export function PortfolioAutoTrade({
               </span>
             </div>
           )}
+          {liveLadders.length > 0 && (
+            <div className="flex items-baseline gap-2 px-1">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.06em]" style={{ color: C.muted }}>Monthly campaigns</span>
+              <span className="text-[10.5px]" style={{ color: C.faint }}>set once · auto-ladders a basket every trading day</span>
+            </div>
+          )}
           {liveLadders.map((l) => (
             <LadderCampaignCard
               key={l.ladder_id}
@@ -1277,6 +1304,12 @@ export function PortfolioAutoTrade({
             />
           ))}
 
+          {liveLadders.length > 0 && (
+            <div className="flex items-baseline gap-2 px-1 pt-1">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.06em]" style={{ color: C.muted }}>Individual sessions</span>
+              <span className="text-[10.5px]" style={{ color: C.faint }}>one-off sessions + each campaign’s daily baskets</span>
+            </div>
+          )}
           <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
             {sessionsLoading && sessions === null ? (
               <p className="text-[12px]" style={{ color: C.muted }}>Loading your sessions…</p>
@@ -2980,7 +3013,13 @@ function LadderCampaignCard({
       <div className="flex items-center gap-2 flex-wrap px-4 pt-3.5 pb-2">
         <span style={{ color: C.mint }}>{ICON.loop(15)}</span>
         <span className="text-[13.5px] font-semibold" style={{ color: C.ink }}>Monthly campaign</span>
+        {/* Short id so multiple campaigns are distinguishable at a glance. */}
+        <span className="text-[9px] font-mono rounded-full px-1.5 py-0.5"
+          style={{ color: C.muted, background: 'rgba(255,255,255,0.05)' }}>
+          #{String(summary.ladder_id).slice(0, 6)}
+        </span>
         <LadderStatusPill status={st} />
+        <ModePill mode={(summary.mode ?? 'paper') as Mode} />
         {product && (
           <span className="text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
             style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
@@ -3060,7 +3099,9 @@ function LadderCampaignCard({
         <span className="ml-auto text-[10.5px]" style={{ color: C.faint }}>
           {scheduled
             ? 'It activates on its start date — its baskets will appear below then.'
-            : 'Its baskets appear below, tagged “Campaign”.'}
+            : (status?.n_active_baskets ?? summary.n_active_baskets ?? 0) === 0
+              ? 'Waiting for the next trading day — it opens its first Falcon Top-5 basket at 09:15.'
+              : 'Its baskets appear below, tagged “Campaign”.'}
         </span>
       </div>
     </div>
