@@ -80,27 +80,30 @@ def market_open_window() -> tuple[tuple[int, int], tuple[int, int]]:
 # are NOT modelled (they are extra OPEN windows, not closures — and ohlc_daily
 # confirmation will catch them for past dates).
 NSE_HOLIDAYS: Set[str] = {
-    # ── 2026 (NSE equity trading holidays) ──
+    # ── 2026 NSE equity trading holidays ──
+    # Reconciled 2026-07-05 against the official NSE circular via three agreeing
+    # public sources (cleartax / kotakneo / groww); 06-26 also operator-confirmed.
+    # Weekend-only festivals are intentionally OMITTED (they are already
+    # non-trading): Mahashivratri, Id-Ul-Fitr, and Independence Day (2026-08-15,
+    # Sat) all fall on Sat/Sun in 2026. The Diwali Laxmi-Pujan Muhurat special
+    # session (Sun 2026-11-08) is a trading session, NOT a full closure, so it is
+    # not listed. Prior list had several wrong dates (Holi/Bakri/Ganesh/Dussehra/
+    # Diwali off by days→weeks, a bogus 04-01, missing Ram Navami) — corrected here.
+    "2026-01-15",  # Municipal Election, Maharashtra
     "2026-01-26",  # Republic Day
-    "2026-02-15",  # Mahashivratri (observed)  [verify against NSE circular]
-    "2026-03-04",  # Holi
-    "2026-03-21",  # Id-Ul-Fitr (Ramzan Id)    [verify against NSE circular]
-    "2026-03-31",  # Ram Navami / Mahavir Jayanti window [verify]
-    "2026-04-01",  # Annual bank closing / Mahavir Jayanti [verify]
+    "2026-03-03",  # Holi
+    "2026-03-26",  # Shri Ram Navami
+    "2026-03-31",  # Shri Mahavir Jayanti
     "2026-04-03",  # Good Friday
-    "2026-04-14",  # Dr. Ambedkar Jayanti
+    "2026-04-14",  # Dr. Baba Saheb Ambedkar Jayanti
     "2026-05-01",  # Maharashtra Day
-    "2026-05-27",  # Bakri Id (observed)        [verify against NSE circular]
-    # 2026-07-06 REMOVED 2026-07-04: was the 2025 Muharram date carried over in
-    # error. Muharram 2026 = 2026-06-26 (confirmed vs NSE circular + web check),
-    # already marked via the operator override file. 2026-07-06 (Mon) is a NORMAL
-    # trading day — leaving it here wrongly blocked scheduling for it.
-    "2026-08-15",  # Independence Day (Saturday — already non-trading)
-    "2026-08-28",  # Ganesh Chaturthi (observed) [verify]
-    "2026-10-02",  # Gandhi Jayanti
-    "2026-10-21",  # Dussehra / festival window [verify]
-    "2026-11-09",  # Diwali Balipratipada window [verify]
-    "2026-11-24",  # Guru Nanak Jayanti
+    "2026-05-28",  # Bakri Id
+    "2026-06-26",  # Muharram (operator-confirmed 2026-06-29)
+    "2026-09-14",  # Ganesh Chaturthi
+    "2026-10-02",  # Mahatma Gandhi Jayanti
+    "2026-10-20",  # Dussehra
+    "2026-11-10",  # Diwali - Balipratipada
+    "2026-11-24",  # Prakash Gurpurb Sri Guru Nanak Dev
     "2026-12-25",  # Christmas
     # ── 2025 (kept for past-date confirmation / back-tests) ──
     "2025-02-26", "2025-03-14", "2025-03-31", "2025-04-10", "2025-04-14",

@@ -49,6 +49,37 @@ def test_is_trading_day_holiday():
     assert cal.is_trading_day("2026-06-26") is False  # Muharram (override file)
 
 
+# GUARD: pin the full 2026 NSE holiday calendar (reconciled 2026-07-05 vs the
+# official NSE circular via 3 agreeing public sources). This test exists so the
+# calendar can NEVER silently drift again — if someone edits a date, this fails.
+# Weekend-only festivals are intentionally excluded (already non-trading).
+NSE_2026_HOLIDAYS = [
+    "2026-01-15", "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31",
+    "2026-04-03", "2026-04-14", "2026-05-01", "2026-05-28", "2026-06-26",
+    "2026-09-14", "2026-10-02", "2026-10-20", "2026-11-10", "2026-11-24",
+    "2026-12-25",
+]
+# Dates that were WRONG in a prior list and must be TRADING days now.
+NSE_2026_MUST_TRADE = [
+    "2026-03-04", "2026-04-01", "2026-05-27", "2026-07-06",
+    "2026-08-28", "2026-10-21", "2026-11-09",
+]
+
+
+def test_2026_holiday_calendar_matches_official():
+    for d in NSE_2026_HOLIDAYS:
+        assert cal.is_trading_day(d) is False, f"{d} must be an NSE holiday"
+
+
+def test_2026_prior_wrong_dates_are_trading_days():
+    for d in NSE_2026_MUST_TRADE:
+        # weekend-safe: only assert for weekdays (Sat/Sun are non-trading anyway)
+        from datetime import date as _date
+        y, m, dd = map(int, d.split("-"))
+        if _date(y, m, dd).weekday() < 5:
+            assert cal.is_trading_day(d) is True, f"{d} must be a trading day"
+
+
 def test_next_trading_day_skips_weekend_and_holiday():
     # Friday 06-26 → next is Monday 06-29 (skips Sat/Sun).
     assert cal.next_trading_day("2026-06-26").isoformat() == "2026-06-29"
