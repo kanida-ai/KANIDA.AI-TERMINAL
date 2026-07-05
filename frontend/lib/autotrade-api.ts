@@ -581,6 +581,120 @@ export type PicksResponse = {
   picks: PickItem[]
 }
 
+// ── Falcon Positional Auto-Ladder ("Monthly Campaign") ───────────────────────
+// A "set once, run for a month" campaign. The trader sets total capital +
+// product + duration ONCE and Starts; the backend then autonomously opens,
+// manages and rolls positional baskets every trading day until the end date.
+// The trader NEVER manages individual baskets — a running campaign's child
+// baskets are ordinary sessions (they carry ladder_id) and remain visible in the
+// Sessions tab; this API is the higher-level campaign view.
+//
+// TRADER TERMS ONLY on the wire we can't control, but the UI must never surface
+// internal words like "sleeve" — capital deployed / active baskets / open
+// positions / daily P&L. All response fields are OPTIONAL-SAFE: the backend
+// shape may omit any of them and the UI degrades to "—" rather than crash.
+
+// Product for a campaign — CNC (cash-and-carry) or MTF (margin). NO MIS: the
+// backend 400s an intraday product for a multi-day campaign, so the UI must not
+// offer it.
+export type LadderProduct = 'CNC' | 'MTF'
+
+// When the campaign ends: 'month_end' auto-stops at the current month's end;
+// 'manual' runs until the trader stops it. An explicit end_date may accompany
+// either (backend resolves).
+export type LadderEndMode = 'month_end' | 'manual'
+
+// How a KILL winds the campaign down. 'flatten_now' exits every open basket
+// immediately; 'stop_new_let_finish' stops opening NEW baskets but lets the
+// already-open ones finish their normal exits. The backend REQUIRES one — there
+// is no silent default, so the UI forces the trader to choose.
+export type LadderKillMode = 'flatten_now' | 'stop_new_let_finish'
+
+export type LadderStatusName = 'RUNNING' | 'PAUSED' | 'ENDED' | 'COMPLETED' | string
+
+// POST /ladder/create body. total_capital is ₹; the backend derives the per-
+// basket budget (~total/3). mode defaults paper (no real orders). end_date is
+// optional and only meaningful with an explicit calendar stop.
+export type LadderCreateBody = {
+  total_capital: number
+  order_product: LadderProduct
+  mode: Mode
+  end_date_mode: LadderEndMode
+  end_date?: string
+  kill_mode?: LadderKillMode
+}
+
+export type LadderCreateResponse = {
+  ladder_id: string
+  status?: LadderStatusName
+  [k: string]: unknown
+}
+
+// A child basket of a running campaign (an ordinary session carrying ladder_id).
+// Every field is optional-safe — render "—" for anything absent, never crash.
+export type LadderSession = {
+  session_id: string
+  status?: string
+  total_allocated_capital?: number
+  started_at?: string
+  closed_at?: string
+  [k: string]: unknown
+}
+
+// The informational downturn note. When active, message is plain-language and
+// must be rendered VERBATIM in a calm amber note — it is NOT an error. The
+// optional trailing_5d_avg_return is a FRACTION (×100 to display).
+export type LadderAlert = {
+  active: boolean
+  message: string
+  trailing_5d_avg_return?: number
+  n_days_in_window?: number
+  [k: string]: unknown
+}
+
+// GET /ladder/{id}/status — the live campaign view (poll ~5s). Every field is
+// optional-safe: the backend shape may omit any of them and the UI degrades to
+// "—". realized/unrealized/today P&L are ₹; per_basket_capital is ₹.
+export type LadderStatus = {
+  ladder_id?: string
+  status?: LadderStatusName
+  total_capital?: number
+  capital_deployed?: number
+  capital_free?: number
+  per_basket_capital?: number
+  n_active_baskets?: number
+  n_open_positions?: number
+  realized_pnl?: number
+  unrealized_pnl?: number
+  today_pnl?: number
+  order_product?: LadderProduct
+  start_date?: string
+  end_date?: string
+  mode_kill?: LadderKillMode
+  alert?: LadderAlert
+  sessions?: LadderSession[]
+  [k: string]: unknown
+}
+
+// A campaign as returned by GET /ladders?user_id= (newest first). Permissive
+// shape — we read what we know and keep the rest indexable.
+export type LadderSummary = {
+  ladder_id: string
+  status?: LadderStatusName
+  total_capital?: number
+  order_product?: LadderProduct
+  start_date?: string
+  end_date?: string
+  created_at?: string
+  n_active_baskets?: number
+  today_pnl?: number
+  [k: string]: unknown
+}
+export type LaddersListResponse = {
+  ladders?: LadderSummary[]
+  [k: string]: unknown
+}
+
 // ── Transport helper — honest errors, never fabricates a success ─────────────
 // `base` lets a call target a sibling proxy root (e.g. /api/falcon for the
 // egress-IP endpoint) without changing the default /api/autotrade transport.
@@ -756,4 +870,48 @@ export const AutoTradeAPI = {
     const qs = new URLSearchParams({ universe, top_n: String(topN) })
     return call<PicksResponse>(`/session/picks?${qs.toString()}`)
   },
+
+  // ── Falcon Positional Auto-Ladder ("Monthly Campaign") ─────────────────────
+  // A "set once, run for a month" campaign: create → start → the backend then
+  // opens/manages/rolls positional baskets every trading day until end_date. The
+  // operator token + power_jwt are injected by the proxy, exactly like every
+  // other method here — no scope/body wrangling needed beyond the create body.
+
+  // Create a campaign (places nothing — it just registers the plan). Returns the
+  // ladder_id you then Start.
+  ladderCreate: (body: LadderCreateBody) =>
+    call<LadderCreateResponse>('/ladder/create', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  // Start a created campaign → RUNNING (the daily basket engine takes over).
+  ladderStart: (id: string) =>
+    call<LadderCreateResponse>(`/ladder/${encodeURIComponent(id)}/start`, { method: 'POST' }),
+
+  // Pause the campaign — stops opening new baskets; open baskets keep running.
+  ladderPause: (id: string) =>
+    call<LadderCreateResponse>(`/ladder/${encodeURIComponent(id)}/pause`, { method: 'POST' }),
+
+  // Resume a paused campaign → RUNNING.
+  ladderResume: (id: string) =>
+    call<LadderCreateResponse>(`/ladder/${encodeURIComponent(id)}/resume`, { method: 'POST' }),
+
+  // Kill the campaign. The backend REQUIRES a mode — no silent default:
+  //   'flatten_now'          → exit every open basket immediately.
+  //   'stop_new_let_finish'  → stop opening new; let open baskets finish.
+  ladderKill: (id: string, mode: LadderKillMode) =>
+    call<LadderCreateResponse>(`/ladder/${encodeURIComponent(id)}/kill`, {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
+
+  // Live campaign view (poll ~5s). Optional-safe shape — never crash on a missing
+  // field; degrade to "—".
+  ladderStatus: (id: string) =>
+    call<LadderStatus>(`/ladder/${encodeURIComponent(id)}/status`),
+
+  // List a user's campaigns (newest first) so they can re-open a running one.
+  ladders: (userId: number | string) =>
+    call<LaddersListResponse>(`/ladders${q({ user_id: userId })}`),
 }

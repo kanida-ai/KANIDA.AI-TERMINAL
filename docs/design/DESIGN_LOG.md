@@ -1362,3 +1362,32 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
   zero /api/falcon/* calls from the /power zone, execution path / app/falcon/* pages untouched —
   pure navigation UI. Verify: `tsc --noEmit` clean; `npm run build` green (/power/autotrade compiles
   as a dynamic route).
+
+- 2026-07-04 — **Auto-Ladder ("Monthly Campaign") — Falcon Positional Auto-Ladder UI.**
+  Spec: AutoTrade mode (new "set once, run for a month" campaign; backend already DEPLOYED,
+  fixed API contract). Built a NEW top-level tab **Auto-Ladder** in
+  `components/power/autotrade/AutoTradePanel.tsx`, sibling to Sessions (icon: ICON.loop). A
+  running campaign's child baskets remain ordinary sessions (carry ladder_id) and stay in the
+  Sessions tab — this tab is the higher-level view. Changes: (1) `lib/autotrade-api.ts` — added
+  the ladder types (LadderProduct CNC|MTF, LadderEndMode, LadderKillMode, LadderStatus/-Summary/
+  -Session/-Alert, all OPTIONAL-SAFE) + 7 methods on AutoTradeAPI: ladderCreate/ladderStart/
+  ladderPause/ladderResume/ladderKill(mode)/ladderStatus/ladders(userId), all via the existing
+  `call()` helper + BASE `/api/falcon-proxy/api/autotrade` (operator token + power_jwt injected by
+  the proxy). (2) NEW `components/power/autotrade/AutoLadderPanel.tsx` — list (your campaigns,
+  re-open a running one) → setup form → live panel. Setup: total-capital input with live "Each
+  basket ≈ ₹{total/3}" beneath it; Product = CNC|MTF segmented ONLY (NO MIS — backend 400s it);
+  Duration radio (This month auto / Until I stop) + optional explicit date; Mode paper(default)/
+  live behind the same typed-LIVE confirm + ships-disabled warnings as the rest of the panel;
+  Start → ladderCreate then ladderStart → live panel. Live panel polls ladderStatus every ~5s:
+  Capital deployed/free/total (+per-basket), Active baskets · Open positions, Daily/Realized/
+  Unrealized P&L (theme +/- coloured), status pill (RUNNING/PAUSED/ENDED/COMPLETED) + "runs to
+  {end_date}", a calm amber DOWNTURN note rendering alert.message VERBATIM (informational, NOT an
+  error) with optional trailing_5d_avg_return, and the child-baskets list from sessions[] (each an
+  `<a href="?attab=sessions&session=…">` full-nav deep-link that lands on the Sessions tab via a new
+  `?attab=` initial-tab reader). Controls: Pause/Resume + KILL modal that REQUIRES choosing a mode
+  ("Flatten everything now" vs "Stop opening new — let open baskets finish"; no silent default,
+  since the API needs it). HONESTY held: all numbers from the live status, missing fields render
+  "—", calm retry on status failure (mirrors Sessions), no fabricated P&L. TRADER TERMS ONLY —
+  the word "sleeve"/internal terms never appear (capital deployed / active baskets / open
+  positions / daily P&L). SAFETY: UI/transport only; no execution/backend logic touched. Verify:
+  `npx tsc --noEmit` clean; ESLint clean on the three touched files.
