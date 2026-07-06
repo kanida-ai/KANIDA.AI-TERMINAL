@@ -258,3 +258,18 @@ def test_B4_market_exit_not_blocked_by_preflight(monkeypatch):
     assert res.status == "PLACED"                       # exit proceeded despite RED
     assert "PREFLIGHT" not in (res.error or "").upper()
     assert len(spy.placed) == 1                         # order reached the broker
+
+
+def test_A6_admin_owner_live_may_use_global(monkeypatch):
+    """An ADMIN-owned live session with NO bound account MAY use the operator's
+    global account (the admin IS the operator). Non-admin owners are still
+    refused — see test_A1 / A2 / A5."""
+    _live_env(monkeypatch)
+    spy = _SpyKite("GLOBAL")
+    monkeypatch.setattr("services.kite_auth.get_kite_client",
+                        lambda check=False: spy, raising=False)
+    prof = _profile(broker_account_id=None, owner_user_id="admin-1")
+    prof.owner_is_admin = True
+    broker = ZerodhaBroker(prof, dry_run=False)
+    kite = broker._build_kite()
+    assert kite is spy   # built the global client, no NO_OWNED_BROKER_ACCOUNT

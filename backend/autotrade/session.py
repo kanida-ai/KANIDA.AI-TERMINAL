@@ -123,6 +123,34 @@ def now_ist() -> datetime:
     return datetime.now(IST)
 
 
+def _owner_is_admin(user_id) -> bool:
+    """True iff the owning user_id is an ADMIN/operator (power_user role='admin').
+
+    ADMIN-owned sessions may use the operator's global broker account (the admin
+    IS the operator); non-admin sessions must resolve their OWN account — see the
+    _build_kite isolation guard. Fail-CLOSED: any lookup failure / unknown user →
+    False (treat as non-admin → block the global fallback), so we never open the
+    operator's account to an unverified owner. Cheap: one indexed-PK read, done
+    once per session broker-build.
+    """
+    if user_id is None or str(user_id).strip() == "":
+        return False
+    try:
+        import sqlite3
+        from power_user import config as _pc
+        con = sqlite3.connect(_pc.POWER_DB_PATH)
+        try:
+            row = con.execute(
+                "SELECT role FROM power_user_users WHERE id = ?",
+                (int(str(user_id).strip()),)).fetchone()
+        finally:
+            con.close()
+        return bool(row and str(row[0]).lower() == "admin")
+    except Exception as e:  # never let this crash a fire path
+        log.warning("owner-admin lookup failed for user_id=%r: %s", user_id, e)
+        return False
+
+
 def _last_tick_age_ms() -> Optional[int]:
     """Age in ms of the newest WS tick the system has received (now − tick ts),
     for the SPEED-PASS status readout. None when the ticker is unavailable / has
@@ -924,6 +952,9 @@ class TradingSession:
             # a live build instead of silently going global. None (operator/global
             # session) leaves today's global-fallback behaviour unchanged.
             prof.owner_user_id = self.user_id
+            # ADMIN/operator owners may use the global operator account; non-admin
+            # owners are held to their OWN account (isolation guard in _build_kite).
+            prof.owner_is_admin = _owner_is_admin(self.user_id)
             self.brokers[prof.profile_id] = build_client(prof, dry_run=self.dry_run)
         self.gtt_manager = GTTManager(
             self.session_id, self.config, self.brokers, self.registry)

@@ -94,7 +94,12 @@ class ZerodhaBroker(BrokerClient):
         # Paper (dry_run) is unaffected — the mock/dry path never places real
         # orders, and market-data reads must still work.
         owner_user_id = getattr(prof, "owner_user_id", None)
-        if owner_user_id is not None and not self.dry_run and bound is None:
+        owner_is_admin = getattr(prof, "owner_is_admin", False)
+        # ADMIN/operator owners MAY use the global operator account (the admin IS
+        # the operator). Only a NON-admin user-owned live session with no resolved
+        # OWNED account is refused (never silently trade the operator's book).
+        if (owner_user_id is not None and not owner_is_admin
+                and not self.dry_run and bound is None):
             raise ValueError(
                 "NO_OWNED_BROKER_ACCOUNT: user-owned live session did not resolve "
                 "to an ACTIVE, owned broker account with valid creds (vault "

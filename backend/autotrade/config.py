@@ -71,6 +71,11 @@ class BrokerProfile:
     # global-fallback path). When set, the broker adapter refuses to build a LIVE
     # client that would fall back to the operator's global Kite account.
     owner_user_id: Optional[str] = field(default=None)
+    # Whether the owning user is an ADMIN/operator. Admin-owned sessions may use
+    # the operator's global broker account (the admin IS the operator); non-admin
+    # owners are held to their OWN account (see the _build_kite isolation guard).
+    # In-memory only, NEVER persisted.
+    owner_is_admin: bool = field(default=False)
 
     def to_public_dict(self) -> Dict[str, Any]:
         """Serialisable form WITHOUT secrets."""
