@@ -272,11 +272,16 @@ function nonPlacedLabel(status: string): string {
 // Tomorrow's date (IST) as "YYYY-MM-DD" — the min for the campaign Schedule date
 // picker (a campaign can only be scheduled for a FUTURE trading day; the backend
 // validates the actual trading-day rule and 400s a weekend/holiday).
-function tomorrowIST(): string {
-  const now = new Date()
-  // Shift to IST (UTC+05:30), add one day, then take the date part.
-  const ist = new Date(now.getTime() + (5 * 60 + 30) * 60_000 + 24 * 60 * 60_000)
-  return ist.toISOString().slice(0, 10)
+// Earliest date a campaign may be scheduled for: TODAY if the 09:15 IST open
+// hasn't passed yet (so a pre-market "schedule for today" is allowed), else
+// tomorrow. The backend still validates the trading-day + before-open rule.
+function earliestScheduleDateIST(): string {
+  const istMs = Date.now() + (5 * 60 + 30) * 60_000  // UTC epoch → IST wall-clock
+  const ist = new Date(istMs)
+  const beforeOpen =
+    ist.getUTCHours() < 9 || (ist.getUTCHours() === 9 && ist.getUTCMinutes() < 15)
+  const base = beforeOpen ? istMs : istMs + 24 * 60 * 60_000
+  return new Date(base).toISOString().slice(0, 10)
 }
 
 // 'list' is the HOME phase: your saved sessions (newest first). 'config' is the
@@ -2420,7 +2425,7 @@ export function PortfolioAutoTrade({
               </span>
               <input
                 type="date"
-                min={tomorrowIST()}
+                min={earliestScheduleDateIST()}
                 value={campaignDate}
                 onChange={(e) => { setCampaignDate(e.target.value); setCampaignSuggest(null); setCampaignErr(null) }}
                 className="w-full rounded-lg px-2.5 py-1.5 text-[12px] tabular-nums outline-none"
