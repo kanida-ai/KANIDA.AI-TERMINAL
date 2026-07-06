@@ -1558,3 +1558,40 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
   backend path touched. Mint/F2 theme, reused `C`/`ICON` from `cotrade-kit`, no new accents.
   Verify: `npx tsc --noEmit` clean; `next build` "Compiled successfully", `/power/autotrade`
   present in the route manifest.
+
+## 2026-07-05 — Power-user AutoTrade reorganized into a clean 4-tab shell (ATM/Apple simplicity)
+- **Spec/feedback acted on:** operator feedback — the non-admin AutoTrade page was one long
+  single-scroll `AutoTradeExperience`. Replace with a benchmarked-on-`AutoTradePanel` 4-tab shell
+  (one clear next action per tab, minimal scroll, tab bar always visible). Admin `AutoTradePanel`
+  (8 tabs) UNCHANGED.
+- **New `PowerUserAutoTrade.tsx`** — rendered by `app/power/(app)/autotrade/page.tsx` for
+  non-admins. Header (Gears + intro line) + a top tab bar styled like the operator panel. FOUR
+  tabs, ONLY the active tab mounts (inactive unmount → no duplicate polling, no scroll stacking):
+  1. **Connect Your Broker** → `<BrokerAccountsPanel userId isAdmin={false}>` (verbatim).
+  2. **Start Auto Trade** → `<PortfolioAutoTrade view="create" isAdmin={false} onStarted=→live
+     onNeedBroker=→broker>` — mounts straight into the config form (no list).
+  3. **Live & Scheduled Campaigns** → `<PortfolioAutoTrade view="dashboard" isAdmin={false}
+     onNewCampaign=→start>` — sessions/campaigns list only; "New session" jumps to Start.
+  4. **Trade Journal** → `<TradeJournalPanel>` behind a session picker scoped to
+     `AutoTradeAPI.listSessions({user_id})`, defaulting to the most recent session.
+- **Guided handoffs:** default tab = `broker` when 0 connected accounts else `live` (decided after
+  the first accounts load; a `?attab=` deep link always wins). The shell POLLS
+  `AutoTradeAPI.brokerAccounts(userId)` (8s) — since `BrokerAccountsPanel` exposes no top-level
+  onConnected — and when the ACTIVE-account count INCREASES it raises a "Broker connected → Start
+  Auto Trade" nudge on the Broker tab. A live start with no ACTIVE account routes to Broker via
+  `onNeedBroker`. Broker tab shows a small ACTIVE-count badge.
+- **`PortfolioAutoTrade.tsx` — additive `view?: 'create'|'dashboard'` + `onStarted`/`onNewCampaign`/
+  `onNeedBroker` (all DEFAULT undefined ⇒ ADMIN MOUNT 100% UNCHANGED).** Surgical gates only:
+  `phase` inits to `'config'` when `view==='create'` (else `'list'`); a successful `onStart` /
+  `onCampaignStart` calls `onStarted()`; the list + running "New session" buttons route through a
+  new `onNewSessionClick` (→ `onNewCampaign()` in dashboard view, else `openNewSession`);
+  `backToList` in create view resets to a fresh config form (this component never renders the list
+  there) and the config-phase "← Your sessions" button is hidden in create view; the live-without-
+  account guard in `onCreate` routes to `onNeedBroker()` in create view. Strategy dropdown /
+  paper-live / Create / Start-now / Schedule / countdown / campaign flow REUSED verbatim.
+- **Money safety:** unchanged — non-admin live still requires the user's OWN ACTIVE account
+  (enforced inside PortfolioAutoTrade, isAdmin=false). No execution/backend path touched. Mint/F2
+  theme, reused `C`/`ICON`/`Gear` from `cotrade-kit`, no new accents. `AutoTradeExperience` is no
+  longer wired to the page (kept on disk).
+- **Verify:** `npx tsc --noEmit` clean; `next build` → "Compiled successfully in 6.2s", no
+  warnings; `/power/autotrade` present in the route manifest.

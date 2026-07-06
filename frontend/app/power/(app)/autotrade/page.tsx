@@ -15,13 +15,17 @@
  *    origin /api/falcon-proxy (operator token injected server-side), so they
  *    work unchanged inside /power. The /falcon/* routes stay live as a fallback.
  *
- *  • EVERYONE ELSE: the AutoTradeExperience — choose style / set capital / CONNECT
- *    YOUR BROKER (the live, per-user broker-connect panel). Connecting places no
- *    order; automated execution on the user's own account stays gated server-side
- *    (paper by default). This page never places or simulates a real order.
+ *  • EVERYONE ELSE: the PowerUserAutoTrade shell — a clean 4-tab surface (Connect
+ *    Your Broker · Start Auto Trade · Live & Scheduled Campaigns · Trade Journal),
+ *    one clear next action per tab. It reuses the SAME BrokerAccountsPanel +
+ *    PortfolioAutoTrade (view-split into create/dashboard) + TradeJournalPanel the
+ *    operator uses. Connecting places no order; automated execution on the user's
+ *    own account stays gated server-side (paper by default) and, for a LIVE start,
+ *    requires their own ACTIVE broker account. This page never places or simulates
+ *    a real order.
  */
 import { getCurrentUser } from '@/lib/power-auth'
-import { AutoTradeExperience } from '@/components/power/autotrade/AutoTradeExperience'
+import { PowerUserAutoTrade } from '@/components/power/autotrade/PowerUserAutoTrade'
 import { AutoTradePanel } from '@/components/power/autotrade/AutoTradePanel'
 
 export const dynamic = 'force-dynamic'
@@ -45,6 +49,10 @@ export default async function AutoTradePage() {
     return <AutoTradePanel firstName={firstName} userId={user!.id} />
   }
 
-  // Non-operator branch: connect-your-broker page (no preview/waitlist).
-  return <AutoTradeExperience firstName={firstName} userId={user!.id} />
+  // Non-operator branch: the 4-tab power-user AutoTrade shell (Connect Your Broker ·
+  // Start Auto Trade · Live & Scheduled Campaigns · Trade Journal). Reuses the same
+  // BrokerAccountsPanel + PortfolioAutoTrade + TradeJournalPanel the operator uses,
+  // in view-split (create/dashboard) mounts. Real-money gating (own ACTIVE account
+  // for a live start) stays enforced inside PortfolioAutoTrade (isAdmin=false).
+  return <PowerUserAutoTrade firstName={firstName} userId={user!.id} />
 }

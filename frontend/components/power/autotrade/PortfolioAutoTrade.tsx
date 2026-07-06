@@ -340,6 +340,10 @@ export function PortfolioAutoTrade({
   userId,
   onSessionChange,
   isAdmin = true,
+  view,
+  onStarted,
+  onNewCampaign,
+  onNeedBroker,
 }: {
   userId?: number | string
   // Called whenever the user focuses a session (resume or create).
@@ -351,6 +355,26 @@ export function PortfolioAutoTrade({
   // account when they have exactly one, and a LIVE start REQUIRES a selected
   // ACTIVE account (paper may proceed without one). Everything else is identical.
   isAdmin?: boolean
+  // view (DEFAULT undefined — the operator/admin mount is 100% UNCHANGED, combined
+  // list + inline create). When the 4-tab power-user shell splits this component in
+  // two:
+  //   'create'   — mount straight into the config form (phase='config'); the
+  //                sessions/campaigns list is NEVER shown. A successful start/schedule
+  //                calls onStarted() so the shell jumps to the Live tab. Picking LIVE
+  //                without a connected broker routes to onNeedBroker().
+  //   'dashboard' — mount into the list only (phase='list'); the inline config form
+  //                is NEVER shown. The "New session" button calls onNewCampaign()
+  //                (shell → Start tab) instead of opening the inline form.
+  view?: 'create' | 'dashboard'
+  // Called after a session/campaign is successfully created AND started/scheduled
+  // (view='create' only). The shell uses it to jump to the Live tab.
+  onStarted?: () => void
+  // Called by the list's "New session" button (view='dashboard' only). The shell
+  // uses it to jump to the Start tab.
+  onNewCampaign?: () => void
+  // Called when a power user picks LIVE with no connected/active broker account
+  // (view='create' only). The shell uses it to jump to the Broker tab.
+  onNeedBroker?: () => void
 }) {
   const [config, setConfig] = useState<SessionConfig>(DEFAULT_CONFIG)
   const [mode, setMode] = useState<Mode>('paper')
@@ -364,7 +388,10 @@ export function PortfolioAutoTrade({
   const [accounts, setAccounts] = useState<BrokerAccount[]>([])
   const [brokerAccountId, setBrokerAccountId] = useState<string>('')
 
-  const [phase, setPhase] = useState<Phase>('list')
+  // view='create' mounts straight into the config form; every other mount (admin
+  // combined view, or view='dashboard') starts on the sessions list. Admin
+  // (view=undefined) is unchanged: 'list'.
+  const [phase, setPhase] = useState<Phase>(view === 'create' ? 'config' : 'list')
   const [session, setSession] = useState<CreateResponse | null>(null)
   const [startResult, setStartResult] = useState<StartResponse | null>(null)
   const [status, setStatus] = useState<StatusResponse | null>(null)
@@ -1098,6 +1125,8 @@ export function PortfolioAutoTrade({
       setCampaignDate('')
       backToList()
       loadLadders()
+      // Shell (view='create'): campaign started/scheduled — hand off to the Live tab.
+      onStarted?.()
     } catch (e) {
       // A weekend/holiday start → HTTP 400 whose detail is an object carrying a
       // suggested_date. The shared call<>() helper attached it to the Error.
@@ -1108,7 +1137,7 @@ export function PortfolioAutoTrade({
       setCampaignBusy(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [createdLadder, campaignDate, loadLadders])
+  }, [createdLadder, campaignDate, loadLadders, onStarted])
 
   // Discard a draft campaign — PERMANENTLY delete it (it was never started), not
   // just navigate away leaving an orphan CREATED row in the backend.
@@ -1124,6 +1153,13 @@ export function PortfolioAutoTrade({
     // Power-user LIVE guard: a live session must run on THEIR OWN active account —
     // never the operator global default (the backend isolation guard refuses it).
     if (!isAdmin && mode === 'live' && !accountActive) {
+      // Shell (view='create'): no connected/active account — send them to the
+      // Broker tab to connect one, rather than dead-ending on an inline error.
+      if (view === 'create' && onNeedBroker) {
+        setError('Connect your broker first — live needs your own active account. Taking you there…')
+        onNeedBroker()
+        return
+      }
       setError('Select your connected broker account — live needs your own active account. (Paper is fine without one.)')
       return
     }
@@ -1159,7 +1195,7 @@ export function PortfolioAutoTrade({
     } finally {
       setBusy(null)
     }
-  }, [mode, config, loadSessions, toWireConfig, userId, brokerAccountId, onSessionChange, universeFilter, symbolWhitelist, isAdmin, accountActive])
+  }, [mode, config, loadSessions, toWireConfig, userId, brokerAccountId, onSessionChange, universeFilter, symbolWhitelist, isAdmin, accountActive, view, onNeedBroker])
 
   const onStart = useCallback(async (when: StartWhen) => {
     if (!session) return
@@ -1184,12 +1220,15 @@ export function PortfolioAutoTrade({
       }
       setPhase('running')
       setPoll(true)
+      // Shell (view='create'): the session is started/scheduled — hand off to the
+      // Live tab. Passing the id keeps the shell's active-session focus in sync.
+      onStarted?.()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to start session')
     } finally {
       setBusy(null)
     }
-  }, [session, accountExpired])
+  }, [session, accountExpired, onStarted])
 
   const refreshStatus = useCallback(async (silent = false) => {
     if (!session) return
@@ -1270,9 +1309,22 @@ export function PortfolioAutoTrade({
     setUniverseFilter('all500'); setPicks(null); setPicksErr(null); setCheckedSymbols(null)
   }
 
+  // "New session" click router. In the split shell's DASHBOARD view the inline
+  // config form is never shown here — hand off to the Start tab via onNewCampaign.
+  // Admin (view=undefined) and the create view open the inline form as before.
+  const onNewSessionClick = () => {
+    if (view === 'dashboard' && onNewCampaign) { onNewCampaign(); return }
+    openNewSession()
+  }
+
   // Return to the Your-Sessions list and refresh it (so a just-created/started
   // session is visible — the disappearing-session fix).
+  //
+  // Shell (view='create'): this component never renders the list — going "back"
+  // resets to a fresh config form (openNewSession) instead of a phase='list' that
+  // would render nothing. Admin + dashboard views return to the list as before.
   const backToList = () => {
+    if (view === 'create') { openNewSession(); return }
     setPhase('list'); setSession(null); setStartResult(null); setStatus(null)
     setCountdown(null)
     setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
@@ -1325,7 +1377,7 @@ export function PortfolioAutoTrade({
                 style={{ color: C.muted, border: `1px solid ${C.line}` }}>
                 {sessionsLoading ? 'Refreshing…' : 'Refresh'}
               </button>
-              <button type="button" onClick={openNewSession}
+              <button type="button" onClick={onNewSessionClick}
                 className="flex items-center gap-1.5 text-[12px] font-semibold px-3.5 py-1.5 rounded-lg transition-opacity"
                 style={{ color: '#06130c', background: C.mint }}>
                 {ICON.bolt(13)} New session
@@ -1539,11 +1591,15 @@ export function PortfolioAutoTrade({
       {/* ── CONFIG PHASE — explicit New Session form ─────────────────────────── */}
       {phase === 'config' && (
         <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
-          <button type="button" onClick={backToList}
-            className="mb-4 inline-flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-lg transition-colors"
-            style={{ color: C.muted, border: `1px solid ${C.line}` }}>
-            ← Your sessions
-          </button>
+          {/* In the split shell's create view the tab bar is the nav — there is no
+              in-component list to go back to, so this button is hidden there. */}
+          {view !== 'create' && (
+            <button type="button" onClick={backToList}
+              className="mb-4 inline-flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-lg transition-colors"
+              style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+              ← Your sessions
+            </button>
+          )}
 
           {/* Strategy selector — picks the exit engine. Intraday basket seeds its
               validated preset; Auto-Ladder builds a monthly positional campaign
@@ -2981,7 +3037,7 @@ export function PortfolioAutoTrade({
               style={{ color: C.muted, border: `1px solid ${C.line}` }}>
               ← Your sessions
             </button>
-            <button type="button" onClick={openNewSession}
+            <button type="button" onClick={onNewSessionClick}
               className="self-start text-[12px] px-3 py-2 rounded-lg transition-colors"
               style={{ color: C.mint, border: `1px solid rgba(63,227,164,0.3)` }}>
               New session
