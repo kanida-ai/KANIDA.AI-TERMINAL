@@ -707,3 +707,28 @@ def test_schedule_today_after_open_starts_now(clean_positions):
         assert out["when"] == "now"
     finally:
         sess_mod.set_fake_now(None)
+
+
+def test_delete_draft_removes_row(clean_positions):
+    """A CREATED draft can be PERMANENTLY deleted (the Discard fix) — the row is
+    gone, not just hidden."""
+    lad = LadderCampaign.create(total_capital=900000.0)
+    lid = lad.ladder_id
+    assert lad.status == STATUS_CREATED
+    assert lad.delete() is True
+    assert LadderCampaign.load(lid) is None
+
+
+def test_delete_refuses_when_basket_open(clean_positions, patched_brokers):
+    """A campaign with an OPEN basket must be cancelled first — delete refuses so
+    a live position is never orphaned."""
+    import pytest
+    _basket_signals()
+    lad = LadderCampaign.create(total_capital=900000.0)
+    lad.start()                                    # RUNNING
+    lad.daily_tick(ref_now=_trading_day_now())     # opens a basket (10:00, market open)
+    if lad.n_active_baskets() > 0:
+        with pytest.raises(ValueError):
+            lad.delete()
+    else:
+        assert lad.delete() is True   # nothing opened → safe to delete

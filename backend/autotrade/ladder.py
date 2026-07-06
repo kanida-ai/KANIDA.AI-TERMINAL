@@ -502,6 +502,29 @@ class LadderCampaign:
                 "mode": mode, "children_flattened": flattened,
                 "children_left_open": 0, "details": details}
 
+    def delete(self) -> bool:
+        """PERMANENTLY remove this campaign's row (what the UI Discard/Delete
+        should do — not just hide it). Allowed only when NO basket is open: a
+        CREATED draft, a SCHEDULED-but-not-armed campaign, or a finished
+        (COMPLETED/ENDED-flat) one. A campaign with OPEN children must be
+        Cancelled (kill) first — we refuse here so a live position is never
+        orphaned. Child session rows (the trade history) are left intact.
+        Returns True if a row was deleted."""
+        open_n = len(self._open_children())
+        if open_n > 0:
+            raise ValueError(
+                f"campaign {self.ladder_id} has {open_n} open basket(s); "
+                "cancel it first, then delete")
+        with falcon_conn() as con:
+            cur = con.execute(
+                "DELETE FROM autotrade_ladders WHERE ladder_id=?",
+                (self.ladder_id,))
+            con.commit()
+            deleted = cur.rowcount > 0
+        if deleted:
+            log.info("ladder %s DELETED (was %s)", self.ladder_id, self.status)
+        return deleted
+
     def _maybe_complete(self) -> bool:
         """If the campaign is past its opening life (ENDED, or RUNNING past
         end_date) AND no open children remain, transition to COMPLETED. Returns

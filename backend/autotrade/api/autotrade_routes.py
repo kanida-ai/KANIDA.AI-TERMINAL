@@ -777,6 +777,27 @@ def ladder_status(ladder_id: str, caller: Caller = Depends(resolve_caller)):
     return lad.to_status()
 
 
+@router.delete("/autotrade/ladder/{ladder_id}")
+def ladder_delete(ladder_id: str,
+                  caller: Caller = Depends(resolve_caller)):
+    """PERMANENTLY delete a campaign (draft or finished) — what Discard/Delete in
+    the UI should do. Refuses (400) if it still has an open basket: cancel it
+    first. Tenant-scoped (admin may delete any; non-admin only their own) +
+    operator-token gated. 404 if it doesn't exist / not owned."""
+    from ..ladder import LadderCampaign
+    _assert_ladder_access(ladder_id, caller)
+    lad = LadderCampaign.load(ladder_id)
+    if lad is None:
+        raise HTTPException(404, "campaign not found")
+    try:
+        ok = lad.delete()
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not ok:
+        raise HTTPException(404, "campaign not found")
+    return {"ok": True, "ladder_id": ladder_id}
+
+
 @router.get("/autotrade/ladders")
 def ladders_list(user_id: Optional[str] = None,
                  caller: Caller = Depends(resolve_caller)):
