@@ -1490,8 +1490,9 @@ export function PortfolioAutoTrade({
                 <span className="shrink-0 mt-0.5" style={{ color: C.mint }}>{ICON.loop(16)}</span>
                 <div className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
                   <b style={{ color: C.ink }}>Monthly campaign.</b>{' '}
-                  Falcon splits your capital across ~3 baskets and rolls them every trading day
-                  — each basket is held positional (a fixed 3-session hold), and you never manage one.
+                  Falcon splits your capital across ~3 baskets and opens a new one every trading day
+                  at <b style={{ color: C.ink }}>09:15 IST</b> — each basket is held positional (a fixed
+                  3-session hold), and you never manage one.
                 </div>
               </div>
             )}
@@ -2358,7 +2359,9 @@ export function PortfolioAutoTrade({
           </div>
           <div className="text-[11.5px] mb-4" style={{ color: C.muted }}>
             ID <code style={{ color: C.ink2 }}>{createdLadder.ladder_id}</code> · status{' '}
-            <span style={{ color: C.ink2 }}>CREATED (draft)</span> — nothing is placed or armed yet.
+            <span style={{ color: C.ink2 }}>CREATED (draft)</span> · fires{' '}
+            <span style={{ color: C.ink2 }}>09:15 IST</span>
+            <span style={{ color: C.faint }}> · first basket next trading morning, then every trading day — nothing armed yet</span>
           </div>
 
           {/* Calm retry note (parity with the session error line). */}
@@ -2421,7 +2424,7 @@ export function PortfolioAutoTrade({
             <div className="flex-1 flex flex-col gap-2 px-4 py-3 rounded-xl"
               style={{ background: 'rgba(63,227,164,0.10)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
               <span className="flex items-center gap-2 text-[13px] font-semibold" style={{ color: C.mint }}>
-                {ICON.clock(14)} Schedule for a future date
+                {ICON.clock(14)} Schedule for a date
               </span>
               <input
                 type="date"
@@ -2440,10 +2443,10 @@ export function PortfolioAutoTrade({
               >
                 {ICON.clock(13)} {campaignBusy === 'scheduled'
                   ? 'Scheduling…'
-                  : campaignDate ? `Schedule for ${campaignDate}` : 'Pick a date'}
+                  : campaignDate ? `Schedule for ${campaignDate} · 09:15` : 'Pick a date'}
               </button>
               <span className="text-[10.5px] leading-snug" style={{ color: C.muted }}>
-                Arms the campaign for that day — nothing is placed until then.
+                Arms it to open its first basket at 09:15 IST that day — nothing is placed until then.
               </span>
             </div>
           </div>
