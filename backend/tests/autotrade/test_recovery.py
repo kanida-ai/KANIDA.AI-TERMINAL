@@ -221,3 +221,31 @@ def test_resume_does_not_touch_falcon_position_state(clean_positions,
     assert abs(fp["avg_entry"] - 55.5) < 1e-9
     assert fp["managed_by"] == "falcon"
     assert total_fp == 1
+
+
+# ── square-off re-arm delegates to the MIS-aware fire path (2026-07-06 regression) ─
+
+def test_rearm_square_off_delegates_to_arm_square_off(clean_positions):
+    """The resume path must re-arm the square-off using the SAME MIS-aware target
+    selection as the fire path. Previously _rearm_square_off used only
+    square_off_time, so a restart re-armed a MIS session at 15:29 instead of the
+    15:12 defensive mis_square_off_time — Zerodha then force-squared at ~15:20 and
+    our 15:29 order was rejected. It now delegates to _arm_square_off (single
+    source of truth: min(square_off_time, mis_square_off_time for a MIS product))."""
+    import pytest as _pytest
+    cfg = TradingSessionConfig(total_allocated_capital=100000.0, top_n_stocks=3,
+                               strategy="intraday_basket", order_product="MIS",
+                               instrument_type="EQ", square_off_time="15:29:00",
+                               mis_square_off_time="15:12:00",
+                               kill_switch_enabled=False)
+    sess = TradingSession.create(cfg, mode="paper")
+    calls = []
+    from autotrade.session import TradingSession as TS
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(TS, "_arm_square_off",
+               lambda self: (calls.append(self.session_id), True)[1])
+    try:
+        recovery._rearm_square_off(sess.session_id)
+    finally:
+        mp.undo()
+    assert calls == [sess.session_id]   # resume routed through the MIS-aware path

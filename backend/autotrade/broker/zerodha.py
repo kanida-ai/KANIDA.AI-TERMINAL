@@ -683,12 +683,22 @@ class ZerodhaBroker(BrokerClient):
             kotype = (kite.ORDER_TYPE_LIMIT if order_type == "LIMIT"
                       else kite.ORDER_TYPE_MARKET)
             kexch = getattr(kite, f"EXCHANGE_{exchange}", exchange)
-            stop_price = round(float(stop_price), 2)
+            # TICK-SIZE COMPLIANCE: Kite rejects GTT trigger/limit prices that are
+            # not a multiple of the instrument tick (0.05 / 0.10 / …). Plain
+            # 2-decimal rounding lands off the tick grid for most names (esp.
+            # tick=0.10 higher-priced stocks) → place_gtt raised "…should be a
+            # multiple of tick size" and EVERY per-position GTT-OCO silently fell
+            # back to RECORDED_ONLY (no broker-held stop — a hole overnight for CNC).
+            # Round every price to the symbol's REAL tick, matching the order path.
+            from falcon.trade.services.mtf_eligibility import get_tick_size
+            from falcon.trade.services.services_round import round_to_tick_size
+            tick = get_tick_size(kite, symbol) or 0.05
+            stop_price = round_to_tick_size(float(stop_price), tick)
             # Stop leg limit: stop_limit_price when provided (below trigger for a
             # long, above for a short), otherwise the trigger itself.
-            stop_lim = round(float(stop_limit_price), 2) if stop_limit_price is not None \
-                else stop_price
-            target_price = round(float(target_price), 2)
+            stop_lim = round_to_tick_size(float(stop_limit_price), tick) \
+                if stop_limit_price is not None else stop_price
+            target_price = round_to_tick_size(float(target_price), tick)
             is_short = str(direction).lower() == "short"
             txn = (kite.TRANSACTION_TYPE_BUY if is_short
                    else kite.TRANSACTION_TYPE_SELL)
@@ -709,7 +719,8 @@ class ZerodhaBroker(BrokerClient):
                 lambda: kite.place_gtt(
                     trigger_type=kite.GTT_TYPE_OCO, tradingsymbol=symbol,
                     exchange=kexch, trigger_values=trigger_values,
-                    last_price=round(float(last_price), 2), orders=orders),
+                    last_price=round_to_tick_size(float(last_price), tick),
+                    orders=orders),
                 "place_gtt(autotrade)", symbol)
             # Kite returns {"trigger_id": <id>} or the id directly depending on ver.
             if isinstance(gid, dict):

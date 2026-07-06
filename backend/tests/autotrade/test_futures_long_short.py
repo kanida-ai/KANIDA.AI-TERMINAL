@@ -320,6 +320,27 @@ def test_place_gtt_long_unchanged_sell_legs():
     assert all(leg["transaction_type"] == "SELL" for leg in legs)
 
 
+def test_place_gtt_rounds_all_prices_to_tick_size(monkeypatch):
+    """Kite rejects GTT trigger/limit/target prices that aren't a multiple of the
+    instrument tick ('…should be a multiple of tick size 0.10'). Off-grid levels
+    (a tick=0.10 stock at 1277.18 / 1425.06) MUST be rounded before place_gtt,
+    else EVERY per-position GTT-OCO silently fails (RECORDED_ONLY, no broker stop
+    — the 2026-07-06 CNC overnight hole). Regression: prices land on the tick grid."""
+    import falcon.trade.services.mtf_eligibility as mtf
+    monkeypatch.setattr(mtf, "get_tick_size", lambda kite, symbol: 0.10)
+    b, fk = _zerodha_with_fake_kite()
+    b.place_gtt_oco(symbol="AEGISLOG", qty=35, stop_price=1277.18,
+                    target_price=1425.06, last_price=1344.43, product="CNC",
+                    exchange="NSE", stop_limit_price=1273.35, direction="long")
+    # trigger_values rounded to 0.10 (long: [stop, target]).
+    assert fk.gtt_args["trigger_values"] == [1277.20, 1425.10]
+    # every leg price + last_price is an exact multiple of the tick.
+    for leg in fk.gtt_args["orders"]:
+        assert abs(round(leg["price"] / 0.10) * 0.10 - leg["price"]) < 1e-9
+    lp = fk.gtt_args["last_price"]
+    assert abs(round(lp / 0.10) * 0.10 - lp) < 1e-9
+
+
 # ── Exit side (buy-to-cover) via kill switch ───────────────────────────────────
 
 @pytest.fixture

@@ -89,35 +89,32 @@ def _backfill_live_gtts(session_id: str) -> int:
 
 
 def _rearm_square_off(session_id: str) -> None:
-    """Re-arm the square-off scheduler for a resumed RUNNING intraday_basket
-    session (future square_off_time only). No-op for kill-switch sessions or when
-    the time has passed (the in-tick square-off handles that case)."""
-    from .session import TradingSession, _parse_entry_time_today_ist
+    """Re-arm the square-off scheduler for a resumed RUNNING session, using the
+    SAME MIS-aware target selection as the fire path (`_arm_square_off`).
+
+    BUG THIS FIXES (2026-07-06): this used only `square_off_time`, so on a restart
+    a MIS intraday session was re-armed at 15:29 instead of its `mis_square_off_time`
+    (15:12) defensive flatten. Zerodha's RMS then force-squared the position at
+    ~15:20 and OUR 15:29 order was rejected ("Intraday orders (MIS) are allowed
+    only till 3.25 PM") — leaving EXIT_FAILED rows with stale P&L. `_arm_square_off`
+    arms at the EARLIER of square_off_time (intraday_basket) and mis_square_off_time
+    (any MIS product), skips positional (square_off_enabled False) and kill-switch
+    sessions, and no-ops when the time already passed (the in-tick square-off is
+    the backstop). Delegating keeps ONE source of truth for the square-off target.
+
+    The MULTI-SESSION MAX-HOLD CAP (max_hold_sessions>0) needs NO re-arm here: it
+    recomputes the cap datetime from the PERSISTED started_at every tick, so once
+    the tick driver is re-armed it fires on the Nth trading session across restarts.
+    """
+    from .session import TradingSession
 
     sess = TradingSession.load(session_id)
-    if sess is None or sess.config.strategy != "intraday_basket":
-        return
-    # POSITIONAL (square_off_enabled False): no forced DAILY square-off — the
-    # tick/ws drivers (already re-armed by _resume_running) keep the trail alive
-    # across days; there is deliberately NO overnight flatten to re-arm.
-    #
-    # The MULTI-SESSION MAX-HOLD CAP (max_hold_sessions>0) needs NO re-arm here:
-    # its enforcement lives in _tick_intraday and recomputes the cap datetime from
-    # the PERSISTED started_at every tick, so once the tick driver is re-armed
-    # (above) the cap fires on the Nth trading session even across a restart —
-    # durable by construction, no in-memory timer to restore.
-    if not getattr(sess.config, "square_off_enabled", True):
+    if sess is None:
         return
     try:
-        target = _parse_entry_time_today_ist(sess.config.square_off_time)
-    except ValueError:
-        return  # unparseable → in-tick square-off backstop
-    if datetime.now(IST) >= target:
-        return  # already past → next tick squares off
-    armed = square_off_scheduler.start_for_session(session_id, target)
-    if armed:
-        log.info("recovery: re-armed square-off for %s at %s",
-                 session_id, target.isoformat())
+        sess._arm_square_off()
+    except Exception as e:  # never block recovery on the backup square-off
+        log.warning("recovery: re-arm square-off failed for %s: %s", session_id, e)
 
 
 def _resume_running(session_id: str) -> str:
