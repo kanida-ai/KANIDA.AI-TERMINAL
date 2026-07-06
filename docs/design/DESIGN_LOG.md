@@ -1519,3 +1519,42 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
   types only — no execution/backend logic touched. Verify: `npx tsc --noEmit` clean;
   `next build` compiled successfully, `/power/autotrade/connect` present in route manifest,
   no collision with `/power/autotrade`.
+
+## 2026-07-05 — Power-user AutoTrade: complete guided self-serve flow (Falcon)
+
+- **Problem:** a non-admin power user's `/power/autotrade` DEAD-ENDED — `AutoTradeExperience`
+  showed a hardcoded "Launching soon" `MechanismStrip launching` badge and two standalone
+  style/capital steps with NO path to create a campaign, while `PortfolioAutoTrade` (the real,
+  already per-user-aware creator: strategy dropdown → config → Start/Schedule → sessions list +
+  Auto-Ladder campaign) was operator-only. Fixed by REUSING the real creator, not building a
+  second one.
+- **`AutoTradeExperience.tsx` (rewrite):** removed the `launching` dead-end and the redundant
+  standalone "choose style / set capital" steps (they duplicated PortfolioAutoTrade's own
+  config — there is now exactly ONE capital input). New guided flow: hero + honest mint banner
+  ("Connecting places no order · sessions run in Paper by default") + `MechanismStrip variant=
+  autotrade` (no launching) → STEP 1 Connect your broker (`BrokerAccountsPanel`, unchanged) →
+  STEP 2 Create your campaign (`<PortfolioAutoTrade userId isAdmin={false} />`, this user's own
+  scoped list). Guided HANDOFF: the shell fetches the user's own accounts via
+  `AutoTradeAPI.brokerAccounts(userId)` (6s poll until an ACTIVE one exists, plus a manual
+  "Refresh") — with ≥1 ACTIVE account a prominent "Create your campaign ↓" CTA scrolls to the
+  creator; with none, the creator is framed with an amber "Connect a broker account above to
+  start a live session (Paper still works)". `BrokerAccountsPanel` was NOT modified (it exposes
+  no top-level onConnected), so the shell polls instead — reuse-verbatim honored.
+- **`PortfolioAutoTrade.tsx` (additive `isAdmin` prop, DEFAULT true):** operator mount is
+  byte-for-byte unchanged. When `isAdmin===false` (power user): the broker-account selector no
+  longer offers "Global account (operator default)" (the backend isolation guard refuses it) —
+  it shows ONLY the user's own connected accounts, auto-selects the single account when they
+  have exactly one, and shows a disabled "Select your account…" / "No connected account —
+  connect one above" placeholder otherwise. A LIVE start now REQUIRES a selected ACTIVE account:
+  `liveAccountReady = isAdmin || mode==='paper' || (selectedAccount && !expired)`; the Create
+  CTA is gated on `canGoLive = liveReady && liveAccountReady` with the inline message "Select
+  your connected broker account — live needs your own active account." `onCreate` also hard-
+  guards live+no-account (defense in depth). PAPER proceeds without an account. Strategy
+  dropdown / campaign flow / config / start / schedule / countdown / status are REUSED unchanged.
+- **`AutoTradePanel.tsx`:** now passes `isAdmin` explicitly to its `<PortfolioAutoTrade>` so the
+  operator's global-account default is preserved exactly.
+- **Money safety:** a power user can NEVER be silently pointed at the operator global account —
+  for non-admin that option is absent and live requires their own ACTIVE account. No execution/
+  backend path touched. Mint/F2 theme, reused `C`/`ICON` from `cotrade-kit`, no new accents.
+  Verify: `npx tsc --noEmit` clean; `next build` "Compiled successfully", `/power/autotrade`
+  present in the route manifest.

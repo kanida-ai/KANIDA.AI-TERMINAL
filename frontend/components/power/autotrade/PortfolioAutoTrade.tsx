@@ -339,11 +339,18 @@ const inputStyle: React.CSSProperties = {
 export function PortfolioAutoTrade({
   userId,
   onSessionChange,
+  isAdmin = true,
 }: {
   userId?: number | string
   // Called whenever the user focuses a session (resume or create).
   // Passes the session_id up so sibling tabs (Journal) can use it.
   onSessionChange?: (sessionId: string) => void
+  // isAdmin (DEFAULT true — the operator mount is unchanged). When false (a power
+  // user), the broker-account selector NEVER offers the global/operator account
+  // (the backend isolation guard refuses it), defaults to their single connected
+  // account when they have exactly one, and a LIVE start REQUIRES a selected
+  // ACTIVE account (paper may proceed without one). Everything else is identical.
+  isAdmin?: boolean
 }) {
   const [config, setConfig] = useState<SessionConfig>(DEFAULT_CONFIG)
   const [mode, setMode] = useState<Mode>('paper')
@@ -495,6 +502,16 @@ export function PortfolioAutoTrade({
       .catch(() => { if (!cancelled) setAccounts([]) })
     return () => { cancelled = true }
   }, [userId])
+
+  // Power-user (isAdmin === false): the global/operator account is NOT an option
+  // (the backend isolation guard refuses it). Default-select their connected
+  // account when they have exactly one so the selector is never on the empty
+  // global default. Only runs while no account is chosen yet.
+  useEffect(() => {
+    if (isAdmin) return
+    if (brokerAccountId) return
+    if (accounts.length === 1) setBrokerAccountId(accounts[0].broker_account_id)
+  }, [isAdmin, accounts, brokerAccountId])
 
   // Switch strategy (UI level). For intraday_basket, SEED the validated preset.
   // For auto_ladder (UI construct), map to a POSITIONAL intraday_basket under the
@@ -690,6 +707,18 @@ export function PortfolioAutoTrade({
   })()
 
   const liveReady = mode === 'paper' || liveConfirm.trim().toUpperCase() === 'LIVE'
+
+  // ── Power-user LIVE requires their OWN active broker account ───────────────────
+  // A power user (isAdmin === false) may NEVER be silently pointed at the operator
+  // global account, and a LIVE start needs a selected ACTIVE account (paper may
+  // proceed without one). accountActive = a chosen, non-EXPIRED connected account.
+  // liveAccountReady gates the LIVE Create/Start; for an operator (isAdmin) it is
+  // always true (the global account is a valid live target), preserving behaviour.
+  const accountActive = selectedAccount != null && !accountExpired
+  const liveAccountReady = isAdmin || mode === 'paper' || accountActive
+  // Combined LIVE readiness for the create/start buttons: the typed-LIVE confirm
+  // AND (for a power user) a selected active account.
+  const canGoLive = liveReady && liveAccountReady
 
   // Auto-Ladder splits the total campaign capital across ~3 baskets. The sizing
   // preview must reflect what ONE day's basket buys, so we preview on total ÷ 3.
@@ -1092,6 +1121,12 @@ export function PortfolioAutoTrade({
   }, [createdLadder, loadLadders])
 
   const onCreate = useCallback(async () => {
+    // Power-user LIVE guard: a live session must run on THEIR OWN active account —
+    // never the operator global default (the backend isolation guard refuses it).
+    if (!isAdmin && mode === 'live' && !accountActive) {
+      setError('Select your connected broker account — live needs your own active account. (Paper is fine without one.)')
+      return
+    }
     setError(null); setCreateSuggest(null); setBusy('create')
     try {
       // UNITS: the backend uses FRACTIONS for percentages (0.01 = 1%). The form
@@ -1124,7 +1159,7 @@ export function PortfolioAutoTrade({
     } finally {
       setBusy(null)
     }
-  }, [mode, config, loadSessions, toWireConfig, userId, brokerAccountId, onSessionChange, universeFilter, symbolWhitelist])
+  }, [mode, config, loadSessions, toWireConfig, userId, brokerAccountId, onSessionChange, universeFilter, symbolWhitelist, isAdmin, accountActive])
 
   const onStart = useCallback(async (when: StartWhen) => {
     if (!session) return
@@ -1563,9 +1598,13 @@ export function PortfolioAutoTrade({
                 label="Broker account"
                 hint={selectedAccount
                   ? (accountExpired
-                      ? 'This account is EXPIRED — re-connect it (Broker accounts tab) before a LIVE start. Paper is fine.'
-                      : 'This session will run on the selected connected account.')
-                  : 'Default — the global operator account. Pick a connected account to run this session on it.'}
+                      ? 'This account is EXPIRED — re-connect it (Broker accounts) before a LIVE start. Paper is fine.'
+                      : 'This session will run on your selected connected account.')
+                  : (isAdmin
+                      ? 'Default — the global operator account. Pick a connected account to run this session on it.'
+                      : (accounts.length === 0
+                          ? 'Connect a broker account above to run a live session on your own account.'
+                          : 'Select your connected account — live needs your own account.'))}
               >
                 <select
                   value={brokerAccountId}
@@ -1573,9 +1612,19 @@ export function PortfolioAutoTrade({
                   className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
                   style={inputStyle}
                 >
-                  <option value="" style={{ background: '#0b1410', color: C.ink }}>
-                    Global account (operator default)
-                  </option>
+                  {/* Operator: the global/operator account is a valid default.
+                      Power user: the global account is NEVER offered (backend
+                      isolation refuses it) — only their own connected accounts.
+                      A power user with no account sees a disabled placeholder. */}
+                  {isAdmin ? (
+                    <option value="" style={{ background: '#0b1410', color: C.ink }}>
+                      Global account (operator default)
+                    </option>
+                  ) : (
+                    <option value="" disabled={accounts.length > 0} style={{ background: '#0b1410', color: C.ink }}>
+                      {accounts.length === 0 ? 'No connected account — connect one above' : 'Select your account…'}
+                    </option>
+                  )}
                   {accounts.map((a) => {
                     const st = (a.status ?? '').toUpperCase()
                     return (
@@ -2375,7 +2424,7 @@ export function PortfolioAutoTrade({
           <div className="mt-5 flex items-center gap-3">
             <button
               type="button"
-              disabled={busy === 'create' || !liveReady || (isLadder && (config.total_allocated_capital || 0) <= 0)}
+              disabled={busy === 'create' || !canGoLive || (isLadder && (config.total_allocated_capital || 0) <= 0)}
               onClick={isLadder ? onCreateCampaign : onCreate}
               className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-semibold transition-opacity disabled:opacity-40"
               style={{ color: '#06130c', background: C.mint }}
@@ -2387,6 +2436,8 @@ export function PortfolioAutoTrade({
             <span className="text-[11px]" style={{ color: C.muted }}>
               {mode === 'live' && !liveReady
                 ? 'Type LIVE above to enable.'
+                : mode === 'live' && !liveAccountReady
+                ? 'Select your connected broker account — live needs your own active account.'
                 : isLadder
                 ? `Creates the ${mode} campaign as a draft — next you choose Start now or Schedule for a future date. No baskets open yet.`
                 : `Creates a ${mode} session — no orders are placed yet.`}
