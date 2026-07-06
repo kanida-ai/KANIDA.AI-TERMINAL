@@ -418,6 +418,14 @@ export type BrokerAccount = {
   api_key_masked?: string
   has_secret?: boolean
   has_token?: boolean
+  // ── Token lifecycle (all optional; surfaced on the connection card) ──
+  token_date?: string          // IST date the current token was minted (last refresh)
+  token_expiry?: string        // broker-specific expiry hint (e.g. next 06:00 IST)
+  token_expires_at?: string    // absolute ISO-IST expiry, when the broker gives one
+  last_login_at?: string       // last successful connect / re-auth (ISO IST)
+  last_health_at?: string      // last live validate() ping (ISO IST)
+  last_health_status?: string  // result of that ping (ok / detail)
+  user_id?: number | string    // owner (admin all-users view)
   [k: string]: unknown
 }
 

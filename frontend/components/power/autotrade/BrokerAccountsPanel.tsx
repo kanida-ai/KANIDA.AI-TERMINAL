@@ -897,6 +897,15 @@ function YourConnections({
             const h = health[a.broker_account_id]
             const lastVerified = typeof a.last_health_at === 'string' ? a.last_health_at
               : typeof a.last_verified_at === 'string' ? a.last_verified_at : null
+            // Token lifecycle (all optional): last refresh, expiry, last live check.
+            const refreshedAt = (typeof a.token_date === 'string' && a.token_date)
+              || (typeof a.last_login_at === 'string' && a.last_login_at) || null
+            const expiresRaw = (typeof a.token_expiry === 'string' && a.token_expiry)
+              || (typeof a.token_expires_at === 'string' && a.token_expires_at)
+              || (typeof meta?.capabilities?.token_lifetime === 'string' ? meta.capabilities.token_lifetime : null)
+            // ISO IST (…+05:30) → "2026-07-06 06:00" (kept in IST, no tz conversion).
+            const fmtWhen = (s: string) => /^\d{4}-\d\d-\d\dT/.test(s) ? `${s.slice(0, 16).replace('T', ' ')} IST` : s
+            const expiresLabel = expiresRaw ? fmtWhen(expiresRaw) : null
             return (
               <li key={a.broker_account_id} className="rounded-xl border p-3.5"
                 style={{ borderColor: expired ? 'rgba(232,115,107,0.3)' : C.line2, background: 'rgba(255,255,255,0.02)' }}>
@@ -908,10 +917,23 @@ function YourConnections({
                       <span className="text-[11px]" style={{ color: C.muted }}>· {displayName(meta, a.broker)}</span>
                       <StatusPill status={a.status} />
                     </div>
-                    <div className="mt-1 flex items-center gap-3 flex-wrap text-[11px]" style={{ color: C.faint }}>
+                    {/* Token lifecycle — validity · last refresh · expiry · last live check */}
+                    <div className="mt-1 flex items-center gap-x-3 gap-y-0.5 flex-wrap text-[11px]" style={{ color: C.faint }}>
                       <span>key <code style={{ color: C.ink2 }}>{a.api_key_masked || '—'}</code></span>
-                      <span>token {a.has_token ? <b style={{ color: C.mint }}>active</b> : '—'}</span>
-                      {lastVerified && <span>Last verified {lastVerified}</span>}
+                      <span>token{' '}
+                        {a.has_token
+                          ? <b style={{ color: expired ? C.red : C.mint }}>{expired ? 'expired' : 'valid'}</b>
+                          : <b style={{ color: C.muted }}>none</b>}
+                      </span>
+                      {refreshedAt && <span>refreshed <b style={{ color: C.ink2 }}>{fmtWhen(refreshedAt)}</b></span>}
+                      {expiresLabel && <span>expires <b style={{ color: C.ink2 }}>{expiresLabel}</b></span>}
+                      {lastVerified && (
+                        <span>checked {fmtWhen(lastVerified)}
+                          {typeof a.last_health_status === 'string' && a.last_health_status
+                            ? <> · <b style={{ color: expired ? C.amber : C.mint }}>{a.last_health_status}</b></>
+                            : null}
+                        </span>
+                      )}
                     </div>
                     {expired && (
                       <p className="mt-1.5 text-[11px]" style={{ color: C.red }}>
