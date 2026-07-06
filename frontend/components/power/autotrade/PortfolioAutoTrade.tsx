@@ -825,6 +825,12 @@ export function PortfolioAutoTrade({
     const s = (l.status ?? '').toUpperCase()
     return s === 'RUNNING' || s === 'PAUSED' || s === 'SCHEDULED'
   })
+  // Finished campaigns (COMPLETED / ENDED) — terminal history. Shown compactly so
+  // the trader can permanently DELETE them (they no longer open baskets).
+  const finishedLadders = (ladders ?? []).filter((l) => {
+    const s = (l.status ?? '').toUpperCase()
+    return s === 'COMPLETED' || s === 'ENDED'
+  })
   const liveLadderIds = liveLadders.map((l) => l.ladder_id).join(',')
 
   // Poll each live campaign's status (~5s). Keeps last-good numbers on a transient
@@ -895,6 +901,19 @@ export function PortfolioAutoTrade({
       setLadderBusy((b) => { const n = { ...b }; delete n[id]; return n })
     }
   }, [killLadderId, ladderKillMode, loadLadders])
+
+  // Permanently delete a FINISHED campaign (COMPLETED/ENDED) — removes the row.
+  const onLadderDelete = useCallback(async (id: string) => {
+    setLadderErr(null); setLadderBusy((b) => ({ ...b, [id]: 'kill' }))
+    try {
+      await AutoTradeAPI.ladderDelete(id)
+      loadLadders()
+    } catch (e) {
+      setLadderErr(e instanceof Error ? e.message : 'Could not delete the campaign.')
+    } finally {
+      setLadderBusy((b) => { const n = { ...b }; delete n[id]; return n })
+    }
+  }, [loadLadders])
 
   // ── Multi-select delete (paper/test housekeeping) ────────────────────────────
   const toggleSelect = useCallback((id: string) => {
@@ -1322,7 +1341,32 @@ export function PortfolioAutoTrade({
             />
           ))}
 
-          {liveLadders.length > 0 && (
+          {finishedLadders.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.06em] px-1" style={{ color: C.muted }}>Finished campaigns</span>
+              {finishedLadders.map((l) => (
+                <div key={l.ladder_id} className="flex items-center gap-2 rounded-xl border px-3 py-2"
+                  style={{ borderColor: C.line, background: 'rgba(255,255,255,0.012)' }}>
+                  <span style={{ color: C.faint }}>{ICON.loop(13)}</span>
+                  <span className="text-[11.5px]" style={{ color: C.ink2 }}>Monthly campaign</span>
+                  <span className="text-[9px] font-mono rounded-full px-1.5 py-0.5"
+                    style={{ color: C.muted, background: 'rgba(255,255,255,0.05)' }}>#{String(l.ladder_id).slice(0, 6)}</span>
+                  <span className="text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+                    style={{ color: C.faint, background: 'rgba(133,153,144,0.13)', boxShadow: 'inset 0 0 0 1px rgba(133,153,144,0.4)' }}>
+                    {(l.status ?? '').toUpperCase()}
+                  </span>
+                  <button type="button" disabled={ladderBusy[l.ladder_id] != null}
+                    onClick={() => onLadderDelete(l.ladder_id)}
+                    className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11.5px] font-semibold transition-opacity disabled:opacity-40"
+                    style={{ color: C.red, background: 'rgba(232,115,107,0.10)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.35)' }}>
+                    {ICON.close(12)} {ladderBusy[l.ladder_id] === 'kill' ? 'Deleting…' : 'Delete'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {(liveLadders.length > 0 || finishedLadders.length > 0) && (
             <div className="flex items-baseline gap-2 px-1 pt-1">
               <span className="text-[11px] font-semibold uppercase tracking-[0.06em]" style={{ color: C.muted }}>Individual sessions</span>
               <span className="text-[10.5px]" style={{ color: C.faint }}>one-off sessions + each campaign’s daily baskets</span>
