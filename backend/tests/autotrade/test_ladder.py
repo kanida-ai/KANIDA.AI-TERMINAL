@@ -680,3 +680,30 @@ def test_scheduled_tick_at_open_activates(clean_positions, patched_brokers):
     res = lad.daily_tick(ref_now=at_open)
     assert res.get("activated") is True
     assert LadderCampaign.load(lad.ladder_id).status == STATUS_RUNNING
+
+
+def test_schedule_today_before_open_is_scheduled(clean_positions):
+    """Scheduling for TODAY before the 09:15 open lands SCHEDULED (with a
+    countdown), NOT RUNNING — the reported 'can't schedule for today' fix."""
+    sess_mod.set_fake_now(datetime(2026, 6, 25, 8, 0, 0, tzinfo=IST))  # pre-open, trading day
+    try:
+        lad = LadderCampaign.create(total_capital=900000.0)
+        out = lad.start(start_date="2026-06-25")  # today
+        assert out["status"] == STATUS_SCHEDULED
+        assert out["when"] == "scheduled"
+        assert out["start_date"] == "2026-06-25"
+        assert LadderCampaign.load(lad.ladder_id).status == STATUS_SCHEDULED
+    finally:
+        sess_mod.set_fake_now(None)
+
+
+def test_schedule_today_after_open_starts_now(clean_positions):
+    """Scheduling for TODAY once the 09:15 open has passed → RUNNING (start-now)."""
+    sess_mod.set_fake_now(datetime(2026, 6, 25, 10, 0, 0, tzinfo=IST))  # after open
+    try:
+        lad = LadderCampaign.create(total_capital=900000.0)
+        out = lad.start(start_date="2026-06-25")  # today, after open
+        assert out["status"] == STATUS_RUNNING
+        assert out["when"] == "now"
+    finally:
+        sess_mod.set_fake_now(None)

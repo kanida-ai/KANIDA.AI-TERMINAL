@@ -347,14 +347,14 @@ class LadderCampaign:
         """Arm the campaign — mirrors the single-session start(when=...) lifecycle.
 
         start_date (YYYY-MM-DD, IST):
-          * None, or <= today → status RUNNING, start_date=today. Starts
-            immediately; the first positional basket opens on the next daily tick
-            (09:15 on the next trading day / now via an immediate tick when it's a
-            trading day with a free slice). This is the DEFAULT so today's
-            one-step create+start still lands RUNNING (additive, backward-compat).
-          * a FUTURE trading day → status SCHEDULED, start_date=that date. The
-            daily tick auto-activates it to RUNNING on/after start_date. Survives a
-            restart (resume includes SCHEDULED).
+          * None, a PAST date, or TODAY once the 09:15 open has passed → status
+            RUNNING, start_date=today. Starts immediately; the first positional
+            basket opens on the next daily tick at/after the open. This is the
+            DEFAULT so today's one-step create+start still lands RUNNING.
+          * TODAY before the 09:15 open, or a FUTURE trading day → status
+            SCHEDULED, start_date=that date. It stays SCHEDULED (with the UI
+            countdown) and the daily tick activates it to RUNNING at 09:15 on
+            start_date. Survives a restart (resume includes SCHEDULED).
 
         A future start_date on a weekend/holiday is REJECTED with a ValueError
         carrying the suggested next NSE trading day (route → 400 with a
@@ -372,7 +372,8 @@ class LadderCampaign:
             raise ValueError(f"ladder {self.ladder_id} is {self.status}; "
                              "create a new campaign")
 
-        today = now_ist().date()
+        now = now_ist()
+        today = now.date()
 
         # No date / empty → start immediately (RUNNING today).
         target: Optional[date] = None
@@ -384,7 +385,18 @@ class LadderCampaign:
                 raise ValueError(
                     f"start_date must be YYYY-MM-DD, got {start_date!r}")
 
-        if target is None or target <= today:
+        # SCHEDULE (not start-now) when the requested date's 09:15 activation is
+        # still ahead: a FUTURE trading day, OR TODAY when today is a trading day
+        # and the daily open (09:15 IST) hasn't passed yet — so a pre-market
+        # "schedule for today" lands SCHEDULED with a countdown, exactly like the
+        # single-session scheduled flow. No date / a past date / today-after-open
+        # → start now (RUNNING).
+        schedulable_today = (
+            target == today
+            and _cal.is_trading_day(today)
+            and now.time() < _ladder_open_time()
+        )
+        if target is None or target < today or (target == today and not schedulable_today):
             # Start now → RUNNING, start_date pinned to today.
             self._update(status=STATUS_RUNNING, start_date=today.isoformat())
             log.info("ladder %s started NOW (RUNNING, start_date=%s)",
