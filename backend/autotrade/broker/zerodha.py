@@ -630,6 +630,42 @@ class ZerodhaBroker(BrokerClient):
             log.warning("get_net_position_qty failed for %s: %s", symbol, e)
             return None
 
+    def get_positions_net(self):
+        """Return the FULL Kite day-net book in ONE kite.positions() call, as the
+        raw list of net rows (tradingsymbol/exchange/quantity/buy_quantity/
+        sell_quantity/buy_price/sell_price/average_price/pnl/product), or None.
+
+        Powers the AUTHORITATIVE position reconciler — one broker round trip per
+        tick. None is the SAFE sentinel (caller does NOTHING on None): returned in
+        paper / live-disabled AND on any Kite API error, so an unreachable or
+        delayed broker can never flatten our DB. An empty list is returned as []
+        (a present-but-empty book; the reconciler also no-ops on it)."""
+        if not self._live_allowed():
+            return None
+        try:
+            pos = self.kite.positions() or {}
+            return list(pos.get("net") or [])
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("get_positions_net failed: %s", e)
+            return None
+
+    def get_holdings(self):
+        """Delivered demat holdings (kite.holdings()) as the raw list, or None.
+
+        A CNC equity position settles OUT of positions()['net'] into holdings on
+        T+1 — so the reconciler consults this before concluding a delivery
+        position was closed (else a real overnight CNC hold would be wrongly
+        flattened the next day). None = paper / live-disabled / API error (the
+        reconciler does NOTHING on None). Rows: tradingsymbol, quantity,
+        t1_quantity (bought, not-yet-delivered), average_price."""
+        if not self._live_allowed():
+            return None
+        try:
+            return list(self.kite.holdings() or [])
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("get_holdings failed: %s", e)
+            return None
+
     def cancel_order_sync(self, order_id: str) -> bool:
         """Synchronously cancel a regular Kite order.
 

@@ -197,6 +197,47 @@ class PositionRegistry:
                 )
             con.commit()
 
+    def set_qty(self, symbol: str, qty: int,
+                avg_price: Optional[float] = None,
+                broker_profile: Optional[str] = None) -> None:
+        """Correct a position's qty (and optionally avg_price) to the BROKER's
+        truth — used by the authoritative position reconciler when the broker's
+        net qty diverges from our DB (partial fill, missed reconcile). Recomputes
+        unrealised_pnl from the persisted ltp so the panel stays consistent.
+
+        Sign-aware uPnL (FUTURES long/short): long CASE = +1 (byte-identical to
+        (ltp-avg)*qty), short = (avg-ltp)*qty. avg_price is updated only when a
+        non-None value is passed (COALESCE keeps the existing avg otherwise).
+        Scoped to (session_id, symbol[, broker_profile])."""
+        with falcon_conn() as con:
+            if broker_profile is not None:
+                con.execute(
+                    """UPDATE autotrade_positions
+                       SET qty=?,
+                           avg_price=COALESCE(?, avg_price),
+                           unrealised_pnl=(CASE WHEN direction='short' THEN -1
+                                                ELSE 1 END)
+                               * (COALESCE(ltp, avg_price)
+                                  - COALESCE(?, avg_price)) * ?
+                       WHERE session_id=? AND symbol=?
+                         AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
+                    (qty, avg_price, avg_price, qty,
+                     self.session_id, symbol, broker_profile),
+                )
+            else:
+                con.execute(
+                    """UPDATE autotrade_positions
+                       SET qty=?,
+                           avg_price=COALESCE(?, avg_price),
+                           unrealised_pnl=(CASE WHEN direction='short' THEN -1
+                                                ELSE 1 END)
+                               * (COALESCE(ltp, avg_price)
+                                  - COALESCE(?, avg_price)) * ?
+                       WHERE session_id=? AND symbol=?""",
+                    (qty, avg_price, avg_price, qty, self.session_id, symbol),
+                )
+            con.commit()
+
     # ── GTT-OCO backup (FEATURE 1) ────────────────────────────────────────────
     def set_gtt(self, symbol: str, gtt_id: Optional[str],
                 gtt_stop: Optional[float] = None,

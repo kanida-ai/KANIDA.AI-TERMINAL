@@ -88,6 +88,38 @@ def _backfill_live_gtts(session_id: str) -> int:
         return 0
 
 
+def _reconcile_broker_positions(session_id: str) -> int:
+    """AUTHORITATIVE broker→DB reconcile on resume: correct any position the
+    broker closed (RMS auto-square / manual exit / missed GTT fill) OR whose qty
+    diverged while we were down, immediately on restart — BEFORE the tick driver
+    re-arms and marks to (stale) market.
+
+    LIVE only (paper no-ops inside reconcile_broker_positions). Best-effort:
+    builds the session + brokers, runs one net-book reconcile pass, never raises.
+    Returns the number of actions taken (0 in paper / when the broker is
+    unreachable — an unreachable book NEVER mutates the DB). DATA-ISOLATION: writes
+    only autotrade_positions / autotrade_sessions.
+    """
+    from .session import TradingSession
+    from .monitoring.position_reconciler import reconcile_broker_positions
+
+    sess = TradingSession.load(session_id)
+    if sess is None:
+        return 0
+    try:
+        sess._build_brokers()
+        actions = reconcile_broker_positions(sess)
+        if actions:
+            log.info("recovery: broker reconcile for %s — %d action(s): %s",
+                     session_id, len(actions),
+                     [a.get("action") for a in actions])
+        return len(actions)
+    except Exception as e:  # never block recovery on the reconcile pass
+        log.warning("recovery: broker position reconcile failed for %s: %s",
+                    session_id, e)
+        return 0
+
+
 def _rearm_square_off(session_id: str) -> None:
     """Re-arm the square-off scheduler for a resumed RUNNING session, using the
     SAME MIS-aware target selection as the fire path (`_arm_square_off`).
@@ -123,6 +155,14 @@ def _resume_running(session_id: str) -> str:
     # FEATURE 1/3: retroactively place the broker GTT backup on live positions
     # that pre-date this feature, BEFORE re-arming the drivers.
     _backfill_live_gtts(session_id)
+    # AUTHORITATIVE broker→DB reconcile: correct any position the broker closed /
+    # resized while we were down BEFORE the tick driver marks a stale book to
+    # market. Best-effort, LIVE only, never blocks recovery.
+    try:
+        _reconcile_broker_positions(session_id)
+    except Exception as e:  # pragma: no cover - never block recovery
+        log.warning("recovery: broker reconcile pass failed for %s: %s",
+                    session_id, e)
     armed = tick_driver.start_for_session(session_id)
     # FEATURE 2: re-arm the sub-second WS-driven kill-switch path too.
     try:

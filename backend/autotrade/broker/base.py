@@ -197,6 +197,47 @@ class BrokerClient(ABC):
         unchanged. Only the live Zerodha adapter returns a real number."""
         return None
 
+    def get_positions_net(self) -> Optional[List[dict]]:
+        """Return the broker's FULL day-net position book in ONE call, as a list
+        of raw broker net rows, or None when the broker can't answer.
+
+        This is the batched primitive that powers the AUTHORITATIVE broker→DB
+        position reconciler (monitoring/position_reconciler.py): one broker round
+        trip per tick instead of one per position. Each row is expected to expose
+        (best-effort, broker-shaped): tradingsymbol, exchange, quantity,
+        buy_quantity, sell_quantity, buy_price, sell_price, average_price, pnl,
+        product. Missing fields are tolerated by the reconciler.
+
+        SAFETY CONTRACT — None is "broker unreachable, do NOTHING":
+          * None  → the broker book is UNKNOWN (paper / stub / no live creds /
+                    API error). The reconciler MUST treat this as "do not mutate
+                    the DB" — an unreachable broker can never flatten our rows.
+          * []    → an EMPTY (but present) book. The reconciler ALSO does nothing
+                    on an empty book (a genuine same-day close still shows a
+                    day-flat row with quantity 0; an empty net list is almost
+                    always a transient API blip).
+          * [rows]→ a non-empty book → the reconciler matches per position.
+
+        Default (paper / stub / no live creds): None — indistinguishable-as-safe.
+        Only the live Zerodha adapter (and best-effort Rupeezy) return a list."""
+        return None
+
+    def get_holdings(self) -> Optional[List[dict]]:
+        """Return the broker's DELIVERED demat holdings, as a list of raw broker
+        holding rows, or None when the broker can't answer.
+
+        WHY THE RECONCILER NEEDS THIS (real-money truth): an equity CNC position
+        moves OUT of positions()['net'] into holdings on T+1 settlement. So a
+        multi-day CNC hold shows quantity 0 (or vanishes) in the net book the next
+        day — WITHOUT a sell. The reconciler MUST consult holdings before it can
+        conclude a delivery position was closed, or it would wrongly flatten a
+        real overnight hold. Rows expose (best-effort): tradingsymbol, quantity,
+        t1_quantity, average_price.
+
+        None is the SAME safe sentinel as get_positions_net (do NOTHING). Default
+        (paper / stub / no live creds) → None."""
+        return None
+
     # ── GTT-OCO (broker-held per-position backup floor) ───────────────────────
     # Default no-ops so stub brokers (fyers/upstox/angel/dhan) and dry-run never
     # place real GTTs — they return None. Only the live Zerodha adapter overrides

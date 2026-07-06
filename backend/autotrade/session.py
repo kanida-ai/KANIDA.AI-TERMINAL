@@ -1590,6 +1590,19 @@ class TradingSession:
     async def tick(self) -> Dict[str, Any]:
         if not self.brokers:
             self._build_brokers()
+        # AUTHORITATIVE BROKER→DB RECONCILE (real-money truth): BEFORE anything
+        # else, validate our OPEN/EXIT_FAILED rows against the broker's live net
+        # book (ONE call). Closes the systemic gap where a position closed at the
+        # broker outside our path (RMS auto-square, manual exit, missed GTT fill)
+        # stayed stale OPEN/EXIT_FAILED with phantom P&L. LIVE only; paper no-ops.
+        # SAFE: an unreachable/empty book NEVER mutates the DB. Never blocks the tick.
+        broker_reconciled: List[Dict[str, Any]] = []
+        try:
+            from .monitoring.position_reconciler import reconcile_broker_positions
+            broker_reconciled = reconcile_broker_positions(self)
+        except Exception as e:  # pragma: no cover - never block the tick
+            log.warning("broker position reconcile failed for %s: %s",
+                        self.session_id, e)
         # COORDINATION (FEATURE 3): detect positions a fired broker GTT closed
         # externally BEFORE marking to market, so gross_return recomputes on the
         # remaining positions only (denominator stays total_allocated_capital).
@@ -1651,7 +1664,8 @@ class TradingSession:
         gr_invested = self.monitor.compute_gross_return_invested()
 
         if self.config.strategy == "intraday_basket":
-            return await self._tick_intraday(gr_invested, snap, gtt_closed)
+            return await self._tick_intraday(gr_invested, snap, gtt_closed,
+                                             broker_reconciled)
 
         # DEFAULT strategy: portfolio_kill_switch (UNCHANGED).
         reason = (self.kill_switch.check_threshold(gr_invested)
@@ -1686,10 +1700,13 @@ class TradingSession:
         return {"gross_return": gr_invested, "gross_return_fund": snap["gross_return"],
                 "snapshot": snap, "kill_switch_fired": bool(fired),
                 "kill_reason": reason, "fire_result": fired,
-                "gtt_closed": gtt_closed}
+                "gtt_closed": gtt_closed,
+                "broker_reconciled": broker_reconciled}
 
     async def _tick_intraday(self, gr_invested: float, snap: Dict[str, Any],
-                             gtt_closed) -> Dict[str, Any]:
+                             gtt_closed,
+                             broker_reconciled: Optional[List[Dict[str, Any]]] = None
+                             ) -> Dict[str, Any]:
         """One tick for strategy=="intraday_basket": run the pure trail engine
         over the invested-basis gross return + persisted (armed, peak) state.
 
@@ -1706,6 +1723,8 @@ class TradingSession:
         the broker-held backup; our software stop fires earlier (default -1.5%).
         After per-stock exits the trail engine runs on the remaining positions."""
         from .monitoring import trail_engine
+
+        broker_reconciled = broker_reconciled or []
 
         # ── MULTI-SESSION MAX-HOLD CAP (positional) ───────────────────────────
         # A positional basket (square_off_enabled=False, max_hold_sessions>0) is
@@ -1748,6 +1767,7 @@ class TradingSession:
                                     "kill_reason": "MAX_HOLD_EXIT",
                                     "fire_result": fired,
                                     "gtt_closed": gtt_closed,
+                                    "broker_reconciled": broker_reconciled,
                                     "per_stock_exits": []}
                         # Another path is firing this same tick — let it win.
         except Exception as e:  # never block the tick on the max-hold check
@@ -1827,6 +1847,7 @@ class TradingSession:
                 "kill_switch_fired": bool(fired),
                 "kill_reason": reason, "fire_result": fired,
                 "gtt_closed": gtt_closed,
+                "broker_reconciled": broker_reconciled,
                 "per_stock_exits": per_stock_exits}
 
     # ── Manual kill ────────────────────────────────────────────────────────────

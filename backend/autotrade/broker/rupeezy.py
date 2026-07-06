@@ -564,6 +564,53 @@ class RupeezyBroker(BrokerClient):
             log.warning("rupeezy get_positions failed: %s", e)
             return []
 
+    def get_positions_net(self):
+        """Best-effort map of get_positions() to the Kite-shaped net book the
+        AUTHORITATIVE reconciler consumes, or None when unavailable.
+
+        SAFETY: None is the "do nothing" sentinel. We return None in paper /
+        live-disabled and on ANY error, so an unreachable Vortex book can never
+        flatten our DB. TODO(certify): the exact Vortex position field names —
+        this maps a plausible shape; if a row can't be mapped it is skipped, and
+        if the whole fetch is empty/unavailable we return None rather than [] so
+        the reconciler treats an uncertified/empty response as "unknown, do
+        nothing" (conservative — never mass-close on Rupeezy until certified)."""
+        if not self._live_allowed():
+            return None
+        try:
+            raw = self.get_positions()
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("rupeezy get_positions_net fetch failed: %s", e)
+            return None
+        if not raw:
+            # Empty / unavailable → unknown (None), NOT an authoritative flat book.
+            return None
+        out: List[dict] = []
+        for r in raw:
+            if not isinstance(r, dict):
+                continue
+            # TODO(certify) field names — reference the Vortex positions payload.
+            sym = r.get("tradingsymbol") or r.get("trading_symbol") \
+                or r.get("symbol") or r.get("token")
+            if not sym:
+                continue
+            buy_q = r.get("buy_quantity", r.get("buy_qty"))
+            sell_q = r.get("sell_quantity", r.get("sell_qty"))
+            qty = r.get("quantity", r.get("net_quantity", r.get("net_qty")))
+            out.append({
+                "tradingsymbol": str(sym),
+                "exchange": r.get("exchange") or r.get("exchange_segment"),
+                "quantity": qty,
+                "buy_quantity": buy_q,
+                "sell_quantity": sell_q,
+                "buy_price": r.get("buy_price", r.get("buy_average")),
+                "sell_price": r.get("sell_price", r.get("sell_average")),
+                "average_price": r.get("average_price", r.get("avg_price")),
+                "pnl": r.get("pnl", r.get("net_pnl")),
+                "product": r.get("product") or r.get("product_type"),
+            })
+        return out or None
+
     def get_holdings(self) -> List[dict]:
         """Delivery holdings. TODO(certify) exact path — reference CONFIRM #3
         (`GET /trading/portfolio/holdings`). Returns [] on any failure."""

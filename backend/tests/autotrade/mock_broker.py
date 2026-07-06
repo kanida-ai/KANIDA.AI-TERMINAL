@@ -22,8 +22,15 @@ class MockBroker(BrokerClient):
                  margins: Optional[Dict[str, float]] = None,
                  margins_available: bool = True,
                  net_positions: Optional[Dict[str, int]] = None,
+                 net_book: Optional[Any] = None,
+                 holdings: Optional[Any] = None,
                  reject_symbols: Optional[set] = None):
         super().__init__(profile, dry_run=dry_run)
+        # DELIVERY holdings book (list of raw holding rows, or {symbol: {quantity,
+        # t1_quantity, average_price}} auto-normalised). None (default) → get_holdings
+        # returns None (the reconciler treats a CNC position settled to holdings as
+        # "unknown here" and relies on the exit-evidence guard). Models T+1 delivery.
+        self._holdings = holdings
         # POST-PLACEMENT REJECTION sim: symbols the broker ACCEPTS (issues an
         # order_id) but the EXCHANGE then REJECTS asynchronously (0 fill) — e.g. a
         # circuit-limit breach. place_order returns PLACED w/ no fill; the entry
@@ -35,6 +42,16 @@ class MockBroker(BrokerClient):
         # net-position probe → the base default (None) is used and the exit path
         # is unchanged. A dict entry of 0 = flat at the broker (already closed).
         self._net_positions = net_positions
+        # AUTHORITATIVE reconciler: the broker's FULL day-net book. Accepts either
+        #   * a list of raw Kite-shaped net rows, or
+        #   * a dict {symbol -> {quantity, buy_quantity, sell_quantity, sell_price,
+        #     buy_price, average_price, exchange, pnl, ...}} (auto-normalised to a
+        #     list, injecting tradingsymbol from the key), or
+        #   * None (DEFAULT) → get_positions_net() returns None (models paper / "no
+        #     broker book" → the reconciler does NOTHING). Existing tests unaffected.
+        # A special sentinel value of [] (empty list) models a present-but-EMPTY
+        # book (transient API blip) → the reconciler also does nothing.
+        self._net_book = net_book
         self.ltps = ltps or {}
         # FEATURE C: per-share MTF/MIS margin the mock reports (leverage). When
         # margins_available is False the margin API is simulated as DOWN → the
@@ -98,6 +115,37 @@ class MockBroker(BrokerClient):
         if self._net_positions is None:
             return None
         return self._net_positions.get(symbol)
+
+    def get_positions_net(self):
+        # None (default) → the reconciler treats it as "broker unreachable / paper"
+        # and does NOTHING. A list is the raw Kite-shaped net book. A dict is
+        # normalised to a list, injecting the symbol key as tradingsymbol.
+        nb = self._net_book
+        if nb is None:
+            return None
+        if isinstance(nb, dict):
+            rows = []
+            for sym, row in nb.items():
+                r = dict(row)
+                r.setdefault("tradingsymbol", sym)
+                rows.append(r)
+            return rows
+        return list(nb)
+
+    def get_holdings(self):
+        # None (default) → reconciler treats delivery holdings as unknown here. A
+        # list is the raw holdings book. A dict {symbol: {...}} is normalised.
+        hd = self._holdings
+        if hd is None:
+            return None
+        if isinstance(hd, dict):
+            rows = []
+            for sym, row in hd.items():
+                r = dict(row)
+                r.setdefault("tradingsymbol", sym)
+                rows.append(r)
+            return rows
+        return list(hd)
 
     def get_option_chain(self, symbol: str) -> List[Any]:
         spot = self.ltps.get(symbol, 100.0)

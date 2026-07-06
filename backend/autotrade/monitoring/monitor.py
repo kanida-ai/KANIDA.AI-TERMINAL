@@ -166,6 +166,36 @@ class PortfolioMonitor:
             con.commit()
         return stored
 
+    def refreeze_invested_basis(self) -> float:
+        """FORCE-recompute the invested basis over the CURRENT OPEN positions and
+        write it back onto the session row.
+
+        Unlike freeze_invested_basis() (idempotent-once, called after entry),
+        this is used by the AUTHORITATIVE position reconciler AFTER it corrects
+        the book (a position closed externally / a qty corrected to the broker):
+        the frozen basis must be re-derived from what is ACTUALLY still open so
+        the kill / trail denominator matches reality.
+
+        Product-aware, mirroring freeze_invested_basis:
+          * F&O basket    → total_allocated_capital (qty*avg is NOTIONAL, ~4-5x
+            the margin at risk).
+          * cash equity   → Σ(qty*avg_price) over the remaining OPEN positions.
+        Falls back to total_allocated_capital when nothing is open (avoids 0/div).
+        Returns the value written."""
+        positions = self._open_positions()
+        if self._is_fno(positions):
+            ib = self._total_allocated_capital
+        else:
+            ib = self.compute_invested_basis(positions)
+        stored = ib if ib > 0 else self._total_allocated_capital
+        with falcon_conn() as con:
+            con.execute(
+                "UPDATE autotrade_sessions SET invested_basis=? WHERE session_id=?",
+                (stored, self.session_id),
+            )
+            con.commit()
+        return stored
+
     # ── Intraday-basket trail state (strategy=="intraday_basket") ──────────────
     def load_trail_state(self):
         """Read the persisted (armed, peak) trail state for this session.
