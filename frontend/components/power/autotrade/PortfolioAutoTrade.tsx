@@ -1062,6 +1062,16 @@ export function PortfolioAutoTrade({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [createdLadder, campaignDate, loadLadders])
 
+  // Discard a draft campaign — PERMANENTLY delete it (it was never started), not
+  // just navigate away leaving an orphan CREATED row in the backend.
+  const onDiscardCampaign = useCallback(async () => {
+    const id = createdLadder?.ladder_id
+    if (id) await AutoTradeAPI.ladderDelete(id).catch(() => { /* best-effort */ })
+    backToList()
+    loadLadders()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createdLadder, loadLadders])
+
   const onCreate = useCallback(async () => {
     setError(null); setCreateSuggest(null); setBusy('create')
     try {
@@ -2452,7 +2462,7 @@ export function PortfolioAutoTrade({
           </div>
 
           <div className="mt-3 flex items-center gap-3">
-            <button type="button" onClick={backToList}
+            <button type="button" onClick={onDiscardCampaign}
               className="text-[12px] px-3 py-2 rounded-lg transition-colors"
               style={{ color: C.muted, border: `1px solid ${C.line}` }}>
               Discard

@@ -985,6 +985,13 @@ export const AutoTradeAPI = {
       body: JSON.stringify({ mode }),
     }),
 
+  // PERMANENTLY delete a campaign (draft or finished). 400 if it still has an
+  // open basket (cancel it first). This is what Discard/Delete should call — it
+  // removes the row, not just hides it.
+  ladderDelete: (id: string) =>
+    call<{ ok?: boolean; ladder_id?: string }>(
+      `/ladder/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
   // Live campaign view (poll ~5s). Optional-safe shape — never crash on a missing
   // field; degrade to "—".
   ladderStatus: (id: string) =>
