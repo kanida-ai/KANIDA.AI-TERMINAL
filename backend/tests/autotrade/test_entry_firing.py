@@ -96,6 +96,74 @@ def test_start_default_when_is_now(clean_positions, patched_brokers):
     assert res["n_placed"] == 1
 
 
+# ── 1b. POST-PLACEMENT REJECTION must NOT register a phantom position ──────────
+
+@pytest.fixture
+def patched_brokers_reject(monkeypatch):
+    """Like patched_brokers, but the mock REJECTS symbol 'B' post-placement (an
+    order_id is issued, then the exchange rejects it with 0 fill — a circuit-limit
+    breach). Verifies _fire_one drops the leg instead of registering it at the mark."""
+    created = {}
+    shared_ltps = {"A": 100.0, "B": 200.0, "C": 50.0, "D": 150.0, "E": 300.0}
+
+    def fake_build_client(profile, dry_run=True):
+        mb = MockBroker(profile=profile, dry_run=False, ltps=shared_ltps,
+                        reject_symbols={"B"})
+        created[profile.profile_id] = mb
+        return mb
+
+    monkeypatch.setattr(router_mod, "build_client", fake_build_client)
+    import autotrade.session as sess_mod
+    monkeypatch.setattr(sess_mod, "build_client", fake_build_client)
+    return created
+
+
+def test_post_placement_rejection_not_registered(clean_positions,
+                                                 patched_brokers_reject):
+    """The 2026-07-06 CEMPRO incident: a leg the exchange rejects AFTER placement
+    (order_id issued, then REJECTED, 0 fill) must NOT be registered as a phantom.
+    The other legs fill normally; the session runs with the REAL fills only."""
+    seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0),
+                  ("C", 3, 7.0, 50.0)])
+    cfg = TradingSessionConfig(total_allocated_capital=300000.0, top_n_stocks=3,
+                               sizing_mode="equal", kill_switch_enabled=False)
+    sess = TradingSession.create(cfg, mode="live")   # live → reconcile path runs
+    res = asyncio.run(sess.start(when="now"))
+    assert res["status"] == "RUNNING"
+    # B was rejected post-placement → only A and C are real positions.
+    st = sess.status()
+    assert st["n_open_positions"] == 2
+    from falcon.db import falcon_conn
+    with falcon_conn() as con:
+        syms = {r["symbol"] for r in con.execute(
+            "SELECT symbol FROM autotrade_positions WHERE session_id=? "
+            "AND status='OPEN'", (sess.session_id,)).fetchall()}
+    assert syms == {"A", "C"}          # B is NOT a phantom OPEN row
+    assert "B" not in syms
+
+
+def test_reconcile_entry_fill_signals_rejected(clean_positions,
+                                               patched_brokers_reject):
+    """_reconcile_entry_fill returns a distinct rejected sentinel (not None) on a
+    REJECTED order, so the caller can drop the leg vs falling back to the mark."""
+    profile = list(patched_brokers_reject.values()) or None
+    from autotrade.broker.router import build_client
+    from autotrade.config import BrokerProfile
+    prof = BrokerProfile(profile_id="p", broker_name="zerodha",
+                         allocated_capital=100000.0, order_product="MIS",
+                         instrument_type="EQ")
+    broker = build_client(prof, dry_run=False)
+    cfg = TradingSessionConfig(total_allocated_capital=100000.0, top_n_stocks=1)
+    sess = TradingSession.create(cfg, mode="live")
+    rec = asyncio.run(sess._reconcile_entry_fill(broker, "ord-B", 10))
+    assert rec is not None and rec.get("rejected") is True
+    assert rec.get("status") == "REJECTED"
+    # A COMPLETE-but-zero-fill order (still pending) returns None (fall back path).
+    rec2 = asyncio.run(sess._reconcile_entry_fill(broker, "ord-A", 10,
+                                                  max_wait_sec=1.0))
+    assert rec2 is None
+
+
 # ── 2. when="now" with the MARKET CLOSED is REFUSED — places NOTHING ───────────
 
 def test_start_now_market_closed_refused(clean_positions, patched_brokers):

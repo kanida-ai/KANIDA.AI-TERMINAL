@@ -29,7 +29,10 @@ FAILED OrderResult.
 TODO(certify) items (see RUPEEZY_VORTEX_API_REFERENCE.md §"Still to CONFIRM"):
   * RUPEEZY_API_BASE default host (#1).
   * Positions/holdings paths (#2/#3).
-  * Funds/margin path (#4).
+  * Funds path (#4). Order-margin (MIS/MTF leverage sizing) is now WIRED but
+    UNCERTIFIED: qty=1 order-margin probe → per-share margin, env-overridable
+    path RUPEEZY_MARGIN_PATH, tolerant parser, safe None (cash) fallback. Needs
+    one live response to confirm the endpoint path + field names (#4).
   * Instrument master download URL + format (#5).
   * Quotes/LTP endpoint (#6).
   * GTT inline object exact shape + MTF/GTT semantics (#8, reference §Orders).
@@ -51,6 +54,14 @@ log = logging.getLogger("kanida.autotrade.broker.rupeezy")
 _HTTP_TIMEOUT = 15
 _RETRY_MAX_ATTEMPTS = 3
 _RETRY_BASE_SLEEP_SEC = 0.4
+
+# Order-margin (equity intraday/MTF leverage) probe — see get_margin_per_share.
+# The endpoint path is env-overridable (RUPEEZY_MARGIN_PATH) until the Vortex
+# order-margin endpoint is certified (reference CONFIRM #4). Broker leverage is
+# stable intraday, so a short process cache spares N round-trips on the hot
+# preview path. Keyed (SYMBOL, vortex_product) — margin is account-independent.
+_MARGIN_TTL_SEC = 300
+_margin_cache: Dict[Any, Any] = {}  # (symbol, product) -> (per_share_margin, ts)
 
 # Our product string → Vortex `product` (reference §Orders adapter mapping).
 _PRODUCT_MAP = {
@@ -435,6 +446,106 @@ class RupeezyBroker(BrokerClient):
 
     # get_ltps_batch inherits the base loop over get_ltp (safe None fallback).
 
+    # ── Margin / leverage (equity MIS/MTF sizing) ─────────────────────────────
+    def _margin_probe(self, symbol: str, prod_vortex: str,
+                      ltp: float) -> Optional[float]:
+        """POST a qty=1 order-margin probe and return the per-share margin ₹
+        (qty=1 → the required margin IS the per-share figure), or None on any
+        failure / implausible value. Cached per (symbol, product).
+
+        SAFETY: any error, a missing margin field, or a value that exceeds the
+        full cash price (which would imply leverage < 1x → a mis-parse) returns
+        None so the caller cash-falls-back (never over-deploys)."""
+        ckey = (symbol.upper(), prod_vortex)
+        now = time.time()
+        hit = _margin_cache.get(ckey)
+        if hit and (now - hit[1]) < _MARGIN_TTL_SEC:
+            return hit[0]
+        if not ltp or ltp <= 0:
+            return None
+        try:
+            seg = self._map_exchange("NSE")
+            token = self._resolve_token(symbol, seg)
+        except Exception as e:
+            log.debug("rupeezy margin token miss for %s: %s", symbol, e)
+            return None
+        # TODO(certify): exact order-margin request/response shape (#4). We send
+        # the same order fields as a real qty=1 order; unknown extra fields are
+        # harmless and a wrong shape simply 4xx's → None → cash fallback.
+        body = {
+            "exchange": seg,
+            "token": token,
+            "transaction_type": "BUY",
+            "product": prod_vortex,
+            "variety": "RL-MKT",
+            "quantity": 1,
+            "price": round(float(ltp), 2),
+            "old_quantity": 0,
+            "old_price": 0.0,
+            "mode": "NEW",
+        }
+        try:
+            r = self._request("POST", _margin_path(), json_body=body)
+            r.raise_for_status()
+            mps = _extract_margin(r.json() or {})
+        except Exception as e:
+            log.warning("rupeezy margin probe failed for %s (%s) — cash fallback",
+                        symbol, e)
+            return None
+        if mps is None or mps <= 0:
+            return None
+        # Per-share margin must be <= full cash price (leverage >= 1x). A larger
+        # value means the wrong field was parsed (e.g. account-level margin) —
+        # refuse it rather than mis-size. Small epsilon absorbs charges/rounding.
+        if mps > float(ltp) * 1.05:
+            log.warning("rupeezy margin %.2f > LTP %.2f for %s — refusing "
+                        "(cash fallback)", mps, ltp, symbol)
+            return None
+        _margin_cache[ckey] = (float(mps), now)
+        return float(mps)
+
+    def get_margin_per_share(self, symbol: str,
+                             product: str = "MTF") -> Optional[float]:
+        """Per-share margin Vortex locks for `product`, so MIS/MTF equity sizes
+        off the broker's REAL intraday/delivery leverage (qty = budget /
+        margin_per_share) — the same contract the Zerodha adapter fulfils via
+        kite.order_margins. Cash-equivalent products (CNC/DELIVERY/NRML) return
+        None by design (1x → the caller cash-sizes on LTP).
+
+        Returns None on ANY failure → caller falls back to cash sizing (never
+        over-deploys). TODO(certify): the Vortex order-margin endpoint path +
+        field names (reference CONFIRM #4); the path is env-overridable via
+        RUPEEZY_MARGIN_PATH and the parser accepts the common spellings, so until
+        a live response is confirmed this safely returns None (cash sizing)."""
+        if not self._access_token():
+            return None
+        prod = self._map_product(product)
+        if prod not in ("INTRADAY", "MTF"):
+            return None  # cash product — 1x, size on LTP
+        return self._margin_probe(symbol, prod, self.get_ltp(symbol) or 0.0)
+
+    def get_margins_batch(self, symbols: List[str],
+                          product: str = "MTF") -> dict:
+        """{symbol: per_share_margin} for the whole pick list. Reuses ONE batched
+        LTP pass (base get_ltps_batch) then a cached per-symbol margin probe, so
+        the hot preview path re-fetches no prices. Symbols whose margin is
+        unavailable are ABSENT (caller cash-falls-back per symbol)."""
+        if not symbols or not self._access_token():
+            return {}
+        prod = self._map_product(product)
+        if prod not in ("INTRADAY", "MTF"):
+            return {}
+        ltps = self.get_ltps_batch(list(symbols))
+        out: Dict[str, float] = {}
+        for s in symbols:
+            ltp = ltps.get(s)
+            if not ltp or ltp <= 0:
+                continue
+            m = self._margin_probe(s, prod, float(ltp))
+            if m and m > 0:
+                out[s] = float(m)
+        return out
+
     # ── Portfolio (design §6) ─────────────────────────────────────────────────
     def get_positions(self) -> List[dict]:
         """Current-day positions. TODO(certify) exact path — reference CONFIRM #2
@@ -538,6 +649,40 @@ class RupeezyBroker(BrokerClient):
     def get_option_contract(self, symbol: str, strike: float,
                             expiry_preference: str) -> str:
         raise NotImplementedError("rupeezy option contract not implemented (EQ-first)")
+
+
+def _margin_path() -> str:
+    """Vortex order-margin endpoint path (env-overridable until certified — #4)."""
+    return os.environ.get("RUPEEZY_MARGIN_PATH", "").strip() or "/trading/margins"
+
+
+def _extract_margin(payload) -> Optional[float]:
+    """Pull the required per-order margin (₹) from a Vortex margin response,
+    tolerant of the field spelling (TODO(certify) exact name — #4). Accepts a
+    bare object, a {'data': {...}} wrapper, or a single-row list, and a nested
+    {'total': ...} value. Returns None when no positive margin field is found."""
+    data = payload
+    if isinstance(data, dict) and "data" in data:
+        data = data.get("data")
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    if not isinstance(data, dict):
+        return None
+    keys = ("required_margin", "total_margin", "margin_required", "final_margin",
+            "initial_margin", "total", "margin")
+    for k in keys:
+        v = data.get(k)
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)) and v > 0:
+            return float(v)
+        if isinstance(v, dict):
+            for kk in ("total", "required", "value", "amount"):
+                vv = v.get(kk)
+                if isinstance(vv, (int, float)) and not isinstance(vv, bool) \
+                        and vv > 0:
+                    return float(vv)
+    return None
 
 
 # Vortex order state → exit_poller (Kite-compatible) vocabulary.

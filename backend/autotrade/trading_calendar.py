@@ -344,6 +344,32 @@ def is_trading_day(d: Union[str, date, datetime]) -> bool:
     return heuristic
 
 
+def previous_trading_day(d: Union[str, date, datetime],
+                         inclusive: bool = False) -> date:
+    """The previous NSE trading day strictly BEFORE `d` (or `d` itself if
+    inclusive and `d` is a trading day). Skips weekends + holidays. Bounded scan
+    (≤ 31 days) so a mis-seeded holiday set can never loop forever.
+
+    Used by the signals-freshness gate: the freshest POSSIBLE signals are the
+    previous trading day's close, so 'recent' must be measured in trading days
+    (a raw calendar gap false-blocks every Monday / post-holiday morning)."""
+    dd = _to_date(d)
+    if inclusive and is_trading_day(dd):
+        return dd
+    cur = dd - timedelta(days=1)
+    for _ in range(31):
+        if is_trading_day(cur):
+            return cur
+        cur = cur - timedelta(days=1)
+    # Fallback (should be unreachable): the weekday-only previous day.
+    log.warning("previous_trading_day: no trading day within 31d of %s — "
+                "returning weekday fallback (check NSE_HOLIDAYS)", dd)
+    cur = dd - timedelta(days=1)
+    while cur.weekday() >= 5:
+        cur = cur - timedelta(days=1)
+    return cur
+
+
 def next_trading_day(d: Union[str, date, datetime],
                      inclusive: bool = False) -> date:
     """The next NSE trading day strictly AFTER `d` (or `d` itself if inclusive

@@ -294,13 +294,34 @@ def check_signals_recent(_kite, _ctx: Dict[str, Any]) -> CheckResult:
         today = _now_ist().date()
         latest_d = datetime.strptime(latest, "%Y-%m-%d").date()
         gap = (today - latest_d).days
-        # On a weekday morning past the deploy-ready window, signals must be <=1 day old.
         n = _now_ist()
         past_market_prep = n.weekday() < 5 and (n.hour, n.minute) >= (9, 0)
-        if past_market_prep and gap > 1:
-            return RED, (f"signals are {gap}d old (latest: {latest}); today is a trading day "
-                         f"past 09:00 IST"),\
-                       "run pipeline: daily_data_refresh -> daily_features -> daily_signals"
+        # Freshness must be measured in TRADING days, not calendar days. The
+        # freshest POSSIBLE signals are the previous trading day's close (no data
+        # on weekends/holidays), so a raw calendar gap>1 rule false-blocks EVERY
+        # Monday (Fri->Mon = 3 calendar days) and every post-holiday morning —
+        # exactly what stranded the 09:15 auto-trade entries on 2026-07-06.
+        # Compare against the previous trading day instead.
+        try:
+            from autotrade.trading_calendar import (previous_trading_day,
+                                                    is_trading_day)
+            expected = previous_trading_day(today, inclusive=False)
+            if latest_d >= expected:
+                return GREEN, (f"signals from {latest} (prev trading day "
+                               f"{expected}; {gap}d cal.)"), ""
+            if past_market_prep and is_trading_day(today):
+                return RED, (f"signals stale: latest {latest} is older than the "
+                             f"previous trading day {expected} (today {today} is "
+                             f"a trading day past 09:00 IST)"),\
+                           ("run pipeline: daily_data_refresh -> daily_features "
+                            "-> daily_signals")
+            # Pre-09:00, weekend, or holiday → soft (EOD may still be pending).
+            return YELLOW, (f"signals from {latest}; previous trading day is "
+                            f"{expected} (pre-open/holiday — soft)"),\
+                           "EOD may still be pending"
+        except Exception as e:  # calendar unavailable → calendar-day fallback
+            log.warning("signals_recent: trading calendar unavailable (%s) — "
+                        "calendar-day fallback", e)
         if gap > 4:
             return RED, f"signals are {gap}d old (latest: {latest})", "run daily_signals job"
         if gap > 2:

@@ -223,7 +223,8 @@ def _row_to_public(row, provider: KeyProvider) -> Dict[str, Any]:
     boolean 'has_secret' / 'has_token'."""
     d = dict(row)
     token_date = d.get("token_date")
-    status = _derive_status(d.get("status"), token_date)
+    status = _derive_status(d.get("status"), token_date,
+                            d.get("token_expires_at"))
     return {
         "broker_account_id": d.get("broker_account_id"),
         "user_id": d.get("user_id"),
@@ -235,6 +236,9 @@ def _row_to_public(row, provider: KeyProvider) -> Dict[str, Any]:
         "status": status,
         "token_date": token_date,
         "token_expiry": d.get("token_expiry"),
+        # Absolute expiry (e.g. Vortex JWT exp) — powers the real "expires" line on
+        # the connection card. None for daily-cycle brokers (Kite).
+        "token_expires_at": d.get("token_expires_at"),
         "created_at": d.get("created_at"),
         "updated_at": d.get("updated_at"),
         "last_login_at": d.get("last_login_at"),
@@ -245,15 +249,30 @@ def _row_to_public(row, provider: KeyProvider) -> Dict[str, Any]:
     }
 
 
-def _derive_status(stored_status: Optional[str], token_date: Optional[str]
-                   ) -> str:
-    """ACTIVE only if there is a token minted TODAY (IST). A stored ACTIVE with a
-    stale token_date is reported EXPIRED (Kite tokens die daily). PENDING/REVOKED/
-    ERROR pass through."""
+def _derive_status(stored_status: Optional[str], token_date: Optional[str],
+                   token_expires_at: Optional[str] = None) -> str:
+    """ACTIVE only if the token is still live. PENDING/REVOKED/ERROR pass through.
+
+    Two expiry rules, in order:
+      1. Absolute expiry (token_expires_at, e.g. a Vortex JWT `exp`): if it has
+         PASSED → EXPIRED, regardless of token_date. This catches short-lived
+         tokens that die intraday (a Vortex token can lapse before market open),
+         which the date-only rule would wrongly keep 'ACTIVE' all day.
+      2. Otherwise (brokers with no absolute stamp, e.g. Kite's daily cycle) →
+         ACTIVE only if token_date is TODAY (IST); a stale date → EXPIRED."""
     s = (stored_status or STATUS_PENDING).upper()
     if s in (STATUS_REVOKED, STATUS_ERROR, STATUS_PENDING):
         return s
-    # ACTIVE / EXPIRED → re-derive from token_date.
+    # ACTIVE / EXPIRED → re-derive.
+    if token_expires_at:
+        try:
+            exp = datetime.fromisoformat(str(token_expires_at))
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=IST)
+            if exp < _now_ist():
+                return STATUS_EXPIRED
+        except Exception:  # unparseable stamp → fall through to the date rule
+            pass
     if token_date and str(token_date) == _today_ist():
         return STATUS_ACTIVE
     return STATUS_EXPIRED
@@ -575,7 +594,8 @@ def get_decrypted_creds(broker_account_id: str, user_id: Optional[str] = None,
         refresh_token=refresh_token,
         token_date=d.get("token_date"),
         token_expires_at=d.get("token_expires_at"),
-        status=_derive_status(d.get("status"), d.get("token_date")),
+        status=_derive_status(d.get("status"), d.get("token_date"),
+                              d.get("token_expires_at")),
     )
 
 

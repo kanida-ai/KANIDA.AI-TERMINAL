@@ -21,8 +21,15 @@ class MockBroker(BrokerClient):
                  no_future_symbols: Optional[set] = None,
                  margins: Optional[Dict[str, float]] = None,
                  margins_available: bool = True,
-                 net_positions: Optional[Dict[str, int]] = None):
+                 net_positions: Optional[Dict[str, int]] = None,
+                 reject_symbols: Optional[set] = None):
         super().__init__(profile, dry_run=dry_run)
+        # POST-PLACEMENT REJECTION sim: symbols the broker ACCEPTS (issues an
+        # order_id) but the EXCHANGE then REJECTS asynchronously (0 fill) — e.g. a
+        # circuit-limit breach. place_order returns PLACED w/ no fill; the entry
+        # reconcile's get_order_status then reports REJECTED. Default empty →
+        # existing tests unaffected.
+        self.reject_symbols = reject_symbols or set()
         # Pre-exit reconciliation guard: simulate the broker's live net book.
         # {symbol: signed_qty}. None (default) means the mock does NOT answer the
         # net-position probe → the base default (None) is used and the exit path
@@ -102,6 +109,12 @@ class MockBroker(BrokerClient):
     # order lifecycle
     async def place_order(self, order) -> OrderResult:
         self.placed.append(order)
+        if order.symbol in self.reject_symbols:
+            # Accepted (order_id issued) but NO fill — the reconcile poll will see
+            # REJECTED. Mirrors a real exchange circuit-limit / RMS rejection.
+            return OrderResult(status="PLACED", broker_order_id="ord-" + order.symbol,
+                               symbol=order.symbol, qty=order.qty,
+                               filled_qty=0, avg_price=None)
         if order.symbol in self.partial_fills:
             filled = self.partial_fills[order.symbol]
             return OrderResult(status="PARTIAL", broker_order_id="ord-" + order.symbol,
@@ -125,6 +138,15 @@ class MockBroker(BrokerClient):
         # order_id shape is "exit-<SYMBOL>" (see place_market_exit). Report the
         # placed exit qty as fully filled so confirm_exit resolves COMPLETE for
         # non-dry mock brokers (matches a real broker's near-instant MARKET fill).
+        # ENTRY reconcile probe ("ord-<SYM>"): a rejected symbol reports REJECTED
+        # (0 fill) so _fire_one drops the leg instead of registering a phantom.
+        if str(order_id).startswith("ord-"):
+            esym = order_id[len("ord-"):]
+            if esym in self.reject_symbols:
+                return {"status": "REJECTED", "filled_quantity": 0,
+                        "average_price": 0.0}
+            return {"status": "COMPLETE",
+                    "filled_quantity": 0, "average_price": 0.0}
         sym = order_id[len("exit-"):] if str(order_id).startswith("exit-") else None
         if sym is not None:
             total = sum(q for s, q in self.exits if s == sym)

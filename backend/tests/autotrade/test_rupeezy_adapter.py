@@ -28,7 +28,9 @@ import pytest
 
 from autotrade.broker import registry, router
 from autotrade.broker.auth_base import RefreshNotSupported
-from autotrade.broker.rupeezy import RupeezyBroker, _normalise_status
+from autotrade.broker import rupeezy as rupeezy_mod
+from autotrade.broker.rupeezy import (
+    RupeezyBroker, _normalise_status, _extract_margin)
 from autotrade.broker.rupeezy_auth_provider import RupeezyAuth
 
 
@@ -215,6 +217,67 @@ def test_expiry_none():
     assert RupeezyAuth().expiry(TokenSet(access_token="a")) is None
 
 
+# ── JWT exp decoding (real, short-lived Vortex token) ─────────────────────────
+
+def _make_jwt(exp_ts):
+    """A minimal (unsigned) JWT carrying an `exp` claim — enough for the
+    read-only exp decode (no signature verification)."""
+    import base64
+    import json as _json
+
+    def b64(o):
+        return base64.urlsafe_b64encode(
+            _json.dumps(o).encode()).decode().rstrip("=")
+    return f"{b64({'alg': 'RS512', 'typ': 'JWT'})}.{b64({'exp': int(exp_ts)})}.sig"
+
+
+def _epoch(dt):
+    return int(dt.timestamp())
+
+
+def test_exchange_captures_jwt_exp(fake_requests):
+    """A real Vortex JWT carries a short `exp` — exchange must surface it as
+    TokenSet.expires_at (not None) so the card shows a true expiry."""
+    from datetime import datetime, timedelta
+    from autotrade.broker.auth_base import IST
+    exp_dt = datetime.now(IST) + timedelta(hours=2)
+    jwt = _make_jwt(_epoch(exp_dt))
+    fake_requests.set_next(_FakeResp(200, {"data": {"access_token": jwt}}))
+    ts = RupeezyAuth().exchange(_creds(), request_token="rt")
+    assert ts.expires_at is not None
+    assert _epoch(ts.expires_at) == _epoch(exp_dt)
+
+
+def test_expiry_decodes_jwt():
+    from datetime import datetime, timedelta
+    from autotrade.broker.auth_base import IST, TokenSet
+    exp_dt = datetime.now(IST) + timedelta(hours=1)
+    ts = TokenSet(access_token=_make_jwt(_epoch(exp_dt)))
+    got = RupeezyAuth().expiry(ts)
+    assert got is not None and _epoch(got) == _epoch(exp_dt)
+
+
+def test_validate_expired_jwt_short_circuits_no_http(fake_requests):
+    """An already-expired JWT is EXPIRED locally — NO funds round-trip."""
+    from datetime import datetime, timedelta
+    from autotrade.broker.auth_base import IST
+    past = _make_jwt(_epoch(datetime.now(IST) - timedelta(minutes=5)))
+    h = RupeezyAuth().validate(_creds(access_token=past))
+    assert h.ok is False and h.status == "EXPIRED"
+    assert fake_requests.calls == []                 # no network call
+
+
+def test_validate_live_jwt_hits_network(fake_requests):
+    """A still-valid JWT falls through to the live funds ping (200 → ACTIVE)."""
+    from datetime import datetime, timedelta
+    from autotrade.broker.auth_base import IST
+    future = _make_jwt(_epoch(datetime.now(IST) + timedelta(hours=2)))
+    fake_requests.set_next(_FakeResp(200, {"data": {}}))
+    h = RupeezyAuth().validate(_creds(access_token=future))
+    assert h.ok is True and h.status == "ACTIVE"
+    assert any("/user/funds" in c["url"] for c in fake_requests.calls)
+
+
 # ── registry / router wiring ──────────────────────────────────────────────────
 
 def test_registry_rupeezy_live():
@@ -364,3 +427,125 @@ def test_dry_run_order_status_synthetic():
     b = RupeezyBroker(_live_profile(), dry_run=True)
     st = b.get_order_status("anything")
     assert st["status"] == "COMPLETE"
+
+
+# ── MIS/MTF margin-per-share (broker leverage sizing) ─────────────────────────
+
+@pytest.fixture(autouse=True)
+def _clear_margin_cache():
+    """The per-share margin cache is module-level — clear it between tests so a
+    cached value from one test never leaks into another."""
+    rupeezy_mod._margin_cache.clear()
+    yield
+    rupeezy_mod._margin_cache.clear()
+
+
+def _quote(ltp):
+    return _FakeResp(200, {"data": {"ltp": ltp}})
+
+
+def test_margin_per_share_parses_required_margin(fake_requests, master_file,
+                                                 monkeypatch):
+    """MIS margin probe: qty=1 order-margin → per-share margin, and the probe body
+    carries INTRADAY product + quantity=1 at the live LTP."""
+    fake_requests.on("/data/quote", _quote(1000.0))
+    fake_requests.on("/trading/margins",
+                     _FakeResp(200, {"data": {"required_margin": 200.0}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    mps = b.get_margin_per_share("INFY", "MIS")
+    assert mps == 200.0                      # 5x intraday leverage on ₹1000
+    body = [c for c in fake_requests.calls
+            if "/trading/margins" in c["url"]][-1]["json"]
+    assert body["product"] == "INTRADAY"     # MIS → INTRADAY
+    assert body["quantity"] == 1
+    assert body["price"] == 1000.0
+    assert body["token"] == 408065           # from master
+
+
+def test_margin_mtf_product_mapped(fake_requests, master_file, monkeypatch):
+    fake_requests.on("/data/quote", _quote(500.0))
+    fake_requests.on("/trading/margins",
+                     _FakeResp(200, {"data": {"total_margin": 175.0}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_margin_per_share("INFY", "MTF") == 175.0
+    body = [c for c in fake_requests.calls
+            if "/trading/margins" in c["url"]][-1]["json"]
+    assert body["product"] == "MTF"
+
+
+def test_margin_cnc_returns_none_no_probe(fake_requests, master_file):
+    """Cash product → None (1x, size on LTP) and NO margin HTTP call."""
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_margin_per_share("INFY", "CNC") is None
+    assert not any("/trading/margins" in c["url"] for c in fake_requests.calls)
+
+
+def test_margin_rejects_value_above_ltp(fake_requests, master_file):
+    """A margin > full cash price implies leverage < 1x → mis-parse; refuse it
+    (cash fallback) rather than mis-size."""
+    fake_requests.on("/data/quote", _quote(1000.0))
+    fake_requests.on("/trading/margins",
+                     _FakeResp(200, {"data": {"margin": 5000.0}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_margin_per_share("INFY", "MIS") is None
+
+
+def test_margin_endpoint_error_falls_back_none(fake_requests, master_file):
+    fake_requests.on("/data/quote", _quote(1000.0))
+    fake_requests.on("/trading/margins", _FakeResp(500, {}, text="boom"))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_margin_per_share("INFY", "MIS") is None
+
+
+def test_margin_no_ltp_returns_none(fake_requests, master_file):
+    """No LTP (quote fails) → None without ever probing margin."""
+    fake_requests.on("/data/quote", _FakeResp(500, {}, text="no quote"))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_margin_per_share("INFY", "MIS") is None
+    assert not any("/trading/margins" in c["url"] for c in fake_requests.calls)
+
+
+def test_margins_batch_aggregates(fake_requests, master_file):
+    fake_requests.on("/data/quote", _quote(1000.0))     # both symbols priced same
+    fake_requests.on("/trading/margins",
+                     _FakeResp(200, {"data": {"required_margin": 250.0}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    out = b.get_margins_batch(["INFY", "TCS"], "MIS")
+    assert out == {"INFY": 250.0, "TCS": 250.0}
+
+
+def test_margins_batch_cash_product_empty(fake_requests, master_file):
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_margins_batch(["INFY"], "CNC") == {}
+
+
+def test_margin_cache_hit_skips_second_probe(fake_requests, master_file):
+    fake_requests.on("/data/quote", _quote(1000.0))
+    fake_requests.on("/trading/margins",
+                     _FakeResp(200, {"data": {"required_margin": 200.0}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_margin_per_share("INFY", "MIS") == 200.0
+    n_probe = sum(1 for c in fake_requests.calls if "/trading/margins" in c["url"])
+    assert b.get_margin_per_share("INFY", "MIS") == 200.0   # served from cache
+    n_probe2 = sum(1 for c in fake_requests.calls if "/trading/margins" in c["url"])
+    assert n_probe2 == n_probe                              # no extra probe
+
+
+def test_margin_path_env_override(fake_requests, master_file, monkeypatch):
+    monkeypatch.setenv("RUPEEZY_MARGIN_PATH", "/v2/margins/order")
+    fake_requests.on("/data/quote", _quote(1000.0))
+    fake_requests.on("/v2/margins/order",
+                     _FakeResp(200, {"data": {"required_margin": 300.0}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_margin_per_share("INFY", "MIS") == 300.0
+    assert any("/v2/margins/order" in c["url"] for c in fake_requests.calls)
+
+
+def test_extract_margin_field_variants():
+    assert _extract_margin({"data": {"required_margin": 10.0}}) == 10.0
+    assert _extract_margin({"total_margin": 12.5}) == 12.5
+    assert _extract_margin([{"margin": 7.0}]) == 7.0
+    assert _extract_margin({"data": {"margin": {"total": 9.0}}}) == 9.0
+    assert _extract_margin({"data": {}}) is None
+    assert _extract_margin({"data": {"required_margin": 0}}) is None
+    assert _extract_margin("nonsense") is None

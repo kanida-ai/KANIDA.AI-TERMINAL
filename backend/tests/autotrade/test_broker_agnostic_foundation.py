@@ -177,6 +177,99 @@ def test_store_access_token_delegates(vault_key, wipe_accounts):
     assert vault.get_decrypted_creds(bid, user_id="u1").access_token == "tok"
 
 
+# ── broker-name binding: a bound account must build ITS broker's adapter ──────
+# The default profile is hardcoded broker_name="zerodha". A power user whose
+# account is Rupeezy would otherwise be sized through the Zerodha adapter (every
+# Kite LTP/margin call fails → "no sizable positions"). Cred resolution must
+# rebind broker_name to the account's real broker — in BOTH the preview and the
+# live session paths, so the preview and the live fire agree.
+
+def _default_profile(broker_account_id):
+    from autotrade.config import BrokerProfile
+    return BrokerProfile(
+        profile_id="zerodha_default", broker_name="zerodha",
+        allocated_capital=100000.0, order_product="MIS",
+        instrument_type="EQ", broker_account_id=broker_account_id)
+
+
+def test_preview_rebinds_broker_name_to_account_broker(vault_key, wipe_accounts):
+    from autotrade.session import _preview_resolve_creds
+    pub = vault.put_account("u9", "rupeezy", "Vortex", "appid", "xkey")
+    bid = pub["broker_account_id"]
+    vault.store_tokens(bid, "rz-token", user_id="u9")
+    prof = _default_profile(bid)
+    assert prof.broker_name == "zerodha"          # default before resolution
+    _preview_resolve_creds(prof, user_id="u9")
+    assert prof.broker_name == "rupeezy"          # rebound to the account's broker
+    assert prof.access_token == "rz-token"
+    assert prof.broker_account_id == bid
+
+
+def test_live_session_rebinds_broker_name_to_account_broker(vault_key, wipe_accounts):
+    from autotrade.session import TradingSession
+    from autotrade.config import TradingSessionConfig
+    pub = vault.put_account("u9", "rupeezy", "Vortex", "appid", "xkey")
+    bid = pub["broker_account_id"]
+    vault.store_tokens(bid, "rz-token", user_id="u9")
+    cfg = TradingSessionConfig(total_allocated_capital=100000.0, top_n_stocks=5,
+                               order_product="MIS", instrument_type="EQ")
+    sess = TradingSession.create(cfg, mode="paper", user_id="u9",
+                                 broker_account_id=bid)
+    prof = _default_profile(bid)
+    sess._resolve_account_creds(prof)
+    assert prof.broker_name == "rupeezy"          # LIVE path matches preview
+    assert prof.access_token == "rz-token"
+
+
+def test_zerodha_account_keeps_zerodha(vault_key, wipe_accounts):
+    """A zerodha account resolves to the zerodha adapter (no regression)."""
+    from autotrade.session import _preview_resolve_creds
+    pub = vault.put_account("u9", "zerodha", "Main", "kkey", "ksecret")
+    bid = pub["broker_account_id"]
+    vault.store_tokens(bid, "z-token", user_id="u9")
+    prof = _default_profile(bid)
+    _preview_resolve_creds(prof, user_id="u9")
+    assert prof.broker_name == "zerodha"
+
+
+# ── status honours an absolute expiry (Vortex JWT exp) ────────────────────────
+
+def test_derive_status_absolute_expiry_past_is_expired():
+    """A token minted TODAY but whose absolute expiry has PASSED → EXPIRED
+    (a short-lived Vortex JWT that lapsed intraday), not ACTIVE-all-day."""
+    from autotrade import vault as v
+    today = v._today_ist()
+    past = (datetime.now(v.IST) - timedelta(minutes=5)).isoformat()
+    assert v._derive_status("ACTIVE", today, past) == "EXPIRED"
+
+
+def test_derive_status_absolute_expiry_future_is_active():
+    from autotrade import vault as v
+    today = v._today_ist()
+    future = (datetime.now(v.IST) + timedelta(hours=2)).isoformat()
+    assert v._derive_status("ACTIVE", today, future) == "ACTIVE"
+
+
+def test_derive_status_no_absolute_expiry_uses_token_date():
+    """No absolute stamp (Kite daily) → unchanged token_date rule."""
+    from autotrade import vault as v
+    assert v._derive_status("ACTIVE", v._today_ist(), None) == "ACTIVE"
+    assert v._derive_status("ACTIVE", "2020-01-01", None) == "EXPIRED"
+
+
+def test_derive_status_expired_via_stored_creds_roundtrip(vault_key, wipe_accounts):
+    """End-to-end: an account whose token_expires_at is in the past reports
+    EXPIRED through the public serialiser, even with today's token_date."""
+    from autotrade import vault as v
+    pub = v.put_account("u9", "rupeezy", "Vortex", "appid", "xkey")
+    bid = pub["broker_account_id"]
+    past = (datetime.now(v.IST) - timedelta(minutes=1)).isoformat()
+    v.store_tokens(bid, "tok", expires_at=past, user_id="u9")
+    got = v.get_account_public(bid, user_id="u9")
+    assert got["status"] == "EXPIRED"
+    assert got["token_expires_at"] == past
+
+
 def test_record_health(vault_key, wipe_accounts):
     from falcon.db import falcon_conn
     pub = vault.put_account("u1", "zerodha", "Main", "k", "s")

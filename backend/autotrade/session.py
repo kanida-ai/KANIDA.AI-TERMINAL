@@ -490,6 +490,12 @@ def _preview_resolve_creds(prof, user_id: Optional[str]) -> None:
         prof.api_secret = creds.api_secret or ""
         prof.access_token = creds.access_token
         prof.broker_account_id = acct_id
+        # Bind the adapter to the ACCOUNT'S broker. The default preview profile is
+        # hardcoded broker_name="zerodha"; without this a Rupeezy (or any non-Kite)
+        # account is sized through the Zerodha adapter → every Kite LTP/margin call
+        # fails → "no sizable positions". Keep the default when the vault omits it.
+        if getattr(creds, "broker", None):
+            prof.broker_name = creds.broker
     except Exception:  # pragma: no cover - preview must never crash on creds
         prof.broker_account_id = None
 
@@ -1005,6 +1011,11 @@ class TradingSession:
         prof.api_secret = creds.api_secret or ""
         prof.access_token = creds.access_token or ""
         prof.broker_account_id = acct_id
+        # Bind the LIVE adapter to the ACCOUNT'S broker so it matches what the
+        # preview sized (a Rupeezy account must build a RupeezyBroker, not the
+        # hardcoded default zerodha leg). Keep the default when the vault omits it.
+        if getattr(creds, "broker", None):
+            prof.broker_name = creds.broker
 
     # ── Start: now | scheduled ──────────────────────────────────────────────────
     async def start(self, when: str = "now") -> Dict[str, Any]:
@@ -1475,6 +1486,20 @@ class TradingSession:
                 not fill_price or not fill_qty):
             rec = await self._reconcile_entry_fill(
                 broker, res.broker_order_id, qty)
+            if rec and rec.get("rejected"):
+                # POST-PLACEMENT REJECTION (real-money safety). The broker gave an
+                # order_id (so the upfront guard passed) but the EXCHANGE rejected
+                # the order asynchronously (circuit-limit breach / RMS) → filled_qty
+                # is 0, there is NO position. Do NOT fall back to the entry mark and
+                # register a PHANTOM: it would inflate basket return + trail and make
+                # a later exit try to SELL shares we never bought. Drop the leg.
+                # (2026-07-06 incident: CEMPRO pinned at its upper circuit.)
+                err = (f"broker rejected order {res.broker_order_id} "
+                       f"post-placement ({rec.get('status')})")
+                log.error("entry REJECTED (post-placement) %s: %s — NOT "
+                          "registering", symbol, err)
+                return {"symbol": symbol, "status": "FAILED", "error": err,
+                        "broker_profile": prof.profile_id}
             if rec:
                 fill_price = rec.get("avg_price") or fill_price
                 fill_qty = rec.get("filled_qty") or fill_qty
@@ -1550,7 +1575,12 @@ class TradingSession:
             if status == "COMPLETE" and filled > 0 and avg > 0:
                 return {"avg_price": avg, "filled_qty": filled}
             if status in ("REJECTED", "CANCELLED"):
-                return None
+                # TERMINAL REJECTION (distinct from 'still pending'). The broker
+                # ACCEPTED the order (we have an order_id) but the EXCHANGE later
+                # rejected it (circuit-limit breach, RMS…). Signal this explicitly
+                # so the caller DROPS the leg instead of falling back to the mark
+                # and registering a phantom. (2026-07-06: CEMPRO upper-circuit.)
+                return {"rejected": True, "status": status}
             await asyncio.sleep(poll_interval)
         log.warning("entry reconcile %s: no confirmed fill within %.0fs — "
                     "falling back to reference mark", order_id, max_wait_sec)

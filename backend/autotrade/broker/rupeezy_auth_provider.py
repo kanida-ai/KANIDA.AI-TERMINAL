@@ -68,6 +68,33 @@ def _proxies():
         return None
 
 
+def _jwt_exp(token: str) -> Optional[datetime]:
+    """Best-effort decode of a JWT access token's `exp` claim → aware IST
+    datetime, or None. Read-only, NO signature verification — we only need the
+    expiry HINT to drive status/UI (the broker still enforces the real thing).
+
+    Vortex issues an RS512 JWT whose `exp` is the true, short session expiry
+    (observed ~2-3h — well before next-day, and can lapse BEFORE market open).
+    Surfacing it lets the account card show a real expiry and lets status flip
+    to EXPIRED on time, instead of treating the token as an opaque all-day
+    'session'. Any parse issue (not a JWT / no exp) → None."""
+    try:
+        import base64
+        import json as _json
+        parts = (token or "").split(".")
+        if len(parts) != 3:
+            return None
+        seg = parts[1]
+        payload = _json.loads(
+            base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4)))
+        exp = payload.get("exp")
+        if not exp:
+            return None
+        return datetime.fromtimestamp(int(exp), IST)
+    except Exception:  # pragma: no cover - defensive; any parse issue → None
+        return None
+
+
 class RupeezyAuth(BrokerAuthProvider):
     broker_name = "rupeezy"
     capabilities = BrokerCapabilities(
@@ -158,8 +185,11 @@ class RupeezyAuth(BrokerAuthProvider):
             detail += (". If it says invalid/expired, click Log in again for a "
                        "fresh token and paste it right away.")
             raise ValueError(detail)
+        # Vortex returns an RS512 JWT with a real (short) `exp` — capture it so the
+        # account card shows a true expiry and status flips to EXPIRED on time.
+        # None when the token isn't a decodable JWT (then the health-ping drives it).
         return TokenSet(access_token=str(access_token), refresh_token=None,
-                        expires_at=None)  # session-scoped; health-ping drives EXPIRED
+                        expires_at=_jwt_exp(str(access_token)))
 
     # 3. REFRESH — inherits RefreshNotSupported (has_refresh_token=False).
 
@@ -175,6 +205,14 @@ class RupeezyAuth(BrokerAuthProvider):
         if not access_token:
             return TokenHealth(ok=False, status=STATUS_EXPIRED,
                                detail="no access_token (re-connect the account)")
+        # Local fast-path: a JWT whose `exp` has passed is definitively EXPIRED —
+        # no network round-trip, and accurate even while the funds path is still
+        # uncertified. (Vortex JWTs are short-lived; this catches them on time.)
+        exp = _jwt_exp(access_token)
+        if exp is not None and exp < datetime.now(IST):
+            return TokenHealth(
+                ok=False, status=STATUS_EXPIRED,
+                detail=f"token expired at {exp:%Y-%m-%d %H:%M IST}")
         # TODO(certify): confirm the funds path — reference CONFIRM #4
         # (`GET {base}/user/funds`). Positions (#2) is an equally valid cheap ping.
         url = f"{_api_base()}/user/funds"
@@ -197,6 +235,7 @@ class RupeezyAuth(BrokerAuthProvider):
 
     # 5. EXPIRY ────────────────────────────────────────────────────────────────
     def expiry(self, token_set: TokenSet) -> Optional[datetime]:
-        """Session-scoped: no absolute expiry documented. Returns None so the
-        health-ping (validate) is the source of truth for EXPIRED detection."""
-        return None
+        """Decode the access-token JWT's `exp` (Vortex issues a short-lived RS512
+        JWT). Returns the aware IST expiry, or None when the token isn't a JWT /
+        carries no exp (then the health-ping drives EXPIRED detection)."""
+        return _jwt_exp(getattr(token_set, "access_token", "") or "")
