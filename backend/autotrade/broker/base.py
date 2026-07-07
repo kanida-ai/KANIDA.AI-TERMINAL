@@ -306,3 +306,24 @@ class BrokerClient(ABC):
         """Fetch a GTT's current state (e.g. to detect it triggered). No-op
         default (returns None)."""
         return None
+
+    def get_gtt_fill(self, gtt_id: str) -> Optional[dict]:
+        """RECONCILIATION FRAMEWORK (Phase 4): POSITIVE fill evidence for a
+        TRIGGERED GTT.
+
+        When a GTT fires, Kite marks it status='triggered' and PLACES a real
+        order — the GTT object's `orders[]` carries that order's broker order-id
+        (via `result` / `order_id`) but NOT always its live fill status. This
+        helper resolves the fired leg's order-id and asks the broker for THAT
+        order's status via get_order_status, returning:
+
+            {"status": <ORDER STATUS>, "filled_quantity": int,
+             "average_price": float, "order_id": str}
+
+        as the confirmed fill evidence. Returns None when the GTT is NOT
+        triggered (active / absent / cancelled) or when no fired order-id can be
+        resolved — the caller then treats it conservatively (never closes).
+
+        Default no-op (None) — paper / stub / uncertified brokers have no real
+        GTT. Only the live Zerodha adapter overrides it."""
+        return None

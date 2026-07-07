@@ -994,6 +994,11 @@ class ZerodhaBroker(BrokerClient):
 
     def get_gtt(self, gtt_id):
         """Fetch a GTT's current state via kite.get_gtt (to detect it triggered).
+
+        Returns the FULL Kite GTT object, including its `orders` list — each leg
+        carries a `result` (with the placed order's id) once the GTT has fired,
+        which get_gtt_fill uses to resolve the ACTUAL fill.
+
         Dry-run / disabled → None. Returns None on any error."""
         if not self._live_allowed():
             return None
@@ -1001,4 +1006,95 @@ class ZerodhaBroker(BrokerClient):
             return self.kite.get_gtt(trigger_id=gtt_id)
         except Exception as e:
             log.debug("get_gtt failed for %s: %s", gtt_id, e)
+            return None
+
+    @staticmethod
+    def _extract_fired_order_id(state: Any) -> Optional[str]:
+        """Pull the broker order-id of the order a TRIGGERED GTT placed.
+
+        Kite's get_gtt object exposes each leg under `orders`; once a leg fires
+        its placed-order reference appears as `result` (a dict) carrying
+        `order_id`, or the leg dict itself may carry `order_id` / `result` as a
+        bare id string. We scan every leg and return the first resolvable id.
+
+        Returns None when no fired order-id can be found (GTT armed but not fired,
+        or an unexpected shape) — the caller then treats it conservatively."""
+        if state is None:
+            return None
+        orders = state.get("orders") if isinstance(state, dict) \
+            else getattr(state, "orders", None)
+        if not orders:
+            return None
+        def _oid(result, leg):
+            if isinstance(result, dict):
+                # REAL Kite triggered-GTT shape (verified live 2026-07-07 on a
+                # fired GTT): the placed order-id lives at
+                #   leg["result"]["order_result"]["order_id"].
+                orr = result.get("order_result")
+                if isinstance(orr, dict) and orr.get("order_id"):
+                    return orr.get("order_id")
+                oid = result.get("order_id") or result.get("id")
+                if oid:
+                    return oid
+            elif isinstance(result, str):
+                return result
+            if isinstance(leg, dict):
+                return leg.get("order_id")
+            return getattr(leg, "order_id", None)
+
+        for leg in orders:
+            result = leg.get("result") if isinstance(leg, dict) \
+                else getattr(leg, "result", None)
+            oid = _oid(result, leg)
+            if oid:
+                return str(oid)
+        return None
+
+    def get_gtt_fill(self, gtt_id) -> Optional[dict]:
+        """RECONCILIATION FRAMEWORK (Phase 4): resolve the POSITIVE fill evidence
+        for a TRIGGERED GTT.
+
+        Flow (live only):
+          1. get_gtt(gtt_id) → the full Kite GTT object.
+          2. If its status is NOT 'triggered', return None (nothing fired — the
+             caller keeps the position OPEN).
+          3. Extract the fired leg's broker order-id from `orders[].result`.
+          4. get_order_status(order_id) → the ACTUAL order status, filled qty and
+             average price.
+
+        Returns {"status", "filled_quantity", "average_price", "order_id"} — the
+        confirmed fill evidence — or None when the GTT isn't triggered or no fired
+        order-id can be resolved (conservative: the caller never closes on None).
+
+        Dry-run / disabled → None (paper never places a real GTT)."""
+        if not self._live_allowed():
+            return None
+        try:
+            state = self.get_gtt(gtt_id)
+            if state is None:
+                return None
+            status_raw = state.get("status") if isinstance(state, dict) \
+                else getattr(state, "status", None)
+            if str(status_raw or "").lower() != "triggered":
+                # Not triggered (active / cancelled / deleted / expired) — no
+                # fired order to confirm. Return None; the reconciler handles the
+                # GTT-object status separately.
+                return None
+            order_id = self._extract_fired_order_id(state)
+            if not order_id:
+                log.debug("get_gtt_fill %s: triggered but no fired order-id in "
+                          "orders[] — treating as unresolved", gtt_id)
+                return None
+            order = self.get_order_status(order_id)
+            if not order:
+                # Order id known but not yet visible in kite.orders() — unresolved.
+                return None
+            return {
+                "status": str(order.get("status") or "").upper(),
+                "filled_quantity": int(order.get("filled_quantity") or 0),
+                "average_price": float(order.get("average_price") or 0.0),
+                "order_id": str(order_id),
+            }
+        except Exception as e:  # pragma: no cover - defensive; never raise
+            log.debug("get_gtt_fill failed for %s: %s", gtt_id, e)
             return None

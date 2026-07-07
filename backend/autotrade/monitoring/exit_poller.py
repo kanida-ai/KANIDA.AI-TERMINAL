@@ -100,9 +100,11 @@ async def confirm_exit(
 
         if kite_status == "COMPLETE":
             if filled_qty >= qty:
-                # Full fill confirmed.
+                # Full fill confirmed. RECONCILIATION Phase 1: record the EXIT
+                # order-id on the closed row (attributable by order-id).
                 fill_price = avg_price if avg_price > 0 else None
-                registry.mark_closed(symbol, close_reason, exit_price=fill_price)
+                registry.mark_closed(symbol, close_reason, exit_price=fill_price,
+                                     exit_order_id=order_id)
                 log.info(
                     "confirm_exit %s/%s: COMPLETE fill_qty=%d exit_price=%s",
                     session_id, symbol, filled_qty, fill_price)
@@ -122,7 +124,7 @@ async def confirm_exit(
         elif kite_status in ("REJECTED", "CANCELLED"):
             registry.mark_exit_failed(
                 symbol, f"order {kite_status}",
-                broker_profile=None)
+                broker_profile=None, exit_order_id=order_id)
             log.error("confirm_exit %s/%s: order %s — gate released for retry",
                       session_id, symbol, kite_status)
             return {"status": kite_status, "filled_qty": filled_qty,

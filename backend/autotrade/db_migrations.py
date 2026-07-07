@@ -111,6 +111,22 @@ def run_migrations() -> dict:
                         f"ALTER TABLE autotrade_positions ADD COLUMN {name} {ddl_type}")
                     added_cols.append(name)
 
+        # ── 2b-oid. ALTER-guard the ORDER-ID tracking columns on
+        # autotrade_positions (RECONCILIATION FRAMEWORK Phase 1). entry_order_id
+        # is the broker order-id of the ENTRY fill; exit_order_id the broker
+        # order-id of the EXIT fill (or the GTT-fired order). Both NULLABLE — every
+        # existing row stays NULL (the reconcilers handle absent ids), so this is
+        # byte-for-byte unchanged for legacy rows. These enable PER-SESSION
+        # attribution of a broker order (never the account aggregate). Additive +
+        # idempotent.
+        if _table_exists(con, "autotrade_positions"):
+            have = set(_existing_columns(con, "autotrade_positions"))
+            for name in ("entry_order_id", "exit_order_id"):
+                if name not in have:
+                    con.execute(
+                        f"ALTER TABLE autotrade_positions ADD COLUMN {name} TEXT")
+                    added_cols.append(name)
+
         # ── 2b-dir. ALTER-guard `direction` on autotrade_positions ────────────
         # FUTURES long/short. Per-position direction so the P&L sign + exit side
         # invert ONLY for shorts. DEFAULT 'long' → every existing row + every
@@ -278,6 +294,12 @@ CREATE TABLE IF NOT EXISTS autotrade_positions (
     gtt_id          TEXT,
     gtt_stop        REAL,
     gtt_target      REAL,
+    -- RECONCILIATION FRAMEWORK (Phase 1): the broker order-ids for this position.
+    -- entry_order_id = the ENTRY fill's order id; exit_order_id = the EXIT fill's
+    -- order id (or the GTT-fired order). Both NULLABLE — enable PER-SESSION
+    -- attribution of a broker order by order-id (never the account aggregate).
+    entry_order_id  TEXT,
+    exit_order_id   TEXT,
     -- FUTURES long/short. 'long' (default) = entry BUY, exit SELL, P&L
     -- (ltp-avg)*qty. 'short' = entry SELL, exit BUY-to-cover, P&L (avg-ltp)*qty.
     -- Every equity/long row is 'long' → byte-for-byte unchanged.

@@ -25,7 +25,9 @@ class MockBroker(BrokerClient):
                  net_book: Optional[Any] = None,
                  holdings: Optional[Any] = None,
                  reject_symbols: Optional[set] = None,
-                 quotes: Optional[Dict[str, dict]] = None):
+                 quotes: Optional[Dict[str, dict]] = None,
+                 gtts: Optional[Dict[str, dict]] = None,
+                 order_status: Optional[Dict[str, dict]] = None):
         super().__init__(profile, dry_run=dry_run)
         # DELIVERY holdings book (list of raw holding rows, or {symbol: {quantity,
         # t1_quantity, average_price}} auto-normalised). None (default) → get_holdings
@@ -74,6 +76,14 @@ class MockBroker(BrokerClient):
         self.exits: List[tuple] = []          # (symbol, qty) — unchanged shape
         self.exit_calls: List[dict] = []      # full exit args incl. direction
         self.cancelled: List[str] = []
+        # RECONCILIATION Phase 4: GTT-fill confirmation support.
+        #   gtts        : {gtt_id: <kite get_gtt object dict>} — what get_gtt returns.
+        #   order_status: {order_id: <kite order dict>} — what get_order_status
+        #                 returns for the fired GTT order (status/filled_quantity/
+        #                 average_price). None (default) → both no-op (base
+        #                 behaviour), so existing tests are unaffected.
+        self._gtts = gtts
+        self._order_status_map = order_status
 
     # QUOTE-DRIVEN MARKETABLE-LIMIT: the live order book the mock reports.
     # {symbol: {ltp,bid,ask,upper_circuit,lower_circuit,ts}}. None (DEFAULT) →
@@ -197,7 +207,52 @@ class MockBroker(BrokerClient):
         self.cancelled.append(order_id)
         return {"status": "CANCELLED", "order_id": order_id}
 
+    # ── GTT-fill confirmation (RECONCILIATION Phase 4) ────────────────────────
+    def get_gtt(self, gtt_id):
+        # None (default) → base no-op. A configured map returns the full Kite
+        # GTT object (status + orders[]) for the reconciler.
+        if self._gtts is None:
+            return None
+        return self._gtts.get(str(gtt_id))
+
+    def get_gtt_fill(self, gtt_id):
+        # Mirror the LIVE ZerodhaBroker.get_gtt_fill flow: only a TRIGGERED GTT
+        # yields positive fill evidence, resolved via the fired order-id ->
+        # get_order_status. None otherwise (not triggered / no map / no fired id).
+        if self._gtts is None:
+            return None
+        state = self._gtts.get(str(gtt_id))
+        if not isinstance(state, dict):
+            return None
+        if str(state.get("status") or "").lower() != "triggered":
+            return None
+        order_id = None
+        for leg in (state.get("orders") or []):
+            result = leg.get("result") if isinstance(leg, dict) else None
+            if isinstance(result, dict):
+                order_id = result.get("order_id") or result.get("id")
+            elif isinstance(result, str):
+                order_id = result
+            order_id = order_id or (leg.get("order_id") if isinstance(leg, dict) else None)
+            if order_id:
+                break
+        if not order_id:
+            return None
+        order = self.get_order_status(str(order_id))
+        if not order:
+            return None
+        return {
+            "status": str(order.get("status") or "").upper(),
+            "filled_quantity": int(order.get("filled_quantity") or 0),
+            "average_price": float(order.get("average_price") or 0.0),
+            "order_id": str(order_id),
+        }
+
     def get_order_status(self, order_id: str) -> dict:
+        # RECONCILIATION Phase 4: an explicit order_status map takes precedence
+        # (used to model a fired GTT order's fill state). {} = unknown/not found.
+        if self._order_status_map is not None and str(order_id) in self._order_status_map:
+            return dict(self._order_status_map[str(order_id)])
         # Synthetic COMPLETE fill for the exit order the confirm poller checks.
         # order_id shape is "exit-<SYMBOL>" (see place_market_exit). Report the
         # placed exit qty as fully filled so confirm_exit resolves COMPLETE for

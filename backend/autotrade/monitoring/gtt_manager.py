@@ -270,6 +270,7 @@ class GTTManager:
         After marking rows CLOSED here, the caller (session.tick) recomputes
         gross_return on the REMAINING positions."""
         out: List[Dict[str, Any]] = []
+        closed_any = False
         for pos in self.registry.get_open_positions():
             gtt_id = pos.get("gtt_id")
             if not gtt_id:
@@ -284,7 +285,7 @@ class GTTManager:
                 log.debug("get_gtt failed for %s (%s): %s",
                           pos["symbol"], gtt_id, e)
                 continue
-            result = self._gtt_execution_result(state)
+            result = await self._resolve_gtt_result(broker, gtt_id, state)
             if result is None:
                 # GTT still active — nothing to do this tick.
                 continue
@@ -315,18 +316,101 @@ class GTTManager:
                 continue
             if result["status"] == "complete":
                 # Fill confirmed — use the ACTUAL fill price, not the trigger.
+                # RECONCILIATION Phase 1: record the fired GTT order-id as the
+                # exit_order_id so the close is attributable by order-id.
                 exit_price = result.get("exit_price")
                 self.registry.mark_closed(pos["symbol"], "GTT",
                                           exit_price=exit_price,
-                                          broker_profile=prof_id)
+                                          broker_profile=prof_id,
+                                          exit_order_id=result.get("order_id"))
+                closed_any = True
                 out.append({"symbol": pos["symbol"], "gtt_id": gtt_id,
                             "status": "CLOSED_GTT",
                             "exit_price": exit_price,
-                            "filled_qty": result.get("filled_qty")})
-                log.warning("GTT FIRED + FILLED for %s/%s @ %.2f — marked CLOSED",
+                            "filled_qty": result.get("filled_qty"),
+                            "exit_order_id": result.get("order_id")})
+                log.warning("GTT FIRED + FILLED for %s/%s @ %.2f "
+                            "(order_id=%s) — marked CLOSED",
                             self.session_id, pos["symbol"],
-                            exit_price if exit_price else 0.0)
+                            exit_price if exit_price else 0.0,
+                            result.get("order_id"))
+        # RECONCILIATION Phase 4: after a GTT close, RE-FREEZE this session's
+        # invested_basis over the REMAINING open rows so the kill/trail
+        # denominator reflects reality (a closed position must leave the basis).
+        if closed_any:
+            try:
+                self._refreeze_invested_basis()
+            except Exception as e:  # pragma: no cover - never block the tick
+                log.warning("refreeze_invested_basis after GTT close failed "
+                            "for %s: %s", self.session_id, e)
         return out
+
+    def _refreeze_invested_basis(self) -> None:
+        """Re-freeze the session's invested_basis over the CURRENT open rows via
+        PortfolioMonitor.refreeze_invested_basis (product-aware). Best-effort —
+        imported locally to avoid a module-level cycle. total_allocated_capital
+        is read from the registry (the monitor needs it for the fund basis)."""
+        from .monitor import PortfolioMonitor
+        cap = float(getattr(self.registry, "total_allocated_capital", 0.0) or 0.0)
+        if cap <= 0:
+            # PortfolioMonitor requires a positive fund; nothing sane to refreeze.
+            return
+        PortfolioMonitor(self.session_id, cap).refreeze_invested_basis()
+
+    async def _resolve_gtt_result(self, broker: Any, gtt_id: Any,
+                                  state: Optional[Any]
+                                  ) -> Optional[Dict[str, Any]]:
+        """RECONCILIATION Phase 4: resolve a GTT's confirmed execution status,
+        using the FIRED ORDER as positive evidence when the GTT is 'triggered'.
+
+        Kite marks a fired GTT status='triggered' and PLACES an order, but the
+        GTT object alone often can't confirm the fill (this left ACUTAAS OPEN on
+        2026-07-07). So for a triggered GTT we ask the broker for the actual fill
+        via broker.get_gtt_fill(gtt_id) — which resolves the fired order-id and
+        calls get_order_status on THAT order:
+
+          COMPLETE + filled_qty>0 → {"status":"complete","exit_price":avg,
+                                     "filled_qty":q,"order_id":oid} → the caller
+                                     marks CLOSED at the REAL fill with the id.
+          any other order status / unresolved → {"status":"pending"} → NEVER
+                                     close early; retry next tick.
+
+        NON-triggered states (active / cancelled / deleted / expired / ambiguous)
+        are resolved by the pure _gtt_execution_result(state) parse — unchanged
+        (a cancelled-without-fill GTT stays "cancelled", an active GTT stays
+        None). get_gtt_fill returns None for those, so we fall through to the
+        object parse.
+
+        get_gtt_fill defaults to None on the base broker (paper / stub / mocks
+        without the override) → this method is byte-for-byte the old
+        _gtt_execution_result(state) for them."""
+        # Positive fill evidence for a triggered GTT (live only; None otherwise).
+        try:
+            fill = await asyncio.to_thread(broker.get_gtt_fill, gtt_id)
+        except Exception as e:  # pragma: no cover - defensive; never raise
+            log.debug("get_gtt_fill failed for %s: %s", gtt_id, e)
+            fill = None
+        if fill is not None:
+            status = str(fill.get("status") or "").upper()
+            filled = int(fill.get("filled_quantity") or 0)
+            if status == "COMPLETE" and filled > 0:
+                avg = fill.get("average_price")
+                return {
+                    "status": "complete",
+                    "exit_price": float(avg) if avg else None,
+                    "filled_qty": filled,
+                    "order_id": fill.get("order_id"),
+                    "close_reason": "GTT",
+                }
+            # Triggered but the order is not a confirmed COMPLETE fill yet
+            # (OPEN / PENDING / partial / rejected-in-flight) — conservative:
+            # pending. NEVER close on anything but a positive complete fill.
+            log.debug("GTT %s triggered, fired order status=%s filled=%d — "
+                      "pending (not closing)", gtt_id, status, filled)
+            return {"status": "pending"}
+        # No positive fill evidence (not triggered, or paper/stub broker) — fall
+        # back to the pure GTT-object parse (active/cancelled/ambiguous).
+        return self._gtt_execution_result(state)
 
     @staticmethod
     def _gtt_execution_result(state: Optional[Any]) -> Optional[Dict[str, Any]]:

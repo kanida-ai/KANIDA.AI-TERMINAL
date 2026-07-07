@@ -1706,6 +1706,11 @@ class TradingSession:
         # default a FUT contract to NSE and place the OCO on the wrong segment
         # (Kite rejects it → the F&O position runs with NO broker-held backup).
         _exchange = getattr(order, "exchange", None)
+        # RECONCILIATION FRAMEWORK (Phase 1): thread the broker ENTRY order-id
+        # onto the position row so this fill is attributable to THIS session by
+        # order-id (never the account aggregate). None in dry-run / when the
+        # broker gave no id (reconcilers handle absent ids).
+        _entry_oid = getattr(res, "broker_order_id", None)
         if res.status == "PARTIAL":
             self.registry.register_partial(register_symbol, prof.profile_id,
                                            fill_qty, fill_price,
@@ -1713,7 +1718,8 @@ class TradingSession:
                                            instrument_type=prof.instrument_type,
                                            exchange=_exchange,
                                            broker_account_id=acct_id,
-                                           direction=_direction)
+                                           direction=_direction,
+                                           entry_order_id=_entry_oid)
         else:
             self.registry.register(symbol=register_symbol,
                                    broker_profile=prof.profile_id,
@@ -1722,7 +1728,8 @@ class TradingSession:
                                    instrument_type=prof.instrument_type,
                                    exchange=_exchange,
                                    broker_account_id=acct_id,
-                                   direction=_direction)
+                                   direction=_direction,
+                                   entry_order_id=_entry_oid)
         if ref_price > 0 and reconciled:
             record_slippage(symbol, ref_price, fill_price, fill_qty,
                             session_id=self.session_id,

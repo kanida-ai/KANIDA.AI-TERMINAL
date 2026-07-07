@@ -36,7 +36,8 @@ class PositionRegistry:
                  target_price: Optional[float] = None,
                  entry_date: Optional[str] = None,
                  broker_account_id: Optional[str] = None,
-                 direction: str = "long") -> None:
+                 direction: str = "long",
+                 entry_order_id: Optional[str] = None) -> None:
         """Insert or update a session position in autotrade_positions.
 
         Keyed by (session_id, symbol, broker_profile). Seeds the mark (ltp) to
@@ -49,6 +50,13 @@ class PositionRegistry:
         FUTURES long/short: `direction` ('long' default | 'short') is persisted
         so the P&L sign + exit side invert ONLY for shorts. 'long' is byte-for-
         byte unchanged.
+
+        RECONCILIATION FRAMEWORK (Phase 1): entry_order_id (NULLABLE) is the
+        broker order-id of the ENTRY fill, persisted so a broker order can be
+        attributed to THIS session/position by order-id (never the account
+        aggregate). NULL = unknown (paper / pre-migration rows) — the reconcilers
+        handle absent ids. On an UPDATE the id is only overwritten when a new,
+        non-None value is supplied (COALESCE keeps the original otherwise).
         """
         now = datetime.now(IST).isoformat()
         direction = "short" if str(direction).lower() == "short" else "long"
@@ -67,10 +75,12 @@ class PositionRegistry:
                            sl_level=COALESCE(?, sl_level),
                            target_price=COALESCE(?, target_price),
                            ltp=COALESCE(ltp, ?),
+                           entry_order_id=COALESCE(?, entry_order_id),
                            status='OPEN'
                        WHERE id=?""",
                     (qty, avg_price, instrument_type, exchange, direction,
-                     sl_level, target_price, avg_price, existing[0]),
+                     sl_level, target_price, avg_price, entry_order_id,
+                     existing[0]),
                 )
             else:
                 con.execute(
@@ -78,11 +88,12 @@ class PositionRegistry:
                        (session_id, broker_profile, broker_account_id, symbol,
                         instrument_type, exchange, qty, avg_price, sl_level,
                         target_price, ltp, unrealised_pnl, status, exit_lock,
-                        opened_at, direction)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN', 0, ?, ?)""",
+                        opened_at, direction, entry_order_id)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN', 0, ?, ?, ?)""",
                     (self.session_id, broker_profile, broker_account_id, symbol,
                      instrument_type, exchange, qty, avg_price, sl_level,
-                     target_price, avg_price, 0.0, now, direction),
+                     target_price, avg_price, 0.0, now, direction,
+                     entry_order_id),
                 )
             con.commit()
 
@@ -92,15 +103,18 @@ class PositionRegistry:
                          instrument_type: str = "EQ",
                          exchange: Optional[str] = None,
                          broker_account_id: Optional[str] = None,
-                         direction: str = "long") -> None:
+                         direction: str = "long",
+                         entry_order_id: Optional[str] = None) -> None:
         """Partial fill: register the FILLED qty (spec parity check #3 — 80 not
-        0/100)."""
+        0/100). entry_order_id (RECONCILIATION Phase 1) is persisted the same as
+        the normal path so a partial-fill leg is still attributable by order-id."""
         log.warning("Partial fill registered: %s filled=%d", symbol, filled_qty)
         self.register(symbol=symbol, broker_profile=broker_profile,
                       qty=filled_qty, avg_price=avg_price, product=product,
                       instrument_type=instrument_type, exchange=exchange,
                       broker_account_id=broker_account_id,
-                      direction=direction)
+                      direction=direction,
+                      entry_order_id=entry_order_id)
 
     # ── Reads ─────────────────────────────────────────────────────────────────
     def get_open_positions(self) -> List[Dict[str, Any]]:
@@ -165,7 +179,15 @@ class PositionRegistry:
 
     def mark_closed(self, symbol: str, reason: str,
                     exit_price: Optional[float] = None,
-                    broker_profile: Optional[str] = None) -> None:
+                    broker_profile: Optional[str] = None,
+                    exit_order_id: Optional[str] = None) -> None:
+        """Mark a position CLOSED, recording the realised P&L at exit_price.
+
+        RECONCILIATION FRAMEWORK (Phase 1): exit_order_id (NULLABLE) is the
+        broker order-id of the EXIT fill (a market exit, or the GTT-fired order).
+        Persisted so the closing order can be attributed to THIS position by
+        order-id. Only overwritten when a non-None value is supplied (COALESCE
+        keeps any earlier value otherwise). NULL = unknown (paper / legacy)."""
         now = datetime.now(IST).isoformat()
         with falcon_conn() as con:
             # FUTURES long/short: sign-aware realised P&L. 'long' CASE = +1 →
@@ -175,12 +197,13 @@ class PositionRegistry:
                     """UPDATE autotrade_positions
                        SET status='CLOSED', close_reason=?, closed_at=?,
                            exit_price=COALESCE(?, ltp),
+                           exit_order_id=COALESCE(?, exit_order_id),
                            realised_pnl=(CASE WHEN direction='short' THEN -1
                                               ELSE 1 END)
                                         * (COALESCE(?, ltp, avg_price) - avg_price)*qty
                        WHERE session_id=? AND symbol=?
                          AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
-                    (reason, now, exit_price, exit_price,
+                    (reason, now, exit_price, exit_order_id, exit_price,
                      self.session_id, symbol, broker_profile),
                 )
             else:
@@ -188,11 +211,12 @@ class PositionRegistry:
                     """UPDATE autotrade_positions
                        SET status='CLOSED', close_reason=?, closed_at=?,
                            exit_price=COALESCE(?, ltp),
+                           exit_order_id=COALESCE(?, exit_order_id),
                            realised_pnl=(CASE WHEN direction='short' THEN -1
                                               ELSE 1 END)
                                         * (COALESCE(?, ltp, avg_price) - avg_price)*qty
                        WHERE session_id=? AND symbol=?""",
-                    (reason, now, exit_price, exit_price,
+                    (reason, now, exit_price, exit_order_id, exit_price,
                      self.session_id, symbol),
                 )
             con.commit()
@@ -287,14 +311,23 @@ class PositionRegistry:
         return [dict(r) for r in rows]
 
     def mark_exit_failed(self, symbol: str, error: str,
-                         broker_profile: Optional[str] = None) -> None:
+                         broker_profile: Optional[str] = None,
+                         exit_order_id: Optional[str] = None) -> None:
+        """Mark a position EXIT_FAILED and RELEASE the exit gate for retry.
+
+        RECONCILIATION FRAMEWORK (Phase 1): when the exit order WAS placed but
+        then rejected/cancelled, exit_order_id records the order-id that failed so
+        the failed broker order is still attributable to this position. Only
+        overwritten when non-None (COALESCE keeps any earlier value)."""
         now = datetime.now(IST).isoformat()
         with falcon_conn() as con:
             con.execute(
                 """UPDATE autotrade_positions
-                   SET status='EXIT_FAILED', close_reason=?, closed_at=?
+                   SET status='EXIT_FAILED', close_reason=?, closed_at=?,
+                       exit_order_id=COALESCE(?, exit_order_id)
                    WHERE session_id=? AND symbol=?""",
-                (f"EXIT_FAILED: {error}", now, self.session_id, symbol),
+                (f"EXIT_FAILED: {error}", now, exit_order_id,
+                 self.session_id, symbol),
             )
             con.commit()
         # Release the exit gate so a future retry can reclaim it.
