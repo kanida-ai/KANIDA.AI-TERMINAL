@@ -39,9 +39,24 @@ the session's registry / monitor. Never touches falcon_position_state.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("kanida.autotrade.position_reconciler")
+
+
+def _reconcile_disabled() -> bool:
+    """Kill-switch. FALCON_AUTOTRADE_BROKER_RECONCILE=off disables the broker→DB
+    position reconciler entirely (returns []). SAFETY: this reconciler matches the
+    broker net book PER (symbol, product) but the broker AGGREGATES all sessions on
+    one account — so with MULTIPLE sessions holding the SAME symbol it cannot
+    attribute a single session's qty and WILL corrupt qtys (2026-07-07 incident: 3
+    same-pick sessions → every qty overwritten to the account aggregate). Disabled
+    until it is made multi-session-aware. Entry-fill / GTT / pre-exit reconciles are
+    unaffected."""
+    return os.environ.get(
+        "FALCON_AUTOTRADE_BROKER_RECONCILE", "on").strip().lower() in (
+        "off", "0", "false", "no")
 
 # F&O instrument types (match the same segment logic as
 # zerodha.get_net_position_qty — a FUT/OPT row lives on NFO, cash on NSE).
@@ -130,6 +145,9 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
     Returns a list of action dicts (see the decision table in the module docstring).
     Places NO order. LIVE only — paper returns [].
     """
+    # KILL-SWITCH: disabled until multi-session-safe (see _reconcile_disabled).
+    if _reconcile_disabled():
+        return []
     # Paper / dry-run → never reconcile (no real broker book; paper is unchanged).
     if getattr(session, "dry_run", True):
         return []
