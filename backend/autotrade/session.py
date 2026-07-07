@@ -487,6 +487,105 @@ def _filter_fno_eligible(picks: List[Pick], broker, expiry_preference: str,
     return out
 
 
+def _resolve_basket_symbols(session) -> List[str]:
+    """Resolve the (approx) symbols a session will trade — the same Falcon picks +
+    filters + routing _fire_entries uses, WITHOUT sizing/placing. Best-effort:
+    used only to pre-subscribe/pre-prime the WARM path, so a miss just means one
+    symbol needs a REST quote at fire time (never a failure). FUT profiles map to
+    the current-month contract symbol so the FULL subscription + circuit prime hit
+    the tradeable instrument."""
+    try:
+        picks = load_falcon_picks(
+            top_n=max(session.config.top_n_stocks, 10),
+            universe_filter=session.config.universe_filter)
+        if session.config.rank_filter:
+            picks = [p for p in picks if p.rank in session.config.rank_filter]
+        if session.config.symbol_whitelist is not None:
+            wl = set(session.config.symbol_whitelist)
+            picks = [p for p in picks if p.symbol in wl]
+        router = BrokerRouter(top_n_stocks=session.config.top_n_stocks)
+        routed = router.route_picks(picks, session.config.broker_profiles)
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("prewarm: pick resolution failed for %s: %s",
+                  session.session_id, e)
+        return []
+    syms: List[str] = []
+    for prof in session.config.broker_profiles:
+        if not prof.enabled:
+            continue
+        prof_picks = routed.get(prof.profile_id, [])
+        broker = session.brokers.get(prof.profile_id)
+        if prof.instrument_type == "FUT" and broker is not None:
+            for p in prof_picks:
+                try:
+                    c = broker.get_active_futures_or_none(
+                        p.symbol, session.config.expiry_preference)
+                except Exception:  # pragma: no cover
+                    c = None
+                syms.append(c or p.symbol)
+        else:
+            syms.extend(p.symbol for p in prof_picks)
+    # De-dup preserving order.
+    seen: set = set()
+    out: List[str] = []
+    for s in syms:
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def prewarm_execution(session) -> Dict[str, Any]:
+    """PHASE-2 PRE-OPEN WARM (best-effort, never blocks/raises). Only meaningful
+    when execution_mode=="marketable_limit": subscribe the resolved basket to the
+    shared KiteTicker in MODE_FULL (so bid/ask/ltp stream over the WS, network-
+    free) AND prime the per-day circuit-limit cache with ONE REST kite.quote (per
+    live broker). At the 09:15 fire, get_quotes then reads the whole book from the
+    WS + the cached circuit → ZERO REST calls in the hot path.
+
+    SAFE: a no-op for the default "market" mode and for paper/disabled brokers
+    (subscribe_full no-ops if the ticker isn't connected; prime_circuit_limits
+    no-ops unless _live_allowed()). Any error is swallowed — a failed prewarm just
+    means the first fire falls back to the (already-correct) batched REST quote."""
+    out: Dict[str, Any] = {"subscribed_full": 0, "circuits_primed": 0,
+                           "symbols": []}
+    try:
+        if getattr(session.config, "execution_mode", "market") != "marketable_limit":
+            return out
+        if not session.brokers:
+            session._build_brokers()
+        symbols = _resolve_basket_symbols(session)
+        out["symbols"] = symbols
+        if not symbols:
+            return out
+        # Subscribe the WHOLE basket to FULL on the shared ticker (one call).
+        try:
+            from falcon.trade.services.kite_ticker import subscribe_full
+            out["subscribed_full"] = int(subscribe_full(symbols) or 0)
+        except Exception as e:  # pragma: no cover - best-effort
+            log.debug("prewarm subscribe_full failed for %s: %s",
+                      session.session_id, e)
+        # Prime the circuit day-cache per live broker (one REST each).
+        primed = 0
+        for prof in session.config.broker_profiles:
+            if not prof.enabled:
+                continue
+            broker = session.brokers.get(prof.profile_id)
+            if broker is None:
+                continue
+            try:
+                primed += int(broker.prime_circuit_limits(symbols) or 0)
+            except Exception as e:  # pragma: no cover - best-effort
+                log.debug("prewarm prime_circuit_limits failed for %s: %s",
+                          prof.profile_id, e)
+        out["circuits_primed"] = primed
+        log.info("session %s prewarm: full=%d circuits=%d (%d symbols)",
+                 session.session_id, out["subscribed_full"], primed, len(symbols))
+    except Exception as e:  # pragma: no cover - never raise out of prewarm
+        log.debug("prewarm_execution failed for %s: %s", session.session_id, e)
+    return out
+
+
 def _preview_resolve_creds(prof, user_id: Optional[str]) -> None:
     """Best-effort vault cred resolution for the PREVIEW path (paper-only).
 
@@ -1069,6 +1168,12 @@ class TradingSession:
         gate = evaluate_fire_gate(self.config, now, fire_dt=now)
         if not gate.allow:
             return self._refuse_fire(gate, when="now")
+        # PHASE-2 WARM: subscribe the basket to FULL + prime circuits so the
+        # imminent fire prices network-free (no-op for market mode / paper).
+        try:
+            prewarm_execution(self)
+        except Exception:  # pragma: no cover - never block the fire
+            pass
         return await self._fire_entries()
 
     async def _start_scheduled(self) -> Dict[str, Any]:
@@ -1106,6 +1211,14 @@ class TradingSession:
             self._set_status("SCHEDULED", reason=gate.reason)
             armed = entry_scheduler.start_for_session(
                 self.session_id, gate.fire_dt, now_fn=now_ist)
+            # PHASE-2 WARM: subscribe the basket to FULL at ARM time so bid/ask
+            # stream over the WS well before the fire. The entry_scheduler ALSO
+            # re-prewarms within ~60s of the target (circuits are day-cached; a
+            # same-day prime here is valid). No-op for market mode / paper.
+            try:
+                prewarm_execution(self)
+            except Exception:  # pragma: no cover - never block scheduling
+                pass
             seconds = int(max(0.0, (gate.fire_dt - now).total_seconds()))
             log.info("session %s SCHEDULED — entry at %s (in %ss, armed=%s, %s)",
                      self.session_id, gate.fire_dt.isoformat(), seconds, armed,
@@ -1629,7 +1742,20 @@ class TradingSession:
         the position's entry is the REAL fill, not the 9:15 mark. Returns
         {'avg_price','filled_qty'} on a confirmed fill, else None (caller falls
         back to the mark). get_order_status runs in a thread so the event loop is
-        never blocked."""
+        never blocked.
+
+        PHASE-2 (sub-second, event-driven): FIRST consult the KiteTicker order
+        POSTBACK for a TERMINAL state (COMPLETE / REJECTED / CANCELLED) with a
+        short wait (~1.5s). A COMPLETE postback resolves the fill in milliseconds
+        (no polling); a REJECTED/CANCELLED postback returns {'rejected':True}
+        immediately. ONLY if no terminal postback arrives do we fall through to
+        the existing get_order_status poll (the reliable backstop). The postback
+        path is skipped entirely in DRY_RUN (paper never places a real order → no
+        postback), so paper behaviour is byte-for-byte unchanged."""
+        if not self.dry_run:
+            rec = await self._await_order_postback(order_id, timeout=1.5)
+            if rec is not None:
+                return rec
         deadline = time.monotonic() + max_wait_sec
         while time.monotonic() < deadline:
             try:
@@ -1654,6 +1780,42 @@ class TradingSession:
             await asyncio.sleep(poll_interval)
         log.warning("entry reconcile %s: no confirmed fill within %.0fs — "
                     "falling back to reference mark", order_id, max_wait_sec)
+        return None
+
+    async def _await_order_postback(self, order_id: str, timeout: float = 1.5
+                                    ) -> Optional[Dict[str, Any]]:
+        """Consult the KiteTicker order POSTBACK for a TERMINAL state within
+        `timeout` seconds. Returns:
+          * {'avg_price','filled_qty'} on a COMPLETE postback (with a real fill),
+          * {'rejected':True,'status':...} on REJECTED/CANCELLED,
+          * None if no usable terminal postback arrived (caller polls).
+        Best-effort: any import/lookup error → None (fall through to the poll).
+        The blocking wait runs in a thread so the event loop is never blocked."""
+        try:
+            from falcon.trade.services.kite_ticker import wait_order_terminal
+        except Exception:  # pragma: no cover - ticker unavailable → poll
+            return None
+        try:
+            upd = await asyncio.to_thread(wait_order_terminal, order_id, timeout)
+        except Exception as e:  # pragma: no cover - defensive
+            log.debug("entry reconcile %s: postback wait err %s", order_id, e)
+            return None
+        if not upd:
+            return None
+        status = str(upd.get("status", "")).upper()
+        if status == "COMPLETE":
+            filled = int(upd.get("filled_quantity") or 0)
+            avg = float(upd.get("average_price") or 0.0)
+            if filled > 0 and avg > 0:
+                log.info("entry reconcile %s: COMPLETE via postback (%d @ %.2f)",
+                         order_id, filled, avg)
+                return {"avg_price": avg, "filled_qty": filled}
+            # COMPLETE but no fill numbers on the postback → let the poll confirm.
+            return None
+        if status in ("REJECTED", "CANCELLED"):
+            log.warning("entry reconcile %s: %s via postback — dropping leg",
+                        order_id, status)
+            return {"rejected": True, "status": status}
         return None
 
     # ── Tick: monitor + GTT reconcile + kill switch / trail engine ─────────────

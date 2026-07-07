@@ -41,6 +41,10 @@ log = logging.getLogger("kanida.autotrade.entry_scheduler")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# PHASE-2 WARM: how far before the fire target to subscribe the basket to WS FULL
+# + prime the circuit day-cache, so the 09:15 fire prices network-free.
+_PREWARM_LEAD_SEC = 60.0
+
 # session_id -> _Scheduler
 _SCHEDULERS: Dict[str, "_Scheduler"] = {}
 _LOCK = threading.Lock()
@@ -77,6 +81,23 @@ class _Scheduler:
     def is_alive(self) -> bool:
         return self._thread.is_alive()
 
+    def _prewarm(self) -> None:
+        """Best-effort pre-open warm (~60s before fire): subscribe the basket to
+        WS FULL + prime the circuit day-cache. No-op for market mode / paper /
+        disabled brokers. NEVER raises — a failed prewarm just means the fire
+        falls back to the batched REST quote."""
+        try:
+            if _session_status(self.session_id) != "SCHEDULED":
+                return
+            from ..session import TradingSession, prewarm_execution
+            sess = TradingSession.load(self.session_id)
+            if sess is None:
+                return
+            prewarm_execution(sess)
+        except Exception as e:  # pragma: no cover - never block the fire
+            log.debug("entry_scheduler prewarm failed for %s: %s",
+                      self.session_id, e)
+
     def _seconds_remaining(self) -> float:
         # Production: real wall-clock. Tests may inject a frozen now_fn. The
         # trading-day / market-open GATE is re-evaluated at WAKE inside
@@ -90,7 +111,18 @@ class _Scheduler:
         try:
             # Interruptible sleep until the target time. wait() returns True if
             # stop() was called (cancel/kill), in which case we place NOTHING.
+            # PHASE-2 WARM: wake ~PREWARM_LEAD_SEC early to subscribe the basket to
+            # FULL + prime circuits so the fire prices network-free (no-op for
+            # market mode / paper). If the target is already inside the lead
+            # window, prewarm immediately then wait the remainder.
             remaining = self._seconds_remaining()
+            if remaining > _PREWARM_LEAD_SEC:
+                if self._stop.wait(remaining - _PREWARM_LEAD_SEC):
+                    log.info("entry_scheduler: session %s stopped before fire — "
+                             "placing nothing", self.session_id)
+                    return
+                remaining = self._seconds_remaining()
+            self._prewarm()
             if remaining > 0:
                 if self._stop.wait(remaining):
                     log.info("entry_scheduler: session %s stopped before fire — "

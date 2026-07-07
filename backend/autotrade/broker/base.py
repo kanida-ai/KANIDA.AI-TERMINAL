@@ -88,6 +88,13 @@ class BrokerClient(ABC):
         live Zerodha adapter returns a real book."""
         return None
 
+    def prime_circuit_limits(self, symbols: List[str]) -> int:
+        """PHASE-2 WARM PATH: pre-fetch the per-day circuit band for `symbols` so
+        the first quote-driven fire needs no REST for circuits. Default no-op
+        (paper / stub brokers have no real band); the live Zerodha adapter
+        overrides it. Returns the count primed."""
+        return 0
+
     # ── Instrument master (F&O) ──────────────────────────────────────────────
     @abstractmethod
     def get_lot_size(self, contract: str) -> int:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
 from .base import BrokerClient, OrderResult
@@ -37,6 +38,33 @@ _FUT_FACT_TTL = 6 * 3600.0        # contract + lot size (daily)
 _FUT_MARGIN_TTL = 3600.0          # per-lot margin drifts slowly; 1h fresh enough for a preview
 _LTP_CACHE: dict = {}             # symbol -> (last_price, ts) — REST-fallback prices
 _LTP_TTL = 8.0                    # brief; a config-time PREVIEW estimate tolerates ~8s staleness
+
+# ── Circuit-limit day-cache (PHASE-2 WARM PATH) ──────────────────────────────
+# Exchange circuit bands are STATIC for the whole trading day (published at the
+# open, unchanged intraday). So once fetched (via one REST kite.quote), cache
+# (upper, lower) per (symbol, IST-date). A WARM fire then reads bid/ask/ltp from
+# the WS FULL cache and the circuit band from HERE → ZERO REST calls. Keyed by
+# IST date so a new day re-fetches (and the dict can't grow unbounded across days
+# — a stale-day sweep prunes anything not for today).
+_CIRCUIT_DAY: dict = {}           # (symbol, "YYYY-MM-DD") -> (upper, lower)
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _ist_day() -> str:
+    return datetime.now(_IST).strftime("%Y-%m-%d")
+
+
+def _circuit_get(symbol: str) -> Optional[tuple]:
+    return _CIRCUIT_DAY.get((symbol, _ist_day()))
+
+
+def _circuit_put(symbol: str, upper, lower) -> None:
+    day = _ist_day()
+    _CIRCUIT_DAY[(symbol, day)] = (upper, lower)
+    # Prune any entries from a previous day so the dict stays bounded.
+    stale = [k for k in _CIRCUIT_DAY if k[1] != day]
+    for k in stale:
+        _CIRCUIT_DAY.pop(k, None)
 
 
 def _nfo_instruments(kite):
@@ -272,7 +300,15 @@ class ZerodhaBroker(BrokerClient):
         timestamp isn't reliably parseable, and "just fetched" is the useful
         staleness reference for the pricer).
 
-        SAFETY: returns None (the caller falls back — SKIP entry / MARKET exit)
+        PHASE-2 WARM PATH (network-free at the 09:15 open): each symbol's live
+        bid/ask/ltp is taken from the KiteTicker WS FULL cache first
+        (get_quote_ws, zero network), and its circuit band from the per-(symbol,
+        IST-day) circuit day-cache (circuits are STATIC intraday). Only symbols
+        MISSING from the WS cache OR without a cached circuit go into a SINGLE
+        batched REST kite.quote(). A pre-warmed basket (subscribe_full + a one-off
+        circuit prime) therefore needs NO REST call at fire time.
+
+        SAFETY: returns None (the caller falls back — MARKET exit / MARKET entry)
         when not _live_allowed() (paper / disabled: there is no real book to
         price against, and a paper session must stay byte-for-byte on the MARKET
         path) OR on ANY error. Exchange-aware keys via _rest_key (NSE cash / NFO
@@ -283,16 +319,54 @@ class ZerodhaBroker(BrokerClient):
             return {}
         if not self._live_allowed():
             return None
+        now = time.time()
+
+        # WS FULL cache reader (network-free). Import guarded so a missing/older
+        # ticker module degrades to the REST path (never crashes).
         try:
-            key_of = {s: self._rest_key(s) for s in symbols}
+            from falcon.trade.services.kite_ticker import get_quote_ws
+        except Exception:  # pragma: no cover - defensive
+            get_quote_ws = None
+
+        out: dict = {}
+        rest_needed: List[str] = []   # symbols we must REST for (no WS book and/or
+                                      # no cached circuit)
+        for s in symbols:
+            ws_q = None
+            if get_quote_ws is not None:
+                try:
+                    ws_q = get_quote_ws(s)
+                except Exception:  # pragma: no cover - per-symbol
+                    ws_q = None
+            circ = _circuit_get(s)   # (upper, lower) or None
+            if ws_q and circ is not None:
+                # Fully warm: bid/ask/ltp from WS, circuit from the day-cache.
+                out[s] = {
+                    "ltp": ws_q.get("ltp"),
+                    "bid": ws_q.get("bid"),
+                    "ask": ws_q.get("ask"),
+                    "upper_circuit": circ[0],
+                    "lower_circuit": circ[1],
+                    "ts": now,
+                }
+            else:
+                rest_needed.append(s)
+
+        if not rest_needed:
+            return out   # ZERO REST calls — the warm fire path.
+
+        # One batched REST call for whatever wasn't fully warm.
+        try:
+            key_of = {s: self._rest_key(s) for s in rest_needed}
             data = self.kite.quote(list(key_of.values()))
         except Exception as e:
             log.warning("get_quotes batch failed for %d syms: %s",
-                        len(symbols), e)
-            return None
-        now = time.time()
-        out: dict = {}
-        for s in symbols:
+                        len(rest_needed), e)
+            # We may still have some warm results; return them rather than None so
+            # a partial WS overlay isn't discarded. If NONE were warm, this is {}
+            # → the caller treats an empty book per-symbol (MARKET fallback).
+            return out if out else None
+        for s in rest_needed:
             row = data.get(key_of.get(s))
             if not row:
                 continue
@@ -306,21 +380,53 @@ class ZerodhaBroker(BrokerClient):
                 # as absent so the pricer uses the LTP-based fallback instead.
                 bid = bid if (bid and bid > 0) else None
                 ask = ask if (ask and ask > 0) else None
-                q = {
+                upper = (float(row["upper_circuit_limit"])
+                         if row.get("upper_circuit_limit") else None)
+                lower = (float(row["lower_circuit_limit"])
+                         if row.get("lower_circuit_limit") else None)
+                # Prime the circuit day-cache so the NEXT fire is REST-free.
+                if upper is not None or lower is not None:
+                    _circuit_put(s, upper, lower)
+                out[s] = {
                     "ltp": float(row.get("last_price") or 0.0) or None,
                     "bid": bid,
                     "ask": ask,
-                    "upper_circuit": (float(row["upper_circuit_limit"])
-                                      if row.get("upper_circuit_limit") else None),
-                    "lower_circuit": (float(row["lower_circuit_limit"])
-                                      if row.get("lower_circuit_limit") else None),
+                    "upper_circuit": upper,
+                    "lower_circuit": lower,
                     "ts": now,
                 }
-                out[s] = q
             except Exception as pe:  # pragma: no cover - per-symbol defensive
                 log.debug("get_quotes parse miss for %s: %s", s, pe)
                 continue
         return out
+
+    def prime_circuit_limits(self, symbols: List[str]) -> int:
+        """PHASE-2 WARM PATH: prime the per-day circuit band cache for `symbols`
+        with ONE batched REST kite.quote() (circuits are static intraday). Called
+        by prewarm_execution before the open so the FIRST fire needs no REST for
+        circuits. Returns the count primed. Best-effort; no-op when not live."""
+        if not symbols or not self._live_allowed():
+            return 0
+        try:
+            key_of = {s: self._rest_key(s) for s in symbols}
+            data = self.kite.quote(list(key_of.values()))
+        except Exception as e:  # pragma: no cover - best-effort
+            log.warning("prime_circuit_limits failed for %d syms: %s",
+                        len(symbols), e)
+            return 0
+        primed = 0
+        for s in symbols:
+            row = data.get(key_of.get(s))
+            if not row:
+                continue
+            upper = (float(row["upper_circuit_limit"])
+                     if row.get("upper_circuit_limit") else None)
+            lower = (float(row["lower_circuit_limit"])
+                     if row.get("lower_circuit_limit") else None)
+            if upper is not None or lower is not None:
+                _circuit_put(s, upper, lower)
+                primed += 1
+        return primed
 
     # ── MTF margin (leverage) — reuse the legacy order_margins lookup ─────────
     def get_margins_batch(self, symbols: List[str],

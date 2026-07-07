@@ -42,7 +42,7 @@ class _TickerState:
         self.kt = None                      # KiteTicker instance
         self.connected = False
         self.subscribed_tokens: Set[int] = set()
-        # token -> {ltp, ts (datetime IST), symbol}
+        # token -> {ltp, ts (datetime IST), symbol}  (+ bid/ask when a FULL tick)
         self.tick_cache: Dict[int, Dict[str, Any]] = {}
         # symbol -> token (for fast lookup from get_ltp)
         self.sym_to_token: Dict[str, int] = {}
@@ -51,6 +51,18 @@ class _TickerState:
         self.last_tick_at: Optional[datetime] = None
         self.started_at: Optional[datetime] = None
         self.tick_count: int = 0
+        # ── ADDITIVE (AutoTrade Phase-2, Falcon-neutral) ──────────────────────
+        # Tokens explicitly upgraded to MODE_FULL (depth) by an AutoTrade
+        # subscribe_full() caller. A token here is a SUPERSET of MODE_LTP — a FULL
+        # tick still carries last_price, so Falcon's get_ltp is unaffected. Falcon
+        # never populates this set; it starts empty and stays empty in the
+        # Falcon-only process. Used to (a) re-apply FULL on reconnect and (b) gate
+        # get_quote_ws (only trust bid/ask for a token we deliberately made FULL).
+        self.full_tokens: Set[int] = set()
+        # order_id -> {status, filled_quantity, average_price, tradingsymbol, ts}
+        # Populated by the KiteTicker on_order_update postback (event-driven fill
+        # confirmation for AutoTrade). Empty + untouched in the Falcon-only path.
+        self.order_updates: Dict[str, Dict[str, Any]] = {}
 
 
 _state = _TickerState()
@@ -83,6 +95,82 @@ def remove_tick_listener(fn) -> None:
             pass
 
 
+# ─── Optional ORDER-UPDATE listeners (ADDITIVE, default-empty) ────────────────
+# KiteConnect pushes an on_order_update POSTBACK over the SAME WebSocket whenever
+# an order changes state (COMPLETE / REJECTED / CANCELLED / …). AutoTrade uses
+# this for SUB-SECOND fill confirmation instead of polling get_order_status.
+# DEFAULT BEHAVIOUR IS UNCHANGED: with no order listeners registered (the Falcon-
+# only default), the postback just stores the update in order_updates and returns.
+# Listeners are invoked OUTSIDE the state lock, each wrapped so a listener
+# exception can never disturb the ticker or the Falcon monitor. Falcon never
+# registers an order listener → this whole path is inert for it.
+_order_listeners: List[Any] = []       # callables: fn(order_id, data) -> None
+_ORDER_UPDATES_MAX = 2000              # bound the dict so a long session can't grow it
+
+
+def add_order_listener(fn) -> None:
+    """Register a callback invoked (best-effort, off-lock) with (order_id, data)
+    after each order postback. Idempotent per callable."""
+    with _listeners_lock:
+        if fn not in _order_listeners:
+            _order_listeners.append(fn)
+
+
+def remove_order_listener(fn) -> None:
+    with _listeners_lock:
+        try:
+            _order_listeners.remove(fn)
+        except ValueError:
+            pass
+
+
+def get_order_update(order_id: str) -> Optional[Dict[str, Any]]:
+    """Latest postback state for an order_id, or None if none received yet.
+    Returns {status, filled_quantity, average_price, tradingsymbol, ts}."""
+    if not order_id:
+        return None
+    with _state.lock:
+        u = _state.order_updates.get(str(order_id))
+        return dict(u) if u else None
+
+
+# order_id -> threading.Event set when a TERMINAL update arrives (for await).
+_order_events_lock = threading.Lock()
+_order_events: Dict[str, threading.Event] = {}
+_TERMINAL_ORDER_STATUSES = {"COMPLETE", "REJECTED", "CANCELLED"}
+
+
+def _order_event(order_id: str) -> threading.Event:
+    with _order_events_lock:
+        ev = _order_events.get(order_id)
+        if ev is None:
+            ev = threading.Event()
+            _order_events[order_id] = ev
+        return ev
+
+
+def wait_order_terminal(order_id: str, timeout: float) -> Optional[Dict[str, Any]]:
+    """Block up to `timeout` seconds for a TERMINAL postback (COMPLETE/REJECTED/
+    CANCELLED) for `order_id`, returning its update dict, else None.
+
+    Thread-safe + race-free: an update that ALREADY arrived before this call is
+    honoured (we check the cache first), and the Event is armed BEFORE the wait so
+    a postback landing mid-wait wakes us. Runs on the caller's thread; the
+    reconciler calls it via asyncio.to_thread so the event loop is never blocked.
+    """
+    if not order_id:
+        return None
+    oid = str(order_id)
+    # Fast path: a terminal update already cached?
+    existing = get_order_update(oid)
+    if existing and str(existing.get("status", "")).upper() in _TERMINAL_ORDER_STATUSES:
+        return existing
+    ev = _order_event(oid)
+    if ev.wait(timeout):
+        return get_order_update(oid)
+    return None
+
+
 # ─── Tick callbacks (run in KiteTicker background thread) ────────────────────
 
 def _on_ticks(ws, ticks: List[Dict[str, Any]]) -> None:
@@ -97,7 +185,27 @@ def _on_ticks(ws, ticks: List[Dict[str, Any]]) -> None:
             if ltp <= 0:
                 continue
             sym = _state.token_to_sym.get(tok)
-            _state.tick_cache[tok] = {"ltp": ltp, "ts": now, "symbol": sym}
+            entry = {"ltp": ltp, "ts": now, "symbol": sym}
+            # ── ADDITIVE: FULL-mode depth → also cache best bid/ask. An LTP-only
+            # tick has NO "depth" key → this block is skipped and `entry` is
+            # EXACTLY the old {ltp,ts,symbol} dict (Falcon path byte-for-byte
+            # unchanged). A 0/absent level = "no order there" → left out, so the
+            # AutoTrade pricer falls back to LTP for that side. ltp is NEVER
+            # dropped or altered here.
+            depth = t.get("depth")
+            if depth:
+                try:
+                    buy = depth.get("buy") or []
+                    sell = depth.get("sell") or []
+                    bid = float(buy[0].get("price") or 0) if buy else 0.0
+                    ask = float(sell[0].get("price") or 0) if sell else 0.0
+                    if bid > 0:
+                        entry["bid"] = bid
+                    if ask > 0:
+                        entry["ask"] = ask
+                except Exception:  # pragma: no cover - never disturb ltp caching
+                    pass
+            _state.tick_cache[tok] = entry
             _state.tick_count += 1
             if sym:
                 ticked_syms.add(sym)
@@ -121,6 +229,50 @@ def last_tick_at():
         return _state.last_tick_at
 
 
+def _on_order_update(ws, data: Dict[str, Any]) -> None:
+    """KiteTicker on_order_update postback (runs on the KiteTicker background
+    thread). Store the update by order_id (bounded), signal any waiter on a
+    TERMINAL state, then notify order listeners OFF-lock. NEVER raises — a bad
+    postback can't disturb ticking or the Falcon monitor. Falcon registers no
+    order listeners, so for it this only writes to order_updates (inert)."""
+    try:
+        oid = str(data.get("order_id") or "")
+        if not oid:
+            return
+        status = str(data.get("status") or "").upper()
+        rec = {
+            "status": status,
+            "filled_quantity": int(data.get("filled_quantity") or 0),
+            "average_price": float(data.get("average_price") or 0.0),
+            "tradingsymbol": data.get("tradingsymbol"),
+            "ts": datetime.now(IST),
+        }
+    except Exception as e:  # pragma: no cover - never disturb the ticker
+        log.debug("order update parse error: %s", e)
+        return
+    with _state.lock:
+        _state.order_updates[oid] = rec
+        # Trim oldest if we somehow exceed the cap (bounded memory).
+        if len(_state.order_updates) > _ORDER_UPDATES_MAX:
+            for k in list(_state.order_updates.keys())[
+                    :len(_state.order_updates) - _ORDER_UPDATES_MAX]:
+                _state.order_updates.pop(k, None)
+    # Wake any await_order_terminal waiter on a terminal state.
+    if status in _TERMINAL_ORDER_STATUSES:
+        with _order_events_lock:
+            ev = _order_events.get(oid)
+        if ev is not None:
+            ev.set()
+    # Notify listeners OUTSIDE the lock. No listeners → no-op (unchanged default).
+    with _listeners_lock:
+        listeners = list(_order_listeners)
+    for fn in listeners:
+        try:
+            fn(oid, rec)
+        except Exception as e:  # pragma: no cover - never disturb the ticker
+            log.debug("order listener error: %s", e)
+
+
 def _on_connect(ws, response) -> None:
     log.info("KiteTicker connected: %s", response)
     with _state.lock:
@@ -135,6 +287,18 @@ def _on_connect(ws, response) -> None:
                 log.info("KiteTicker resubscribed %d tokens", len(tokens))
             except Exception as e:
                 log.warning("KiteTicker resubscribe failed: %s", e)
+        # ADDITIVE: re-apply MODE_FULL to any tokens AutoTrade upgraded so depth
+        # (bid/ask) survives a reconnect. These are already re-subscribed as LTP
+        # above (full_tokens ⊆ subscribed_tokens); this only upgrades their mode.
+        # FULL is a SUPERSET of LTP → a Falcon-shared token upgraded here still
+        # feeds last_price to get_ltp. Empty in the Falcon-only path → no-op.
+        if _state.full_tokens:
+            ftoks = list(_state.full_tokens)
+            try:
+                ws.set_mode(ws.MODE_FULL, ftoks)
+                log.info("KiteTicker re-applied MODE_FULL to %d tokens", len(ftoks))
+            except Exception as e:
+                log.warning("KiteTicker re-apply FULL failed: %s", e)
 
 
 def _on_close(ws, code, reason) -> None:
@@ -194,12 +358,15 @@ def start(force: bool = False) -> bool:
         return False
 
     kt = KiteTicker(api_key, access_token)
-    kt.on_ticks       = _on_ticks
-    kt.on_connect     = _on_connect
-    kt.on_close       = _on_close
-    kt.on_error       = _on_error
-    kt.on_reconnect   = _on_reconnect
-    kt.on_noreconnect = _on_noreconnect
+    kt.on_ticks        = _on_ticks
+    kt.on_connect      = _on_connect
+    kt.on_close        = _on_close
+    kt.on_error        = _on_error
+    kt.on_reconnect    = _on_reconnect
+    kt.on_noreconnect  = _on_noreconnect
+    # ADDITIVE: order postbacks over the SAME socket → event-driven fill
+    # confirmation for AutoTrade. Inert for Falcon (no order listeners).
+    kt.on_order_update = _on_order_update
 
     with _state.lock:
         _state.kt = kt
@@ -209,6 +376,11 @@ def start(force: bool = False) -> bool:
         # next monitor poll will repopulate it from current Falcon-tracked syms.
         _state.subscribed_tokens = set()
         _state.tick_cache = {}
+        # ADDITIVE: on a fresh (re)connect the AutoTrade FULL set + order postbacks
+        # are re-primed by the caller (subscribe_full / prewarm) — clear stale
+        # state so a token isn't wrongly treated as FULL after a force-restart.
+        _state.full_tokens = set()
+        _state.order_updates = {}
 
     # KiteTicker.connect(threaded=True) spawns its own thread; non-blocking.
     try:
@@ -300,6 +472,95 @@ def refresh_subscriptions(kite) -> Dict[str, Any]:
         "added":      len(to_add),
         "removed":    len(to_remove),
     }
+
+
+def subscribe_full(symbols: List[str]) -> int:
+    """ADDITIVE (AutoTrade Phase-2): subscribe `symbols` and upgrade them to
+    MODE_FULL so the tick_cache also carries bid/ask (depth). Best-effort,
+    soft-fail, idempotent. Returns the count of tokens successfully upgraded.
+
+    FALCON-SAFE by construction:
+      * MODE_FULL is a SUPERSET of MODE_LTP — a full tick still carries
+        last_price, so a token SHARED with Falcon (already MODE_LTP) is only
+        UPGRADED; get_ltp keeps working identically.
+      * We only ADD to subscribed_tokens / full_tokens — never unsubscribe,
+        never downgrade a token to LTP, never touch Falcon's tokens beyond an
+        upgrade. Falcon never calls this, so its tokens stay MODE_LTP unless it
+        happens to hold the same symbol AutoTrade is trading (an upgrade, safe).
+      * Reuses the SAME instrument-token resolution refresh_subscriptions uses
+        (mtf_eligibility.get_instrument_token) — no new resolution logic.
+    """
+    if not symbols:
+        return 0
+    try:
+        from . import mtf_eligibility  # noqa: WPS433
+        from services.kite_auth import get_kite_client
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("subscribe_full import failed: %s", e)
+        return 0
+    if not is_connected():
+        return 0
+    try:
+        kite = get_kite_client(check=False)
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("subscribe_full: no kite client: %s", e)
+        return 0
+
+    tokens: List[int] = []
+    for sym in symbols:
+        try:
+            tok = mtf_eligibility.get_instrument_token(kite, sym)
+        except Exception:  # pragma: no cover - per-symbol
+            tok = None
+        if tok and tok > 0:
+            tok = int(tok)
+            tokens.append(tok)
+            with _state.lock:
+                _state.sym_to_token[sym] = tok
+                _state.token_to_sym[tok] = sym
+    if not tokens:
+        return 0
+
+    with _state.lock:
+        kt = _state.kt
+    if kt is None:
+        return 0
+    try:
+        kt.subscribe(tokens)
+        kt.set_mode(kt.MODE_FULL, tokens)
+    except Exception as e:  # pragma: no cover - best-effort
+        log.warning("subscribe_full failed: %s", e)
+        return 0
+    with _state.lock:
+        _state.subscribed_tokens |= set(tokens)
+        _state.full_tokens |= set(tokens)
+    log.info("KiteTicker subscribe_full upgraded %d tokens to FULL", len(tokens))
+    return len(tokens)
+
+
+def get_quote_ws(symbol: str, max_age_sec: int = 10) -> Optional[dict]:
+    """ADDITIVE: return {ltp, bid, ask} for `symbol` from the WS cache — but ONLY
+    when the symbol's token is in full_tokens (deliberately upgraded to FULL) AND
+    the cached tick is FRESH AND actually carries a bid AND ask. Otherwise None,
+    so the caller falls back to a REST quote. Network-free; a superset of get_ltp.
+    """
+    with _state.lock:
+        tok = _state.sym_to_token.get(symbol)
+        if not tok or tok not in _state.full_tokens:
+            return None
+        entry = _state.tick_cache.get(tok)
+        if not entry:
+            return None
+        bid = entry.get("bid")
+        ask = entry.get("ask")
+        ltp = entry.get("ltp")
+        if not (bid and bid > 0 and ask and ask > 0):
+            return None
+        age = (datetime.now(IST) - entry["ts"]).total_seconds()
+        if age > max_age_sec:
+            return None
+        return {"ltp": float(ltp) if ltp else None,
+                "bid": float(bid), "ask": float(ask)}
 
 
 def get_ltp(symbol: str, max_age_sec: int = 30) -> Optional[float]:
