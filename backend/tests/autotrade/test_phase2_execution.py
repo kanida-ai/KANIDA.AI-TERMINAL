@@ -261,7 +261,8 @@ def test_prewarm_is_noop_for_market_mode(clean_positions):
     from autotrade.session import TradingSession, prewarm_execution
     from tests.autotrade.conftest import seed_signals
     seed_signals([("A", 1, 9.0, 100.0)])
-    cfg = TradingSessionConfig(total_allocated_capital=100_000.0)  # market default
+    cfg = TradingSessionConfig(total_allocated_capital=100_000.0,
+                               execution_mode="market")  # explicit (env-independent)
     sess = TradingSession.create(cfg, mode="paper")
     out = prewarm_execution(sess)
     assert out["subscribed_full"] == 0

@@ -157,7 +157,9 @@ class TradingSessionConfig:
     #                      valid, QUEUED order that fills the instant the lock
     #                      breaks — the 2026-07-06 CEMPRO fix; no rejection, no
     #                      dropped pick). No usable price at all → MARKET fallback.
-    execution_mode: str = "market"         # market | marketable_limit
+    execution_mode: str = field(  # env-switchable DEFAULT (FALCON_AUTOTRADE_EXECUTION_MODE);
+        default_factory=lambda: os.environ.get(   # an explicit per-session value still wins.
+            "FALCON_AUTOTRADE_EXECUTION_MODE", "market"))  # market | marketable_limit
     # marketable_buffer_pct (FRACTION, 0.003 = 0.3%): how far THROUGH the touch
     # the marketable-LIMIT crosses (ask+buffer for a BUY / bid-buffer for a SELL)
     # so it fills as fast as a MARKET order for liquid names. The order is then
@@ -605,7 +607,9 @@ class TradingSessionConfig:
             order_type=d.get("order_type", "MARKET"),
             limit_offset_pct=float(d.get("limit_offset_pct", 0.001)),
             vwap_window_seconds=int(d.get("vwap_window_seconds", 60)),
-            execution_mode=d.get("execution_mode", "market"),
+            execution_mode=(d.get("execution_mode")
+                            or os.environ.get("FALCON_AUTOTRADE_EXECUTION_MODE",
+                                              "market")),
             marketable_buffer_pct=float(d.get("marketable_buffer_pct", 0.003)),
             instrument_type=d.get("instrument_type", "EQ"),
             expiry_preference=d.get("expiry_preference", "near"),
