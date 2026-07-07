@@ -326,9 +326,13 @@ def test_unattributed_close_gtt_triggered_but_order_open(clean_positions,
 # ── ORPHAN_AT_BROKER: broker holds MORE than we track → ALERT, nothing mutated ─
 
 def test_orphan_at_broker_alert(clean_positions, monkeypatch):
-    """Broker net (30) > Σ tracked (10) → an untracked lot at the broker. ALERT;
-    NEVER adopt or mutate our position."""
-    net_book = {"A": {"quantity": 30, "buy_quantity": 30, "sell_quantity": 0,
+    """Broker net (17) > Σ tracked (10) → an untracked lot at the broker. ALERT;
+    NEVER adopt or mutate our position.
+
+    NOTE: 17 vs 10 is a NON-clean ratio deliberately — GUARD G3 reclassifies a
+    CLEAN corp-action surplus (e.g. 30 = 10×3) as CORP_ACTION_SUSPECTED, so this
+    generic-orphan case must use a diff that is NOT a split/bonus multiple."""
+    net_book = {"A": {"quantity": 17, "buy_quantity": 17, "sell_quantity": 0,
                       "average_price": 100.0, "exchange": "NSE", "product": "MIS"}}
     sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
                               order_product="MIS")
@@ -338,7 +342,7 @@ def test_orphan_at_broker_alert(clean_positions, monkeypatch):
     actions = reconcile_broker_positions(sess)
     orphan = [a for a in actions if a["action"] == "ORPHAN_AT_BROKER"]
     assert len(orphan) == 1
-    assert orphan[0]["extra"] == 20
+    assert orphan[0]["extra"] == 7
     # Our position is untouched (never adopt the broker's extra).
     assert _row(sess, "A")["status"] == "OPEN"
     assert _row(sess, "A")["qty"] == 10

@@ -102,8 +102,13 @@ def _review_flag(pos: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
-def _build_position_row(p: Dict[str, Any]) -> Dict[str, Any]:
-    """Build the per-position journal dict from a raw DB row."""
+def _build_position_row(p: Dict[str, Any],
+                        session_product: str = "CNC") -> Dict[str, Any]:
+    """Build the per-position journal dict from a raw DB row.
+
+    session_product: the session's order_product (CNC/MIS/NRML/MTF), used ONLY by
+    the GUARD G4 net-P&L estimate (autotrade_positions has no per-row product
+    column — the reconciler likewise resolves product from the session config)."""
     qty       = int(p.get("qty") or 0)
     avg_price = float(p.get("avg_price") or 0.0)
     invested  = round(qty * avg_price, 2)
@@ -129,6 +134,24 @@ def _build_position_row(p: Dict[str, Any]) -> Dict[str, Any]:
                float(u_pnl) if u_pnl is not None else 0.0)
     pnl_pct = round(pnl_rs / invested * 100, 4) if invested > 0 else 0.0
 
+    # ── GUARD G4 (mode F4): GROSS vs NET P&L clarity ──────────────────────────
+    # The existing realised_pnl is GROSS (no charges). ADD an ESTIMATED net for
+    # CLOSED positions: gross − estimated charges (brokerage/STT/txn/GST/stamp/DP).
+    # We NEVER rename or alter the gross field; net is additive + clearly labelled
+    # an estimate. product comes from the position row's stored `product` (falls
+    # back to the session product resolved by the caller via `_product`).
+    charges_est: Optional[Dict[str, Any]] = None
+    realised_pnl_net: Optional[float] = None
+    if status == "CLOSED" and r_pnl is not None and exit_p is not None and \
+            avg_price > 0 and qty > 0:
+        from ..charges import estimate_charges
+        buy_value  = qty * avg_price
+        sell_value = qty * float(exit_p)
+        charges_est = estimate_charges(
+            product=session_product,
+            buy_value=buy_value, sell_value=sell_value, legs=2)
+        realised_pnl_net = round(float(r_pnl) - charges_est["total"], 2)
+
     row: Dict[str, Any] = {
         "symbol":        p.get("symbol"),
         "exchange":      p.get("exchange"),
@@ -144,7 +167,12 @@ def _build_position_row(p: Dict[str, Any]) -> Dict[str, Any]:
         "ltp":           p.get("ltp"),
         "status":        status,
         "exit_price":    float(exit_p) if exit_p is not None else None,
-        "realised_pnl":  float(r_pnl) if r_pnl is not None else None,
+        # realised_pnl is GROSS (no charges) — UNCHANGED field. GUARD G4 adds the
+        # net estimate + a mirror gross label WITHOUT touching this key.
+        "realised_pnl":       float(r_pnl) if r_pnl is not None else None,
+        "realised_pnl_gross": float(r_pnl) if r_pnl is not None else None,
+        "realised_pnl_net":   realised_pnl_net,   # ESTIMATE (gross − est charges)
+        "charges_estimate":   charges_est,        # breakdown dict or None
         "unrealised_pnl": float(u_pnl) if u_pnl is not None else None,
         "pnl_rs":        round(pnl_rs, 2),
         "pnl_pct":       pnl_pct,
@@ -198,9 +226,13 @@ def build_journal(session_id: str) -> Dict[str, Any]:
     fund        = float(sess.get("total_allocated_capital") or 0.0)
     inv_basis   = float(sess.get("invested_basis") or 0.0) or fund
     leverage    = round(inv_basis / fund, 4) if fund > 0 else 1.0
+    # GUARD G4: the session product drives the net-P&L charge estimate (the
+    # positions table has no per-row product; EQ→CNC handled in charges.py).
+    session_product = str(cfg.get("order_product") or "CNC")
 
     # ── Build per-position rows ───────────────────────────────────────────────
-    pos_journal: List[Dict[str, Any]] = [_build_position_row(p) for p in positions_raw]
+    pos_journal: List[Dict[str, Any]] = [
+        _build_position_row(p, session_product) for p in positions_raw]
 
     # ── Aggregate summary ─────────────────────────────────────────────────────
     n_total   = len(pos_journal)
@@ -210,6 +242,15 @@ def build_journal(session_id: str) -> Dict[str, Any]:
     total_realised   = sum(p["realised_pnl"] or 0.0 for p in closed)
     total_unrealised = sum(p["unrealised_pnl"] or 0.0 for p in open_pos)
     total_pnl        = round(total_realised + total_unrealised, 2)
+
+    # GUARD G4: session-level ESTIMATED charges + net realised. Additive; the
+    # gross totals above are UNCHANGED. total_charges_est sums the per-position
+    # estimates; realised falls back to gross when a row has no net estimate.
+    total_charges_est = round(sum(
+        (p.get("charges_estimate") or {}).get("total", 0.0) for p in closed), 2)
+    total_realised_net = round(sum(
+        (p["realised_pnl_net"] if p.get("realised_pnl_net") is not None
+         else (p["realised_pnl"] or 0.0)) for p in closed), 2)
 
     n_winners = sum(1 for p in closed if (p["realised_pnl"] or 0.0) > 0)
     n_losers  = sum(1 for p in closed if (p["realised_pnl"] or 0.0) <= 0)
@@ -286,7 +327,10 @@ def build_journal(session_id: str) -> Dict[str, Any]:
             "total_allocated_capital": fund,
             "invested_basis":          round(inv_basis, 2),
             "leverage":                leverage,
-            "total_realised_pnl":      round(total_realised, 2),
+            "total_realised_pnl":       round(total_realised, 2),  # GROSS
+            "total_realised_pnl_gross": round(total_realised, 2),
+            "total_realised_pnl_net":   total_realised_net,        # ESTIMATE
+            "total_charges_estimate":   total_charges_est,         # ESTIMATE
             "total_unrealised_pnl":    round(total_unrealised, 2),
             "total_pnl":               total_pnl,
             "total_pnl_pct_invested":  total_pnl_pct_inv,

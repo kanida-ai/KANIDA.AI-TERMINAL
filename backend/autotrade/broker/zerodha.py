@@ -162,6 +162,46 @@ class ZerodhaBroker(BrokerClient):
         from falcon.trade.services.order_executor import _autotrade_enabled
         return _autotrade_enabled()
 
+    def _token_abort_reason(self) -> Optional[str]:
+        """GUARD G2 (mode E5): O(1), NO-network token pre-check for the LIVE order
+        path. Returns a reason string ("TOKEN_EXPIRED: ...") when the broker token
+        is known-bad / absent, else None (place normally).
+
+        HAPPY-PATH COST — zero extra network round-trips:
+          1. A per-account bound client carries its OWN vault token; the process
+             _build_kite already RAISES on a missing/expired bound token (caught
+             by the order path → FAILED). We do NOT re-probe it here — return None
+             (let placement surface any bound-token error as it does today).
+          2. Global/operator path: consult get_cached_token_status(60s) — a status
+             the admin widget / auth scheduler / a prior order already computed. If
+             fresh and INVALID → abort TOKEN_EXPIRED. If fresh and VALID → None
+             (no network). We NEVER call get_token_status() (which does profile())
+             from here, so a valid token adds NOTHING.
+          3. No fresh cache → fall back to the O(1) token-PRESENCE probe
+             (token_present, a DB/env read, no network): NO token at all is the
+             'dead session' signal → abort TOKEN_MISSING. A present token proceeds
+             (any server-side expiry then surfaces as the normal placement error).
+        """
+        # A per-account (vault-bound) client validates its own token in _build_kite
+        # (raises on expiry). Don't second-guess it with the global cache.
+        if getattr(self.profile, "broker_account_id", None):
+            return None
+        try:
+            from services.kite_auth import (get_cached_token_status,
+                                            token_present)
+        except Exception:  # pragma: no cover - defensive; never block on import
+            return None
+        cached = get_cached_token_status(60.0)
+        if cached is not None:
+            if not cached.get("valid"):
+                code = cached.get("code") or "TOKEN_EXPIRED"
+                return f"TOKEN_EXPIRED: {code} ({cached.get('reason') or 'invalid token'})"
+            return None  # fresh + valid → no network, proceed
+        # No fresh cache → cheapest possible check: is there a token at all?
+        if token_present() is None:
+            return "TOKEN_EXPIRED: TOKEN_MISSING (no Kite access token present)"
+        return None
+
     def _preflight_block_reason(self) -> Optional[str]:
         """FIX B (reliability gate): mirror the legacy /place path — before any
         LIVE order, the falcon.preflight 13-check gate must be GREEN. Returns a
@@ -597,6 +637,14 @@ class ZerodhaBroker(BrokerClient):
             return OrderResult(status="DRY_RUN", broker_order_id=None,
                                symbol=order.symbol, qty=order.qty,
                                error=None, raw={"dry_run": True})
+        # GUARD G2 (mode E5): token-expiry abort. O(1), no network on a valid
+        # token. Never place into a dead/expired session — return FAILED cleanly
+        # (the caller's REJECTION GUARD then drops the leg; no half-state).
+        tok = self._token_abort_reason()
+        if tok:
+            log.error("place_order ABORTED (token) for %s: %s", order.symbol, tok)
+            return OrderResult(status="FAILED", broker_order_id=None,
+                               symbol=order.symbol, qty=order.qty, error=tok)
         # FIX B: reliability preflight gate on the LIVE path (paper bypassed
         # above). RED → refuse, no kite call, named reason.
         block = self._preflight_block_reason()
@@ -706,6 +754,17 @@ class ZerodhaBroker(BrokerClient):
         if not self._live_allowed():
             return OrderResult(status="DRY_RUN", broker_order_id=None,
                                symbol=symbol, qty=qty, raw={"dry_run": True})
+        # GUARD G2 (mode E5): token-expiry abort on the EXIT path too. O(1), no
+        # network on a valid token. A dead/expired token cannot place ANY order —
+        # so instead of an opaque kite exception (caught below → EXIT_FAILED with a
+        # cryptic error), abort CLEANLY with a named TOKEN_EXPIRED reason. The
+        # position stays OPEN/EXIT_FAILED (never half-closed) and the exit-retry
+        # sweep re-attempts next tick, by which time a refreshed token may work.
+        tok = self._token_abort_reason()
+        if tok:
+            log.error("place_market_exit ABORTED (token) for %s: %s", symbol, tok)
+            return OrderResult(status="FAILED", broker_order_id=None,
+                               symbol=symbol, qty=qty, error=tok)
         # FIX B scope — EXITS deliberately DO NOT gate on preflight. An exit
         # protects capital and must ALWAYS attempt: the preflight RED set includes
         # daily signal/data-freshness checks (stale ohlc, no fresh signals, 0

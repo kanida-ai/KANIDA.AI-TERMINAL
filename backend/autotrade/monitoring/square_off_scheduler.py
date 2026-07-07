@@ -139,6 +139,20 @@ class _Scheduler:
             close_reason = "MIS_SQUARE_OFF" if is_mis else "SQUARE_OFF"
             trigger_prefix = ("MIS_SQUARE_OFF" if is_mis
                               else "INTRADAY_BASKET SQUARE_OFF")
+            # GUARD G1 (mode F5) belt-and-suspenders: before the MIS square-off,
+            # cancel any STRAY GTT on an intraday leg so nothing survives past the
+            # square-off to orphan-short us. (The kill_switch flatten also cancels
+            # ALL GTTs; this is a dedicated intraday-only sweep on the MIS path.)
+            if is_mis and getattr(sess, "gtt_manager", None) is not None:
+                try:
+                    swept = sess.gtt_manager.sweep_intraday_gtts()
+                    if swept:
+                        log.warning("square_off_scheduler: G1 swept %d stray "
+                                    "intraday GTT(s) for %s: %s",
+                                    len(swept), self.session_id, swept)
+                except Exception as e:  # never block the square-off on a sweep
+                    log.warning("square_off_scheduler: intraday GTT sweep failed "
+                                "for %s: %s", self.session_id, e)
             log.info("square_off_scheduler: SQUARING OFF %s (%s, gross_return=%.4f)",
                      self.session_id, close_reason, gr)
             # Single-fire guard so the precise-time square-off and the tick-driver

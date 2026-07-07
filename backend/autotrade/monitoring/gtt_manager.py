@@ -46,6 +46,41 @@ log = logging.getLogger("kanida.autotrade.gtt_manager")
 _GTT_STOP_LIMIT_BUFFER_DEFAULT = 0.003
 
 
+# ── GUARD G1 (mode F5): NO GTT on intraday / MIS legs ─────────────────────────
+# HIT-LIVE 2026-07-06: MIS positions had GTT-OCO stops placed. MIS is auto-squared
+# same-day (~15:12 by the square-off scheduler + the tick-driver stop). A GTT that
+# survives past square-off is ORPHANED — if it later triggers it SELLS shares we no
+# longer hold → a naked SHORT. Protection for an MIS leg is the tick-driver
+# arm/stop + the intraday square-off, NOT a broker GTT. So GTTs are placed ONLY
+# for CARRIED products (CNC / MTF / NRML); MIS is ALWAYS suppressed.
+#
+# _gtt_allowed_for_product is the SINGLE choke-point every GTT-place path funnels
+# through (place_for_position) so the gate can't be bypassed. It mirrors the
+# reconciler's _kite_product normalisation (EQ→CNC) so the product bucket the GTT
+# gate keys on is the SAME one the reconciler buckets the invariant on.
+_CARRIED_PRODUCTS = {"CNC", "MTF", "NRML"}
+
+
+def _norm_product(product: Optional[str]) -> str:
+    """Normalise to CNC | MIS | NRML | MTF (EQ→CNC), matching the reconciler's
+    position_reconciler._kite_product so GTT gating and invariant bucketing agree."""
+    p = str(product or "CNC").upper()
+    if p == "EQ":
+        return "CNC"
+    if p in ("CNC", "MIS", "NRML", "MTF"):
+        return p
+    return "CNC"
+
+
+def _gtt_allowed_for_product(product: Optional[str]) -> bool:
+    """True iff a broker GTT-OCO may be placed for this product. CARRIED products
+    (CNC / MTF / NRML) → True. MIS (intraday) → False (its protection is the
+    tick-driver arm/stop + the intraday square-off; a surviving GTT would orphan).
+    Any unknown value normalises to CNC → allowed (a carried default is the safe
+    fallback; the reconciler's sweep is the belt-and-suspenders backstop)."""
+    return _norm_product(product) in _CARRIED_PRODUCTS
+
+
 def _gtt_stop_buffer() -> float:
     """Read FALCON_GTT_STOP_BUFFER from env at call time (so tests can patch
     os.environ without re-importing)."""
@@ -107,6 +142,20 @@ class GTTManager:
         self.brokers = brokers          # {broker_profile: BrokerClient}
         self.registry = registry        # PositionRegistry
 
+    def _effective_product(self, prof_id: Optional[str]) -> str:
+        """The order_product for a position's broker_profile, or the session-level
+        order_product when the profile can't be matched. Used by the GUARD G1 GTT
+        gate. Never raises (defaults to the session product, then CNC)."""
+        try:
+            for bp in (getattr(self.config, "broker_profiles", None) or []):
+                if str(getattr(bp, "profile_id", "")) == str(prof_id):
+                    p = getattr(bp, "order_product", None)
+                    if p:
+                        return str(p)
+        except Exception:  # pragma: no cover - defensive
+            pass
+        return str(getattr(self.config, "order_product", "CNC") or "CNC")
+
     # ── Place one position's GTT-OCO ──────────────────────────────────────────
     def place_for_position(self, pos: Dict[str, Any]) -> Dict[str, Any]:
         """Compute levels + place a GTT-OCO for one open position, then persist
@@ -119,6 +168,27 @@ class GTTManager:
         direction = pos.get("direction") or "long"
         if qty <= 0 or entry <= 0:
             return {"symbol": symbol, "status": "SKIPPED_NO_QTY_OR_PRICE"}
+
+        # GUARD G1 (mode F5): the effective product for THIS leg. Prefer the
+        # position's broker_profile order_product (the product it was actually
+        # opened with); fall back to the session order_product. This is resolved
+        # with the SAME _norm_product the reconciler buckets on (EQ→CNC), so the
+        # GTT gate and the invariant agree on what an "MIS leg" is.
+        eff_product = self._effective_product(prof_id)
+        if not _gtt_allowed_for_product(eff_product):
+            # MIS (intraday) — NEVER place a broker GTT. Record levels only so the
+            # UI still shows the intended stop/target; the tick-driver arm/stop +
+            # the intraday square-off are the real protection.
+            log.info("GTT SUPPRESSED (intraday leg) for %s/%s product=%s — "
+                     "tick-stop + square-off cover it (no orphan GTT)",
+                     self.session_id, symbol, _norm_product(eff_product))
+            stop_trig, _sl, tgt_trig, _tl = compute_levels(
+                entry, self.config.per_position_stop_pct,
+                self.config.per_position_target_pct, direction=direction)
+            self.registry.set_gtt(symbol, None, gtt_stop=stop_trig,
+                                  gtt_target=tgt_trig, broker_profile=prof_id)
+            return {"symbol": symbol, "status": "SUPPRESSED_INTRADAY",
+                    "gtt_id": None, "stop": stop_trig, "target": tgt_trig}
 
         # FUTURES long/short: for a short the STOP is ABOVE entry (buy-stop) and
         # the TARGET is BELOW (buy-limit). compute_levels inverts on direction.
@@ -179,6 +249,47 @@ class GTTManager:
         out: List[Dict[str, Any]] = []
         for pos in self.registry.get_open_positions_missing_gtt():
             out.append(self.place_for_position(pos))
+        return out
+
+    # ── GUARD G1 sweep: cancel any stray GTT on an INTRADAY (MIS) leg ─────────
+    def sweep_intraday_gtts(self) -> List[Dict[str, Any]]:
+        """Belt-and-suspenders (mode F5): cancel any GTT that somehow exists on an
+        OPEN intraday/MIS position. G1's place-gate should prevent MIS GTTs from
+        ever being created, but a legacy row (opened before this guard) or a
+        cross-session backfill could still carry one — a GTT that outlives the MIS
+        square-off is an orphan-short risk. Called on the MIS square-off / exit
+        path (defensive; the full flatten's cancel_session_gtts_async is the other
+        layer). Best-effort — a cancel failure is logged, never raised."""
+        out: List[Dict[str, Any]] = []
+        for pos in self.registry.get_open_positions():
+            gtt_id = pos.get("gtt_id")
+            if not gtt_id:
+                continue
+            if _gtt_allowed_for_product(self._effective_product(
+                    pos.get("broker_profile"))):
+                continue  # carried product — its GTT is legitimate, leave it
+            prof_id = pos.get("broker_profile")
+            broker = self.brokers.get(prof_id) or next(iter(self.brokers.values()), None)
+            if broker is None:
+                continue
+            try:
+                broker.cancel_gtt(gtt_id)
+                # Clear the id so the reconciler doesn't chase a cancelled GTT.
+                try:
+                    self.registry.set_gtt(pos["symbol"], None, broker_profile=prof_id)
+                except Exception as _clr:  # pragma: no cover - defensive
+                    log.debug("sweep_intraday_gtts: gtt_id clear failed %s: %s",
+                              pos["symbol"], _clr)
+                log.warning("GUARD G1 SWEEP: cancelled STRAY intraday GTT %s for "
+                            "%s/%s (MIS leg must not carry a GTT)",
+                            gtt_id, self.session_id, pos["symbol"])
+                out.append({"symbol": pos["symbol"], "gtt_id": gtt_id,
+                            "status": "SWEPT_INTRADAY_GTT"})
+            except Exception as e:  # never block the exit on a cancel
+                log.warning("sweep_intraday_gtts: cancel_gtt failed for %s (%s): %s",
+                            pos["symbol"], gtt_id, e)
+                out.append({"symbol": pos["symbol"], "gtt_id": gtt_id,
+                            "status": "SWEEP_CANCEL_FAILED", "error": str(e)})
         return out
 
     # ── Cancel all session GTTs (called by kill switch before flatten) ────────

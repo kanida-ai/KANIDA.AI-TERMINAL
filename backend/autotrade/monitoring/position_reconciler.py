@@ -239,6 +239,51 @@ def _confirmed_close(pos: Dict[str, Any], broker) -> Optional[Dict[str, Any]]:
     return None
 
 
+# ── GUARD G3 (mode C3): corporate-action classifier ──────────────────────────
+# A split / bonus changes the BROKER quantity with NO order — so the invariant
+# sees a surplus (broker > db) or deficit (broker < db) it cannot attribute to
+# any order-id, and would otherwise raise a GENERIC ORPHAN_AT_BROKER /
+# UNATTRIBUTED_CLOSE. When the divergence is a CLEAN corporate-action ratio we
+# instead raise a distinct CORP_ACTION_SUSPECTED alert carrying the detected
+# ratio. We NEVER auto-mutate — this only RECLASSIFIES the alert.
+#
+# Ratios: broker ≈ db × R for a split/bonus multiplier R. Common Indian equity
+# corporate actions: 1:1 bonus (×2), 2:1 bonus (×3), 1:5 split from ₹10→₹2 face
+# (×5), 3:2 bonus (×2.5), 1:10 split ₹10→₹1 (×10), and the fractional 1.5 that a
+# 1:2 bonus (3-for-2) produces (×1.5). A reverse split shrinks qty (db × R with
+# R<1) — the reciprocals are covered by classifying db/broker too.
+_CORP_ACTION_RATIOS = (2.0, 3.0, 5.0, 1.5, 2.5, 10.0)
+# Tolerance: broker qty is an INTEGER, so db×R may be off by rounding on odd lots.
+# Accept a ratio within ±2% (a clean split/bonus lands on the integer exactly for
+# a round lot; the tolerance only forgives fractional-share rounding).
+_CORP_ACTION_TOL = 0.02
+
+
+def _corp_action_ratio(broker_held: int, db_held: int) -> Optional[float]:
+    """Return the CLEAN corporate-action multiplier R such that broker ≈ db × R
+    (a split/bonus grew the broker qty) — or its reciprocal for a reverse split —
+    else None. Conservative: only a ratio within tolerance of a known
+    _CORP_ACTION_RATIOS entry qualifies; anything else stays None (generic alert).
+
+    Both sides must be > 0 (a 0 on either side is a real close/orphan, not a
+    ratio). Never raises."""
+    try:
+        b = int(broker_held)
+        d = int(db_held)
+    except (TypeError, ValueError):
+        return None
+    if b <= 0 or d <= 0 or b == d:
+        return None
+    # Growth (split/bonus): broker larger. Shrink (reverse split): broker smaller.
+    hi, lo = (b, d) if b > d else (d, b)
+    raw = hi / lo
+    for R in _CORP_ACTION_RATIOS:
+        if abs(raw - R) <= _CORP_ACTION_TOL * R:
+            # Report the SIGNED multiplier vs db: >1 broker grew, <1 broker shrank.
+            return round(R if b > d else (1.0 / R), 4)
+    return None
+
+
 def _persist_alert(session_id: Optional[str], symbol: str, product: str,
                    kind: str, detail: str) -> None:
     """Persist a lightweight recon alert row (best-effort; never raises) + WARN.
@@ -463,25 +508,58 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
             if deficit > 0:
                 # A close we CANNOT attribute to any of our order-ids (e.g. an RMS
                 # auto-square with no order we tracked). ALERT — never blind-close.
-                detail = (f"broker_held={broker_held} < db_held_all={db_held_all}; "
-                          f"unresolved deficit={deficit} after order-id evidence")
-                _persist_alert(session.session_id, bare_sym, product,
-                               "UNATTRIBUTED_CLOSE", detail)
-                actions.append({
-                    "action": "UNATTRIBUTED_CLOSE", "symbol": bare_sym,
-                    "product": product, "deficit": int(deficit)})
+                # GUARD G3: if broker vs db is a CLEAN corp-action ratio (e.g. a
+                # reverse split shrank the broker qty), RECLASSIFY as
+                # CORP_ACTION_SUSPECTED with the ratio instead of the generic alert.
+                ratio = _corp_action_ratio(broker_held, db_held_all)
+                if ratio is not None:
+                    detail = (f"broker_held={broker_held} vs db_held_all="
+                              f"{db_held_all}; clean corp-action ratio={ratio} "
+                              f"(no order evidence) — split/bonus SUSPECTED, NOT "
+                              f"auto-mutated")
+                    _persist_alert(session.session_id, bare_sym, product,
+                                   "CORP_ACTION_SUSPECTED", detail)
+                    actions.append({
+                        "action": "CORP_ACTION_SUSPECTED", "symbol": bare_sym,
+                        "product": product, "ratio": ratio,
+                        "broker_held": int(broker_held),
+                        "db_held": int(db_held_all)})
+                else:
+                    detail = (f"broker_held={broker_held} < db_held_all="
+                              f"{db_held_all}; unresolved deficit={deficit} after "
+                              f"order-id evidence")
+                    _persist_alert(session.session_id, bare_sym, product,
+                                   "UNATTRIBUTED_CLOSE", detail)
+                    actions.append({
+                        "action": "UNATTRIBUTED_CLOSE", "symbol": bare_sym,
+                        "product": product, "deficit": int(deficit)})
             continue
 
         # broker_held > db_held_all → broker holds MORE than we track → orphan /
         # untracked position at the broker. NEVER adopt or mutate — ALERT.
+        # GUARD G3: if the surplus is a CLEAN corp-action ratio (a split/bonus GREW
+        # the broker qty with no order), RECLASSIFY as CORP_ACTION_SUSPECTED with
+        # the ratio instead of a generic ORPHAN_AT_BROKER. Still never mutates.
         extra = broker_held - db_held_all
-        detail = (f"broker_held={broker_held} > db_held_all={db_held_all}; "
-                  f"extra={extra} untracked at broker")
-        _persist_alert(session.session_id, bare_sym, product,
-                       "ORPHAN_AT_BROKER", detail)
-        actions.append({
-            "action": "ORPHAN_AT_BROKER", "symbol": bare_sym,
-            "product": product, "extra": int(extra)})
+        ratio = _corp_action_ratio(broker_held, db_held_all)
+        if ratio is not None:
+            detail = (f"broker_held={broker_held} vs db_held_all={db_held_all}; "
+                      f"clean corp-action ratio={ratio} — split/bonus SUSPECTED, "
+                      f"NOT auto-adopted")
+            _persist_alert(session.session_id, bare_sym, product,
+                           "CORP_ACTION_SUSPECTED", detail)
+            actions.append({
+                "action": "CORP_ACTION_SUSPECTED", "symbol": bare_sym,
+                "product": product, "ratio": ratio,
+                "broker_held": int(broker_held), "db_held": int(db_held_all)})
+        else:
+            detail = (f"broker_held={broker_held} > db_held_all={db_held_all}; "
+                      f"extra={extra} untracked at broker")
+            _persist_alert(session.session_id, bare_sym, product,
+                           "ORPHAN_AT_BROKER", detail)
+            actions.append({
+                "action": "ORPHAN_AT_BROKER", "symbol": bare_sym,
+                "product": product, "extra": int(extra)})
 
     # After any close, re-freeze the invested basis over the REMAINING OPEN
     # positions so the kill / trail denominator matches reality.

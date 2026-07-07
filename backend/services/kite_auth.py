@@ -260,6 +260,19 @@ def get_kite_client(check: bool = False):
     return kite
 
 
+# ── Token-status cache (for the O(1) order-path pre-check, AutoTrade GUARD G2) ─
+# get_token_status() does a kite.profile() network round-trip. The AutoTrade
+# order path (entry/exit) must NOT pay that on every order. So every successful/
+# failed get_token_status() result is cached with a monotonic timestamp, and
+# get_cached_token_status() lets a hot path REUSE a recent result WITHOUT ever
+# triggering a fresh probe. This changes NO existing behaviour of
+# get_token_status (it still probes + returns the same dict) — it only adds a
+# side cache other callers can read.
+import time as _time  # local alias; avoids touching the module import block above
+
+_TOKEN_STATUS_CACHE: dict = {"status": None, "at": 0.0}
+
+
 def get_token_status() -> dict:
     """
     Check current token validity.
@@ -268,18 +281,22 @@ def get_token_status() -> dict:
     try:
         api_key, _ = _get_credentials()
     except KiteAuthError as e:
-        return {"valid": False, "code": e.code, "reason": e.detail}
+        st = {"valid": False, "code": e.code, "reason": e.detail}
+        _TOKEN_STATUS_CACHE.update(status=st, at=_time.monotonic())
+        return st
 
     try:
         token = get_access_token()
     except KiteAuthError as e:
-        return {"valid": False, "code": e.code, "reason": e.detail}
+        st = {"valid": False, "code": e.code, "reason": e.detail}
+        _TOKEN_STATUS_CACHE.update(status=st, at=_time.monotonic())
+        return st
 
     try:
         kite = _new_kite(api_key)
         kite.set_access_token(token)
         profile = kite.profile()
-        return {
+        st = {
             "valid":         True,
             "user":          profile.get("user_name", ""),
             "email":         profile.get("email", ""),
@@ -287,8 +304,43 @@ def get_token_status() -> dict:
             "token_source":  "db" if _load_token_from_db() else "env",
             "token_date":    date.today().isoformat(),
         }
+        _TOKEN_STATUS_CACHE.update(status=st, at=_time.monotonic())
+        return st
     except Exception as e:
-        return {"valid": False, "code": "TOKEN_EXPIRED", "reason": str(e)}
+        st = {"valid": False, "code": "TOKEN_EXPIRED", "reason": str(e)}
+        _TOKEN_STATUS_CACHE.update(status=st, at=_time.monotonic())
+        return st
+
+
+def get_cached_token_status(max_age_sec: float = 60.0) -> Optional[dict]:
+    """Return the most recent get_token_status() result IF it is younger than
+    max_age_sec, else None — WITHOUT triggering a fresh network probe.
+
+    O(1), no network. Used by the AutoTrade order path (GUARD G2) so the happy
+    path (valid token) costs nothing extra: any recent status computed by the
+    admin widget / auth scheduler / a prior order is reused; a stale/absent cache
+    returns None and the caller falls back to the O(1) token-PRESENCE check
+    (get_access_token) rather than a profile() round-trip."""
+    st = _TOKEN_STATUS_CACHE.get("status")
+    if st is None:
+        return None
+    age = _time.monotonic() - float(_TOKEN_STATUS_CACHE.get("at") or 0.0)
+    if age > max_age_sec:
+        return None
+    return dict(st)
+
+
+def token_present() -> Optional[str]:
+    """O(1) token-PRESENCE probe (no network): the current access token if one
+    exists in DB/env, else None. A None here is the E5 'dead session' signal —
+    there is NO token to place into. This never validates against the broker (a
+    present-but-server-expired token still returns a string); it only answers
+    'is there a token at all'. Used by GUARD G2 as the cheap always-available
+    fallback when no cached status is fresh."""
+    try:
+        return get_access_token()
+    except KiteAuthError:
+        return None
 
 
 def exchange_and_save(request_token: str) -> str:

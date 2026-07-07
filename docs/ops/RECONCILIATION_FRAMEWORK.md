@@ -48,8 +48,39 @@ Full scenario/safeguard per mode: see the artifact.
 - **P2** order-driven reconcile engine (per-session, positive evidence). DONE (v2 reconciler).
 - **P3** invariant checker + alerts; re-enable the broker sync SAFELY. DONE.
 - **P4** GTT-fill confirmation (triggered GTT → its order-id → real fill → CLOSE). DONE (`get_gtt_fill`).
-- **P5** guards: no GTT on intraday/MIS legs; token-expiry abort; corp-action alert; P&L clarity.
+- **P5** guards: no GTT on intraday/MIS legs; token-expiry abort; corp-action alert; P&L clarity. BUILT (branch, awaiting review/deploy).
 - **P6** full test matrix — one test per mode.
+
+## P5 GUARDS (built — additive, paper byte-for-byte unchanged, no falcon_position_state)
+- **G1 (F5) NO GTT on MIS legs** — choke-point `monitoring/gtt_manager.py:place_for_position`
+  gated by `_gtt_allowed_for_product(product)` (CARRIED CNC/MTF/NRML → place;
+  MIS → SUPPRESSED_INTRADAY, records levels only, gtt_id NULL). Product resolved
+  via `_effective_product(prof_id)` (per-profile order_product → session
+  order_product) normalised with the SAME EQ→CNC rule the reconciler's
+  `_kite_product` uses. Belt-and-suspenders `sweep_intraday_gtts()` cancels any
+  stray MIS gtt_id + clears it; wired on the MIS square-off path
+  (`square_off_scheduler`, additive to the kill-switch full GTT-cancel sweep).
+- **G2 (E5) token-expiry abort** — `broker/zerodha.py:_token_abort_reason()` gates
+  `place_order` (entry) + `place_market_exit` (exit) AFTER `_live_allowed()` (paper
+  bypassed). O(1), NO network on a valid token: reads `get_cached_token_status(60s)`
+  (a status the admin widget / auth scheduler / a prior order already computed);
+  if fresh+valid → proceed (never calls `profile()`); fresh+invalid → FAILED
+  `TOKEN_EXPIRED`; no fresh cache → O(1) `token_present()` (DB/env read) → FAILED
+  `TOKEN_MISSING` when absent. Bound per-account clients validate their own token
+  in `_build_kite` (skipped here). New `services/kite_auth.py`:
+  `get_cached_token_status` + `token_present` + a side-cache in `get_token_status`.
+- **G3 (C3) corp-action alert** — `position_reconciler.py:_corp_action_ratio()` — a
+  CLEAN split/bonus multiplier {2,3,5,1.5,2.5,10} (±2% tol) between broker_held and
+  db_held_all → distinct `CORP_ACTION_SUSPECTED` alert (kind on
+  autotrade_recon_alerts, carries the ratio) INSTEAD of the generic
+  ORPHAN_AT_BROKER (surplus) / UNATTRIBUTED_CLOSE (deficit). Reverse split →
+  reciprocal. NEVER mutates. Non-clean diff → stays generic.
+- **G4 (F4) P&L gross/net** — pure `autotrade/charges.py:estimate_charges(product,
+  buy_value, sell_value, legs)` → {brokerage, stt, exchange, gst, stamp, dp, total}
+  (Zerodha equity rates in one `_RATES` block; ESTIMATE, no live API). Journal read
+  path ADDS `realised_pnl_net` + `charges_estimate` + a `realised_pnl_gross` mirror
+  per position AND session-level `total_realised_pnl_net`/`total_charges_estimate`
+  — the existing GROSS `realised_pnl` / `total_realised_pnl` are UNCHANGED.
 
 ## P2+P3 reconciler (v2) — order-id-driven, invariant-based
 `monitoring/position_reconciler.py` was REWRITTEN. The old aggregate qty-correction
