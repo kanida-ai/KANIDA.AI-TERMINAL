@@ -44,16 +44,41 @@ quantity overwritten to the account total by exactly that mistake.
 Full scenario/safeguard per mode: see the artifact.
 
 ## Build plan (phased, reviewed)
-- **P1** order-id tracking (`entry_order_id`/`exit_order_id` on positions) — foundation.
-- **P2** order-driven reconcile engine (PENDING→FILLED→CLOSED, per-session, positive evidence).
-- **P3** invariant checker + alerts; re-enable the broker sync in CROSS-CHECK-ONLY mode.
-- **P4** GTT-fill confirmation (triggered GTT → its order-id → real fill → CLOSE).
+- **P1** order-id tracking (`entry_order_id`/`exit_order_id` on positions) — foundation. DONE.
+- **P2** order-driven reconcile engine (per-session, positive evidence). DONE (v2 reconciler).
+- **P3** invariant checker + alerts; re-enable the broker sync SAFELY. DONE.
+- **P4** GTT-fill confirmation (triggered GTT → its order-id → real fill → CLOSE). DONE (`get_gtt_fill`).
 - **P5** guards: no GTT on intraday/MIS legs; token-expiry abort; corp-action alert; P&L clarity.
 - **P6** full test matrix — one test per mode.
 
+## P2+P3 reconciler (v2) — order-id-driven, invariant-based
+`monitoring/position_reconciler.py` was REWRITTEN. The old aggregate qty-correction
+(`set_qty` from the account net) and the close-on-net-0-without-order-evidence
+paths are GONE. Each cycle, per (symbol, product):
+
+    Σ open qty (ALL sessions on the account) == broker net qty + holdings
+
+Decision table:
+- `==` → in sync, NO action (this is what makes multi-session same-symbol safe:
+  30+21==51 CNC and 326==326 MIS both hold; nothing is touched).
+- `broker < db` → resolve PER POSITION on POSITIVE order-id evidence only, in a
+  deterministic order (by row id), closing until the invariant is met:
+  `gtt_id → get_gtt_fill` COMPLETE, then `exit_order_id → get_order_status`
+  COMPLETE. An unresolved remainder → **UNATTRIBUTED_CLOSE** alert (nothing closed).
+- `broker > db` → **ORPHAN_AT_BROKER** alert (never adopt / mutate).
+
+Product is resolved per session from `config_json.order_product` (CNC/MIS/NRML/MTF,
+EQ→CNC) and the broker net row's `product` field, so a same-symbol CNC leg and MIS
+leg never cross-contaminate. Account-wide sum is scoped to the reconciling
+session's broker profile(s). After any close → `refreeze_invested_basis()`.
+
+Alerts are logged at WARNING and persisted to `autotrade_recon_alerts`
+(id, ts, session_id, symbol, product, kind, detail). **Alerts NEVER mutate a
+position** — a stale-but-flagged OPEN beats a false close.
+
 ## Operational note
-The old broker-position reconciler is DISABLED via
-`FALCON_AUTOTRADE_BROKER_RECONCILE=off` (config/.env) because it corrupted
-per-session quantities across same-symbol sessions. Keep it OFF until P3 makes it
-multi-session-safe (cross-check-only). Entry-fill / GTT / pre-exit reconciles
-still run.
+`FALCON_AUTOTRADE_BROKER_RECONCILE` now gates the SAFE v2 reconciler and defaults
+**on** (only `off`/`0`/`false`/`no` disables). The v2 reconciler is order-id-driven
+and multi-session-safe — it never writes a session's qty from the account
+aggregate. Fail-safe unchanged: unreachable/expired (net book None) / empty book /
+paper → strict no-op. Entry-fill / GTT / pre-exit reconciles still run.

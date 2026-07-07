@@ -250,7 +250,7 @@ def run_migrations() -> dict:
             "autotrade_sessions", "autotrade_config_presets",
             "autotrade_broker_profiles", "autotrade_slippage",
             "autotrade_portfolio_snapshots", "autotrade_kill_switch_log",
-            "broker_accounts", "autotrade_ladders",
+            "broker_accounts", "autotrade_ladders", "autotrade_recon_alerts",
         ):
             if _table_exists(con, t):
                 created_tables.append(t)
@@ -482,6 +482,26 @@ CREATE TABLE IF NOT EXISTS autotrade_ladders (
 );
 CREATE INDEX IF NOT EXISTS idx_autotrade_ladders_user
     ON autotrade_ladders(user_id, status);
+
+-- ── RECONCILIATION FRAMEWORK (Phase 3): lightweight recon alert log ──────────
+-- The ORDER-ID-DRIVEN reconciler (monitoring/position_reconciler.py) writes a
+-- row here whenever it detects a broker/DB divergence it CANNOT attribute to one
+-- of our order-ids and therefore REFUSES to auto-correct: an UNATTRIBUTED_CLOSE
+-- (broker holds fewer than we track, no filled order explains it — e.g. an RMS
+-- auto-square with no order we tracked) or an ORPHAN_AT_BROKER (broker holds more
+-- than we track). These rows are OBSERVABILITY ONLY — they NEVER mutate a
+-- position; ops reviews and reconciles by hand. Additive + idempotent.
+CREATE TABLE IF NOT EXISTS autotrade_recon_alerts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,                 -- ISO IST when detected
+    session_id  TEXT,                          -- reconciling session (may be NULL)
+    symbol      TEXT NOT NULL,
+    product     TEXT,                          -- CNC | MIS | NRML | MTF
+    kind        TEXT NOT NULL,                 -- UNATTRIBUTED_CLOSE | ORPHAN_AT_BROKER
+    detail      TEXT                           -- human-readable divergence detail
+);
+CREATE INDEX IF NOT EXISTS idx_autotrade_recon_alerts_ts
+    ON autotrade_recon_alerts(ts DESC);
 """
 
 

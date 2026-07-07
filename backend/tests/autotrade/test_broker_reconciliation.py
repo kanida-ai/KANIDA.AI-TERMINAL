@@ -1,19 +1,24 @@
-"""AUTHORITATIVE broker→DB position reconciler tests.
+"""ORDER-ID-DRIVEN, INVARIANT-BASED broker→DB reconciler tests (v2).
 
-The broker is the SINGLE SOURCE OF TRUTH for position existence / qty / exit
-price. Each scenario builds a LIVE-mode session (dry_run=False so the reconcile
-path runs), seeds OPEN/EXIT_FAILED rows directly in autotrade_positions, injects
-a mock broker net book, runs ONE reconcile tick, and asserts panel == broker.
+The reconciler is MULTI-SESSION-SAFE: it NEVER writes a session's qty from the
+account aggregate and only CLOSES a position on POSITIVE order-id evidence
+(a triggered-GTT whose order filled COMPLETE, or an exit_order that filled
+COMPLETE). Any divergence it can't attribute to one of OUR order-ids is an ALERT
+(never a mutation).
 
-Harness mirrors test_entry_firing.py: patch broker.router.build_client to return
-a MockBroker, and freeze "now" to a mid-session trading day (Thu 2026-06-25 10:00
-IST) so tick()'s market-hours guard is satisfied and nothing whipsaws.
+Each scenario builds a LIVE-mode session (dry_run=False), seeds OPEN/EXIT_FAILED
+rows in autotrade_positions, injects a mock broker net book / holdings, runs ONE
+reconcile, and asserts the invariant-driven outcome.
 
-SAFETY invariants under test (the whole point):
-  * None book (broker unreachable / paper) → ZERO changes.
-  * EMPTY book ([]) while holding OPEN → ZERO changes (transient blip).
-  * ABSENT from a non-empty book → flagged, NOT closed.
-  * day-flat (net 0) → CLOSED at the REAL broker sell/buy avg.
+The invariant, per (symbol, product):
+    Σ open-position qty (ALL sessions on the account) == broker net + holdings.
+  * ==  → in sync, NO action.
+  * <   → order-id resolution (close per position on positive evidence), else
+          UNATTRIBUTED_CLOSE alert (nothing closed).
+  * >   → ORPHAN_AT_BROKER alert (nothing mutated).
+
+Harness mirrors the prior file: patch broker.router.build_client to a MockBroker,
+freeze "now" to a mid-session trading day so tick()'s market guard passes.
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -39,15 +44,17 @@ def _frozen_open_clock():
     set_fake_now(None)
 
 
-def _patch_brokers(monkeypatch, net_book, ltps=None):
-    """Patch build_client so every broker profile gets a MockBroker carrying the
-    given net_book + ltps. Returns the dict of created brokers by profile_id."""
+def _patch_brokers(monkeypatch, net_book, ltps=None, gtts=None,
+                   order_status=None, holdings=None):
+    """Patch build_client so every profile gets a MockBroker carrying the given
+    net_book / ltps / gtts / order_status / holdings. Returns brokers by profile."""
     created = {}
     ltps = ltps or {}
 
     def fake_build_client(profile, dry_run=True):
         mb = MockBroker(profile=profile, dry_run=False, ltps=ltps,
-                        net_book=net_book)
+                        net_book=net_book, gtts=gtts, order_status=order_status,
+                        holdings=holdings)
         created[profile.profile_id] = mb
         return mb
 
@@ -57,10 +64,12 @@ def _patch_brokers(monkeypatch, net_book, ltps=None):
     return created
 
 
-def _make_live_session(monkeypatch, net_book, ltps=None, *,
+def _make_live_session(monkeypatch, net_book, ltps=None, *, gtts=None,
+                       order_status=None, holdings=None,
                        kill_switch_enabled=False, capital=300000.0, top_n=3,
                        order_product="CNC"):
-    _patch_brokers(monkeypatch, net_book, ltps=ltps)
+    _patch_brokers(monkeypatch, net_book, ltps=ltps, gtts=gtts,
+                   order_status=order_status, holdings=holdings)
     cfg = TradingSessionConfig(total_allocated_capital=capital, top_n_stocks=top_n,
                                sizing_mode="equal",
                                kill_switch_enabled=kill_switch_enabled,
@@ -71,7 +80,8 @@ def _make_live_session(monkeypatch, net_book, ltps=None, *,
 
 
 def _register(sess, symbol, qty, avg_price, *, ltp=None, status="OPEN",
-              instrument_type="EQ", direction="long", exchange="NSE"):
+              instrument_type="EQ", direction="long", exchange="NSE",
+              gtt_id=None, exit_order_id=None):
     prof = sess.config.broker_profiles[0].profile_id
     sess.registry.register(symbol=symbol, broker_profile=prof, qty=qty,
                            avg_price=avg_price, product="MIS",
@@ -79,6 +89,15 @@ def _register(sess, symbol, qty, avg_price, *, ltp=None, status="OPEN",
                            direction=direction)
     if ltp is not None:
         sess.registry.update_ltp(symbol, ltp, broker_profile=prof)
+    if gtt_id is not None:
+        sess.registry.set_gtt(symbol, gtt_id, broker_profile=prof)
+    if exit_order_id is not None:
+        with falcon_conn() as con:
+            con.execute(
+                "UPDATE autotrade_positions SET exit_order_id=? "
+                "WHERE session_id=? AND symbol=?",
+                (exit_order_id, sess.session_id, symbol))
+            con.commit()
     if status != "OPEN":
         with falcon_conn() as con:
             con.execute(
@@ -91,7 +110,8 @@ def _row(sess, symbol):
     with falcon_conn() as con:
         r = con.execute(
             "SELECT status, qty, avg_price, exit_price, close_reason, "
-            "realised_pnl FROM autotrade_positions WHERE session_id=? AND symbol=?",
+            "exit_order_id, realised_pnl FROM autotrade_positions "
+            "WHERE session_id=? AND symbol=?",
             (sess.session_id, symbol)).fetchone()
     return dict(r) if r else None
 
@@ -107,122 +127,253 @@ def _invested_basis(sess):
     return r["invested_basis"] if r else None
 
 
-# ── (a) New order placed, not yet filled → buy in progress, NO change ─────────
+def _alerts(kind=None):
+    with falcon_conn() as con:
+        if kind:
+            rows = con.execute(
+                "SELECT * FROM autotrade_recon_alerts WHERE kind=?",
+                (kind,)).fetchall()
+        else:
+            rows = con.execute("SELECT * FROM autotrade_recon_alerts").fetchall()
+    return [dict(r) for r in rows]
 
-def test_a_buy_in_progress_no_change(clean_positions, monkeypatch):
-    """Broker shows a buy started (quantity>0, sell_quantity=0). The position
-    stays OPEN — the reconciler makes NO change (net qty > 0 and == DB qty)."""
+
+# ── IN SYNC: broker net == db qty → NO action (the base case) ─────────────────
+
+def test_in_sync_no_action(clean_positions, monkeypatch):
     net_book = {"A": {"quantity": 10, "buy_quantity": 10, "sell_quantity": 0,
-                      "average_price": 100.0, "exchange": "NSE"}}
+                      "average_price": 100.0, "exchange": "NSE", "product": "CNC"}}
     sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0})
     _register(sess, "A", 10, 100.0, ltp=100.0)
     _freeze(sess)
 
     actions = reconcile_broker_positions(sess)
     assert actions == []
+    assert _row(sess, "A")["status"] == "OPEN"
+    assert _row(sess, "A")["qty"] == 10
+
+
+# ── THE 2026-07-07 CORRUPTION REGRESSION ──────────────────────────────────────
+# Three same-pick sessions on ONE account hold WELCORP: two CNC (30 + 21) and one
+# MIS (326). Broker net = CNC 51 / MIS 326; holdings 0. The invariant holds per
+# (symbol, product): 30+21==51 and 326==326. NO qty may be changed on ANY session.
+# The OLD code overwrote every session's qty to the account aggregate (51/51/51).
+
+def test_corruption_regression_same_symbol_multi_session_no_qty_change(
+        clean_positions, monkeypatch):
+    net_book = {
+        "WELCORP_CNC": {"tradingsymbol": "WELCORP", "quantity": 51,
+                        "buy_quantity": 51, "sell_quantity": 0,
+                        "average_price": 100.0, "exchange": "NSE",
+                        "product": "CNC"},
+        "WELCORP_MIS": {"tradingsymbol": "WELCORP", "quantity": 326,
+                        "buy_quantity": 326, "sell_quantity": 0,
+                        "average_price": 100.0, "exchange": "NSE",
+                        "product": "MIS"},
+    }
+    # Session 1 + 2: CNC, hold 30 and 21. Session 3: MIS, holds 326.
+    s1 = _make_live_session(monkeypatch, net_book, ltps={"WELCORP": 100.0},
+                            order_product="CNC")
+    _register(s1, "WELCORP", 30, 100.0, ltp=100.0)
+    _freeze(s1)
+    s2 = _make_live_session(monkeypatch, net_book, ltps={"WELCORP": 100.0},
+                            order_product="CNC")
+    _register(s2, "WELCORP", 21, 100.0, ltp=100.0)
+    _freeze(s2)
+    s3 = _make_live_session(monkeypatch, net_book, ltps={"WELCORP": 100.0},
+                            order_product="MIS")
+    _register(s3, "WELCORP", 326, 100.0, ltp=100.0)
+    _freeze(s3)
+
+    # Reconcile each session. NONE may mutate a qty; all in sync per (sym,product).
+    for s in (s1, s2, s3):
+        actions = reconcile_broker_positions(s)
+        assert actions == [], f"unexpected actions for {s.session_id}: {actions}"
+
+    assert _row(s1, "WELCORP")["qty"] == 30       # NOT corrupted to 51
+    assert _row(s2, "WELCORP")["qty"] == 21       # NOT corrupted to 51
+    assert _row(s3, "WELCORP")["qty"] == 326
+    for s in (s1, s2, s3):
+        assert _row(s, "WELCORP")["status"] == "OPEN"
+    assert _alerts() == []                         # no divergence → no alerts
+
+
+# ── CLOSE via GTT order-id: only the position with the fired GTT closes ────────
+
+def test_close_via_gtt_order_id_only_that_position(clean_positions, monkeypatch):
+    """Two CNC sessions hold WELCORP (30 + 21). Session 1's position has a fired
+    GTT (COMPLETE @ 96.5) for its 30. Broker net drops to 21 (only session 2's
+    lot remains). ONLY session 1's position closes at the real fill; session 2 is
+    untouched."""
+    net_book = {"WELCORP": {"tradingsymbol": "WELCORP", "quantity": 21,
+                            "buy_quantity": 51, "sell_quantity": 30,
+                            "sell_price": 96.5, "average_price": 100.0,
+                            "exchange": "NSE", "product": "CNC"}}
+    gtts = {"G-WEL": {"status": "triggered",
+                      "orders": [{"result": {"order_id": "O-WEL-FIRED"}}]}}
+    order_status = {"O-WEL-FIRED": {"status": "COMPLETE", "filled_quantity": 30,
+                                    "average_price": 96.5}}
+    s1 = _make_live_session(monkeypatch, net_book, ltps={"WELCORP": 96.5},
+                            gtts=gtts, order_status=order_status,
+                            order_product="CNC")
+    _register(s1, "WELCORP", 30, 100.0, ltp=96.5, gtt_id="G-WEL")
+    _freeze(s1)
+    s2 = _make_live_session(monkeypatch, net_book, ltps={"WELCORP": 96.5},
+                            gtts=gtts, order_status=order_status,
+                            order_product="CNC")
+    _register(s2, "WELCORP", 21, 100.0, ltp=96.5)
+    _freeze(s2)
+
+    # Session 1 reconciles: db_all=30+21=51, broker=21 → deficit 30; its GTT
+    # fill (30 @ 96.5) attributes exactly → close session 1's position only.
+    actions = reconcile_broker_positions(s1)
+    assert len(actions) == 1
+    a = actions[0]
+    assert a["action"] == "CLOSED_RECONCILED"
+    assert a["close_reason"] == "GTT"
+    assert a["exit_price"] == pytest.approx(96.5)
+    assert a["exit_order_id"] == "O-WEL-FIRED"
+
+    r1 = _row(s1, "WELCORP")
+    assert r1["status"] == "CLOSED"
+    assert r1["exit_price"] == pytest.approx(96.5)
+    assert r1["exit_order_id"] == "O-WEL-FIRED"
+    assert r1["realised_pnl"] == pytest.approx((96.5 - 100.0) * 30)
+    # Sibling session UNTOUCHED.
+    assert _row(s2, "WELCORP")["status"] == "OPEN"
+    assert _row(s2, "WELCORP")["qty"] == 21
+    assert _alerts("UNATTRIBUTED_CLOSE") == []
+
+    # Session 2 now reconciles: db_all=21 (s1 closed), broker=21 → in sync, no-op.
+    actions2 = reconcile_broker_positions(s2)
+    assert actions2 == []
+    assert _row(s2, "WELCORP")["status"] == "OPEN"
+
+
+# ── CLOSE via exit_order_id (our own exit confirmed COMPLETE) ─────────────────
+
+def test_close_via_exit_order_id(clean_positions, monkeypatch):
+    net_book = {"A": {"quantity": 0, "buy_quantity": 10, "sell_quantity": 10,
+                      "sell_price": 104.25, "average_price": 100.0,
+                      "exchange": "NSE", "product": "MIS"}}
+    order_status = {"O-EXIT-A": {"status": "COMPLETE", "filled_quantity": 10,
+                                 "average_price": 104.25}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 104.25},
+                              order_status=order_status, order_product="MIS")
+    _register(sess, "A", 10, 100.0, ltp=104.25, exit_order_id="O-EXIT-A")
+    _freeze(sess)
+
+    actions = reconcile_broker_positions(sess)
+    assert len(actions) == 1
+    assert actions[0]["action"] == "CLOSED_RECONCILED"
+    assert actions[0]["close_reason"] == "RECONCILED_EXIT"
     r = _row(sess, "A")
-    assert r["status"] == "OPEN"
-    assert r["qty"] == 10
+    assert r["status"] == "CLOSED"
+    assert r["exit_price"] == pytest.approx(104.25)
+    assert r["exit_order_id"] == "O-EXIT-A"
+    assert r["realised_pnl"] == pytest.approx((104.25 - 100.0) * 10)
 
 
-# ── (b) Partial fill → broker qty < DB qty → corrected + basis re-frozen ──────
+# ── UNATTRIBUTED_CLOSE: deficit with NO filled order → ALERT, nothing closed ──
 
-def test_b_partial_fill_qty_corrected(clean_positions, monkeypatch):
+def test_unattributed_close_alert_no_evidence(clean_positions, monkeypatch):
+    """Broker shows a deficit (net 0) but the position has NO gtt_id / exit_order_id
+    that filled → we CANNOT attribute the close → ALERT, position stays OPEN."""
+    net_book = {"A": {"quantity": 0, "buy_quantity": 10, "sell_quantity": 10,
+                      "sell_price": 96.5, "average_price": 100.0,
+                      "exchange": "NSE", "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+                              order_product="MIS")
+    _register(sess, "A", 10, 100.0, ltp=100.0)     # no order-ids
+    _freeze(sess)
+
+    actions = reconcile_broker_positions(sess)
+    kinds = {a["action"] for a in actions}
+    assert "UNATTRIBUTED_CLOSE" in kinds
+    ua = next(a for a in actions if a["action"] == "UNATTRIBUTED_CLOSE")
+    assert ua["deficit"] == 10
+    # NOTHING closed — a stale-but-flagged OPEN beats a false close.
+    assert _row(sess, "A")["status"] == "OPEN"
+    assert _row(sess, "A")["qty"] == 10
+    persisted = _alerts("UNATTRIBUTED_CLOSE")
+    assert len(persisted) == 1
+    assert persisted[0]["symbol"] == "A"
+    assert persisted[0]["product"] == "MIS"
+
+
+def test_unattributed_close_gtt_triggered_but_order_open(clean_positions,
+                                                         monkeypatch):
+    """A triggered GTT whose FIRED order is still OPEN (not COMPLETE) is NOT
+    positive evidence → the deficit is UNATTRIBUTED, position stays OPEN."""
+    net_book = {"A": {"quantity": 0, "buy_quantity": 10, "sell_quantity": 10,
+                      "sell_price": 96.5, "average_price": 100.0,
+                      "exchange": "NSE", "product": "MIS"}}
+    gtts = {"G-A": {"status": "triggered",
+                    "orders": [{"result": {"order_id": "O-A"}}]}}
+    order_status = {"O-A": {"status": "OPEN", "filled_quantity": 0,
+                            "average_price": 0.0}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+                              gtts=gtts, order_status=order_status,
+                              order_product="MIS")
+    _register(sess, "A", 10, 100.0, ltp=100.0, gtt_id="G-A")
+    _freeze(sess)
+
+    actions = reconcile_broker_positions(sess)
+    assert any(a["action"] == "UNATTRIBUTED_CLOSE" for a in actions)
+    assert _row(sess, "A")["status"] == "OPEN"    # never close on non-COMPLETE
+
+
+# ── ORPHAN_AT_BROKER: broker holds MORE than we track → ALERT, nothing mutated ─
+
+def test_orphan_at_broker_alert(clean_positions, monkeypatch):
+    """Broker net (30) > Σ tracked (10) → an untracked lot at the broker. ALERT;
+    NEVER adopt or mutate our position."""
+    net_book = {"A": {"quantity": 30, "buy_quantity": 30, "sell_quantity": 0,
+                      "average_price": 100.0, "exchange": "NSE", "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+                              order_product="MIS")
+    _register(sess, "A", 10, 100.0, ltp=100.0)
+    _freeze(sess)
+
+    actions = reconcile_broker_positions(sess)
+    orphan = [a for a in actions if a["action"] == "ORPHAN_AT_BROKER"]
+    assert len(orphan) == 1
+    assert orphan[0]["extra"] == 20
+    # Our position is untouched (never adopt the broker's extra).
+    assert _row(sess, "A")["status"] == "OPEN"
+    assert _row(sess, "A")["qty"] == 10
+    assert len(_alerts("ORPHAN_AT_BROKER")) == 1
+
+
+# ── PARTIAL divergence with no order evidence → UNATTRIBUTED (never qty-correct) ─
+
+def test_partial_broker_less_no_evidence_unattributed(clean_positions,
+                                                      monkeypatch):
+    """Broker holds 6, DB thinks 10, no filled order explains the 4 gap. The OLD
+    code silently QTY_CORRECTED 10→6. The v2 reconciler REFUSES to correct qty
+    from the aggregate → UNATTRIBUTED_CLOSE alert, qty unchanged."""
     net_book = {"A": {"quantity": 6, "buy_quantity": 6, "sell_quantity": 0,
-                      "average_price": 100.0, "exchange": "NSE"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0})
-    _register(sess, "A", 10, 100.0, ltp=100.0)   # DB thinks 10; broker holds 6
+                      "average_price": 100.0, "exchange": "NSE", "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+                              order_product="MIS")
+    _register(sess, "A", 10, 100.0, ltp=100.0)
     _freeze(sess)
     assert _invested_basis(sess) == pytest.approx(10 * 100.0)
 
     actions = reconcile_broker_positions(sess)
-    assert len(actions) == 1
-    assert actions[0]["action"] == "QTY_CORRECTED"
-    assert actions[0]["from"] == 10 and actions[0]["to"] == 6
-    r = _row(sess, "A")
-    assert r["status"] == "OPEN"
-    assert r["qty"] == 6
-    # invested_basis re-frozen to the corrected qty.
-    assert _invested_basis(sess) == pytest.approx(6 * 100.0)
+    assert any(a["action"] == "UNATTRIBUTED_CLOSE" for a in actions)
+    assert _row(sess, "A")["qty"] == 10            # NOT corrected to 6
+    assert _invested_basis(sess) == pytest.approx(10 * 100.0)   # unchanged
 
 
-# ── (c) Stray OPEN row absent from a non-empty book → ABSENT_REVIEW, not closed
+# ── IDEMPOTENT: an already-CLOSED row is never re-touched ─────────────────────
 
-def test_c_absent_from_nonempty_book_review_not_closed(clean_positions,
-                                                       monkeypatch):
-    net_book = {"A": {"quantity": 10, "buy_quantity": 10, "sell_quantity": 0,
-                      "average_price": 100.0, "exchange": "NSE"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0, "Z": 50.0})
-    _register(sess, "A", 10, 100.0, ltp=100.0)
-    _register(sess, "Z", 5, 50.0, ltp=50.0)      # Z is NOT in the broker book
-    _freeze(sess)
-
-    actions = reconcile_broker_positions(sess)
-    acts = {a["symbol"]: a for a in actions}
-    assert acts["Z"]["action"] == "ABSENT_REVIEW"
-    # Z must remain OPEN — a false close is worse than a flagged stale-open.
-    assert _row(sess, "Z")["status"] == "OPEN"
-    assert _row(sess, "A")["status"] == "OPEN"   # A in sync, untouched
-
-
-# ── (d) Stop-loss / trailing trigger → day-flat → CLOSED at sell avg ──────────
-
-def test_d_stop_triggered_day_flat_closed_at_sell_avg(clean_positions,
-                                                      monkeypatch):
-    """Defense-in-depth beyond the GTT path: a broker SL fired (bought 10, sold
-    10 at 96.5) → day-flat → CLOSED at the SELL average, not the mark."""
-    net_book = {"A": {"quantity": 0, "buy_quantity": 10, "sell_quantity": 10,
-                      "buy_price": 100.0, "sell_price": 96.5,
-                      "average_price": 100.0, "exchange": "NSE"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0})
-    _register(sess, "A", 10, 100.0, ltp=100.0)
-    _freeze(sess)
-
-    actions = reconcile_broker_positions(sess)
-    assert len(actions) == 1
-    a = actions[0]
-    assert a["action"] == "CLOSED_EXTERNAL"
-    assert a["exit_price"] == pytest.approx(96.5)
-    assert "exit_price_approx" not in a
-    r = _row(sess, "A")
-    assert r["status"] == "CLOSED"
-    assert r["close_reason"] == "BROKER_RECONCILED_FLAT"
-    assert r["exit_price"] == pytest.approx(96.5)
-    # realised P&L computed from the REAL sell avg, not the mark.
-    assert r["realised_pnl"] == pytest.approx((96.5 - 100.0) * 10)
-
-
-# ── (e) Manual broker-side exit → CLOSED at real sell avg + correct P&L ───────
-
-def test_e_manual_broker_exit_closed_correct_pnl(clean_positions, monkeypatch):
-    """THE KEY new capability: a manual broker exit (no GTT, not our path). The
-    position is day-flat at a REAL sell avg → CLOSED with the correct realised P&L."""
-    net_book = {"A": {"quantity": 0, "buy_quantity": 20, "sell_quantity": 20,
-                      "buy_price": 100.0, "sell_price": 104.25,
-                      "average_price": 100.0, "exchange": "NSE"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0})
-    _register(sess, "A", 20, 100.0, ltp=100.0)
-    _freeze(sess)
-
-    actions = reconcile_broker_positions(sess)
-    assert actions[0]["action"] == "CLOSED_EXTERNAL"
-    assert actions[0]["source"] == "BROKER_RECONCILED_FLAT"
-    r = _row(sess, "A")
-    assert r["status"] == "CLOSED"
-    assert r["exit_price"] == pytest.approx(104.25)
-    assert r["realised_pnl"] == pytest.approx((104.25 - 100.0) * 20)
-
-
-# ── (f) Our own auto-exit already CLOSED → idempotent no-op ───────────────────
-
-def test_f_already_closed_idempotent_noop(clean_positions, monkeypatch):
-    """A position we already CLOSED (our exit path) must not be re-touched — the
-    reconciler only examines OPEN/EXIT_FAILED rows."""
-    # Broker still shows a day-flat row, but our DB row is already CLOSED.
+def test_already_closed_idempotent_noop(clean_positions, monkeypatch):
     net_book = {"A": {"quantity": 0, "buy_quantity": 10, "sell_quantity": 10,
                       "sell_price": 96.5, "average_price": 100.0,
-                      "exchange": "NSE"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0})
+                      "exchange": "NSE", "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+                              order_product="MIS")
     prof = sess.config.broker_profiles[0].profile_id
     sess.registry.register(symbol="A", broker_profile=prof, qty=10,
                            avg_price=100.0, product="MIS", instrument_type="EQ")
@@ -234,74 +385,43 @@ def test_f_already_closed_idempotent_noop(clean_positions, monkeypatch):
     actions = reconcile_broker_positions(sess)
     assert actions == []
     after = _row(sess, "A")
-    assert after["close_reason"] == "OUR_EXIT"        # NOT overwritten
-    assert after["exit_price"] == pytest.approx(98.0)  # our price, not 96.5
     assert after == before
+    assert after["close_reason"] == "OUR_EXIT"
 
 
-# ── (g) Carried overnight → resume: still-held no-op; flat-overnight closed ───
+# ── FAIL-SAFE: None / empty book / paper → ZERO changes ───────────────────────
 
-def test_g_overnight_still_held_no_change(clean_positions, monkeypatch):
-    net_book = {"A": {"quantity": 10, "buy_quantity": 10, "sell_quantity": 0,
-                      "average_price": 100.0, "exchange": "NSE"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0})
+def test_none_book_never_mutates(clean_positions, monkeypatch):
+    sess = _make_live_session(monkeypatch, net_book=None, ltps={"A": 100.0},
+                              order_product="MIS")
     _register(sess, "A", 10, 100.0, ltp=100.0)
     _freeze(sess)
-
-    actions = reconcile_broker_positions(sess)
-    assert actions == []
-    assert _row(sess, "A")["status"] == "OPEN"
-
-
-def test_g_overnight_flat_at_broker_closed(clean_positions, monkeypatch):
-    net_book = {"A": {"quantity": 0, "buy_quantity": 10, "sell_quantity": 10,
-                      "sell_price": 99.0, "average_price": 100.0,
-                      "exchange": "NSE"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0})
-    _register(sess, "A", 10, 100.0, ltp=100.0)
-    _freeze(sess)
-
-    actions = reconcile_broker_positions(sess)
-    assert actions[0]["action"] == "CLOSED_EXTERNAL"
-    assert _row(sess, "A")["status"] == "CLOSED"
-    assert _row(sess, "A")["exit_price"] == pytest.approx(99.0)
-
-
-# ── (h) API delay: None book AND empty book → ZERO changes (most important) ───
-
-def test_h_none_book_never_flattens(clean_positions, monkeypatch):
-    """Broker session reconnect / API delay → get_positions_net() returns None →
-    the reconciler must make ZERO changes (never flatten the DB)."""
-    sess = _make_live_session(monkeypatch, net_book=None, ltps={"A": 100.0})
-    _register(sess, "A", 10, 100.0, ltp=100.0)
-    _freeze(sess)
-
     actions = reconcile_broker_positions(sess)
     assert actions == []
     assert _row(sess, "A")["status"] == "OPEN"
     assert _row(sess, "A")["qty"] == 10
 
 
-def test_h_empty_book_never_flattens(clean_positions, monkeypatch):
-    """An EMPTY net book ([]) while we hold OPEN positions is a transient API
-    blip → ZERO changes (a genuine close shows a day-flat row, not an empty book)."""
-    sess = _make_live_session(monkeypatch, net_book=[], ltps={"A": 100.0})
+def test_empty_book_never_mutates(clean_positions, monkeypatch):
+    """An EMPTY net book while we hold OPEN → deficit is unattributable, but the
+    fail-safe contract is that we make NO position mutation (a genuine close shows
+    a day-flat row + an order we can attribute). It surfaces as an alert at most."""
+    sess = _make_live_session(monkeypatch, net_book=[], ltps={"A": 100.0},
+                              order_product="MIS")
     _register(sess, "A", 10, 100.0, ltp=100.0)
     _freeze(sess)
-
     actions = reconcile_broker_positions(sess)
-    assert actions == []
+    # No position may be closed (no positive evidence).
+    assert all(a["action"] != "CLOSED_RECONCILED" for a in actions)
     assert _row(sess, "A")["status"] == "OPEN"
     assert _row(sess, "A")["qty"] == 10
 
 
-def test_h_paper_session_noop(clean_positions, monkeypatch):
-    """Paper (dry_run) → the reconciler returns [] immediately and mutates
-    nothing, even with a broker net book that would otherwise flatten."""
+def test_paper_session_noop(clean_positions, monkeypatch):
     _patch_brokers(monkeypatch,
                    net_book={"A": {"quantity": 0, "buy_quantity": 10,
                                    "sell_quantity": 10, "sell_price": 96.5,
-                                   "exchange": "NSE"}},
+                                   "exchange": "NSE", "product": "MIS"}},
                    ltps={"A": 100.0})
     cfg = TradingSessionConfig(total_allocated_capital=100000.0, top_n_stocks=1,
                                sizing_mode="equal", kill_switch_enabled=False)
@@ -311,173 +431,162 @@ def test_h_paper_session_noop(clean_positions, monkeypatch):
 
     actions = reconcile_broker_positions(sess)
     assert actions == []
-    assert _row(sess, "A")["status"] == "OPEN"   # paper is byte-for-byte unchanged
+    assert _row(sess, "A")["status"] == "OPEN"     # paper byte-for-byte unchanged
+    assert _alerts() == []
 
 
-# ── (i) Divergence in qty + avg + status → corrected to broker + P&L recomputed
+# ── OVERNIGHT CNC / holdings: a delivered CNC in holdings is IN SYNC, not closed ─
 
-def test_i_qty_avg_status_all_corrected_to_broker(clean_positions, monkeypatch):
-    """Broker/panel diverge in qty AND avg. Broker holds 8 @ 102 (>0.5% off the
-    DB's 90); DB thinks 10 @ 100. The reconciler corrects qty→8, avg→102, and
-    unrealised_pnl is recomputed from the broker truth at the persisted ltp."""
-    net_book = {"A": {"quantity": 8, "buy_quantity": 8, "sell_quantity": 0,
-                      "average_price": 102.0, "exchange": "NSE"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 105.0})
-    _register(sess, "A", 10, 90.0, ltp=105.0)    # divergent qty AND avg
+def test_overnight_cnc_in_holdings_in_sync_no_action(clean_positions,
+                                                     monkeypatch):
+    """A delivered CNC shows net 0 (no sell) but is HELD in holdings. broker_held
+    (holdings 10) == db_held_all (10) → in sync, NO action / alert."""
+    net_book = {"A": {"quantity": 0, "buy_quantity": 0, "sell_quantity": 0,
+                      "average_price": 100.0, "exchange": "NSE",
+                      "product": "CNC"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 105.0},
+                              order_product="CNC",
+                              holdings={"A": {"quantity": 10, "t1_quantity": 0,
+                                              "average_price": 100.0}})
+    _register(sess, "A", 10, 100.0, ltp=105.0)
+    _freeze(sess)
+    actions = reconcile_broker_positions(sess)
+    assert actions == []
+    assert _row(sess, "A")["status"] == "OPEN"
+    assert _row(sess, "A")["qty"] == 10
+
+
+def test_overnight_cnc_t1_quantity_counts_as_held(clean_positions, monkeypatch):
+    net_book = {"A": {"quantity": 0, "buy_quantity": 0, "sell_quantity": 0,
+                      "average_price": 100.0, "exchange": "NSE",
+                      "product": "CNC"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 104.0},
+                              order_product="CNC",
+                              holdings={"A": {"quantity": 0, "t1_quantity": 10}})
+    _register(sess, "A", 10, 100.0, ltp=104.0)
+    _freeze(sess)
+    actions = reconcile_broker_positions(sess)
+    assert actions == []
+    assert _row(sess, "A")["status"] == "OPEN"
+
+
+# ── CNC broker_held = signed day-net + settled holdings (LIVE 2026-07-06 shapes) ─
+
+def test_cnc_today_net_plus_overnight_holdings_summed_in_sync(clean_positions,
+                                                              monkeypatch):
+    """Live AEGISLOG shape: today's CNC buys sit in net.quantity (57) while an
+    OVERNIGHT lot from another session has settled into holdings.t1 (35). The two
+    are DISJOINT — true held = 57 + 35 = 92. Two sessions (today 57, overnight 35)
+    sum to 92 → in sync. The OLD max(net_abs, held)=max(57,35)=57 would fire a
+    FALSE UNATTRIBUTED_CLOSE of 35 every tick; the summed formula is in sync."""
+    net_book = {"A": {"tradingsymbol": "A", "quantity": 57, "buy_quantity": 57,
+                      "sell_quantity": 0, "average_price": 100.0,
+                      "exchange": "NSE", "product": "CNC"}}
+    holdings = {"A": {"quantity": 0, "t1_quantity": 35, "average_price": 98.0}}
+    s_today = _make_live_session(monkeypatch, net_book, ltps={"A": 101.0},
+                                 holdings=holdings, order_product="CNC")
+    _register(s_today, "A", 57, 100.0, ltp=101.0)
+    _freeze(s_today)
+    s_overnight = _make_live_session(monkeypatch, net_book, ltps={"A": 101.0},
+                                     holdings=holdings, order_product="CNC")
+    _register(s_overnight, "A", 35, 98.0, ltp=101.0)
+    _freeze(s_overnight)
+
+    for s in (s_today, s_overnight):
+        actions = reconcile_broker_positions(s)
+        assert actions == [], f"unexpected {actions} for {s.session_id}"
+    assert _row(s_today, "A")["qty"] == 57
+    assert _row(s_overnight, "A")["qty"] == 35
+    assert _alerts() == []
+
+
+def test_cnc_sell_negative_net_offsets_not_phantom_hold(clean_positions,
+                                                        monkeypatch):
+    """Live ACUTAAS shape: a fully-exited CNC shows a NEGATIVE day-net (sold 12)
+    with 0 holdings → truly held 0. The OLD abs(-12)=12 would read as still-held
+    and MISS the close (position wrongly OPEN, broker_held==db → 'in sync'); the
+    SIGNED formula floors at 0 and the fired-GTT evidence closes it at the fill."""
+    net_book = {"A": {"tradingsymbol": "A", "quantity": -12, "buy_quantity": 0,
+                      "sell_quantity": 12, "sell_price": 3481.875,
+                      "average_price": 3500.0, "exchange": "NSE",
+                      "product": "CNC"}}
+    gtts = {"G-A": {"status": "triggered",
+                    "orders": [{"result": {"order_id": "O-A"}}]}}
+    order_status = {"O-A": {"status": "COMPLETE", "filled_quantity": 12,
+                            "average_price": 3481.875}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 3481.875},
+                              gtts=gtts, order_status=order_status,
+                              order_product="CNC")
+    _register(sess, "A", 12, 3500.0, ltp=3481.875, gtt_id="G-A")
     _freeze(sess)
 
     actions = reconcile_broker_positions(sess)
-    assert actions[0]["action"] == "QTY_CORRECTED"
-    assert actions[0]["from"] == 10 and actions[0]["to"] == 8
-    assert actions[0]["avg_to"] == pytest.approx(102.0)
-    with falcon_conn() as con:
-        r = con.execute(
-            "SELECT qty, avg_price, unrealised_pnl FROM autotrade_positions "
-            "WHERE session_id=? AND symbol=?",
-            (sess.session_id, "A")).fetchone()
-    assert r["qty"] == 8
-    assert r["avg_price"] == pytest.approx(102.0)
-    # uPnL recomputed from broker avg + persisted ltp: (105-102)*8 = 24.
-    assert r["unrealised_pnl"] == pytest.approx((105.0 - 102.0) * 8)
+    assert any(a["action"] == "CLOSED_RECONCILED" for a in actions), actions
+    r = _row(sess, "A")
+    assert r["status"] == "CLOSED"
+    assert r["exit_price"] == pytest.approx(3481.875)
+    assert r["close_reason"] == "GTT"
 
 
-# ── today's incident regression: EXIT_FAILED + broker day-flat → CLOSED ───────
+# ── EXIT_FAILED row is examined too; closes only on positive evidence ─────────
 
-def test_exit_failed_day_flat_reconciled_closed(clean_positions, monkeypatch):
-    """The 2026-07-06 MIS case: a MIS basket was RMS-squared at 15:25 but our DB
-    stayed EXIT_FAILED with wrong P&L. The reconciler sees the day-flat broker row
-    and marks it CLOSED at the real sell avg."""
+def test_exit_failed_with_confirmed_exit_order_closed(clean_positions,
+                                                      monkeypatch):
+    """An EXIT_FAILED row whose exit_order actually filled COMPLETE later → CLOSED
+    at the real fill (positive evidence)."""
     net_book = {"A": {"quantity": 0, "buy_quantity": 15, "sell_quantity": 15,
-                      "buy_price": 100.0, "sell_price": 97.8,
-                      "average_price": 100.0, "exchange": "NSE"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0})
-    _register(sess, "A", 15, 100.0, ltp=100.0, status="EXIT_FAILED")
+                      "sell_price": 97.8, "average_price": 100.0,
+                      "exchange": "NSE", "product": "MIS"}}
+    order_status = {"O-XF": {"status": "COMPLETE", "filled_quantity": 15,
+                             "average_price": 97.8}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+                              order_status=order_status, order_product="MIS")
+    _register(sess, "A", 15, 100.0, ltp=100.0, status="EXIT_FAILED",
+              exit_order_id="O-XF")
     _freeze(sess)
-
     actions = reconcile_broker_positions(sess)
-    assert actions[0]["action"] == "CLOSED_EXTERNAL"
+    assert any(a["action"] == "CLOSED_RECONCILED" for a in actions)
     r = _row(sess, "A")
     assert r["status"] == "CLOSED"
     assert r["exit_price"] == pytest.approx(97.8)
     assert r["realised_pnl"] == pytest.approx((97.8 - 100.0) * 15)
 
 
-# ── panel==broker via a full reconcile TICK (not just the raw reconcile fn) ───
+def test_exit_failed_no_evidence_unattributed(clean_positions, monkeypatch):
+    """An EXIT_FAILED row with NO attributable filled order + a broker deficit →
+    UNATTRIBUTED_CLOSE alert, NOT auto-closed (we never guess a fill price)."""
+    net_book = {"A": {"quantity": 0, "buy_quantity": 15, "sell_quantity": 15,
+                      "sell_price": 97.8, "average_price": 100.0,
+                      "exchange": "NSE", "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+                              order_product="MIS")
+    _register(sess, "A", 15, 100.0, ltp=100.0, status="EXIT_FAILED")
+    _freeze(sess)
+    actions = reconcile_broker_positions(sess)
+    assert any(a["action"] == "UNATTRIBUTED_CLOSE" for a in actions)
+    assert _row(sess, "A")["status"] == "EXIT_FAILED"    # unchanged, flagged
 
-def test_reconcile_runs_at_tick_start(clean_positions, monkeypatch):
-    """End-to-end through session.tick(): the day-flat position is CLOSED and the
-    tick dict surfaces the action under 'broker_reconciled'."""
+
+# ── END-TO-END through session.tick(): close surfaces under broker_reconciled ─
+
+def test_close_via_order_id_at_tick(clean_positions, monkeypatch):
     net_book = {"A": {"quantity": 0, "buy_quantity": 10, "sell_quantity": 10,
                       "sell_price": 95.0, "average_price": 100.0,
-                      "exchange": "NSE"},
+                      "exchange": "NSE", "product": "MIS"},
                 "B": {"quantity": 5, "buy_quantity": 5, "sell_quantity": 0,
-                      "average_price": 200.0, "exchange": "NSE"}}
+                      "average_price": 200.0, "exchange": "NSE",
+                      "product": "MIS"}}
+    order_status = {"O-A": {"status": "COMPLETE", "filled_quantity": 10,
+                            "average_price": 95.0}}
     sess = _make_live_session(monkeypatch, net_book,
-                              ltps={"A": 100.0, "B": 200.0})
-    _register(sess, "A", 10, 100.0, ltp=100.0)
+                              ltps={"A": 100.0, "B": 200.0},
+                              order_status=order_status, order_product="MIS")
+    _register(sess, "A", 10, 100.0, ltp=100.0, exit_order_id="O-A")
     _register(sess, "B", 5, 200.0, ltp=200.0)
     _freeze(sess)
 
     tick = asyncio.run(sess.tick())
     recon = {a["symbol"]: a for a in tick.get("broker_reconciled", [])}
-    assert recon["A"]["action"] == "CLOSED_EXTERNAL"
+    assert recon["A"]["action"] == "CLOSED_RECONCILED"
     assert _row(sess, "A")["status"] == "CLOSED"
-    assert _row(sess, "B")["status"] == "OPEN"   # B in sync
-
-
-# ── OVERNIGHT CNC / holdings safety (the T+1 delivery bug) ─────────────────────
-# CRITICAL: an equity CNC position settles OUT of positions()['net'] into holdings
-# on T+1 — the next day it shows net 0 (sell_quantity=0) or vanishes from the net
-# book WITHOUT a sell. The reconciler must NEVER close a position that has no exit
-# trade; holdings is the source of truth for a delivered CNC hold.
-
-def _set_holdings(sess, holdings):
-    for b in sess.brokers.values():
-        b._holdings = holdings
-
-
-def test_overnight_cnc_net_zero_no_sell_but_in_holdings_not_closed(
-        clean_positions, monkeypatch):
-    """THE BUG: a delivered CNC shows net 0 with sell_quantity=0 in the net book
-    but is STILL HELD in holdings. It must NOT be closed."""
-    net_book = {"A": {"quantity": 0, "buy_quantity": 0, "sell_quantity": 0,
-                      "average_price": 100.0, "exchange": "NSE", "product": "CNC"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 105.0},
-                              order_product="CNC")
-    _register(sess, "A", 10, 100.0, ltp=105.0)
-    _set_holdings(sess, {"A": {"quantity": 10, "t1_quantity": 0,
-                               "average_price": 100.0}})
-    _freeze(sess)
-    actions = reconcile_broker_positions(sess)
-    assert all(a["action"] != "CLOSED_EXTERNAL" for a in actions)
-    assert _row(sess, "A")["status"] == "OPEN"
-    assert _row(sess, "A")["qty"] == 10
-
-
-def test_overnight_cnc_absent_from_net_but_in_holdings_not_closed(
-        clean_positions, monkeypatch):
-    """Day 2+: the CNC has fully left the net book (it's in holdings). Absent from
-    a NON-empty net book but held in holdings → in-sync, NOT closed/flagged."""
-    net_book = {"OTHER": {"quantity": 5, "buy_quantity": 5, "sell_quantity": 0,
-                          "average_price": 50.0, "exchange": "NSE"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 105.0},
-                              order_product="CNC")
-    _register(sess, "A", 10, 100.0, ltp=105.0)
-    _set_holdings(sess, {"A": {"quantity": 10, "t1_quantity": 0}})
-    _freeze(sess)
-    actions = reconcile_broker_positions(sess)
-    a_acts = [a for a in actions if a["symbol"] == "A"]
-    assert all(a["action"] not in ("CLOSED_EXTERNAL", "ABSENT_REVIEW")
-               for a in a_acts)
-    assert _row(sess, "A")["status"] == "OPEN"
-
-
-def test_overnight_cnc_t1_quantity_counts_as_held(clean_positions, monkeypatch):
-    """A CNC bought yesterday sits in holdings as t1_quantity (not yet delivered)
-    — that still counts as HELD → not closed."""
-    net_book = {"A": {"quantity": 0, "buy_quantity": 0, "sell_quantity": 0,
-                      "average_price": 100.0, "exchange": "NSE"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 104.0},
-                              order_product="CNC")
-    _register(sess, "A", 10, 100.0, ltp=104.0)
-    _set_holdings(sess, {"A": {"quantity": 0, "t1_quantity": 10}})
-    _freeze(sess)
-    actions = reconcile_broker_positions(sess)
-    assert all(a["action"] != "CLOSED_EXTERNAL" for a in actions)
-    assert _row(sess, "A")["status"] == "OPEN"
-
-
-def test_cnc_net_zero_WITH_sell_is_closed_at_sell_avg(clean_positions,
-                                                      monkeypatch):
-    """A CNC GENUINELY sold (sell_quantity>0) → net 0 WITH exit evidence AND not in
-    holdings → CLOSED at the real sell average. Confirms we still catch a real exit."""
-    net_book = {"A": {"quantity": 0, "buy_quantity": 10, "sell_quantity": 10,
-                      "sell_price": 108.0, "average_price": 100.0,
-                      "exchange": "NSE"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 108.0},
-                              order_product="CNC")
-    _register(sess, "A", 10, 100.0, ltp=108.0)
-    _set_holdings(sess, None)   # sold → not held
-    _freeze(sess)
-    actions = reconcile_broker_positions(sess)
-    assert any(a["action"] == "CLOSED_EXTERNAL" for a in actions)
-    r = _row(sess, "A")
-    assert r["status"] == "CLOSED"
-    assert r["exit_price"] == pytest.approx(108.0)
-    assert r["realised_pnl"] == pytest.approx((108.0 - 100.0) * 10)
-
-
-def test_cnc_net_zero_no_sell_no_holdings_info_not_closed(clean_positions,
-                                                          monkeypatch):
-    """Defensive: net 0, NO sell trade, and holdings unavailable (None) → NEVER
-    closed (a delivery position is only closed on a real exit trade)."""
-    net_book = {"A": {"quantity": 0, "buy_quantity": 0, "sell_quantity": 0,
-                      "average_price": 100.0, "exchange": "NSE"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
-                              order_product="CNC")
-    _register(sess, "A", 10, 100.0, ltp=100.0)
-    _set_holdings(sess, None)
-    _freeze(sess)
-    actions = reconcile_broker_positions(sess)
-    assert all(a["action"] != "CLOSED_EXTERNAL" for a in actions)
-    assert _row(sess, "A")["status"] == "OPEN"
+    assert _row(sess, "B")["status"] == "OPEN"     # B in sync
