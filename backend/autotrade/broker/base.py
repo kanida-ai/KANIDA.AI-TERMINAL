@@ -70,6 +70,24 @@ class BrokerClient(ABC):
                 out[s] = float(v)
         return out
 
+    # ── Live order book (quote-driven marketable-limit execution) ────────────
+    def get_quotes(self, symbols: List[str]) -> Optional[dict]:
+        """Return the live order book for `symbols` in ONE batched broker call:
+
+            {symbol: {ltp, bid, ask, upper_circuit, lower_circuit, ts}}
+
+        where `bid` is the best BUY price (depth top), `ask` the best SELL price,
+        the circuits are the exchange price band, and `ts` is a monotonic-ish
+        epoch seconds the caller uses for a staleness check. Any per-symbol field
+        the broker can't supply is simply absent from that symbol's dict.
+
+        DEFAULT None is the SAFE SENTINEL — "no quote, the caller falls back":
+        the marketable-limit pricer SKIPS an entry it can't price and FALLS BACK
+        to a MARKET exit. Paper / stub / uncertified brokers return None so the
+        quote-driven path is inert for them (byte-for-byte unchanged). Only the
+        live Zerodha adapter returns a real book."""
+        return None
+
     # ── Instrument master (F&O) ──────────────────────────────────────────────
     @abstractmethod
     def get_lot_size(self, contract: str) -> int:
@@ -153,13 +171,23 @@ class BrokerClient(ABC):
     async def place_market_exit(self, symbol: str, qty: int,
                                 instrument_type: str,
                                 kite_product: str | None = None,
-                                direction: str = "long") -> OrderResult:
+                                direction: str = "long",
+                                *, exec_cfg: Any = None) -> OrderResult:
         """Flatten one position with a MARKET order in the CLOSING direction.
 
         direction=="long"  (default) → SELL  (today's behaviour, unchanged).
         direction=="short" → BUY-to-cover (close a short future).
         A wrong-direction exit would DOUBLE the position instead of closing it,
-        so every caller MUST pass the position's stored direction for shorts."""
+        so every caller MUST pass the position's stored direction for shorts.
+
+        exec_cfg (additive, keyword-only, DEFAULT None = today's MARKET exit,
+        byte-for-byte): when it is a TradingSessionConfig with
+        execution_mode=="marketable_limit", the LIVE adapter prices an in-band
+        marketable-LIMIT exit off the live book (SELL at bid-buffer floored above
+        the lower circuit / BUY-cover at ask+buffer capped below the upper). If
+        the quote is UNAVAILABLE it FALLS BACK to the MARKET exit — an exit must
+        NEVER fail to fire because a quote is missing (exiting safely > pricing
+        perfectly). Stub / paper brokers ignore exec_cfg (MARKET path)."""
         ...
 
     def get_order_status(self, order_id: str) -> dict:

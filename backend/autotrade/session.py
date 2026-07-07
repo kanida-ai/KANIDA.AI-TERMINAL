@@ -442,6 +442,26 @@ def load_falcon_picks(top_n: int = 100,
     return result
 
 
+def _get_tick_for(broker, symbol: str) -> float:
+    """The instrument tick size for `symbol` (marketable-limit rounding).
+
+    Reuses the legacy mtf_eligibility.get_tick_size (per-scrip tick cache) via the
+    broker's live kite client. Best-effort: any failure (paper / mock broker with
+    no kite / lookup miss) falls back to 0.05 — round_to_tick_size also defends
+    the same default, so a wrong tick never crashes the fire, at worst rounds to
+    the NSE minimum tick (which stays inside the circuit cap the pricer applies)."""
+    try:
+        from falcon.trade.services.mtf_eligibility import get_tick_size
+        kite = getattr(broker, "kite", None)
+        if kite is not None:
+            t = get_tick_size(kite, symbol)
+            if t and t > 0:
+                return float(t)
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("tick lookup failed for %s: %s", symbol, e)
+    return 0.05
+
+
 def _filter_fno_eligible(picks: List[Pick], broker, expiry_preference: str,
                          session_id: str = "") -> List[Pick]:
     """FUTURES symbol eligibility: keep ONLY picks that HAVE a tradeable
@@ -658,6 +678,7 @@ async def _exit_single_position(
         registry: Any,
         gtt_manager: Any,
         kite_product: Optional[str] = None,
+        exec_cfg: Any = None,
 ) -> Dict[str, Any]:
     """Our backend directly exits one position (per-stock software stop).
 
@@ -747,7 +768,8 @@ async def _exit_single_position(
     try:
         res = await broker.place_market_exit(symbol, qty, itype,
                                              kite_product=effective_product,
-                                             direction=direction)
+                                             direction=direction,
+                                             exec_cfg=exec_cfg)
     except Exception as e:
         log.error("per-stock stop %s/%s: place_market_exit raised: %s",
                   session_id, symbol, e)
@@ -1214,12 +1236,12 @@ class TradingSession:
         sem = asyncio.Semaphore(_ENTRY_CONCURRENCY)
 
         async def _guarded_place(broker, prof, pick, amount, allocator, cache,
-                                 forced_qty=None):
+                                 forced_qty=None, quote=None):
             async with sem:
                 try:
                     return await self._place_one(
                         broker, prof, pick, amount, allocator, prefetch=cache,
-                        forced_qty=forced_qty)
+                        forced_qty=forced_qty, quote=quote)
                 except Exception as e:  # belt-and-braces leg isolation
                     log.error("entry leg crashed for %s: %s", pick.symbol, e)
                     return {"symbol": pick.symbol, "status": "FAILED",
@@ -1248,6 +1270,23 @@ class TradingSession:
                 log.warning("prefetch failed for %s (%s) — per-symbol fallback",
                             prof.profile_id, e)
                 cache = {}
+            # QUOTE-DRIVEN MARKETABLE-LIMIT (execution_mode=="marketable_limit"
+            # only): ONE batched broker.get_quotes() for the WHOLE basket, exactly
+            # like the LTP/margin prefetch above — NOT a per-leg network call, so
+            # the concurrent asyncio.gather over _place_one below is unchanged. The
+            # per-symbol book (bid/ask/circuit) is threaded into _place_one via the
+            # quote_cache; the market path never fetches this (byte-for-byte
+            # unchanged). None (paper / disabled / error) → every leg SKIPs on a
+            # missing quote inside _place_one; conservative by design.
+            quote_cache: Dict[str, Any] = {}
+            if getattr(self.config, "execution_mode", "market") == "marketable_limit":
+                try:
+                    q = broker.get_quotes([p.symbol for p in fund_picks])
+                    quote_cache = q or {}
+                except Exception as e:  # pragma: no cover - defensive
+                    log.warning("get_quotes failed for %s (%s) — marketable-limit "
+                                "legs will skip", prof.profile_id, e)
+                    quote_cache = {}
             # FEATURE C: whole-portfolio plan — floors each slice, SKIPS a pick
             # whose 1 unit > slice (logged + slice freed), and (default on)
             # redistributes the stranded remainder to affordable picks. Never
@@ -1264,7 +1303,7 @@ class TradingSession:
                 amount = amounts.get(pick.symbol, 0.0)
                 leg_coros.append(_guarded_place(
                     broker, prof, pick, amount, allocator, cache,
-                    forced_qty=qty))
+                    forced_qty=qty, quote=quote_cache.get(pick.symbol)))
 
         placed: List[Dict[str, Any]] = list(
             await asyncio.gather(*leg_coros)) if leg_coros else []
@@ -1422,7 +1461,8 @@ class TradingSession:
     async def _place_one(self, broker, prof, pick: Pick, amount: float,
                          allocator: CapitalAllocator,
                          prefetch: Optional[Dict[str, Any]] = None,
-                         forced_qty: Optional[int] = None) -> Dict[str, Any]:
+                         forced_qty: Optional[int] = None,
+                         quote: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         symbol = pick.symbol
         # FEATURE C: when the whole-portfolio planner already computed the qty
         # (with redistribution / skip), use it verbatim so the placed size matches
@@ -1449,6 +1489,36 @@ class TradingSession:
         order = build_order(symbol, qty, self.config, broker)
         if order.order_type == "LIMIT" and ref_price > 0:
             order.price = order.compute_limit_price(ref_price)
+
+        # QUOTE-DRIVEN MARKETABLE-LIMIT (execution_mode=="marketable_limit" only).
+        # The market path above is UNTOUCHED. Here we consult the pre-fetched live
+        # book (bid/ask/circuit, threaded in from the ONE batched get_quotes in
+        # _fire_entries) and ALWAYS place: an in-band marketable LIMIT (ask+buffer
+        # for a BUY, capped AT the upper circuit) or — when there is no usable
+        # price at all — a MARKET fallback. The pricer NEVER skips. A stock LOCKED
+        # at its upper circuit is placed as a LIMIT exactly AT the circuit price: a
+        # valid, ACCEPTED, QUEUED order that fills the instant the lock breaks
+        # (the CEMPRO fix — no rejection, no dropped pick). Auto-trade executes; it
+        # never hands the decision back.
+        if getattr(self.config, "execution_mode", "market") == "marketable_limit":
+            from .execution.quote_pricer import plan_marketable_order
+            # BUY side for a long entry; a short FUT entry SELLs to open.
+            side = "SELL" if getattr(self.config, "direction", "long") == "short" \
+                else "BUY"
+            tick = _get_tick_for(broker, order.symbol)
+            plan = plan_marketable_order(side, order.symbol, qty, quote, tick,
+                                         self.config,
+                                         ltp_fallback=(ref_price or None))
+            if plan.get("ok"):
+                order.order_type = "LIMIT"
+                order.price = float(plan["price"])
+                log.info("marketable-limit ENTRY %s: %s LIMIT @ %.2f",
+                         symbol, side, order.price)
+            else:
+                # No usable price → MARKET fallback (still places). Leave the
+                # order as-built (its configured order_type / market path).
+                log.warning("marketable-limit ENTRY %s: %s — MARKET fallback (%s)",
+                            symbol, side, plan.get("reason"))
 
         # VWAP: observe the window then place MARKET (skip the wait in paper to
         # keep smoke tests fast; live honours the window).
@@ -1807,6 +1877,7 @@ class TradingSession:
                             registry=self.registry,
                             gtt_manager=self.gtt_manager,
                             kite_product=self.config.order_product,
+                            exec_cfg=self.config,
                         )
                         per_stock_exits.append(result)
                         log.warning(

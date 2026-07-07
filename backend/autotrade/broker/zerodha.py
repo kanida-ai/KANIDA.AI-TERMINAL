@@ -261,6 +261,67 @@ class ZerodhaBroker(BrokerClient):
             log.warning("batch REST ltp failed for %d syms: %s", len(cold), e)
         return out
 
+    def get_quotes(self, symbols: List[str]) -> Optional[dict]:
+        """ONE batched kite.quote() for the whole list → the live order book:
+
+            {symbol: {ltp, bid, ask, upper_circuit, lower_circuit, ts}}
+
+        `bid` = depth.buy[0].price (best BUY), `ask` = depth.sell[0].price (best
+        SELL), circuits from lower/upper_circuit_limit, ltp from last_price. `ts`
+        is now() epoch seconds (kite.quote is a fresh REST read; the quote's own
+        timestamp isn't reliably parseable, and "just fetched" is the useful
+        staleness reference for the pricer).
+
+        SAFETY: returns None (the caller falls back — SKIP entry / MARKET exit)
+        when not _live_allowed() (paper / disabled: there is no real book to
+        price against, and a paper session must stay byte-for-byte on the MARKET
+        path) OR on ANY error. Exchange-aware keys via _rest_key (NSE cash / NFO
+        F&O) so a FUT contract resolves instead of silently failing. A per-symbol
+        parse error drops just that symbol (absent from the result), never the
+        whole batch."""
+        if not symbols:
+            return {}
+        if not self._live_allowed():
+            return None
+        try:
+            key_of = {s: self._rest_key(s) for s in symbols}
+            data = self.kite.quote(list(key_of.values()))
+        except Exception as e:
+            log.warning("get_quotes batch failed for %d syms: %s",
+                        len(symbols), e)
+            return None
+        now = time.time()
+        out: dict = {}
+        for s in symbols:
+            row = data.get(key_of.get(s))
+            if not row:
+                continue
+            try:
+                depth = row.get("depth") or {}
+                buy = depth.get("buy") or []
+                sell = depth.get("sell") or []
+                bid = float(buy[0]["price"]) if buy and buy[0].get("price") else None
+                ask = float(sell[0]["price"]) if sell and sell[0].get("price") else None
+                # A price of 0 in the book means "no order at that level" — treat
+                # as absent so the pricer uses the LTP-based fallback instead.
+                bid = bid if (bid and bid > 0) else None
+                ask = ask if (ask and ask > 0) else None
+                q = {
+                    "ltp": float(row.get("last_price") or 0.0) or None,
+                    "bid": bid,
+                    "ask": ask,
+                    "upper_circuit": (float(row["upper_circuit_limit"])
+                                      if row.get("upper_circuit_limit") else None),
+                    "lower_circuit": (float(row["lower_circuit_limit"])
+                                      if row.get("lower_circuit_limit") else None),
+                    "ts": now,
+                }
+                out[s] = q
+            except Exception as pe:  # pragma: no cover - per-symbol defensive
+                log.debug("get_quotes parse miss for %s: %s", s, pe)
+                continue
+        return out
+
     # ── MTF margin (leverage) — reuse the legacy order_margins lookup ─────────
     def get_margins_batch(self, symbols: List[str],
                           product: str = "MTF") -> dict:
@@ -513,9 +574,9 @@ class ZerodhaBroker(BrokerClient):
     async def place_market_exit(self, symbol: str, qty: int,
                                 instrument_type: str,
                                 kite_product: str | None = None,
-                                direction: str = "long") -> OrderResult:
-        """Flatten one position with a direct Kite MARKET order in the CLOSING
-        side.
+                                direction: str = "long",
+                                *, exec_cfg=None) -> OrderResult:
+        """Flatten one position with a direct Kite order in the CLOSING side.
 
         direction=="long"  (default) → SELL  (today's behaviour, unchanged).
         direction=="short" → BUY-to-cover (close a short future). A wrong side
@@ -526,6 +587,11 @@ class ZerodhaBroker(BrokerClient):
         "NRML"). When provided it takes precedence over
         _resolve_product(instrument_type), which maps security-type ("EQ") not
         trading-product — wrong for MTF/FUT sessions.
+
+        exec_cfg: TradingSessionConfig (or None = MARKET, today's behaviour). When
+        execution_mode=="marketable_limit" we price an in-band marketable-LIMIT
+        exit off the live book; if the quote is UNAVAILABLE we FALL BACK to the
+        MARKET exit (never fail to flatten a real position for a missing quote).
 
         kite.place_order is a blocking HTTP call. Running it via asyncio.to_thread
         keeps the event loop responsive so ticks, ws_driver, and other coroutines
@@ -552,9 +618,51 @@ class ZerodhaBroker(BrokerClient):
             kexch = getattr(kite, f"EXCHANGE_{exchange}", exchange)
             product = kite_product if kite_product else self._resolve_product(instrument_type)
             # CLOSING side: long→SELL (unchanged), short→BUY-to-cover.
-            closing_txn = (kite.TRANSACTION_TYPE_BUY
-                           if str(direction).lower() == "short"
+            is_cover = str(direction).lower() == "short"
+            closing_txn = (kite.TRANSACTION_TYPE_BUY if is_cover
                            else kite.TRANSACTION_TYPE_SELL)
+
+            # QUOTE-DRIVEN MARKETABLE-LIMIT EXIT (execution_mode=="marketable_limit"
+            # only). Default (exec_cfg None / "market") → the raw MARKET exit below,
+            # byte-for-byte unchanged. On marketable_limit we read this ONE symbol's
+            # live book and ALWAYS place: an in-band marketable LIMIT (bid-buffer
+            # for a long-exit SELL / ask+buffer for a short-cover BUY, capped at the
+            # circuit band), OR a MARKET fallback when there is no usable price.
+            # A position is NEVER left unexited. The pricer "side" is the CLOSING
+            # side: long-exit = SELL, short-cover = BUY.
+            limit_kwargs = dict(order_type=kite.ORDER_TYPE_MARKET,
+                                market_protection=2.0)
+            if exec_cfg is not None and getattr(
+                    exec_cfg, "execution_mode", "market") == "marketable_limit":
+                try:
+                    from ..execution.quote_pricer import plan_marketable_order
+                    from falcon.trade.services.mtf_eligibility import get_tick_size
+                    qmap = self.get_quotes([symbol]) or {}
+                    q = qmap.get(symbol)
+                    tick = get_tick_size(kite, trading_symbol) or 0.05
+                    pside = "BUY" if is_cover else "SELL"
+                    # A last-resort LTP so the pricer can still LIMIT when the book
+                    # is thin/empty; get_ltp is WS-cache-first (fast).
+                    ltp_fb = None
+                    try:
+                        ltp_fb = self.get_ltp(symbol)
+                    except Exception:  # pragma: no cover - defensive
+                        ltp_fb = None
+                    plan = plan_marketable_order(pside, symbol, int(qty), q,
+                                                 tick, exec_cfg,
+                                                 ltp_fallback=ltp_fb)
+                    if plan.get("ok"):
+                        limit_kwargs = dict(order_type=kite.ORDER_TYPE_LIMIT,
+                                            price=float(plan["price"]))
+                        log.info("marketable-limit EXIT %s: %s LIMIT @ %.2f",
+                                 symbol, pside, plan["price"])
+                    else:
+                        # No usable price → MARKET fallback (still exits).
+                        log.warning("marketable-limit EXIT %s: %s — MARKET fallback (%s)",
+                                    symbol, pside, plan.get("reason"))
+                except Exception as _qe:  # never fail an exit on the quote path
+                    log.warning("marketable-limit EXIT %s pricing raised (%s) — "
+                                "MARKET fallback", symbol, _qe)
 
             order_id = await asyncio.to_thread(
                 lambda: kite.place_order(
@@ -564,14 +672,12 @@ class ZerodhaBroker(BrokerClient):
                     transaction_type=closing_txn,
                     quantity=int(qty),
                     product=product,
-                    order_type=kite.ORDER_TYPE_MARKET,
-                    # Kite API rejects MARKET orders without market_protection.
-                    # 2.0 = allow up to 2% slippage from last traded price.
-                    market_protection=2.0,
+                    **limit_kwargs,
                 )
             )
-            log.info("place_market_exit: %s qty=%d product=%s side=%s order_id=%s",
-                     symbol, qty, product, closing_txn, order_id)
+            log.info("place_market_exit: %s qty=%d product=%s side=%s type=%s order_id=%s",
+                     symbol, qty, product, closing_txn,
+                     limit_kwargs.get("order_type"), order_id)
             return OrderResult(status="PLACED", broker_order_id=str(order_id),
                                symbol=symbol, qty=qty)
         except Exception as e:

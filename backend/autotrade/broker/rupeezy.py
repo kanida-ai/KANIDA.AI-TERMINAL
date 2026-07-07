@@ -290,7 +290,8 @@ class RupeezyBroker(BrokerClient):
     async def place_market_exit(self, symbol: str, qty: int,
                                 instrument_type: str,
                                 kite_product: str | None = None,
-                                direction: str = "long") -> OrderResult:
+                                direction: str = "long",
+                                *, exec_cfg=None) -> OrderResult:
         """Flatten one position with a Vortex MARKET order (variety=RL-MKT).
 
         kite_product: explicit trading-product override (e.g. "MTF", "CNC", "MIS")

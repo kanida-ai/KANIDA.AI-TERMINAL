@@ -207,7 +207,8 @@ class AngelBroker(BrokerClient):
     async def place_market_exit(self, symbol: str, qty: int,
                                 instrument_type: str,
                                 kite_product: str | None = None,
-                                direction: str = "long") -> OrderResult:
+                                direction: str = "long",
+                                *, exec_cfg=None) -> OrderResult:
         # kite_product accepted (ignored here) + direction for FUTURES cover:
         # long→SELL (default), short→BUY-to-cover.
         if not self._live_allowed():

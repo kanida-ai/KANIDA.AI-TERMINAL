@@ -170,7 +170,8 @@ class FyersBroker(BrokerClient):
     async def place_market_exit(self, symbol: str, qty: int,
                                 instrument_type: str,
                                 kite_product: str | None = None,
-                                direction: str = "long") -> OrderResult:
+                                direction: str = "long",
+                                *, exec_cfg=None) -> OrderResult:
         # kite_product accepted (ignored) + direction for FUTURES cover. Fyers
         # side: -1 = SELL (long exit, default), 1 = BUY-to-cover (short exit).
         if not self._live_allowed():

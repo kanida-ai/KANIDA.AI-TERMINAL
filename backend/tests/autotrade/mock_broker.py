@@ -24,7 +24,8 @@ class MockBroker(BrokerClient):
                  net_positions: Optional[Dict[str, int]] = None,
                  net_book: Optional[Any] = None,
                  holdings: Optional[Any] = None,
-                 reject_symbols: Optional[set] = None):
+                 reject_symbols: Optional[set] = None,
+                 quotes: Optional[Dict[str, dict]] = None):
         super().__init__(profile, dry_run=dry_run)
         # DELIVERY holdings book (list of raw holding rows, or {symbol: {quantity,
         # t1_quantity, average_price}} auto-normalised). None (default) → get_holdings
@@ -53,6 +54,7 @@ class MockBroker(BrokerClient):
         # book (transient API blip) → the reconciler also does nothing.
         self._net_book = net_book
         self.ltps = ltps or {}
+        self._quotes = quotes
         # FEATURE C: per-share MTF/MIS margin the mock reports (leverage). When
         # margins_available is False the margin API is simulated as DOWN → the
         # allocator must cash-fall-back (never over-deploy).
@@ -73,9 +75,23 @@ class MockBroker(BrokerClient):
         self.exit_calls: List[dict] = []      # full exit args incl. direction
         self.cancelled: List[str] = []
 
+    # QUOTE-DRIVEN MARKETABLE-LIMIT: the live order book the mock reports.
+    # {symbol: {ltp,bid,ask,upper_circuit,lower_circuit,ts}}. None (DEFAULT) →
+    # get_quotes returns None (the SAFE sentinel = "no book" → the pricer uses a
+    # MARKET fallback), matching a paper / uncertified broker. Existing tests
+    # (no quotes arg) are unaffected.
+    _quotes = None
+
     # market data
     def get_ltp(self, symbol: str) -> Optional[float]:
         return self.ltps.get(symbol)
+
+    def get_quotes(self, symbols):
+        # None (default) → base sentinel: no book. Otherwise return only the
+        # requested symbols that we have a quote for (per-symbol absence is fine).
+        if self._quotes is None:
+            return None
+        return {s: dict(self._quotes[s]) for s in symbols if s in self._quotes}
 
     def set_ltp(self, symbol: str, price: float) -> None:
         self.ltps[symbol] = price
@@ -206,19 +222,24 @@ class MockBroker(BrokerClient):
     async def place_market_exit(self, symbol: str, qty: int,
                                 instrument_type: str,
                                 kite_product: str | None = None,
-                                direction: str = "long") -> OrderResult:
+                                direction: str = "long",
+                                *, exec_cfg=None) -> OrderResult:
         # kite_product accepted (and ignored) to match the real ZerodhaBroker
         # signature after the MTF-exit-product fix; kill_switch/exit paths pass it.
         # direction ("long"|"short") records the CLOSING side so futures-short
         # tests can assert a BUY-to-cover exit. Kept as an extra tuple element so
         # existing (symbol, qty) unpacking in equity tests stays valid via slicing.
+        # exec_cfg (marketable-limit config) is accepted + recorded so exit tests
+        # can assert it threads through; the mock always returns the same result
+        # (it never places a real order).
         if self.exit_delay_sec:
             await asyncio.sleep(self.exit_delay_sec)
         self.exits.append((symbol, qty))
         self.exit_calls.append({"symbol": symbol, "qty": qty,
                                 "instrument_type": instrument_type,
                                 "kite_product": kite_product,
-                                "direction": direction})
+                                "direction": direction,
+                                "exec_cfg": exec_cfg})
         if symbol in self.fail_symbols:
             return OrderResult(status="FAILED", broker_order_id=None,
                                symbol=symbol, qty=qty, error="mock failure")

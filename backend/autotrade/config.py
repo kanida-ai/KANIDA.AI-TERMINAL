@@ -141,6 +141,32 @@ class TradingSessionConfig:
     limit_offset_pct: float = 0.001
     vwap_window_seconds: int = 60
 
+    # ── QUOTE-DRIVEN MARKETABLE-LIMIT execution (additive, default-off) ────────
+    # execution_mode controls HOW an entry/exit order is priced against the live
+    # book. It is ORTHOGONAL to order_type / strategy — it only changes the
+    # PRICING, not what/when we trade. The execution layer ALWAYS PLACES an order
+    # (it never skips / hands the decision back).
+    #   "market"           (DEFAULT, UNCHANGED, byte-for-byte) — today's behaviour:
+    #                      raw MARKET orders priced off LTP only (market_protection).
+    #                      The quote pricer is NEVER invoked; no extra network call.
+    #   "marketable_limit" — read the live book (bid/ask/circuit) via ONE batched
+    #                      broker.get_quotes() and send an in-band marketable-LIMIT
+    #                      (ask+buffer for a BUY / bid-buffer for a SELL) CAPPED at
+    #                      the exchange circuit band. A stock LOCKED at its upper
+    #                      circuit is placed as a LIMIT exactly AT the circuit (a
+    #                      valid, QUEUED order that fills the instant the lock
+    #                      breaks — the 2026-07-06 CEMPRO fix; no rejection, no
+    #                      dropped pick). No usable price at all → MARKET fallback.
+    execution_mode: str = "market"         # market | marketable_limit
+    # marketable_buffer_pct (FRACTION, 0.003 = 0.3%): how far THROUGH the touch
+    # the marketable-LIMIT crosses (ask+buffer for a BUY / bid-buffer for a SELL)
+    # so it fills as fast as a MARKET order for liquid names. The order is then
+    # CAPPED at the exchange circuit band (the only cap). Inert unless
+    # execution_mode == "marketable_limit". There is NO skip path — a locked-up
+    # stock is placed as a LIMIT exactly AT the circuit (valid, queued, fills when
+    # the lock breaks); with no usable price the caller uses a MARKET fallback.
+    marketable_buffer_pct: float = 0.003
+
     # Instrument
     instrument_type: str = "EQ"            # EQ | FUT | CE | PE
     expiry_preference: str = "near"        # near | next | far
@@ -308,6 +334,20 @@ class TradingSessionConfig:
             raise ValueError(f"invalid sizing_mode: {self.sizing_mode}")
         if self.order_type not in ("MARKET", "LIMIT", "VWAP"):
             raise ValueError(f"invalid order_type: {self.order_type}")
+        # ── QUOTE-DRIVEN MARKETABLE-LIMIT execution ───────────────────────────
+        if self.execution_mode not in ("market", "marketable_limit"):
+            raise ValueError(
+                "invalid execution_mode (market | marketable_limit): "
+                f"{self.execution_mode}")
+        # marketable_buffer_pct is a FRACTION in (0, 0.5] (same units as every
+        # other pct); a mis-scaled 5.0 would push the "marketable" price 500%
+        # through the touch (before the circuit cap) — reject at the door. It is
+        # only meaningful for marketable_limit but a saved preset must round-trip
+        # a valid value regardless.
+        if not (0.0 < float(self.marketable_buffer_pct) <= 0.5):
+            raise ValueError(
+                "marketable_buffer_pct must be a fraction in (0, 0.5] "
+                f"(e.g. 0.003 = 0.3%), got {self.marketable_buffer_pct}")
         if self.instrument_type not in ("EQ", "FUT", "CE", "PE", "MTF"):
             raise ValueError(f"invalid instrument_type: {self.instrument_type}")
         # OPTIONS (CE/PE) are half-wired but NOT certified — the ATM-strike /
@@ -565,6 +605,8 @@ class TradingSessionConfig:
             order_type=d.get("order_type", "MARKET"),
             limit_offset_pct=float(d.get("limit_offset_pct", 0.001)),
             vwap_window_seconds=int(d.get("vwap_window_seconds", 60)),
+            execution_mode=d.get("execution_mode", "market"),
+            marketable_buffer_pct=float(d.get("marketable_buffer_pct", 0.003)),
             instrument_type=d.get("instrument_type", "EQ"),
             expiry_preference=d.get("expiry_preference", "near"),
             direction=d.get("direction", "long"),

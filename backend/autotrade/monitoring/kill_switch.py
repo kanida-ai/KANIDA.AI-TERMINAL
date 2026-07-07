@@ -154,9 +154,9 @@ class KillSwitchExecutor:
                 exit_meta.append({"symbol": symbol, "claimed": False,
                                   "reconciled_flat": True})
                 continue
-            exit_coros.append(broker.place_market_exit(symbol, qty, itype,
-                                                       kite_product=kite_product,
-                                                       direction=direction))
+            exit_coros.append(broker.place_market_exit(
+                symbol, qty, itype, kite_product=kite_product,
+                direction=direction, exec_cfg=self.config))
             exit_meta.append({"symbol": symbol, "claimed": True, "qty": qty,
                               "broker_profile": prof_id, "direction": direction,
                               "instrument_type": itype, "kite_product": kite_product})
