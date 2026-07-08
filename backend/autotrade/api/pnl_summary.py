@@ -242,6 +242,15 @@ def _load_closed_trades(con: sqlite3.Connection,
             f"FROM autotrade_positions "
             f"WHERE session_id IN ({placeholders}) "
             f"AND status = 'CLOSED' AND closed_at IS NOT NULL "
+            # A REAL trade only. Excludes qty=0 stale-cleanups
+            # (STALE_CLEANUP_BROKER_FLAT, realised NULL) and entry-reject phantoms
+            # (never held: qty 0, or exit_price NULL AND realised 0). A genuine trade
+            # has qty>0, a computed realised_pnl, and EITHER a real exit price OR
+            # non-zero P&L (some real closes record realised_pnl with a NULL
+            # exit_price field — those are kept). So phantoms never inflate the trade
+            # count / drag win rate, but no real trade is dropped.
+            f"AND qty > 0 AND realised_pnl IS NOT NULL "
+            f"AND (exit_price > 0 OR realised_pnl != 0) "
             f"AND substr(closed_at, 1, 10) >= ? AND substr(closed_at, 1, 10) <= ?"
         )
         rows.extend(con.execute(sql, (*chunk, from_iso, to_iso)).fetchall())
