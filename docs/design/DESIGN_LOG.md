@@ -1623,3 +1623,44 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
   longer wired to the page (kept on disk).
 - **Verify:** `npx tsc --noEmit` clean; `next build` → "Compiled successfully in 6.2s", no
   warnings; `/power/autotrade` present in the route manifest.
+
+## 2026-07-07 — LIVE "Edit config" for running AutoTrade sessions + campaigns (hot-reload the risk/exit knobs)
+- **Task acted on:** operator ask — let the operator re-tune a session/campaign's risk/exit knobs
+  POST-launch and Apply, hot-reloading the live session without a restart and without disturbing
+  open positions. Match the mint theme + the existing AutoTrade panel.
+- **New `SessionConfigEditor.tsx`** — one shared compact MODAL for both a running session and a
+  running Monthly campaign (driven by a `kind` prop). Pre-filled from the live status. EDITABLE
+  (risk/exit only): Arm / Floor / Give-back / Basket stop / Per-stock stop / Per-stock target /
+  Square-off time / (MIS square-off when MIS) / Max-hold days; CAMPAIGN adds Per-basket capital /
+  Total capital / End date under an "Applies to future spawns" divider. Knobs are labelled in the
+  operator's capital-basis language (e.g. "Arm — start trailing at +X% of capital"). LOCKED knobs
+  (Allocated/Total capital · Product · Picks · Entry time) render greyed with a lock note
+  "locked after launch — start a new session to change". A mint reassurance line states it
+  hot-reloads live + positions are untouched.
+- **dry-run → confirm → apply:** Apply first PATCHes `?dry_run=true`; if the backend returns
+  `warnings` (e.g. "AEGISLOG at −4.2% would exit next tick under the new 4% stop") the modal shows
+  a confirm step ("Apply anyway?"); on confirm it PATCHes `?dry_run=false`. Success → bottom toast
+  "Config updated — live within ~5s" (campaign appends "· updated N running children + future
+  spawns" from `children_updated`) + the card refreshes (session `refreshStatus`, campaign
+  `ladderStatus`+`loadLadders`). Only CHANGED fields are sent (a precise subset of the whitelist);
+  pct fields convert percent→FRACTION at the send boundary (same convention as create/preview + the
+  status trail readout). 409/404/400 map to plain-language errors.
+- **AUTH:** the config PATCH endpoints are `/api/power/autotrade/{session|ladder}/{id}/config`
+  (Bearer power_jwt), NOT the operator-token `/api/autotrade/*` proxy path. Added
+  `PowerAPI.autotradeUpdateSessionConfig` / `autotradeUpdateLadderConfig` (+ `AutotradeConfigPatch`
+  / `AutotradeConfigResult` types) in `lib/power-api.ts`; `FetchOpts.method` gained `'PATCH'`.
+  Threaded a new optional `jwt` prop into `PortfolioAutoTrade` (from `AutoTradePanel` +
+  `PowerUserAutoTrade`, both of which already hold the power_jwt). When `jwt` is absent (the
+  broker-only / OperatorAutoTrade mounts) the Edit-config controls simply don't render — every other
+  behaviour unchanged.
+- **Where the buttons live:** "Edit config" (sliders glyph, mint outline) sits in the RUNNING
+  session's Live-status header (only for `intraday_basket` = trailing/positional sessions; the flat
+  kill-switch strategy exits differently and isn't edited here) and in the running/paused campaign
+  card's controls row. Current values come from the existing session/ladder STATUS endpoints; trail
+  knobs read from `status.trail` (fractions), per-position/MIS/product + the ladder trail knobs are
+  read DEFENSIVELY (the status endpoints are being extended to expose them) and degrade to a blank
+  input rather than crash.
+- **Safety:** UI + BFF types only. No execution/trade path touched; the editor PATCHes only the
+  operator-authored risk knobs. Mint/F2 theme, reused `C`/`ICON` from `cotrade-kit`, no new accents.
+  Verify: `npx tsc --noEmit` clean; `next build` → "✓ Compiled successfully in 11.4s",
+  `/power/autotrade` in the route manifest. NOT committed/deployed — operator reviews + integrates.

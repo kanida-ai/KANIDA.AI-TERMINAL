@@ -207,6 +207,7 @@ export function PowerUserAutoTrade({ firstName, userId, jwt }: { firstName: stri
               <div className="mx-auto w-full max-w-3xl px-5 pb-10 sm:px-8 pt-4">
                 <PortfolioAutoTrade
                   userId={userId}
+                  jwt={jwt}
                   isAdmin={false}
                   view="create"
                   onStarted={() => go('live')}
@@ -219,6 +220,7 @@ export function PowerUserAutoTrade({ firstName, userId, jwt }: { firstName: stri
               <div className="mx-auto w-full max-w-4xl px-5 pb-10 sm:px-8 pt-4">
                 <PortfolioAutoTrade
                   userId={userId}
+                  jwt={jwt}
                   isAdmin={false}
                   view="dashboard"
                   onNewCampaign={() => go('start')}

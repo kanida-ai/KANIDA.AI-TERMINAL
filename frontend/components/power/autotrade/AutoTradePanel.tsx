@@ -128,7 +128,7 @@ export function AutoTradePanel({ firstName, userId, jwt }: { firstName: string; 
       <div className="flex-1 min-h-0 overflow-y-auto">
         {tab === 'sessions' && (
           <div className="mx-auto w-full max-w-4xl px-5 pb-10 sm:px-8">
-            <PortfolioAutoTrade userId={userId} isAdmin onSessionChange={setActiveSessionId} />
+            <PortfolioAutoTrade userId={userId} jwt={jwt} isAdmin onSessionChange={setActiveSessionId} />
           </div>
         )}
 

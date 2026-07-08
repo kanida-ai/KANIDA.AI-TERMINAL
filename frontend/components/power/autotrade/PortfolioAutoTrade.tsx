@@ -26,6 +26,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   C, ICON, Gear, MECHANISM_CSS, fmtCapital, fmtPct, pctTone, fmtINR, signedINR,
 } from '@/components/power/shared/cotrade-kit'
+import { SessionConfigEditor, type EditableValues, type LockedContext } from '@/components/power/autotrade/SessionConfigEditor'
 import {
   AutoTradeAPI,
   type Mode, type StartWhen, type SizingMode, type OrderProduct, type KillDirection,
@@ -188,6 +189,86 @@ function fracPct(frac: number | null | undefined, signed = true, dp = 2): string
   return `${sign}${trimmed}%`
 }
 
+// Sliders glyph for the "Edit config" controls (cotrade-kit ICON has no gear).
+const EditGlyph = (n: number) => (
+  <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+    <path d="M4 8h9M17 8h3M4 16h3M11 16h9" strokeLinecap="round" />
+    <circle cx="15" cy="8" r="2.2" /><circle cx="9" cy="16" r="2.2" />
+  </svg>
+)
+
+// ── LIVE config-edit derivations (status → the editor's pre-filled values) ────
+// A backend FRACTION → a PERCENT for the editor input (e.g. 0.025 → 2.5). Absent/
+// non-finite → '' (a blank input the operator can fill). Never fabricates a value.
+const fracToPct = (frac: unknown): number | '' => {
+  const n = Number(frac)
+  return Number.isFinite(n) ? Number((n * 100).toFixed(4).replace(/\.?0+$/, '')) : ''
+}
+const numOrBlank = (v: unknown): number | '' => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : ''
+}
+const strOrEmpty = (v: unknown): string => (typeof v === 'string' ? v : '')
+
+// Pre-fill the editor from a RUNNING session's status. Trail knobs live in
+// status.trail (FRACTIONS); per-position + MIS + product fields are read
+// defensively (the status endpoint EXPOSES the whitelist fields — any still
+// absent degrade to a blank input, never a crash).
+function sessionEditable(s: StatusResponse): EditableValues {
+  const t = s.trail ?? {}
+  const any = s as Record<string, unknown>
+  return {
+    arm_pct: fracToPct(t.arm_pct),
+    floor_pct: fracToPct(t.floor_pct),
+    trail_giveback_pct: fracToPct(t.trail_giveback_pct),
+    stop_pct: fracToPct(t.stop_pct),
+    per_position_stop_pct: fracToPct(any.per_position_stop_pct),
+    per_position_target_pct: fracToPct(any.per_position_target_pct),
+    square_off_time: strOrEmpty(t.square_off_time ?? s.square_off_time),
+    mis_square_off_time: strOrEmpty(any.mis_square_off_time),
+    max_hold_sessions: numOrBlank(t.max_hold_sessions),
+  }
+}
+function sessionLocked(s: StatusResponse): LockedContext {
+  const any = s as Record<string, unknown>
+  const topN = any.top_n_stocks
+  return {
+    allocatedCapital: typeof s.total_allocated_capital === 'number' ? s.total_allocated_capital : undefined,
+    product: strOrEmpty(any.order_product) || undefined,
+    picks: Number.isFinite(Number(topN)) ? `Falcon Top ${Number(topN)}` : undefined,
+    entryTime: strOrEmpty(any.entry_time) || undefined,
+  }
+}
+// Pre-fill from a RUNNING campaign's LadderStatus. Trail knobs are read
+// defensively (the ladder status is being extended to expose them); capital +
+// end-date come straight from the status.
+function ladderEditable(l: LadderStatus): EditableValues {
+  const any = l as Record<string, unknown>
+  const cfg = (any.config ?? {}) as Record<string, unknown>
+  const pick = (k: string) => any[k] ?? cfg[k]
+  return {
+    arm_pct: fracToPct(pick('arm_pct')),
+    floor_pct: fracToPct(pick('floor_pct')),
+    trail_giveback_pct: fracToPct(pick('trail_giveback_pct')),
+    stop_pct: fracToPct(pick('stop_pct')),
+    per_position_stop_pct: fracToPct(pick('per_position_stop_pct')),
+    per_position_target_pct: fracToPct(pick('per_position_target_pct')),
+    square_off_time: strOrEmpty(pick('square_off_time')),
+    max_hold_sessions: numOrBlank(pick('max_hold_sessions')),
+    per_basket_capital: numOrBlank(l.per_basket_capital),
+    total_capital: numOrBlank(l.total_capital),
+    end_date: strOrEmpty(l.end_date),
+  }
+}
+function ladderLocked(l: LadderSummary, st?: LadderStatus): LockedContext {
+  return {
+    allocatedCapital: st?.total_capital ?? l.total_capital,
+    product: (st?.order_product ?? l.order_product) || undefined,
+    picks: 'Falcon Top 5',           // campaigns run positional Falcon Top-5 baskets
+    entryTime: '09:15:00',
+  }
+}
+
 // ── Universe filter options — identical to the signals page Top20Filters ─────
 const UNIVERSE_OPTIONS: Array<{ key: UniverseFilter; label: string }> = [
   { key: 'all500',   label: 'All 500'   },
@@ -338,6 +419,7 @@ const inputStyle: React.CSSProperties = {
 
 export function PortfolioAutoTrade({
   userId,
+  jwt,
   onSessionChange,
   isAdmin = true,
   view,
@@ -346,6 +428,11 @@ export function PortfolioAutoTrade({
   onNeedBroker,
 }: {
   userId?: number | string
+  // Bearer power_jwt — required for the LIVE "Edit config" PATCH endpoints
+  // (/api/power/autotrade/…/config). When absent, the Edit-config controls are
+  // hidden (the operator/broker mounts that don't pass a jwt keep every other
+  // behaviour unchanged). Never used for the operator-token /api/autotrade/* path.
+  jwt?: string
   // Called whenever the user focuses a session (resume or create).
   // Passes the session_id up so sibling tabs (Journal) can use it.
   onSessionChange?: (sessionId: string) => void
@@ -409,6 +496,20 @@ export function PortfolioAutoTrade({
 
   const [busy, setBusy] = useState<null | 'create' | 'start' | 'status' | 'kill'>(null)
   const [error, setError] = useState<string | null>(null)
+
+  // ── LIVE "Edit config" (hot-reload risk/exit knobs) ──────────────────────────
+  // configEditor names WHICH live item the editor is open for (a running session
+  // OR a running campaign). configToast is the transient success line shown after
+  // a successful Apply. Both require a Bearer power_jwt (the PATCH endpoints are
+  // /api/power/autotrade/…/config); when jwt is absent the controls never render.
+  const [configEditor, setConfigEditor] = useState<{ kind: 'session' | 'campaign'; id: string } | null>(null)
+  const [configToast, setConfigToast] = useState<string | null>(null)
+  // Auto-dismiss the success toast after a few seconds (calm, non-blocking).
+  useEffect(() => {
+    if (!configToast) return
+    const t = setTimeout(() => setConfigToast(null), 6000)
+    return () => clearTimeout(t)
+  }, [configToast])
 
   // When Create returns a "not a trading day" 400, we parse the suggested next
   // trading day from the detail and offer a one-click "Use {date}" apply instead
@@ -1425,6 +1526,7 @@ export function PortfolioAutoTrade({
               onPause={() => onLadderPause(l.ladder_id)}
               onResume={() => onLadderResume(l.ladder_id)}
               onKill={() => { setLadderKillMode(null); setKillLadderId(l.ladder_id) }}
+              onEdit={jwt ? () => setConfigEditor({ kind: 'campaign', id: l.ladder_id }) : undefined}
             />
           ))}
 
@@ -2837,6 +2939,17 @@ export function PortfolioAutoTrade({
               {status && <ModePill mode={status.mode} />}
               {status?.strategy && <StrategyPill strategy={status.strategy} />}
               <div className="ml-auto flex items-center gap-2">
+                {/* Edit config — hot-reload the risk/exit knobs of this RUNNING
+                    trailing/positional session (needs a power_jwt; the flat
+                    kill-switch strategy exits differently and isn't edited here). */}
+                {jwt && status?.strategy === 'intraday_basket'
+                  && (status.status ?? '').toUpperCase() === 'RUNNING' && session && (
+                  <button type="button" onClick={() => setConfigEditor({ kind: 'session', id: session.session_id })}
+                    className="flex items-center gap-1.5 text-[11.5px] px-2.5 py-1 rounded-lg transition-colors"
+                    style={{ color: C.mint, border: `1px solid rgba(63,227,164,0.3)` }}>
+                    {EditGlyph(13)} Edit config
+                  </button>
+                )}
                 <label className="flex items-center gap-1.5 text-[11px] cursor-pointer" style={{ color: C.muted }}>
                   <input type="checkbox" checked={poll} onChange={(e) => setPoll(e.target.checked)} />
                   Auto-refresh
@@ -3058,6 +3171,68 @@ export function PortfolioAutoTrade({
         </div>
       )}
 
+      {/* ── LIVE config-edit success toast ───────────────────────────────────── */}
+      {configToast && (
+        <div className="fixed left-1/2 -translate-x-1/2 bottom-6 z-[60] flex items-center gap-2 rounded-xl border px-4 py-2.5 shadow-lg"
+          style={{ borderColor: 'rgba(63,227,164,0.4)', background: C.panel, color: C.ink }}>
+          <span style={{ color: C.mint }}>{ICON.check(15)}</span>
+          <span className="text-[12px] font-medium">{configToast}</span>
+          <button type="button" onClick={() => setConfigToast(null)} className="ml-1 shrink-0" style={{ color: C.faint }}>
+            {ICON.close(13)}
+          </button>
+        </div>
+      )}
+
+      {/* ── LIVE config-edit modal — session OR campaign ─────────────────────── */}
+      {configEditor && jwt && (() => {
+        if (configEditor.kind === 'session') {
+          // Use the live status already loaded for the running session.
+          if (!status || configEditor.id !== session?.session_id) return null
+          const any = status as Record<string, unknown>
+          const positional = Number(status.trail?.max_hold_sessions ?? 0) > 0 || any.square_off_enabled === false
+          const isMis = strOrEmpty(any.order_product).toUpperCase() === 'MIS'
+          return (
+            <SessionConfigEditor
+              kind="session"
+              id={configEditor.id}
+              jwt={jwt}
+              initial={sessionEditable(status)}
+              locked={sessionLocked(status)}
+              isTrailing={status.strategy === 'intraday_basket'}
+              isPositional={positional}
+              isMis={isMis}
+              onClose={() => setConfigEditor(null)}
+              onApplied={(msg) => { setConfigToast(msg); refreshStatus(false) }}
+            />
+          )
+        }
+        // Campaign
+        const summary = (ladders ?? []).find((l) => l.ladder_id === configEditor.id)
+        if (!summary) return null
+        const st = ladderStatuses[configEditor.id]
+        return (
+          <SessionConfigEditor
+            kind="campaign"
+            id={configEditor.id}
+            jwt={jwt}
+            initial={st ? ladderEditable(st) : {}}
+            locked={ladderLocked(summary, st)}
+            isTrailing
+            isPositional
+            isMis={false}
+            onClose={() => setConfigEditor(null)}
+            onApplied={(msg) => {
+              setConfigToast(msg)
+              // Refresh this campaign's live view + the list.
+              AutoTradeAPI.ladderStatus(configEditor.id)
+                .then((r) => setLadderStatuses((prev) => ({ ...prev, [configEditor.id]: r })))
+                .catch(() => {})
+              loadLadders()
+            }}
+          />
+        )
+      })()}
+
       {/* ── Campaign action error (pause/resume/kill) — calm, dismissible ─────── */}
       {ladderErr && (ladders?.length ?? 0) > 0 && (
         <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
@@ -3188,7 +3363,7 @@ function CampaignChip() {
 // ladderStatus poll (falls back to the list summary), missing → "—". Controls:
 // Pause / Resume + Stop (opens the required-mode kill modal). Trader terms only.
 function LadderCampaignCard({
-  summary, status, busy, onPause, onResume, onKill,
+  summary, status, busy, onPause, onResume, onKill, onEdit,
 }: {
   summary: LadderSummary
   status?: LadderStatus
@@ -3196,6 +3371,9 @@ function LadderCampaignCard({
   onPause: () => void
   onResume: () => void
   onKill: () => void
+  // Present only when a power_jwt exists AND the campaign is live-editable
+  // (RUNNING/PAUSED). Opens the shared config editor; undefined → no button.
+  onEdit?: () => void
 }) {
   const st: LadderStatusName | undefined = status?.status ?? summary.status
   const upper = (s?: string | null) => (s ?? '').toUpperCase()
@@ -3329,6 +3507,15 @@ function LadderCampaignCard({
             {ICON.clock(14)} {busy === 'pause' ? 'Pausing…' : 'Pause'}
           </button>
         ))}
+        {/* Edit config — hot-reload the campaign's risk/exit knobs + future-spawn
+            capital. Only for a live campaign (RUNNING/PAUSED) with a power_jwt. */}
+        {onEdit && (running || paused) && (
+          <button type="button" disabled={busy != null} onClick={onEdit}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors disabled:opacity-40"
+            style={{ color: C.mint, border: `1px solid rgba(63,227,164,0.35)` }}>
+            {EditGlyph(14)} Edit config
+          </button>
+        )}
         {(running || paused || scheduled) && (
           <button type="button" disabled={busy != null} onClick={onKill}
             className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"

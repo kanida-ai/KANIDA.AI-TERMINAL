@@ -236,7 +236,7 @@ export class PowerAPIError extends Error {
 // ──────────────────────────────────────────────────────────────────────────
 
 type FetchOpts = {
-  method?: 'GET' | 'POST' | 'DELETE'
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'
   body?:   unknown
   jwt?:    string | null
   signal?: AbortSignal
@@ -823,6 +823,53 @@ export function autotradePnlExportUrl(period: PnlPeriod, opts: PnlQueryOpts = {}
 }
 
 
+// ──────────────────────────────────────────────────────────────────────────
+// AutoTrade LIVE CONFIG EDIT — hot-reload the risk/exit knobs of a RUNNING
+// session or campaign without a restart (open positions untouched). CONTRACT:
+//   PATCH /api/power/autotrade/session/{session_id}/config?dry_run=true|false  (Bearer)
+//   PATCH /api/power/autotrade/ladder/{ladder_id}/config?dry_run=true|false    (Bearer)
+// Body is a SUBSET of the whitelist below. All pct fields are FRACTIONS on the
+// wire (send ÷100, display ×100) — the SAME convention as session create/preview
+// and the status trail readout. Times are "HH:MM:SS" IST; capital is ₹ int;
+// max_hold_sessions is an int (trading days); end_date is "YYYY-MM-DD".
+//   400 = non-whitelisted / out-of-range field · 409 = session/ladder not RUNNING
+//   404 = not owned by the caller.
+// ──────────────────────────────────────────────────────────────────────────
+
+export type AutotradeConfigPatch = {
+  // Trailing / exit knobs (both session + campaign children)
+  arm_pct?: number                   // FRACTION — start trailing at +arm of capital
+  floor_pct?: number                 // FRACTION — floor locked once armed
+  trail_giveback_pct?: number        // FRACTION — give-back from the peak
+  stop_pct?: number                  // FRACTION — basket hard stop
+  per_position_stop_pct?: number     // FRACTION — per-stock stop
+  per_position_target_pct?: number   // FRACTION — per-stock target
+  square_off_time?: string           // "HH:MM:SS" IST
+  mis_square_off_time?: string        // "HH:MM:SS" IST (MIS defensive square-off)
+  max_hold_sessions?: number         // int trading days (positional only; 0 = no cap)
+  // Campaign-only — "applies to future spawns"
+  per_basket_capital?: number        // ₹ per daily basket
+  total_capital?: number             // ₹ campaign total
+  end_date?: string                  // "YYYY-MM-DD"
+}
+
+// Result of a config PATCH (dry_run or apply). Optional-safe: any field may be
+// absent → the UI degrades gracefully. `warnings` (dry_run) is a plain-language
+// list the operator must confirm before a real apply. `children_updated` (ladder)
+// names the running child baskets that were hot-reloaded.
+export type AutotradeConfigResult = {
+  ok?: boolean
+  session_id?: string
+  ladder_id?: string
+  applied?: Record<string, unknown>
+  rejected?: unknown[]
+  effective_config?: Record<string, unknown>
+  children_updated?: string[]
+  warnings?: string[]
+  config_version?: number | string
+  [k: string]: unknown
+}
+
 export const PowerAPI = {
   // ── Public (no JWT) ───────────────────────────────────────────────────
   todayPreview: (signal?: AbortSignal) =>
@@ -992,6 +1039,36 @@ export const PowerAPI = {
     }
     return r.blob()
   },
+
+  // ── AutoTrade LIVE CONFIG EDIT (hot-reload the risk/exit knobs) ────────
+  /** PATCH a RUNNING session's risk/exit knobs. Pass `{ dryRun: true }` first to
+   *  fetch `warnings` (e.g. a name that would exit next tick under the new stop);
+   *  on confirm call again with `{ dryRun: false }` to apply live (~5s, positions
+   *  untouched). Body is a SUBSET of AutotradeConfigPatch (pct fields ÷100). */
+  autotradeUpdateSessionConfig: (
+    sessionId: string,
+    patch:     AutotradeConfigPatch,
+    opts:      { dryRun?: boolean } = {},
+    jwt?:      string | null,
+  ) =>
+    apiFetch<AutotradeConfigResult>(
+      `/api/power/autotrade/session/${encodeURIComponent(sessionId)}/config?dry_run=${opts.dryRun ? 'true' : 'false'}`,
+      { method: 'PATCH', body: patch, jwt: jwt ?? null },
+    ),
+
+  /** PATCH a RUNNING campaign's knobs. Same dry_run→apply flow. Trailing/exit
+   *  knobs hot-reload every open child basket; capital/end-date apply to FUTURE
+   *  spawns. Response `children_updated` names the baskets that were reloaded. */
+  autotradeUpdateLadderConfig: (
+    ladderId: string,
+    patch:    AutotradeConfigPatch,
+    opts:     { dryRun?: boolean } = {},
+    jwt?:     string | null,
+  ) =>
+    apiFetch<AutotradeConfigResult>(
+      `/api/power/autotrade/ladder/${encodeURIComponent(ladderId)}/config?dry_run=${opts.dryRun ? 'true' : 'false'}`,
+      { method: 'PATCH', body: patch, jwt: jwt ?? null },
+    ),
 }
 
 // ──────────────────────────────────────────────────────────────────────────
