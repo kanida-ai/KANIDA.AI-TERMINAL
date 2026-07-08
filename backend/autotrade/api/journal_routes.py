@@ -147,9 +147,13 @@ def _build_position_row(p: Dict[str, Any],
         from ..charges import estimate_charges
         buy_value  = qty * avg_price
         sell_value = qty * float(exit_p)
+        # Pass the position's own instrument_type so FUT/CE/PE use the F&O charge
+        # model (NOT the equity-delivery model — that overstated futures charges
+        # ~10-20×). EQ (or absent) → the existing equity behaviour, unchanged.
         charges_est = estimate_charges(
             product=session_product,
-            buy_value=buy_value, sell_value=sell_value, legs=2)
+            buy_value=buy_value, sell_value=sell_value, legs=2,
+            instrument_type=str(p.get("instrument_type") or "EQ"))
         realised_pnl_net = round(float(r_pnl) - charges_est["total"], 2)
 
     row: Dict[str, Any] = {

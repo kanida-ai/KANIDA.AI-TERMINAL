@@ -563,6 +563,7 @@ from falcon.routers.patterns_router   import router as falcon_patterns_router
 from falcon.routers.admin_router      import router as falcon_admin_router
 from falcon.trade.routers.trade_router import router as falcon_trade_router
 from autotrade.api.autotrade_routes import router as autotrade_router  # AutoTrade portfolio + kill switch (operator-token gated)
+from autotrade.api.pnl_routes import router as autotrade_pnl_router  # AutoTrade Performance dashboard P&L (power_jwt-gated, read-only, /api/power/autotrade/pnl/*)
 # P1PUB (2026-06-14): laptop → cloud "publish intelligence" ingest. Self-auth
 # (X-Publish-Secret), atomic full-replace. See CLOUD_ARCHITECTURE.md §6.
 from falcon.routers.publish_router     import router as falcon_publish_router
@@ -628,6 +629,7 @@ app.include_router(power_billing_router,       tags=["Power-User"])    # Razorpa
 app.include_router(power_ask_router,            tags=["Power-User"])    # Ask-Falcon: universe / quote / analyze-stock
 app.include_router(power_cotrade_router,         tags=["Power-User"])    # Co-Trading virtual-portfolio sim (falcon-top-10)
 app.include_router(autotrade_router,             prefix="/api", tags=["AutoTrade"])    # AutoTrade: multi-broker portfolio sessions + kill switch (/api/autotrade/*) — ships DISABLED
+app.include_router(autotrade_pnl_router,          tags=["Power-User"])    # AutoTrade Performance dashboard P&L (power_jwt-gated, read-only) — /api/power/autotrade/pnl/*
 
 # Power User schema init — idempotent, creates tables on first boot.
 # Uses POWER_DB_PATH resolver — same DB as the engine read-only tables
