@@ -1931,7 +1931,17 @@ class TradingSession:
         gr_invested = self.monitor.compute_gross_return_invested()
 
         if self.config.strategy == "intraday_basket":
-            return await self._tick_intraday(gr_invested, snap, gtt_closed,
+            # CAPITAL-BASIS TRAIL (2026-07-07): the intraday_basket trail measures
+            # arm/floor/giveback/basket-stop as % of ALLOCATED CAPITAL
+            # (compute_gross_return = (uPnL+realised)/total_allocated_capital), NOT
+            # the notional/invested basis. On a leveraged product (MIS/MTF/FUT/CE/PE)
+            # invested_basis >> deployed capital, so a notional-basis arm fired at
+            # leverage× the intended % of the trader's money. For a 1x CNC basket
+            # capital ≈ invested_basis so this is a no-op. The KILL SWITCH
+            # (portfolio_kill_switch strategy) and the per-stock software stop stay
+            # on their own bases — unchanged.
+            gr_capital = self.monitor.compute_gross_return()
+            return await self._tick_intraday(gr_capital, snap, gtt_closed,
                                              broker_reconciled)
 
         # DEFAULT strategy: portfolio_kill_switch (UNCHANGED).
@@ -1970,12 +1980,18 @@ class TradingSession:
                 "gtt_closed": gtt_closed,
                 "broker_reconciled": broker_reconciled}
 
-    async def _tick_intraday(self, gr_invested: float, snap: Dict[str, Any],
+    async def _tick_intraday(self, gr_capital: float, snap: Dict[str, Any],
                              gtt_closed,
                              broker_reconciled: Optional[List[Dict[str, Any]]] = None
                              ) -> Dict[str, Any]:
         """One tick for strategy=="intraday_basket": run the pure trail engine
-        over the invested-basis gross return + persisted (armed, peak) state.
+        over the ALLOCATED-CAPITAL gross return + persisted (armed, peak) state.
+
+        gr_capital = compute_gross_return() = (uPnL+realised)/total_allocated_capital
+        (2026-07-07: switched from the notional/invested basis so arm/floor/
+        giveback/basket-stop are "% of deployed capital", leverage-correct). The
+        returned/logged gross_return is this same capital-basis number the engine
+        decided on; gross_return_fund is retained for the on-fund snapshot view.
 
         The engine DECIDES only; on EXIT we REUSE the existing flatten
         (kill_switch.fire) passing the trail reason through as close_reason. State
@@ -2022,10 +2038,10 @@ class TradingSession:
                             fired = await self.kill_switch.fire(
                                 f"MAX_HOLD_EXIT max_hold_sessions="
                                 f"{self.config.max_hold_sessions} "
-                                f"gross_return={gr_invested:.4f}",
-                                gross_return=gr_invested,
+                                f"gross_return={gr_capital:.4f}",
+                                gross_return=gr_capital,
                                 close_reason="MAX_HOLD_EXIT")
-                            return {"gross_return": gr_invested,
+                            return {"gross_return": gr_capital,
                                     "gross_return_fund": snap["gross_return"],
                                     "snapshot": snap,
                                     "strategy": "intraday_basket",
@@ -2085,7 +2101,7 @@ class TradingSession:
 
         state = self.monitor.load_trail_state()
         params = trail_engine.params_from_config(self.config)
-        decision = trail_engine.decide(gr_invested, state, params)
+        decision = trail_engine.decide(gr_capital, state, params)
 
         # Persist any state change (arm transition or peak ratchet) so the trail
         # is durable across restarts BEFORE any exit fires.
@@ -2100,11 +2116,11 @@ class TradingSession:
                 if won:
                     fired = await self.kill_switch.fire(
                         f"INTRADAY_BASKET {reason} "
-                        f"gross_return={gr_invested:.4f}",
-                        gross_return=gr_invested, close_reason=reason)
+                        f"gross_return={gr_capital:.4f}",
+                        gross_return=gr_capital, close_reason=reason)
                 else:
                     reason = None  # another path already fired/is firing
-        return {"gross_return": gr_invested,
+        return {"gross_return": gr_capital,
                 "gross_return_fund": snap["gross_return"],
                 "snapshot": snap,
                 "strategy": "intraday_basket",
@@ -2252,7 +2268,11 @@ class TradingSession:
             out["trail"] = {
                 "armed": state.armed,
                 "peak": state.peak,
-                "current_gross_return": gr_invested,     # notional G (kill basis)
+                # CAPITAL-BASIS (2026-07-07): the trail keys on allocated-capital
+                # G (compute_gross_return), so surface THAT here — arm/floor/
+                # giveback/stop below are all % of deployed capital. (The top-level
+                # gross_return stays the invested/kill basis.)
+                "current_gross_return": gr_fund,          # allocated-capital G
                 "trigger": trigger,                       # live exit-trigger G
                 "arm_pct": self.config.arm_pct,
                 "floor_pct": self.config.floor_pct,

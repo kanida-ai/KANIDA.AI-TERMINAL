@@ -215,7 +215,11 @@ class TradingSessionConfig:
     # ── INTRADAY BASKET trailing engine (strategy=="intraday_basket" only) ────
     # All percentages are FRACTIONS (0.01 = 1%), validated in (0, 0.5], exactly
     # like kill_switch_pct. They drive monitoring/trail_engine.py over the
-    # NOTIONAL / invested-basis gross return G (compute_gross_return_invested):
+    # ALLOCATED-CAPITAL gross return G (compute_gross_return = uPnL/deployed
+    # capital) — updated 2026-07-07 from the notional/invested basis so the knobs
+    # mean "% of the trader's deployed money" regardless of product leverage (on
+    # MIS 5x the old notional 2.5% arm was really 12.5% of capital). For a 1x CNC
+    # basket capital ≈ invested, so this is a no-op there:
     #   arm_pct            : G >= +arm_pct → the trail ARMS (locks a floor).
     #   floor_pct          : the minimum locked floor once armed (default = arm).
     #   trail_giveback_pct : giveback from the peak G once armed.
@@ -229,7 +233,11 @@ class TradingSessionConfig:
     # are EOD); the higher 2.5% arm skips small blips; the -3% basket hard stop
     # replaces the whipsaw-prone tight/per-stock stops. Return-maximizing choice
     # per the doc; superseded the earlier arm2/floor1/give0.5/stop1.5 sweep values.
-    arm_pct: float = 0.025
+    # 2026-07-07: with the trail now on the ALLOCATED-CAPITAL basis, the default
+    # arm is raised 0.025 -> 0.05 so a fresh/default intraday session arms at +5%
+    # of deployed capital. floor/giveback/stop defaults unchanged now read as
+    # floor +1% / giveback 1.5% / hard-stop -3% OF CAPITAL — a coherent set.
+    arm_pct: float = 0.05
     floor_pct: float = 0.01
     trail_giveback_pct: float = 0.015
     stop_pct: float = 0.03
@@ -626,7 +634,7 @@ class TradingSessionConfig:
             per_position_gtt_enabled=bool(d.get("per_position_gtt_enabled", True)),
             per_position_stop_pct=float(d.get("per_position_stop_pct", 0.05)),
             per_position_target_pct=float(d.get("per_position_target_pct", 0.06)),
-            arm_pct=float(d.get("arm_pct", 0.025)),
+            arm_pct=float(d.get("arm_pct", 0.05)),
             floor_pct=float(d.get("floor_pct", 0.01)),
             trail_giveback_pct=float(d.get("trail_giveback_pct", 0.015)),
             stop_pct=float(d.get("stop_pct", 0.03)),

@@ -310,9 +310,16 @@ class _WSDriver:
         if getattr(sess.config, "strategy", "portfolio_kill_switch") \
                 == "intraday_basket":
             from . import trail_engine
+            # CAPITAL-BASIS TRAIL (2026-07-07): the intraday trail decides on the
+            # ALLOCATED-CAPITAL gross return (÷ total_allocated_capital), NOT the
+            # notional/invested basis `gr` used by the kill switch below. This
+            # makes arm/floor/giveback/basket-stop "% of deployed capital",
+            # leverage-correct (a 1x CNC basket is a no-op). Mirrors
+            # session.py:_tick_intraday.
+            gr_capital = sess.monitor.compute_gross_return()
             state = sess.monitor.load_trail_state()
             params = trail_engine.params_from_config(sess.config)
-            decision = trail_engine.decide(gr, state, params)
+            decision = trail_engine.decide(gr_capital, state, params)
             if decision.state_changed:
                 sess.monitor.save_trail_state(decision.state)
             if decision.action != "EXIT":
@@ -323,8 +330,9 @@ class _WSDriver:
                 log.critical("ws_driver: intraday trail AUTO-fired (sub-second) "
                              "for %s (%s)", self.session_id, decision.reason)
                 asyncio.run(sess.kill_switch.fire(
-                    f"INTRADAY_BASKET {decision.reason} gross_return={gr:.4f}",
-                    gross_return=gr, close_reason=decision.reason))
+                    f"INTRADAY_BASKET {decision.reason} "
+                    f"gross_return={gr_capital:.4f}",
+                    gross_return=gr_capital, close_reason=decision.reason))
             return
 
         reason = (sess.kill_switch.check_threshold(gr)

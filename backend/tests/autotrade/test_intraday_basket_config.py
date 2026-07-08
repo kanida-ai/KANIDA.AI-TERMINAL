@@ -1,7 +1,8 @@
 """Regression lock for the VALIDATED basket-only intraday config (2026-07-04).
 
-Pins the exit parameters the strategy doc validated over 530 days (arm 2.5% /
-floor 1% / giveback 1.5% / stop 3%), the widened -5% GTT catastrophe backstop,
+Pins the exit parameters the strategy doc validated over 530 days (arm 5% of
+CAPITAL / floor 1% / giveback 1.5% / stop 3%; arm raised from 2.5% when the trail
+moved to the allocated-capital basis 2026-07-07), the widened -5% GTT backstop,
 and — critically — that Layer A (the per-stock software stop) is OFF by default
 so live exits are BASKET-ONLY, matching the backtest. A silent drift of any of
 these would make live diverge from the documented, validated behaviour.
@@ -19,7 +20,7 @@ def _cfg(**kw):
 def test_validated_basket_only_defaults():
     c = _cfg()
     c.validate()
-    assert c.arm_pct == 0.025            # profit-lock arms at +2.5%
+    assert c.arm_pct == 0.05             # profit-lock arms at +5% OF CAPITAL
     assert c.floor_pct == 0.01           # locked floor +1%
     assert c.trail_giveback_pct == 0.015 # WIDE 1.5% giveback rides runners
     assert c.stop_pct == 0.03            # -3% basket hard stop
@@ -33,7 +34,7 @@ def test_from_dict_preserves_basket_only_and_parses_flag():
                           "total_allocated_capital": 500000.0,
                           "order_product": "MIS", "top_n_stocks": 5})
     assert d.per_stock_stop_enabled is False
-    assert d.arm_pct == 0.025 and d.stop_pct == 0.03 and d.per_position_stop_pct == 0.05
+    assert d.arm_pct == 0.05 and d.stop_pct == 0.03 and d.per_position_stop_pct == 0.05
     # Explicit opt-in to the (worse-returning) two-layer variant is honoured.
     two = _cfg().from_dict({"strategy": "intraday_basket",
                             "total_allocated_capital": 500000.0,
@@ -43,7 +44,7 @@ def test_from_dict_preserves_basket_only_and_parses_flag():
 
 
 def test_new_params_pass_validation_and_floor_le_arm():
-    # floor (1%) <= arm (2.5%) and all four in (0, 0.5] — no ValueError.
+    # floor (1%) <= arm (5%) and all four in (0, 0.5] — no ValueError.
     _cfg().validate()
 
 
