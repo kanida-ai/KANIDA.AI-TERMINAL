@@ -409,10 +409,11 @@ def test_g3_split_surplus_raises_corp_action(clean_positions, monkeypatch,
     assert dict(r)["qty"] == 10
 
 
-def test_g3_noisy_surplus_stays_generic_orphan(clean_positions, monkeypatch,
-                                                _frozen):
-    """A NON-clean surplus (broker 13 vs db 10) → NOT a corp-action; stays a
-    generic ORPHAN_AT_BROKER."""
+def test_g3_noisy_surplus_is_invisible(clean_positions, monkeypatch, _frozen):
+    """PHASE 7: a NON-clean surplus (broker 13 vs db 10) is NOT a corp-action AND
+    NOT an orphan — the extra 3 is a MANUAL trade / other holding, NOT ours. It is
+    INVISIBLE: no action, no alert, our position untouched. (Pre-P7 this raised a
+    generic ORPHAN_AT_BROKER — the false signal P7 removes.)"""
     net_book = {"NOISE": {"tradingsymbol": "NOISE", "quantity": 13,
                           "buy_quantity": 13, "sell_quantity": 0,
                           "average_price": 100.0, "exchange": "NSE",
@@ -423,10 +424,15 @@ def test_g3_noisy_surplus_stays_generic_orphan(clean_positions, monkeypatch,
     sess.monitor.freeze_invested_basis()
 
     actions = reconcile_broker_positions(sess)
-    assert any(a["action"] == "ORPHAN_AT_BROKER" for a in actions)
-    assert not any(a["action"] == "CORP_ACTION_SUSPECTED" for a in actions)
-    assert len(_alerts("ORPHAN_AT_BROKER")) == 1
+    assert actions == []
+    assert _alerts("ORPHAN_AT_BROKER") == []
     assert _alerts("CORP_ACTION_SUSPECTED") == []
+    with falcon_conn() as con:
+        r = con.execute("SELECT status, qty FROM autotrade_positions "
+                        "WHERE session_id=? AND symbol=?",
+                        (sess.session_id, "NOISE")).fetchone()
+    assert dict(r)["status"] == "OPEN"
+    assert dict(r)["qty"] == 10
 
 
 # ══════════════════════════════════════════════════════════════════════════════

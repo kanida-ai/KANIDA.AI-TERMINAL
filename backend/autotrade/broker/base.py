@@ -273,6 +273,30 @@ class BrokerClient(ABC):
         (paper / stub / no live creds) → None."""
         return None
 
+    def get_orders(self) -> Optional[List[dict]]:
+        """Return the broker's FULL day orderbook in ONE call, as a list of raw
+        broker order rows, or None when the broker can't answer.
+
+        RECONCILIATION FRAMEWORK (Phase 7): the reconciler uses this to STRENGTHEN
+        order-id attribution — before flagging an unattributed deficit it scans the
+        orderbook for one of OUR OWN recorded order-ids (exit_order_id) that
+        explains the shortfall (a batched second source alongside the per-position
+        get_order_status). An order-id NOT owned by one of our positions is NEVER
+        attributed as ours (a manual trade stays invisible). Each row is expected
+        to expose (best-effort, broker-shaped): order_id, status, filled_quantity,
+        average_price, product, tradingsymbol, transaction_type, exchange.
+
+        SAME safe-sentinel contract as get_positions_net / get_holdings:
+          * None → the orderbook is UNKNOWN (paper / stub / no live creds / API
+                   error). The reconciler falls back to the safe floor (per-position
+                   get_order_status only) and NEVER treats None as "no orders".
+          * []   → a present-but-empty orderbook.
+          * [rows] → a real orderbook the reconciler may consult.
+
+        Default (paper / stub / no live creds) → None. Only the live Zerodha
+        adapter (and best-effort Rupeezy) return a list."""
+        return None
+
     # ── GTT-OCO (broker-held per-position backup floor) ───────────────────────
     # Default no-ops so stub brokers (fyers/upstox/angel/dhan) and dry-run never
     # place real GTTs — they return None. Only the live Zerodha adapter overrides

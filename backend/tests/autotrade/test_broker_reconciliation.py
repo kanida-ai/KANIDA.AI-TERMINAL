@@ -45,16 +45,17 @@ def _frozen_open_clock():
 
 
 def _patch_brokers(monkeypatch, net_book, ltps=None, gtts=None,
-                   order_status=None, holdings=None):
+                   order_status=None, holdings=None, orders=None):
     """Patch build_client so every profile gets a MockBroker carrying the given
-    net_book / ltps / gtts / order_status / holdings. Returns brokers by profile."""
+    net_book / ltps / gtts / order_status / holdings / orders. Returns brokers by
+    profile."""
     created = {}
     ltps = ltps or {}
 
     def fake_build_client(profile, dry_run=True):
         mb = MockBroker(profile=profile, dry_run=False, ltps=ltps,
                         net_book=net_book, gtts=gtts, order_status=order_status,
-                        holdings=holdings)
+                        holdings=holdings, orders=orders)
         created[profile.profile_id] = mb
         return mb
 
@@ -65,11 +66,11 @@ def _patch_brokers(monkeypatch, net_book, ltps=None, gtts=None,
 
 
 def _make_live_session(monkeypatch, net_book, ltps=None, *, gtts=None,
-                       order_status=None, holdings=None,
+                       order_status=None, holdings=None, orders=None,
                        kill_switch_enabled=False, capital=300000.0, top_n=3,
                        order_product="CNC"):
     _patch_brokers(monkeypatch, net_book, ltps=ltps, gtts=gtts,
-                   order_status=order_status, holdings=holdings)
+                   order_status=order_status, holdings=holdings, orders=orders)
     cfg = TradingSessionConfig(total_allocated_capital=capital, top_n_stocks=top_n,
                                sizing_mode="equal",
                                kill_switch_enabled=kill_switch_enabled,
@@ -323,30 +324,166 @@ def test_unattributed_close_gtt_triggered_but_order_open(clean_positions,
     assert _row(sess, "A")["status"] == "OPEN"    # never close on non-COMPLETE
 
 
-# ── ORPHAN_AT_BROKER: broker holds MORE than we track → ALERT, nothing mutated ─
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 7 — ORDER-ID-SCOPED cross-check: a MANUAL trade in an overlapping symbol
+# produces ZERO reconciliation signal. A SURPLUS (broker > our tracked qty) is
+# INVISIBLE; only a DEFICIT with no order-id evidence alerts.
+# ══════════════════════════════════════════════════════════════════════════════
 
-def test_orphan_at_broker_alert(clean_positions, monkeypatch):
-    """Broker net (17) > Σ tracked (10) → an untracked lot at the broker. ALERT;
-    NEVER adopt or mutate our position.
-
-    NOTE: 17 vs 10 is a NON-clean ratio deliberately — GUARD G3 reclassifies a
-    CLEAN corp-action surplus (e.g. 30 = 10×3) as CORP_ACTION_SUSPECTED, so this
-    generic-orphan case must use a diff that is NOT a split/bonus multiple."""
-    net_book = {"A": {"quantity": 17, "buy_quantity": 17, "sell_quantity": 0,
-                      "average_price": 100.0, "exchange": "NSE", "product": "MIS"}}
-    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+def test_p7_manual_buy_arbitrary_overlap_invisible(clean_positions, monkeypatch):
+    """HEADLINE P7: our session holds TRENT 100; the trader ALSO manually buys 37
+    → broker 137 (our 100 + manual 37, an ARBITRARY ratio 1.37). NO action, NO
+    alert; our qty stays 100. The manual trade is invisible."""
+    net_book = {"TRENT": {"tradingsymbol": "TRENT", "quantity": 137,
+                          "buy_quantity": 137, "sell_quantity": 0,
+                          "average_price": 100.0, "exchange": "NSE",
+                          "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"TRENT": 100.0},
                               order_product="MIS")
-    _register(sess, "A", 10, 100.0, ltp=100.0)
+    _register(sess, "TRENT", 100, 100.0, ltp=100.0)
     _freeze(sess)
 
     actions = reconcile_broker_positions(sess)
-    orphan = [a for a in actions if a["action"] == "ORPHAN_AT_BROKER"]
-    assert len(orphan) == 1
-    assert orphan[0]["extra"] == 7
-    # Our position is untouched (never adopt the broker's extra).
+    assert actions == []
+    assert _alerts() == []                      # NO orphan, NO corp-action
+    assert _row(sess, "TRENT")["status"] == "OPEN"
+    assert _row(sess, "TRENT")["qty"] == 100
+
+
+def test_p7_manual_buy_clean_multiple_not_orphan(clean_positions, monkeypatch):
+    """MANUAL BUY overlap that happens to land on a CLEAN multiple: our 100 +
+    manual 50 = 150 (ratio ×1.5). This is NOT an ORPHAN. Because a split/bonus
+    would look identical (no order-id to confirm either), it surfaces as at most a
+    NON-mutating CORP_ACTION_SUSPECTED — the documented rare-coincidence trade-off.
+    Never mutated."""
+    net_book = {"A": {"tradingsymbol": "A", "quantity": 150, "buy_quantity": 150,
+                      "sell_quantity": 0, "average_price": 100.0,
+                      "exchange": "NSE", "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+                              order_product="MIS")
+    _register(sess, "A", 100, 100.0, ltp=100.0)
+    _freeze(sess)
+
+    actions = reconcile_broker_positions(sess)
+    assert not any(a["action"] == "ORPHAN_AT_BROKER" for a in actions)
+    assert _alerts("ORPHAN_AT_BROKER") == []
+    # Corp-action-suspected at most, and NON-mutating.
     assert _row(sess, "A")["status"] == "OPEN"
-    assert _row(sess, "A")["qty"] == 10
-    assert len(_alerts("ORPHAN_AT_BROKER")) == 1
+    assert _row(sess, "A")["qty"] == 100
+
+
+def test_p7_manual_sell_others_shares_in_sync(clean_positions, monkeypatch):
+    """MANUAL SELL of the trader's OTHER shares: the account was our 100 + the
+    trader's own 50 = 150; the trader sells THEIR 50 → broker 100 == our 100 → IN
+    SYNC. No alert, nothing mutated (the broker still fully covers our tracked qty)."""
+    net_book = {"A": {"tradingsymbol": "A", "quantity": 100, "buy_quantity": 150,
+                      "sell_quantity": 50, "sell_price": 101.0,
+                      "average_price": 100.0, "exchange": "NSE",
+                      "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 101.0},
+                              order_product="MIS")
+    _register(sess, "A", 100, 100.0, ltp=101.0)
+    _freeze(sess)
+
+    actions = reconcile_broker_positions(sess)
+    assert actions == []
+    assert _alerts() == []
+    assert _row(sess, "A")["status"] == "OPEN"
+    assert _row(sess, "A")["qty"] == 100
+
+
+def test_p7_manual_sell_below_tracked_no_evidence_unattributed(clean_positions,
+                                                               monkeypatch):
+    """THE IRREDUCIBLE case: a manual sell dips the FUNGIBLE account BELOW our
+    tracked qty (our 100, broker 60) and our GTT never fired → we cannot tell our
+    close from a manual sell of shares we don't track. Conservative: UNATTRIBUTED_
+    CLOSE alert (deficit 40), position STAYS OPEN — never closed without evidence.
+
+    A manual SELL order sits in the orderbook under an id we DON'T own — it is
+    NEVER attributed as our close (order-id-scoped)."""
+    net_book = {"A": {"tradingsymbol": "A", "quantity": 60, "buy_quantity": 100,
+                      "sell_quantity": 40, "sell_price": 99.0,
+                      "average_price": 100.0, "exchange": "NSE",
+                      "product": "MIS"}}
+    orders = {"MANUAL-SELL-1": {"status": "COMPLETE", "filled_quantity": 40,
+                                "average_price": 99.0, "transaction_type": "SELL",
+                                "tradingsymbol": "A", "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 99.0},
+                              orders=orders, order_product="MIS")
+    _register(sess, "A", 100, 100.0, ltp=99.0)      # NO exit_order_id / gtt
+    _freeze(sess)
+
+    actions = reconcile_broker_positions(sess)
+    ua = [a for a in actions if a["action"] == "UNATTRIBUTED_CLOSE"]
+    assert len(ua) == 1
+    assert ua[0]["deficit"] == 40
+    assert _row(sess, "A")["status"] == "OPEN"       # never closed without evidence
+    assert _row(sess, "A")["qty"] == 100
+    assert len(_alerts("UNATTRIBUTED_CLOSE")) == 1
+
+
+def test_p7_our_gtt_fires_manual_remainder_not_orphan(clean_positions,
+                                                      monkeypatch):
+    """OUR GTT fires (our 100 sold) while a manual 37 remains → broker net 37. Our
+    position CLOSES on the GTT order-id evidence; the manual remainder (37) is NOT
+    treated as an orphan (never surfaces)."""
+    net_book = {"TRENT": {"tradingsymbol": "TRENT", "quantity": 37,
+                          "buy_quantity": 137, "sell_quantity": 100,
+                          "sell_price": 96.0, "average_price": 100.0,
+                          "exchange": "NSE", "product": "MIS"}}
+    gtts = {"G-T": {"status": "triggered",
+                    "orders": [{"result": {"order_id": "O-T"}}]}}
+    order_status = {"O-T": {"status": "COMPLETE", "filled_quantity": 100,
+                            "average_price": 96.0}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"TRENT": 96.0},
+                              gtts=gtts, order_status=order_status,
+                              order_product="MIS")
+    _register(sess, "TRENT", 100, 100.0, ltp=96.0, gtt_id="G-T")
+    _freeze(sess)
+
+    actions = reconcile_broker_positions(sess)
+    assert any(a["action"] == "CLOSED_RECONCILED" for a in actions), actions
+    assert not any(a["action"] == "ORPHAN_AT_BROKER" for a in actions)
+    assert not any(a["action"] == "UNATTRIBUTED_CLOSE" for a in actions)
+    r = _row(sess, "TRENT")
+    assert r["status"] == "CLOSED"
+    assert r["close_reason"] == "GTT"
+    assert r["exit_price"] == pytest.approx(96.0)
+    assert _alerts("ORPHAN_AT_BROKER") == []
+
+
+def test_p7_orderbook_strengthens_our_exit_attribution(clean_positions,
+                                                       monkeypatch):
+    """PHASE 7 get_orders() strengthening: our exit_order_id filled COMPLETE, but
+    the per-position get_order_status probe reports 0-fill (transient miss). The
+    BATCHED orderbook shows OUR exit order COMPLETE → the deficit is attributed to
+    OUR order-id and the position CLOSES at the real fill (never a manual order)."""
+    net_book = {"A": {"tradingsymbol": "A", "quantity": 0, "buy_quantity": 100,
+                      "sell_quantity": 100, "sell_price": 98.5,
+                      "average_price": 100.0, "exchange": "NSE",
+                      "product": "MIS"}}
+    # No order_status map entry for O-BOOK → per-position get_order_status returns a
+    # synthetic 0-fill → _confirmed_close returns None. The orderbook resolves it.
+    orders = {"O-BOOK": {"status": "COMPLETE", "filled_quantity": 100,
+                         "average_price": 98.5, "transaction_type": "SELL",
+                         "tradingsymbol": "A", "product": "MIS"},
+              "MANUAL-9": {"status": "COMPLETE", "filled_quantity": 5,
+                           "average_price": 98.5, "transaction_type": "SELL",
+                           "tradingsymbol": "A", "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 98.5},
+                              orders=orders, order_product="MIS")
+    _register(sess, "A", 100, 100.0, ltp=98.5, exit_order_id="O-BOOK")
+    _freeze(sess)
+
+    actions = reconcile_broker_positions(sess)
+    closed = [a for a in actions if a["action"] == "CLOSED_RECONCILED"]
+    assert len(closed) == 1
+    assert closed[0]["close_reason"] == "RECONCILED_EXIT"
+    r = _row(sess, "A")
+    assert r["status"] == "CLOSED"
+    assert r["exit_price"] == pytest.approx(98.5)
+    assert r["realised_pnl"] == pytest.approx((98.5 - 100.0) * 100)
+    assert _alerts("UNATTRIBUTED_CLOSE") == []
 
 
 # ── PARTIAL divergence with no order evidence → UNATTRIBUTED (never qty-correct) ─

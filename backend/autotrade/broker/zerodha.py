@@ -920,6 +920,30 @@ class ZerodhaBroker(BrokerClient):
             log.warning("get_positions_net failed: %s", e)
             return None
 
+    def get_orders(self):
+        """Return the FULL Kite day orderbook in ONE kite.orders() call, as the
+        raw list of order rows (order_id/status/filled_quantity/average_price/
+        product/tradingsymbol/transaction_type/exchange/...), or None.
+
+        RECONCILIATION FRAMEWORK (Phase 7): powers ORDER-ID-SCOPED attribution.
+        The reconciler fetches this ONCE per reconcile, builds an order_id→row map,
+        and — before flagging an unattributed deficit — checks whether one of OUR
+        OWN recorded exit order-ids sits in the book as a COMPLETE closing fill.
+        An order-id NOT owned by one of our positions is NEVER attributed (a manual
+        trade in an overlapping symbol stays invisible).
+
+        None is the SAME safe sentinel as get_positions_net (caller does NOTHING /
+        falls back to the per-position floor on None): returned in paper /
+        live-disabled AND on any Kite API error. An empty list ([]) is a
+        present-but-empty book (also a safe no-op)."""
+        if not self._live_allowed():
+            return None
+        try:
+            return list(self.kite.orders() or [])
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("get_orders failed: %s", e)
+            return None
+
     def get_holdings(self):
         """Delivered demat holdings (kite.holdings()) as the raw list, or None.
 

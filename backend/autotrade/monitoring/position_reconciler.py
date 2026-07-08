@@ -25,14 +25,35 @@ WHAT THIS NEVER DOES (the removed bug paths):
   * NEVER closes on net-0 / day-flat WITHOUT a confirmed order-id owned by that
     position. A close we can't attribute to one of OUR orders → UNATTRIBUTED_CLOSE
     alert, position left OPEN.
-  * NEVER adopts / mutates a broker orphan (broker holds more than we track) →
-    ORPHAN_AT_BROKER alert.
+  * NEVER adopts / mutates a broker orphan (broker holds more than we track).
+
+PHASE 7 — ORDER-ID-SCOPED cross-check (a MANUAL trade is INVISIBLE):
+  Zerodha's positions() net has NO order-ids, so a manual trade in a symbol our
+  session also holds used to leak into the invariant (a SURPLUS → ORPHAN_AT_BROKER,
+  a manual sell → UNATTRIBUTED_CLOSE). We reconcile by session_id + broker order-id,
+  never by symbol/qty. The new invariant, per (symbol, product):
+    * broker_held >= our_db_held → IN SYNC or SURPLUS. A surplus (broker holds MORE
+      than we track) is a MANUAL trade / the trader's own holding / a different
+      session — NOT ours. It is INVISIBLE: no ORPHAN_AT_BROKER, no action, no alert.
+      (The one preserved exception: a CLEAN corp-action ratio, a split/bonus that
+      multiplied OUR shares with no order → a NON-mutating CORP_ACTION_SUSPECTED.)
+    * broker_held <  our_db_held → we appear SHORT of our OWN records. Resolve on
+      OUR order-ids first (positive evidence); a shortfall REMAINING with no
+      order-id evidence is the ONLY alerting case → UNATTRIBUTED_CLOSE (flag, NEVER
+      close without evidence). This correctly stays silent for a manual sell of the
+      trader's OTHER shares as long as the broker still covers our tracked qty.
+  The IRREDUCIBLE shared-account case: a manual sell that dips the FUNGIBLE account
+  BELOW our tracked qty is indistinguishable from our own position closing — we
+  FLAG it (UNATTRIBUTED_CLOSE), never mutate. A flagged-but-open row beats a false
+  close.
 
 DELIVERY CONTRACT (unchanged from v1):
   * LIVE only. Paper (dry_run) / None book (unreachable / expired) / empty book →
     return [] immediately, mutate NOTHING.
   * Places NO order, ever.
-  * Fetches the broker net book + holdings in ONE call each, per broker profile.
+  * Fetches the broker net book + holdings + orderbook in ONE call each, per broker
+    profile (the orderbook STRENGTHENS attribution — a batched second source for
+    OUR OWN recorded exit order-ids; a manual order-id is never consulted).
 
 DATA-ISOLATION: reads autotrade_positions / autotrade_sessions ONLY. Never touches
 falcon_position_state. The account-wide invariant reads autotrade_positions
@@ -239,13 +260,59 @@ def _confirmed_close(pos: Dict[str, Any], broker) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _orderbook_exit_evidence(pos: Dict[str, Any],
+                             order_map: Dict[str, Dict[str, Any]]
+                             ) -> Optional[Dict[str, Any]]:
+    """RECONCILIATION FRAMEWORK (Phase 7): POSITIVE order-id evidence that THIS
+    position closed, resolved from a PRE-FETCHED day orderbook map (one
+    get_orders() call), or None.
+
+    STRICTLY OUR-ORDER-ID-SCOPED. Consults ONLY the position's OWN recorded
+    exit_order_id. An order-id that is NOT one of our positions' order-ids is NEVER
+    looked up here — a MANUAL order in an overlapping symbol can never be
+    attributed as our close. This is a batched SECOND SOURCE alongside
+    _confirmed_close's per-position get_order_status (kept EXACTLY as-is): if that
+    transient per-position probe missed but the batched book shows OUR exit
+    COMPLETE, we still attribute it — never a manual order.
+
+    Requires the mapped order to be COMPLETE, filled_quantity > 0, and on the
+    CLOSING side (long → SELL, short → BUY-to-cover) when the book states a side.
+    Returns the same evidence shape as _confirmed_close, else None. Never raises."""
+    exit_oid = pos.get("exit_order_id")
+    if not exit_oid or not order_map:
+        return None
+    order = order_map.get(str(exit_oid))
+    if not order:
+        return None
+    if str(order.get("status") or "").upper() != "COMPLETE":
+        return None
+    if int(_num(order.get("filled_quantity")) or 0) <= 0:
+        return None
+    # Closing side must match the position's direction so a mis-recorded id can't
+    # mis-attribute. When the book states no side, accept (it IS our exit id).
+    txn = str(order.get("transaction_type") or "").upper()
+    if txn:
+        want = ("BUY" if str(pos.get("direction") or "long").lower() == "short"
+                else "SELL")
+        if txn != want:
+            return None
+    price = _num(order.get("average_price"))
+    return {
+        "exit_price": price if (price and price > 0) else pos.get("ltp"),
+        "exit_order_id": str(exit_oid),
+        "close_reason": "RECONCILED_EXIT",
+        "filled_qty": int(_num(order.get("filled_quantity")) or 0),
+    }
+
+
 # ── GUARD G3 (mode C3): corporate-action classifier ──────────────────────────
 # A split / bonus changes the BROKER quantity with NO order — so the invariant
 # sees a surplus (broker > db) or deficit (broker < db) it cannot attribute to
-# any order-id, and would otherwise raise a GENERIC ORPHAN_AT_BROKER /
-# UNATTRIBUTED_CLOSE. When the divergence is a CLEAN corporate-action ratio we
-# instead raise a distinct CORP_ACTION_SUSPECTED alert carrying the detected
-# ratio. We NEVER auto-mutate — this only RECLASSIFIES the alert.
+# any order-id. When the divergence is a CLEAN corporate-action ratio we raise a
+# distinct CORP_ACTION_SUSPECTED alert carrying the detected ratio. On the DEFICIT
+# side this REPLACES a generic UNATTRIBUTED_CLOSE; on the SURPLUS side (P7) a
+# non-ratio surplus is INVISIBLE, so a clean ratio is the ONLY surplus that
+# surfaces at all. We NEVER auto-mutate — this only RECLASSIFIES / gates the alert.
 #
 # Ratios: broker ≈ db × R for a split/bonus multiplier R. Common Indian equity
 # corporate actions: 1:1 bonus (×2), 2:1 bonus (×3), 1:5 split from ₹10→₹2 face
@@ -314,13 +381,16 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
     Returns a list of action dicts:
       * CLOSED via a confirmed order-id: {action: CLOSED_RECONCILED, symbol,
         product, exit_price, exit_order_id, close_reason}
-      * ALERTS (never mutate): {action: UNATTRIBUTED_CLOSE | ORPHAN_AT_BROKER,
-        symbol, product, deficit|extra}
-    In an integer invariant every mismatch is either a DEFICIT (broker < db →
-    order-id resolution, else UNATTRIBUTED_CLOSE) or a SURPLUS (broker > db →
-    ORPHAN_AT_BROKER). A qty that differs for a non-order reason (e.g. a corporate
-    action) surfaces as one of these alerts (a surplus/deficit we can't attribute),
-    never an auto-correction.
+      * ALERTS (never mutate): {action: UNATTRIBUTED_CLOSE | CORP_ACTION_SUSPECTED,
+        symbol, product, deficit|ratio}
+    PHASE 7 order-id-scoped invariant, per (symbol, product):
+      * broker_held >= db → IN SYNC or a SURPLUS. A surplus is a MANUAL / other
+        position (NOT ours) → INVISIBLE (no action, no alert), unless it is a
+        CLEAN corp-action ratio → non-mutating CORP_ACTION_SUSPECTED.
+      * broker_held <  db → a DEFICIT: order-id resolution (positive evidence,
+        incl. the batched orderbook second source), else UNATTRIBUTED_CLOSE (a
+        reverse-split-ratio deficit reclassifies to CORP_ACTION_SUSPECTED).
+    NEVER an auto-correction from the aggregate.
     Places NO order. LIVE only — paper / None book / empty book → [].
     """
     if _reconcile_disabled():
@@ -345,6 +415,7 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
     #    token / API error). We never mutate on None.
     books: Dict[str, Optional[List[dict]]] = {}
     holdings_book: Dict[str, Optional[List[dict]]] = {}
+    orderbooks: Dict[str, Optional[List[dict]]] = {}
     for prof_id, broker in brokers.items():
         try:
             books[prof_id] = broker.get_positions_net()
@@ -358,6 +429,15 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
             log.debug("reconcile: get_holdings raised for %s/%s: %s",
                       session.session_id, prof_id, e)
             holdings_book[prof_id] = None
+        # PHASE 7: the day orderbook — a batched second source for OUR OWN recorded
+        # exit order-ids (strengthens deficit attribution). None (unreachable /
+        # paper) → the per-position get_order_status floor is used unchanged.
+        try:
+            orderbooks[prof_id] = broker.get_orders()
+        except Exception as e:  # pragma: no cover - defensive
+            log.debug("reconcile: get_orders raised for %s/%s: %s",
+                      session.session_id, prof_id, e)
+            orderbooks[prof_id] = None
 
     if all(book is None for book in books.values()):
         log.debug("reconcile %s: all broker books None (unreachable/expired) — no-op",
@@ -377,6 +457,29 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
     _prod_cache: Dict[str, str] = {}
     actions: List[Dict[str, Any]] = []
     changed = False
+
+    # PHASE 7: per-profile order_id → row maps from the day orderbook (built once).
+    # ONLY consulted for OUR OWN recorded exit order-ids (never a manual order-id).
+    order_maps: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for pid, ob in orderbooks.items():
+        if isinstance(ob, list):
+            m: Dict[str, Dict[str, Any]] = {}
+            for o in ob:
+                if isinstance(o, dict):
+                    oid = o.get("order_id")
+                    if oid not in (None, ""):
+                        m[str(oid)] = o
+            order_maps[pid] = m
+
+    def _order_map_for(prof_id: Optional[str]) -> Dict[str, Dict[str, Any]]:
+        """The orderbook map for a position's broker profile, or the single map for
+        a single-broker session, else {} (no orderbook → per-position floor)."""
+        m = order_maps.get(str(prof_id or ""))
+        if m is not None:
+            return m
+        if len(order_maps) == 1:
+            return next(iter(order_maps.values()))
+        return {}
 
     # Distinct (bare_symbol, product) groups THIS session has OPEN, in a
     # deterministic order.
@@ -482,6 +585,12 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                     continue
                 ev = _confirmed_close(pos, broker_for_pos)
                 if ev is None:
+                    # PHASE 7 strengthening: a batched second source for OUR OWN
+                    # recorded exit_order_id (never a manual order-id). Catches an
+                    # exit the per-position get_order_status transiently missed.
+                    ev = _orderbook_exit_evidence(
+                        pos, _order_map_for(pos.get("broker_profile")))
+                if ev is None:
                     continue
                 sym = pos.get("symbol")
                 prof_id = pos.get("broker_profile")
@@ -535,31 +644,37 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                         "product": product, "deficit": int(deficit)})
             continue
 
-        # broker_held > db_held_all → broker holds MORE than we track → orphan /
-        # untracked position at the broker. NEVER adopt or mutate — ALERT.
-        # GUARD G3: if the surplus is a CLEAN corp-action ratio (a split/bonus GREW
-        # the broker qty with no order), RECLASSIFY as CORP_ACTION_SUSPECTED with
-        # the ratio instead of a generic ORPHAN_AT_BROKER. Still never mutates.
-        extra = broker_held - db_held_all
+        # broker_held > db_held_all → SURPLUS: the broker holds MORE than our
+        # sessions track for (symbol, product). PHASE 7 CORE CHANGE — a surplus is
+        # a MANUAL trade / the trader's own holding / a DIFFERENT session, NOT ours.
+        # Because Zerodha's net book carries NO order-ids we CANNOT attribute the
+        # extra to any of our orders, and it is not ours to reconcile → it is
+        # INVISIBLE: NO ORPHAN_AT_BROKER, no action, no alert. (This is the literal
+        # "reconcile by session_id + order_id, never by symbol/qty" model.)
+        #
+        # The ONE preserved exception is GUARD G3: a CLEAN corp-action ratio (a
+        # split/bonus that multiplied OUR shares with no order — e.g. exactly ×2)
+        # → a distinct, NON-mutating CORP_ACTION_SUSPECTED. This is conservative
+        # (a bonus has no order-id, so it can never be CONFIRMED — we flag at most,
+        # never mutate). The documented trade-off: a manual buy that lands on an
+        # EXACT clean multiple (e.g. our 100 + a manual 100 = 200 = ×2) is the one
+        # rare coincidence that still flags — acceptable, info-level, non-mutating.
+        # An ARBITRARY surplus (our 100 + a manual 37 = 137, ratio 1.37) is fully
+        # invisible.
         ratio = _corp_action_ratio(broker_held, db_held_all)
         if ratio is not None:
             detail = (f"broker_held={broker_held} vs db_held_all={db_held_all}; "
                       f"clean corp-action ratio={ratio} — split/bonus SUSPECTED, "
-                      f"NOT auto-adopted")
+                      f"NOT auto-adopted (a manual clean-multiple buy would look "
+                      f"identical; non-mutating)")
             _persist_alert(session.session_id, bare_sym, product,
                            "CORP_ACTION_SUSPECTED", detail)
             actions.append({
                 "action": "CORP_ACTION_SUSPECTED", "symbol": bare_sym,
                 "product": product, "ratio": ratio,
                 "broker_held": int(broker_held), "db_held": int(db_held_all)})
-        else:
-            detail = (f"broker_held={broker_held} > db_held_all={db_held_all}; "
-                      f"extra={extra} untracked at broker")
-            _persist_alert(session.session_id, bare_sym, product,
-                           "ORPHAN_AT_BROKER", detail)
-            actions.append({
-                "action": "ORPHAN_AT_BROKER", "symbol": bare_sym,
-                "product": product, "extra": int(extra)})
+        # else: INVISIBLE — a surplus we can't attribute to our order-ids is a
+        # manual/other position, not ours. No alert, no action (the P7 change).
 
     # After any close, re-freeze the invested basis over the REMAINING OPEN
     # positions so the kill / trail denominator matches reality.

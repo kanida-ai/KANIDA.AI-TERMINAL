@@ -24,6 +24,7 @@ class MockBroker(BrokerClient):
                  net_positions: Optional[Dict[str, int]] = None,
                  net_book: Optional[Any] = None,
                  holdings: Optional[Any] = None,
+                 orders: Optional[Any] = None,
                  reject_symbols: Optional[set] = None,
                  quotes: Optional[Dict[str, dict]] = None,
                  gtts: Optional[Dict[str, dict]] = None,
@@ -55,6 +56,15 @@ class MockBroker(BrokerClient):
         # A special sentinel value of [] (empty list) models a present-but-EMPTY
         # book (transient API blip) → the reconciler also does nothing.
         self._net_book = net_book
+        # RECONCILIATION Phase 7: the broker's FULL day orderbook. Accepts either
+        #   * a list of raw Kite-shaped order rows (order_id/status/
+        #     filled_quantity/average_price/transaction_type/tradingsymbol/...), or
+        #   * a dict {order_id -> {status, filled_quantity, ...}} (auto-normalised
+        #     to a list, injecting order_id from the key), or
+        #   * None (DEFAULT) → get_orders() returns None (the SAFE sentinel → the
+        #     reconciler falls back to the per-position floor). Existing tests
+        #     unaffected.
+        self._orders = orders
         self.ltps = ltps or {}
         self._quotes = quotes
         # FEATURE C: per-share MTF/MIS margin the mock reports (leverage). When
@@ -157,6 +167,22 @@ class MockBroker(BrokerClient):
                 rows.append(r)
             return rows
         return list(nb)
+
+    def get_orders(self):
+        # None (default) → the reconciler treats the orderbook as unknown and falls
+        # back to the per-position floor. A list is the raw Kite-shaped orderbook.
+        # A dict {order_id: {...}} is normalised to a list, injecting order_id.
+        ob = self._orders
+        if ob is None:
+            return None
+        if isinstance(ob, dict):
+            rows = []
+            for oid, row in ob.items():
+                r = dict(row)
+                r.setdefault("order_id", oid)
+                rows.append(r)
+            return rows
+        return list(ob)
 
     def get_holdings(self):
         # None (default) → reconciler treats delivery holdings as unknown here. A
