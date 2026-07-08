@@ -245,6 +245,43 @@ def run_migrations() -> dict:
                 "CREATE INDEX IF NOT EXISTS idx_autotrade_sessions_ladder "
                 "ON autotrade_sessions(ladder_id)")
 
+        # ── 2g. LIVE CONFIG EDIT — config_version on autotrade_sessions ───────
+        # A monotone counter bumped every time an operator applies a live
+        # risk/exit config edit (PATCH .../session/{id}/config). A long-lived
+        # in-memory session compares the persisted config_version to the version
+        # it last loaded; a higher value triggers maybe_reload_config() which
+        # re-parses config_json and updates ONLY the whitelisted risk/exit fields
+        # (never invested_basis / trail state / positions). Additive + idempotent;
+        # DEFAULT 0 → every existing session starts unversioned = no reload, i.e.
+        # byte-for-byte unchanged. NOT NULL DEFAULT 0 is a valid SQLite ADD COLUMN.
+        if _table_exists(con, "autotrade_sessions"):
+            have = set(_existing_columns(con, "autotrade_sessions"))
+            if "config_version" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_sessions "
+                    "ADD COLUMN config_version INTEGER NOT NULL DEFAULT 0")
+                added_cols.append("config_version")
+
+        # ── 2h. LIVE CONFIG EDIT (ladder) — child-config template + version ───
+        # child_config_json: OPTIONAL JSON overriding the risk/exit knobs of the
+        #   positional child config the ladder spawns (future baskets). NULL (the
+        #   default for every existing ladder) → the built-in validated positional
+        #   preset, byte-for-byte unchanged. Only the whitelisted risk/exit keys
+        #   are ever written here; capital/product/duration stay on their own
+        #   columns. config_version: bumped on each template edit (parity with the
+        #   session counter). Additive + idempotent.
+        if _table_exists(con, "autotrade_ladders"):
+            have = set(_existing_columns(con, "autotrade_ladders"))
+            if "child_config_json" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_ladders ADD COLUMN child_config_json TEXT")
+                added_cols.append("child_config_json")
+            if "config_version" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_ladders "
+                    "ADD COLUMN config_version INTEGER NOT NULL DEFAULT 0")
+                added_cols.append("ladder_config_version")
+
         for t in (
             "autotrade_positions",
             "autotrade_sessions", "autotrade_config_presets",
@@ -338,6 +375,9 @@ CREATE TABLE IF NOT EXISTS autotrade_sessions (
     -- added via idempotent ALTER for DBs created before these columns.)
     entry_latency_ms INTEGER,
     exit_latency_ms  INTEGER,
+    -- LIVE CONFIG EDIT: bumped on every applied risk/exit config edit so a
+    -- long-lived in-memory session hot-reloads the whitelisted knobs. DEFAULT 0.
+    config_version  INTEGER NOT NULL DEFAULT 0,
     config_json     TEXT NOT NULL,
     last_gross_return REAL,
     kill_reason     TEXT,
@@ -477,6 +517,12 @@ CREATE TABLE IF NOT EXISTS autotrade_ladders (
     daily_returns_json  TEXT,                         -- JSON [{"date","ret"}, ...]
     alert_active        INTEGER NOT NULL DEFAULT 0,   -- 0/1 down-crossing latch
     last_tick_date      TEXT,                         -- ISO date of the last daily tick (idempotency)
+    -- LIVE CONFIG EDIT: optional risk/exit override for FUTURE spawned children
+    -- (NULL = built-in validated positional preset) + a monotone template
+    -- version bumped on each edit. Capital/product/duration stay on their own
+    -- columns above; only whitelisted risk/exit keys are written here.
+    child_config_json   TEXT,
+    config_version      INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL,                -- ISO IST
     updated_at          TEXT
 );

@@ -950,12 +950,37 @@ async def _exit_single_position(
                 "confirm_status": confirm_status}
 
 
+# ── LIVE CONFIG EDIT — hot-reload whitelist ──────────────────────────────────
+# The ONLY config fields a RUNNING session may hot-reload post-launch. RISK/EXIT
+# knobs only. Capital / product / picks / entry params stay LOCKED once fired:
+# editing them would desync the frozen invested_basis + the placed orders / GTTs.
+# maybe_reload_config() re-parses config_json and copies ONLY these onto the live
+# self.config — it NEVER touches invested_basis, trail_armed/trail_peak, open
+# positions, order-ids, broker_profiles, capital, product, or entry timing.
+LIVE_EDITABLE_SESSION_FIELDS = (
+    "arm_pct",
+    "floor_pct",
+    "trail_giveback_pct",
+    "stop_pct",
+    "per_position_stop_pct",
+    "per_position_target_pct",
+    "square_off_time",
+    "mis_square_off_time",
+    "max_hold_sessions",
+)
+
+
 class TradingSession:
     def __init__(self, session_id: str, config: TradingSessionConfig,
                  mode: str = "paper", user_id: Optional[str] = None,
                  broker_account_id: Optional[str] = None):
         self.session_id = session_id
         self.config = config
+        # LIVE CONFIG EDIT: the config_version this in-memory session last loaded.
+        # maybe_reload_config() compares the persisted config_version to this and
+        # hot-reloads the whitelist when the row is newer. Set from the row in
+        # load(); a freshly create()d session starts at 0 (matches the DB default).
+        self._loaded_config_version = 0
         self.mode = mode  # 'paper' | 'live'
         self.dry_run = (mode != "live")
         # PHASE-2 MULTI-TENANT (additive). Both default None → operator/global
@@ -1015,7 +1040,8 @@ class TradingSession:
     def load(cls, session_id: str) -> Optional["TradingSession"]:
         with falcon_conn() as con:
             row = con.execute(
-                "SELECT mode, config_json, user_id, broker_account_id "
+                "SELECT mode, config_json, user_id, broker_account_id, "
+                "config_version "
                 "FROM autotrade_sessions WHERE session_id=?",
                 (session_id,),
             ).fetchone()
@@ -1025,9 +1051,61 @@ class TradingSession:
         # user_id / broker_account_id are NULL for pre-Phase-2 sessions → the
         # operator/global path, unchanged.
         d = dict(row)
-        return cls(session_id, cfg, mode=row["mode"],
-                   user_id=d.get("user_id"),
-                   broker_account_id=d.get("broker_account_id"))
+        obj = cls(session_id, cfg, mode=row["mode"],
+                  user_id=d.get("user_id"),
+                  broker_account_id=d.get("broker_account_id"))
+        # LIVE CONFIG EDIT: remember the config_version this session was loaded at
+        # so maybe_reload_config() can detect a newer persisted edit.
+        obj._loaded_config_version = int(d.get("config_version") or 0)
+        return obj
+
+    # ── LIVE CONFIG EDIT — hot-reload of the whitelisted risk/exit knobs ───────
+    def maybe_reload_config(self) -> bool:
+        """Pick up an operator's live risk/exit edit WITHOUT a restart.
+
+        Reads the row's config_version (one tiny SELECT). If it is GREATER than
+        the version this in-memory session last loaded, re-parse config_json and
+        copy ONLY the LIVE_EDITABLE_SESSION_FIELDS (risk/exit knobs) onto
+        self.config; everything else on the live config is left EXACTLY as first
+        loaded (capital, order_product, broker_profiles, top_n/picks, entry timing,
+        strategy, kill-switch pct, direction, …).
+
+        HARD GUARANTEES (real money): this method NEVER touches invested_basis,
+        trail_armed / trail_peak (they are separate autotrade_sessions columns,
+        not part of self.config), any open position, or any order-id. It only
+        mutates in-memory self.config attributes in the whitelist. When the
+        version is unchanged it is an O(1) no-op (no re-parse). Returns True iff a
+        reload happened.
+        """
+        with falcon_conn() as con:
+            row = con.execute(
+                "SELECT config_version, config_json "
+                "FROM autotrade_sessions WHERE session_id=?",
+                (self.session_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        d = dict(row)
+        ver = int(d.get("config_version") or 0)
+        if ver <= int(getattr(self, "_loaded_config_version", 0)):
+            return False  # unchanged → do nothing (no re-parse)
+        try:
+            new_cfg = TradingSessionConfig.from_json(d["config_json"])
+        except Exception as e:  # pragma: no cover - never break the tick
+            log.warning("config hot-reload parse failed for %s: %s",
+                        self.session_id, e)
+            return False
+        changed: List[str] = []
+        for f in LIVE_EDITABLE_SESSION_FIELDS:
+            old = getattr(self.config, f, None)
+            new = getattr(new_cfg, f, None)
+            if old != new:
+                setattr(self.config, f, new)
+                changed.append(f"{f}: {old!r}->{new!r}")
+        self._loaded_config_version = ver
+        log.info("config hot-reloaded v%d for %s: %s", ver, self.session_id,
+                 ", ".join(changed) if changed else "(no whitelisted change)")
+        return True
 
     @classmethod
     def list_sessions(cls, limit: int = 50,
@@ -1855,6 +1933,15 @@ class TradingSession:
 
     # ── Tick: monitor + GTT reconcile + kill switch / trail engine ─────────────
     async def tick(self) -> Dict[str, Any]:
+        # LIVE CONFIG EDIT: hot-reload any operator risk/exit edit FIRST, before
+        # the trail/stop/kill decision this tick, so an Apply takes effect within
+        # one tick without a restart. Safe O(1) no-op when nothing changed; never
+        # touches invested_basis / trail state / positions. (Covers the tick_driver
+        # path, which holds a long-lived session and calls tick() each interval.)
+        try:
+            self.maybe_reload_config()
+        except Exception as e:  # pragma: no cover - never block the tick
+            log.warning("config hot-reload failed for %s: %s", self.session_id, e)
         if not self.brokers:
             self._build_brokers()
         # AUTHORITATIVE BROKER→DB RECONCILE (real-money truth): BEFORE anything
@@ -2258,6 +2345,18 @@ class TradingSession:
 
         # Always surface the strategy so the UI can pick the right panel.
         out["strategy"] = self.config.strategy
+
+        # LIVE CONFIG EDIT: surface the CURRENT whitelisted risk/exit knobs + the
+        # config_version so the UI can pre-fill the "edit while running" form and
+        # PATCH .../config with the version it saw. These are the ONLY fields the
+        # PATCH endpoint accepts on a running session (capital/product/picks/entry
+        # stay locked). Present for BOTH strategies (kill-switch sessions still
+        # expose per_position_* + mis_square_off_time + square_off_time).
+        out["config_version"] = int(sess.get("config_version") or 0)
+        out["editable_config"] = {
+            f: getattr(self.config, f, None)
+            for f in LIVE_EDITABLE_SESSION_FIELDS
+        }
 
         # INTRADAY BASKET: surface the full trailing-engine state + the per-day
         # dual-return report so the UI can render the trail status panel.

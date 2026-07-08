@@ -285,6 +285,14 @@ class _WSDriver:
 
     def _tick_once(self, sess, fire_guard) -> None:
         """One sub-second pass: pull fresh WS LTPs → recompute → maybe fire."""
+        # LIVE CONFIG EDIT: this driver holds a long-lived `sess` (loaded once in
+        # _run), so it must hot-reload any operator risk/exit edit BEFORE the
+        # trail/kill decision below — mirrors session.tick(). Safe no-op when the
+        # config_version is unchanged; never touches invested_basis / trail state.
+        try:
+            sess.maybe_reload_config()
+        except Exception:  # pragma: no cover - never block the sub-second path
+            pass
         positions = sess.registry.get_open_positions()
         if not positions:
             return

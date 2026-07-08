@@ -144,6 +144,11 @@ class LadderCampaign:
     daily_returns_json: Optional[str] = None
     alert_active: int = 0
     last_tick_date: Optional[str] = None
+    # LIVE CONFIG EDIT: optional risk/exit override for FUTURE spawned children
+    # (NULL = the built-in validated positional preset, unchanged) + a monotone
+    # template version bumped on each edit.
+    child_config_json: Optional[str] = None
+    config_version: int = 0
 
     # ── Factory / persistence ─────────────────────────────────────────────────
     @classmethod
@@ -250,7 +255,9 @@ class LadderCampaign:
             mode_kill=d.get("mode_kill"),
             daily_returns_json=d.get("daily_returns_json"),
             alert_active=int(d.get("alert_active") or 0),
-            last_tick_date=d.get("last_tick_date"))
+            last_tick_date=d.get("last_tick_date"),
+            child_config_json=d.get("child_config_json"),
+            config_version=int(d.get("config_version") or 0))
 
     @classmethod
     def list_ladders(cls, user_id: Optional[str] = None,
@@ -698,8 +705,14 @@ class LadderCampaign:
     def _build_child_config(self) -> TradingSessionConfig:
         """The positional child config: strategy=intraday_basket,
         square_off_enabled=False, max_hold_sessions=3, the validated positional
-        trail preset, product = ladder product, capital = per_basket."""
-        return TradingSessionConfig(
+        trail preset, product = ladder product, capital = per_basket.
+
+        LIVE CONFIG EDIT: if the operator has edited the child-config template
+        (child_config_json), the whitelisted RISK/EXIT overrides are merged on top
+        of the built-in preset for FUTURE spawns. Capital/product/duration are NOT
+        sourced from the template (they stay on the ladder columns), so an edit
+        can never desync a running basket's frozen basis."""
+        cfg = TradingSessionConfig(
             total_allocated_capital=float(self.per_basket_capital),
             strategy="intraday_basket",
             top_n_stocks=POSITIONAL_TOP_N,
@@ -714,6 +727,37 @@ class LadderCampaign:
             # per-position GTT is the broker floor, wider than the trail — keep the
             # session defaults (3% stop / 6% target).
         )
+        # Merge the operator's saved risk/exit overrides (whitelist only) for
+        # FUTURE children. Never touches capital/product/strategy/square_off_enabled.
+        overrides = self.child_config_overrides()
+        for f, v in overrides.items():
+            setattr(cfg, f, v)
+        return cfg
+
+    # The risk/exit knobs a ladder edit may override on FUTURE spawned children.
+    # A SUBSET of the session whitelist that is meaningful for a positional child
+    # (square_off_time / mis_square_off_time are inert for a positional carry, but
+    # accepted + stored harmlessly). Capital/product/duration are NOT here.
+    LADDER_CHILD_WHITELIST = (
+        "arm_pct",
+        "floor_pct",
+        "trail_giveback_pct",
+        "stop_pct",
+        "per_position_stop_pct",
+        "per_position_target_pct",
+        "max_hold_sessions",
+    )
+
+    def child_config_overrides(self) -> Dict[str, Any]:
+        """The saved whitelisted risk/exit overrides for future children (empty
+        when no template edit has been applied)."""
+        if not self.child_config_json:
+            return {}
+        try:
+            raw = json.loads(self.child_config_json)
+        except Exception:
+            return {}
+        return {k: raw[k] for k in self.LADDER_CHILD_WHITELIST if k in raw}
 
     def _spawn_child(self, today: date) -> Dict[str, Any]:
         """Create + start ONE positional child for `today`, tagged ladder_id.
@@ -908,7 +952,25 @@ class LadderCampaign:
             "sessions": child_list,
             "user_id": self.user_id,
             "broker_account_id": self.broker_account_id,
+            # LIVE CONFIG EDIT: current risk/exit template (effective values,
+            # preset merged with any saved overrides) + capital/duration knobs +
+            # the template version, so the UI can pre-fill the ladder edit form.
+            "config_version": int(self.config_version or 0),
+            "editable_config": self._editable_config(),
         }
+
+    def _editable_config(self) -> Dict[str, Any]:
+        """Effective editable knobs for the ladder edit form: the risk/exit
+        template a FUTURE child would spawn with (built-in preset merged with any
+        operator override) + the capital/duration knobs."""
+        child = self._build_child_config()
+        out: Dict[str, Any] = {
+            f: getattr(child, f, None) for f in self.LADDER_CHILD_WHITELIST
+        }
+        out["per_basket_capital"] = self.per_basket_capital
+        out["total_capital"] = self.total_capital
+        out["end_date"] = self.end_date
+        return out
 
     def _aggregate_pnl(self) -> "tuple[float, float, int]":
         """(realized_total, unrealised_total, n_open_positions) across all this
