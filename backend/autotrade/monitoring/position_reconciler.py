@@ -531,13 +531,18 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                     matched_rows.append(r)
 
         # ── broker_held for (symbol, product) ─────────────────────────────────
-        # CNC (delivery): the SIGNED day-net PLUS settled holdings (demat + t1).
-        # The two are DISJOINT — today's CNC buys sit in net.quantity; an overnight
-        # lot has already moved to holdings (verified LIVE 2026-07-06: AEGISLOG
-        # net 57 today + t1 35 overnight = 92 held, with net.overnight_quantity 0).
-        # A CNC SELL shows a NEGATIVE net that OFFSETS holdings, so a fully-exited
-        # delivery nets to 0 — NOT abs() (ACUTAAS live: net -12 + holdings 0 → 0,
-        # not a phantom 12). max(0, …) floors a fully-sold position at zero.
+        # CNC (delivery): settled HOLDINGS (demat + t1) PLUS today's unsettled BUYS
+        # only. Today's CNC buys sit in net.quantity (not yet in holdings) → ADD.
+        # A CNC SELL is negative net, but the sold shares are ALREADY removed from
+        # holdings (holdings reflects the post-sell balance) — so a negative net must
+        # NOT be subtracted again or we DOUBLE-COUNT the sell. Hence `max(0, net)`,
+        # not `net`. (Verified LIVE 2026-07-08 AEGISLOG: holdings t1 35 STILL held +
+        # net -57 from OTHER sessions' ladder-exits selling their lots → true held is
+        # 35, but the old `max(0, net+holdings)` gave max(0,-22)=0, a false
+        # UNATTRIBUTED_CLOSE. And 2026-07-06 AEGISLOG: holdings 35 + net +57 buys =
+        # 92 held → 35+max(0,57)=92 ✓. ACUTAAS fully sold: holdings 0 + net -12 →
+        # 0+max(0,-12)=0 ✓.) A fully-sold delivery floors to 0; the DB position is
+        # then closed by ITS OWN order-id evidence, not this aggregate.
         # MIS / NRML / MTF: no holdings; |signed net| IS the exposure (a short MTF
         # nets negative — abs is the held size; live AARTIIND MTF net -630 → 630).
         held = 0
@@ -548,7 +553,7 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                     if _bare_symbol(str(h.get("tradingsymbol") or "")) == bare_sym:
                         held += int((_num(h.get("quantity")) or 0)
                                     + (_num(h.get("t1_quantity")) or 0))
-            broker_held = max(0, broker_net + held)
+            broker_held = held + max(0, broker_net)
         else:
             broker_held = abs(broker_net)
 

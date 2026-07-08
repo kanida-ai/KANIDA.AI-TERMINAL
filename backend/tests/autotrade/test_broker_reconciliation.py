@@ -669,6 +669,29 @@ def test_cnc_sell_negative_net_offsets_not_phantom_hold(clean_positions,
     assert r["close_reason"] == "GTT"
 
 
+def test_cnc_held_lot_survives_other_sessions_same_day_sells(clean_positions,
+                                                             monkeypatch):
+    """LIVE 2026-07-08 AEGISLOG: one session still HOLDS 35 CNC (in holdings t1=35),
+    while OTHER sessions' ladder exits SOLD their lots today → broker day-net = -57.
+    Those 57 are ALREADY removed from holdings, so the true held is 35. The OLD
+    formula max(0, net+holdings)=max(0,-57+35)=0 fired a FALSE UNATTRIBUTED_CLOSE;
+    the fixed formula holdings+max(0,net)=35+0=35 is IN SYNC. Our held position must
+    NOT be flagged or closed."""
+    net_book = {"A": {"tradingsymbol": "A", "quantity": -57, "buy_quantity": 0,
+                      "sell_quantity": 57, "sell_price": 1320.0,
+                      "average_price": 1344.0, "exchange": "NSE",
+                      "product": "CNC"}}
+    holdings = {"A": {"quantity": 0, "t1_quantity": 35, "average_price": 1344.4}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 1330.0},
+                              holdings=holdings, order_product="CNC")
+    _register(sess, "A", 35, 1344.4, ltp=1330.0)
+    _freeze(sess)
+    actions = reconcile_broker_positions(sess)
+    assert actions == [], f"held lot falsely flagged: {actions}"
+    assert _alerts() == []
+    assert _row(sess, "A")["status"] == "OPEN" and _row(sess, "A")["qty"] == 35
+
+
 # ── EXIT_FAILED row is examined too; closes only on positive evidence ─────────
 
 def test_exit_failed_with_confirmed_exit_order_closed(clean_positions,
