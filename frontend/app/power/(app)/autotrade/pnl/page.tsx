@@ -14,7 +14,7 @@
  * rewrite forwards it, but the backend reads Authorization, not the cookie).
  */
 import { requireSession } from '@/lib/power-auth'
-import { PnlDashboard } from './PnlDashboard'
+import { PnlDashboard } from '@/components/power/autotrade/PnlDashboard'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0

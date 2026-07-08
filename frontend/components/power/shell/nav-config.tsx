@@ -12,7 +12,7 @@
 import type { ComponentType } from 'react'
 import {
   IconSpark, IconSignal, IconHandshake, IconBolt, IconChart, IconLock,
-  IconUser, IconBook, IconAdmin, IconReceipt,
+  IconUser, IconBook, IconAdmin,
 } from './icons'
 
 export type NavItem = {
@@ -37,7 +37,10 @@ export const PRIMARY_NAV: NavItem[] = [
 
 /** Footer / account section (not primary modes). */
 export const FOOTER_NAV: NavItem[] = [
-  { key: 'autotrade-pnl', label: 'AutoTrade P&L', href: '/power/autotrade/pnl', Icon: IconReceipt, live: true },
+  // AutoTrade P&L is no longer a footer link — it now lives as a "P&L" TAB inside
+  // the AutoTrade surface (both the operator AutoTradePanel and the power-user
+  // PowerUserAutoTrade). The standalone /power/autotrade/pnl route is kept as a
+  // deep-link fallback.
   { key: 'account', label: 'Account',      href: '/power/account', Icon: IconUser,  live: true },
   { key: 'learn',   label: 'Learn Falcon', href: '/power/learn',   Icon: IconBook,  live: true },
   { key: 'admin',   label: 'Admin',        href: '/power/admin',   Icon: IconAdmin, live: true, adminOnly: true },

@@ -28,18 +28,20 @@ import { C, ICON, Gear, MECHANISM_CSS } from '@/components/power/shared/cotrade-
 import { PortfolioAutoTrade } from '@/components/power/autotrade/PortfolioAutoTrade'
 import { BrokerAccountsPanel } from '@/components/power/autotrade/BrokerAccountsPanel'
 import { TradeJournalPanel } from '@/components/power/autotrade/TradeJournalPanel'
+import { PnlDashboard } from '@/components/power/autotrade/PnlDashboard'
 import { AutoTradeAPI, type SessionSummary, type BrokerAccount } from '@/lib/autotrade-api'
 
-type Tab = 'broker' | 'start' | 'live' | 'journal'
+type Tab = 'broker' | 'start' | 'live' | 'journal' | 'pnl'
 
 const TABS: { id: Tab; label: string; icon: (n: number) => ReactNode }[] = [
   { id: 'broker',  label: 'Connect Your Broker',      icon: ICON.link },
   { id: 'start',   label: 'Start Auto Trade',         icon: ICON.bolt },
   { id: 'live',    label: 'Live & Scheduled Campaigns', icon: ICON.clock },
   { id: 'journal', label: 'Trade Journal',            icon: ICON.book },
+  { id: 'pnl',     label: 'P&L',                      icon: ICON.wallet },
 ]
 
-const VALID_TABS: Tab[] = ['broker', 'start', 'live', 'journal']
+const VALID_TABS: Tab[] = ['broker', 'start', 'live', 'journal', 'pnl']
 
 // Deep-link support — ?attab=start|live|broker|journal. Falls back to null so the
 // account-count default (below) can decide the opening tab.
@@ -53,7 +55,7 @@ function deepLinkTab(): Tab | null {
 // EXPIRED accounts are connected but cannot place a real order yet.
 const isActive = (a: BrokerAccount) => String(a.status ?? '').toUpperCase() === 'ACTIVE'
 
-export function PowerUserAutoTrade({ firstName, userId }: { firstName: string; userId: number | string }) {
+export function PowerUserAutoTrade({ firstName, userId, jwt }: { firstName: string; userId: number | string; jwt: string }) {
   // tab is decided AFTER the first accounts load (default = broker when they have
   // 0 connected accounts, else live). A deep link, if present, always wins. Until
   // resolved we render nothing in the body (a brief spinner) so we never flash the
@@ -227,6 +229,15 @@ export function PowerUserAutoTrade({ firstName, userId }: { firstName: string; u
             {tab === 'journal' && (
               <div className="mx-auto w-full max-w-4xl px-5 pb-10 sm:px-8 pt-4">
                 <JournalTab userId={userId} onNewCampaign={() => go('start')} />
+              </div>
+            )}
+
+            {/* P&L — this user's own strategy-level net-after-charges report
+                (the backend scopes by user_id). Calls the Bearer-authed endpoint
+                directly, so it takes the raw jwt handed down from the page. */}
+            {tab === 'pnl' && (
+              <div className="mx-auto w-full max-w-5xl px-5 pb-10 sm:px-8 pt-4">
+                <PnlDashboard jwt={jwt} />
               </div>
             )}
           </>

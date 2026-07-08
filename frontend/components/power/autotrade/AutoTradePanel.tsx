@@ -40,6 +40,7 @@ import { C, ICON, Gear, MECHANISM_CSS } from '@/components/power/shared/cotrade-
 import { PortfolioAutoTrade } from '@/components/power/autotrade/PortfolioAutoTrade'
 import { BrokerAccountsPanel } from '@/components/power/autotrade/BrokerAccountsPanel'
 import { TradeJournalPanel } from '@/components/power/autotrade/TradeJournalPanel'
+import { PnlDashboard } from '@/components/power/autotrade/PnlDashboard'
 
 // Legacy operator screens — reused verbatim (default exports rendered as tabs).
 import PremarketPage from '@/app/falcon/premarket/page'
@@ -48,11 +49,12 @@ import TrailConfigPage from '@/app/falcon/config/page'
 import FalconAdminPage from '@/app/falcon/admin/page'
 import FalconTradePage from '@/app/falcon/trade/page'
 
-type Tab = 'sessions' | 'journal' | 'brokers' | 'trade' | 'premarket' | 'positions' | 'config' | 'engine'
+type Tab = 'sessions' | 'journal' | 'pnl' | 'brokers' | 'trade' | 'premarket' | 'positions' | 'config' | 'engine'
 
 const TABS: { id: Tab; label: string; icon: (n: number) => React.ReactNode }[] = [
   { id: 'sessions',  label: 'Sessions',       icon: ICON.bolt },
   { id: 'journal',   label: 'Journal',        icon: ICON.book },
+  { id: 'pnl',       label: 'P&L',            icon: ICON.wallet },
   { id: 'brokers',   label: 'Broker accounts', icon: ICON.link },
   { id: 'trade',     label: 'Trade',          icon: ICON.arrow },
   { id: 'premarket', label: 'Pre-Market',     icon: ICON.clock },
@@ -64,14 +66,14 @@ const TABS: { id: Tab; label: string; icon: (n: number) => React.ReactNode }[] =
 // Read the initial tab from ?attab= (deep links point at ?attab=sessions&…).
 // Falls back to 'sessions'. Auto-Ladder is now a strategy INSIDE Sessions — it
 // is no longer a tab of its own.
-const VALID_TABS: Tab[] = ['sessions', 'journal', 'brokers', 'trade', 'premarket', 'positions', 'config', 'engine']
+const VALID_TABS: Tab[] = ['sessions', 'journal', 'pnl', 'brokers', 'trade', 'premarket', 'positions', 'config', 'engine']
 function initialTab(): Tab {
   if (typeof window === 'undefined') return 'sessions'
   const t = new URLSearchParams(window.location.search).get('attab')
   return (t && (VALID_TABS as string[]).includes(t)) ? (t as Tab) : 'sessions'
 }
 
-export function AutoTradePanel({ firstName, userId }: { firstName: string; userId: number | string }) {
+export function AutoTradePanel({ firstName, userId, jwt }: { firstName: string; userId: number | string; jwt: string }) {
   const [tab, setTab] = useState<Tab>(initialTab)
   // activeSessionId is lifted here so the Journal tab can receive it without
   // requiring PortfolioAutoTrade to be rewritten. PortfolioAutoTrade notifies
@@ -145,6 +147,15 @@ export function AutoTradePanel({ firstName, userId }: { firstName: string; userI
                 </p>
               </div>
             )}
+          </div>
+        )}
+
+        {/* P&L — strategy-level net-after-charges report. Unlike the other tabs it
+            calls the Bearer-authed autotrade P&L endpoint directly, so it takes the
+            raw jwt (passed down from the page's requireSession). */}
+        {tab === 'pnl' && (
+          <div className="mx-auto w-full max-w-5xl px-5 pb-10 sm:px-8 pt-4">
+            <PnlDashboard jwt={jwt} />
           </div>
         )}
 

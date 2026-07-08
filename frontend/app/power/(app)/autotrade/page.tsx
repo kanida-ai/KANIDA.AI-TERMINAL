@@ -24,7 +24,7 @@
  *    requires their own ACTIVE broker account. This page never places or simulates
  *    a real order.
  */
-import { getCurrentUser } from '@/lib/power-auth'
+import { getCurrentUser, requireSession } from '@/lib/power-auth'
 import { PowerUserAutoTrade } from '@/components/power/autotrade/PowerUserAutoTrade'
 import { AutoTradePanel } from '@/components/power/autotrade/AutoTradePanel'
 
@@ -40,13 +40,19 @@ export default async function AutoTradePage() {
   const user = await getCurrentUser()
   const firstName = firstNameOf(user?.display_name ?? null, user?.email ?? null)
 
+  // The P&L tab (inside both panels) calls the Bearer-authed autotrade P&L
+  // endpoint directly from the client, so it needs the raw JWT (the other tabs
+  // route through the same-origin proxy and don't). requireSession() hands it
+  // down; getCurrentUser (above) still drives the operator/user role branch.
+  const { jwt } = await requireSession()
+
   // Operator branch: the single unified panel — same admin check the shell uses
   // for isAdmin. The panel's children fetch their own data client-side.
   const isOperator = user?.role === 'admin'
   if (isOperator) {
     // user.id is the logged-in operator's numeric id — reused as the per-account
     // owner for the new broker-accounts panel + per-account session scoping.
-    return <AutoTradePanel firstName={firstName} userId={user!.id} />
+    return <AutoTradePanel firstName={firstName} userId={user!.id} jwt={jwt} />
   }
 
   // Non-operator branch: the 4-tab power-user AutoTrade shell (Connect Your Broker ·
@@ -54,5 +60,5 @@ export default async function AutoTradePage() {
   // BrokerAccountsPanel + PortfolioAutoTrade + TradeJournalPanel the operator uses,
   // in view-split (create/dashboard) mounts. Real-money gating (own ACTIVE account
   // for a live start) stays enforced inside PortfolioAutoTrade (isAdmin=false).
-  return <PowerUserAutoTrade firstName={firstName} userId={user!.id} />
+  return <PowerUserAutoTrade firstName={firstName} userId={user!.id} jwt={jwt} />
 }
