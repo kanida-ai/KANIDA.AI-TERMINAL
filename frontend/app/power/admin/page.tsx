@@ -209,6 +209,9 @@ function DailyJobsPanel() {
       )}
       {error && <ErrorBox text={error} />}
 
+      {/* Live market-data capture — Start/Stop control */}
+      <MktDataControl />
+
       {/* Scheduled jobs roster */}
       <div className="space-y-2">
         {jobs.map(j => (
@@ -233,6 +236,80 @@ function DailyJobsPanel() {
         ))}
       </div>
     </section>
+  )
+}
+
+// ── Live market-data capture control (mkt_ cluster) — Start/Stop + status ──
+type MktStatus = {
+  enabled: boolean; running: boolean; last_bar: string | null
+  instruments: number; orderflow_live: number; rows_today: number; error?: string
+}
+
+function MktDataControl() {
+  const [st,    setSt]    = useState<MktStatus | null>(null)
+  const [busy,  setBusy]  = useState(false)
+  const [err,   setErr]   = useState<string | null>(null)
+  const [flash, setFlash] = useState<string | null>(null)
+
+  const refresh = async () => {
+    try {
+      const r = await fetch(`${apiBase()}/api/power/admin/mktdata/status`, adminFetchInit())
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      setSt(await r.json()); setErr(null)
+    } catch (e) { setErr(e instanceof Error ? e.message : 'status failed') }
+  }
+  useEffect(() => {
+    void refresh(); const id = setInterval(refresh, 15_000); return () => clearInterval(id)
+  }, [])
+
+  const act = async (action: 'start' | 'stop') => {
+    setBusy(true); setFlash(null); setErr(null)
+    try {
+      const r = await fetch(`${apiBase()}/api/power/admin/mktdata/${action}`, adminFetchInit({ method: 'POST' }))
+      const b = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(b.detail?.message || `HTTP ${r.status}`)
+      setFlash(b.message || `${action} ok`)
+      setTimeout(refresh, 1_500); setTimeout(refresh, 6_000)
+    } catch (e) { setErr(e instanceof Error ? e.message : `${action} failed`) }
+    finally { setBusy(false) }
+  }
+
+  const on = st?.enabled === true
+  const running = st?.running === true
+  const badge = running ? ['CAPTURING', 'bg-green-500/15 text-green-200 border-green-500/40']
+    : on ? ['ARMED', 'bg-amber-400/[0.12] text-amber-200 border-amber-400/40']
+    : ['STOPPED', 'bg-neutral-800 text-neutral-400 border-neutral-700']
+
+  return (
+    <div className="bg-neutral-950/60 border border-neutral-800 rounded p-3 space-y-3">
+      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <span className="font-semibold text-sm text-neutral-100">Market-data capture</span>
+          <span className="text-[11px] text-neutral-500 font-mono">09:15–15:30 IST · 742 instruments (cash+fut+index) → mkt_orderflow_1min</span>
+        </div>
+        <span className={['inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide border font-mono', badge[1]].join(' ')}>
+          {badge[0]}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+        <KV label="Last bar"        value={st?.last_bar ? fmtIst(st.last_bar) : '—'} mono />
+        <KV label="Instruments"     value={String(st?.instruments ?? 0)} mono />
+        <KV label="Order-flow live" value={String(st?.orderflow_live ?? 0)} mono />
+        <KV label="Rows today"      value={(st?.rows_today ?? 0).toLocaleString()} mono />
+      </div>
+      <div className="flex gap-2">
+        <button type="button" onClick={() => act('start')} disabled={busy || running}
+          className="px-3 py-1.5 rounded text-sm font-semibold bg-mint-400 text-neutral-950 hover:bg-mint-300 disabled:opacity-50">
+          {busy ? '…' : 'Start'}
+        </button>
+        <button type="button" onClick={() => act('stop')} disabled={busy || (on === false)}
+          className="px-3 py-1.5 rounded text-sm font-semibold bg-red-500/20 text-red-200 border border-red-500/40 hover:bg-red-500/30 disabled:opacity-50">
+          {busy ? '…' : 'Stop'}
+        </button>
+      </div>
+      {flash && <p role="status" className="px-3 py-2 rounded bg-green-500/10 text-green-200 border border-green-500/40 text-xs">{flash}</p>}
+      {err && <ErrorBox text={err} />}
+    </div>
   )
 }
 
