@@ -38,6 +38,34 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-07-07 — **AutoTrade · Performance (strategy-level P&L dashboard)** built to the
+  approved mockup (scratchpad/autotrade_pnl.html). Placed at `/power/autotrade/pnl`
+  (a sub-surface of the AutoTrade mode) — NOT the `/power/performance` mode, which is
+  the picks proof/replay conversion surface; broker P&L is a distinct job ("what did my
+  automation net?"). Files: `app/power/(app)/autotrade/pnl/page.tsx` (server; requireSession
+  → hands JWT to the client because the P&L endpoint + CSV export both need a Bearer
+  header the HTTPOnly cookie can't supply through the rewrite), `PnlDashboard.tsx` (client),
+  `lib/fixtures/autotrade-pnl.ts` (dev fixture), plus `lib/power-api.ts` wrappers
+  (`autotradePnlSummary`, `autotradePnlExport` blob, `autotradePnlExportUrl`) + contract
+  types, and a footer nav entry "AutoTrade P&L" (new `IconReceipt`). Faithful to the mockup:
+  segmented period control (Yesterday/1W/2W/MTD/YTD/Custom + lightweight date-range popover),
+  summary band (Net P&L hero + gross/charges/deployed + per-strategy sparkline + Trades +
+  win-rate conic ring + Best/Needs-attention tiles), filter toolbar (Strategy/Segment/Product
+  multiselect + session search + Trade-log CSV export), sortable strategy table with segment
+  chip + product per row + colour-coded P&L, and collapsed click-to-expand session/campaign
+  drill-down. Behaviour per spec: period switch REFETCHES; Strategy/Segment/Product/search
+  filter CLIENT-side and the summary totals RE-COMPUTE from the visible set; sort client-side;
+  loading skeletons (not spinners), empty ("No strategies match"), error+retry, and 402→paywall
+  states; mobile-responsive (summary stacks at <900px, table has its own overflow-x). Design
+  decisions: theme tokens only (T + `--color-mint-400`); mint reserved for interactive
+  (selected period, active filter, export, expand chevron, sort arrow); profit=green (T.g),
+  loss=red (T.r), charges=amber (T.a); every number monospace tabular-nums. Strategy
+  names/segments/products come entirely from the API — nothing hardcoded (mockup's "F&O Futures"
+  was a placeholder; Futures is a SEGMENT filter). Dev-only fixture gated behind
+  `NEXT_PUBLIC_PNL_FIXTURE=1` (never fakes data in prod). `npx tsc --noEmit` clean;
+  `next build` passes (`/power/autotrade/pnl` = ƒ dynamic). Backend contract still to ship:
+  `GET /api/power/autotrade/pnl/summary` + `/export.csv` (see Backend needs). NOT committed —
+  operator reviews + integrates.
 - 2026-06-28 — **AutoTrade Phase-2 multi-tenant: connect-your-broker-account panel
   + per-account session selection + graceful vault-disabled state** (operator ask;
   backend worktree commit a770457 adds the operator-token-gated broker-account

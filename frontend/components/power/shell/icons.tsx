@@ -132,6 +132,16 @@ export function IconSearch(p: IconProps) {
   )
 }
 
+/** receipt — AutoTrade P&L (strategy-level performance report) */
+export function IconReceipt(p: IconProps) {
+  return (
+    <svg {...base(p)}>
+      <path d="M5 3v18l2-1.3L9 21l2-1.3L13 21l2-1.3L17 21l2-1.3V3l-2 1.3L15 3l-2 1.3L11 3 9 4.3 7 3 5 4.3z" />
+      <path d="M9 8h6M9 12h6" />
+    </svg>
+  )
+}
+
 /** bell — used by LaunchPending notify CTA */
 export function IconBell(p: IconProps) {
   return (

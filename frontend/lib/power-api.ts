@@ -739,6 +739,90 @@ export type CotradeSimulateResponse = {
   actions:      CotradeAction[]
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// AutoTrade P&L (strategy-level performance) — CONTRACT
+//   GET /api/power/autotrade/pnl/summary?period=&from=&to=&mode=   (Bearer)
+//   GET /api/power/autotrade/pnl/export.csv?period=&from=&to=&mode= (Bearer)
+// net = gross − charges throughout. Empty period → strategies:[] + zeroed totals.
+// A strategy may span multiple segments/products; `segment`/`product` are the
+// primary display value, `segments`/`products` the full set for filtering.
+// ──────────────────────────────────────────────────────────────────────────
+
+export type PnlPeriod = 'yesterday' | '1w' | '2w' | 'mtd' | 'ytd' | 'custom'
+export type PnlMode   = 'live' | 'paper'
+export type PnlKind   = 'session' | 'campaign'
+
+export type PnlBestWorst = { pnl: number; label: string }
+
+export type PnlSession = {
+  id:         string
+  kind:       PnlKind
+  name:       string
+  date_label: string
+  net:        number
+  gross:      number
+  charges:    number
+  trades:     number
+  win_rate:   number
+  segment:    string
+  product:    string
+}
+
+export type PnlStrategy = {
+  id:       string
+  name:     string
+  segment:  string
+  segments: string[]
+  product:  string
+  products: string[]
+  net:      number
+  gross:    number
+  charges:  number
+  trades:   number
+  wins:     number
+  losses:   number
+  win_rate: number
+  avg:      number
+  best:     PnlBestWorst
+  worst:    PnlBestWorst
+  sessions: PnlSession[]
+}
+
+export type PnlTotals = {
+  net:      number
+  gross:    number
+  charges:  number
+  trades:   number
+  wins:     number
+  losses:   number
+  win_rate: number
+}
+
+export type AutotradePnlSummary = {
+  period:           PnlPeriod
+  from:             string | null
+  to:               string | null
+  as_of:            string
+  capital_deployed: number
+  totals:           PnlTotals
+  strategies:       PnlStrategy[]
+}
+
+type PnlQueryOpts = { from?: string | null; to?: string | null; mode?: PnlMode }
+
+/** Path (relative, no origin) for the auth'd CSV export. Kept as a helper so the
+ *  caller can log/inspect it; the actual download must go through
+ *  PowerAPI.autotradePnlExport() because the endpoint needs a Bearer header (a
+ *  plain <a href> cannot attach one). */
+export function autotradePnlExportUrl(period: PnlPeriod, opts: PnlQueryOpts = {}): string {
+  const qs = new URLSearchParams({ period })
+  if (opts.from) qs.set('from', opts.from)
+  if (opts.to)   qs.set('to', opts.to)
+  qs.set('mode', opts.mode ?? 'live')
+  return `/api/power/autotrade/pnl/export.csv?${qs.toString()}`
+}
+
+
 export const PowerAPI = {
   // ── Public (no JWT) ───────────────────────────────────────────────────
   todayPreview: (signal?: AbortSignal) =>
@@ -874,6 +958,39 @@ export const PowerAPI = {
     if (entry_date) qs.set('entry_date', entry_date)
     return apiFetch<LiveDecisionsResponse>(
       `/api/power/picks/live?${qs.toString()}`, { jwt })
+  },
+
+  // ── AutoTrade P&L (strategy-level performance) ─────────────────────────
+  autotradePnlSummary: (
+    period: PnlPeriod,
+    opts:   PnlQueryOpts = {},
+    jwt?:   string | null,
+    signal?: AbortSignal,
+  ) => {
+    const qs = new URLSearchParams({ period })
+    if (opts.from) qs.set('from', opts.from)
+    if (opts.to)   qs.set('to', opts.to)
+    qs.set('mode', opts.mode ?? 'live')
+    return apiFetch<AutotradePnlSummary>(
+      `/api/power/autotrade/pnl/summary?${qs.toString()}`, { jwt: jwt ?? null, signal })
+  },
+
+  /** Auth'd CSV export → Blob. Fetches with the Bearer token (the endpoint is
+   *  not a plain href because it needs the Authorization header) and returns a
+   *  Blob the caller turns into a download. */
+  autotradePnlExport: async (
+    period: PnlPeriod,
+    opts:   PnlQueryOpts = {},
+    jwt?:   string | null,
+  ): Promise<Blob> => {
+    const r = await fetch(`${apiBase()}${autotradePnlExportUrl(period, opts)}`, {
+      headers: jwt ? { Authorization: `Bearer ${jwt}` } : {},
+      cache:   'no-store',
+    })
+    if (!r.ok) {
+      throw new PowerAPIError(r.status, `HTTP_${r.status}`, `Export failed: ${r.status}`)
+    }
+    return r.blob()
   },
 }
 

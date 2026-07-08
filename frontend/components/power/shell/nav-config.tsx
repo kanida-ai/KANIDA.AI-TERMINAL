@@ -12,7 +12,7 @@
 import type { ComponentType } from 'react'
 import {
   IconSpark, IconSignal, IconHandshake, IconBolt, IconChart, IconLock,
-  IconUser, IconBook, IconAdmin,
+  IconUser, IconBook, IconAdmin, IconReceipt,
 } from './icons'
 
 export type NavItem = {
@@ -37,6 +37,7 @@ export const PRIMARY_NAV: NavItem[] = [
 
 /** Footer / account section (not primary modes). */
 export const FOOTER_NAV: NavItem[] = [
+  { key: 'autotrade-pnl', label: 'AutoTrade P&L', href: '/power/autotrade/pnl', Icon: IconReceipt, live: true },
   { key: 'account', label: 'Account',      href: '/power/account', Icon: IconUser,  live: true },
   { key: 'learn',   label: 'Learn Falcon', href: '/power/learn',   Icon: IconBook,  live: true },
   { key: 'admin',   label: 'Admin',        href: '/power/admin',   Icon: IconAdmin, live: true, adminOnly: true },
