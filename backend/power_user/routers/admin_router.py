@@ -513,6 +513,75 @@ def jobs_scheduled(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
     return {"n": len(jobs), "jobs": jobs}
 
 
+# ── Market-data live capture (mkt_ cluster) — Start/Stop control ───────
+from pathlib import Path as _Path
+_UNIV_DB = _Path(__file__).resolve().parents[3] / "universe_engine" / "data" / "db" / "kanida_universe.db"
+
+
+def _mkt_conn():
+    return sqlite3.connect(str(_UNIV_DB), timeout=15)
+
+
+def _mkt_set_flag(val: str) -> None:
+    con = _mkt_conn()
+    con.execute("CREATE TABLE IF NOT EXISTS mkt_control (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
+    con.execute("INSERT INTO mkt_control(key,value,updated_at) VALUES('poller_enabled',?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (val, datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")))
+    con.commit(); con.close()
+
+
+@router.get("/mktdata/status")
+def mktdata_status(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
+    """Live market-data poller status: enabled flag + latest 1-min bar + coverage today."""
+    out: Dict[str, Any] = {"enabled": True, "running": False, "last_bar": None,
+                           "instruments": 0, "orderflow_live": 0, "rows_today": 0}
+    try:
+        con = _mkt_conn()
+        r = con.execute("SELECT value FROM mkt_control WHERE key='poller_enabled'").fetchone()
+        out["enabled"] = (r is None) or (str(r[0]) != "0")
+        today = datetime.now(IST).strftime("%Y-%m-%d")
+        last = (con.execute("SELECT max(bar_time) FROM mkt_orderflow_1min WHERE bar_time LIKE ?",
+                            (today + "%",)).fetchone() or [None])[0]
+        out["last_bar"] = last
+        if last:
+            out["instruments"] = con.execute("SELECT count(*) FROM mkt_orderflow_1min WHERE bar_time=?", (last,)).fetchone()[0]
+            out["orderflow_live"] = con.execute("SELECT count(*) FROM mkt_orderflow_1min WHERE bar_time=? AND total_buy_qty>0", (last,)).fetchone()[0]
+            try:
+                lb = datetime.strptime(last, "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+                out["running"] = bool(out["enabled"] and (datetime.now(IST) - lb).total_seconds() < 180)
+            except Exception:
+                pass
+        out["rows_today"] = con.execute("SELECT count(*) FROM mkt_orderflow_1min WHERE bar_time LIKE ?", (today + "%",)).fetchone()[0]
+        con.close()
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
+@router.post("/mktdata/stop")
+def mktdata_stop(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
+    """Stop the live poller — flag OFF; the running loop flushes and exits within ~5s."""
+    _mkt_set_flag("0")
+    return {"status": "stopped", "message": "Capture flag set OFF — poller exits within ~5s (stays off until Started)."}
+
+
+@router.post("/mktdata/start")
+def mktdata_start(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
+    """Start the live poller — flag ON; trigger the scheduled task for an immediate start
+    (during market hours). Outside hours it self-gates and will run at the next open."""
+    _mkt_set_flag("1")
+    launched = False
+    try:
+        import subprocess
+        subprocess.run(["schtasks", "/run", "/tn", "KanidaOrderFlowPoller"], timeout=15, capture_output=True)
+        launched = True
+    except Exception:
+        pass
+    return {"status": "started", "launched": launched,
+            "message": "Capture flag set ON" + (" and task triggered." if launched else " — starts at the next 30-min fire / market open.")}
+
+
 # ─────────────────────────────────────────────────────────────────────
 
 
