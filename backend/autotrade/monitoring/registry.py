@@ -187,7 +187,16 @@ class PositionRegistry:
         broker order-id of the EXIT fill (a market exit, or the GTT-fired order).
         Persisted so the closing order can be attributed to THIS position by
         order-id. Only overwritten when a non-None value is supplied (COALESCE
-        keeps any earlier value otherwise). NULL = unknown (paper / legacy)."""
+        keeps any earlier value otherwise). NULL = unknown (paper / legacy).
+
+        ZERO-FILL FLOOR (2026-07-07, CEMPRO circuit incident): a CLOSED row must
+        NEVER carry exit_price 0.0 — a 0 exit books a phantom ~-100% realised loss
+        (avg×qty). `NULLIF(x, 0)` treats a 0/absent price as UNKNOWN so the
+        effective exit price falls through supplied-price → ltp → avg_price. When
+        it lands on avg_price the realised P&L is 0 (P&L-neutral: an honest
+        "no known exit price", never a fabricated -100%). This is byte-for-byte
+        identical whenever a positive price is supplied OR ltp>0 (the only real
+        paper/live flows); it ONLY changes the pathological 0/absent case."""
         now = datetime.now(IST).isoformat()
         with falcon_conn() as con:
             # FUTURES long/short: sign-aware realised P&L. 'long' CASE = +1 →
@@ -196,11 +205,11 @@ class PositionRegistry:
                 con.execute(
                     """UPDATE autotrade_positions
                        SET status='CLOSED', close_reason=?, closed_at=?,
-                           exit_price=COALESCE(?, ltp),
+                           exit_price=COALESCE(NULLIF(?,0), NULLIF(ltp,0), avg_price),
                            exit_order_id=COALESCE(?, exit_order_id),
                            realised_pnl=(CASE WHEN direction='short' THEN -1
                                               ELSE 1 END)
-                                        * (COALESCE(?, ltp, avg_price) - avg_price)*qty
+                                        * (COALESCE(NULLIF(?,0), NULLIF(ltp,0), avg_price) - avg_price)*qty
                        WHERE session_id=? AND symbol=?
                          AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
                     (reason, now, exit_price, exit_order_id, exit_price,
@@ -210,11 +219,11 @@ class PositionRegistry:
                 con.execute(
                     """UPDATE autotrade_positions
                        SET status='CLOSED', close_reason=?, closed_at=?,
-                           exit_price=COALESCE(?, ltp),
+                           exit_price=COALESCE(NULLIF(?,0), NULLIF(ltp,0), avg_price),
                            exit_order_id=COALESCE(?, exit_order_id),
                            realised_pnl=(CASE WHEN direction='short' THEN -1
                                               ELSE 1 END)
-                                        * (COALESCE(?, ltp, avg_price) - avg_price)*qty
+                                        * (COALESCE(NULLIF(?,0), NULLIF(ltp,0), avg_price) - avg_price)*qty
                        WHERE session_id=? AND symbol=?""",
                     (reason, now, exit_price, exit_order_id, exit_price,
                      self.session_id, symbol),

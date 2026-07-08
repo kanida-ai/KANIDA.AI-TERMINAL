@@ -853,13 +853,41 @@ async def _exit_single_position(
         log.warning(
             "pre-exit reconcile %s/%s: broker net qty is 0 (already closed "
             "externally) — marking CLOSED, placing NO order", session_id, symbol)
+        # POSITIVE-EVIDENCE RECONCILE (2026-07-07 CEMPRO circuit incident): the leg
+        # was closed by ANOTHER order (a fired GTT / manual / RMS). Resolve at the
+        # REAL fill from the broker orderbook via the framework's order-id-driven
+        # primitive — NEVER fabricate a 0/mark price (a 0 exit books a phantom
+        # ~-100% realised loss). Confirmed fill → CLOSE at it; else a POSITIVE mark
+        # → RECONCILED_FLAT at the mark (pre-existing behaviour, never 0); else
+        # (no evidence AND no positive mark) → EXIT_FAILED for the reconciler.
+        from autotrade.monitoring.position_reconciler import _confirmed_close
         try:
+            ev = await asyncio.to_thread(_confirmed_close, position, broker)
+        except Exception as _ce:  # pragma: no cover - defensive
+            log.debug("pre-exit reconcile _confirmed_close raised %s/%s: %s",
+                      session_id, symbol, _ce)
+            ev = None
+        ltp_val = position.get("ltp")
+        if ev is not None:
             registry.mark_closed(symbol, f"{reason}_RECONCILED_FLAT",
-                                 exit_price=position.get("ltp"),
-                                 broker_profile=prof_id)
-        finally:
+                                 exit_price=ev.get("exit_price"),
+                                 broker_profile=prof_id,
+                                 exit_order_id=ev.get("exit_order_id"))
             _exit_gate_mod.release_exit_session(session_id, symbol)
-        return {"symbol": symbol, "status": "RECONCILED_FLAT", "reason": reason}
+            return {"symbol": symbol, "status": "RECONCILED_FLAT", "reason": reason,
+                    "exit_price": ev.get("exit_price")}
+        if ltp_val and float(ltp_val) > 0:
+            registry.mark_closed(symbol, f"{reason}_RECONCILED_FLAT",
+                                 exit_price=ltp_val, broker_profile=prof_id)
+            _exit_gate_mod.release_exit_session(session_id, symbol)
+            return {"symbol": symbol, "status": "RECONCILED_FLAT", "reason": reason}
+        # Flat at broker, NO attributable fill AND no positive mark → do NOT book a
+        # phantom CLOSED@0. mark_exit_failed releases the gate itself.
+        registry.mark_exit_failed(
+            symbol, f"{reason}: broker flat, no attributable exit fill",
+            broker_profile=prof_id)
+        return {"symbol": symbol, "status": "EXIT_FAILED",
+                "confirm_status": "RECONCILE_UNATTRIBUTED", "reason": reason}
     # kite_product overrides instrument_type mapping: positions table stores security
     # type ("EQ"), not the trading product ("MTF"/"CNC"). Without this, MTF exits
     # become CNC sells and Kite rejects them with "Holding quantity: 0".

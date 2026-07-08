@@ -439,3 +439,120 @@ def test_f1_stale_basis_refrozen_after_reconciled_close(clean_positions,
         after = con.execute("SELECT invested_basis FROM autotrade_sessions "
                             "WHERE session_id=?", (sess.session_id,)).fetchone()[0]
     assert after == pytest.approx(1000.0)      # re-frozen over KEEP only
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# D6 FLATTEN vs BROKER-FLAT — the CEMPRO circuit incident (2026-07-07)
+# A leg the broker already flattened (a fired GTT / manual / RMS) must NEVER be
+# marked CLOSED at exit_price 0.0 — a 0 exit books a phantom ~-100% realised loss
+# (avg×qty). It must CLOSE at the REAL orderbook fill (positive order-id evidence)
+# or, absent any real price, go EXIT_FAILED for the reconciler/human.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_d6a_flatten_broker_flat_no_evidence_zero_ltp_goes_exit_failed(
+        clean_positions):
+    """Per-stock flatten: broker flat, stale ltp 0, NO order-id evidence → the row
+    is NOT CLOSED@0 (no phantom -100% loss). It goes EXIT_FAILED so the reconciler
+    / retry sweep resolves it. Safeguard: _exit_single_position reconcile-flat
+    positive-evidence branch (session.py)."""
+    broker = MockBroker(profile=_prof(), dry_run=False, ltps={"CEMPRO": 0.0},
+                        net_positions={"CEMPRO": 0})
+    reg = PositionRegistry("sess-d6a", 300000.0)
+    reg.register(symbol="CEMPRO", broker_profile="zer", qty=31, avg_price=1512.0,
+                 product="CNC", instrument_type="EQ")
+    reg.update_ltp("CEMPRO", 0.0, broker_profile="zer")   # stale/never refreshed
+
+    out = asyncio.run(_exit_single_position(
+        "sess-d6a", reg.get_open_positions()[0], "STOP_STOCK",
+        {"zer": broker}, reg, gtt_manager=None))
+
+    assert out["status"] == "EXIT_FAILED"
+    assert broker.exits == []                     # NO naked order on a flat book
+    r = _row("sess-d6a", "CEMPRO")
+    assert r["status"] == "EXIT_FAILED"           # NOT falsely CLOSED
+    assert r["status"] != "CLOSED"
+    assert (r["exit_price"] or 0) == 0            # never booked a phantom price...
+    # ...and CRUCIALLY no phantom -100% realised loss was recorded.
+    assert (r["realised_pnl"] or 0) == 0
+
+
+def test_d6b_flatten_broker_flat_closes_at_real_orderbook_fill(clean_positions):
+    """Per-stock flatten: broker flat, stale ltp 0, but the position OWNS an exit
+    order-id that filled COMPLETE @ 1470 (a GTT/exit that actually sold it) → the
+    row CLOSES at the REAL fill 1470 (not 0, not the mark), realised computed from
+    1470, exit_order_id attributed. Safeguard: reconcile-flat _confirmed_close."""
+    reg = PositionRegistry("sess-d6b", 300000.0)
+    reg.register(symbol="CEMPRO", broker_profile="zer", qty=31, avg_price=1512.0,
+                 product="CNC", instrument_type="EQ")
+    reg.update_ltp("CEMPRO", 0.0, broker_profile="zer")
+    # The position's OWN exit order-id (positive evidence lives on the row).
+    with falcon_conn() as con:
+        con.execute("UPDATE autotrade_positions SET exit_order_id=? "
+                    "WHERE session_id=? AND symbol=?",
+                    ("OID-REAL", "sess-d6b", "CEMPRO"))
+        con.commit()
+    broker = MockBroker(
+        profile=_prof(), dry_run=False, ltps={"CEMPRO": 0.0},
+        net_positions={"CEMPRO": 0},
+        order_status={"OID-REAL": {"status": "COMPLETE",
+                                   "filled_quantity": 31, "average_price": 1470.0}})
+
+    out = asyncio.run(_exit_single_position(
+        "sess-d6b", reg.get_open_positions()[0], "STOP_STOCK",
+        {"zer": broker}, reg, gtt_manager=None))
+
+    assert out["status"] == "RECONCILED_FLAT"
+    assert broker.exits == []                     # no new order — already sold
+    r = _row("sess-d6b", "CEMPRO")
+    assert r["status"] == "CLOSED"
+    assert r["exit_price"] == pytest.approx(1470.0)          # REAL fill, not 0
+    assert r["realised_pnl"] == pytest.approx((1470.0 - 1512.0) * 31)
+    assert r["exit_order_id"] == "OID-REAL"
+
+
+def test_d6c_killswitch_flat_no_evidence_zero_ltp_not_closed_zero(clean_positions):
+    """Portfolio kill switch: a leg flat at the broker with stale ltp 0 and NO
+    order-id evidence → EXIT_FAILED, never CLOSED@0. Safeguard: kill_switch.fire
+    reconcile-flat positive-evidence branch."""
+    from autotrade.monitoring.kill_switch import KillSwitchExecutor
+    sid = "sess-d6c"
+    with falcon_conn() as con:
+        con.execute(
+            """INSERT INTO autotrade_sessions
+               (session_id, created_at, status, mode, total_allocated_capital,
+                config_json) VALUES (?,?,?,?,?,?)""",
+            (sid, "2026-06-25T09:00:00", "RUNNING", "live", 1_000_000.0, "{}"))
+        con.commit()
+    reg = PositionRegistry(sid, 1_000_000.0)
+    reg.register(symbol="CEMPRO", broker_profile="zer", qty=31, avg_price=1512.0,
+                 product="CNC", instrument_type="EQ")
+    reg.update_ltp("CEMPRO", 0.0, broker_profile="zer")
+    broker = MockBroker(profile=_prof(), dry_run=False, ltps={"CEMPRO": 0.0},
+                        net_positions={"CEMPRO": 0})
+    cfg = TradingSessionConfig(total_allocated_capital=1_000_000.0,
+                               kill_switch_enabled=True)
+    ks = KillSwitchExecutor(sid, cfg, {"zer": broker}, reg)
+    res = asyncio.run(ks.fire("TEST"))
+
+    assert broker.exits == []                     # no naked order
+    r = _row(sid, "CEMPRO")
+    assert r["status"] == "EXIT_FAILED"           # NOT CLOSED@0
+    assert (r["realised_pnl"] or 0) == 0          # no phantom -100% loss
+    assert res["n_exit_failed"] >= 0              # fire completed without a phantom
+
+
+def test_d6d_mark_closed_zero_price_floor(clean_positions):
+    """registry.mark_closed FLOOR: even if a caller passes exit_price 0 AND ltp is
+    0, the CLOSED row must NOT record exit_price 0.0 / a -100% realised loss — the
+    effective price floors to avg_price (realised 0). A price of 0 is impossible
+    for a CLOSED row."""
+    reg = PositionRegistry("sess-d6d", 300000.0)
+    reg.register(symbol="CEMPRO", broker_profile="zer", qty=31, avg_price=1512.0,
+                 product="CNC", instrument_type="EQ")
+    reg.update_ltp("CEMPRO", 0.0, broker_profile="zer")
+    reg.mark_closed("CEMPRO", "TEST_ZERO", exit_price=0.0,
+                    broker_profile="zer")
+    r = _row("sess-d6d", "CEMPRO")
+    assert r["status"] == "CLOSED"
+    assert r["exit_price"] == pytest.approx(1512.0)     # avg fallback, never 0
+    assert r["realised_pnl"] == pytest.approx(0.0)      # never a phantom -46,872

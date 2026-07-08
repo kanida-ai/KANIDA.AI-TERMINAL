@@ -148,11 +148,48 @@ class KillSwitchExecutor:
             if net_qty is not None and net_qty == 0:
                 log.warning("kill: %s/%s already flat at broker — reconciling, "
                             "no exit order", self.session_id, symbol)
-                self.registry.mark_closed(symbol, f"{close_reason}_RECONCILED_FLAT",
-                                          broker_profile=prof_id)
-                exit_gate.release_exit_session(self.session_id, symbol)
-                exit_meta.append({"symbol": symbol, "claimed": False,
-                                  "reconciled_flat": True})
+                # POSITIVE-EVIDENCE RECONCILE (2026-07-07 CEMPRO circuit incident).
+                # The leg was closed by ANOTHER order (a fired GTT / manual / RMS).
+                # Resolve its close at the REAL fill from the broker orderbook via
+                # the framework's order-id-driven primitive — NEVER fabricate a
+                # 0/mark price (a 0 exit books a phantom ~-100% realised loss).
+                #   * confirmed real fill (gtt/exit order COMPLETE) → CLOSE at it.
+                #   * else a POSITIVE mark exists → RECONCILED_FLAT at the mark
+                #     (pre-existing 2026-07-02 behaviour; never a 0 price).
+                #   * else (no evidence AND no positive mark) → EXIT_FAILED so the
+                #     reconciler/human resolves it; do NOT book CLOSED@0.
+                from .position_reconciler import _confirmed_close
+                try:
+                    ev = await asyncio.to_thread(_confirmed_close, pos, broker)
+                except Exception as _ce:  # pragma: no cover - defensive
+                    log.debug("kill: _confirmed_close raised %s: %s", symbol, _ce)
+                    ev = None
+                ltp_val = pos.get("ltp")
+                if ev is not None:
+                    self.registry.mark_closed(
+                        symbol, f"{close_reason}_RECONCILED_FLAT",
+                        exit_price=ev.get("exit_price"),
+                        broker_profile=prof_id,
+                        exit_order_id=ev.get("exit_order_id"))
+                    exit_gate.release_exit_session(self.session_id, symbol)
+                    exit_meta.append({"symbol": symbol, "claimed": False,
+                                      "reconciled_flat": True,
+                                      "exit_price": ev.get("exit_price")})
+                elif ltp_val and float(ltp_val) > 0:
+                    self.registry.mark_closed(
+                        symbol, f"{close_reason}_RECONCILED_FLAT",
+                        broker_profile=prof_id)
+                    exit_gate.release_exit_session(self.session_id, symbol)
+                    exit_meta.append({"symbol": symbol, "claimed": False,
+                                      "reconciled_flat": True})
+                else:
+                    # mark_exit_failed releases the exit gate itself.
+                    self.registry.mark_exit_failed(
+                        symbol,
+                        f"{close_reason}: broker flat, no attributable exit fill",
+                        broker_profile=prof_id)
+                    exit_meta.append({"symbol": symbol, "claimed": False,
+                                      "reconciled_flat_unattributed": True})
                 continue
             exit_coros.append(broker.place_market_exit(
                 symbol, qty, itype, kite_product=kite_product,
