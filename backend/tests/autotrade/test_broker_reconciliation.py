@@ -275,37 +275,76 @@ def test_close_via_exit_order_id(clean_positions, monkeypatch):
     assert r["realised_pnl"] == pytest.approx((104.25 - 100.0) * 10)
 
 
-# ── UNATTRIBUTED_CLOSE: deficit with NO filled order → ALERT, nothing closed ──
+# ── FULLY FLAT at the broker + no order-id → CLOSED_EXTERNAL_FLAT (2026-07-09) ──
 
-def test_unattributed_close_alert_no_evidence(clean_positions, monkeypatch):
-    """Broker shows a deficit (net 0) but the position has NO gtt_id / exit_order_id
-    that filled → we CANNOT attribute the close → ALERT, position stays OPEN."""
+def test_fully_flat_external_close_no_order_id(clean_positions, monkeypatch):
+    """The manual-exit-of-our-own-position gap (2026-07-09 ATHERENERG): the broker
+    is FULLY FLAT (net 0 WITH real sell evidence) but the position has NO
+    gtt_id / exit_order_id we own — the trader squared it off manually. broker_held
+    ==0 makes the close UNAMBIGUOUS → CLOSE it as CLOSED_EXTERNAL_FLAT at the broker
+    sell avg, instead of looping UNATTRIBUTED_CLOSE forever and leaving a phantom
+    OPEN row the trail keeps tracking (a latent false-sell)."""
     net_book = {"A": {"quantity": 0, "buy_quantity": 10, "sell_quantity": 10,
                       "sell_price": 96.5, "average_price": 100.0,
                       "exchange": "NSE", "product": "MIS"}}
     sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
                               order_product="MIS")
-    _register(sess, "A", 10, 100.0, ltp=100.0)     # no order-ids
+    _register(sess, "A", 10, 100.0, ltp=100.0)     # no order-ids (manual exit)
     _freeze(sess)
 
     actions = reconcile_broker_positions(sess)
     kinds = {a["action"] for a in actions}
+    assert "CLOSED_EXTERNAL_FLAT" in kinds
+    assert "UNATTRIBUTED_CLOSE" not in kinds        # no more phantom-alert loop
+    a = next(a for a in actions if a["action"] == "CLOSED_EXTERNAL_FLAT")
+    assert a["exit_price"] == pytest.approx(96.5)   # broker sell avg
+    r = _row(sess, "A")
+    assert r["status"] == "CLOSED"                  # phantom cleared
+    assert r["exit_price"] == pytest.approx(96.5)
+    assert r["realised_pnl"] == pytest.approx((96.5 - 100.0) * 10)
+
+
+def test_fully_flat_but_no_sell_evidence_still_alerts(clean_positions, monkeypatch):
+    """SAFETY: broker_held==0 ALONE is not enough. A symbol ABSENT from the net book
+    (empty/glitchy — no sell/buy volume) must NOT auto-close (a transient empty book
+    can never flatten us) → ALERT, position stays OPEN."""
+    net_book = {}    # symbol absent entirely → no rows, no sell evidence
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+                              order_product="MIS")
+    _register(sess, "A", 10, 100.0, ltp=100.0)
+    _freeze(sess)
+    actions = reconcile_broker_positions(sess)
+    kinds = {a["action"] for a in actions}
+    assert "CLOSED_EXTERNAL_FLAT" not in kinds       # NOT closed on an absent book
     assert "UNATTRIBUTED_CLOSE" in kinds
-    ua = next(a for a in actions if a["action"] == "UNATTRIBUTED_CLOSE")
-    assert ua["deficit"] == 10
-    # NOTHING closed — a stale-but-flagged OPEN beats a false close.
+    assert _row(sess, "A")["status"] == "OPEN"       # stays OPEN (safe)
+
+
+def test_partial_deficit_no_evidence_still_alerts(clean_positions, monkeypatch):
+    """A PARTIAL deficit (broker still holds SOME) with no order-id evidence is
+    STILL an alert, never an auto-close — WHICH session's lot closed is ambiguous
+    while the broker holds a remainder. Only a FULL flat auto-closes."""
+    net_book = {"A": {"quantity": 7, "buy_quantity": 10, "sell_quantity": 3,
+                      "sell_price": 96.5, "average_price": 100.0,
+                      "exchange": "NSE", "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+                              order_product="MIS")
+    _register(sess, "A", 10, 100.0, ltp=100.0)       # broker holds 7 < db 10
+    _freeze(sess)
+    actions = reconcile_broker_positions(sess)
+    kinds = {a["action"] for a in actions}
+    assert "UNATTRIBUTED_CLOSE" in kinds             # partial → alert only
+    assert "CLOSED_EXTERNAL_FLAT" not in kinds       # NOT closed (broker holds 7)
     assert _row(sess, "A")["status"] == "OPEN"
-    assert _row(sess, "A")["qty"] == 10
-    persisted = _alerts("UNATTRIBUTED_CLOSE")
-    assert len(persisted) == 1
-    assert persisted[0]["symbol"] == "A"
-    assert persisted[0]["product"] == "MIS"
 
 
-def test_unattributed_close_gtt_triggered_but_order_open(clean_positions,
-                                                         monkeypatch):
-    """A triggered GTT whose FIRED order is still OPEN (not COMPLETE) is NOT
-    positive evidence → the deficit is UNATTRIBUTED, position stays OPEN."""
+def test_gtt_triggered_open_order_still_flat_closes_external(clean_positions,
+                                                            monkeypatch):
+    """A triggered GTT whose FIRED order is still OPEN (not COMPLETE) is NOT valid
+    order-id evidence (the order-id path correctly rejects it). But the broker is
+    FULLY FLAT (net 0 + sell evidence), so the position is closed via the full-flat
+    path as CLOSED_EXTERNAL_FLAT at the broker sell avg (exit_order_id None) — never
+    left as a phantom, and never falsely attributed to the un-filled GTT order."""
     net_book = {"A": {"quantity": 0, "buy_quantity": 10, "sell_quantity": 10,
                       "sell_price": 96.5, "average_price": 100.0,
                       "exchange": "NSE", "product": "MIS"}}
@@ -320,8 +359,10 @@ def test_unattributed_close_gtt_triggered_but_order_open(clean_positions,
     _freeze(sess)
 
     actions = reconcile_broker_positions(sess)
-    assert any(a["action"] == "UNATTRIBUTED_CLOSE" for a in actions)
-    assert _row(sess, "A")["status"] == "OPEN"    # never close on non-COMPLETE
+    a = next(a for a in actions if a["action"] == "CLOSED_EXTERNAL_FLAT")
+    assert a["exit_order_id"] is None             # NOT attributed to the OPEN GTT
+    assert a["exit_price"] == pytest.approx(96.5)
+    assert _row(sess, "A")["status"] == "CLOSED"  # phantom cleared
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -716,9 +757,11 @@ def test_exit_failed_with_confirmed_exit_order_closed(clean_positions,
     assert r["realised_pnl"] == pytest.approx((97.8 - 100.0) * 15)
 
 
-def test_exit_failed_no_evidence_unattributed(clean_positions, monkeypatch):
-    """An EXIT_FAILED row with NO attributable filled order + a broker deficit →
-    UNATTRIBUTED_CLOSE alert, NOT auto-closed (we never guess a fill price)."""
+def test_exit_failed_fully_flat_closes_external(clean_positions, monkeypatch):
+    """An EXIT_FAILED row with NO attributable filled order but the broker FULLY
+    FLAT (net 0 + sell evidence): the position is objectively gone (a retry/manual/
+    RMS exit landed) → close it CLOSED_EXTERNAL_FLAT instead of leaving it stuck
+    EXIT_FAILED forever retrying an exit on a position that no longer exists."""
     net_book = {"A": {"quantity": 0, "buy_quantity": 15, "sell_quantity": 15,
                       "sell_price": 97.8, "average_price": 100.0,
                       "exchange": "NSE", "product": "MIS"}}
@@ -727,8 +770,9 @@ def test_exit_failed_no_evidence_unattributed(clean_positions, monkeypatch):
     _register(sess, "A", 15, 100.0, ltp=100.0, status="EXIT_FAILED")
     _freeze(sess)
     actions = reconcile_broker_positions(sess)
-    assert any(a["action"] == "UNATTRIBUTED_CLOSE" for a in actions)
-    assert _row(sess, "A")["status"] == "EXIT_FAILED"    # unchanged, flagged
+    a = next(a for a in actions if a["action"] == "CLOSED_EXTERNAL_FLAT")
+    assert a["exit_price"] == pytest.approx(97.8)
+    assert _row(sess, "A")["status"] == "CLOSED"         # no longer stuck
 
 
 # ── END-TO-END through session.tick(): close surfaces under broker_reconciled ─

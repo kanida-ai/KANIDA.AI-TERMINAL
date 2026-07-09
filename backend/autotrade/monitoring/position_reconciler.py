@@ -374,6 +374,38 @@ def _persist_alert(session_id: Optional[str], symbol: str, product: str,
                     kind, symbol, product, e)
 
 
+def _has_exit_evidence(matched_rows: List[dict]) -> bool:
+    """True when the broker's day rows for this (symbol, product) carry POSITIVE
+    round-trip evidence — some real sell (long exit) or buy (short cover) volume.
+
+    Used to gate the fully-flat auto-close: broker_held==0 alone is not enough (an
+    ABSENT symbol — an empty/glitchy book row that never appeared — also reads 0).
+    Requiring a nonzero sell/buy quantity proves a trade actually happened, so a
+    transient empty book can NEVER flatten our DB. A same-day round-trip to flat
+    always leaves buy_q>0 AND sell_q>0 in the net book, so this is satisfied for a
+    real exit and false for a vanished/absent row."""
+    for r in matched_rows or []:
+        if (_num(r.get("sell_quantity")) or 0) > 0 or (
+                _num(r.get("buy_quantity")) or 0) > 0:
+            return True
+    return False
+
+
+def _external_flat_exit_price(matched_rows: List[dict]) -> Optional[float]:
+    """Best-available external exit price for a fully-flat (held==0) close we can't
+    attribute to our own order-id: the broker's day SELL average (long exit), else
+    the BUY average (short cover), else the row's last_price. None → the caller
+    falls back to the position's LTP, then its entry mark (a 0-P&L floor). The P&L
+    booked from this is APPROXIMATE (an external/manual order we do not own); the
+    contract note is the source of truth — but the position must be CLOSED."""
+    for key in ("sell_price", "buy_price", "last_price"):
+        for r in matched_rows or []:
+            v = _num(r.get(key))
+            if v and v > 0:
+                return float(v)
+    return None
+
+
 def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
     """Order-id-driven, invariant-based reconcile of THIS session's OPEN /
     EXIT_FAILED positions against the broker's live book — MULTI-SESSION-SAFE.
@@ -580,6 +612,7 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                 (p for p in my_positions
                  if _bare_symbol(str(p.get("symbol") or "")) == bare_sym),
                 key=lambda p: (int(p.get("id") or 0)))
+            _closed_ids: set = set()   # rows this pass already closed (order-id ev.)
             for pos in my_group_positions:
                 if deficit <= 0:
                     break
@@ -609,6 +642,7 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                                 session.session_id, sym, e)
                     continue
                 changed = True
+                _closed_ids.add(pos.get("id"))
                 deficit -= int(pos.get("qty") or 0)
                 log.warning(
                     "reconcile %s/%s: CLOSED via %s @ %s (order %s) — invariant "
@@ -620,11 +654,55 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                     "exit_order_id": ev["exit_order_id"],
                     "close_reason": ev["close_reason"]})
             if deficit > 0:
-                # A close we CANNOT attribute to any of our order-ids (e.g. an RMS
-                # auto-square with no order we tracked). ALERT — never blind-close.
-                # GUARD G3: if broker vs db is a CLEAN corp-action ratio (e.g. a
-                # reverse split shrank the broker qty), RECLASSIFY as
-                # CORP_ACTION_SUSPECTED with the ratio instead of the generic alert.
+                # ── FULLY FLAT AT THE BROKER (held == 0) → close UNCONDITIONALLY ──
+                # The position is OBJECTIVELY gone: the trader (or RMS) squared it
+                # off with an order that is not ours, so there is NO order-id
+                # evidence — but broker_held==0 makes the close UNAMBIGUOUS. There
+                # is nothing to protect and NO false-sell is possible (the broker
+                # holds zero). Order-id attribution is only needed for a PARTIAL
+                # deficit, where WHICH session's lot closed is ambiguous — NOT here.
+                # This closes the P7 gap where a MANUAL exit of OUR OWN position
+                # looped UNATTRIBUTED_CLOSE forever and left a phantom OPEN row the
+                # trail kept "tracking" (2026-07-09 ATHERENERG: user sold 417 MIS,
+                # broker net 0 + sell_q 834, yet the panel tracked it every tick).
+                # Gated on POSITIVE exit evidence (_has_exit_evidence) so a transient
+                # empty/absent book can never flatten us.
+                if broker_held == 0 and _has_exit_evidence(matched_rows):
+                    ext_px = _external_flat_exit_price(matched_rows)
+                    for pos in my_group_positions:
+                        if pos.get("id") in _closed_ids:
+                            continue
+                        if int(pos.get("qty") or 0) <= 0:
+                            continue
+                        sym = pos.get("symbol")
+                        prof_id = pos.get("broker_profile")
+                        px = ext_px or _num(pos.get("ltp")) \
+                            or float(pos.get("avg_price") or 0.0)
+                        try:
+                            registry.mark_closed(
+                                sym, "CLOSED_EXTERNAL_FLAT", exit_price=px,
+                                broker_profile=prof_id, exit_order_id=None)
+                        except Exception as e:  # pragma: no cover - defensive
+                            log.warning("reconcile: external-flat close failed "
+                                        "%s/%s: %s", session.session_id, sym, e)
+                            continue
+                        changed = True
+                        _closed_ids.add(pos.get("id"))
+                        log.warning(
+                            "reconcile %s/%s: broker FULLY FLAT (held=0, sell "
+                            "evidence) — closing phantom OPEN row @ %s (external / "
+                            "manual exit, no order-id)",
+                            session.session_id, sym, px)
+                        actions.append({
+                            "action": "CLOSED_EXTERNAL_FLAT", "symbol": sym,
+                            "product": product, "exit_price": px,
+                            "exit_order_id": None,
+                            "close_reason": "CLOSED_EXTERNAL_FLAT"})
+                    continue
+                # ── PARTIAL deficit we CANNOT attribute (broker still holds some) →
+                # ALERT, never blind-close (which session's lot closed is ambiguous).
+                # GUARD G3: a CLEAN corp-action ratio (reverse split shrank the qty)
+                # RECLASSIFIES as CORP_ACTION_SUSPECTED instead of the generic alert.
                 ratio = _corp_action_ratio(broker_held, db_held_all)
                 if ratio is not None:
                     detail = (f"broker_held={broker_held} vs db_held_all="
