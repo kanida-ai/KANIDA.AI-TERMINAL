@@ -235,10 +235,11 @@ def patched_quote_brokers(monkeypatch):
 
 def test_fire_prices_limit_at_circuit_for_locked_leg_no_phantom(
         clean_positions, patched_quote_brokers):
-    """A full basket fire in marketable_limit mode: the symbol LOCKED at its
-    upper circuit is PLACED as a LIMIT AT the circuit (queued), the others as
-    LIMIT at ask+buffer. No leg is skipped/dropped; panel == intended, no
-    phantom position."""
+    """A full basket fire in marketable_limit mode (ENTRY): the normal legs are
+    genuine MARKET orders (fill at the touch on ANY gap — no tight limit a gap-up
+    could jump), and the symbol LOCKED at its upper circuit is PLACED as a LIMIT
+    AT the circuit (queued, the CEMPRO case). No leg is skipped/dropped; panel ==
+    intended, no phantom position."""
     from autotrade.session import TradingSession
     from tests.autotrade.conftest import seed_signals
     seed_signals([("A", 1, 9.0, 100.0), ("B", 2, 8.0, 200.0),
@@ -254,13 +255,76 @@ def test_fire_prices_limit_at_circuit_for_locked_leg_no_phantom(
 
     broker = next(iter(patched_quote_brokers.values()))
     placed = {o.symbol: o for o in broker.placed}
-    # Every leg is a marketable LIMIT.
-    assert placed["A"].order_type == "LIMIT" and placed["A"].price == 100.40
-    # B: ask 200.5 * 1.003 = 201.1015 → floor to 0.05 tick = 201.10.
-    assert placed["B"].order_type == "LIMIT" and placed["B"].price == 201.10
+    # A, B: normal book → genuine MARKET orders (guaranteed fill at the touch).
+    assert placed["A"].order_type == "MARKET" and placed["A"].price is None
+    assert placed["B"].order_type == "MARKET" and placed["B"].price is None
     # The locked leg is placed AT the upper circuit (a queued LIMIT, not skipped).
     assert placed["C"].order_type == "LIMIT" and placed["C"].price == 110.0
     assert len(broker.placed) == 3
+
+
+# ── ENTRY mode (entry=True): guarantee the fill (2026-07-09 KALYANKJIL) ──────
+
+def test_entry_buy_normal_book_is_market_order():
+    """A normal book (a live ask below the upper circuit) → a genuine MARKET
+    order, so a gap-up can never leave the entry unfilled (the KALYANKJIL miss:
+    a 0.3%-through-touch LIMIT sat below a +2-3% opening gap and never filled)."""
+    cfg = _cfg()
+    q = _q(100.0, bid=99.9, ask=100.1, upper=110.0, lower=90.0)
+    plan = plan_marketable_order("BUY", "X", 10, q, 0.05, cfg, entry=True)
+    assert plan["fallback_market"] is True and plan["order_type"] == "MARKET"
+    assert plan["price"] is None
+
+
+def test_entry_buy_locked_at_upper_circuit_is_limit_at_circuit():
+    """Locked at the upper circuit (no ask) → a LIMIT queued AT the circuit
+    (a MARKET buy on a locked-up stock would be rejected 'outside circuit')."""
+    cfg = _cfg()
+    q = _q(110.0, bid=109.95, ask=None, upper=110.0, lower=90.0)
+    plan = plan_marketable_order("BUY", "CEMPRO", 10, q, 0.05, cfg, entry=True)
+    assert plan["ok"] is True and plan["order_type"] == "LIMIT"
+    assert plan["price"] == 110.0
+
+
+def test_entry_buy_ltp_at_band_is_limit_at_circuit():
+    """LTP printing at the upper band (locked up) → LIMIT at the circuit even if
+    a stale ask is present."""
+    cfg = _cfg()
+    q = _q(110.0, bid=109.9, ask=110.0, upper=110.0, lower=90.0)
+    plan = plan_marketable_order("BUY", "X", 10, q, 0.05, cfg, entry=True)
+    assert plan["order_type"] == "LIMIT" and plan["price"] == 110.0
+
+
+def test_entry_sell_normal_book_is_market_order():
+    """Short entry, normal book → MARKET (fills at the bid on a gap-down)."""
+    cfg = _cfg()
+    q = _q(100.0, bid=99.9, ask=100.1, upper=110.0, lower=90.0)
+    plan = plan_marketable_order("SELL", "X", 10, q, 0.05, cfg, entry=True)
+    assert plan["fallback_market"] is True and plan["order_type"] == "MARKET"
+
+
+def test_entry_sell_locked_at_lower_circuit_is_limit():
+    cfg = _cfg()
+    q = _q(90.0, bid=None, ask=90.05, upper=110.0, lower=90.0)
+    plan = plan_marketable_order("SELL", "X", 10, q, 0.05, cfg, entry=True)
+    assert plan["order_type"] == "LIMIT" and plan["price"] == 90.0
+
+
+def test_entry_no_price_at_all_is_market_fallback():
+    cfg = _cfg()
+    plan = plan_marketable_order("BUY", "X", 10, None, 0.05, cfg, entry=True)
+    assert plan["fallback_market"] is True and plan["order_type"] == "MARKET"
+
+
+def test_exit_pricing_unchanged_by_entry_default():
+    """entry=False (the EXIT default) is byte-for-byte the old buffer pricing —
+    the entry change must NOT touch the exit path."""
+    cfg = _cfg()
+    q = _q(100.0, bid=99.9, ask=100.1, upper=110.0, lower=90.0)
+    plan = plan_marketable_order("BUY", "X", 10, q, 0.05, cfg)  # entry defaults False
+    assert plan["order_type"] == "LIMIT" and plan["price"] == 100.40
+    plan_s = plan_marketable_order("SELL", "X", 10, q, 0.05, cfg)
+    assert plan_s["order_type"] == "LIMIT" and plan_s["price"] == 99.65
 
 
 # ── Exit: marketable-limit threads exec_cfg; MARKET fallback keeps exiting ────
@@ -281,3 +345,67 @@ def test_exit_threads_exec_cfg_and_always_exits():
     assert res.status == "PLACED"           # the mock always places the exit
     assert broker.exit_calls[-1]["exec_cfg"] is cfg
     assert broker.exits == [("INFY", 10)]   # the exit fired
+
+
+# ── PHANTOM-FILL FIX: an unfilled entry is cancelled + dropped, never marked ──
+
+class _PendingThenTerminalBroker:
+    """An entry order that is STILL PENDING while polled, then reports a terminal
+    state ONLY after cancel_order_sync is called. `partial`/`avg` model a real
+    partial fill that landed just before the cancel; 0 = fully unfilled."""
+
+    def __init__(self, partial: int = 0, avg: float = 0.0):
+        self.cancelled: list = []
+        self._partial = partial
+        self._avg = avg
+        self._cancelled_flag = False
+
+    def get_order_status(self, order_id: str) -> dict:
+        if not self._cancelled_flag:
+            # still working at the exchange — no fill yet
+            return {"status": "OPEN", "filled_quantity": 0, "average_price": 0.0}
+        if self._partial > 0:
+            return {"status": "CANCELLED", "filled_quantity": self._partial,
+                    "average_price": self._avg}
+        return {"status": "CANCELLED", "filled_quantity": 0, "average_price": 0.0}
+
+    def cancel_order_sync(self, order_id: str) -> bool:
+        self._cancelled_flag = True
+        self.cancelled.append(order_id)
+        return True
+
+
+def _live_session(monkeypatch):
+    """A session forced onto the LIVE reconcile path (dry_run=False) with the
+    KiteTicker postback stubbed out so the poll+cancel logic runs immediately."""
+    from autotrade.session import TradingSession
+    sess = TradingSession.create(_cfg(), mode="paper")
+    sess.dry_run = False
+
+    async def _no_postback(order_id, timeout=1.5):
+        return None
+    monkeypatch.setattr(sess, "_await_order_postback", _no_postback)
+    return sess
+
+
+def test_entry_reconcile_timeout_cancels_and_drops_when_zero_filled(monkeypatch):
+    """The KALYANKJIL bug: a pending entry that never fills must be CANCELLED and
+    the leg DROPPED — the reconcile signals 'rejected' so _place_one never books a
+    phantom at the reference mark."""
+    sess = _live_session(monkeypatch)
+    broker = _PendingThenTerminalBroker(partial=0)
+    rec = asyncio.run(sess._reconcile_entry_fill(
+        broker, "ord-X", 10, max_wait_sec=0.2, poll_interval=0.05))
+    assert rec == {"rejected": True, "status": "CANCELLED_UNFILLED"}
+    assert broker.cancelled == ["ord-X"]    # we actively cancelled the stuck order
+
+
+def test_entry_reconcile_timeout_registers_only_the_real_partial(monkeypatch):
+    """If a partial actually filled before the cancel landed, register EXACTLY
+    those shares at the real avg — never the full intended qty, never the mark."""
+    sess = _live_session(monkeypatch)
+    broker = _PendingThenTerminalBroker(partial=4, avg=101.0)
+    rec = asyncio.run(sess._reconcile_entry_fill(
+        broker, "ord-X", 10, max_wait_sec=0.2, poll_interval=0.05))
+    assert rec == {"avg_price": 101.0, "filled_qty": 4}
+    assert broker.cancelled == ["ord-X"]

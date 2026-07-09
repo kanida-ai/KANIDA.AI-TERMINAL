@@ -1720,16 +1720,18 @@ class TradingSession:
         if order.order_type == "LIMIT" and ref_price > 0:
             order.price = order.compute_limit_price(ref_price)
 
-        # QUOTE-DRIVEN MARKETABLE-LIMIT (execution_mode=="marketable_limit" only).
-        # The market path above is UNTOUCHED. Here we consult the pre-fetched live
-        # book (bid/ask/circuit, threaded in from the ONE batched get_quotes in
-        # _fire_entries) and ALWAYS place: an in-band marketable LIMIT (ask+buffer
-        # for a BUY, capped AT the upper circuit) or — when there is no usable
-        # price at all — a MARKET fallback. The pricer NEVER skips. A stock LOCKED
-        # at its upper circuit is placed as a LIMIT exactly AT the circuit price: a
-        # valid, ACCEPTED, QUEUED order that fills the instant the lock breaks
-        # (the CEMPRO fix — no rejection, no dropped pick). Auto-trade executes; it
-        # never hands the decision back.
+        # QUOTE-DRIVEN ENTRY (execution_mode=="marketable_limit" only). The
+        # market path above is UNTOUCHED. Here we consult the pre-fetched live book
+        # (bid/ask/circuit, threaded in from the ONE batched get_quotes in
+        # _fire_entries) in ENTRY mode (entry=True) — GUARANTEE the fill:
+        #   * a NORMAL book → a genuine MARKET order (fills instantly at the touch
+        #     for ANY gap; Kite margins it on LTP, no limit-price margin inflation);
+        #   * a stock LOCKED at its circuit → a LIMIT queued exactly AT the circuit
+        #     (a valid, ACCEPTED order that fills when the lock breaks — the CEMPRO
+        #     fix, no rejection, no dropped pick).
+        # (2026-07-09 KALYANKJIL: the OLD 0.3%-through-touch entry LIMIT sat BELOW a
+        # +2-3% opening gap and never filled → the day's best pick was missed.)
+        # Auto-trade executes; it never hands the decision back.
         if getattr(self.config, "execution_mode", "market") == "marketable_limit":
             from .execution.quote_pricer import plan_marketable_order
             # BUY side for a long entry; a short FUT entry SELLs to open.
@@ -1738,17 +1740,19 @@ class TradingSession:
             tick = _get_tick_for(broker, order.symbol)
             plan = plan_marketable_order(side, order.symbol, qty, quote, tick,
                                          self.config,
-                                         ltp_fallback=(ref_price or None))
+                                         ltp_fallback=(ref_price or None),
+                                         entry=True)
             if plan.get("ok"):
+                # Locked at the circuit → LIMIT queued AT the circuit.
                 order.order_type = "LIMIT"
                 order.price = float(plan["price"])
-                log.info("marketable-limit ENTRY %s: %s LIMIT @ %.2f",
+                log.info("ENTRY %s: %s LIMIT @ %.2f (locked at circuit)",
                          symbol, side, order.price)
             else:
-                # No usable price → MARKET fallback (still places). Leave the
-                # order as-built (its configured order_type / market path).
-                log.warning("marketable-limit ENTRY %s: %s — MARKET fallback (%s)",
-                            symbol, side, plan.get("reason"))
+                # Normal book → genuine MARKET order (the intended fast-fill path,
+                # NOT an error). Leave the order as-built (its MARKET path).
+                log.info("ENTRY %s: %s MARKET — %s",
+                         symbol, side, plan.get("reason"))
 
         # VWAP: observe the window then place MARKET (skip the wait in paper to
         # keep smoke tests fast; live honours the window).
@@ -1804,10 +1808,26 @@ class TradingSession:
                 fill_price = rec.get("avg_price") or fill_price
                 fill_qty = rec.get("filled_qty") or fill_qty
         reconciled = bool(fill_price and fill_qty)
-        # Fall back to the reference mark ONLY when the broker gave no fill data
-        # (dry-run, or a still-pending order that never confirmed within the poll).
-        fill_price = fill_price or ref_price
-        fill_qty = fill_qty or qty
+        # PHANTOM-FILL GUARD (real-money, 2026-07-09). NEVER register a LIVE
+        # position at the pre-trade reference mark. In live a fill is booked ONLY
+        # when the broker CONFIRMED it — either place_order returned fill numbers,
+        # or _reconcile_entry_fill returned a real (possibly partial) fill. An
+        # unconfirmed live order is already dropped upstream via the rejected /
+        # CANCELLED_UNFILLED path, so it never reaches here with empty fill data;
+        # this is defence-in-depth so no future change can re-introduce a phantom.
+        # The reference-mark fallback is for DRY-RUN (paper) ONLY, where no real
+        # order exists. (KALYANKJIL 2026-07-09: a cancelled 0-fill order booked at
+        # the ₹384.55 mark → 1338 phantom shares that tripped the basket exit.)
+        if not (fill_price and fill_qty):
+            if not self.dry_run:
+                log.error("entry %s: no confirmed fill in LIVE — dropping leg "
+                          "(phantom guard; refusing to register at the mark)",
+                          symbol)
+                return {"symbol": symbol, "status": "FAILED",
+                        "error": "no confirmed fill (phantom guard)",
+                        "broker_profile": prof.profile_id}
+            fill_price = fill_price or ref_price
+            fill_qty = fill_qty or qty
         acct_id = getattr(prof, "broker_account_id", None)
         # FUTURES long/short: persist the session direction on the position so
         # the P&L sign, exit side, and GTT orientation invert ONLY for shorts.
@@ -1897,14 +1917,47 @@ class TradingSession:
             if status in ("REJECTED", "CANCELLED"):
                 # TERMINAL REJECTION (distinct from 'still pending'). The broker
                 # ACCEPTED the order (we have an order_id) but the EXCHANGE later
-                # rejected it (circuit-limit breach, RMS…). Signal this explicitly
-                # so the caller DROPS the leg instead of falling back to the mark
-                # and registering a phantom. (2026-07-06: CEMPRO upper-circuit.)
+                # rejected it (circuit-limit breach, RMS…). Before dropping, honour
+                # any real partial that DID fill (a CANCELLED order can still have a
+                # filled_quantity>0). Otherwise signal a drop so the caller does NOT
+                # fall back to the mark and register a phantom. (2026-07-06: CEMPRO.)
+                if filled > 0 and avg > 0:
+                    return {"avg_price": avg, "filled_qty": filled}
                 return {"rejected": True, "status": status}
             await asyncio.sleep(poll_interval)
+        # POLL TIMEOUT — the order is STILL PENDING (never confirmed a fill). Do
+        # NOT fall back to the reference mark: that books a PHANTOM position the
+        # broker never actually filled, which then pollutes basket return + trail
+        # and makes a later exit try to SELL shares we never bought (2026-07-09
+        # KALYANKJIL: its entry sat unfilled on a gap-up, was later cancelled 0-
+        # filled, yet was booked at the ₹384.55 mark). Force a TERMINAL state:
+        # CANCEL the unfilled order and read its FINAL fill. A real (even partial)
+        # fill → register exactly those shares; zero filled → DROP the leg. This is
+        # race-safe: we read the definitive state AFTER the cancel, so a fill that
+        # landed just before the cancel is still registered, never lost or faked.
         log.warning("entry reconcile %s: no confirmed fill within %.0fs — "
-                    "falling back to reference mark", order_id, max_wait_sec)
-        return None
+                    "cancelling the unfilled order to force a terminal state",
+                    order_id, max_wait_sec)
+        cancel = getattr(broker, "cancel_order_sync", None)
+        if callable(cancel):
+            try:
+                await asyncio.to_thread(cancel, order_id)
+            except Exception as e:  # pragma: no cover - defensive
+                log.warning("entry reconcile %s: cancel failed %s", order_id, e)
+        await asyncio.sleep(poll_interval)  # let the cancel settle at the broker
+        try:
+            st = await asyncio.to_thread(broker.get_order_status, order_id)
+        except Exception:  # pragma: no cover - defensive
+            st = {}
+        filled = int(st.get("filled_quantity") or 0)
+        avg = float(st.get("average_price") or 0.0)
+        if filled > 0 and avg > 0:
+            log.warning("entry reconcile %s: PARTIAL %d @ %.2f after cancel — "
+                        "registering only the real fill", order_id, filled, avg)
+            return {"avg_price": avg, "filled_qty": filled}
+        log.error("entry reconcile %s: 0 filled after cancel — DROPPING leg "
+                  "(refusing to register a phantom at the mark)", order_id)
+        return {"rejected": True, "status": "CANCELLED_UNFILLED"}
 
     async def _await_order_postback(self, order_id: str, timeout: float = 1.5
                                     ) -> Optional[Dict[str, Any]]:

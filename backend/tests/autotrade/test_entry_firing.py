@@ -158,10 +158,13 @@ def test_reconcile_entry_fill_signals_rejected(clean_positions,
     rec = asyncio.run(sess._reconcile_entry_fill(broker, "ord-B", 10))
     assert rec is not None and rec.get("rejected") is True
     assert rec.get("status") == "REJECTED"
-    # A COMPLETE-but-zero-fill order (still pending) returns None (fall back path).
+    # A COMPLETE-but-zero-fill order that never really fills is CANCELLED and
+    # DROPPED (CORRECTED 2026-07-09): the reconcile returns the rejected sentinel
+    # so the caller drops the leg — it NO LONGER returns None to fall back to the
+    # mark and register a phantom (the KALYANKJIL bug).
     rec2 = asyncio.run(sess._reconcile_entry_fill(broker, "ord-A", 10,
-                                                  max_wait_sec=1.0))
-    assert rec2 is None
+                                                  max_wait_sec=0.3))
+    assert rec2 == {"rejected": True, "status": "CANCELLED_UNFILLED"}
 
 
 # ── 2. when="now" with the MARKET CLOSED is REFUSED — places NOTHING ───────────

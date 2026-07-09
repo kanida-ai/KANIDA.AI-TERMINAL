@@ -88,12 +88,15 @@ def _n_rows(session_id, symbol):
 # A ENTRY
 # ══════════════════════════════════════════════════════════════════════════════
 
-def test_a1_pending_not_filled_falls_back_to_mark(clean_positions, monkeypatch):
-    """A1 pending-not-filled: a LIVE entry that returns an order_id but no fill,
-    and whose status never confirms within the poll window, falls back to the
-    reference MARK (never drops a real order silently, never invents a fill). The
-    position registers at the mark qty/price and the session runs. Safeguard:
-    session._place_one fill-reconcile fallback (session.py ~1690)."""
+def test_a1_pending_not_filled_dropped_no_phantom(clean_positions, monkeypatch):
+    """A1 pending-not-filled (CORRECTED 2026-07-09): a LIVE entry that returns an
+    order_id but never confirms a fill is CANCELLED and DROPPED — it must NEVER
+    fall back to the reference mark and register a PHANTOM position the broker
+    never actually bought (the KALYANKJIL bug: a gap-up entry sat unfilled, was
+    cancelled 0-filled, yet was booked at the ₹384.55 mark and then tripped the
+    basket exit). With the only pick dropped, the session has NOTHING to manage →
+    it is marked FAILED, and NO position row exists. Safeguard: _place_one phantom
+    guard + _reconcile_entry_fill cancel-on-timeout."""
     class _PendingBroker(MockBroker):
         async def place_order(self, order):
             self.placed.append(order)
@@ -103,7 +106,7 @@ def test_a1_pending_not_filled_falls_back_to_mark(clean_positions, monkeypatch):
                                filled_qty=0, avg_price=None)
 
         def get_order_status(self, order_id):
-            # Never COMPLETE, never REJECTED → the poll times out → None → mark.
+            # Never COMPLETE → the poll times out → cancel + drop (no phantom).
             return {"status": "OPEN", "filled_quantity": 0, "average_price": 0.0}
 
     _patch_brokers(monkeypatch, lambda p: _PendingBroker(
@@ -114,17 +117,16 @@ def test_a1_pending_not_filled_falls_back_to_mark(clean_positions, monkeypatch):
                                order_product="MIS",
                                per_position_gtt_enabled=False)
     sess = TradingSession.create(cfg, mode="live")
-    # Speed up the poll so the test doesn't wait 8s.
-    monkeypatch.setattr(sess, "_reconcile_entry_fill",
-                        lambda *a, **k: _async_none())
+    # The fixed reconcile now returns the rejected sentinel for a never-filled
+    # order; simulate it deterministically (avoids the 8s live poll in the test).
+    async def _rejected(*a, **k):
+        return {"rejected": True, "status": "CANCELLED_UNFILLED"}
+    monkeypatch.setattr(sess, "_reconcile_entry_fill", _rejected)
     res = asyncio.run(sess.start(when="now"))
-    assert res["status"] == "RUNNING"
-    assert res["n_placed"] == 1
-    r = _row(sess.session_id, "A")
-    assert r is not None and r["status"] == "OPEN"
-    # Fell back to the mark: qty = sized qty, avg_price = the 100.0 reference.
-    assert r["qty"] > 0
-    assert r["avg_price"] == pytest.approx(100.0)
+    # The only leg was dropped → nothing to manage → FAILED, no phantom row.
+    assert res["status"] == "FAILED"
+    assert res["n_placed"] == 0
+    assert _row(sess.session_id, "A") is None      # NO phantom position registered
 
 
 async def _async_none():
@@ -158,29 +160,40 @@ def test_a2_partial_fill_at_entry_registers_filled_qty(clean_positions,
     assert eoid == "ord-A"             # attributable by order-id
 
 
-def test_a5_poll_timeout_returns_none_caller_uses_mark(clean_positions,
-                                                       monkeypatch):
-    """A5 poll-timeout: _reconcile_entry_fill polls, never sees COMPLETE/REJECTED
-    within max_wait_sec, and returns None (so the caller falls back to the mark —
-    NEVER invents a fill price). Safeguard: session._reconcile_entry_fill deadline
-    branch (session.py ~1788)."""
+def test_a5_poll_timeout_cancels_and_drops_no_phantom(clean_positions,
+                                                      monkeypatch):
+    """A5 poll-timeout (CORRECTED 2026-07-09): _reconcile_entry_fill polls, never
+    sees COMPLETE/REJECTED within max_wait_sec, then CANCELS the stuck order and
+    reads its terminal state. Zero filled → it signals a DROP (rejected sentinel),
+    NEVER returns None to let the caller register a PHANTOM at the mark (the
+    KALYANKJIL bug). Safeguard: session._reconcile_entry_fill timeout branch."""
     _patch_brokers(monkeypatch, lambda p: MockBroker(profile=p, dry_run=False))
     cfg = TradingSessionConfig(total_allocated_capital=100000.0, top_n_stocks=1)
     sess = TradingSession.create(cfg, mode="live")
 
+    async def _no_postback(order_id, timeout=1.5):
+        return None
+    monkeypatch.setattr(sess, "_await_order_postback", _no_postback)
+
     class _StuckBroker:
         def __init__(self):
             self.calls = 0
+            self.cancelled = []
         def get_order_status(self, order_id):
             self.calls += 1
             return {"status": "OPEN", "filled_quantity": 0, "average_price": 0.0}
+        def cancel_order_sync(self, order_id):
+            self.cancelled.append(order_id)
+            return True
 
     b = _StuckBroker()
     rec = asyncio.run(sess._reconcile_entry_fill(b, "ORD-STUCK", 10,
                                                  max_wait_sec=0.3,
                                                  poll_interval=0.05))
-    assert rec is None                 # timed out → mark fallback, no invented fill
-    assert b.calls >= 1                # the poll DID run (not a no-op)
+    # DROP, never a phantom at the mark.
+    assert rec == {"rejected": True, "status": "CANCELLED_UNFILLED"}
+    assert b.cancelled == ["ORD-STUCK"]   # the stuck order was actively cancelled
+    assert b.calls >= 1                    # the poll DID run (not a no-op)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
