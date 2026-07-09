@@ -99,16 +99,28 @@ class _Driver:
         try:
             while not self._stop.is_set():
                 status = _session_status(self.session_id)
-                if status != "RUNNING":
+                # C2: KILLING_INCOMPLETE is NON-terminal — a kill left a stranded
+                # EXIT_FAILED leg. Keep ticking so the EXIT_FAILED retry sweep in
+                # tick() keeps re-attempting it; tick() promotes to CLOSED once the
+                # last leg is flat, and the CLOSED check below then stops us.
+                if status not in ("RUNNING", "KILLING_INCOMPLETE"):
                     log.info("tick_driver: session %s status=%s — stopping",
                              self.session_id, status)
                     break
                 try:
                     out = asyncio.run(sess.tick())
                     if out.get("kill_switch_fired"):
-                        log.critical("tick_driver: kill switch AUTO-fired for %s (%s)",
-                                     self.session_id, out.get("kill_reason"))
-                        break  # session now CLOSED; nothing left to tick
+                        fr = out.get("fire_result") or {}
+                        if int(fr.get("n_exit_failed") or 0) == 0:
+                            log.critical(
+                                "tick_driver: kill switch AUTO-fired for %s (%s)",
+                                self.session_id, out.get("kill_reason"))
+                            break  # session now CLOSED; nothing left to tick
+                        # Incomplete kill: a leg failed → keep ticking to retry it.
+                        log.critical(
+                            "tick_driver: kill INCOMPLETE for %s (%d legs failed) "
+                            "— continuing to service EXIT_FAILED retry",
+                            self.session_id, int(fr.get("n_exit_failed") or 0))
                 except Exception as e:  # pragma: no cover - never kill the thread
                     log.exception("tick_driver: tick error for %s: %s",
                                   self.session_id, e)

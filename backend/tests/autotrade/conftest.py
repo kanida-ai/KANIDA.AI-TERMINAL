@@ -132,9 +132,16 @@ def clean_positions():
         for sch in sqscheds:
             sch._thread.join(timeout=2.0)
         # Reset the per-session fire guard so a session_id reused across tests
-        # isn't stuck "already fired".
+        # isn't stuck "already fired". Also clear the entry-claim (C5) so a reused
+        # session_id isn't stuck "entry already claimed".
         with fire_guard._LOCK:
             fire_guard._FIRED.clear()
+            fire_guard._ENTRY_CLAIMED.clear()
+        # Clear the R4 basket reconcile-validation stamps so a reused session_id
+        # doesn't carry a stale "validated" set across tests.
+        from autotrade.monitoring import basket_gen
+        with basket_gen._LOCK:
+            basket_gen._LAST_RECONCILED.clear()
 
     _stop_all_drivers()
     with falcon_conn() as con:

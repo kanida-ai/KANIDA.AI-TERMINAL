@@ -307,6 +307,16 @@ class _WSDriver:
                 sess.registry.update_ltp(
                     pos["symbol"], float(ltp),
                     broker_profile=pos.get("broker_profile"))
+        # R4 — STALE-BASKET GUARD. Marks are updated (above), but the ws never runs
+        # the 5s broker reconcile. If the open-position set diverged from what the
+        # last tick reconcile validated (e.g. a leg closed at the broker but the DB
+        # row isn't reconciled yet), DEFER the fire to the next 5s tick — never fire
+        # a real-money exit on a possibly-phantom basket. No broker call added.
+        from . import basket_gen
+        if not basket_gen.basket_reconcile_validated(self.session_id, positions):
+            log.debug("ws_driver: basket not reconcile-validated for %s — "
+                      "deferring fire to next tick", self.session_id)
+            return
         # KILL BASIS: check against the INVESTED-basis gross return (÷ frozen
         # invested_basis), matching the 5s poll path.
         gr = sess.monitor.compute_gross_return_invested()

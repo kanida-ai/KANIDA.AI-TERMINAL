@@ -331,6 +331,13 @@ class BrokerClient(ABC):
         default (returns None)."""
         return None
 
+    def get_gtts_map(self) -> Optional[dict]:
+        """P1(b): fetch ALL GTTs in ONE broker call and return {str(id): state},
+        so a per-tick reconcile can look up N positions' GTTs without N round
+        trips. Default None = 'no batch available' → the caller falls back to
+        per-position get_gtt (byte-identical). Live adapters override."""
+        return None
+
     def get_gtt_fill(self, gtt_id: str) -> Optional[dict]:
         """RECONCILIATION FRAMEWORK (Phase 4): POSITIVE fill evidence for a
         TRIGGERED GTT.

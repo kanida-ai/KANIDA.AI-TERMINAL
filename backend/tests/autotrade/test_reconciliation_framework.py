@@ -240,9 +240,13 @@ def test_reconcile_no_gtt_map_noop(clean_positions):
     assert _row(reg, "PAP")["status"] == "OPEN"
 
 
-def test_reconcile_gtt_close_refreezes_invested_basis(clean_positions):
-    """After a GTT close, the session invested_basis is re-frozen over the
-    REMAINING open cash-equity rows."""
+def test_reconcile_gtt_close_keeps_invested_basis_frozen(clean_positions):
+    """FROZEN BASIS EVERYWHERE (2026-07-09, D1): after a GTT close the session
+    invested_basis STAYS frozen at entry — it does NOT shrink to the remaining
+    rows. The closed leg's realised P&L stays in the numerator over the original
+    deployed capital, so a GTT close reports the SAME gross_return % as a trail/
+    stop/reconcile close of the same trade (previously the GTT path alone shrank
+    the basis, making the % path-dependent)."""
     from falcon.db import falcon_conn
     sid = "sess-recon-refreeze"
     reg = PositionRegistry(sid, 500000.0)
@@ -273,8 +277,9 @@ def test_reconcile_gtt_close_refreezes_invested_basis(clean_positions):
         ib = con.execute(
             "SELECT invested_basis FROM autotrade_sessions WHERE session_id=?",
             (sid,)).fetchone()[0]
-    # Only KEEPME remains open: 10*100 = 1000 (was 2000 before the close).
-    assert abs(ib - 1000.0) < 1e-6
+    # Basis stays FROZEN at 2000 (both legs' entry notional) — the GTT close of
+    # GONE does NOT shrink it; GONE's realised P&L now lives in the numerator.
+    assert abs(ib - 2000.0) < 1e-6
 
 
 def test_extract_fired_order_id_real_kite_shape():

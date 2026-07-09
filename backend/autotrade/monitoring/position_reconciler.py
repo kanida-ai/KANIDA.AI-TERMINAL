@@ -134,17 +134,21 @@ def _row_product(broker_row: Dict[str, Any]) -> Optional[str]:
 
 
 def _row_matches_symbol_product(bare_sym: str, is_fno: bool, want_product: str,
-                                broker_row: Dict[str, Any]) -> bool:
+                                broker_row: Dict[str, Any],
+                                want_exchange: str = "NSE") -> bool:
     """True if `broker_row` is the broker's view of our (symbol, product).
 
-    Match rules (a SUPERSET of the v1 exchange rule + a NEW product rule):
+    Match rules (a SUPERSET of the v1 exchange rule + a product rule + M#11):
       * tradingsymbol == bare_sym.
-      * F&O leg → require exchange NFO (when stated); cash leg → reject a stray
-        NFO contract row of the same base name.
+      * F&O leg → require exchange NFO (when stated).
+      * cash leg → require the row exchange to EQUAL the position's stored
+        exchange (default NSE) when the row STATES one (M#11): a BSE row of the
+        same base name must NOT shadow an NSE hold (they are different securities
+        that can diverge in qty). A row with no exchange stated is accepted
+        (older/degraded books) — the (symbol, product) match still scopes it.
       * product: when the broker row STATES a product it must equal want_product
         (so a CNC leg and an MIS leg of the same symbol don't cross-contaminate).
-        A row with NO stated product is accepted (older/degraded books) — the
-        (symbol, exchange) match still scopes it.
+        A row with NO stated product is accepted (older/degraded books).
     """
     row_sym = str(broker_row.get("tradingsymbol") or "")
     if row_sym != bare_sym:
@@ -154,7 +158,10 @@ def _row_matches_symbol_product(bare_sym: str, is_fno: bool, want_product: str,
         if rexch and rexch != "NFO":
             return False
     else:
-        if rexch == "NFO":
+        # M#11: a stated cash exchange must match the position's exchange (NSE by
+        # default). This subsumes the old NFO-only rejection (NFO != NSE).
+        want = str(want_exchange or "NSE").upper()
+        if rexch and rexch != want:
             return False
     rprod = _row_product(broker_row)
     if rprod is not None and rprod != want_product:
@@ -362,7 +369,20 @@ def _persist_alert(session_id: Optional[str], symbol: str, product: str,
                 kind, symbol, product, session_id, detail)
     try:
         now = datetime.now(IST).isoformat()
+        today = now[:10]
         with falcon_conn() as con:
+            # DEDUP (C4b): the reconciler runs every tick (~5s), so a PERSISTENT
+            # divergence would INSERT a fresh alert row every tick → unbounded
+            # growth. Cap it at ONE row per (session, symbol, product, kind) per
+            # day. Check the table before INSERT (idempotent within the day).
+            dup = con.execute(
+                """SELECT 1 FROM autotrade_recon_alerts
+                   WHERE COALESCE(session_id,'')=COALESCE(?,'')
+                     AND symbol=? AND product=? AND kind=?
+                     AND substr(ts,1,10)=? LIMIT 1""",
+                (session_id, symbol, product, kind, today)).fetchone()
+            if dup:
+                return
             con.execute(
                 """INSERT INTO autotrade_recon_alerts
                    (ts, session_id, symbol, product, kind, detail)
@@ -387,6 +407,19 @@ def _has_exit_evidence(matched_rows: List[dict]) -> bool:
     for r in matched_rows or []:
         if (_num(r.get("sell_quantity")) or 0) > 0 or (
                 _num(r.get("buy_quantity")) or 0) > 0:
+            return True
+    return False
+
+
+def _has_close_side_evidence(matched_rows: List[dict], is_short: bool) -> bool:
+    """True when the broker day rows carry CLOSING-side volume for the position's
+    direction — a SELL for a long, a BUY-to-cover for a short. Stricter than
+    _has_exit_evidence (which accepts EITHER side): a partial external CLOSE must
+    be evidenced by the closing side specifically, so a buy-only mismatch (a
+    mis-tracked / partial entry, no sell) never books a phantom close (C4a)."""
+    key = "buy_quantity" if is_short else "sell_quantity"
+    for r in matched_rows or []:
+        if (_num(r.get(key)) or 0) > 0:
             return True
     return False
 
@@ -530,6 +563,12 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
         is_fno = any(
             _is_fno(p.get("instrument_type")) for p in my_positions
             if _bare_symbol(str(p.get("symbol") or "")) == bare_sym)
+        # M#11: the position's stored cash exchange (default NSE) — used to reject
+        # a same-name row on a DIFFERENT exchange (e.g. BSE) from the NSE bucket.
+        want_exchange = next(
+            (str(p.get("exchange") or "NSE").upper() for p in my_positions
+             if _bare_symbol(str(p.get("symbol") or "")) == bare_sym
+             and p.get("exchange")), "NSE")
 
         # ── broker_held for (symbol, product): Σ net qty over matching rows, plus
         #    (delivery CNC only) holdings when the net book shows net0/absent
@@ -556,7 +595,8 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
             if not isinstance(book, list):
                 continue
             for r in book:
-                if _row_matches_symbol_product(bare_sym, is_fno, product, r):
+                if _row_matches_symbol_product(bare_sym, is_fno, product, r,
+                                               want_exchange):
                     nq = _num(r.get("quantity"))
                     if nq is not None:
                         broker_net += int(nq)  # SIGNED day-net (a sell is negative)
@@ -699,6 +739,82 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                             "exit_order_id": None,
                             "close_reason": "CLOSED_EXTERNAL_FLAT"})
                     continue
+                # ── PARTIAL deficit WITH sell/buy evidence, no order-id (C4a) ──
+                # The broker physically holds FEWER shares than we track, so our
+                # tracked qty CANNOT all be there — `deficit` shares are provably
+                # gone (an external/manual exit we can't attribute to an order-id).
+                # Book a PARTIAL external close of exactly `deficit` shares against
+                # THIS session's OLDEST lot(s) (FIFO by id) via update_partial_exit
+                # (remainder stays OPEN) so we stop over-tracking (which would risk
+                # a naked oversell on the next exit) and stop looping the alert
+                # forever. Still emit ONE (deduped) UNATTRIBUTED_CLOSE for ops
+                # visibility — the booked P&L is APPROXIMATE (no contract note).
+                # NOTE: this OVERRIDES the prior "flag, never mutate a partial"
+                # choice; safe because the account can't cover our tracked qty.
+                _is_short_group = any(
+                    str(p.get("direction") or "long").lower() == "short"
+                    for p in my_group_positions)
+                # AMBIGUITY GATE (2026-07-09): only auto-book a partial deficit when
+                # exactly ONE session tracks this (symbol, product) across the whole
+                # account. With >1 session on the SAME symbol (an A/B run), which
+                # session's lot the external sell hit is UNKNOWABLE — booking it
+                # against the reconciling session's FIFO lot would mis-attribute the
+                # close and silently corrupt the A/B P&L. In that case fall through
+                # to the (deduped) alert and let the operator resolve. The C1
+                # session-scoped pre-exit guard already prevents any naked oversell
+                # from the resulting over-track, so leaving it OPEN-but-flagged is safe.
+                _distinct_sessions = len(
+                    {str(p.get("session_id")) for p in account_positions})
+                if (broker_held > 0 and _distinct_sessions == 1
+                        and _has_close_side_evidence(matched_rows, _is_short_group)):
+                    ext_px = _external_flat_exit_price(matched_rows)
+                    remaining = deficit
+                    booked = 0
+                    for pos in my_group_positions:
+                        if remaining <= 0:
+                            break
+                        if pos.get("id") in _closed_ids:
+                            continue
+                        pq = int(pos.get("qty") or 0)
+                        if pq <= 0:
+                            continue
+                        take = min(pq, remaining)
+                        sym = pos.get("symbol")
+                        prof_id = pos.get("broker_profile")
+                        px = ext_px or _num(pos.get("ltp")) \
+                            or float(pos.get("avg_price") or 0.0)
+                        try:
+                            registry.update_partial_exit(
+                                sym, take, px, broker_profile=prof_id)
+                        except Exception as e:  # pragma: no cover - defensive
+                            log.warning("reconcile: partial external-close failed "
+                                        "%s/%s: %s", session.session_id, sym, e)
+                            continue
+                        changed = True
+                        remaining -= take
+                        booked += take
+                        log.warning(
+                            "reconcile %s/%s: PARTIAL external close of %d sh @ %s "
+                            "(broker_held=%d < db=%d, sell evidence, no order-id) "
+                            "— remainder stays OPEN", session.session_id, sym, take,
+                            px, broker_held, db_held_all)
+                        actions.append({
+                            "action": "PARTIAL_EXTERNAL_CLOSE", "symbol": sym,
+                            "product": product, "closed_qty": int(take),
+                            "exit_price": px,
+                            "close_reason": "CLOSED_EXTERNAL_FLAT"})
+                    if booked > 0:
+                        _persist_alert(
+                            session.session_id, bare_sym, product,
+                            "UNATTRIBUTED_CLOSE",
+                            f"partial external close booked {booked} of "
+                            f"db_held_all={db_held_all} (broker_held={broker_held}, "
+                            f"sell evidence, no order-id)")
+                        actions.append({
+                            "action": "UNATTRIBUTED_CLOSE", "symbol": bare_sym,
+                            "product": product, "deficit": int(deficit),
+                            "partial_close_booked": int(booked)})
+                        continue
                 # ── PARTIAL deficit we CANNOT attribute (broker still holds some) →
                 # ALERT, never blind-close (which session's lot closed is ambiguous).
                 # GUARD G3: a CLEAN corp-action ratio (reverse split shrank the qty)
@@ -759,13 +875,14 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
         # else: INVISIBLE — a surplus we can't attribute to our order-ids is a
         # manual/other position, not ours. No alert, no action (the P7 change).
 
-    # After any close, re-freeze the invested basis over the REMAINING OPEN
-    # positions so the kill / trail denominator matches reality.
-    if changed:
-        try:
-            monitor.refreeze_invested_basis()
-        except Exception as e:  # pragma: no cover - defensive
-            log.warning("reconcile: refreeze_invested_basis failed for %s: %s",
-                        session.session_id, e)
-
+    # D1 — the invested_basis is FROZEN AT ENTRY and must NOT shrink as positions
+    # close (the documented invariant, monitor.py). A closed leg's realised P&L
+    # stays in the gross-return NUMERATOR (monitor._total_realised) against the
+    # ORIGINAL committed capital, so gross_return % is identical whether a trade
+    # was closed by a stop, a kill, or this reconciler. The previous
+    # refreeze_invested_basis() here shrank the denominator on the reconcile-close
+    # path ONLY, making the same closed trade show a DIFFERENT % than a stop-close.
+    # Removed to keep the basis frozen on ALL close paths. (`changed` is retained
+    # for readability of the close loop above; no post-close basis mutation.)
+    _ = changed
     return actions

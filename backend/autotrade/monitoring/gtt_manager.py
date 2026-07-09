@@ -430,6 +430,19 @@ class GTTManager:
         gross_return on the REMAINING positions."""
         out: List[Dict[str, Any]] = []
         closed_any = False
+        # P1(b): fetch ALL GTTs ONCE per broker profile into an id→state map so the
+        # loop below resolves N positions' GTTs from that map instead of N serial
+        # get_gtt round-trips. None (paper / unimplemented / error) → per-position
+        # get_gtt fallback (byte-identical). A gtt_id ABSENT from the map also falls
+        # back to the single get_gtt so a deleted/unknown GTT keeps its exact prior
+        # resolution — the batch is used ONLY for ids it actually contains.
+        gtt_maps: Dict[str, Optional[dict]] = {}
+        for _pid, _b in self.brokers.items():
+            try:
+                gtt_maps[_pid] = _b.get_gtts_map()
+            except Exception as e:  # pragma: no cover - defensive
+                log.debug("get_gtts_map failed for %s: %s", _pid, e)
+                gtt_maps[_pid] = None
         for pos in self.registry.get_open_positions():
             gtt_id = pos.get("gtt_id")
             if not gtt_id:
@@ -438,8 +451,14 @@ class GTTManager:
             broker = self.brokers.get(prof_id) or next(iter(self.brokers.values()), None)
             if broker is None:
                 continue
+            gmap = gtt_maps.get(prof_id)
+            if gmap is None and len(gtt_maps) == 1:
+                gmap = next(iter(gtt_maps.values()))
             try:
-                state = await asyncio.to_thread(broker.get_gtt, gtt_id)
+                if gmap is not None and str(gtt_id) in gmap:
+                    state = gmap[str(gtt_id)]
+                else:
+                    state = await asyncio.to_thread(broker.get_gtt, gtt_id)
             except Exception as e:  # pragma: no cover - defensive
                 log.debug("get_gtt failed for %s (%s): %s",
                           pos["symbol"], gtt_id, e)
@@ -493,15 +512,12 @@ class GTTManager:
                             self.session_id, pos["symbol"],
                             exit_price if exit_price else 0.0,
                             result.get("order_id"))
-        # RECONCILIATION Phase 4: after a GTT close, RE-FREEZE this session's
-        # invested_basis over the REMAINING open rows so the kill/trail
-        # denominator reflects reality (a closed position must leave the basis).
-        if closed_any:
-            try:
-                self._refreeze_invested_basis()
-            except Exception as e:  # pragma: no cover - never block the tick
-                log.warning("refreeze_invested_basis after GTT close failed "
-                            "for %s: %s", self.session_id, e)
+        # FROZEN BASIS EVERYWHERE (2026-07-09, D1): a GTT close does NOT re-freeze
+        # invested_basis — the basis stays FROZEN at entry on EVERY close path
+        # (trail/stop/kill/reconcile/GTT), so the same trade reports the SAME
+        # gross_return % regardless of HOW it closed. The realised P&L of the closed
+        # leg stays in the numerator over the original deployed capital (the
+        # documented invariant; PortfolioMonitor never shrinks the denominator).
         return out
 
     def _refreeze_invested_basis(self) -> None:

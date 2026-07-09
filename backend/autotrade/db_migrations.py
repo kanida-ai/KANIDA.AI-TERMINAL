@@ -160,6 +160,17 @@ def run_migrations() -> dict:
                         f"ADD COLUMN {name} {ddl_type}{default_clause}")
                     added_cols.append(name)
 
+        # ── 2b-mark. ALTER-guard ltp_as_of on autotrade_positions (Lifecycle#8) ─
+        # The IST timestamp a position's mark (ltp) was last refreshed, so a
+        # stalled tick (stale mark) is VISIBLE in status(). NULLABLE → every
+        # existing row unchanged until its next refresh_ltps stamps it.
+        if _table_exists(con, "autotrade_positions"):
+            have = set(_existing_columns(con, "autotrade_positions"))
+            if "ltp_as_of" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_positions ADD COLUMN ltp_as_of TEXT")
+                added_cols.append("ltp_as_of")
+
         # ── 2c. ALTER-guard invested_basis on autotrade_sessions ─────────────
         # INVESTED-CAPITAL-BASIS feature: the FROZEN sum of qty*avg_price across
         # the session's positions AT ENTRY. This is the product-aware capital

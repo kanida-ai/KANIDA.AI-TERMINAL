@@ -218,10 +218,20 @@ class PortfolioMonitor:
         return TrailState(armed=armed, peak=peak)
 
     def save_trail_state(self, state) -> None:
-        """Persist the (armed, peak) trail state on the session row."""
+        """Persist the (armed, peak) trail state on the session row.
+
+        R1 — MONOTONE RATCHET: trail_peak is written as MAX(existing, new) and
+        trail_armed as MAX(existing, new). The 5s tick_driver and the sub-second
+        ws_driver both load→decide→save this state; a STALE writer (whose loaded
+        peak lagged a concurrent ratchet) must never REGRESS the peak — a lower
+        peak would drop the exit trigger and over-give-back real profit. The trail
+        engine only ever ratchets peak UP and arms 0→1 (never disarms), so MAX is
+        behaviour-preserving for the single-writer path and race-safe for two."""
         with falcon_conn() as con:
             con.execute(
-                "UPDATE autotrade_sessions SET trail_armed=?, trail_peak=? "
+                "UPDATE autotrade_sessions "
+                "SET trail_armed = MAX(COALESCE(trail_armed,0), ?), "
+                "    trail_peak  = MAX(COALESCE(trail_peak,0), ?) "
                 "WHERE session_id=?",
                 (1 if state.armed else 0, float(state.peak), self.session_id),
             )
@@ -247,11 +257,16 @@ class PortfolioMonitor:
         """Persist ONE position's per-stock step-lock trail state (pos_trail_armed,
         pos_trail_peak) so its ratchet is durable across restarts. Scoped to
         (session_id, symbol) among OPEN rows. Used only in step_lock_scope=="stock".
-        NEVER touches the session-level trail_armed/trail_peak (basket state)."""
+        NEVER touches the session-level trail_armed/trail_peak (basket state).
+
+        R1 — MONOTONE RATCHET (per-stock): same as save_trail_state, pos_trail_peak
+        is written as MAX(existing, new) so an out-of-order writer can't regress a
+        position's ratchet high-water and over-give-back."""
         with falcon_conn() as con:
             con.execute(
                 "UPDATE autotrade_positions "
-                "SET pos_trail_armed=?, pos_trail_peak=? "
+                "SET pos_trail_armed = MAX(COALESCE(pos_trail_armed,0), ?), "
+                "    pos_trail_peak  = MAX(COALESCE(pos_trail_peak,0), ?) "
                 "WHERE session_id=? AND symbol=? AND status='OPEN'",
                 (1 if state.armed else 0, float(state.peak),
                  self.session_id, symbol),
@@ -295,6 +310,25 @@ class PortfolioMonitor:
             ).fetchone()
         return float(row["total"]) if row else 0.0
 
+    def _total_exit_failed_unrealised(self) -> float:
+        """Σ persisted uPnL over EXIT_FAILED positions (qty>0) — C3.
+
+        An EXIT_FAILED leg is still HELD (its exit never confirmed), so it is REAL
+        exposure and its live uPnL must stay in the gross-return numerator; without
+        this the % understates exposure while invested_basis (frozen at entry)
+        still counts these shares in the denominator. refresh_ltps() marks these
+        rows to market alongside OPEN so the figure is live. Returns 0.0 when there
+        are no EXIT_FAILED rows (byte-identical to before for a normal book)."""
+        with falcon_conn() as con:
+            row = con.execute(
+                "SELECT COALESCE(SUM(unrealised_pnl),0.0) AS total "
+                "FROM autotrade_positions "
+                "WHERE session_id=? AND status='EXIT_FAILED' AND qty>0 "
+                "AND unrealised_pnl IS NOT NULL",
+                (self.session_id,),
+            ).fetchone()
+        return float(row["total"]) if row else 0.0
+
     def total_unrealised(self) -> float:
         total = 0.0
         for p in self._open_positions():
@@ -312,10 +346,12 @@ class PortfolioMonitor:
         """ON-FUND view: (sum(uPnL) + realised_pnl) / total_allocated_capital.
 
         Secondary basis — for display only, not the kill basis. Includes
-        realised P&L from CLOSED positions so a GTT-closed loss is reflected.
+        realised P&L from CLOSED positions so a GTT-closed loss is reflected, and
+        the live uPnL of EXIT_FAILED (still-held) legs so % reflects real exposure.
         Denominator never shrinks (frozen total_allocated_capital).
         """
-        total_pnl = self.total_unrealised() + self._total_realised()
+        total_pnl = (self.total_unrealised() + self._total_realised()
+                     + self._total_exit_failed_unrealised())
         return total_pnl / self._total_allocated_capital
 
     def compute_gross_return_invested(self) -> float:
@@ -325,9 +361,12 @@ class PortfolioMonitor:
         (MTF leveraged value / CNC cash). The kill switch is checked against
         THIS value. Includes realised P&L from CLOSED positions so that a
         GTT-closed loss cannot inflate the remaining portfolio's apparent return.
-        invested_basis() falls back to total_allocated_capital when no positions
-        exist, so this never divides by zero."""
-        total_pnl = self.total_unrealised() + self._total_realised()
+        Also includes EXIT_FAILED (still-held) legs so a stranded loss stays in the
+        kill/trail numerator (C3). invested_basis() falls back to
+        total_allocated_capital when no positions exist, so this never divides by
+        zero."""
+        total_pnl = (self.total_unrealised() + self._total_realised()
+                     + self._total_exit_failed_unrealised())
         return total_pnl / self.invested_basis()
 
     def refresh_ltps(self, brokers: Dict[str, Any]) -> int:
@@ -338,40 +377,84 @@ class PortfolioMonitor:
         """
         updated = 0
         with falcon_conn() as con:
+            # C3: mark EXIT_FAILED (still-held) legs to market too, so their live
+            # uPnL feeding the gross-return numerator stays fresh (not the stale
+            # mark from the tick their exit failed).
             rows = con.execute(
                 """SELECT id, symbol, broker_profile, avg_price
                    FROM autotrade_positions
-                   WHERE session_id=? AND status='OPEN' AND qty > 0""",
+                   WHERE session_id=? AND status IN ('OPEN','EXIT_FAILED')
+                     AND qty > 0""",
                 (self.session_id,),
             ).fetchall()
+        rows = [dict(r) for r in rows]
+        brokers = brokers or {}
+
+        # P1(a): ONE batched LTP call per broker profile (get_ltps_batch = one WS
+        # pass + a single kite.ltp() REST fallback for the whole list) instead of
+        # a per-symbol broker round-trip. Only symbols the batch MISSED fall back
+        # to the per-symbol resolver (ohlc close → entry). O(profiles) broker
+        # calls per tick, not O(positions). Byte-identical marks (the default
+        # get_ltps_batch loops get_ltp, so a mock/stub is unchanged).
+        from collections import defaultdict as _dd
+        syms_by_prof: Dict[Optional[str], set] = _dd(set)
         for r in rows:
-            ltp = resolve_brokers_ltp(
-                r["symbol"], brokers or {},
-                broker_profile=r["broker_profile"],
-                fallback_entry=r["avg_price"])
-            if ltp is None:
+            syms_by_prof[r["broker_profile"]].add(r["symbol"])
+        batched: Dict[tuple, float] = {}
+        for prof, syms in syms_by_prof.items():
+            broker = brokers.get(prof) or (
+                next(iter(brokers.values()), None) if brokers else None)
+            if broker is None:
                 continue
-            with falcon_conn() as con:
+            try:
+                b = broker.get_ltps_batch(list(syms)) or {}
+            except Exception as e:  # pragma: no cover - defensive
+                log.debug("refresh_ltps: get_ltps_batch failed for %s: %s",
+                          prof, e)
+                b = {}
+            for s, v in b.items():
+                if v is not None and float(v) > 0:
+                    batched[(prof, s)] = float(v)
+
+        now_iso = datetime.now(IST).isoformat()
+        with falcon_conn() as con:
+            for r in rows:
+                ltp = batched.get((r["broker_profile"], r["symbol"]))
+                if ltp is None:
+                    # Residual miss only → per-symbol resolve (broker single probe
+                    # → ohlc close → entry). Unchanged fallback semantics.
+                    ltp = resolve_brokers_ltp(
+                        r["symbol"], brokers,
+                        broker_profile=r["broker_profile"],
+                        fallback_entry=r["avg_price"])
+                if ltp is None:
+                    continue
                 # FUTURES long/short: sign-aware persisted uPnL so the trail /
                 # kill see profit correctly for shorts. 'long' CASE = +1 →
-                # byte-identical to (ltp-avg)*qty.
+                # byte-identical to (ltp-avg)*qty. Lifecycle#8: stamp the mark
+                # time so a stalled tick (stale mark) is visible in status().
                 con.execute(
                     """UPDATE autotrade_positions
-                       SET ltp=?,
+                       SET ltp=?, ltp_as_of=?,
                            unrealised_pnl=(CASE WHEN direction='short' THEN -1
                                                 ELSE 1 END) * (? - avg_price)*qty
                        WHERE id=?""",
-                    (ltp, ltp, r["id"]),
+                    (ltp, now_iso, ltp, r["id"]),
                 )
-                con.commit()
-            updated += 1
+                updated += 1
+            con.commit()
         return updated
 
     def snapshot(self) -> Dict[str, Any]:
         """Persist a portfolio snapshot row + return the computed numbers."""
         positions = self._open_positions()
         total_u = self.total_unrealised()
-        gr = total_u / self._total_allocated_capital
+        # Lifecycle#7 — the persisted snapshot / last_gross_return must MATCH the
+        # live panel, which includes realised P&L (CLOSED legs) + EXIT_FAILED
+        # (still-held) uPnL. Previously this stored uPnL-only, so history diverged
+        # from the panel the moment any leg closed.
+        gr = (total_u + self._total_realised()
+              + self._total_exit_failed_unrealised()) / self._total_allocated_capital
         with falcon_conn() as con:
             con.execute(
                 """INSERT INTO autotrade_portfolio_snapshots

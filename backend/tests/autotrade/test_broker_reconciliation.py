@@ -321,11 +321,12 @@ def test_fully_flat_but_no_sell_evidence_still_alerts(clean_positions, monkeypat
 
 
 def test_partial_deficit_no_evidence_still_alerts(clean_positions, monkeypatch):
-    """A PARTIAL deficit (broker still holds SOME) with no order-id evidence is
-    STILL an alert, never an auto-close — WHICH session's lot closed is ambiguous
-    while the broker holds a remainder. Only a FULL flat auto-closes."""
-    net_book = {"A": {"quantity": 7, "buy_quantity": 10, "sell_quantity": 3,
-                      "sell_price": 96.5, "average_price": 100.0,
+    """A PARTIAL deficit (broker still holds SOME) with NO market evidence
+    (no sell/buy volume — a stale/glitchy book) is STILL an alert, never a
+    close: without positive sell/buy evidence C4a's partial external-close is
+    NOT triggered (a transient empty/odd book can never mutate our qty)."""
+    net_book = {"A": {"quantity": 7, "buy_quantity": 0, "sell_quantity": 0,
+                      "average_price": 100.0,
                       "exchange": "NSE", "product": "MIS"}}
     sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
                               order_product="MIS")
@@ -333,9 +334,11 @@ def test_partial_deficit_no_evidence_still_alerts(clean_positions, monkeypatch):
     _freeze(sess)
     actions = reconcile_broker_positions(sess)
     kinds = {a["action"] for a in actions}
-    assert "UNATTRIBUTED_CLOSE" in kinds             # partial → alert only
+    assert "UNATTRIBUTED_CLOSE" in kinds             # partial, no evidence → alert
+    assert "PARTIAL_EXTERNAL_CLOSE" not in kinds     # NOT booked (no evidence)
     assert "CLOSED_EXTERNAL_FLAT" not in kinds       # NOT closed (broker holds 7)
     assert _row(sess, "A")["status"] == "OPEN"
+    assert _row(sess, "A")["qty"] == 10              # qty untouched
 
 
 def test_gtt_triggered_open_order_still_flat_closes_external(clean_positions,
@@ -435,13 +438,13 @@ def test_p7_manual_sell_others_shares_in_sync(clean_positions, monkeypatch):
 
 def test_p7_manual_sell_below_tracked_no_evidence_unattributed(clean_positions,
                                                                monkeypatch):
-    """THE IRREDUCIBLE case: a manual sell dips the FUNGIBLE account BELOW our
-    tracked qty (our 100, broker 60) and our GTT never fired → we cannot tell our
-    close from a manual sell of shares we don't track. Conservative: UNATTRIBUTED_
-    CLOSE alert (deficit 40), position STAYS OPEN — never closed without evidence.
-
-    A manual SELL order sits in the orderbook under an id we DON'T own — it is
-    NEVER attributed as our close (order-id-scoped)."""
+    """C4a — a manual sell dips the FUNGIBLE account BELOW our tracked qty
+    (our 100, broker 60) with sell EVIDENCE but no order-id we own. The account
+    can no longer cover our 100, so `deficit` (40) shares are provably gone: we
+    BOOK a partial external close of 40 against our oldest lot (qty 100→60,
+    remainder OPEN) — which prevents over-tracking / a naked oversell — and still
+    raise ONE (deduped) UNATTRIBUTED_CLOSE for ops. A manual SELL order under an
+    id we DON'T own is NEVER attributed as our close (order-id-scoped)."""
     net_book = {"A": {"tradingsymbol": "A", "quantity": 60, "buy_quantity": 100,
                       "sell_quantity": 40, "sell_price": 99.0,
                       "average_price": 100.0, "exchange": "NSE",
@@ -452,14 +455,17 @@ def test_p7_manual_sell_below_tracked_no_evidence_unattributed(clean_positions,
     sess = _make_live_session(monkeypatch, net_book, ltps={"A": 99.0},
                               orders=orders, order_product="MIS")
     _register(sess, "A", 100, 100.0, ltp=99.0)      # NO exit_order_id / gtt
-    _freeze(sess)
 
     actions = reconcile_broker_positions(sess)
     ua = [a for a in actions if a["action"] == "UNATTRIBUTED_CLOSE"]
     assert len(ua) == 1
     assert ua[0]["deficit"] == 40
-    assert _row(sess, "A")["status"] == "OPEN"       # never closed without evidence
-    assert _row(sess, "A")["qty"] == 100
+    assert ua[0]["partial_close_booked"] == 40
+    pec = [a for a in actions if a["action"] == "PARTIAL_EXTERNAL_CLOSE"]
+    assert len(pec) == 1 and pec[0]["closed_qty"] == 40
+    r = _row(sess, "A")
+    assert r["status"] == "OPEN"                      # remainder stays open
+    assert r["qty"] == 60                             # over-tracked deficit booked
     assert len(_alerts("UNATTRIBUTED_CLOSE")) == 1
 
 
@@ -798,3 +804,99 @@ def test_close_via_order_id_at_tick(clean_positions, monkeypatch):
     assert recon["A"]["action"] == "CLOSED_RECONCILED"
     assert _row(sess, "A")["status"] == "CLOSED"
     assert _row(sess, "B")["status"] == "OPEN"     # B in sync
+
+
+# ── C4a — PARTIAL external close (broker < db, sell evidence, no order-id) ─────
+
+def test_c4a_partial_external_close_books_deficit(clean_positions, monkeypatch):
+    """Broker holds 60 of our 100 (sell evidence, no order-id). The account can't
+    cover our tracked qty → book a partial external close of exactly the deficit
+    (40) against our oldest lot; remainder (60) stays OPEN; ONE alert."""
+    net_book = {"A": {"tradingsymbol": "A", "quantity": 60, "buy_quantity": 100,
+                      "sell_quantity": 40, "sell_price": 97.0,
+                      "average_price": 100.0, "exchange": "NSE",
+                      "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 99.0},
+                              order_product="MIS")
+    _register(sess, "A", 100, 100.0, ltp=99.0)
+    _freeze(sess)
+
+    actions = reconcile_broker_positions(sess)
+    pec = [a for a in actions if a["action"] == "PARTIAL_EXTERNAL_CLOSE"]
+    assert len(pec) == 1
+    assert pec[0]["closed_qty"] == 40
+    assert pec[0]["exit_price"] == pytest.approx(97.0)   # broker sell avg
+    r = _row(sess, "A")
+    assert r["status"] == "OPEN"
+    assert r["qty"] == 60
+    # Booked realised P&L on the closed 40 at the sell avg.
+    assert r["realised_pnl"] == pytest.approx((97.0 - 100.0) * 40)
+    assert len(_alerts("UNATTRIBUTED_CLOSE")) == 1
+
+
+def test_c4a_next_tick_in_sync_no_reclose(clean_positions, monkeypatch):
+    """After booking the deficit, db == broker → the next reconcile is in-sync and
+    does NOTHING (no double-book, no new alert)."""
+    net_book = {"A": {"tradingsymbol": "A", "quantity": 60, "buy_quantity": 100,
+                      "sell_quantity": 40, "sell_price": 97.0,
+                      "average_price": 100.0, "exchange": "NSE",
+                      "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 99.0},
+                              order_product="MIS")
+    _register(sess, "A", 100, 100.0, ltp=99.0)
+    _freeze(sess)
+
+    reconcile_broker_positions(sess)
+    assert _row(sess, "A")["qty"] == 60
+    actions2 = reconcile_broker_positions(sess)
+    assert actions2 == []
+    assert _row(sess, "A")["qty"] == 60
+    assert len(_alerts("UNATTRIBUTED_CLOSE")) == 1        # still exactly one
+
+
+def test_c4b_alert_deduped_across_ticks(clean_positions, monkeypatch):
+    """A persistent partial deficit with NO market evidence alerts EVERY tick in
+    the old code (unbounded rows). Dedup caps it at one row per (session,symbol,
+    product,kind) per day even across many reconcile passes."""
+    net_book = {"A": {"tradingsymbol": "A", "quantity": 7, "buy_quantity": 0,
+                      "sell_quantity": 0, "average_price": 100.0,
+                      "exchange": "NSE", "product": "MIS"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+                              order_product="MIS")
+    _register(sess, "A", 10, 100.0, ltp=100.0)
+    _freeze(sess)
+
+    for _ in range(4):
+        reconcile_broker_positions(sess)
+    # No evidence → never booked (position untouched), but only ONE alert row.
+    assert _row(sess, "A")["qty"] == 10
+    assert len(_alerts("UNATTRIBUTED_CLOSE")) == 1
+
+
+# ── M#11 — cash exchange match (a BSE row must not shadow an NSE hold) ─────────
+
+def test_m11_bse_row_does_not_shadow_nse_hold(clean_positions, monkeypatch):
+    """The broker net book carries a BSE row of the SAME base name as our NSE
+    CNC hold. It must NOT count toward the NSE bucket (different security). With
+    ONLY the BSE row present, our NSE hold reads broker_held 0 → resolved by ITS
+    OWN order-id evidence, NOT by the BSE quantity."""
+    net_book = {"BSEROW": {"tradingsymbol": "A", "quantity": 25,
+                           "buy_quantity": 25, "sell_quantity": 0,
+                           "average_price": 100.0, "exchange": "BSE",
+                           "product": "CNC"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+                              order_product="CNC")
+    prof = sess.config.broker_profiles[0].profile_id
+    sess.registry.register(symbol="A", broker_profile=prof, qty=10,
+                           avg_price=100.0, product="CNC", instrument_type="EQ",
+                           exchange="NSE")
+    sess.registry.update_ltp("A", 100.0, broker_profile=prof)
+    _freeze(sess)
+
+    actions = reconcile_broker_positions(sess)
+    # The BSE 25 is NOT counted as our NSE hold; broker_held for NSE is 0 (no
+    # holdings, no matching net row) → a deficit alert, never an in-sync / a
+    # BSE-driven qty. Crucially the BSE qty never becomes our broker_held.
+    assert not any(a.get("action") == "CORP_ACTION_SUSPECTED" for a in actions)
+    # Our NSE row is untouched (never mutated from the BSE row).
+    assert _row(sess, "A")["qty"] == 10

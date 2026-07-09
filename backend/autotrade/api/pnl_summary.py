@@ -321,8 +321,22 @@ def collect_trades(con: sqlite3.Connection,
 
             product = meta["product"]
             instrument = str(row["instrument_type"] or "EQ").upper()
+            # Lifecycle#10 — a reconcile-flat / unknown-price close booked the exit
+            # at the ENTRY mark (no real fill: RECONCILED_FLAT / CLOSED_EXTERNAL_FLAT
+            # / a stale cleanup), so it never actually traded at a known price. It
+            # carries NO real brokerage — charging it (charges on avg==exit) would
+            # show a phantom charge-only "loss". Skip its charges AND flag it so the
+            # win/loss stats exclude it.
+            _cr = str(row["close_reason"] or "").upper()
+            reconcile_flat = (
+                "RECONCILED_FLAT" in _cr or "EXTERNAL_FLAT" in _cr
+                or "STALE" in _cr
+                or (exit_price is not None and avg_price > 0
+                    and abs(exit_price - avg_price) < 1e-9
+                    and abs(gross) < 1e-9))
             charges_total = 0.0
-            if exit_price is not None and avg_price > 0 and qty > 0:
+            if (not reconcile_flat and exit_price is not None
+                    and avg_price > 0 and qty > 0):
                 ch = estimate_charges(
                     product=product,
                     buy_value=qty * avg_price,
@@ -359,6 +373,8 @@ def collect_trades(con: sqlite3.Connection,
                 "entry_order_id": row["entry_order_id"],
                 "exit_order_id":  row["exit_order_id"],
                 "invested_basis": meta["invested_basis"],
+                # Lifecycle#10: excluded from charge-bearing win/loss stats.
+                "reconcile_flat": reconcile_flat,
             })
         except Exception as e:  # never let one bad row break the read path
             log.warning("collect_trades: skipping bad row (%s): %s",
@@ -395,8 +411,15 @@ def _bucket_stats(trade_list: List[Dict[str, Any]]) -> Dict[str, Any]:
     charges = round(sum(t["charges"] for t in trade_list), 2)
     net = round(sum(t["net"] for t in trade_list), 2)
     n = len(trade_list)
-    wins = sum(1 for t in trade_list if t["net"] > 0)
-    losses = n - wins
+    # Lifecycle#10 — win/loss/win_rate are computed over the CHARGE-BEARING trades
+    # only. Reconcile-flat / unknown-price closes (exit booked at the entry mark,
+    # no real fill) carry no real P&L or charges; counting them would show phantom
+    # charge-only losses. gross/charges/net totals are unchanged (they are ~0 for
+    # those rows anyway). When there are none, this is byte-identical (n_real==n).
+    real = [t for t in trade_list if not t.get("reconcile_flat")]
+    n_real = len(real)
+    wins = sum(1 for t in real if t["net"] > 0)
+    losses = n_real - wins
     return {
         "net":      net,
         "gross":    gross,
@@ -404,7 +427,7 @@ def _bucket_stats(trade_list: List[Dict[str, Any]]) -> Dict[str, Any]:
         "trades":   n,
         "wins":     wins,
         "losses":   losses,
-        "win_rate": _win_rate(wins, n),
+        "win_rate": _win_rate(wins, n_real),
     }
 
 

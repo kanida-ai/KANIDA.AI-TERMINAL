@@ -30,6 +30,29 @@ _LOCK = threading.Lock()
 # session_id -> True once a fire has been claimed (never reset within a session;
 # a session fires at most once then goes CLOSED).
 _FIRED: Dict[str, bool] = {}
+# session_id -> True once ENTRY placement has been claimed (C5). SEPARATE from
+# _FIRED so the entry idempotency guard never blocks the later kill-switch fire.
+_ENTRY_CLAIMED: Dict[str, bool] = {}
+
+
+def claim_entry(session_id: str) -> bool:
+    """Claim the right to place THIS session's ENTRIES exactly once (C5).
+
+    Returns True to the FIRST caller, False to any concurrent / subsequent caller
+    — so two racing start()/scheduled-fire invocations place orders ONCE. Kept
+    separate from the exit _FIRED guard so a later kill-switch fire is unaffected.
+    The durable idempotency check is the DB (a session with OPEN positions already
+    fired); this in-memory claim closes the concurrent double-invocation window."""
+    with _LOCK:
+        if _ENTRY_CLAIMED.get(session_id):
+            return False
+        _ENTRY_CLAIMED[session_id] = True
+        return True
+
+
+def entry_claimed(session_id: str) -> bool:
+    with _LOCK:
+        return bool(_ENTRY_CLAIMED.get(session_id))
 
 
 @contextmanager
@@ -54,3 +77,4 @@ def reset(session_id: str) -> None:
     """Clear the guard for a session. For tests / operator recovery only."""
     with _LOCK:
         _FIRED.pop(session_id, None)
+        _ENTRY_CLAIMED.pop(session_id, None)

@@ -394,11 +394,11 @@ def test_e6_duplicate_entry_registration_upserts_single_row(clean_positions):
 
 def test_f1_stale_basis_refrozen_after_reconciled_close(clean_positions,
                                                         monkeypatch):
-    """F1 stale basis: after the reconciler CLOSES one leg on order-id evidence,
-    the session invested_basis (the kill/trail denominator) is RE-FROZEN over the
-    REMAINING open cash-equity rows — a stale basis would over/under-state the kill
-    threshold. Safeguard: position_reconciler.refreeze after a close
-    (position_reconciler.py ~566)."""
+    """D1 — the invested_basis is FROZEN AT ENTRY and must NOT shrink when the
+    reconciler CLOSES a leg. The closed leg's realised P&L stays in the numerator
+    against the ORIGINAL committed capital, so the % is identical whether a trade
+    was closed by a stop, a kill, or the reconciler. (Previously the reconciler
+    re-froze the basis over the remaining rows on this path only.)"""
     from autotrade.monitoring.position_reconciler import reconcile_broker_positions
 
     # Two CNC legs (KEEP 10*100 + GONE 10*100 = basis 2000). GONE's GTT fired
@@ -451,7 +451,7 @@ def test_f1_stale_basis_refrozen_after_reconciled_close(clean_positions,
     with falcon_conn() as con:
         after = con.execute("SELECT invested_basis FROM autotrade_sessions "
                             "WHERE session_id=?", (sess.session_id,)).fetchone()[0]
-    assert after == pytest.approx(1000.0)      # re-frozen over KEEP only
+    assert after == pytest.approx(2000.0)      # D1: FROZEN at entry, not shrunk
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -569,3 +569,73 @@ def test_d6d_mark_closed_zero_price_floor(clean_positions):
     assert r["status"] == "CLOSED"
     assert r["exit_price"] == pytest.approx(1512.0)     # avg fallback, never 0
     assert r["realised_pnl"] == pytest.approx(0.0)      # never a phantom -46,872
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# D1 (design) — invested_basis stays FROZEN: same closed trade → same gross_return
+# whether it was closed by the reconciler or by a stop.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_d1_frozen_basis_same_gross_return_reconcile_vs_stop(clean_positions,
+                                                             monkeypatch):
+    """Two identical books (KEEP 10@100 + GONE 10@100, basis 2000). In one, GONE
+    is closed by the RECONCILER (order-id evidence @96); in the other by a STOP
+    (mark_closed @96). The invested_basis stays FROZEN at 2000 in BOTH, so
+    gross_return_invested is IDENTICAL."""
+    from autotrade.monitoring.position_reconciler import reconcile_broker_positions
+
+    # ── Path A: reconcile-close ──────────────────────────────────────────────
+    net_book = {"GONE": {"tradingsymbol": "GONE", "quantity": 0,
+                         "buy_quantity": 10, "sell_quantity": 10,
+                         "sell_price": 96.0, "average_price": 100.0,
+                         "exchange": "NSE", "product": "CNC"},
+                "KEEP": {"tradingsymbol": "KEEP", "quantity": 10,
+                         "buy_quantity": 10, "sell_quantity": 0,
+                         "average_price": 100.0, "exchange": "NSE",
+                         "product": "CNC"}}
+    gtts = {"G-GONE": {"status": "triggered",
+                       "orders": [{"result": {"order_id": "O-GONE"}}]}}
+    order_status = {"O-GONE": {"status": "COMPLETE", "filled_quantity": 10,
+                               "average_price": 96.0}}
+
+    def factory(p):
+        return MockBroker(profile=p, dry_run=False,
+                          ltps={"GONE": 96.0, "KEEP": 100.0}, net_book=net_book,
+                          gtts=gtts, order_status=order_status, holdings={})
+
+    _patch_brokers(monkeypatch, factory)
+    cfg = TradingSessionConfig(total_allocated_capital=300000.0, top_n_stocks=2,
+                               sizing_mode="equal", kill_switch_enabled=False,
+                               order_product="CNC")
+    sess_a = TradingSession.create(cfg, mode="live")
+    sess_a._build_brokers()
+    prof = sess_a.config.broker_profiles[0].profile_id
+    for sym in ("KEEP", "GONE"):
+        sess_a.registry.register(symbol=sym, broker_profile=prof, qty=10,
+                                 avg_price=100.0, product="CNC",
+                                 instrument_type="EQ")
+        sess_a.registry.update_ltp(sym, 96.0 if sym == "GONE" else 100.0,
+                                   broker_profile=prof)
+    sess_a.registry.set_gtt("GONE", "G-GONE", broker_profile=prof)
+    sess_a.monitor.freeze_invested_basis()
+    reconcile_broker_positions(sess_a)
+    gr_reconcile = sess_a.monitor.compute_gross_return_invested()
+
+    # ── Path B: stop-close (plain mark_closed) ───────────────────────────────
+    sess_b = TradingSession.create(cfg, mode="live")
+    sess_b._build_brokers()
+    prof_b = sess_b.config.broker_profiles[0].profile_id
+    for sym in ("KEEP", "GONE"):
+        sess_b.registry.register(symbol=sym, broker_profile=prof_b, qty=10,
+                                 avg_price=100.0, product="CNC",
+                                 instrument_type="EQ")
+        sess_b.registry.update_ltp(sym, 96.0 if sym == "GONE" else 100.0,
+                                   broker_profile=prof_b)
+    sess_b.monitor.freeze_invested_basis()
+    sess_b.registry.mark_closed("GONE", "STOP_STOCK", exit_price=96.0,
+                                broker_profile=prof_b)
+    gr_stop = sess_b.monitor.compute_gross_return_invested()
+
+    # Both keep basis 2000; realised -40 on GONE → gr = -0.02 in BOTH.
+    assert gr_reconcile == pytest.approx(gr_stop)
+    assert gr_reconcile == pytest.approx(-40.0 / 2000.0)

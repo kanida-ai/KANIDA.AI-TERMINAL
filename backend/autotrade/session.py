@@ -82,6 +82,12 @@ def _entry_concurrency() -> int:
 
 _ENTRY_CONCURRENCY = _entry_concurrency()
 
+# Max seconds to wait for a per-position GTT cancel to confirm before proceeding
+# to the market exit (R3). On a TIMEOUT the OCO may still be live, so the exit qty
+# is clamped to the session-scoped live-held qty. Module-level so it is tunable
+# (and testable) without touching the exit logic.
+_GTT_CANCEL_TIMEOUT_SEC = 5.0
+
 
 def _now_ist_iso() -> str:
     return datetime.now(IST).isoformat()
@@ -165,6 +171,29 @@ def _last_tick_age_ms() -> Optional[int]:
     try:
         return int(max(0.0, (datetime.now(IST) - last).total_seconds() * 1000))
     except Exception:  # pragma: no cover
+        return None
+
+
+def _oldest_mark_age_ms(positions) -> Optional[int]:
+    """Lifecycle#8 — age in ms of the OLDEST open-position mark (now − min
+    ltp_as_of across the given positions). Surfaces a stalled tick (stale marks)
+    in status(). None when no position carries a mark timestamp yet."""
+    oldest = None
+    for p in positions or []:
+        ts = p.get("ltp_as_of")
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            continue
+        if oldest is None or dt < oldest:
+            oldest = dt
+    if oldest is None:
+        return None
+    try:
+        return int(max(0.0, (datetime.now(IST) - oldest).total_seconds() * 1000))
+    except Exception:  # pragma: no cover - defensive
         return None
 
 
@@ -812,16 +841,21 @@ async def _exit_single_position(
     # preventing place_market_exit from ever running.  The underlying thread
     # continues to completion (cannot be interrupted), but we stop waiting for it.
     gtt_id = position.get("gtt_id")
+    gtt_cancel_timed_out = False
     if gtt_manager and gtt_id:
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(broker.cancel_gtt, gtt_id),
-                timeout=5.0,
+                timeout=_GTT_CANCEL_TIMEOUT_SEC,
             )
             log.info("per-stock stop %s/%s: GTT %s cancelled", session_id, symbol, gtt_id)
         except asyncio.TimeoutError:
-            log.warning("per-stock stop %s/%s: GTT %s cancel timed out — proceeding to exit",
-                        session_id, symbol, gtt_id)
+            # R3 — the cancel didn't confirm in 5s: the OCO may STILL be live and
+            # could FIRE concurrently with our market exit → a double-sell window.
+            # We flag it so the exit qty is re-probed + clamped below.
+            gtt_cancel_timed_out = True
+            log.warning("per-stock stop %s/%s: GTT %s cancel timed out — will "
+                        "clamp exit qty to live-held", session_id, symbol, gtt_id)
         except Exception as e:
             log.warning("per-stock stop %s/%s: GTT cancel failed (%s): %s",
                         session_id, symbol, gtt_id, e)
@@ -849,7 +883,13 @@ async def _exit_single_position(
         log.debug("pre-exit net-position probe failed %s/%s: %s",
                   session_id, symbol, _net_e)
         net_qty = None
-    if net_qty is not None and net_qty == 0:
+    # SESSION-SCOPED flat decision (C1): the broker net is ACCOUNT-wide, so when a
+    # sibling session holds the same symbol we must NOT read its shares as ours.
+    # our_held = the qty attributable to THIS session still at the broker; 0 ⟺ our
+    # shares are gone (reconcile + place nothing), never the whole-account net.
+    from autotrade.monitoring.registry import our_held_at_broker as _our_held
+    our_held = _our_held(session_id, position.get("symbol"), itype, qty, net_qty)
+    if net_qty is not None and our_held == 0:
         log.warning(
             "pre-exit reconcile %s/%s: broker net qty is 0 (already closed "
             "externally) — marking CLOSED, placing NO order", session_id, symbol)
@@ -888,6 +928,16 @@ async def _exit_single_position(
             broker_profile=prof_id)
         return {"symbol": symbol, "status": "EXIT_FAILED",
                 "confirm_status": "RECONCILE_UNATTRIBUTED", "reason": reason}
+    # R3 — GTT cancel timed out (the OCO may still be live / mid-fire). We already
+    # re-probed the SESSION-SCOPED net (our_held) above; CLAMP the exit qty to it
+    # so a GTT that fires concurrently can never make us OVERSELL / go naked-short.
+    # our_held is None in paper (get_net_position_qty None) → no clamp, paper
+    # unchanged. When our_held >= qty (broker fully covers us) this is a no-op.
+    if gtt_cancel_timed_out and our_held is not None and 0 < our_held < qty:
+        log.warning("per-stock stop %s/%s: GTT cancel timed out — clamping exit "
+                    "qty %d→%d (session-scoped live-held; GTT may have partly "
+                    "filled)", session_id, symbol, qty, int(our_held))
+        qty = int(our_held)
     # kite_product overrides instrument_type mapping: positions table stores security
     # type ("EQ"), not the trading product ("MTF"/"CNC"). Without this, MTF exits
     # become CNC sells and Kite rejects them with "Holding quantity: 0".
@@ -1435,6 +1485,31 @@ class TradingSession:
                             "orders": [], "error": str(e),
                             "note": "bound broker account is not ACTIVE"}
         self._build_brokers()
+        # C5 — ENTRY IDEMPOTENCY. Two racing start()/scheduled-fire invocations (or
+        # a double call) must place orders ONCE. (1) A DB check: a session that
+        # already has OPEN positions has already fired → refuse. (2) An in-memory
+        # per-session claim closes the concurrent-invocation window (both callers
+        # can pass the DB check before either places; only one wins the claim).
+        # Claimed HERE (after the gate + account checks pass) so a refused fire on
+        # a non-trading day does NOT burn the claim and block a legitimate carry.
+        _already_open = self.registry.get_open_positions()
+        if _already_open:
+            log.warning("session %s: already has %d OPEN positions — refusing "
+                        "entry re-fire (idempotency)", self.session_id,
+                        len(_already_open))
+            return {"session_id": self.session_id,
+                    "status": self._current_status(), "mode": self.mode,
+                    "when": "fire", "n_placed": 0, "orders": [],
+                    "already_fired": True,
+                    "note": "session already has open positions"}
+        if not fire_guard.claim_entry(self.session_id):
+            log.warning("session %s: entry already claimed — refusing double-fire",
+                        self.session_id)
+            return {"session_id": self.session_id,
+                    "status": self._current_status(), "mode": self.mode,
+                    "when": "fire", "n_placed": 0, "orders": [],
+                    "already_fired": True,
+                    "note": "entry already claimed (idempotency guard)"}
         self._set_status("RUNNING", started_at=_now_ist_iso())
 
         falcon_picks = load_falcon_picks(
@@ -1851,7 +1926,20 @@ class TradingSession:
         # order-id (never the account aggregate). None in dry-run / when the
         # broker gave no id (reconcilers handle absent ids).
         _entry_oid = getattr(res, "broker_order_id", None)
-        if res.status == "PARTIAL":
+        # Lifecycle#9 — classify a partial ENTRY by fill_qty < ORDERED qty, not
+        # only res.status=="PARTIAL". A broker can report COMPLETE while filling
+        # fewer shares than ordered (RMS trim / thin book); that under-fill must be
+        # flagged (register_partial's warning + a PARTIAL status the panel shows),
+        # not silently registered as a clean full fill.
+        _under_fill = (fill_qty is not None and qty
+                       and int(fill_qty) < int(qty))
+        _is_partial = (res.status == "PARTIAL") or bool(_under_fill)
+        if _is_partial:
+            if _under_fill and res.status != "PARTIAL":
+                log.warning("session %s: entry UNDER-FILL for %s — ordered %d, "
+                            "filled %d (broker status=%s) → flagged PARTIAL",
+                            self.session_id, register_symbol, int(qty),
+                            int(fill_qty), res.status)
             self.registry.register_partial(register_symbol, prof.profile_id,
                                            fill_qty, fill_price,
                                            product=prof.order_product,
@@ -1874,10 +1962,11 @@ class TradingSession:
             record_slippage(symbol, ref_price, fill_price, fill_qty,
                             session_id=self.session_id,
                             broker_profile=prof.profile_id)
-        return {"symbol": symbol, "status": res.status, "qty": fill_qty,
+        _ret_status = "PARTIAL" if _is_partial else res.status
+        return {"symbol": symbol, "status": _ret_status, "qty": fill_qty,
                 "price": fill_price, "broker_order_id": res.broker_order_id,
                 "broker_profile": prof.profile_id, "order_type": order.order_type,
-                "reconciled": reconciled}
+                "reconciled": reconciled, "ordered_qty": int(qty) if qty else None}
 
     async def _reconcile_entry_fill(self, broker, order_id: str,
                                     expected_qty: int,
@@ -2034,6 +2123,17 @@ class TradingSession:
             log.warning("GTT reconcile failed for %s: %s", self.session_id, e)
         self.monitor.refresh_ltps(self.brokers)
 
+        # R4 — STAMP the reconcile-validated open-position set so the sub-second
+        # ws_driver (which never runs the broker reconcile) can tell when its view
+        # diverged from the last broker-validated basket and DEFER firing on a
+        # phantom leg. Cheap (one hash); no broker call.
+        try:
+            from .monitoring import basket_gen
+            basket_gen.stamp_reconciled(
+                self.session_id, self.registry.get_open_positions())
+        except Exception as e:  # pragma: no cover - never block the tick
+            log.debug("basket_gen stamp failed for %s: %s", self.session_id, e)
+
         # Market-hours guard: only fire software stops and retries during 09:15–15:29 IST.
         # After-hours restarts read stale closing prices which falsely trigger exits.
         _now_ist_tick = datetime.now(IST)
@@ -2077,6 +2177,31 @@ class TradingSession:
         except Exception as _efr_e:
             log.warning("EXIT_FAILED retry sweep failed for %s: %s",
                         self.session_id, _efr_e)
+
+        # C2 — KILLING_INCOMPLETE servicing. A kill/exit that left a stranded
+        # EXIT_FAILED leg set this NON-terminal status so the retry sweep above
+        # keeps re-attempting the leg. Do NOT re-run the kill-threshold fire here
+        # (the basket is already being flattened; a fresh fire would churn GTTs /
+        # could prematurely mark CLOSED). Once every leg is flat → CLOSED (terminal
+        # → the tick driver stops next iteration). This never fires on the normal
+        # all-success kill (that path is CLOSED immediately).
+        if self._current_status() == "KILLING_INCOMPLETE":
+            snap = self.monitor.snapshot()
+            if not self._has_unflat_positions():
+                self._set_status("CLOSED",
+                                 closed_at=datetime.now(IST).isoformat())
+                log.critical("KILLING_INCOMPLETE resolved — all legs flat, "
+                             "session CLOSED %s", self.session_id)
+                still_incomplete = False
+            else:
+                still_incomplete = True
+            return {
+                "gross_return": self.monitor.compute_gross_return_invested(),
+                "gross_return_fund": snap["gross_return"], "snapshot": snap,
+                "kill_switch_fired": False, "kill_reason": None,
+                "fire_result": None, "gtt_closed": gtt_closed,
+                "broker_reconciled": broker_reconciled,
+                "killing_incomplete": still_incomplete}
 
         snap = self.monitor.snapshot()
         # KILL BASIS: both strategies measure the INVESTED-basis gross return
@@ -2480,6 +2605,14 @@ class TradingSession:
         sess = dict(row) if row else {}
         status = sess.get("status")
         positions = self.registry.get_open_positions()
+        # C3 — SURFACE EXIT_FAILED (still-held) legs. They are dropped from
+        # open_positions (OPEN-only) and from the realised total (CLOSED-only), yet
+        # invested_basis (frozen) still counts them — so without this the panel is
+        # blind to real exposure. Their live uPnL is already in gross_return via
+        # monitor._total_exit_failed_unrealised(). Each row is flagged explicitly.
+        exit_failed = self.registry.get_exit_failed_all()
+        for _p in exit_failed:
+            _p["exit_failed"] = True
         # Two clearly-named gross returns. gross_return is the KILL BASIS
         # (÷ frozen invested_basis); gross_return_fund is the on-fund view.
         invested_basis = self.monitor.invested_basis()
@@ -2506,6 +2639,13 @@ class TradingSession:
                 kill_switch_stop_pct=self.config.kill_switch_stop_pct),
             "n_open_positions": len(positions),
             "open_positions": positions,
+            # C3: stranded EXIT_FAILED legs (still held; not in open_positions).
+            "exit_failed_positions": exit_failed,
+            "n_exit_failed_positions": len(exit_failed),
+            "has_exit_failed": bool(exit_failed),
+            # Lifecycle#8: mark freshness — the age (ms) of the OLDEST open-position
+            # mark, so a stalled tick (stale marks) is visible. None when no marks.
+            "oldest_mark_age_ms": _oldest_mark_age_ms(positions),
             # SPEED-PASS observability so the operator can SEE the latency.
             "entry_latency_ms": sess.get("entry_latency_ms"),
             "exit_latency_ms": sess.get("exit_latency_ms"),
@@ -2696,6 +2836,26 @@ class TradingSession:
                     "UPDATE autotrade_sessions SET exit_latency_ms=? "
                     "WHERE session_id=?", (int(exit_latency_ms), self.session_id))
             con.commit()
+
+    def _current_status(self) -> Optional[str]:
+        """The session's CURRENT persisted status (fresh read), or None."""
+        with falcon_conn() as con:
+            r = con.execute(
+                "SELECT status FROM autotrade_sessions WHERE session_id=?",
+                (self.session_id,)).fetchone()
+        return r["status"] if r else None
+
+    def _has_unflat_positions(self) -> bool:
+        """True while ANY position is still OPEN or EXIT_FAILED (qty>0) — i.e. not
+        yet flat. Used to decide when a KILLING_INCOMPLETE session may be promoted
+        to CLOSED (C2). Counts a locked in-flight retry (exit_lock=1) too, so we
+        never close while an exit is mid-flight."""
+        with falcon_conn() as con:
+            r = con.execute(
+                "SELECT COUNT(*) AS n FROM autotrade_positions "
+                "WHERE session_id=? AND status IN ('OPEN','EXIT_FAILED') "
+                "AND qty>0", (self.session_id,)).fetchone()
+        return bool(r and int(r["n"] or 0) > 0)
 
     def _set_status(self, status: str, started_at: Optional[str] = None,
                     reason: Optional[str] = None,

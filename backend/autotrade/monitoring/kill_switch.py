@@ -145,7 +145,12 @@ class KillSwitchExecutor:
             except Exception as _net_e:  # pragma: no cover - defensive
                 log.debug("kill: net-position probe failed %s: %s", symbol, _net_e)
                 net_qty = None
-            if net_qty is not None and net_qty == 0:
+            # SESSION-SCOPED flat decision (C1): subtract OTHER sessions' still-held
+            # qty so session A never treats session B's shares as flat / sells into
+            # B's lot. our_held==0 ⟺ THIS session's shares are gone (not the account).
+            from .registry import our_held_at_broker as _our_held
+            our_held = _our_held(self.session_id, symbol, itype, qty, net_qty)
+            if net_qty is not None and our_held == 0:
                 log.warning("kill: %s/%s already flat at broker — reconciling, "
                             "no exit order", self.session_id, symbol)
                 # POSITIVE-EVIDENCE RECONCILE (2026-07-07 CEMPRO circuit incident).
@@ -204,11 +209,86 @@ class KillSwitchExecutor:
         # For each placed order we poll until COMPLETE / REJECTED / TIMEOUT
         # rather than optimistically marking CLOSED on PLACED. DRY_RUN orders
         # are confirmed immediately (no polling) so paper mode is unchanged.
+        # R2 — the fill CONFIRMATIONS run CONCURRENTLY (asyncio.gather), not
+        # serially: each confirm_exit can block up to 60s, so N legs used to take
+        # up to N×60s. One bad/slow leg can no longer stall the rest; per-leg
+        # EXIT_FAILED handling + fire_guard/exit_gate scoping are preserved.
         from .exit_poller import confirm_exit, cancel_and_retry_exit
+
+        async def _confirm_live_leg(meta, order_id):
+            """Confirm ONE live placed leg (+ partial/timeout retry). Returns
+            (ok: bool, detail: dict). Isolated so legs confirm in parallel."""
+            prof_id = meta.get("broker_profile")
+            broker_for_pos = (self.brokers.get(prof_id)
+                              or next(iter(self.brokers.values()), None))
+            confirm_result = await confirm_exit(
+                session_id=self.session_id, symbol=meta["symbol"],
+                order_id=order_id, qty=meta["qty"], broker=broker_for_pos,
+                registry=self.registry, close_reason=close_reason,
+                max_wait_sec=60, poll_interval_sec=5.0)
+            confirm_status = confirm_result.get("status", "UNKNOWN")
+
+            if confirm_status == "COMPLETE":
+                return True, {**meta, "status": "COMPLETE",
+                              "broker_order_id": order_id,
+                              "exit_price": confirm_result.get("exit_price")}
+
+            if confirm_status == "PARTIAL":
+                remaining = confirm_result.get("remaining_qty", 0)
+                log.warning("kill switch: PARTIAL fill for %s/%s "
+                            "(filled=%d remaining=%d) — retrying remainder",
+                            self.session_id, meta["symbol"],
+                            confirm_result.get("filled_qty", 0), remaining)
+                if remaining > 0:
+                    retry_result = await cancel_and_retry_exit(
+                        session_id=self.session_id, symbol=meta["symbol"],
+                        order_id=order_id, qty=remaining, broker=broker_for_pos,
+                        registry=self.registry, close_reason=close_reason,
+                        max_retries=3, direction=meta.get("direction", "long"),
+                        instrument_type=meta.get("instrument_type", "EQ"),
+                        kite_product=meta.get("kite_product"))
+                    if retry_result.get("status") == "COMPLETE":
+                        return True, {**meta, "status": "COMPLETE_AFTER_PARTIAL",
+                                      "broker_order_id": order_id}
+                    alerts.send_urgent(
+                        f"MANUAL EXIT REQUIRED (partial): "
+                        f"{meta['symbol']} ({self.session_id})")
+                    return False, {**meta, "status": "PARTIAL_FAILED",
+                                   "remaining_qty": remaining}
+                return True, {**meta, "status": "COMPLETE_AFTER_PARTIAL"}
+
+            if confirm_status == "TIMEOUT":
+                log.error("kill switch: TIMEOUT confirming exit for %s/%s "
+                          "— cancelling + retrying", self.session_id,
+                          meta["symbol"])
+                retry_result = await cancel_and_retry_exit(
+                    session_id=self.session_id, symbol=meta["symbol"],
+                    order_id=order_id, qty=meta["qty"], broker=broker_for_pos,
+                    registry=self.registry, close_reason=close_reason,
+                    max_retries=3, direction=meta.get("direction", "long"),
+                    instrument_type=meta.get("instrument_type", "EQ"),
+                    kite_product=meta.get("kite_product"))
+                if retry_result.get("status") == "COMPLETE":
+                    return True, {**meta, "status": "COMPLETE_AFTER_TIMEOUT",
+                                  "broker_order_id": order_id}
+                alerts.send_urgent(
+                    f"MANUAL EXIT REQUIRED (timeout): "
+                    f"{meta['symbol']} ({self.session_id})")
+                self.registry.mark_exit_failed(
+                    meta["symbol"], "timeout + retry exhausted",
+                    broker_profile=meta.get("broker_profile"))
+                return False, {**meta, "status": "EXIT_FAILED_TIMEOUT"}
+
+            # REJECTED / CANCELLED — exit_gate already released by confirm_exit.
+            alerts.send_urgent(
+                f"MANUAL EXIT REQUIRED ({confirm_status}): "
+                f"{meta['symbol']} ({self.session_id})")
+            return False, {**meta, "status": f"EXIT_FAILED_{confirm_status}"}
 
         n_ok, n_failed = 0, 0
         result_iter = iter(results)
         details: List[Dict[str, Any]] = []
+        confirm_jobs: List[Any] = []       # (meta, coro) for the LIVE placed legs
         for meta in exit_meta:
             if not meta["claimed"]:
                 details.append({**meta, "status": "BLOCKED"})
@@ -252,108 +332,38 @@ class KillSwitchExecutor:
                                 "broker_order_id": order_id})
                 continue
 
-            # Live path: resolve the broker for this position.
-            prof_id = meta.get("broker_profile")
-            broker_for_pos = (self.brokers.get(prof_id)
-                              or next(iter(self.brokers.values()), None))
+            # Live placed leg → defer to the concurrent confirm phase.
+            confirm_jobs.append((meta, _confirm_live_leg(meta, order_id)))
 
-            confirm_result = await confirm_exit(
-                session_id=self.session_id,
-                symbol=meta["symbol"],
-                order_id=order_id,
-                qty=meta["qty"],
-                broker=broker_for_pos,
-                registry=self.registry,
-                close_reason=close_reason,
-                max_wait_sec=60,
-                poll_interval_sec=5.0,
-            )
-            confirm_status = confirm_result.get("status", "UNKNOWN")
-
-            if confirm_status == "COMPLETE":
-                n_ok += 1
-                details.append({**meta, "status": "COMPLETE",
-                                "broker_order_id": order_id,
-                                "exit_price": confirm_result.get("exit_price")})
-
-            elif confirm_status == "PARTIAL":
-                # Try to exit the remaining qty with cancel-and-retry.
-                remaining = confirm_result.get("remaining_qty", 0)
-                log.warning("kill switch: PARTIAL fill for %s/%s "
-                            "(filled=%d remaining=%d) — retrying remainder",
-                            self.session_id, meta["symbol"],
-                            confirm_result.get("filled_qty", 0), remaining)
-                if remaining > 0:
-                    retry_result = await cancel_and_retry_exit(
-                        session_id=self.session_id,
-                        symbol=meta["symbol"],
-                        order_id=order_id,
-                        qty=remaining,
-                        broker=broker_for_pos,
-                        registry=self.registry,
-                        close_reason=close_reason,
-                        max_retries=3,
-                        direction=meta.get("direction", "long"),
-                        instrument_type=meta.get("instrument_type", "EQ"),
-                        kite_product=meta.get("kite_product"),
-                    )
-                    if retry_result.get("status") == "COMPLETE":
-                        n_ok += 1
-                        details.append({**meta, "status": "COMPLETE_AFTER_PARTIAL",
-                                        "broker_order_id": order_id})
-                    else:
-                        n_failed += 1
-                        alerts.send_urgent(
-                            f"MANUAL EXIT REQUIRED (partial): "
-                            f"{meta['symbol']} ({self.session_id})")
-                        details.append({**meta, "status": "PARTIAL_FAILED",
-                                        "remaining_qty": remaining})
-                else:
-                    n_ok += 1
-                    details.append({**meta, "status": "COMPLETE_AFTER_PARTIAL"})
-
-            elif confirm_status in ("TIMEOUT",):
-                # Order still pending — cancel it and retry with a fresh sell.
-                log.error("kill switch: TIMEOUT confirming exit for %s/%s "
-                          "— cancelling + retrying", self.session_id, meta["symbol"])
-                retry_result = await cancel_and_retry_exit(
-                    session_id=self.session_id,
-                    symbol=meta["symbol"],
-                    order_id=order_id,
-                    qty=meta["qty"],
-                    broker=broker_for_pos,
-                    registry=self.registry,
-                    close_reason=close_reason,
-                    max_retries=3,
-                    direction=meta.get("direction", "long"),
-                    instrument_type=meta.get("instrument_type", "EQ"),
-                    kite_product=meta.get("kite_product"),
-                )
-                if retry_result.get("status") == "COMPLETE":
-                    n_ok += 1
-                    details.append({**meta, "status": "COMPLETE_AFTER_TIMEOUT",
-                                    "broker_order_id": order_id})
-                else:
+        # R2: confirm all live legs CONCURRENTLY. return_exceptions=True so one
+        # bad leg can't block (or crash) the others.
+        if confirm_jobs:
+            outcomes = await asyncio.gather(
+                *[c for _m, c in confirm_jobs], return_exceptions=True)
+            for (meta, _coro), outcome in zip(confirm_jobs, outcomes):
+                if isinstance(outcome, Exception):
                     n_failed += 1
                     alerts.send_urgent(
-                        f"MANUAL EXIT REQUIRED (timeout): "
-                        f"{meta['symbol']} ({self.session_id})")
+                        f"MANUAL EXIT REQUIRED: {meta['symbol']} "
+                        f"({self.session_id})")
                     self.registry.mark_exit_failed(
-                        meta["symbol"], "timeout + retry exhausted",
+                        meta["symbol"], str(outcome),
                         broker_profile=meta.get("broker_profile"))
-                    details.append({**meta, "status": "EXIT_FAILED_TIMEOUT"})
-
-            else:
-                # REJECTED / CANCELLED — exit_gate already released by confirm_exit
-                # (via mark_exit_failed). Needs human intervention.
-                n_failed += 1
-                alerts.send_urgent(
-                    f"MANUAL EXIT REQUIRED ({confirm_status}): "
-                    f"{meta['symbol']} ({self.session_id})")
-                details.append({**meta, "status": f"EXIT_FAILED_{confirm_status}"})
+                    details.append({**meta, "status": "EXIT_FAILED",
+                                    "error": str(outcome)})
+                    continue
+                ok, detail = outcome
+                n_ok += 1 if ok else 0
+                n_failed += 0 if ok else 1
+                details.append(detail)
 
         # STEP 4 — close session + log. Record exit_latency_ms (trigger → flat).
-        self._set_session_status("CLOSED")
+        # C2: only mark CLOSED (terminal) when EVERY leg confirmed flat. If any leg
+        # is EXIT_FAILED / unconfirmed, set the NON-terminal KILLING_INCOMPLETE so
+        # the tick driver keeps servicing the EXIT_FAILED retry sweep instead of
+        # self-stopping and stranding the leg. tick() promotes it to CLOSED once
+        # the last leg is flat. The all-success path stays byte-for-byte CLOSED.
+        self._set_session_status("CLOSED" if n_failed == 0 else "KILLING_INCOMPLETE")
         exit_latency_ms = int((time.monotonic() - _exit_t0) * 1000)
         try:
             with falcon_conn() as con:

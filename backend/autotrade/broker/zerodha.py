@@ -1091,6 +1091,27 @@ class ZerodhaBroker(BrokerClient):
             log.debug("get_gtt failed for %s: %s", gtt_id, e)
             return None
 
+    def get_gtts_map(self) -> Optional[dict]:
+        """P1(b): ONE kite.get_gtts() → {str(trigger_id): full GTT state} so the
+        per-tick GTT reconcile resolves N positions from a single call instead of
+        N get_gtt round-trips. Dry-run / disabled → None (paper unchanged). Any
+        error → None so the caller SAFELY falls back to per-position get_gtt."""
+        if not self._live_allowed():
+            return None
+        try:
+            gtts = self.kite.get_gtts() or []
+        except Exception as e:  # pragma: no cover - defensive
+            log.debug("get_gtts failed: %s", e)
+            return None
+        out: dict = {}
+        for g in gtts:
+            if not isinstance(g, dict):
+                continue
+            gid = g.get("id") if g.get("id") is not None else g.get("trigger_id")
+            if gid is not None:
+                out[str(gid)] = g
+        return out
+
     @staticmethod
     def _extract_fired_order_id(state: Any) -> Optional[str]:
         """Pull the broker order-id of the order a TRIGGERED GTT placed.

@@ -23,6 +23,65 @@ log = logging.getLogger("kanida.autotrade.registry")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
+# ── SESSION-SCOPED pre-exit flat guard (C1) ──────────────────────────────────
+# The broker's net book is ACCOUNT-wide: when two sessions hold the same symbol
+# a plain `broker_net == 0` (or `broker_net < our_qty`) test cannot tell whose
+# shares are gone, so session A could (a) wrongly treat session B's still-open
+# shares as "already flat", or (b) place a market exit that SELLS INTO B's lot
+# (an oversell). These helpers make the decision SESSION-SCOPED: they subtract
+# the qty other sessions still hold from the broker net, leaving only the shares
+# attributable to THIS session. Reads autotrade_positions ONLY (never
+# falcon_position_state) — data-isolation preserved.
+def sibling_open_qty(session_id: str, symbol: str,
+                     instrument_type: Optional[str] = None) -> int:
+    """Σ still-held qty for `symbol` across OTHER sessions on the account
+    (status OPEN or EXIT_FAILED — an EXIT_FAILED sibling still holds its shares
+    at the broker). When instrument_type is given it must match (so a cash EQ
+    lot and a FUT contract of the same base name never cross-count)."""
+    with falcon_conn() as con:
+        if instrument_type is not None:
+            r = con.execute(
+                """SELECT COALESCE(SUM(qty),0) AS q FROM autotrade_positions
+                   WHERE symbol=? AND session_id<>?
+                     AND status IN ('OPEN','EXIT_FAILED') AND qty>0
+                     AND COALESCE(instrument_type,'EQ')=COALESCE(?,'EQ')""",
+                (symbol, session_id, instrument_type)).fetchone()
+        else:
+            r = con.execute(
+                """SELECT COALESCE(SUM(qty),0) AS q FROM autotrade_positions
+                   WHERE symbol=? AND session_id<>?
+                     AND status IN ('OPEN','EXIT_FAILED') AND qty>0""",
+                (symbol, session_id)).fetchone()
+    return int(r["q"] or 0) if r else 0
+
+
+def our_held_at_broker(session_id: str, symbol: str,
+                       instrument_type: Optional[str],
+                       our_qty: int, broker_net) -> Optional[int]:
+    """The qty attributable to THIS session that is STILL held at the broker:
+
+        clamp(|broker_net| - Σ(other sessions' held qty), 0, our_qty)
+
+    `broker_net` is the broker's ACCOUNT net for the symbol (signed; abs() so a
+    short's negative net counts as held). Returns None when broker_net is None
+    (paper / unknown) → the caller proceeds with its normal exit (paper is
+    byte-for-byte unchanged). The position is "already closed FOR THIS SESSION"
+    (our shares gone) iff the return is 0 — NOT when the whole account is 0.
+    When there are NO siblings this equals min(our_qty, |broker_net|), so a
+    fully-flat broker (0) → 0 and a fully-held broker (>=our_qty) → our_qty,
+    byte-identical to the old `broker_net == 0` decision for the single-session
+    case."""
+    if broker_net is None:
+        return None
+    try:
+        net = abs(int(broker_net))
+        oq = int(our_qty)
+    except (TypeError, ValueError):
+        return None
+    other = sibling_open_qty(session_id, symbol, instrument_type)
+    return max(0, min(oq, net - other))
+
+
 class PositionRegistry:
     def __init__(self, session_id: str, total_allocated_capital: float):
         self.session_id = session_id
@@ -134,6 +193,19 @@ class PositionRegistry:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_exit_failed_all(self) -> List[Dict[str, Any]]:
+        """ALL EXIT_FAILED positions (qty>0) for this session, regardless of the
+        exit_lock — for status() so a stranded, still-held leg is VISIBLE (C3).
+        (monitor.get_exit_failed_positions returns only the retry-eligible
+        exit_lock=0 subset; this is the full set for display.)"""
+        with falcon_conn() as con:
+            rows = con.execute(
+                """SELECT * FROM autotrade_positions
+                   WHERE session_id=? AND status='EXIT_FAILED' AND qty > 0""",
+                (self.session_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def update_ltp(self, symbol: str, ltp: Optional[float] = None,
                    broker: Any = None,
                    broker_profile: Optional[str] = None) -> None:
@@ -167,13 +239,14 @@ class PositionRegistry:
             # FUTURES long/short: sign-aware uPnL. For 'long' the CASE is +1 so
             # this is byte-identical to (ltp-avg)*qty; for 'short' it is
             # (avg-ltp)*qty (profit when price falls).
+            # Lifecycle#8: stamp the mark time (as-of) so a stale mark is visible.
             con.execute(
                 """UPDATE autotrade_positions
-                   SET ltp=?,
+                   SET ltp=?, ltp_as_of=?,
                        unrealised_pnl=(CASE WHEN direction='short' THEN -1
                                             ELSE 1 END) * (? - avg_price) * qty
                    WHERE id=?""",
-                (ltp, ltp, row["id"]),
+                (ltp, datetime.now(IST).isoformat(), ltp, row["id"]),
             )
             con.commit()
 
