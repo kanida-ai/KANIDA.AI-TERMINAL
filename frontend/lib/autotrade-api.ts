@@ -137,11 +137,16 @@ export type SessionConfig = {
   //     FRACTIONS. 0 < lock < peak (< 100 UI / < 1 wire); both columns ascending.
   //   trail_large_peak_pct / trail_large_giveback_rel: once peak ≥ large_peak the
   //     give-back switches to RELATIVE (peak × (1 − rel)). Percents in UI.
+  //   per_stock_stop_pct: per-stock CAPITAL-basis hard stop (FRACTION on the wire,
+  //     PERCENT in the UI; toWireConfig ÷100). ONLY applies when step_lock_scope =
+  //     'stock' — a single stock down this % of ITS OWN deployed capital exits alone
+  //     (reason STOP_STOCK). Inert for 'basket'. 0 = off. Wire range [0, 0.5].
   step_lock_scope?: 'basket' | 'stock'
   trail_step_lock_enabled?: boolean
   trail_step_lock_ladder?: number[][]
   trail_large_peak_pct?: number
   trail_large_giveback_rel?: number
+  per_stock_stop_pct?: number
 }
 
 // A pick the backend SKIPPED because one unit of it costs more than its per-slice

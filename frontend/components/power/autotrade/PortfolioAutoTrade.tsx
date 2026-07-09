@@ -98,6 +98,9 @@ const INTRADAY_PRESET: Partial<SessionConfig> = {
   trail_step_lock_ladder: [[3, 2], [5, 3.5], [8, 6], [12, 9.5], [16, 13]],
   trail_large_peak_pct: 20,
   trail_large_giveback_rel: 17.5,
+  // Per-stock hard stop (UI PERCENT; only used in Individual-stock mode). 3% of the
+  // capital deployed on a name → exit it alone. 0 = off. Wired ÷100.
+  per_stock_stop_pct: 3,
 }
 
 // ── Hold-mode TRAIL presets (params only — product/entry/capital untouched) ────
@@ -154,6 +157,11 @@ function validateIntradayStepLock(c: SessionConfig): string | null {
   const lr = Number(c.trail_large_giveback_rel)
   if (!(lp > 0 && lp <= 50)) return 'Large-day peak must be between 0 and 50%.'
   if (!(lr > 0 && lr < 100)) return 'Large-day give-back must be between 0 and 100%.'
+  // Per-stock hard stop (Individual-stock mode) — 0 = off, otherwise ≤ 50%.
+  if (c.step_lock_scope === 'stock') {
+    const ps = Number(c.per_stock_stop_pct)
+    if (!Number.isFinite(ps) || ps < 0 || ps > 50) return 'Per-stock stop-loss must be between 0 and 50% (0 = off).'
+  }
   return null
 }
 
@@ -822,6 +830,9 @@ export function PortfolioAutoTrade({
           .map((r) => [(Number(r[0]) || 0) / 100, (Number(r[1]) || 0) / 100]),
         trail_large_peak_pct: (Number(c.trail_large_peak_pct) || STEP_LOCK_LARGE_PEAK_DEFAULT) / 100,
         trail_large_giveback_rel: (Number(c.trail_large_giveback_rel) || STEP_LOCK_LARGE_GIVEBACK_DEFAULT) / 100,
+        // Per-stock CAPITAL-basis hard stop — PERCENT → FRACTION. 0 = off (kept, not
+        // coerced to a default). Backend applies it only in 'stock' scope.
+        per_stock_stop_pct: Math.max(0, Number(c.per_stock_stop_pct) || 0) / 100,
         // intraday_basket exits via the trail, not the flat kill switch
         kill_switch_enabled: false,
       }
@@ -2550,6 +2561,18 @@ export function PortfolioAutoTrade({
                   <div><b style={{ color: scope === 'basket' ? C.mint : C.ink2 }}>Portfolio-level</b> — the whole basket&apos;s profit is trailed and exits together.</div>
                   <div><b style={{ color: scope === 'stock' ? C.mint : C.ink2 }}>Individual-stock</b> — each stock trails and exits on its own.</div>
                 </div>
+
+                {/* PER-STOCK hard stop — only meaningful in Individual-stock mode.
+                    Portfolio-level uses the aggregate hard stop (Stop loss above). */}
+                {scope === 'stock' && (
+                  <div className="mt-4">
+                    <Field label="Per-stock stop-loss (% of capital)" hint="Exit an individual stock when it's down this % of the capital deployed on it. 0 = off.">
+                      <input type="number" min={0} step={0.5} value={config.per_stock_stop_pct ?? ''}
+                        onChange={(e) => set('per_stock_stop_pct', Number(e.target.value) || 0)}
+                        className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                    </Field>
+                  </div>
+                )}
 
                 {/* ENABLE step-locking — reuses the kill-switch toggle pattern. */}
                 <div className="mt-4 flex items-center justify-between rounded-lg border px-3 py-2.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
