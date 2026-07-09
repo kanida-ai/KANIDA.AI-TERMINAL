@@ -973,6 +973,9 @@ LIVE_EDITABLE_SESSION_FIELDS = (
     # create). maybe_reload_config copies it onto the live config within one tick;
     # positions / basis / per-stock ratchet state are untouched.
     "step_lock_scope",
+    # PER-STOCK CAPITAL STOP — the % of a stock's OWN deployed capital at which it
+    # is cut (step_lock_scope=="stock"). Hot-editable on a running session.
+    "per_stock_stop_pct",
     "per_position_stop_pct",
     "per_position_target_pct",
     "square_off_time",
@@ -2377,11 +2380,18 @@ class TradingSession:
             return []
         total_cap = float(self.config.total_allocated_capital)
         # Per-stock params: the SAME ladder / give-back / arm-at-first-rung /
-        # large-tier knobs, but with the BASKET safety branches SUPPRESSED — the
-        # time SQUARE_OFF (square_off_enabled=False) and the downside STOP (an
-        # unreachable stop_pct) are handled once at the basket level by the caller,
-        # never per-stock. Only the profit trail (arm/ratchet/trail-exit) fires.
-        ps_params = _dc_replace(params, square_off_enabled=False, stop_pct=10.0)
+        # large-tier knobs, the time SQUARE_OFF suppressed (basket-level), and the
+        # engine's STOP branch REPURPOSED as the PER-STOCK CAPITAL STOP. Because
+        # g_stock is on the stock's own capital slice, feeding per_stock_stop_pct as
+        # stop_pct makes the engine exit a name (reason STOP → relabelled STOP_STOCK)
+        # the instant g_stock <= -per_stock_stop_pct — i.e. down that % of the money
+        # deployed on THAT stock (leverage-correct, same basis as arm/give/ladder).
+        # (2026-07-09: this is the previously-missing per-name stop; before, a name
+        # drifting down had only the basket-AGGREGATE stop.) 0.0 → keep it suppressed
+        # (unreachable 10.0) so the aggregate basket stop remains the only downside.
+        _ps_stop = float(getattr(self.config, "per_stock_stop_pct", 0.03) or 0.0)
+        ps_params = _dc_replace(params, square_off_enabled=False,
+                                stop_pct=(_ps_stop if _ps_stop > 0 else 10.0))
 
         exits: List[Dict[str, Any]] = []
         for p in positions:
@@ -2405,17 +2415,21 @@ class TradingSession:
             if decision.state_changed:
                 self.monitor.save_per_stock_trail_state(p["symbol"], decision.state)
             if decision.action == "EXIT":
+                # The engine emits "STOP" for the downside hard stop; in per-stock
+                # scope that IS the per-stock CAPITAL stop → relabel for clarity so
+                # the close_reason/journal reads STOP_STOCK, not the basket "STOP".
+                reason = "STOP_STOCK" if decision.reason == "STOP" else decision.reason
                 result = await _exit_single_position(
                     session_id=self.session_id, position=p,
-                    reason=decision.reason, brokers=self.brokers,
+                    reason=reason, brokers=self.brokers,
                     registry=self.registry, gtt_manager=self.gtt_manager,
                     kite_product=self.config.order_product, exec_cfg=self.config)
-                result["reason"] = decision.reason
+                result["reason"] = reason
                 result["g_stock"] = g_stock
                 exits.append(result)
                 log.warning(
-                    "PER-STOCK STEP-LOCK EXIT %s/%s: g_stock=%.4f reason=%s",
-                    self.session_id, p["symbol"], g_stock, decision.reason)
+                    "PER-STOCK EXIT %s/%s: g_stock=%.4f reason=%s",
+                    self.session_id, p["symbol"], g_stock, reason)
         return exits
 
     # ── Manual kill ────────────────────────────────────────────────────────────

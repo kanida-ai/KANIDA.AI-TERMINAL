@@ -337,6 +337,21 @@ class TradingSessionConfig:
     # (cut a name at its stop that then recovered inside the basket), reducing return
     # at EVERY level. Set True only to run the (worse-returning) two-layer variant.
     per_stock_stop_enabled: bool = False
+    # ── PER-STOCK CAPITAL-BASIS HARD STOP (step_lock_scope=="stock" only) ──────
+    # 2026-07-09: an INDIVIDUAL-stock downside stop expressed as a FRACTION OF
+    # THAT STOCK'S DEPLOYED CAPITAL (its capital slice = total_allocated_capital *
+    # notional/Σnotional), NOT of price. It runs inside _run_per_stock_step_lock:
+    # a position exits (reason STOP_STOCK) the moment its g_stock <= -this. Because
+    # g_stock is already on the stock's capital slice, "3%" means 3% of the money
+    # deployed on that name — leverage-correct, consistent with arm/give/ladder.
+    # This is the stop that was MISSING: with step_lock_scope=="stock" the only
+    # downside net was the basket-AGGREGATE stop (whole basket G <= -stop_pct), so
+    # a single name drifting down (e.g. ATHERENERG -2.85% of capital on 2026-07-09,
+    # 0.56% of PRICE at 5x) had NO per-name stop. 0.0 disables it (aggregate-only,
+    # the pre-2026-07-09 behaviour). Inert when scope=="basket" (the basket exits
+    # whole via the aggregate stop). Distinct from per_stock_stop_enabled (that
+    # gates the OLDER PRICE-basis two-layer stop, still off by default).
+    per_stock_stop_pct: float = 0.03
     square_off_time: str = "15:29:00"
     # ── INTRADAY vs POSITIONAL trailing (additive, default-on = today) ────────
     # Applies to strategy=="intraday_basket" only. Inert otherwise.
@@ -557,6 +572,12 @@ class TradingSessionConfig:
                 raise ValueError(
                     "step_lock_scope must be 'basket' or 'stock', got "
                     f"{self.step_lock_scope!r}")
+            # PER-STOCK CAPITAL STOP: a FRACTION in [0, 0.5]; 0 disables it.
+            if not (0.0 <= float(self.per_stock_stop_pct) <= 0.5):
+                raise ValueError(
+                    "per_stock_stop_pct must be a fraction in [0, 0.5] "
+                    "(e.g. 0.03 = 3% of the stock's capital; 0 disables), got "
+                    f"{self.per_stock_stop_pct}")
             # Times must parse and square-off must be strictly after entry.
             try:
                 entry_s = _parse_clock_to_seconds(self.entry_time)
@@ -762,6 +783,7 @@ class TradingSessionConfig:
                 d.get("trail_large_giveback_rel", 0.175)),
             step_lock_scope=d.get("step_lock_scope", "basket"),
             per_stock_stop_enabled=bool(d.get("per_stock_stop_enabled", False)),
+            per_stock_stop_pct=float(d.get("per_stock_stop_pct", 0.03)),
             square_off_time=d.get("square_off_time", "15:29:00"),
             square_off_enabled=bool(d.get("square_off_enabled", True)),
             max_hold_sessions=int(d.get("max_hold_sessions", 0)),

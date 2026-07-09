@@ -63,13 +63,14 @@ CAP = 20_000.0
 
 
 def _cfg(*, scope="stock", square_off_enabled=True, stop_pct=0.03,
+         per_stock_stop_pct=0.03,
          square_off_time="15:29:00", entry_time="09:15:00",
          mis_square_off_time="15:12:00"):
     return TradingSessionConfig(
         total_allocated_capital=CAP, top_n_stocks=3, sizing_mode="equal",
         strategy="intraday_basket", order_product="CNC",
         per_position_gtt_enabled=False, per_stock_stop_enabled=False,
-        step_lock_scope=scope,
+        step_lock_scope=scope, per_stock_stop_pct=per_stock_stop_pct,
         # step-lock ON with the default ladder (arm at first rung 0.03); give-back
         # default is now 0.0125.
         trail_step_lock_enabled=True,
@@ -323,3 +324,70 @@ def test_basket_scope_exits_whole_basket(clean_positions, ab_brokers):
     assert r2["trail_action"] == "EXIT"
     assert r2["kill_reason"] == "TRAIL_EXIT"
     assert _open_count(sid) == 0                    # ALL flattened, not one leg
+
+
+# ── 6. PER-STOCK CAPITAL STOP (2026-07-09) ────────────────────────────────────
+# A single name down -per_stock_stop_pct of ITS OWN capital slice is cut ALONE
+# (STOP_STOCK), even when the basket AGGREGATE is flat (so the basket -stop_pct
+# does NOT fire). This is the gap that let ATHERENERG drift -2.85% of capital
+# un-stopped on 2026-07-09 (only 0.56% of PRICE at 5x, so the price-basis GTT
+# never fired and there was no per-name capital stop).
+
+def test_per_stock_capital_stop_exits_one_name_alone(clean_positions, ab_brokers):
+    sid = _start(_cfg(scope="stock", square_off_enabled=False), ab_brokers)
+    # A -3% (g_stock -0.03), B +3% (g_stock +0.03) → basket G = 0 → basket stop
+    # does NOT fire; only A's per-stock capital stop should act.
+    ab_brokers["A"] = 97.0
+    ab_brokers["B"] = 103.0
+    r = _tick(sid)
+    assert r.get("kill_reason") in (None, "")        # basket aggregate stop silent
+    exits = {e["symbol"]: e["reason"] for e in r["per_stock_exits"]}
+    assert exits == {"A": "STOP_STOCK"}              # A cut on its OWN capital stop
+    assert _pos_state(sid, "A")["status"] == "CLOSED"
+    b = _pos_state(sid, "B")
+    assert b["status"] == "OPEN" and b["pos_trail_armed"] == 1   # sibling runs on
+    assert _open_count(sid) == 1
+
+
+def test_per_stock_capital_stop_fires_before_arming(clean_positions, ab_brokers):
+    """The stop is checked before the profit trail, so a name that goes straight
+    down (never arming) is still cut at -per_stock_stop_pct."""
+    sid = _start(_cfg(scope="stock", square_off_enabled=False), ab_brokers)
+    ab_brokers["A"] = 96.5    # -3.5% of its slice, never armed
+    ab_brokers["B"] = 100.0   # flat → basket G = -1.75% (not at -3%, basket silent)
+    r = _tick(sid)
+    exits = {e["symbol"]: e["reason"] for e in r["per_stock_exits"]}
+    assert exits == {"A": "STOP_STOCK"}
+    assert _pos_state(sid, "A")["pos_trail_armed"] in (0, None)  # exited pre-arm
+    assert _open_count(sid) == 1
+
+
+def test_per_stock_capital_stop_disabled_when_zero(clean_positions, ab_brokers):
+    """per_stock_stop_pct=0 → the per-stock capital stop is OFF (pre-2026-07-09
+    behaviour): a name down -4% keeps running; only the basket-aggregate stop and
+    the profit trail act."""
+    sid = _start(_cfg(scope="stock", square_off_enabled=False,
+                      per_stock_stop_pct=0.0), ab_brokers)
+    ab_brokers["A"] = 96.0    # -4% of its slice
+    ab_brokers["B"] = 104.0   # +4% → basket G = 0 (basket stop also silent)
+    r = _tick(sid)
+    assert r["per_stock_exits"] == []                # A NOT cut (stop disabled)
+    assert _pos_state(sid, "A")["status"] == "OPEN"
+    assert _open_count(sid) == 2
+
+
+def test_per_stock_stop_pct_config_default_validation_live_editable():
+    c = TradingSessionConfig(total_allocated_capital=CAP,
+                             strategy="intraday_basket", top_n_stocks=5)
+    assert c.per_stock_stop_pct == pytest.approx(0.03)   # capital-basis default
+    c.validate()
+    TradingSessionConfig(total_allocated_capital=CAP, strategy="intraday_basket",
+                         top_n_stocks=5, per_stock_stop_pct=0.0).validate()  # 0 ok
+    bad = TradingSessionConfig(total_allocated_capital=CAP,
+                               strategy="intraday_basket", top_n_stocks=5,
+                               per_stock_stop_pct=0.9)                       # >0.5
+    with pytest.raises(ValueError, match="per_stock_stop_pct"):
+        bad.validate()
+    assert TradingSessionConfig.from_dict(c.to_dict()).per_stock_stop_pct == \
+        pytest.approx(0.03)                                # round-trips
+    assert "per_stock_stop_pct" in LIVE_EDITABLE_SESSION_FIELDS  # hot-editable
