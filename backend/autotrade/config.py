@@ -256,12 +256,16 @@ class TradingSessionConfig:
     # portfolio target usually fires first. LIVE-only: in paper mode no real GTT
     # is placed (the intended levels are still recorded for the UI).
     per_position_gtt_enabled: bool = True
-    # Per-position broker GTT-OCO backstop. WIDENED to -5% (was -3%) per the
-    # validated basket-only strategy doc (2026-07-04): the GTT is a rare CATASTROPHE
-    # backstop only — a tight -3% GTT dragged live toward the (worse) two-layer
-    # numbers. Basket-level exits (arm/trail/stop) do the real work.
-    per_position_stop_pct: float = 0.05    # stop  = entry * (1 - this)
-    per_position_target_pct: float = 0.06  # target = entry * (1 + this)
+    # Per-position broker GTT-OCO backstop. These are now FRACTIONS OF THE
+    # POSITION'S CAPITAL (NOT price) — GTTManager converts them to the broker
+    # PRICE trigger via the session leverage L (price_pct = capital_pct / L; on a
+    # 5x MTF basket an 8% capital stop = a ~1.6% price stop, on a 1x CNC basket
+    # L=1 so 8% capital = 8% price). Validated in (0, 0.5] like every other pct.
+    # The GTT is a rare CATASTROPHE backstop only — basket-level exits
+    # (arm/trail/stop) do the real work, so target is a wide profit backstop set
+    # ABOVE the trail's top ladder rung.
+    per_position_stop_pct: float = 0.08    # 8% of the position's CAPITAL (→ price via L)
+    per_position_target_pct: float = 0.20  # 20% of the position's CAPITAL (→ price via L)
 
     # ── INTRADAY BASKET trailing engine (strategy=="intraday_basket" only) ────
     # All percentages are FRACTIONS (0.01 = 1%), validated in (0, 0.5], exactly
@@ -765,8 +769,8 @@ class TradingSessionConfig:
                 float(d["kill_switch_stop_pct"])
                 if d.get("kill_switch_stop_pct") is not None else None),
             per_position_gtt_enabled=bool(d.get("per_position_gtt_enabled", True)),
-            per_position_stop_pct=float(d.get("per_position_stop_pct", 0.05)),
-            per_position_target_pct=float(d.get("per_position_target_pct", 0.06)),
+            per_position_stop_pct=float(d.get("per_position_stop_pct", 0.08)),
+            per_position_target_pct=float(d.get("per_position_target_pct", 0.20)),
             arm_pct=float(d.get("arm_pct", 0.05)),
             floor_pct=float(d.get("floor_pct", 0.01)),
             trail_giveback_pct=float(d.get("trail_giveback_pct", 0.0125)),

@@ -6,9 +6,15 @@ the BACKUP floor: a Kite two-leg OCO GTT per LIVE session position — a STOP le
 broker holds it, so a position is still protected if our process is down.
 
 Widths are CONFIG-driven and default WIDER than the portfolio kill_switch_pct so
-the portfolio target usually fires first:
-    stop   = entry * (1 - per_position_stop_pct)     (default 0.03 → -3%)
-    target = entry * (1 + per_position_target_pct)   (default 0.06 → +6%)
+the portfolio target usually fires first. per_position_stop_pct /
+per_position_target_pct are FRACTIONS OF THE POSITION'S CAPITAL (default 0.08 /
+0.20). place_for_position converts them to the broker PRICE-trigger fraction via
+the session leverage L (see _session_leverage) before calling compute_levels —
+which stays PURE and price-basis:
+    price_stop_pct = per_position_stop_pct / L
+    stop   = entry * (1 - price_stop_pct)    (e.g. 8% capital / 5x basket = 1.6% price)
+    price_target_pct = per_position_target_pct / L
+    target = entry * (1 + price_target_pct)  (on a 1x CNC basket L=1 → 8% / 20% price)
 
 SAFETY:
   * LIVE-ONLY real GTTs. In paper mode (broker.place_gtt_oco returns None because
@@ -156,6 +162,40 @@ class GTTManager:
             pass
         return str(getattr(self.config, "order_product", "CNC") or "CNC")
 
+    def _session_leverage(self) -> float:
+        """Session BASKET leverage L = Σ(qty*avg_price over OPEN positions) /
+        total_allocated_capital, clamped to max(1.0, L).
+
+        Used by place_for_position to convert a per-position CAPITAL-basis
+        stop/target fraction into the broker PRICE-trigger fraction
+        (price_pct = capital_pct / L), keeping compute_levels pure/price-basis.
+
+        WHY L = invested / capital works uniformly: the equal-notional basket
+        sizing makes each leg's capital slice ∝ its notional, so leverage is the
+        SAME across every leg — one session-wide L converts every leg correctly
+        (an 8% capital stop on a 5x basket → a 1.6% price stop).
+
+        FALLBACK = 1.0 and it is CONSERVATIVE. On ANY error, missing/≤0 capital,
+        or Σnotional ≤ 0 we return 1.0 → the price fraction EQUALS the capital
+        fraction → the WIDEST stop. Because L ≥ 1 always, the converted price
+        fraction is never LARGER than the capital fraction, so a real broker stop
+        can never FALSE-FIRE (fire tighter than intended) from a leverage
+        miscompute — it can only ever be wider than the leverage-exact value."""
+        try:
+            cap = float(getattr(self.config, "total_allocated_capital", 0.0) or 0.0)
+            if cap <= 0:
+                return 1.0
+            notional = 0.0
+            for p in self.registry.get_open_positions():
+                qty = float(p.get("qty") or 0.0)
+                avg = float(p.get("avg_price") or 0.0)
+                notional += qty * avg
+            if notional <= 0:
+                return 1.0
+            return max(1.0, notional / cap)
+        except Exception:  # pragma: no cover - defensive; conservative fallback
+            return 1.0
+
     # ── Place one position's GTT-OCO ──────────────────────────────────────────
     def place_for_position(self, pos: Dict[str, Any]) -> Dict[str, Any]:
         """Compute levels + place a GTT-OCO for one open position, then persist
@@ -168,6 +208,16 @@ class GTTManager:
         direction = pos.get("direction") or "long"
         if qty <= 0 or entry <= 0:
             return {"symbol": symbol, "status": "SKIPPED_NO_QTY_OR_PRICE"}
+
+        # CAPITAL→PRICE conversion: per_position_stop_pct / per_position_target_pct
+        # are FRACTIONS OF THE POSITION'S CAPITAL. compute_levels is PURE and
+        # price-basis, so we convert here via the session leverage L (≥1). An 8%
+        # capital stop on a 5x basket → a 1.6% price stop; on a 1x CNC basket
+        # (L clamps to 1) → 8% price. L ≥ 1 → price_pct ≤ capital_pct, so a real
+        # broker stop is never TIGHTER than intended (never false-fires).
+        lev = self._session_leverage()
+        price_stop_pct = float(self.config.per_position_stop_pct) / lev
+        price_target_pct = float(self.config.per_position_target_pct) / lev
 
         # GUARD G1 (mode F5): the effective product for THIS leg. Prefer the
         # position's broker_profile order_product (the product it was actually
@@ -183,8 +233,7 @@ class GTTManager:
                      "tick-stop + square-off cover it (no orphan GTT)",
                      self.session_id, symbol, _norm_product(eff_product))
             stop_trig, _sl, tgt_trig, _tl = compute_levels(
-                entry, self.config.per_position_stop_pct,
-                self.config.per_position_target_pct, direction=direction)
+                entry, price_stop_pct, price_target_pct, direction=direction)
             self.registry.set_gtt(symbol, None, gtt_stop=stop_trig,
                                   gtt_target=tgt_trig, broker_profile=prof_id)
             return {"symbol": symbol, "status": "SUPPRESSED_INTRADAY",
@@ -193,8 +242,7 @@ class GTTManager:
         # FUTURES long/short: for a short the STOP is ABOVE entry (buy-stop) and
         # the TARGET is BELOW (buy-limit). compute_levels inverts on direction.
         stop_trig, stop_lim, tgt_trig, tgt_lim = compute_levels(
-            entry, self.config.per_position_stop_pct,
-            self.config.per_position_target_pct, direction=direction)
+            entry, price_stop_pct, price_target_pct, direction=direction)
 
         broker = self.brokers.get(prof_id) or next(iter(self.brokers.values()), None)
         gtt_id: Optional[str] = None

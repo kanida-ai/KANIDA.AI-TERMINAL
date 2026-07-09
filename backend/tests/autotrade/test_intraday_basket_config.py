@@ -24,7 +24,7 @@ def test_validated_basket_only_defaults():
     assert c.floor_pct == 0.01           # locked floor +1%
     assert c.trail_giveback_pct == 0.0125 # 1.25% give-back (2026-07-08 default)
     assert c.stop_pct == 0.03            # -3% basket hard stop
-    assert c.per_position_stop_pct == 0.05   # GTT = rare -5% catastrophe backstop
+    assert c.per_position_stop_pct == 0.08   # GTT = 8% OF CAPITAL (→ price via leverage)
     assert c.per_stock_stop_enabled is False # Layer A OFF → basket-only
 
 
@@ -34,7 +34,7 @@ def test_from_dict_preserves_basket_only_and_parses_flag():
                           "total_allocated_capital": 500000.0,
                           "order_product": "MIS", "top_n_stocks": 5})
     assert d.per_stock_stop_enabled is False
-    assert d.arm_pct == 0.05 and d.stop_pct == 0.03 and d.per_position_stop_pct == 0.05
+    assert d.arm_pct == 0.05 and d.stop_pct == 0.03 and d.per_position_stop_pct == 0.08
     # Explicit opt-in to the (worse-returning) two-layer variant is honoured.
     two = _cfg().from_dict({"strategy": "intraday_basket",
                             "total_allocated_capital": 500000.0,
