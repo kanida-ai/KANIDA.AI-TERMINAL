@@ -25,6 +25,57 @@ def _now_ist_iso() -> str:
     return datetime.now(IST).isoformat()
 
 
+# ── PROFIT STEP-LOCK ladder (intraday_basket trail) ─────────────────────────────
+# A ratcheting profit-floor ladder: ascending (peak_threshold, lock_floor) rungs,
+# ALL FRACTIONS OF ALLOCATED CAPITAL (the intraday_basket trail keys on
+# compute_gross_return = uPnL/deployed capital). Once the peak G crosses a rung's
+# peak_threshold the lock_floor is LOCKED IN (monotonic-up: peak only ratchets up,
+# so the step floor never steps down). The DEFAULT matches a ₹5L / 5x setup exactly
+# (peak ≥3%→lock 2% ; ≥5%→3.5% ; ≥8%→6% ; ≥12%→9.5% ; ≥16%→13%).
+DEFAULT_STEP_LOCK_LADDER: List[List[float]] = [
+    [0.03, 0.02], [0.05, 0.035], [0.08, 0.06], [0.12, 0.095], [0.16, 0.13],
+]
+
+
+def validate_step_lock_ladder(ladder: Any) -> None:
+    """Validate a step-lock ladder shape (shared by config.validate() + the live
+    config-edit PATCH endpoint). Raises ValueError on any violation.
+
+    Rules: non-empty; each rung is a 2-tuple [peak_threshold, lock_floor] with
+    0 < lock < peak < 1; strictly ASCENDING by peak; lock strictly ascending too
+    (so the locked floor is genuinely monotonic-up as the peak climbs)."""
+    if not isinstance(ladder, (list, tuple)) or len(ladder) == 0:
+        raise ValueError("trail_step_lock_ladder must be a non-empty list of "
+                         "[peak_threshold, lock_floor] rungs")
+    prev_peak: Optional[float] = None
+    prev_lock: Optional[float] = None
+    for i, rung in enumerate(ladder):
+        if not isinstance(rung, (list, tuple)) or len(rung) != 2:
+            raise ValueError(
+                f"trail_step_lock_ladder rung {i} must be a [peak, lock] pair, "
+                f"got {rung!r}")
+        try:
+            peak = float(rung[0])
+            lock = float(rung[1])
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"trail_step_lock_ladder rung {i} values must be numbers, "
+                f"got {rung!r}")
+        if not (0.0 < lock < peak < 1.0):
+            raise ValueError(
+                f"trail_step_lock_ladder rung {i} must satisfy 0 < lock < peak < 1 "
+                f"(fractions of capital), got peak={peak}, lock={lock}")
+        if prev_peak is not None and peak <= prev_peak:
+            raise ValueError(
+                "trail_step_lock_ladder peak_thresholds must be strictly ascending "
+                f"(rung {i} peak {peak} <= previous {prev_peak})")
+        if prev_lock is not None and lock <= prev_lock:
+            raise ValueError(
+                "trail_step_lock_ladder lock_floors must be strictly ascending "
+                f"(rung {i} lock {lock} <= previous {prev_lock})")
+        prev_peak, prev_lock = peak, lock
+
+
 def _parse_clock_to_seconds(value: str) -> int:
     """Parse an IST clock string ("HH:MM" or "HH:MM:SS") to seconds-since-midnight.
 
@@ -241,6 +292,29 @@ class TradingSessionConfig:
     floor_pct: float = 0.01
     trail_giveback_pct: float = 0.015
     stop_pct: float = 0.03
+    # ── PROFIT STEP-LOCKING (ratcheting profit floor, intraday_basket trail) ──
+    # Replaces the single fixed floor_pct with a STEP-LOCK LADDER floor(peak) that
+    # ratchets UP in discrete steps as the peak G climbs, while STILL taking the
+    # give-back level (peak - trail_giveback_pct, or the relative large-day
+    # giveback) and exiting at the MAX of both. All values are FRACTIONS OF
+    # ALLOCATED CAPITAL (same basis as the trail's g).
+    #   trail_step_lock_enabled : True (DEFAULT — strictly-better ratchet). When
+    #       FALSE (or the ladder is empty) the EXISTING fixed-floor decide path
+    #       runs UNCHANGED, byte-identical — the backward-compat opt-out.
+    #   trail_step_lock_ladder  : ascending [peak_threshold, lock_floor] rungs;
+    #       step_lock_floor(peak) = the lock of the HIGHEST rung whose
+    #       peak_threshold <= peak (0 below the first rung). ARM (when enabled)
+    #       happens at the FIRST rung's peak_threshold (supersedes arm_pct).
+    #   trail_large_peak_pct    : once peak >= this, the give-back switches from
+    #       fixed (peak - trail_giveback_pct) to RELATIVE (peak * (1 - rel)) so a
+    #       big-trend day trails a proportional distance and lets winners run.
+    #   trail_large_giveback_rel: the relative give-back fraction for the large tier
+    #       (0.175 → "trail ~17.5% from peak").
+    trail_step_lock_enabled: bool = True
+    trail_step_lock_ladder: List[List[float]] = field(
+        default_factory=lambda: [list(r) for r in DEFAULT_STEP_LOCK_LADDER])
+    trail_large_peak_pct: float = 0.20
+    trail_large_giveback_rel: float = 0.175
     # Layer A — per-stock software stop (session.py _tick_intraday). OFF by default:
     # the validated config is BASKET-ONLY. Across 530 days a per-stock stop whipsawed
     # (cut a name at its stop that then recovered inside the basket), reducing return
@@ -445,6 +519,22 @@ class TradingSessionConfig:
                 raise ValueError(
                     f"floor_pct ({self.floor_pct}) must be <= arm_pct "
                     f"({self.arm_pct})")
+            # ── PROFIT STEP-LOCK ──────────────────────────────────────────────
+            # The large-day give-back tier params are always range-checked (a
+            # saved preset must round-trip valid values); the ladder shape is
+            # validated only when step-locking is ACTIVE (enabled AND non-empty)
+            # — an empty ladder or enabled=False is the fixed-floor opt-out.
+            if not (0.0 < float(self.trail_large_peak_pct) <= 0.5):
+                raise ValueError(
+                    "trail_large_peak_pct must be a fraction in (0, 0.5] "
+                    f"(e.g. 0.20 = 20%), got {self.trail_large_peak_pct}")
+            if not (0.0 < float(self.trail_large_giveback_rel) < 1.0):
+                raise ValueError(
+                    "trail_large_giveback_rel must be a fraction in (0, 1) "
+                    f"(e.g. 0.175 = trail 17.5% from peak), got "
+                    f"{self.trail_large_giveback_rel}")
+            if self.trail_step_lock_enabled and self.trail_step_lock_ladder:
+                validate_step_lock_ladder(self.trail_step_lock_ladder)
             # Times must parse and square-off must be strictly after entry.
             try:
                 entry_s = _parse_clock_to_seconds(self.entry_time)
@@ -638,6 +728,16 @@ class TradingSessionConfig:
             floor_pct=float(d.get("floor_pct", 0.01)),
             trail_giveback_pct=float(d.get("trail_giveback_pct", 0.015)),
             stop_pct=float(d.get("stop_pct", 0.03)),
+            trail_step_lock_enabled=bool(d.get("trail_step_lock_enabled", True)),
+            # Absent key → the default ladder; an EXPLICIT [] (opt-out) is
+            # preserved as-is. Values coerced to plain [float, float] rungs.
+            trail_step_lock_ladder=(
+                [[float(r[0]), float(r[1])] for r in d["trail_step_lock_ladder"]]
+                if d.get("trail_step_lock_ladder") is not None
+                else [list(r) for r in DEFAULT_STEP_LOCK_LADDER]),
+            trail_large_peak_pct=float(d.get("trail_large_peak_pct", 0.20)),
+            trail_large_giveback_rel=float(
+                d.get("trail_large_giveback_rel", 0.175)),
             per_stock_stop_enabled=bool(d.get("per_stock_stop_enabled", False)),
             square_off_time=d.get("square_off_time", "15:29:00"),
             square_off_enabled=bool(d.get("square_off_enabled", True)),

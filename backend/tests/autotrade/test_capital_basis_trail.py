@@ -56,11 +56,16 @@ def _signals():
 
 def _cfg(*, capital, arm_pct, stop_pct=0.03, square_off_enabled=True,
          max_hold_sessions=0):
+    # trail_step_lock_enabled=False: this file is the FIXED-FLOOR / capital-basis
+    # regression suite (it proves the trail keys on CAPITAL not notional, on the
+    # legacy arm-at-arm_pct path). The PROFIT STEP-LOCK ratchet has its own suite
+    # (test_step_lock_trail.py); opting out here keeps the legacy arm semantics.
     return TradingSessionConfig(
         total_allocated_capital=capital, top_n_stocks=3, sizing_mode="equal",
         strategy="intraday_basket", order_product="CNC",
         per_position_gtt_enabled=False, per_stock_stop_enabled=False,
         square_off_enabled=square_off_enabled, max_hold_sessions=max_hold_sessions,
+        trail_step_lock_enabled=False,
         arm_pct=arm_pct, floor_pct=0.01, trail_giveback_pct=0.015,
         stop_pct=stop_pct, square_off_time="15:29:00")
 

@@ -138,6 +138,18 @@ def clean_positions():
 
     _stop_all_drivers()
     with falcon_conn() as con:
+        # ISOLATION GUARD (2026-07-09 incident): NEVER let this wipe run against a
+        # real DB. If import-order ever lets falcon.config.FALCON_DB resolve to the
+        # PROD path, the DELETEs below would destroy the live AutoTrade book (it
+        # happened once). Check the connection's ACTUAL open file — not an env var —
+        # and hard-fail before deleting anything if it is not our temp test DB.
+        _dbs = con.execute("PRAGMA database_list").fetchall()
+        _main = next((d[2] for d in _dbs if d[1] == "main"), "")
+        if "kanida_autotrade_test_" not in str(_main):
+            raise RuntimeError(
+                "TEST ISOLATION FAILURE: clean_positions refuses to DELETE against a "
+                "non-test DB (%s). Expected the temp DB %s. Aborting to protect the "
+                "live AutoTrade book." % (_main, _TMP_DB))
         # autotrade_positions is the ONLY session-position store now. We also
         # clear falcon_position_state to PROVE (in the regression test) that the
         # autotrade path never writes into it.

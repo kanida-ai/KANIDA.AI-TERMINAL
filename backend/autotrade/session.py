@@ -962,6 +962,13 @@ LIVE_EDITABLE_SESSION_FIELDS = (
     "floor_pct",
     "trail_giveback_pct",
     "stop_pct",
+    # PROFIT STEP-LOCK — tunable on a RUNNING session (the ladder is a list;
+    # validated the same way as config.validate). maybe_reload_config copies
+    # these onto the live config within one tick without touching positions.
+    "trail_step_lock_enabled",
+    "trail_step_lock_ladder",
+    "trail_large_peak_pct",
+    "trail_large_giveback_rel",
     "per_position_stop_pct",
     "per_position_target_pct",
     "square_off_time",
@@ -2377,6 +2384,22 @@ class TradingSession:
                 "floor_pct": self.config.floor_pct,
                 "trail_giveback_pct": self.config.trail_giveback_pct,
                 "stop_pct": self.config.stop_pct,
+                # PROFIT STEP-LOCK panel: the ladder + large-day tier + the CURRENT
+                # locked floor (of the ratcheted peak). step_lock_floor is 0 until
+                # the peak crosses the first rung. Inert display when disabled.
+                "trail_step_lock_enabled": bool(
+                    getattr(self.config, "trail_step_lock_enabled", False)),
+                "trail_step_lock_ladder": getattr(
+                    self.config, "trail_step_lock_ladder", []),
+                "trail_large_peak_pct": getattr(
+                    self.config, "trail_large_peak_pct", 0.20),
+                "trail_large_giveback_rel": getattr(
+                    self.config, "trail_large_giveback_rel", 0.175),
+                "step_lock_floor": (
+                    trail_engine.step_lock_floor(
+                        state.peak, params.step_lock_ladder)
+                    if (state.armed and params.step_lock_enabled
+                        and params.step_lock_ladder) else None),
                 "square_off_time": self.config.square_off_time,
                 # INTRADAY (True) vs POSITIONAL (False). When False the basket
                 # carries across days; seconds_to_square_off / square_off_armed

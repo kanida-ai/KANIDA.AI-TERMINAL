@@ -724,6 +724,12 @@ class LadderCampaign:
             stop_pct=POSITIONAL_STOP_PCT,
             square_off_enabled=False,          # POSITIONAL: carry across days
             max_hold_sessions=POSITIONAL_MAX_HOLD_SESSIONS,
+            # POSITIONAL keeps its LEGACY fixed-floor trail (looser give-back to
+            # breathe across days). Profit step-locking (a tight ratchet tuned for
+            # the intraday MIS basket) would clip multi-day positionals on normal
+            # pullbacks, so it is OFF for ladder children by design. The operator
+            # can opt an individual campaign in via the live config edit.
+            trail_step_lock_enabled=False,
             # per-position GTT is the broker floor, wider than the trail — keep the
             # session defaults (3% stop / 6% target).
         )

@@ -37,7 +37,8 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from falcon.db import falcon_conn
 
-from ..config import TradingSessionConfig, _parse_clock_to_seconds
+from ..config import (
+    TradingSessionConfig, _parse_clock_to_seconds, validate_step_lock_ladder)
 from ..ladder import LadderCampaign
 from ..session import LIVE_EDITABLE_SESSION_FIELDS, TradingSession
 from .autotrade_routes import _assert_ladder_access, _assert_session_access
@@ -65,6 +66,8 @@ LADDER_WHITELIST = LADDER_RISK_EXIT | LADDER_CAPITAL
 _PCT_FIELDS = {
     "arm_pct", "floor_pct", "trail_giveback_pct", "stop_pct",
     "per_position_stop_pct", "per_position_target_pct",
+    # PROFIT STEP-LOCK: large-day peak threshold is a fraction of capital.
+    "trail_large_peak_pct",
 }
 _TIME_FIELDS = {"square_off_time", "mis_square_off_time"}
 
@@ -97,6 +100,39 @@ def _coerce_and_validate(field: str, value: Any) -> Any:
         if v < 0:
             raise HTTPException(400, f"max_hold_sessions must be an integer >= 0, got {v}")
         return v
+    # ── PROFIT STEP-LOCK live-edit fields ─────────────────────────────────────
+    if field == "trail_step_lock_enabled":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str) and value.strip().lower() in (
+                "true", "false", "1", "0", "yes", "no", "on", "off"):
+            return value.strip().lower() in ("true", "1", "yes", "on")
+        raise HTTPException(
+            400, f"trail_step_lock_enabled must be a boolean, got {value!r}")
+    if field == "trail_large_giveback_rel":
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                400, f"trail_large_giveback_rel must be a number, got {value!r}")
+        if not (0.0 < v < 1.0):
+            raise HTTPException(
+                400, "trail_large_giveback_rel must be a fraction in (0, 1) "
+                     f"(e.g. 0.175 = trail 17.5% from peak), got {v}")
+        return v
+    if field == "trail_step_lock_ladder":
+        # Validate the ladder shape exactly as config.validate() does (non-empty,
+        # 0<lock<peak<1 per rung, strictly ascending by peak AND lock), then
+        # normalise to plain [float, float] rungs. cfg.validate() re-checks the
+        # cross-field set after the merge, but reject an obviously-bad ladder here
+        # with a clear 400.
+        try:
+            validate_step_lock_ladder(value)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return [[float(r[0]), float(r[1])] for r in value]
     # Ladder capital/duration.
     if field in ("per_basket_capital", "total_capital"):
         try:

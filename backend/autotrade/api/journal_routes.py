@@ -275,7 +275,8 @@ def build_journal(session_id: str) -> Dict[str, Any]:
                 n_stop_hits += 1  # conservative: can't tell → count as stop
 
     n_trail_exits  = sum(1 for p in closed
-                         if p.get("close_reason") in ("TRAIL_EXIT", "FLOOR_EXIT"))
+                         if p.get("close_reason") in ("TRAIL_EXIT", "FLOOR_EXIT",
+                                                      "STEP_LOCK_EXIT"))
     n_square_off   = sum(1 for p in closed
                          if p.get("close_reason") == "SQUARE_OFF")
     n_kill_switch  = sum(1 for p in closed

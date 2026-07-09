@@ -44,7 +44,7 @@ VALID_REASONS = {
     "TRAILING_STOP", "TRAILING_PROFIT", "TIME_BOUND", "DAY_BOUND",
     "KILL_SWITCH", "MANUAL",
     # Intraday-basket trail engine reasons (strategy=="intraday_basket").
-    "TRAIL_EXIT", "FLOOR_EXIT", "STOP", "SQUARE_OFF",
+    "TRAIL_EXIT", "FLOOR_EXIT", "STOP", "SQUARE_OFF", "STEP_LOCK_EXIT",
     # Per-stock software stop (Fix 3: individual stock exits before the GTT fires).
     "STOP_STOCK",
     # Map the existing trail_manager reasons onto the gate vocabulary too, so a

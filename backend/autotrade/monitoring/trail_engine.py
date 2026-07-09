@@ -17,33 +17,48 @@ DECISION TABLE (evaluated top to bottom, each tick):
               (always active; in practice only reachable
                pre-arm because once armed the floor is
                positive and triggers first)
-  3 PRE-ARM   not armed and G >= arm_pct                  → ARM (armed=True,
-              (sets the lock; NO exit this tick)            peak=G); state change
+  3 PRE-ARM   not armed and G >= arm_threshold            → ARM (armed=True,
+              (arm_threshold = ladder[0] peak when          peak=G); state change
+               step-locking, else arm_pct; sets the
+               lock; NO exit this tick)
   4 ARMED     armed:                                      → maybe EXIT
                 peak = max(peak, G)  (ratchet up)
-                trigger = max(peak - trail_giveback_pct,
-                              floor_pct)
-                if G <= trigger:
-                  EXIT "TRAIL_EXIT"  if trigger == peak-giveback
-                  EXIT "FLOOR_EXIT"  if trigger == floor_pct
+                STEP-LOCK (default):
+                  step  = step_lock_floor(peak)   (ratchets up)
+                  gback = peak - trail_giveback_pct  (peak < large_peak_pct)
+                        = peak*(1 - large_giveback_rel) (peak >= large_peak_pct)
+                  trigger = max(step, gback)
+                  if G <= trigger:
+                    EXIT "STEP_LOCK_EXIT" if step > gback (step binds)
+                    EXIT "TRAIL_EXIT"     otherwise
+                LEGACY (step-locking off / empty ladder):
+                  trigger = max(peak - trail_giveback_pct, floor_pct)
+                  if G <= trigger:
+                    EXIT "TRAIL_EXIT"  if trigger == peak-giveback
+                    EXIT "FLOOR_EXIT"  if trigger == floor_pct
   -           otherwise                                   → HOLD (state persisted
                                                             if peak ratcheted)
 
-EXIT REASON SET: {"SQUARE_OFF", "STOP", "TRAIL_EXIT", "FLOOR_EXIT"}.
+EXIT REASON SET: {"SQUARE_OFF", "STOP", "TRAIL_EXIT", "FLOOR_EXIT",
+                  "STEP_LOCK_EXIT"}.
 
 The function is side-effect-free and fully unit-testable. State persistence and
 order execution are the caller's responsibility (see session.tick()).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import List, Optional, Tuple
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # Exit reasons the engine can emit. Kept as a frozenset so callers can assert.
-EXIT_REASONS = frozenset({"SQUARE_OFF", "STOP", "TRAIL_EXIT", "FLOOR_EXIT"})
+# STEP_LOCK_EXIT is emitted when the ratcheting step-lock floor is the binding
+# (higher) side of the armed trigger (else TRAIL_EXIT); FLOOR_EXIT is the legacy
+# fixed-floor reason (step-locking disabled).
+EXIT_REASONS = frozenset(
+    {"SQUARE_OFF", "STOP", "TRAIL_EXIT", "FLOOR_EXIT", "STEP_LOCK_EXIT"})
 
 
 @dataclass
@@ -65,6 +80,23 @@ class TrailParams:
     trail_giveback_pct: float = 0.0075
     stop_pct: float = 0.015
     square_off_time: str = "15:29:00"
+    # ── PROFIT STEP-LOCK (ratcheting profit floor) ────────────────────────────
+    # step_lock_enabled DEFAULTS FALSE HERE (the low-level pure struct) so any
+    # directly-constructed TrailParams keeps the EXACT legacy fixed-floor
+    # behaviour byte-for-byte. params_from_config() threads the CONFIG default
+    # (True) so a real intraday_basket session ratchets. When active
+    # (step_lock_enabled AND a non-empty step_lock_ladder):
+    #   * ARM at the first rung's peak_threshold (supersedes arm_pct).
+    #   * the armed trigger = max(step_lock_floor(peak), give-back level), where
+    #     step_lock_floor(peak) is the lock of the highest rung whose threshold
+    #     <= peak (monotonic-up because peak only ratchets up), and the give-back
+    #     level is (peak - trail_giveback_pct) below large_peak_pct, else the
+    #     RELATIVE peak * (1 - large_giveback_rel).
+    # All fractions of ALLOCATED CAPITAL (the trail's g basis).
+    step_lock_enabled: bool = False
+    step_lock_ladder: List[Tuple[float, float]] = field(default_factory=list)
+    large_peak_pct: float = 0.20
+    large_giveback_rel: float = 0.175
     # True (DEFAULT) = INTRADAY: the time-based SQUARE_OFF branch is active
     #   (today's behaviour, byte-for-byte). False = POSITIONAL: the SQUARE_OFF
     #   branch is SKIPPED entirely so the ratchet/floor/hard-stop carry across
@@ -109,12 +141,50 @@ def _parse_square_off_today_ist(square_off_time: str,
                         second=parsed.second, microsecond=0)
 
 
+def _step_lock_active(params: TrailParams) -> bool:
+    """True when profit step-locking is switched on AND has a ladder to use.
+    When False the engine runs the legacy fixed-floor path byte-for-byte."""
+    return bool(params.step_lock_enabled and params.step_lock_ladder)
+
+
+def step_lock_floor(peak: float, ladder: List[Tuple[float, float]]) -> float:
+    """The ratcheting profit floor for a given peak: the lock_floor of the HIGHEST
+    rung whose peak_threshold <= peak, or 0.0 if peak is below the first rung.
+
+    The ladder is ascending by peak_threshold (validated at config time). Because
+    the caller only ever feeds a MONOTONIC-UP peak (peak = max(peak, g)), the
+    returned floor is itself monotonic-up — it never steps down."""
+    floor = 0.0
+    for thr, lock in ladder:
+        if peak >= thr:
+            floor = lock
+        else:
+            break  # ascending ladder → no higher rung can qualify
+    return floor
+
+
+def _giveback_level(peak: float, params: TrailParams) -> float:
+    """The give-back trigger level for an armed peak. Below large_peak_pct it is
+    the FIXED giveback (peak - trail_giveback_pct); at/above large_peak_pct it is
+    the RELATIVE giveback (peak * (1 - large_giveback_rel)) so a big-trend day
+    trails a proportional distance and lets the winner run."""
+    if peak >= params.large_peak_pct:
+        return peak * (1.0 - params.large_giveback_rel)
+    return peak - params.trail_giveback_pct
+
+
 def compute_trigger(state: TrailState, params: TrailParams) -> Optional[float]:
-    """The live exit-trigger level for an ARMED basket:
-        max(peak - trail_giveback_pct, floor_pct).
-    None when not armed (no trigger yet)."""
+    """The live exit-trigger level for an ARMED basket. None when not armed.
+
+    STEP-LOCK ACTIVE : max(step_lock_floor(peak), give-back level) — the give-back
+        level is the fixed peak-giveback below large_peak_pct, else the relative
+        peak*(1-large_giveback_rel).
+    LEGACY (off)     : max(peak - trail_giveback_pct, floor_pct) — byte-for-byte."""
     if not state.armed:
         return None
+    if _step_lock_active(params):
+        return max(step_lock_floor(state.peak, params.step_lock_ladder),
+                   _giveback_level(state.peak, params))
     return max(state.peak - params.trail_giveback_pct, params.floor_pct)
 
 
@@ -148,9 +218,15 @@ def decide(g: float, state: TrailState, params: TrailParams,
                              state_changed=False,
                              trigger=compute_trigger(state, params))
 
-    # 3. PRE-ARM — arm when G first reaches +arm_pct. No exit this tick.
+    step_active = _step_lock_active(params)
+    # The arm threshold: with step-locking active it is the FIRST rung's
+    # peak_threshold (that IS the arm, superseding arm_pct); else the legacy
+    # arm_pct. Below it → HOLD (no trail yet).
+    arm_threshold = params.step_lock_ladder[0][0] if step_active else params.arm_pct
+
+    # 3. PRE-ARM — arm when G first reaches the arm threshold. No exit this tick.
     if not state.armed:
-        if g >= params.arm_pct:
+        if g >= arm_threshold:
             new_state = TrailState(armed=True, peak=g)
             return TrailDecision(action="ARM", reason=None, state=new_state,
                                  state_changed=True,
@@ -158,13 +234,30 @@ def decide(g: float, state: TrailState, params: TrailParams,
         return TrailDecision(action="HOLD", reason=None, state=state,
                              state_changed=False, trigger=None)
 
-    # 4. ARMED — ratchet the peak up, then test the giveback / floor trigger.
+    # 4. ARMED — ratchet the peak up, then test the trigger.
     changed = False
     peak = state.peak
     if g > peak:
         peak = g
         changed = True
     cur_state = TrailState(armed=True, peak=peak)
+
+    if step_active:
+        # STEP-LOCK: trigger = max(ratcheting step floor, give-back level). The
+        # step floor is monotonic-up (peak only ratchets up); the give-back level
+        # is fixed below large_peak_pct, else relative. STEP_LOCK_EXIT when the
+        # step floor is the binding (strictly higher) side, else TRAIL_EXIT.
+        step_floor = step_lock_floor(peak, params.step_lock_ladder)
+        giveback_level = _giveback_level(peak, params)
+        trigger = max(step_floor, giveback_level)
+        if g <= trigger:
+            reason = "STEP_LOCK_EXIT" if step_floor > giveback_level else "TRAIL_EXIT"
+            return TrailDecision(action="EXIT", reason=reason, state=cur_state,
+                                 state_changed=changed, trigger=trigger)
+        return TrailDecision(action="HOLD", reason=None, state=cur_state,
+                             state_changed=changed, trigger=trigger)
+
+    # LEGACY fixed-floor path — byte-for-byte the pre-step-lock behaviour.
     giveback_level = peak - params.trail_giveback_pct
     trigger = max(giveback_level, params.floor_pct)
     if g <= trigger:
@@ -179,7 +272,13 @@ def decide(g: float, state: TrailState, params: TrailParams,
 
 
 def params_from_config(config) -> TrailParams:
-    """Build TrailParams from a TradingSessionConfig."""
+    """Build TrailParams from a TradingSessionConfig.
+
+    Threads the CONFIG-level step-lock default (True) through so a real
+    intraday_basket session ratchets; the ladder is coerced to plain float pairs.
+    A directly-constructed TrailParams still defaults step_lock_enabled=False
+    (legacy fixed-floor)."""
+    ladder = getattr(config, "trail_step_lock_ladder", None) or []
     return TrailParams(
         arm_pct=float(config.arm_pct),
         floor_pct=float(config.floor_pct),
@@ -187,6 +286,10 @@ def params_from_config(config) -> TrailParams:
         stop_pct=float(config.stop_pct),
         square_off_time=config.square_off_time,
         square_off_enabled=bool(getattr(config, "square_off_enabled", True)),
+        step_lock_enabled=bool(getattr(config, "trail_step_lock_enabled", False)),
+        step_lock_ladder=[(float(r[0]), float(r[1])) for r in ladder],
+        large_peak_pct=float(getattr(config, "trail_large_peak_pct", 0.20)),
+        large_giveback_rel=float(getattr(config, "trail_large_giveback_rel", 0.175)),
     )
 
 
