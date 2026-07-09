@@ -1664,3 +1664,37 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
   operator-authored risk knobs. Mint/F2 theme, reused `C`/`ICON` from `cotrade-kit`, no new accents.
   Verify: `npx tsc --noEmit` clean; `next build` → "✓ Compiled successfully in 11.4s",
   `/power/autotrade` in the route manifest. NOT committed/deployed — operator reviews + integrates.
+
+---
+
+## 2026-07-08 — AutoTrade create form: choosable + configurable TRAILING STRATEGY (profit step-lock)
+
+- **Acting on:** operator request — let the operator CHOOSE and CONFIGURE the trailing
+  strategy in the EXISTING intraday session-create form. STRICTLY ADDITIVE — nothing existing
+  removed, moved, or restyled (product CNC/MIS/MTF, entry date, universe, pick-stocks,
+  use-leftover-capital, MIS sizing, Advanced, the four-%s trail card + Hold toggle all untouched).
+- **What was added** (`components/power/autotrade/PortfolioAutoTrade.tsx`): a NEW mint card
+  "Trailing strategy" inserted as a sibling right AFTER the existing intraday_basket trail card
+  (between it and the kill-switch block), gated `strategy === 'intraday_basket' && !isLadder`.
+  Contents: (1) MODE Segmented — Portfolio-level (`step_lock_scope: 'basket'`, DEFAULT) vs
+  Individual-stock (`'stock'`), each with a one-line help; (2) Profit step-lock on/off toggle
+  (`trail_step_lock_enabled`, default true); (3) folded "Advanced" disclosure with an editable
+  [peak%, lock%] ladder (`trail_step_lock_ladder`, default [[3,2],[5,3.5],[8,6],[12,9.5],[16,13]],
+  add/remove rungs, per-rung ₹-locked-on-capital preview) + large-day tier
+  (`trail_large_peak_pct` 20%, `trail_large_giveback_rel` 17.5%). Give-back + hard stop are NOT
+  duplicated — a note points to the existing Trail giveback / Stop loss fields (same backend fields).
+- **Wire:** UI holds every % as a PERCENT; `toWireConfig`'s intraday branch converts ladder +
+  large-day pcts to FRACTIONS (÷100) and passes scope/enable through — matching the backend
+  `TradingSessionConfig` (verified: `config.py` wants fractions, `0 < lock < peak < 1`, validation
+  gated to `strategy=='intraday_basket'`, default ladder identical). Seeded into `INTRADAY_PRESET`
+  = backend defaults, so anyone who ignores the section gets byte-identical behaviour. Client
+  validation (`validateIntradayStepLock`) runs in `onCreate` before the POST: give-back/stop in
+  (0,50]%, ladder rungs 0<lock<peak<100 both-columns-ascending, large-day ranges.
+- **Not for Auto-Ladder:** the section is hidden for the ladder campaign construct (fixed validated
+  config; ladderCreate doesn't take these knobs).
+- **Types:** added `step_lock_scope | trail_step_lock_enabled | trail_step_lock_ladder |
+  trail_large_peak_pct | trail_large_giveback_rel` to `SessionConfig` in `lib/autotrade-api.ts`.
+- **Deploy path:** worktree `_kanida_falconui/frontend`, branch `feat/falcon-ai-shell` →
+  merge to `main` → Vercel. UI + BFF types only; no execution/trade path touched. Mint/F2 theme,
+  reused `C`/`ICON`/`Field`/`Segmented`/`inputStyle`, no new accents. Verify: `npx tsc --noEmit`
+  clean; `next build` → "✓ Compiled successfully in 5.6s". NOT committed/deployed — operator reviews.

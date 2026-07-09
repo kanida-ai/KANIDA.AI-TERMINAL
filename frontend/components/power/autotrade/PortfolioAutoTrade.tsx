@@ -90,6 +90,14 @@ const INTRADAY_PRESET: Partial<SessionConfig> = {
   // Hold mode — default INTRADAY (force square-off). Positional = false.
   square_off_enabled: true,
   max_hold_sessions: 0,   // intraday has no multi-session cap
+  // Trailing STEP-LOCK — DEFAULT = Portfolio-level (basket), enabled, validated
+  // ladder + large-day tier. These match the backend defaults, so seeding them
+  // leaves today's behaviour byte-identical for anyone who ignores the section.
+  step_lock_scope: 'basket',
+  trail_step_lock_enabled: true,
+  trail_step_lock_ladder: [[3, 2], [5, 3.5], [8, 6], [12, 9.5], [16, 13]],
+  trail_large_peak_pct: 20,
+  trail_large_giveback_rel: 17.5,
 }
 
 // ── Hold-mode TRAIL presets (params only — product/entry/capital untouched) ────
@@ -105,6 +113,48 @@ const INTRADAY_TRAIL: Partial<SessionConfig> = {
 const POSITIONAL_TRAIL: Partial<SessionConfig> = {
   arm_pct: 3.0, floor_pct: 1.0, trail_giveback_pct: 4.0, stop_pct: 6.0,
   square_off_enabled: false, max_hold_sessions: 3,
+}
+
+// ── PROFIT STEP-LOCK defaults (intraday_basket) — UI PERCENTS ─────────────────
+// The validated ratcheting floor: at each [peak%, lock%] rung, once profit reaches
+// the peak, lock in at least the lock%. Matches the backend's DEFAULT_STEP_LOCK_
+// LADDER ([[0.03,0.02],…] fractions) expressed as percents; toWireConfig sends ÷100.
+const STEP_LOCK_LADDER_DEFAULT: number[][] = [[3, 2], [5, 3.5], [8, 6], [12, 9.5], [16, 13]]
+const STEP_LOCK_LARGE_PEAK_DEFAULT = 20      // percent (wire 0.20)
+const STEP_LOCK_LARGE_GIVEBACK_DEFAULT = 17.5 // percent (wire 0.175)
+
+// Client-side validation for the intraday_basket trailing knobs (mirrors the
+// backend config.validate() rules so a bad ladder is caught before the POST):
+// give-back/stop in (0, 50]%, ladder rungs 0 < lock < peak < 100 and both columns
+// strictly ascending, large-day peak in (0, 50]%, large give-back in (0, 100)%.
+// Returns a human error string, or null when the config is valid.
+function validateIntradayStepLock(c: SessionConfig): string | null {
+  if (c.strategy !== 'intraday_basket') return null
+  const gb = Number(c.trail_giveback_pct)
+  const st = Number(c.stop_pct)
+  if (!(gb > 0 && gb <= 50)) return 'Trail giveback must be between 0 and 50%.'
+  if (!(st > 0 && st <= 50)) return 'Stop loss must be between 0 and 50%.'
+  if (c.trail_step_lock_enabled !== false) {
+    const ladder = c.trail_step_lock_ladder ?? []
+    if (ladder.length === 0) return 'Add at least one step-lock rung, or turn step-locking off.'
+    let prevPeak = -Infinity
+    let prevLock = -Infinity
+    for (let i = 0; i < ladder.length; i++) {
+      const peak = Number(ladder[i]?.[0])
+      const lock = Number(ladder[i]?.[1])
+      if (!Number.isFinite(peak) || !Number.isFinite(lock)) return `Step-lock rung ${i + 1}: enter both peak and lock %.`
+      if (!(lock > 0 && lock < peak && peak < 100)) return `Step-lock rung ${i + 1}: need 0 < lock (${lock}) < peak (${peak}) < 100.`
+      if (peak <= prevPeak) return `Step-lock rung ${i + 1}: peak % must increase down the ladder.`
+      if (lock <= prevLock) return `Step-lock rung ${i + 1}: lock % must increase down the ladder.`
+      prevPeak = peak
+      prevLock = lock
+    }
+  }
+  const lp = Number(c.trail_large_peak_pct)
+  const lr = Number(c.trail_large_giveback_rel)
+  if (!(lp > 0 && lp <= 50)) return 'Large-day peak must be between 0 and 50%.'
+  if (!(lr > 0 && lr < 100)) return 'Large-day give-back must be between 0 and 100%.'
+  return null
 }
 
 // UI-level strategy choices for the create form's dropdown. The first two map
@@ -597,6 +647,9 @@ export function PortfolioAutoTrade({
   // Duplicate-campaign soft guard: holds the product:capital:mode signature the
   // user was just warned about, so a second "Create campaign" click proceeds.
   const [dupConfirm, setDupConfirm] = useState<string | null>(null)
+  // Step-lock "Advanced" disclosure (ladder editor + large-day tier). The MODE
+  // selector + enable toggle stay visible; only the ladder/large-day are folded.
+  const [stepLockAdv, setStepLockAdv] = useState(false)
 
   const set = <K extends keyof SessionConfig>(k: K, v: SessionConfig[K]) =>
     setConfig((c) => ({ ...c, [k]: v }))
@@ -687,6 +740,20 @@ export function PortfolioAutoTrade({
     setConfig((c) => ({ ...c, ...(hold === 'positional' ? POSITIONAL_TRAIL : INTRADAY_TRAIL) }))
   }
 
+  // ── Step-lock ladder editing (intraday_basket) — rungs held as PERCENTS ──────
+  // Falls back to the validated default ladder when state is empty so the editor
+  // always renders at least the seeded rungs.
+  const ladderRows = (): number[][] => config.trail_step_lock_ladder ?? STEP_LOCK_LADDER_DEFAULT
+  const setLadder = (rows: number[][]) => set('trail_step_lock_ladder', rows)
+  const updateRung = (i: number, col: 0 | 1, v: number) =>
+    setLadder(ladderRows().map((r, idx) => (idx === i ? (col === 0 ? [v, r[1]] : [r[0], v]) : r)))
+  const addRung = () => {
+    const rows = ladderRows()
+    const last = rows[rows.length - 1] ?? [0, 0]
+    setLadder([...rows, [Number(last[0]) + 2, Number(last[1]) + 2]])
+  }
+  const removeRung = (i: number) => setLadder(ladderRows().filter((_, idx) => idx !== i))
+
   // Build the wire payload for a config: percents → fractions, exactly at the
   // send boundary (state stays in percents so the inputs read naturally). Both
   // create + preview use this so there is one conversion site per strategy.
@@ -745,6 +812,16 @@ export function PortfolioAutoTrade({
         // session; MIS + intraday never carry a cap. Int, 0 = no cap.
         max_hold_sessions: (c.order_product !== 'MIS' && c.square_off_enabled === false)
           ? Math.max(0, Math.floor(Number(c.max_hold_sessions) || 0)) : 0,
+        // PROFIT STEP-LOCK — scope + enable pass through; ladder + large-day pcts
+        // convert PERCENT → FRACTION (backend wants fractions, 0 < lock < peak < 1).
+        // Untouched large-day fields fall back to the validated defaults (never 0,
+        // which the backend rejects).
+        step_lock_scope: c.step_lock_scope === 'stock' ? 'stock' : 'basket',
+        trail_step_lock_enabled: c.trail_step_lock_enabled !== false,
+        trail_step_lock_ladder: (c.trail_step_lock_ladder ?? STEP_LOCK_LADDER_DEFAULT)
+          .map((r) => [(Number(r[0]) || 0) / 100, (Number(r[1]) || 0) / 100]),
+        trail_large_peak_pct: (Number(c.trail_large_peak_pct) || STEP_LOCK_LARGE_PEAK_DEFAULT) / 100,
+        trail_large_giveback_rel: (Number(c.trail_large_giveback_rel) || STEP_LOCK_LARGE_GIVEBACK_DEFAULT) / 100,
         // intraday_basket exits via the trail, not the flat kill switch
         kill_switch_enabled: false,
       }
@@ -1264,7 +1341,12 @@ export function PortfolioAutoTrade({
       setError('Select your connected broker account — live needs your own active account. (Paper is fine without one.)')
       return
     }
-    setError(null); setCreateSuggest(null); setBusy('create')
+    setError(null); setCreateSuggest(null)
+    // Client-validate the intraday_basket trailing knobs (ladder ascending, ranges
+    // sane) so a bad step-lock config is caught before the POST, not by a 400.
+    const slErr = validateIntradayStepLock(config)
+    if (slErr) { setError(slErr); return }
+    setBusy('create')
     try {
       // UNITS: the backend uses FRACTIONS for percentages (0.01 = 1%). The form
       // captures every pct as a PERCENT so it reads naturally; toWireConfig
@@ -2434,6 +2516,128 @@ export function PortfolioAutoTrade({
               />
             </div>
           )}
+
+          {/* ── Trailing strategy (profit STEP-LOCK) — ADDITIVE, intraday_basket ──
+              NEW controls only: portfolio- vs per-stock trailing + the ratcheting
+              locked-floor ladder + large-day tier. Give-back + the basket hard stop
+              stay in the trail card above (same backend fields — not duplicated).
+              Hidden for Auto-Ladder (fixed validated campaign config). */}
+          {config.strategy === 'intraday_basket' && !isLadder && (() => {
+            const scope = config.step_lock_scope ?? 'basket'
+            const lockOn = config.trail_step_lock_enabled !== false
+            const rows = config.trail_step_lock_ladder ?? STEP_LOCK_LADDER_DEFAULT
+            const cap = Number(config.total_allocated_capital) || 0
+            return (
+              <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.04)' }}>
+                <div className="flex items-center gap-2 mb-3">
+                  <span style={{ color: C.mint }}>{ICON.trend(15)}</span>
+                  <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Trailing strategy</span>
+                  <span className="ml-auto text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+                    style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+                    {scope === 'stock' ? 'Per-stock' : 'Portfolio'}
+                  </span>
+                </div>
+
+                {/* MODE selector — the primary control. Reuses the mint Segmented. */}
+                <Field label="Trailing mode" hint="What the profit trail follows — the whole basket, or each stock on its own.">
+                  <Segmented
+                    options={[{ id: 'basket', label: 'Portfolio-level' }, { id: 'stock', label: 'Individual-stock' }]}
+                    value={scope}
+                    onChange={(v) => set('step_lock_scope', v as 'basket' | 'stock')}
+                  />
+                </Field>
+                <div className="mt-2 grid grid-cols-1 gap-1 text-[11px] leading-snug" style={{ color: C.muted }}>
+                  <div><b style={{ color: scope === 'basket' ? C.mint : C.ink2 }}>Portfolio-level</b> — the whole basket&apos;s profit is trailed and exits together.</div>
+                  <div><b style={{ color: scope === 'stock' ? C.mint : C.ink2 }}>Individual-stock</b> — each stock trails and exits on its own.</div>
+                </div>
+
+                {/* ENABLE step-locking — reuses the kill-switch toggle pattern. */}
+                <div className="mt-4 flex items-center justify-between rounded-lg border px-3 py-2.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                  <div className="pr-3">
+                    <div className="text-[12px] font-semibold" style={{ color: C.ink }}>Profit step-lock</div>
+                    <div className="text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>
+                      Ratchets a rising locked floor as profit climbs the ladder. Off = a single fixed floor + give-back.
+                    </div>
+                  </div>
+                  <button type="button" onClick={() => set('trail_step_lock_enabled', !lockOn)}
+                    className="relative w-11 h-6 rounded-full transition-colors shrink-0"
+                    style={{ background: lockOn ? C.mint : 'rgba(255,255,255,0.12)' }} aria-pressed={lockOn}>
+                    <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all" style={{ left: lockOn ? '22px' : '2px' }} />
+                  </button>
+                </div>
+
+                <div className="mt-2 flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-snug"
+                  style={{ border: `1px solid ${C.line2}`, background: 'rgba(255,255,255,0.02)', color: C.muted }}>
+                  <span className="shrink-0 mt-px" style={{ color: C.mint }}>{ICON.info(12)}</span>
+                  <span>Give-back and the basket hard stop are set in <b style={{ color: C.ink2 }}>Trail giveback</b> / <b style={{ color: C.ink2 }}>Stop loss</b> above.</span>
+                </div>
+
+                {/* ADVANCED — ladder editor + large-day tier (folded to keep the
+                    mode selector + give-back/stop visible). */}
+                {lockOn && (
+                  <>
+                    <button type="button" onClick={() => setStepLockAdv((v) => !v)}
+                      className="mt-3 inline-flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: C.mint }}>
+                      <span className="text-[10px]">{stepLockAdv ? '▾' : '▸'}</span> Advanced — step-lock ladder &amp; large-day tier
+                    </button>
+                    {stepLockAdv && (
+                      <div className="mt-3 rounded-lg border p-3" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.015)' }}>
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.05em] mb-1" style={{ color: C.muted }}>Step-lock ladder</div>
+                        <div className="text-[10.5px] leading-snug mb-2.5" style={{ color: C.faint }}>Once profit reaches a peak %, lock in at least the paired lock %. Both columns must rise down the ladder.</div>
+                        <div className="flex flex-col gap-2">
+                          {rows.map((r, i) => {
+                            const lockRs = cap > 0 ? ((Number(r[1]) || 0) / 100) * cap : 0
+                            return (
+                              <div key={i} className="flex items-center gap-2">
+                                <label className="text-[10px] w-8 shrink-0" style={{ color: C.faint }}>Peak</label>
+                                <div className="relative flex-1 min-w-0">
+                                  <input type="number" min={0} step={0.5} value={r[0] ?? ''}
+                                    onChange={(e) => updateRung(i, 0, Number(e.target.value) || 0)}
+                                    className="w-full rounded-lg pr-6 pl-2.5 py-1.5 text-[12px] outline-none tabular-nums" style={inputStyle} />
+                                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px]" style={{ color: C.faint }}>%</span>
+                                </div>
+                                <span className="text-[11px] shrink-0" style={{ color: C.faint }}>→ lock</span>
+                                <div className="relative flex-1 min-w-0">
+                                  <input type="number" min={0} step={0.5} value={r[1] ?? ''}
+                                    onChange={(e) => updateRung(i, 1, Number(e.target.value) || 0)}
+                                    className="w-full rounded-lg pr-6 pl-2.5 py-1.5 text-[12px] outline-none tabular-nums" style={inputStyle} />
+                                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px]" style={{ color: C.faint }}>%</span>
+                                </div>
+                                {cap > 0 && (
+                                  <span className="hidden sm:block text-[10px] tabular-nums w-20 text-right shrink-0" style={{ color: C.mint }}>{signedINR(lockRs)}</span>
+                                )}
+                                <button type="button" onClick={() => removeRung(i)} disabled={rows.length <= 1}
+                                  title={rows.length <= 1 ? 'Keep at least one rung' : 'Remove rung'}
+                                  className="shrink-0 grid place-items-center w-6 h-6 rounded-md text-[14px] leading-none disabled:opacity-30 disabled:cursor-not-allowed"
+                                  style={{ color: C.red, border: `1px solid ${C.line2}` }}>×</button>
+                              </div>
+                            )
+                          })}
+                        </div>
+                        <button type="button" onClick={addRung}
+                          className="mt-2.5 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-semibold"
+                          style={{ color: C.mint, border: '1px solid rgba(63,227,164,0.4)', background: 'rgba(63,227,164,0.08)' }}>+ Add rung</button>
+
+                        {/* Large-day tier — advanced/optional relative give-back. */}
+                        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <Field label="Large-day peak (%)" hint="Above this peak, give-back turns RELATIVE (a % of the peak) to ride big days.">
+                            <input type="number" min={0} step={0.5} value={config.trail_large_peak_pct ?? ''}
+                              onChange={(e) => set('trail_large_peak_pct', Number(e.target.value) || 0)}
+                              className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                          </Field>
+                          <Field label="Large-day give-back (%)" hint="Relative give-back from the peak once past the large-day peak (e.g. 17.5%).">
+                            <input type="number" min={0} step={0.5} value={config.trail_large_giveback_rel ?? ''}
+                              onChange={(e) => set('trail_large_giveback_rel', Number(e.target.value) || 0)}
+                              className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                          </Field>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )
+          })()}
 
           {/* Kill switch block — portfolio_kill_switch strategy only */}
           {config.strategy === 'portfolio_kill_switch' && (

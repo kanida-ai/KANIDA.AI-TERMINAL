@@ -124,6 +124,24 @@ export type SessionConfig = {
   // skipped. 0 / absent = NO cap (today's behaviour). e.g. 3 = the Falcon
   // Positional strategy's 3-session hold.
   max_hold_sessions?: number
+  // ── PROFIT STEP-LOCK trailing ── (intraday_basket only; additive — every field
+  // defaults to today's validated behaviour when omitted). The UI captures the
+  // ladder + large-day pcts as PERCENTS; toWireConfig sends FRACTIONS (÷100). The
+  // scope + enable flag pass through unchanged.
+  //   step_lock_scope: 'basket' (DEFAULT) = the whole basket trails & exits
+  //     together; 'stock' = each position trails & exits on its own g_stock (the
+  //     time square-off + catastrophic basket hard stop stay basket-level).
+  //   trail_step_lock_enabled: ratchet a rising locked floor (default true). Off =
+  //     a single fixed floor + give-back.
+  //   trail_step_lock_ladder: ascending [peak, lock] rungs — UI PERCENTS, wire
+  //     FRACTIONS. 0 < lock < peak (< 100 UI / < 1 wire); both columns ascending.
+  //   trail_large_peak_pct / trail_large_giveback_rel: once peak ≥ large_peak the
+  //     give-back switches to RELATIVE (peak × (1 − rel)). Percents in UI.
+  step_lock_scope?: 'basket' | 'stock'
+  trail_step_lock_enabled?: boolean
+  trail_step_lock_ladder?: number[][]
+  trail_large_peak_pct?: number
+  trail_large_giveback_rel?: number
 }
 
 // A pick the backend SKIPPED because one unit of it costs more than its per-slice
