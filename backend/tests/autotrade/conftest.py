@@ -165,10 +165,27 @@ def clean_positions():
     _stop_all_drivers()
 
 
+def _assert_test_db(con):
+    """Hard-fail unless the connection's ACTUAL open file is our temp test DB.
+
+    ISOLATION GUARD (2026-07-09 incident #2): seed_signals wiped the LIVE
+    falcon_signals_live (served A/B/C test picks to real users on the portal)
+    when FALCON_DB import-order let falcon_conn() resolve to the prod DB. Every
+    test helper that DELETE/INSERTs via falcon_conn MUST call this first — an env
+    var check is not enough; assert on the real file (PRAGMA database_list)."""
+    _dbs = con.execute("PRAGMA database_list").fetchall()
+    _main = next((d[2] for d in _dbs if d[1] == "main"), "")
+    if "kanida_autotrade_test_" not in str(_main):
+        raise RuntimeError(
+            "TEST ISOLATION FAILURE: a test helper would write against a non-test DB "
+            "(%s). Expected the temp DB %s. Aborting to protect live data." % (_main, _TMP_DB))
+
+
 def seed_signals(symbols_ranks):
     """Insert Falcon picks. symbols_ranks = [(symbol, rank, score, close), ...]."""
     from falcon.db import falcon_conn
     with falcon_conn() as con:
+        _assert_test_db(con)  # never wipe the live falcon_signals_live
         con.execute("DELETE FROM falcon_signals_live")
         for sym, rank, score, close in symbols_ranks:
             con.execute(
