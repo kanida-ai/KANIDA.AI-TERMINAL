@@ -140,6 +140,26 @@ def run_migrations() -> dict:
                     "ADD COLUMN direction TEXT NOT NULL DEFAULT 'long'")
                 added_cols.append("direction")
 
+        # ── 2b-psl. ALTER-guard PER-STOCK step-lock state on autotrade_positions
+        # STEP-LOCK SCOPE == "stock" (intraday_basket): each position ratchets its
+        # OWN trail. pos_trail_armed: 0/1 — has this stock's per-slice return
+        # crossed its arm threshold. pos_trail_peak: the high-water g_stock
+        # (position_uPnL / capital slice). Both NULLABLE / default-0 → every
+        # existing row + every basket-scope session is byte-for-byte unchanged
+        # (these are read only when step_lock_scope=="stock"). Additive +
+        # idempotent — only added when missing.
+        if _table_exists(con, "autotrade_positions"):
+            have = set(_existing_columns(con, "autotrade_positions"))
+            for name, ddl_type, default in (
+                    ("pos_trail_armed", "INTEGER", "0"),
+                    ("pos_trail_peak", "REAL", "NULL")):
+                if name not in have:
+                    default_clause = "" if default == "NULL" else f" DEFAULT {default}"
+                    con.execute(
+                        f"ALTER TABLE autotrade_positions "
+                        f"ADD COLUMN {name} {ddl_type}{default_clause}")
+                    added_cols.append(name)
+
         # ── 2c. ALTER-guard invested_basis on autotrade_sessions ─────────────
         # INVESTED-CAPITAL-BASIS feature: the FROZEN sum of qty*avg_price across
         # the session's positions AT ENTRY. This is the product-aware capital
@@ -340,7 +360,12 @@ CREATE TABLE IF NOT EXISTS autotrade_positions (
     -- FUTURES long/short. 'long' (default) = entry BUY, exit SELL, P&L
     -- (ltp-avg)*qty. 'short' = entry SELL, exit BUY-to-cover, P&L (avg-ltp)*qty.
     -- Every equity/long row is 'long' → byte-for-byte unchanged.
-    direction       TEXT NOT NULL DEFAULT 'long'
+    direction       TEXT NOT NULL DEFAULT 'long',
+    -- STEP-LOCK SCOPE == "stock": this position's OWN ratcheting trail state.
+    -- pos_trail_armed 0/1; pos_trail_peak = high-water g_stock (uPnL / slice).
+    -- Read only when step_lock_scope=="stock"; default-0/NULL otherwise.
+    pos_trail_armed INTEGER DEFAULT 0,
+    pos_trail_peak  REAL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_autotrade_positions_sess_sym_prof
     ON autotrade_positions(session_id, symbol, broker_profile);

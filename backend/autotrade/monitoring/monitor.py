@@ -229,17 +229,34 @@ class PortfolioMonitor:
 
     def _open_positions(self) -> List[Dict[str, Any]]:
         """Return all OPEN positions for this session with the fields needed by
-        both the trail engine (symbol/qty/avg_price/ltp/unrealised_pnl) and the
-        per-stock stop (gtt_id/broker_profile/instrument_type)."""
+        the trail engine (symbol/qty/avg_price/ltp/unrealised_pnl), the per-stock
+        stop (gtt_id/broker_profile/instrument_type) AND the PER-STOCK step-lock
+        (pos_trail_armed/pos_trail_peak — each position's own ratchet state)."""
         with falcon_conn() as con:
             rows = con.execute(
                 """SELECT symbol, qty, avg_price, ltp, unrealised_pnl,
-                          gtt_id, broker_profile, instrument_type, direction
+                          gtt_id, broker_profile, instrument_type, direction,
+                          pos_trail_armed, pos_trail_peak
                    FROM autotrade_positions
                    WHERE session_id=? AND status='OPEN' AND qty > 0""",
                 (self.session_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def save_per_stock_trail_state(self, symbol: str, state) -> None:
+        """Persist ONE position's per-stock step-lock trail state (pos_trail_armed,
+        pos_trail_peak) so its ratchet is durable across restarts. Scoped to
+        (session_id, symbol) among OPEN rows. Used only in step_lock_scope=="stock".
+        NEVER touches the session-level trail_armed/trail_peak (basket state)."""
+        with falcon_conn() as con:
+            con.execute(
+                "UPDATE autotrade_positions "
+                "SET pos_trail_armed=?, pos_trail_peak=? "
+                "WHERE session_id=? AND symbol=? AND status='OPEN'",
+                (1 if state.armed else 0, float(state.peak),
+                 self.session_id, symbol),
+            )
+            con.commit()
 
     def get_exit_failed_positions(self) -> List[Dict[str, Any]]:
         """Return EXIT_FAILED positions whose exit gate is FREE (exit_lock=0).

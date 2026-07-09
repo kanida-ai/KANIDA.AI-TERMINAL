@@ -325,8 +325,37 @@ class _WSDriver:
             # leverage-correct (a 1x CNC basket is a no-op). Mirrors
             # session.py:_tick_intraday.
             gr_capital = sess.monitor.compute_gross_return()
-            state = sess.monitor.load_trail_state()
             params = trail_engine.params_from_config(sess.config)
+            # STEP-LOCK SCOPE == "stock": per-position step-locking (mirrors
+            # session._tick_intraday). The basket safety nets (time square-off +
+            # catastrophic -stop_pct) still flatten ALL positions; only the PROFIT
+            # trail moves per-stock. The basket-scope path below is unchanged.
+            if getattr(sess.config, "step_lock_scope", "basket") == "stock":
+                safety_reason = sess._basket_safety_decision(gr_capital, params)
+                if safety_reason is not None:
+                    with fire_guard.claim_fire(self.session_id) as won:
+                        if not won:
+                            return  # the 5s poll (or a manual kill) already fired
+                        log.critical(
+                            "ws_driver: intraday BASKET safety AUTO-fired "
+                            "(sub-second) for %s (%s)",
+                            self.session_id, safety_reason)
+                        asyncio.run(sess.kill_switch.fire(
+                            f"INTRADAY_BASKET {safety_reason} "
+                            f"gross_return={gr_capital:.4f}",
+                            gross_return=gr_capital, close_reason=safety_reason))
+                    return
+                # No basket safety-net trip → run the per-stock profit trail.
+                exits = asyncio.run(sess._run_per_stock_step_lock(params))
+                if exits:
+                    log.critical(
+                        "ws_driver: PER-STOCK step-lock exits (sub-second) for "
+                        "%s: %s", self.session_id,
+                        [e.get("symbol") for e in exits])
+                return
+
+            # BASKET scope (default) — single-decide whole-basket flow, unchanged.
+            state = sess.monitor.load_trail_state()
             decision = trail_engine.decide(gr_capital, state, params)
             if decision.state_changed:
                 sess.monitor.save_trail_state(decision.state)

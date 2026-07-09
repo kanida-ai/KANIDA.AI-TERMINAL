@@ -969,6 +969,10 @@ LIVE_EDITABLE_SESSION_FIELDS = (
     "trail_step_lock_ladder",
     "trail_large_peak_pct",
     "trail_large_giveback_rel",
+    # STEP-LOCK SCOPE — flip a RUNNING session basket<->stock (normally set at
+    # create). maybe_reload_config copies it onto the live config within one tick;
+    # positions / basis / per-stock ratchet state are untouched.
+    "step_lock_scope",
     "per_position_stop_pct",
     "per_position_target_pct",
     "square_off_time",
@@ -2193,6 +2197,51 @@ class TradingSession:
             except Exception as e:  # never block the tick on per-stock stop errors
                 log.error("per-stock stop loop error for %s: %s", self.session_id, e)
 
+        # ── STEP-LOCK SCOPE == "stock": PER-POSITION step-locking ─────────────
+        # The SAME ladder + give-back run per stock (each on its own capital-slice
+        # return g_stock), exiting individual stocks independently. The BASKET-
+        # level safety nets still flatten ALL positions: the time SQUARE_OFF and
+        # the catastrophic basket hard stop (basket G <= -stop_pct). Only the
+        # PROFIT trail (arm/ratchet/trail-exit) moves per-stock. The basket path
+        # below (scope=="basket", default) is left byte-for-byte unchanged.
+        if getattr(self.config, "step_lock_scope", "basket") == "stock":
+            params = trail_engine.params_from_config(self.config)
+            safety_reason = self._basket_safety_decision(gr_capital, params)
+            if safety_reason is not None:
+                fired = None
+                with fire_guard.claim_fire(self.session_id) as won:
+                    if won:
+                        fired = await self.kill_switch.fire(
+                            f"INTRADAY_BASKET {safety_reason} "
+                            f"gross_return={gr_capital:.4f}",
+                            gross_return=gr_capital, close_reason=safety_reason)
+                    else:
+                        safety_reason = None  # another path already fired
+                return {"gross_return": gr_capital,
+                        "gross_return_fund": snap["gross_return"],
+                        "snapshot": snap, "strategy": "intraday_basket",
+                        "step_lock_scope": "stock",
+                        "trail_action": "EXIT" if fired else "HOLD",
+                        "kill_switch_fired": bool(fired),
+                        "kill_reason": safety_reason, "fire_result": fired,
+                        "gtt_closed": gtt_closed,
+                        "broker_reconciled": broker_reconciled,
+                        "per_stock_exits": per_stock_exits}
+            # No basket safety-net trip → run the per-stock profit trail. It exits
+            # only the individual position(s) whose own ratchet/give-back tripped.
+            step_exits = await self._run_per_stock_step_lock(params)
+            per_stock_exits.extend(step_exits)
+            return {"gross_return": gr_capital,
+                    "gross_return_fund": snap["gross_return"],
+                    "snapshot": snap, "strategy": "intraday_basket",
+                    "step_lock_scope": "stock",
+                    "trail_action": "EXIT" if step_exits else "HOLD",
+                    "kill_switch_fired": False,
+                    "kill_reason": None, "fire_result": None,
+                    "gtt_closed": gtt_closed,
+                    "broker_reconciled": broker_reconciled,
+                    "per_stock_exits": per_stock_exits}
+
         state = self.monitor.load_trail_state()
         params = trail_engine.params_from_config(self.config)
         decision = trail_engine.decide(gr_capital, state, params)
@@ -2227,6 +2276,94 @@ class TradingSession:
                 "gtt_closed": gtt_closed,
                 "broker_reconciled": broker_reconciled,
                 "per_stock_exits": per_stock_exits}
+
+    # ── PER-STOCK step-lock (step_lock_scope == "stock") ──────────────────────
+    def _basket_safety_decision(self, gr_capital: float, params) -> Optional[str]:
+        """In step_lock_scope=="stock", evaluate ONLY the basket-level safety nets
+        via the pure trail engine: the time SQUARE_OFF and the catastrophic
+        downside STOP (basket G <= -stop_pct). Returns the reason ("SQUARE_OFF" |
+        "STOP") when the WHOLE basket must flatten, else None. The engine's PROFIT
+        trail (arm/ratchet/give-back) is intentionally IGNORED here — that is run
+        per-stock. A fresh TrailState is used (SQUARE_OFF/STOP do not depend on
+        armed/peak) so the basket trail state is neither ratcheted nor persisted
+        in stock mode."""
+        decision = trail_engine.decide(
+            gr_capital, trail_engine.TrailState(), params)
+        if decision.action == "EXIT" and decision.reason in ("SQUARE_OFF", "STOP"):
+            return decision.reason
+        return None
+
+    async def _run_per_stock_step_lock(self, params) -> List[Dict[str, Any]]:
+        """PER-STOCK STEP-LOCK profit trail (config.step_lock_scope=="stock").
+
+        Runs the SAME ladder + give-back PER POSITION on each stock's slice-
+        relative return and exits individual stocks independently. The basket
+        safety nets (time SQUARE_OFF + catastrophic -stop_pct) are the CALLER's
+        responsibility and are NOT re-evaluated here.
+
+        g_stock = position_uPnL / capital_slice, where
+            capital_slice = total_allocated_capital
+                            * (position_notional / Σ position_notional over OPEN),
+            position_notional = qty * avg_price.
+        This makes each stock's % directly comparable to the BASKET's %-of-capital
+        (leverage cancels in the proportion; equal-weight → total_capital / N), so
+        an A/B basket-vs-stock test is fair.
+
+        Each position loads/persists its OWN (pos_trail_armed, pos_trail_peak) and,
+        on a profit EXIT (STEP_LOCK_EXIT / TRAIL_EXIT), ONLY that position is
+        flattened via _exit_single_position; the others keep running. Returns the
+        list of per-position exit result dicts."""
+        from dataclasses import replace as _dc_replace
+        positions = self.monitor._open_positions()
+        if not positions:
+            return []
+        total_notional = 0.0
+        for p in positions:
+            total_notional += float(p.get("qty") or 0) * float(p.get("avg_price") or 0)
+        if total_notional <= 0:
+            return []
+        total_cap = float(self.config.total_allocated_capital)
+        # Per-stock params: the SAME ladder / give-back / arm-at-first-rung /
+        # large-tier knobs, but with the BASKET safety branches SUPPRESSED — the
+        # time SQUARE_OFF (square_off_enabled=False) and the downside STOP (an
+        # unreachable stop_pct) are handled once at the basket level by the caller,
+        # never per-stock. Only the profit trail (arm/ratchet/trail-exit) fires.
+        ps_params = _dc_replace(params, square_off_enabled=False, stop_pct=10.0)
+
+        exits: List[Dict[str, Any]] = []
+        for p in positions:
+            ltp = p.get("ltp")
+            avg = float(p.get("avg_price") or 0.0)
+            qty = float(p.get("qty") or 0.0)
+            if ltp is None or avg <= 0 or qty <= 0:
+                continue
+            notional = qty * avg
+            slice_cap = total_cap * (notional / total_notional)
+            if slice_cap <= 0:
+                continue
+            sign = -1.0 if str(p.get("direction") or "long").lower() == "short" \
+                else 1.0
+            upnl = sign * (float(ltp) - avg) * qty
+            g_stock = upnl / slice_cap
+            state = trail_engine.TrailState(
+                armed=bool(p.get("pos_trail_armed")),
+                peak=float(p.get("pos_trail_peak") or 0.0))
+            decision = trail_engine.decide(g_stock, state, ps_params)
+            if decision.state_changed:
+                self.monitor.save_per_stock_trail_state(p["symbol"], decision.state)
+            if decision.action == "EXIT":
+                result = await _exit_single_position(
+                    session_id=self.session_id, position=p,
+                    reason=decision.reason, brokers=self.brokers,
+                    registry=self.registry, gtt_manager=self.gtt_manager,
+                    kite_product=self.config.order_product, exec_cfg=self.config)
+                result["reason"] = decision.reason
+                result["g_stock"] = g_stock
+                exits.append(result)
+                log.warning(
+                    "PER-STOCK STEP-LOCK EXIT %s/%s: g_stock=%.4f reason=%s",
+                    self.session_id, p["symbol"], g_stock, decision.reason)
+        return exits
 
     # ── Manual kill ────────────────────────────────────────────────────────────
     async def kill(self, reason: str = "MANUAL") -> Dict[str, Any]:

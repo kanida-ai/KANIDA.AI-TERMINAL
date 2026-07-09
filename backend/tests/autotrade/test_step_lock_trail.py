@@ -36,8 +36,8 @@ CAP = 500_000.0   # ₹5L, to prove the rupee numbers.
 
 def P(*, giveback=0.0125, large_peak=0.20, large_rel=0.175, ladder=LADDER,
       stop=0.03, enabled=True):
-    """A step-lock TrailParams. giveback defaults to the 0.0125 the operator used
-    in the worked examples (config default trail_giveback_pct is 0.015)."""
+    """A step-lock TrailParams. giveback defaults to 0.0125 — which is now ALSO
+    the config default trail_giveback_pct (2026-07-08), matching the §4 examples."""
     return TrailParams(
         arm_pct=0.05, floor_pct=0.01, trail_giveback_pct=giveback, stop_pct=stop,
         square_off_time="15:29:00",

@@ -22,7 +22,7 @@ def test_validated_basket_only_defaults():
     c.validate()
     assert c.arm_pct == 0.05             # profit-lock arms at +5% OF CAPITAL
     assert c.floor_pct == 0.01           # locked floor +1%
-    assert c.trail_giveback_pct == 0.015 # WIDE 1.5% giveback rides runners
+    assert c.trail_giveback_pct == 0.0125 # 1.25% give-back (2026-07-08 default)
     assert c.stop_pct == 0.03            # -3% basket hard stop
     assert c.per_position_stop_pct == 0.05   # GTT = rare -5% catastrophe backstop
     assert c.per_stock_stop_enabled is False # Layer A OFF → basket-only

@@ -286,11 +286,15 @@ class TradingSessionConfig:
     # per the doc; superseded the earlier arm2/floor1/give0.5/stop1.5 sweep values.
     # 2026-07-07: with the trail now on the ALLOCATED-CAPITAL basis, the default
     # arm is raised 0.025 -> 0.05 so a fresh/default intraday session arms at +5%
-    # of deployed capital. floor/giveback/stop defaults unchanged now read as
-    # floor +1% / giveback 1.5% / hard-stop -3% OF CAPITAL — a coherent set.
+    # of deployed capital. floor/stop defaults read as floor +1% / hard-stop -3%
+    # OF CAPITAL; the give-back default is 1.25% (2026-07-08) — a coherent set.
     arm_pct: float = 0.05
     floor_pct: float = 0.01
-    trail_giveback_pct: float = 0.015
+    # 2026-07-08: default give-back tightened 0.015 -> 0.0125 (1.25% of capital)
+    # per the operator's worked-example set (§4 headline: peak 0.08 -> exit 0.0675
+    # = ₹33,750 on ₹5L). Positional children still set 0.04 explicitly. Additive:
+    # an existing session that persisted an explicit trail_giveback_pct keeps it.
+    trail_giveback_pct: float = 0.0125
     stop_pct: float = 0.03
     # ── PROFIT STEP-LOCKING (ratcheting profit floor, intraday_basket trail) ──
     # Replaces the single fixed floor_pct with a STEP-LOCK LADDER floor(peak) that
@@ -315,6 +319,19 @@ class TradingSessionConfig:
         default_factory=lambda: [list(r) for r in DEFAULT_STEP_LOCK_LADDER])
     trail_large_peak_pct: float = 0.20
     trail_large_giveback_rel: float = 0.175
+    # ── STEP-LOCK SCOPE (basket vs per-stock, intraday_basket only) ────────────
+    #   "basket" (DEFAULT) = EXACTLY today's behaviour, byte-identical: the SAME
+    #       step-lock ladder + give-back run on the BASKET's capital-basis gross
+    #       return G and, on EXIT, flatten the WHOLE basket.
+    #   "stock"  = the SAME ladder + give-back run PER POSITION on each stock's
+    #       g_stock (= position_uPnL / its capital slice), exiting individual
+    #       stocks independently. Each position ratchets its OWN armed/peak
+    #       (autotrade_positions.pos_trail_armed/pos_trail_peak). The SAFETY NETS
+    #       stay basket-level: the time SQUARE_OFF and the catastrophic basket
+    #       hard-stop (basket G <= -stop_pct) still flatten ALL positions. Only
+    #       the PROFIT trail (arm/ratchet/trail-exit) moves per-stock.
+    # Additive + default-off: an existing session (no key) loads as "basket".
+    step_lock_scope: str = "basket"
     # Layer A — per-stock software stop (session.py _tick_intraday). OFF by default:
     # the validated config is BASKET-ONLY. Across 530 days a per-stock stop whipsawed
     # (cut a name at its stop that then recovered inside the basket), reducing return
@@ -535,6 +552,11 @@ class TradingSessionConfig:
                     f"{self.trail_large_giveback_rel}")
             if self.trail_step_lock_enabled and self.trail_step_lock_ladder:
                 validate_step_lock_ladder(self.trail_step_lock_ladder)
+            # STEP-LOCK SCOPE: basket (whole-basket exit) | stock (per-position).
+            if self.step_lock_scope not in ("basket", "stock"):
+                raise ValueError(
+                    "step_lock_scope must be 'basket' or 'stock', got "
+                    f"{self.step_lock_scope!r}")
             # Times must parse and square-off must be strictly after entry.
             try:
                 entry_s = _parse_clock_to_seconds(self.entry_time)
@@ -726,7 +748,7 @@ class TradingSessionConfig:
             per_position_target_pct=float(d.get("per_position_target_pct", 0.06)),
             arm_pct=float(d.get("arm_pct", 0.05)),
             floor_pct=float(d.get("floor_pct", 0.01)),
-            trail_giveback_pct=float(d.get("trail_giveback_pct", 0.015)),
+            trail_giveback_pct=float(d.get("trail_giveback_pct", 0.0125)),
             stop_pct=float(d.get("stop_pct", 0.03)),
             trail_step_lock_enabled=bool(d.get("trail_step_lock_enabled", True)),
             # Absent key → the default ladder; an EXPLICIT [] (opt-out) is
@@ -738,6 +760,7 @@ class TradingSessionConfig:
             trail_large_peak_pct=float(d.get("trail_large_peak_pct", 0.20)),
             trail_large_giveback_rel=float(
                 d.get("trail_large_giveback_rel", 0.175)),
+            step_lock_scope=d.get("step_lock_scope", "basket"),
             per_stock_stop_enabled=bool(d.get("per_stock_stop_enabled", False)),
             square_off_time=d.get("square_off_time", "15:29:00"),
             square_off_enabled=bool(d.get("square_off_enabled", True)),

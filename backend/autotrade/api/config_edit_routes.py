@@ -122,6 +122,12 @@ def _coerce_and_validate(field: str, value: Any) -> Any:
                 400, "trail_large_giveback_rel must be a fraction in (0, 1) "
                      f"(e.g. 0.175 = trail 17.5% from peak), got {v}")
         return v
+    if field == "step_lock_scope":
+        v = str(value).strip().lower()
+        if v not in ("basket", "stock"):
+            raise HTTPException(
+                400, f"step_lock_scope must be 'basket' or 'stock', got {value!r}")
+        return v
     if field == "trail_step_lock_ladder":
         # Validate the ladder shape exactly as config.validate() does (non-empty,
         # 0<lock<peak<1 per rung, strictly ascending by peak AND lock), then
