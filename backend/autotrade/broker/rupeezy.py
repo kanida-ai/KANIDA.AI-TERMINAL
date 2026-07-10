@@ -612,6 +612,51 @@ class RupeezyBroker(BrokerClient):
             })
         return out or None
 
+    def get_net_position_qty(self, symbol: str,
+                             instrument_type: str = "EQ"):
+        """Signed net quantity Vortex currently holds for `symbol`, or None when
+        not live. PRE-EXIT reconciliation guard (parity with the Zerodha adapter).
+
+        REAL-MONEY FAIL-SAFE (2026-07-10 BRIGADE double-cover, ported here): a
+        genuine broker/transport error MUST re-raise — NOT be swallowed to None.
+        None is the PAPER / not-live sentinel; the caller treats None as "no book
+        to reconcile, proceed with the exit". If we swallowed a ConnectionReset to
+        None the caller would place a BLIND exit (a short's buy-to-cover doubling
+        into a naked long). So: paper/not-live → None (unchanged); a genuine flat
+        book → 0; a real fetch error → RAISE so the caller's guard ABORTS the exit
+        and retries next tick.
+
+        This deliberately does NOT reuse get_positions() / get_positions_net()
+        (both swallow errors to []/None — correct for the reconciler's conservative
+        'do nothing on unknown', but WRONG here where an error must abort the exit).
+        TODO(certify): the exact Vortex positions field names are still unverified
+        (same caveat as get_positions_net); the RE-RAISE-on-error property holds
+        regardless of field mapping, so the safety guarantee is certification-
+        independent — only the returned qty on the success path awaits cert."""
+        if not self._live_allowed():
+            return None
+        # No try/except around the fetch: a genuine transport/HTTP error MUST
+        # propagate (that is the whole point of the fail-safe).
+        r = self._request("GET", "/trading/portfolio/positions")
+        r.raise_for_status()
+        data = (r.json() or {}).get("data")
+        if isinstance(data, dict):
+            data = data.get("net") or data.get("positions") or []
+        for row in list(data or []):
+            if not isinstance(row, dict):
+                continue
+            row_sym = (row.get("tradingsymbol") or row.get("trading_symbol")
+                       or row.get("symbol") or row.get("token"))
+            if str(row_sym) != str(symbol):
+                continue
+            qty = row.get("quantity", row.get("net_quantity", row.get("net_qty")))
+            if qty is None:
+                bq = row.get("buy_quantity", row.get("buy_qty")) or 0
+                sq = row.get("sell_quantity", row.get("sell_qty")) or 0
+                qty = int(bq) - int(sq)
+            return int(qty or 0)
+        return 0  # book retrieved, symbol absent → flat at the broker
+
     def get_holdings(self) -> List[dict]:
         """Delivery holdings. TODO(certify) exact path — reference CONFIRM #3
         (`GET /trading/portfolio/holdings`). Returns [] on any failure."""

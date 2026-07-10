@@ -549,3 +549,52 @@ def test_extract_margin_field_variants():
     assert _extract_margin({"data": {}}) is None
     assert _extract_margin({"data": {"required_margin": 0}}) is None
     assert _extract_margin("nonsense") is None
+
+
+# ── PRE-EXIT GUARD: get_net_position_qty + B1 re-raise fail-safe (2026-07-10) ──
+
+def test_get_net_position_qty_paper_returns_none(fake_requests, master_file):
+    """Paper / not-live → None WITHOUT any HTTP call (byte-for-byte unchanged)."""
+    b = RupeezyBroker(_live_profile(), dry_run=True)
+    assert b.get_net_position_qty("INFY") is None
+    assert fake_requests.calls == []
+
+
+def test_get_net_position_qty_live_returns_signed(fake_requests, master_file,
+                                                  monkeypatch):
+    """A live book with our symbol → its SIGNED net qty (short = negative)."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/trading/portfolio/positions",
+                     _FakeResp(200, {"data": [
+                         {"tradingsymbol": "INFY", "quantity": -50},
+                         {"tradingsymbol": "TCS", "quantity": 10}]}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_net_position_qty("INFY") == -50
+
+
+def test_get_net_position_qty_live_flat_returns_zero(fake_requests, master_file,
+                                                     monkeypatch):
+    """Book retrieved OK but our symbol absent → 0 (genuinely flat)."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/trading/portfolio/positions",
+                     _FakeResp(200, {"data": [{"tradingsymbol": "TCS",
+                                               "quantity": 10}]}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_net_position_qty("INFY") == 0
+
+
+def test_get_net_position_qty_reraises_on_transport_error(fake_requests,
+                                                          master_file, monkeypatch):
+    """B1 FAIL-SAFE: a genuine transport error must RE-RAISE, never be swallowed
+    to None — None is the paper sentinel and would make the caller place a BLIND
+    exit (the BRIGADE double-cover naked-position bug). Mutation check: if the
+    method swallowed the error to None this asserts-raises test would fail."""
+    _enable_live(monkeypatch)
+    monkeypatch.setattr(rupeezy_mod.time, "sleep", lambda *a, **k: None)
+
+    def _boom(*a, **k):
+        raise ConnectionResetError("An existing connection was forcibly closed (10054)")
+    monkeypatch.setattr(fake_requests, "request", _boom)
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    with pytest.raises(ConnectionResetError):
+        b.get_net_position_qty("INFY")
