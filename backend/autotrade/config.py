@@ -485,16 +485,33 @@ class TradingSessionConfig:
         if self.direction not in ("long", "short"):
             raise ValueError(
                 f"invalid direction (long | short): {self.direction}")
-        # SHORT is currently supported for FUTURES only. Options short + equity
-        # short are later phases; reject them at the door so we never place a
-        # sell-to-open on an instrument whose margin / cover semantics we haven't
-        # certified.
-        if self.direction == "short" and self.instrument_type != "FUT":
-            raise ValueError(
-                "short is currently supported only for FUT "
-                f"(got instrument_type={self.instrument_type})")
         if self.order_product not in ("CNC", "MIS", "NRML", "MTF"):
             raise ValueError(f"invalid order_product: {self.order_product}")
+        # SHORT is supported for FUTURES (any product) and for EQUITY INTRADAY
+        # ONLY (instrument_type=="EQ" AND order_product=="MIS"). Everything else
+        # is rejected at the door so we never place a sell-to-open on an
+        # instrument whose margin / cover semantics are unsafe or illegal:
+        #   • EQ + CNC  → short-DELIVERY is illegal on NSE cash (can't deliver
+        #                 shares you don't own; broker auto-square + penalty).
+        #   • EQ + MTF  → MTF is a LONG-ONLY leverage (margin-funding) product;
+        #                 you cannot short on MTF.
+        #   • CE / PE   → options short is a separate, uncertified phase.
+        # An EQ+MIS short MUST be bought-to-cover intraday before the broker's
+        # ~15:20 auto-square (enforced by square_off_time defaulting well before
+        # that, plus the intraday square-off machinery — see session/monitor).
+        if self.direction == "short":
+            _short_ok = (
+                self.instrument_type == "FUT"
+                or (self.instrument_type == "EQ" and self.order_product == "MIS")
+            )
+            if not _short_ok:
+                raise ValueError(
+                    "short is supported only for FUT, or for equity INTRADAY "
+                    "(instrument_type=EQ + order_product=MIS). Got "
+                    f"instrument_type={self.instrument_type}, "
+                    f"order_product={self.order_product}. Equity short on CNC "
+                    "(illegal short-delivery) and MTF (long-only leverage) is "
+                    "rejected.")
         # PRODUCT × INSTRUMENT compatibility (real-money safety). NRML is an
         # F&O / currency / commodity CARRY product — the broker REJECTS it on NSE
         # cash equity ("Trading in NSE is not allowed using NRML product type").

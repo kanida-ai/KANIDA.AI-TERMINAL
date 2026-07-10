@@ -337,10 +337,21 @@ def collect_trades(con: sqlite3.Connection,
             charges_total = 0.0
             if (not reconcile_flat and exit_price is not None
                     and avg_price > 0 and qty > 0):
+                # DIRECTION-AWARE legs (real-money charge accuracy): STT (MIS
+                # sell-side / F&O sell-side) and stamp (buy-side) are leg-specific.
+                # For a LONG the entry (avg_price) is the BUY and the exit is the
+                # SELL; for a SHORT it inverts — entry is the SELL-to-open, exit is
+                # the BUY-to-cover. Passing them swapped would charge STT/stamp on
+                # the wrong leg's value. buy_value = the BUY leg, sell_value = SELL.
+                _open_val = qty * avg_price
+                _close_val = qty * exit_price
+                _is_short = str(row["direction"] or "long").lower() == "short"
+                _buy_value = _close_val if _is_short else _open_val
+                _sell_value = _open_val if _is_short else _close_val
                 ch = estimate_charges(
                     product=product,
-                    buy_value=qty * avg_price,
-                    sell_value=qty * exit_price,
+                    buy_value=_buy_value,
+                    sell_value=_sell_value,
                     legs=2,
                     instrument_type=instrument)
                 charges_total = float(ch.get("total", 0.0))

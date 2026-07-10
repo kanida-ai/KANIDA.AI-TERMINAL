@@ -14,9 +14,14 @@ if TYPE_CHECKING:  # avoid import cycle at module load
 
 def build_eq_order(symbol: str, qty: int, config) -> "Order":
     from .orders import Order
+    # EQUITY long/short: entry side. direction=="short" → SELL-to-open (only
+    # ever reached for EQ + MIS — config.validate() rejects short on CNC/MTF).
+    # direction=="long" (default) → BUY (unchanged, byte-identical).
+    txn = "SELL" if getattr(config, "direction", "long") == "short" else "BUY"
     return Order(symbol=symbol, qty=qty, exchange="NSE",
                  product=config.order_product, order_type=config.order_type,
-                 instrument_type="EQ", limit_offset_pct=config.limit_offset_pct,
+                 instrument_type="EQ", transaction_type=txn,
+                 limit_offset_pct=config.limit_offset_pct,
                  vwap_window_seconds=config.vwap_window_seconds)
 
 

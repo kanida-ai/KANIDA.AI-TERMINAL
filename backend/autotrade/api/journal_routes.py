@@ -145,8 +145,15 @@ def _build_position_row(p: Dict[str, Any],
     if status == "CLOSED" and r_pnl is not None and exit_p is not None and \
             avg_price > 0 and qty > 0:
         from ..charges import estimate_charges
-        buy_value  = qty * avg_price
-        sell_value = qty * float(exit_p)
+        # DIRECTION-AWARE legs (real-money charge accuracy): for a SHORT the entry
+        # (avg_price) is the SELL-to-open and the exit (exit_p) is the BUY-to-cover,
+        # so buy/sell values invert. STT (sell-side) + stamp (buy-side) would land
+        # on the wrong leg if passed as long. LONG (default) is byte-identical.
+        _open_val  = qty * avg_price
+        _close_val = qty * float(exit_p)
+        _is_short  = str(p.get("direction") or "long").lower() == "short"
+        buy_value  = _close_val if _is_short else _open_val
+        sell_value = _open_val if _is_short else _close_val
         # Pass the position's own instrument_type so FUT/CE/PE use the F&O charge
         # model (NOT the equity-delivery model — that overstated futures charges
         # ~10-20×). EQ (or absent) → the existing equity behaviour, unchanged.

@@ -32,9 +32,11 @@ def test_direction_defaults_long():
 
 
 def test_short_requires_fut():
+    # EQ + CNC (default product) short = illegal short-delivery → rejected.
+    # (EQ + MIS intraday short is now allowed — see test_short_eq_mis.py.)
     cfg = TradingSessionConfig(total_allocated_capital=100000.0,
                                instrument_type="EQ", direction="short")
-    with pytest.raises(ValueError, match="short is currently supported only for FUT"):
+    with pytest.raises(ValueError, match="short is supported only for FUT"):
         cfg.validate()
 
 
