@@ -31,9 +31,11 @@ export type KillDirection = 'profit' | 'loss' | 'both'
 // the product to NRML server-side and the user does NOT pick CNC/MIS/MTF. (CE/PE
 // are NOT supported yet.)
 export type InstrumentType = 'EQ' | 'FUT'
-// Trade side. 'long' (default) = buy. 'short' = sell — the backend REJECTS
-// direction='short' with HTTP 400 "short is currently supported only for FUT"
-// unless instrument_type=='FUT'.
+// Trade side. 'long' (default) = buy. 'short' = sell. The backend allows
+// direction='short' ONLY for (a) FUT (current-month futures), or (b) EQUITY on
+// MIS (equity short-intraday, auto-covered before close). It REJECTS short with
+// HTTP 400 for equity CNC/MTF and for any non-MIS/non-FUT combination, so the UI
+// must never send short outside those two cases.
 export type TradeDirection = 'long' | 'short'
 
 // Execution-date / trading-day rule. What to do if the fire moment is missed or
@@ -67,8 +69,9 @@ export type SessionConfig = {
   // ── Instrument / direction ── (optional; both default server-side to EQ/long,
   // i.e. the existing equity behaviour when omitted). For FUT the backend uses
   // the current-month expiry (expiry_preference="near") and sets product=NRML;
-  // the user does not pick CNC/MIS/MTF. direction='short' is FUT-only (backend
-  // returns HTTP 400 "short is currently supported only for FUT" otherwise).
+  // the user does not pick CNC/MIS/MTF. direction='short' is allowed ONLY for FUT
+  // or for EQUITY on MIS (equity short-intraday, auto-covered before close); the
+  // backend returns HTTP 400 for short on equity CNC/MTF (or any other combo).
   instrument_type?: InstrumentType
   direction?: TradeDirection
   // ── portfolio_kill_switch strategy ──

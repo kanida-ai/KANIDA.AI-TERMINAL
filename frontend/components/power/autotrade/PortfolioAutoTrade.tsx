@@ -359,6 +359,13 @@ const DIRECTION_OPTIONS: { id: TradeDirection; label: string }[] = [
   { id: 'long',  label: 'Buy'          },
   { id: 'short', label: 'Sell (Short)' },
 ]
+// Direction for an EQUITY session: Long | Short. Short is EQUITY + MIS-only
+// (intraday, auto-covered before close); the backend rejects short on CNC/MTF,
+// so this control only appears when order_product === 'MIS'. Default Long.
+const EQ_DIRECTION_OPTIONS: { id: TradeDirection; label: string }[] = [
+  { id: 'long',  label: 'Long'  },
+  { id: 'short', label: 'Short' },
+]
 // D · Hold mode for the Dynamic (Trailing) basket. Intraday forces a square-off
 // at square_off_time; Positional carries the floor + hard stop across days.
 const HOLD_OPTIONS: { id: 'intraday' | 'positional'; label: string }[] = [
@@ -662,14 +669,24 @@ export function PortfolioAutoTrade({
   const set = <K extends keyof SessionConfig>(k: K, v: SessionConfig[K]) =>
     setConfig((c) => ({ ...c, [k]: v }))
 
-  // Switch instrument. Selecting Equity forces direction back to 'long' (short is
-  // FUT-only; the backend rejects a short equity order). Selecting Futures keeps
-  // the current direction (defaults to 'long').
+  // Switch instrument. Selecting Equity resets direction to 'long' (equity short
+  // is re-selectable only via the EQ+MIS Long/Short control below). Selecting
+  // Futures keeps the current direction (defaults to 'long').
   const onInstrumentChange = (next: InstrumentType) =>
     setConfig((c) => ({
       ...c,
       instrument_type: next,
       direction: next === 'EQ' ? 'long' : (c.direction ?? 'long'),
+    }))
+
+  // Switch the equity order product. Short is EQUITY + MIS-only, so moving the
+  // product away from MIS (to CNC/MTF) snaps direction back to 'long' — the
+  // backend rejects short outside MIS, so the UI must never leave it selected.
+  const onProductChange = (next: OrderProduct) =>
+    setConfig((c) => ({
+      ...c,
+      order_product: next,
+      direction: next === 'MIS' ? (c.direction ?? 'long') : 'long',
     }))
 
   // The selected account object (if any) + the scope to send on create/preview/list.
@@ -801,6 +818,16 @@ export function PortfolioAutoTrade({
     if (c.order_product === 'MIS' && c.mis_square_off_time) {
       misExtra.mis_square_off_time = c.mis_square_off_time
     }
+    // Direction safety net: 'short' is valid ONLY for FUT or EQUITY-on-MIS. The
+    // controls already prevent selecting it elsewhere, but normalise here so the
+    // wire can never carry an invalid short (the backend would 400 it). Sent as
+    // `direction` verbatim (default 'long').
+    // The right operand only runs when instrument_type !== 'FUT' (i.e. EQ), so a
+    // bare MIS check there means EQUITY-on-MIS.
+    const shortOk = c.instrument_type === 'FUT' || c.order_product === 'MIS'
+    const dirExtra: Partial<SessionConfig> = {
+      direction: c.direction === 'short' && shortOk ? 'short' : 'long',
+    }
     if (c.strategy === 'intraday_basket') {
       return {
         ...c,
@@ -808,6 +835,7 @@ export function PortfolioAutoTrade({
         ...universeExtra,
         ...capitalExtra,
         ...misExtra,
+        ...dirExtra,
         arm_pct: (Number(c.arm_pct) || 0) / 100,
         floor_pct: (Number(c.floor_pct) || 0) / 100,
         trail_giveback_pct: (Number(c.trail_giveback_pct) || 0) / 100,
@@ -855,6 +883,7 @@ export function PortfolioAutoTrade({
       ...universeExtra,
       ...capitalExtra,
       ...misExtra,
+      ...dirExtra,
       ...killExtra,
       kill_switch_pct: (Number(c.kill_switch_pct) || 0) / 100,
     }
@@ -2019,7 +2048,7 @@ export function PortfolioAutoTrade({
                 <Segmented
                   options={(isLadder ? (['CNC', 'MTF'] as OrderProduct[]) : PRODUCT_OPTIONS).map((p) => ({ id: p, label: p }))}
                   value={config.order_product === 'MIS' && isLadder ? 'CNC' : config.order_product}
-                  onChange={(v) => set('order_product', v)}
+                  onChange={(v) => onProductChange(v)}
                 />
               </Field>
             ) : null}
@@ -2054,8 +2083,38 @@ export function PortfolioAutoTrade({
                 <Segmented
                   options={PRODUCT_OPTIONS.map((p) => ({ id: p, label: p }))}
                   value={config.order_product}
-                  onChange={(v) => set('order_product', v)}
+                  onChange={(v) => onProductChange(v)}
                 />
+              </Field>
+            )}
+
+            {/* Equity direction — Long | Short. ADDITIVE. Short is EQUITY + MIS-only
+                (intraday, auto-covered before close): the control appears ONLY when
+                instrument is Equity AND product is MIS. CNC/MTF, Futures and
+                Auto-Ladder are Long-only (the Futures Buy/Sell control is separate),
+                so Short is never offered there — the backend rejects it. Default
+                Long; onProductChange snaps back to Long when product leaves MIS. */}
+            {!isLadder
+              && (config.instrument_type ?? 'EQ') === 'EQ'
+              && config.order_product === 'MIS' && (
+              <Field label="Direction" hint="Long buys to open; Short (MIS only) sells to open and auto-covers before close.">
+                <Segmented
+                  options={EQ_DIRECTION_OPTIONS.map((d) => ({ id: d.id, label: d.label }))}
+                  value={config.direction ?? 'long'}
+                  onChange={(v) => set('direction', v)}
+                />
+                {(config.direction ?? 'long') === 'short' && (
+                  <div
+                    className="mt-2 flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-snug"
+                    style={{ color: C.ink2, border: `1px solid ${C.line}`, background: 'rgba(63,227,164,0.06)' }}
+                    role="note"
+                  >
+                    <span className="shrink-0 mt-0.5" style={{ color: C.mint }}>{ICON.info(13)}</span>
+                    <span>
+                      Short sells to open on MIS and is auto-covered before market close (intraday only).
+                    </span>
+                  </div>
+                )}
               </Field>
             )}
 

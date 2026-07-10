@@ -1698,3 +1698,32 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
   merge to `main` → Vercel. UI + BFF types only; no execution/trade path touched. Mint/F2 theme,
   reused `C`/`ICON`/`Field`/`Segmented`/`inputStyle`, no new accents. Verify: `npx tsc --noEmit`
   clean; `next build` → "✓ Compiled successfully in 5.6s". NOT committed/deployed — operator reviews.
+
+## 2026-07-09 — AutoTrade create form: LONG / SHORT direction toggle (equity MIS short-intraday)
+
+- **Acting on:** operator request — ship the FRONTEND half of a new "equity MIS short intraday"
+  capability. STRICTLY ADDITIVE: nothing existing removed/renamed/collapsed (intraday card,
+  Trailing-strategy card, per-stock stop, sizing, preview, the FUT Buy/Sell control all untouched).
+- **What was added** (`components/power/autotrade/PortfolioAutoTrade.tsx`): a clean segmented
+  **Long / Short** control (`EQ_DIRECTION_OPTIONS`), styled to match the existing Trailing-strategy /
+  Segmented language (same F2/mint tokens). It renders ONLY when `!isLadder && instrument_type==='EQ'
+  && order_product==='MIS'` — so Short is impossible for CNC/MTF, Futures (which keep their own
+  Buy/Sell control) and Auto-Ladder, which the backend rejects. Default **Long**. When Short is
+  selected a calm mint-info note (not amber, no scary language) reads verbatim: "Short sells to open
+  on MIS and is auto-covered before market close (intraday only)."
+- **Snap-back guard:** new `onProductChange(next)` handler wraps the two equity product Segmented
+  controls — changing product away from MIS (to CNC/MTF) snaps `direction` back to `'long'`, so the
+  UI can never leave short selected on an invalid product. Instrument→Equity also resets to long
+  (short re-selectable only via the EQ+MIS control).
+- **Wire:** `toWireConfig` now emits a normalised `direction` (verbatim key) via a `shortOk` safety
+  net — `direction:'short'` is passed through only for FUT or EQUITY-on-MIS, otherwise coerced to
+  `'long'`. Spread into BOTH the intraday_basket and kill-switch wire branches. Reuses manual-symbol
+  entry (short sessions are manual-symbol; no new picker built).
+- **Types:** `SessionConfig.direction?: 'long' | 'short'` already existed in `lib/autotrade-api.ts`;
+  updated the `TradeDirection` + field doc-comments from "FUT-only" to the real contract: short is
+  allowed ONLY for FUT or EQUITY-on-MIS (backend 400s short on equity CNC/MTF or any other combo).
+- **Backend contract (as given):** `direction:"short"` accepted only for `instrument_type EQ` +
+  `order_product MIS` (and the pre-existing FUT case). The UI matches this exactly.
+- **Deploy path:** worktree `_kanida_falconui/frontend`, branch `feat/falcon-ai-shell`. UI + BFF
+  types only; no execution/trade path touched. Verify: `npx tsc --noEmit` clean. NOT committed —
+  staged for operator review.
