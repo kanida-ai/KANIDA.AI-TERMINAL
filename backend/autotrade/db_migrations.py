@@ -185,6 +185,23 @@ def run_migrations() -> dict:
                     "ALTER TABLE autotrade_sessions ADD COLUMN invested_basis REAL")
                 added_cols.append("invested_basis")
 
+        # ── 2c-ebn. ALTER-guard entry_basket_notional on autotrade_sessions ───
+        # PER-STOCK STEP-LOCK Fix A (2026-07-10): the FROZEN entry basket notional
+        # = Σ(qty*avg_price) over ALL originally-filled positions. The per-stock
+        # capital-slice denominator (session._run_per_stock_step_lock). Frozen ONCE
+        # in _fire_entries and NEVER shrunk as names close — the bug was using the
+        # live Σ-over-OPEN, which inflated survivors' slices so their per-stock stop
+        # fired at a progressively larger rupee loss. NULLABLE → a session created
+        # before this column falls back to the live Σ (pre-Fix-A behaviour). Read
+        # only in step_lock_scope=="stock". Additive + idempotent.
+        if _table_exists(con, "autotrade_sessions"):
+            have = set(_existing_columns(con, "autotrade_sessions"))
+            if "entry_basket_notional" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_sessions "
+                    "ADD COLUMN entry_basket_notional REAL")
+                added_cols.append("entry_basket_notional")
+
         # ── 2d. ALTER-guard the INTRADAY-BASKET trail state on autotrade_sessions
         # strategy=="intraday_basket" persists its trailing-profit state here so a
         # resumed RUNNING session restores armed+peak and the trail continues
@@ -399,6 +416,11 @@ CREATE TABLE IF NOT EXISTS autotrade_sessions (
     -- return denominator. NULL until _fire_entries captures it. (Also added via
     -- idempotent ALTER for DBs created before this column.)
     invested_basis  REAL,
+    -- PER-STOCK STEP-LOCK Fix A: FROZEN entry basket notional = Σ(qty*avg_price)
+    -- over ALL originally-filled positions. The per-stock capital-slice denominator
+    -- (session._run_per_stock_step_lock); frozen once at entry, never shrinks as
+    -- names close (fixes survivors' slices inflating → stop firing at a larger loss).
+    entry_basket_notional REAL,
     -- INTRADAY-BASKET trailing-profit state (strategy=="intraday_basket").
     -- trail_armed: 0/1 — has the trail armed (G crossed +arm_pct). trail_peak:
     -- the high-water gross return G since arming. Persisted each tick + restored

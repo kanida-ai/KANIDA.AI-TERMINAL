@@ -140,11 +140,29 @@ class KillSwitchExecutor:
             # fired), skip the market exit — a blind order would go NAKED. Returns
             # None in paper / when unknown → we proceed with the normal exit
             # (paper unchanged). Best-effort: a probe error never blocks the kill.
+            probe_raised = False
             try:
                 net_qty = broker.get_net_position_qty(symbol, itype)
-            except Exception as _net_e:  # pragma: no cover - defensive
-                log.debug("kill: net-position probe failed %s: %s", symbol, _net_e)
+            except Exception as _net_e:
+                # FAIL-SAFE (Fix B1, 2026-07-10 BRIGADE double-cover). The pre-exit
+                # position read RAISED (broker connection/timeout — e.g.
+                # ConnectionResetError 10054). We CANNOT confirm the live position,
+                # so a market exit here would be BLIND: a short's buy-to-cover would
+                # DOUBLE into a naked long. NEVER place an exit without a successful
+                # position read — skip this leg (do NOT place), release the gate, and
+                # leave it OPEN so a later kill/tick retries once the broker is
+                # reachable. Paper / not-live returns None WITHOUT raising →
+                # probe_raised stays False → unchanged.
+                log.error("kill: net-position probe RAISED %s/%s: %s — NOT placing "
+                          "exit (no blind order); leg left OPEN for retry",
+                          self.session_id, symbol, _net_e)
                 net_qty = None
+                probe_raised = True
+            if probe_raised:
+                exit_gate.release_exit_session(self.session_id, symbol)
+                exit_meta.append({"symbol": symbol, "claimed": False,
+                                  "probe_failed": True})
+                continue
             # SESSION-SCOPED flat decision (C1): subtract OTHER sessions' still-held
             # qty so session A never treats session B's shares as flat / sells into
             # B's lot. our_held==0 ⟺ THIS session's shares are gone (not the account).

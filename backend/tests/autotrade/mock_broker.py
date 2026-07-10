@@ -22,6 +22,7 @@ class MockBroker(BrokerClient):
                  margins: Optional[Dict[str, float]] = None,
                  margins_available: bool = True,
                  net_positions: Optional[Dict[str, int]] = None,
+                 net_probe_raise_symbols: Optional[set] = None,
                  net_book: Optional[Any] = None,
                  holdings: Optional[Any] = None,
                  orders: Optional[Any] = None,
@@ -46,6 +47,11 @@ class MockBroker(BrokerClient):
         # net-position probe → the base default (None) is used and the exit path
         # is unchanged. A dict entry of 0 = flat at the broker (already closed).
         self._net_positions = net_positions
+        # Fix B1 (2026-07-10): symbols for which get_net_position_qty RAISES (models
+        # a live broker connection error — ConnectionResetError 10054 — mid probe).
+        # The real ZerodhaBroker RE-RAISES on error; the caller's pre-exit guard must
+        # then ABORT (no blind order). Default empty → existing tests unaffected.
+        self._net_probe_raise_symbols = net_probe_raise_symbols or set()
         # AUTHORITATIVE reconciler: the broker's FULL day-net book. Accepts either
         #   * a list of raw Kite-shaped net rows, or
         #   * a dict {symbol -> {quantity, buy_quantity, sell_quantity, sell_price,
@@ -146,6 +152,11 @@ class MockBroker(BrokerClient):
         return self._fut_margin_per_lot
 
     def get_net_position_qty(self, symbol: str, instrument_type: str = "EQ"):
+        # Fix B1: a configured symbol RAISES (models a live broker connection error
+        # mid probe). The caller must ABORT the exit — never place a blind order.
+        if symbol in self._net_probe_raise_symbols:
+            raise ConnectionResetError(
+                10054, "An existing connection was forcibly closed by the remote host")
         # None (default) → don't reconcile (base behaviour). A configured dict
         # answers the live net book for the pre-exit reconciliation guard.
         if self._net_positions is None:

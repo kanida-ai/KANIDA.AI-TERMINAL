@@ -32,13 +32,56 @@ Falcon API (legacy, falcon_position_state — DO NOT route autotrade through it)
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set, Tuple
 
 from falcon.db import falcon_conn
 
 log = logging.getLogger("kanida.autotrade.exit_gate")
 IST = timezone(timedelta(hours=5, minutes=30))
+
+# ════════════════════════════════════════════════════════════════════════════
+# SINGLE-FLIGHT EXIT MUTEX (Fix B2, 2026-07-10) — in-process, per (session,symbol).
+# The DB gate (claim_exit_session) grants a RE-ENTRANT claim to a second caller
+# with the SAME reason (so a kill-switch pre-claim can re-enter the shared exec
+# path). But the 5s tick_driver and the sub-second ws_driver BOTH run the per-
+# stock step-lock in SEPARATE threads, so both could fire STOP_STOCK for the same
+# symbol at the same instant: both got a re-entrant TRUE and both placed a market
+# exit → a short's buy-to-cover fired TWICE (938 covered + 938 extra) → a NAKED
+# long (BRIGADE/LODHA/MAPMYINDIA, ~₹15L, 2026-07-10). This mutex makes ORDER
+# PLACEMENT single-flight: while an exit is in flight for a (session,symbol), a
+# second concurrent placement — even the same reason, even from the other driver
+# — is a NO-OP. It does NOT block the SEQUENTIAL EXIT_FAILED retry: the previous
+# flight has ended (slot cleared) before the next tick re-attempts.
+_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT: Set[Tuple[str, str]] = set()
+
+
+def begin_exit_flight(session_id: str, symbol: str) -> bool:
+    """Atomically acquire the single-flight slot for (session_id, symbol).
+
+    True  → the caller MAY place the exit order (no other placement in flight).
+    False → an exit order is ALREADY in flight for this key → the caller MUST NOT
+            place a second order (return a NO-OP). Must be paired with
+            end_exit_flight() in a finally so the slot is always released."""
+    key = (session_id, symbol)
+    with _INFLIGHT_LOCK:
+        if key in _INFLIGHT:
+            return False
+        _INFLIGHT.add(key)
+        return True
+
+
+def end_exit_flight(session_id: str, symbol: str) -> None:
+    """Release the single-flight slot for (session_id, symbol). Idempotent."""
+    with _INFLIGHT_LOCK:
+        _INFLIGHT.discard((session_id, symbol))
+
+
+def is_exit_in_flight(session_id: str, symbol: str) -> bool:
+    with _INFLIGHT_LOCK:
+        return (session_id, symbol) in _INFLIGHT
 
 VALID_REASONS = {
     "TRAILING_STOP", "TRAILING_PROFIT", "TIME_BOUND", "DAY_BOUND",

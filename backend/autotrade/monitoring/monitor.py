@@ -196,6 +196,52 @@ class PortfolioMonitor:
             con.commit()
         return stored
 
+    # ── PER-STOCK step-lock: frozen entry BASKET NOTIONAL (2026-07-10 Fix A) ────
+    def freeze_entry_basket_notional(self) -> float:
+        """Capture + FREEZE the ENTRY basket notional = Σ(qty*avg_price) over ALL
+        originally-filled positions, onto autotrade_sessions.entry_basket_notional.
+
+        This is the FIXED denominator for the per-stock step-lock capital slice
+        (session._run_per_stock_step_lock). Unlike freeze_invested_basis() this is
+        PRODUCT-AGNOSTIC — it is the raw Σ(qty*avg) (NOT the F&O→total_capital
+        override), because the per-stock slice weight (leg_notional / basket_notional)
+        must be on the SAME notional units for both numerator and leg so leverage
+        cancels in the proportion and each name's slice is total_cap*(weight).
+
+        Captured ONCE in session._fire_entries after entries are placed; it must
+        NOT shrink as names close (the whole point of Fix A — a shrinking Σ-over-OPEN
+        denominator inflated survivors' slices, so their -per_stock_stop_pct stop
+        fired at a progressively larger rupee loss; BRIGADE/GRANULES 2026-07-10).
+        Falls back to total_allocated_capital when nothing was placed (avoids 0/div).
+        Single write site → plain overwrite is safe (never re-frozen)."""
+        positions = self._open_positions()
+        val = self.compute_invested_basis(positions)
+        stored = val if val > 0 else self._total_allocated_capital
+        with falcon_conn() as con:
+            con.execute(
+                "UPDATE autotrade_sessions SET entry_basket_notional=? "
+                "WHERE session_id=?",
+                (stored, self.session_id),
+            )
+            con.commit()
+        return stored
+
+    def entry_basket_notional(self) -> Optional[float]:
+        """The FROZEN entry basket notional (Σ qty*avg at entry), or None when it
+        was never captured (a session created before this column, or before its
+        entries fired). None → the caller falls back to the live Σ-over-OPEN
+        (pre-Fix-A behaviour) so nothing regresses for legacy sessions."""
+        with falcon_conn() as con:
+            row = con.execute(
+                "SELECT entry_basket_notional FROM autotrade_sessions "
+                "WHERE session_id=?",
+                (self.session_id,),
+            ).fetchone()
+        val = row["entry_basket_notional"] if row else None
+        if val is None or val <= 0:
+            return None
+        return float(val)
+
     # ── Intraday-basket trail state (strategy=="intraday_basket") ──────────────
     def load_trail_state(self):
         """Read the persisted (armed, peak) trail state for this session.

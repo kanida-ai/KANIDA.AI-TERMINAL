@@ -808,6 +808,39 @@ async def _exit_single_position(
         kite_product: Optional[str] = None,
         exec_cfg: Any = None,
 ) -> Dict[str, Any]:
+    """SINGLE-FLIGHT wrapper (Fix B2, 2026-07-10) around the real per-position exit.
+
+    While an exit ORDER is in flight for this (session_id, symbol), a SECOND
+    concurrent placement — even the same reason, even from the other driver
+    (tick_driver + ws_driver both ran STOP_STOCK → a short covered TWICE → a naked
+    long; BRIGADE 2026-07-10) — is a NO-OP. The in-process mutex is held for the
+    WHOLE exit (place + fill confirmation) so a re-fire DURING confirmation cannot
+    double-place either. The legitimate sequential EXIT_FAILED retry is preserved:
+    the prior flight has ended (slot cleared) before the next tick re-attempts."""
+    symbol = position["symbol"]
+    if not _exit_gate_mod.begin_exit_flight(session_id, symbol):
+        log.warning("exit %s/%s: an exit order is already IN FLIGHT — skipping "
+                    "(no second order, reason=%s)", session_id, symbol, reason)
+        return {"symbol": symbol, "status": "BLOCKED_INFLIGHT", "reason": reason}
+    try:
+        return await _exit_single_position_inner(
+            session_id=session_id, position=position, reason=reason,
+            brokers=brokers, registry=registry, gtt_manager=gtt_manager,
+            kite_product=kite_product, exec_cfg=exec_cfg)
+    finally:
+        _exit_gate_mod.end_exit_flight(session_id, symbol)
+
+
+async def _exit_single_position_inner(
+        session_id: str,
+        position: Dict[str, Any],
+        reason: str,
+        brokers: Dict[str, Any],
+        registry: Any,
+        gtt_manager: Any,
+        kite_product: Optional[str] = None,
+        exec_cfg: Any = None,
+) -> Dict[str, Any]:
     """Our backend directly exits one position (per-stock software stop).
 
     Sequence:
@@ -877,12 +910,28 @@ async def _exit_single_position(
     # This is the fix for the EXIT_FAILED retry loop that kept re-attempting an
     # already-closed FUT. Returns None in paper / when the broker can't answer →
     # we then proceed with the normal exit (paper is byte-for-byte unchanged).
+    probe_raised = False
     try:
         net_qty = broker.get_net_position_qty(position.get("symbol"), itype)
-    except Exception as _net_e:  # never block the exit on the reconcile probe
-        log.debug("pre-exit net-position probe failed %s/%s: %s",
+    except Exception as _net_e:
+        # FAIL-SAFE (Fix B1, 2026-07-10 BRIGADE double-cover). The pre-exit position
+        # read RAISED (broker connection/timeout — ConnectionResetError 10054 mid
+        # buy-to-cover). We CANNOT confirm the live position, so placing a market
+        # exit now would be BLIND: a short's buy-to-cover would DOUBLE into a naked
+        # long. NEVER place an exit without a successful position read — abort THIS
+        # attempt, leave the leg OPEN, release the gate so the next tick retries once
+        # the broker is reachable. (Paper / not-live returns None WITHOUT raising →
+        # probe_raised stays False → the normal exit path runs, byte-for-byte
+        # unchanged. A confirmed clean 0 still reconciles-flat below.)
+        log.error("pre-exit net-position probe RAISED %s/%s: %s — ABORTING exit "
+                  "(no blind order; leg left OPEN for retry)",
                   session_id, symbol, _net_e)
         net_qty = None
+        probe_raised = True
+    if probe_raised:
+        _exit_gate_mod.release_exit_session(session_id, symbol)
+        return {"symbol": symbol, "status": "EXIT_ABORTED_PROBE_FAILED",
+                "reason": reason}
     # SESSION-SCOPED flat decision (C1): the broker net is ACCOUNT-wide, so when a
     # sibling session holds the same symbol we must NOT read its shares as ours.
     # our_held = the qty attributable to THIS session still at the broker; 0 ⟺ our
@@ -1679,6 +1728,19 @@ class TradingSession:
                      self.config.total_allocated_capital)
         except Exception as e:  # never block start on the basis capture
             log.warning("invested_basis freeze failed for %s: %s",
+                        self.session_id, e)
+
+        # PER-STOCK STEP-LOCK Fix A (2026-07-10): freeze the ENTRY basket notional
+        # (Σ qty*avg over all filled legs) as the FIXED denominator for the per-stock
+        # capital slice, so a survivor's slice (and thus its -per_stock_stop_pct rupee
+        # stop) stays CONSTANT as siblings close — instead of inflating toward the
+        # whole session capital. Only read in step_lock_scope=="stock"; best-effort.
+        try:
+            ebn = self.monitor.freeze_entry_basket_notional()
+            log.info("session %s entry_basket_notional frozen at ₹%.2f",
+                     self.session_id, ebn)
+        except Exception as e:  # never block start on the basis capture
+            log.warning("entry_basket_notional freeze failed for %s: %s",
                         self.session_id, e)
 
         # FEATURE 1: place the per-position GTT-OCO broker backup on every open
@@ -2498,9 +2560,23 @@ class TradingSession:
         positions = self.monitor._open_positions()
         if not positions:
             return []
-        total_notional = 0.0
+        # FROZEN DENOMINATOR (Fix A, 2026-07-10). The per-stock slice weight is
+        # leg_notional / BASKET_notional. Using Σ notional over CURRENTLY-OPEN
+        # positions INFLATED survivors' slices as siblings closed (the denominator
+        # shrank), so each name's "per_stock_stop_pct of its slice" fired at a
+        # progressively larger rupee loss — the last name standing got a slice of
+        # the whole session capital (GRANULES stopped at 2.2x, BRIGADE/others ~2x,
+        # only AFTER others exited; 2026-07-10). Prefer the entry-frozen basket
+        # notional (captured once in _fire_entries, never shrinks). Fall back to the
+        # live Σ-over-OPEN ONLY for a legacy session that never froze it (identical
+        # to the old behaviour — no regression). Leverage still cancels in the
+        # proportion (equal-weight → total_cap/N).
+        live_total_notional = 0.0
         for p in positions:
-            total_notional += float(p.get("qty") or 0) * float(p.get("avg_price") or 0)
+            live_total_notional += float(p.get("qty") or 0) * float(p.get("avg_price") or 0)
+        frozen_notional = self.monitor.entry_basket_notional()
+        total_notional = frozen_notional if (frozen_notional and frozen_notional > 0) \
+            else live_total_notional
         if total_notional <= 0:
             return []
         total_cap = float(self.config.total_allocated_capital)

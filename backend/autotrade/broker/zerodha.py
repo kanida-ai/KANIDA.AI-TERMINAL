@@ -898,8 +898,16 @@ class ZerodhaBroker(BrokerClient):
                 return int(row.get("quantity") or 0)
             return 0  # not in the net book → flat at the broker
         except Exception as e:  # pragma: no cover - defensive
+            # REAL-MONEY FAIL-SAFE (2026-07-10 BRIGADE double-cover). A genuine
+            # broker error here (e.g. ConnectionResetError 10054 mid buy-to-cover)
+            # must NOT be swallowed to None — None is the PAPER / not-live sentinel
+            # (returned above when not _live_allowed()), and the caller treats it as
+            # "no book to reconcile, proceed with the exit" → it would place a BLIND
+            # order and go naked. RE-RAISE so the caller's pre-exit guard ABORTS the
+            # exit (no order) and retries on the next tick once the broker is
+            # reachable. Paper (None) and a confirmed flat (0) are unchanged.
             log.warning("get_net_position_qty failed for %s: %s", symbol, e)
-            return None
+            raise
 
     def get_positions_net(self):
         """Return the FULL Kite day-net book in ONE kite.positions() call, as the
