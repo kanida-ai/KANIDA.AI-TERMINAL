@@ -24,7 +24,10 @@
  */
 import { useMemo, useState } from 'react'
 import { C, ICON } from '@/components/power/shared/cotrade-kit'
-import { PowerAPI, PowerAPIError, type AutotradeConfigPatch, type AutotradeConfigResult } from '@/lib/power-api'
+import {
+  PowerAPI, PowerAPIError, isConfigVersionConflict,
+  type AutotradeConfigPatch, type AutotradeConfigResult,
+} from '@/lib/power-api'
 
 export type ConfigEditorKind = 'session' | 'campaign'
 
@@ -141,13 +144,26 @@ function LockedChip({ label, value }: { label: string; value?: string }) {
 const rs = (v?: number) => (typeof v === 'number' && Number.isFinite(v)
   ? `₹${v.toLocaleString('en-IN')}` : '—')
 
+// What a reload returns: the FRESH editable values + the server's CURRENT
+// config_version, so the editor can re-base an operator's edit after a conflict.
+export type ReloadedConfig = { values: EditableValues; configVersion?: number }
+
 export function SessionConfigEditor({
-  kind, id, jwt, initial, locked, isPositional = false, isMis = false, isTrailing = true, onClose, onApplied,
+  kind, id, jwt, initial, initialConfigVersion, reloadConfig,
+  locked, isPositional = false, isMis = false, isTrailing = true, onClose, onApplied,
 }: {
   kind: ConfigEditorKind
   id: string
   jwt: string
   initial: EditableValues
+  // The config_version captured when the editor opened (from the session/ladder
+  // status). Sent as `expected_config_version` on every PATCH for optimistic
+  // concurrency; a mismatch → 409 CONFIG_VERSION_CONFLICT → calm reload.
+  initialConfigVersion?: number
+  // Re-fetch the CURRENT config + version (used after a 409 conflict so the
+  // operator re-applies against fresh state). Optional — when absent the conflict
+  // banner falls back to "Close & reopen".
+  reloadConfig?: () => Promise<ReloadedConfig | null>
   locked: LockedContext
   // isPositional: carry-overnight (max-hold applies). isMis: show MIS square-off.
   // isTrailing: the session runs the trailing basket (show arm/floor/give-back).
@@ -158,9 +174,18 @@ export function SessionConfigEditor({
   onApplied: (msg: string) => void
 }) {
   const [vals, setVals] = useState<EditableValues>(initial)
+  // `baseline` is the last-known SERVER truth the diff is computed against. It
+  // starts at `initial` and is rebased whenever we (re)load the server config.
+  const [baseline, setBaseline] = useState<EditableValues>(initial)
+  // The config_version the next PATCH will claim as `expected_config_version`.
+  // Updated from every successful PATCH response and on a conflict reload.
+  const [configVersion, setConfigVersion] = useState<number | undefined>(initialConfigVersion)
   const [phase, setPhase] = useState<'edit' | 'confirm' | 'applying'>('edit')
   const [warnings, setWarnings] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
+  // Set when a PATCH is rejected as stale; drives the calm reload banner.
+  const [conflict, setConflict] = useState<string | null>(null)
+  const [reloading, setReloading] = useState(false)
 
   const set = <K extends keyof EditableValues>(k: K, v: EditableValues[K]) =>
     setVals((s) => ({ ...s, [k]: v }))
@@ -174,44 +199,56 @@ export function SessionConfigEditor({
       'per_position_stop_pct', 'per_position_target_pct',
     ]
     for (const k of pctKeys) {
-      if (vals[k] !== initial[k]) {
+      if (vals[k] !== baseline[k]) {
         const f = pctFrac(vals[k] as number | '' | undefined)
         if (f !== undefined) (patch as Record<string, number>)[k] = f
       }
     }
-    if (vals.max_hold_sessions !== initial.max_hold_sessions) {
+    if (vals.max_hold_sessions !== baseline.max_hold_sessions) {
       const n = intOrU(vals.max_hold_sessions)
       if (n !== undefined) patch.max_hold_sessions = n
     }
-    if ((vals.square_off_time ?? '') !== (initial.square_off_time ?? '')) {
+    if ((vals.square_off_time ?? '') !== (baseline.square_off_time ?? '')) {
       const s = strOrU(vals.square_off_time); if (s) patch.square_off_time = s
     }
-    if ((vals.mis_square_off_time ?? '') !== (initial.mis_square_off_time ?? '')) {
+    if ((vals.mis_square_off_time ?? '') !== (baseline.mis_square_off_time ?? '')) {
       const s = strOrU(vals.mis_square_off_time); if (s) patch.mis_square_off_time = s
     }
     if (kind === 'campaign') {
-      if (vals.per_basket_capital !== initial.per_basket_capital) {
+      if (vals.per_basket_capital !== baseline.per_basket_capital) {
         const n = intOrU(vals.per_basket_capital); if (n !== undefined) patch.per_basket_capital = n
       }
-      if (vals.total_capital !== initial.total_capital) {
+      if (vals.total_capital !== baseline.total_capital) {
         const n = intOrU(vals.total_capital); if (n !== undefined) patch.total_capital = n
       }
-      if ((vals.end_date ?? '') !== (initial.end_date ?? '')) {
+      if ((vals.end_date ?? '') !== (baseline.end_date ?? '')) {
         const s = strOrU(vals.end_date); if (s) patch.end_date = s
       }
     }
     return patch
-  }, [vals, initial, kind])
+  }, [vals, baseline, kind])
 
   const nChanged = Object.keys(buildPatch()).length
 
+  // Always send the captured config_version as `expected_config_version` so a
+  // concurrent edit (another operator / a tick) is caught with a 409 instead of
+  // silently clobbering the newer config.
   const callConfig = (patch: AutotradeConfigPatch, dryRun: boolean): Promise<AutotradeConfigResult> =>
     kind === 'session'
-      ? PowerAPI.autotradeUpdateSessionConfig(id, patch, { dryRun }, jwt)
-      : PowerAPI.autotradeUpdateLadderConfig(id, patch, { dryRun }, jwt)
+      ? PowerAPI.autotradeUpdateSessionConfig(id, patch, { dryRun, expectedConfigVersion: configVersion }, jwt)
+      : PowerAPI.autotradeUpdateLadderConfig(id, patch, { dryRun, expectedConfigVersion: configVersion }, jwt)
+
+  // Fold the server's post-apply / post-dry-run config_version back into state so
+  // the NEXT PATCH claims the fresh version. Ignores non-numeric / absent values.
+  const absorbVersion = (res: AutotradeConfigResult) => {
+    const v = Number(res.config_version)
+    if (Number.isFinite(v)) setConfigVersion(v)
+  }
 
   const humanErr = (e: unknown): string => {
     if (e instanceof PowerAPIError) {
+      // NOT_RUNNING is the OTHER 409 — keep its distinct copy. The version
+      // conflict is handled separately (never lands here).
       if (e.status === 409) return 'This is no longer RUNNING — reopen it to edit its config.'
       if (e.status === 404) return 'This session is not available to you.'
       if (e.status === 400) return e.message || 'One of the values is out of range.'
@@ -220,27 +257,68 @@ export function SessionConfigEditor({
     return e instanceof Error ? e.message : 'Could not update the config.'
   }
 
+  // 409 CONFIG_VERSION_CONFLICT — the config changed under us. Do NOT overwrite:
+  // surface a calm banner and (if the parent supplied a re-fetch) reload the
+  // latest config + its new version so the operator can re-apply their change.
+  const onConflict = async (e: PowerAPIError) => {
+    setPhase('edit')
+    setWarnings([])
+    setError(null)
+    const noun = kind === 'campaign' ? "campaign's" : "session's"
+    setConflict(`This ${noun} config changed since you opened it — reloading the latest. Re-enter your change and Apply again.`)
+    // Prefer the server's authoritative current version off the 409 detail.
+    const cur = Number(e.detail?.current_config_version)
+    if (Number.isFinite(cur)) setConfigVersion(cur)
+    await doReload()
+  }
+
+  // Re-fetch the current config + version (the "Reload & review" affordance). On
+  // success rebases the baseline AND the working values to the fresh server truth.
+  const doReload = async () => {
+    if (!reloadConfig) return
+    setReloading(true)
+    try {
+      const fresh = await reloadConfig()
+      if (fresh) {
+        setBaseline(fresh.values)
+        setVals(fresh.values)
+        if (fresh.configVersion != null && Number.isFinite(Number(fresh.configVersion))) {
+          setConfigVersion(Number(fresh.configVersion))
+        }
+      }
+    } catch {
+      /* leave the conflict banner up; the operator can retry or close */
+    } finally {
+      setReloading(false)
+    }
+  }
+
   // Step 1 — dry_run. Warnings → confirm step; clean → apply straight through.
   const onApply = async () => {
     setError(null)
     const patch = buildPatch()
     if (Object.keys(patch).length === 0) { setError('Nothing changed yet.'); return }
+    setConflict(null)
     setPhase('applying')
     try {
       const dry = await callConfig(patch, true)
+      absorbVersion(dry)
       const w = (dry.warnings ?? []).filter(Boolean)
       if (w.length > 0) { setWarnings(w); setPhase('confirm'); return }
       await commit(patch)
     } catch (e) {
+      if (isConfigVersionConflict(e)) { await onConflict(e); return }
       setError(humanErr(e)); setPhase('edit')
     }
   }
 
   // Step 2 — real apply (dry_run=false). Success → toast + refresh.
   const commit = async (patch: AutotradeConfigPatch) => {
+    setConflict(null)
     setPhase('applying')
     try {
       const res = await callConfig(patch, false)
+      absorbVersion(res)
       const base = 'Config updated — live within ~5s'
       const msg = kind === 'campaign'
         ? `${base} · updated ${res.children_updated?.length ?? 0} running ${(res.children_updated?.length ?? 0) === 1 ? 'child' : 'children'} + future spawns`
@@ -248,6 +326,7 @@ export function SessionConfigEditor({
       onApplied(msg)
       onClose()
     } catch (e) {
+      if (isConfigVersionConflict(e)) { await onConflict(e); return }
       setError(humanErr(e)); setPhase('edit')
     }
   }
@@ -328,6 +407,24 @@ export function SessionConfigEditor({
           ) : (
             /* ── EDIT STEP ───────────────────────────────────────────────────── */
             <>
+              {/* Optimistic-concurrency conflict — calm, never a silent overwrite */}
+              {conflict && (
+                <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5"
+                  style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
+                  <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+                  <div className="flex flex-col gap-2">
+                    <p className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>{conflict}</p>
+                    {reloadConfig && (
+                      <button type="button" disabled={reloading || applying} onClick={doReload}
+                        className="self-start inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11.5px] font-semibold transition-opacity disabled:opacity-40"
+                        style={{ color: C.mint, border: `1px solid rgba(63,227,164,0.4)`, background: 'rgba(63,227,164,0.06)' }}>
+                        {reloading ? 'Reloading…' : 'Reload & review'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Editable knobs */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                 {isTrailing && (
@@ -408,7 +505,7 @@ export function SessionConfigEditor({
 
               {/* Footer */}
               <div className="flex items-center gap-2 pt-1">
-                <button type="button" disabled={applying || nChanged === 0} onClick={onApply}
+                <button type="button" disabled={applying || reloading || nChanged === 0} onClick={onApply}
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
                   style={{ color: '#06130c', background: C.mint }}>
                   {applying

@@ -1772,3 +1772,44 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 - **Deploy path:** worktree `_kanida_falconui/frontend`, branch `feat/falcon-ai-shell`. UI + BFF
   types only; NO execution/trade path touched. Verify: `npx tsc --noEmit` clean; `next build` →
   "✓ Compiled successfully in 5.0s". NOT committed — staged for operator review.
+
+## 2026-07-11 — Optimistic concurrency (config_version) wired into the LIVE "Edit config" flow
+
+- **Acting on:** operator request — wire optimistic-concurrency into the AutoTrade config-edit UI.
+  STRICTLY ADDITIVE, integrated into the EXISTING `SessionConfigEditor` modal (the live "Edit config"
+  flow used for BOTH a running session and a running Monthly campaign) + its two call sites in
+  `PortfolioAutoTrade.tsx`. NO new page/tab/route; nothing existing removed or collapsed.
+- **Backend contract (verified against prod `backend/autotrade/api/config_edit_routes.py`):** the
+  session PATCH (`PATCH /api/power/autotrade/session/{id}/config`) and ladder PATCH
+  (`.../ladder/{id}/config`) accept an optional `expected_config_version` in the body (popped BEFORE
+  the whitelist check, so it is not a whitelisted knob). On a mismatch the backend applies NOTHING and
+  returns HTTP 409 `{code:"CONFIG_VERSION_CONFLICT", message, expected_config_version,
+  current_config_version}` (both the pre-apply guard `_assert_version_or_409` and the conditional
+  `WHERE config_version=cur` UPDATE). The session status (`session.py` ~L3693) and ladder status
+  (`ladder.py` ~L964) both already surface `config_version`; the config-edit responses return the
+  post-apply `config_version`. The OTHER 409 (`NOT_RUNNING`) carries a distinct `code`.
+- **`lib/power-api.ts`:** added `ConfigVersionConflictDetail` + the `isConfigVersionConflict(e)` type
+  guard (status 409 AND code `CONFIG_VERSION_CONFLICT`, so callers distinguish it from `NOT_RUNNING`
+  and generic errors; `e.detail.current_config_version` is the version to re-base on); added the
+  shared `AutotradeConfigPatchOpts` ({ dryRun, expectedConfigVersion }); both
+  `autotradeUpdateSessionConfig` / `autotradeUpdateLadderConfig` now fold `expected_config_version`
+  into the PATCH body when provided (patch whitelist unchanged).
+- **`lib/autotrade-api.ts`:** added `config_version?: number` (+ `editable_config?`) to `StatusResponse`
+  and `config_version?: number` to `LadderStatus` — both already emitted by the backend, now typed.
+- **`SessionConfigEditor.tsx`:** captures `initialConfigVersion` on open; ALWAYS sends it as
+  `expected_config_version` on the dry-run AND the apply PATCH; folds the response `config_version`
+  back into state (`absorbVersion`) so a subsequent edit uses the fresh version. The diff baseline is
+  now internal state (`baseline`) so it can be rebased. On a 409 `CONFIG_VERSION_CONFLICT` it does NOT
+  overwrite: shows a calm amber banner ("This session's/campaign's config changed since you opened it
+  — reloading the latest. Re-enter your change and Apply again."), adopts `current_config_version` off
+  the 409 detail, and re-fetches the current config via a new optional `reloadConfig` prop (rebasing
+  both `baseline` and the working values) with a clear "Reload & review" affordance. Apply is disabled
+  while reloading; keyboard/focus states preserved.
+- **`PortfolioAutoTrade.tsx`:** passes `initialConfigVersion` from `status.config_version` /
+  `ladderStatus.config_version` and a `reloadConfig` that re-fetches `sessionStatus` / `ladderStatus`,
+  refreshes the parent's cached view, and returns `{ values, configVersion }`.
+- **Theme:** reused the locked mint/F2 tokens (`C`/`ICON`), the existing amber-note + button language;
+  no new accent colors.
+- **Deploy path:** worktree `_kanida_falconui/frontend`, branch `feat/falcon-ai-shell`. UI + BFF types
+  only; NO execution/trade path touched. Verify: `npx tsc --noEmit` clean; `next build` succeeded.
+  NOT committed — staged for operator review.

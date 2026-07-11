@@ -457,6 +457,14 @@ export type StatusResponse = {
   entry_latency_ms?: number | null  // fire start → all legs settled (deploy speed)
   exit_latency_ms?: number | null   // flatten trigger → all flat (exit speed; once flattened)
   last_tick_age_ms?: number | null  // now − newest tick used (data freshness / liveness)
+  // ── LIVE CONFIG EDIT — optimistic concurrency ──
+  // config_version bumps by 1 on every applied config PATCH. The config-edit
+  // modal captures it here and sends it back as `expected_config_version` so a
+  // concurrent edit is caught (409 CONFIG_VERSION_CONFLICT) instead of clobbered.
+  // editable_config echoes the CURRENT whitelisted risk/exit knobs (used to
+  // re-prefill the form after a conflict reload).
+  config_version?: number
+  editable_config?: Record<string, unknown>
 }
 
 // POST /api/autotrade/preview — an ESTIMATE before Start. Creates no session and
@@ -909,6 +917,10 @@ export type LadderStatus = {
   mode_kill?: LadderKillMode
   alert?: LadderAlert
   sessions?: LadderSession[]
+  // ── LIVE CONFIG EDIT — optimistic concurrency (same as StatusResponse) ──
+  // config_version bumps on every applied ladder config PATCH; the config-edit
+  // modal captures it and sends it back as `expected_config_version`.
+  config_version?: number
   [k: string]: unknown
 }
 

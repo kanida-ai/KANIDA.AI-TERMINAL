@@ -856,7 +856,9 @@ export type AutotradeConfigPatch = {
 // Result of a config PATCH (dry_run or apply). Optional-safe: any field may be
 // absent → the UI degrades gracefully. `warnings` (dry_run) is a plain-language
 // list the operator must confirm before a real apply. `children_updated` (ladder)
-// names the running child baskets that were hot-reloaded.
+// names the running child baskets that were hot-reloaded. `config_version` is the
+// server's post-apply version — callers MUST fold it back into their captured
+// version so a subsequent edit sends the fresh `expected_config_version`.
 export type AutotradeConfigResult = {
   ok?: boolean
   session_id?: string
@@ -868,6 +870,38 @@ export type AutotradeConfigResult = {
   warnings?: string[]
   config_version?: number | string
   [k: string]: unknown
+}
+
+// ── Optimistic-concurrency conflict (HTTP 409, code CONFIG_VERSION_CONFLICT) ──
+// The session/ladder config PATCH is version-checked: when the caller sends an
+// `expected_config_version` that no longer matches the server's CURRENT version
+// (another operator/tick edited it since the modal opened), the backend applies
+// NOTHING and returns 409 with this detail. `apiFetch` surfaces it as a
+// PowerAPIError whose `.detail` carries the two versions. Callers use
+// `isConfigVersionConflict()` to distinguish it from the OTHER 409 (NOT_RUNNING)
+// and from a generic error, then re-fetch + let the operator re-apply.
+export type ConfigVersionConflictDetail = {
+  code: 'CONFIG_VERSION_CONFLICT'
+  message?: string
+  expected_config_version?: number
+  current_config_version?: number
+  [k: string]: unknown
+}
+
+/** True when `e` is the optimistic-concurrency 409 (stale config version). Read
+ *  `e.detail.current_config_version` for the version to re-base on. */
+export function isConfigVersionConflict(
+  e: unknown,
+): e is PowerAPIError & { detail: ConfigVersionConflictDetail } {
+  return e instanceof PowerAPIError && e.status === 409 && e.code === 'CONFIG_VERSION_CONFLICT'
+}
+
+// Options carried by BOTH config-PATCH methods. `dryRun` runs the warnings-only
+// pass; `expectedConfigVersion` (when set) is folded into the request body as
+// `expected_config_version` so the backend can reject a stale edit with a 409.
+export type AutotradeConfigPatchOpts = {
+  dryRun?: boolean
+  expectedConfigVersion?: number
 }
 
 export const PowerAPI = {
@@ -1044,30 +1078,47 @@ export const PowerAPI = {
   /** PATCH a RUNNING session's risk/exit knobs. Pass `{ dryRun: true }` first to
    *  fetch `warnings` (e.g. a name that would exit next tick under the new stop);
    *  on confirm call again with `{ dryRun: false }` to apply live (~5s, positions
-   *  untouched). Body is a SUBSET of AutotradeConfigPatch (pct fields ÷100). */
+   *  untouched). Body is a SUBSET of AutotradeConfigPatch (pct fields ÷100).
+   *  Pass `expectedConfigVersion` (the version captured when the editor opened) so
+   *  a concurrent edit is caught: a mismatch → PowerAPIError 409 that
+   *  `isConfigVersionConflict()` recognises. */
   autotradeUpdateSessionConfig: (
     sessionId: string,
     patch:     AutotradeConfigPatch,
-    opts:      { dryRun?: boolean } = {},
+    opts:      AutotradeConfigPatchOpts = {},
     jwt?:      string | null,
   ) =>
     apiFetch<AutotradeConfigResult>(
       `/api/power/autotrade/session/${encodeURIComponent(sessionId)}/config?dry_run=${opts.dryRun ? 'true' : 'false'}`,
-      { method: 'PATCH', body: patch, jwt: jwt ?? null },
+      {
+        method: 'PATCH',
+        body: opts.expectedConfigVersion != null
+          ? { ...patch, expected_config_version: opts.expectedConfigVersion }
+          : patch,
+        jwt: jwt ?? null,
+      },
     ),
 
   /** PATCH a RUNNING campaign's knobs. Same dry_run→apply flow. Trailing/exit
    *  knobs hot-reload every open child basket; capital/end-date apply to FUTURE
-   *  spawns. Response `children_updated` names the baskets that were reloaded. */
+   *  spawns. Response `children_updated` names the baskets that were reloaded.
+   *  `expectedConfigVersion` gives the same optimistic-concurrency guard as the
+   *  session PATCH (409 on a stale edit). */
   autotradeUpdateLadderConfig: (
     ladderId: string,
     patch:    AutotradeConfigPatch,
-    opts:     { dryRun?: boolean } = {},
+    opts:     AutotradeConfigPatchOpts = {},
     jwt?:     string | null,
   ) =>
     apiFetch<AutotradeConfigResult>(
       `/api/power/autotrade/ladder/${encodeURIComponent(ladderId)}/config?dry_run=${opts.dryRun ? 'true' : 'false'}`,
-      { method: 'PATCH', body: patch, jwt: jwt ?? null },
+      {
+        method: 'PATCH',
+        body: opts.expectedConfigVersion != null
+          ? { ...patch, expected_config_version: opts.expectedConfigVersion }
+          : patch,
+        jwt: jwt ?? null,
+      },
     ),
 }
 

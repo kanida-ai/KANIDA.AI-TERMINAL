@@ -3856,6 +3856,17 @@ export function PortfolioAutoTrade({
               id={configEditor.id}
               jwt={jwt}
               initial={sessionEditable(status)}
+              initialConfigVersion={typeof status.config_version === 'number' ? status.config_version : undefined}
+              reloadConfig={async () => {
+                // Re-fetch the CURRENT session config + version after a concurrency
+                // conflict so the operator re-applies against fresh server truth.
+                const fresh = await AutoTradeAPI.sessionStatus(configEditor.id)
+                refreshStatus(false)
+                return {
+                  values: sessionEditable(fresh),
+                  configVersion: typeof fresh.config_version === 'number' ? fresh.config_version : undefined,
+                }
+              }}
               locked={sessionLocked(status)}
               isTrailing={status.strategy === 'intraday_basket'}
               isPositional={positional}
@@ -3875,6 +3886,17 @@ export function PortfolioAutoTrade({
             id={configEditor.id}
             jwt={jwt}
             initial={st ? ladderEditable(st) : {}}
+            initialConfigVersion={typeof st?.config_version === 'number' ? st.config_version : undefined}
+            reloadConfig={async () => {
+              // Re-fetch the CURRENT campaign config + version after a concurrency
+              // conflict; also refresh the parent's cached live view.
+              const fresh = await AutoTradeAPI.ladderStatus(configEditor.id)
+              setLadderStatuses((prev) => ({ ...prev, [configEditor.id]: fresh }))
+              return {
+                values: ladderEditable(fresh),
+                configVersion: typeof fresh.config_version === 'number' ? fresh.config_version : undefined,
+              }
+            }}
             locked={ladderLocked(summary, st)}
             isTrailing
             isPositional
