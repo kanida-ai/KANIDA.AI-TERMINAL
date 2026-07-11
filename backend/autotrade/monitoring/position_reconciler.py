@@ -206,19 +206,35 @@ def _position_product(pos: Dict[str, Any], _cache: Dict[str, str]) -> str:
 
 def _account_open_positions_for(bare_sym: str, want_product: str,
                                 prof_scope: Optional[List[str]],
-                                _prod_cache: Dict[str, str]) -> List[Dict[str, Any]]:
+                                _prod_cache: Dict[str, str],
+                                acct_scope: Optional[List[Optional[str]]] = None
+                                ) -> List[Dict[str, Any]]:
     """ALL OPEN/EXIT_FAILED positions on the ACCOUNT for (bare_sym, want_product),
-    across EVERY session (the invariant's left-hand side).
+    across EVERY session on THIS broker account (the invariant's left-hand side).
 
     Scoped to the same broker profile(s) as the reconciling session so a
     multi-account platform never sums positions from a DIFFERENT broker account
     into one account's invariant. Product is resolved per session from its
-    config_json (cached). Returns the raw position dicts."""
+    config_json (cached). Returns the raw position dicts.
+
+    CLUSTER 9 CROSS-CUTTING (2026-07-11): broker_profile alone is INSUFFICIENT to
+    separate accounts — every default single-leg session uses profile
+    'zerodha_default' regardless of which vaulted account it is bound to, so two
+    DIFFERENT users' (or one user's two) accounts share the same profile string. The
+    invariant is therefore ALSO scoped by broker_account_id (COALESCE '' so NULL ==
+    NULL): a position on a DIFFERENT account is never summed into this account's
+    invariant (which would false-close / false-alert across accounts). acct_scope
+    None (legacy caller) keeps the profile-only behaviour; the reconciler always
+    passes it now. Legacy single-account rows (all NULL account) stay byte-identical
+    (acct_scope == {None} matches only NULL-account rows)."""
     with falcon_conn() as con:
         rows = con.execute(
             """SELECT * FROM autotrade_positions
                WHERE status IN ('OPEN','EXIT_FAILED') AND qty > 0""",
         ).fetchall()
+    _acct_norm = None
+    if acct_scope is not None:
+        _acct_norm = {("" if a is None else str(a)) for a in acct_scope}
     out: List[Dict[str, Any]] = []
     for r in rows:
         d = dict(r)
@@ -226,6 +242,10 @@ def _account_open_positions_for(bare_sym: str, want_product: str,
             continue
         if prof_scope is not None:
             if str(d.get("broker_profile") or "") not in prof_scope:
+                continue
+        if _acct_norm is not None:
+            if ("" if d.get("broker_account_id") in (None, "") else
+                    str(d.get("broker_account_id"))) not in _acct_norm:
                 continue
         if _position_product(d, _prod_cache) != want_product:
             continue
@@ -597,6 +617,13 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
         return []
 
     prof_scope = list(brokers.keys()) or None
+    # CLUSTER 9 CROSS-CUTTING: the account scope for the account-wide invariant is
+    # the DISTINCT broker_account_id set on THIS session's own positions (all belong
+    # to this session's bound account(s)). A DIFFERENT account's same-symbol lot is
+    # never summed into this invariant even when it shares the 'zerodha_default'
+    # profile string. Legacy single-account rows are all NULL → {None} → unchanged.
+    acct_scope: List[Optional[str]] = list(
+        {p.get("broker_account_id") for p in my_positions})
     _prod_cache: Dict[str, str] = {}
     actions: List[Dict[str, Any]] = []
     changed = False
@@ -710,7 +737,7 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
         # ── db_held_ALL: Σ OPEN qty across ALL sessions on the account for
         #    (symbol, product). The invariant's left side. ─────────────────────
         account_positions = _account_open_positions_for(
-            bare_sym, product, prof_scope, _prod_cache)
+            bare_sym, product, prof_scope, _prod_cache, acct_scope)
         # ITEM 6(a) — SIGNED sum so an OPPOSITE-direction sibling position never
         # inflates the invariant's left side. Two sessions long+short the same
         # (symbol, product) NET to 0 at the broker (broker_held=abs(net)=0); the OLD

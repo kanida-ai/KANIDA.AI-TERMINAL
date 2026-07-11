@@ -55,11 +55,30 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # — is a NO-OP. It does NOT block the SEQUENTIAL EXIT_FAILED retry: the previous
 # flight has ended (slot cleared) before the next tick re-attempts.
 _INFLIGHT_LOCK = threading.Lock()
-_INFLIGHT: Set[Tuple[str, str]] = set()
+# CLUSTER 9 ITEM 1 (2026-07-11) — the flight slot is keyed by the FULL leg
+# identity (session_id, symbol, broker_profile), not (session_id, symbol). A
+# single session holding the SAME symbol on TWO broker profiles has two distinct
+# autotrade_positions rows (the composite unique key is
+# (session_id, symbol, broker_profile)); their exits must fly INDEPENDENTLY — one
+# profile's in-flight exit must never block the other profile's exit. The third
+# tuple element is COALESCE('') so broker_profile=None (the single-profile norm)
+# is byte-for-byte the old 2-tuple behaviour.
+_INFLIGHT: Set[Tuple[str, str, str]] = set()
 
 
-def begin_exit_flight(session_id: str, symbol: str) -> bool:
-    """Atomically acquire the single-flight slot for (session_id, symbol).
+def _flight_key(session_id: str, symbol: str,
+                broker_profile: Optional[str]) -> str:
+    """The cross-process durable-claim key. Byte-for-byte the old string when
+    broker_profile is None (the single-profile norm); profile-scoped otherwise."""
+    if broker_profile:
+        return f"exitflight:{session_id}:{symbol}:{broker_profile}"
+    return f"exitflight:{session_id}:{symbol}"
+
+
+def begin_exit_flight(session_id: str, symbol: str,
+                      broker_profile: Optional[str] = None) -> bool:
+    """Atomically acquire the single-flight slot for
+    (session_id, symbol, broker_profile).
 
     True  → the caller MAY place the exit order (no other placement in flight).
     False → an exit order is ALREADY in flight for this key → the caller MUST NOT
@@ -69,31 +88,37 @@ def begin_exit_flight(session_id: str, symbol: str) -> bool:
     ITEM 2 (C3 I3a): backed by a cross-process DURABLE claim (CAS + lease). The
     in-process set is the FAST first check; the DB claim is the AUTHORITY so a
     second PROCESS (or a restart mid-flight) can't place a duplicate exit. The
-    lease reclaims a crashed holder after EXIT_FLIGHT_LEASE_SEC."""
+    lease reclaims a crashed holder after EXIT_FLIGHT_LEASE_SEC.
+
+    CLUSTER 9 ITEM 1: keyed by (session_id, symbol, broker_profile) so the same
+    symbol on two profiles flies independently (broker_profile=None ⇒ unchanged)."""
     from . import durable_claims
-    key = (session_id, symbol)
+    key = (session_id, symbol, broker_profile or "")
     with _INFLIGHT_LOCK:
         if key in _INFLIGHT:
             return False
         if not durable_claims.claim(
-                f"exitflight:{session_id}:{symbol}",
+                _flight_key(session_id, symbol, broker_profile),
                 durable_claims.EXIT_FLIGHT_LEASE_SEC):
             return False
         _INFLIGHT.add(key)
         return True
 
 
-def end_exit_flight(session_id: str, symbol: str) -> None:
-    """Release the single-flight slot for (session_id, symbol). Idempotent."""
+def end_exit_flight(session_id: str, symbol: str,
+                    broker_profile: Optional[str] = None) -> None:
+    """Release the single-flight slot for (session_id, symbol, broker_profile).
+    Idempotent."""
     from . import durable_claims
     with _INFLIGHT_LOCK:
-        _INFLIGHT.discard((session_id, symbol))
-    durable_claims.release(f"exitflight:{session_id}:{symbol}")
+        _INFLIGHT.discard((session_id, symbol, broker_profile or ""))
+    durable_claims.release(_flight_key(session_id, symbol, broker_profile))
 
 
-def is_exit_in_flight(session_id: str, symbol: str) -> bool:
+def is_exit_in_flight(session_id: str, symbol: str,
+                      broker_profile: Optional[str] = None) -> bool:
     with _INFLIGHT_LOCK:
-        return (session_id, symbol) in _INFLIGHT
+        return (session_id, symbol, broker_profile or "") in _INFLIGHT
 
 VALID_REASONS = {
     "TRAILING_STOP", "TRAILING_PROFIT", "TIME_BOUND", "DAY_BOUND",
@@ -116,34 +141,60 @@ VALID_REASONS = {
 # falcon_position_state. Keyed by (session_id, symbol).
 # ════════════════════════════════════════════════════════════════════════════
 
-def claim_exit_session(session_id: str, symbol: str, reason: str) -> bool:
-    """Atomically claim the exit for (session_id, symbol) in autotrade_positions.
+def claim_exit_session(session_id: str, symbol: str, reason: str,
+                       broker_profile: Optional[str] = None) -> bool:
+    """Atomically claim the exit for (session_id, symbol[, broker_profile]) in
+    autotrade_positions.
 
     True  → this caller owns the exit (lock was free, or re-entrant same reason).
     False → another mechanism already claimed it (do NOT place another order),
             or no such open position.
-    """
+
+    CLUSTER 9 ITEM 1 (2026-07-11): when broker_profile is given the claim UPDATE +
+    the owner re-read are scoped to (session_id, symbol, broker_profile) with the
+    same COALESCE(broker_profile,'') pattern used elsewhere, so a session holding
+    the SAME symbol on two profiles locks ONLY the firing leg — the other profile's
+    exit is never blocked. broker_profile=None keeps the old symbol-wide claim
+    (byte-for-byte for the single-profile norm)."""
     if reason not in VALID_REASONS:
         log.warning("exit_gate: unrecognised reason %r for %s/%s (allowing)",
                     reason, session_id, symbol)
     now = datetime.now(IST).isoformat()
     with falcon_conn() as con:
-        cur = con.execute(
-            """UPDATE autotrade_positions
-               SET exit_lock = 1, exit_initiated_by = ?
-               WHERE session_id = ? AND symbol = ?
-                 AND COALESCE(exit_lock, 0) = 0""",
-            (reason, session_id, symbol),
-        )
+        if broker_profile is not None:
+            cur = con.execute(
+                """UPDATE autotrade_positions
+                   SET exit_lock = 1, exit_initiated_by = ?
+                   WHERE session_id = ? AND symbol = ?
+                     AND COALESCE(broker_profile,'')=COALESCE(?,'')
+                     AND COALESCE(exit_lock, 0) = 0""",
+                (reason, session_id, symbol, broker_profile),
+            )
+        else:
+            cur = con.execute(
+                """UPDATE autotrade_positions
+                   SET exit_lock = 1, exit_initiated_by = ?
+                   WHERE session_id = ? AND symbol = ?
+                     AND COALESCE(exit_lock, 0) = 0""",
+                (reason, session_id, symbol),
+            )
         con.commit()
         if cur.rowcount == 1:
             log.info("exit_gate: %s/%s claimed by %s", session_id, symbol, reason)
             return True
-        row = con.execute(
-            """SELECT exit_initiated_by FROM autotrade_positions
-               WHERE session_id=? AND symbol=?""",
-            (session_id, symbol),
-        ).fetchone()
+        if broker_profile is not None:
+            row = con.execute(
+                """SELECT exit_initiated_by FROM autotrade_positions
+                   WHERE session_id=? AND symbol=?
+                     AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
+                (session_id, symbol, broker_profile),
+            ).fetchone()
+        else:
+            row = con.execute(
+                """SELECT exit_initiated_by FROM autotrade_positions
+                   WHERE session_id=? AND symbol=?""",
+                (session_id, symbol),
+            ).fetchone()
     owner = row["exit_initiated_by"] if row else "NO_SUCH_POSITION"
     if owner == reason:
         log.info("exit_gate: %s/%s re-entrant claim by %s", session_id, symbol, reason)
@@ -153,25 +204,45 @@ def claim_exit_session(session_id: str, symbol: str, reason: str) -> bool:
     return False
 
 
-def release_exit_session(session_id: str, symbol: str) -> None:
-    """Reset the session lock. For tests / operator recovery only."""
+def release_exit_session(session_id: str, symbol: str,
+                         broker_profile: Optional[str] = None) -> None:
+    """Reset the session lock. For tests / operator recovery only. Scoped by
+    broker_profile when given (CLUSTER 9 ITEM 1)."""
     with falcon_conn() as con:
-        con.execute(
-            """UPDATE autotrade_positions
-               SET exit_lock=0, exit_initiated_by=NULL
-               WHERE session_id=? AND symbol=?""",
-            (session_id, symbol),
-        )
+        if broker_profile is not None:
+            con.execute(
+                """UPDATE autotrade_positions
+                   SET exit_lock=0, exit_initiated_by=NULL
+                   WHERE session_id=? AND symbol=?
+                     AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
+                (session_id, symbol, broker_profile),
+            )
+        else:
+            con.execute(
+                """UPDATE autotrade_positions
+                   SET exit_lock=0, exit_initiated_by=NULL
+                   WHERE session_id=? AND symbol=?""",
+                (session_id, symbol),
+            )
         con.commit()
 
 
-def is_locked_session(session_id: str, symbol: str) -> bool:
+def is_locked_session(session_id: str, symbol: str,
+                      broker_profile: Optional[str] = None) -> bool:
     with falcon_conn() as con:
-        row = con.execute(
-            """SELECT COALESCE(exit_lock,0) AS l FROM autotrade_positions
-               WHERE session_id=? AND symbol=?""",
-            (session_id, symbol),
-        ).fetchone()
+        if broker_profile is not None:
+            row = con.execute(
+                """SELECT COALESCE(exit_lock,0) AS l FROM autotrade_positions
+                   WHERE session_id=? AND symbol=?
+                     AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
+                (session_id, symbol, broker_profile),
+            ).fetchone()
+        else:
+            row = con.execute(
+                """SELECT COALESCE(exit_lock,0) AS l FROM autotrade_positions
+                   WHERE session_id=? AND symbol=?""",
+                (session_id, symbol),
+            ).fetchone()
     return bool(row and row["l"])
 
 

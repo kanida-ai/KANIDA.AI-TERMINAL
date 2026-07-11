@@ -34,36 +34,59 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # attributable to THIS session. Reads autotrade_positions ONLY (never
 # falcon_position_state) — data-isolation preserved.
 def sibling_open_qty(session_id: str, symbol: str,
-                     instrument_type: Optional[str] = None) -> int:
-    """Σ still-held qty for `symbol` across OTHER sessions on the account
-    (status OPEN or EXIT_FAILED — an EXIT_FAILED sibling still holds its shares
-    at the broker). When instrument_type is given it must match (so a cash EQ
-    lot and a FUT contract of the same base name never cross-count)."""
+                     instrument_type: Optional[str] = None,
+                     *, broker_profile: Optional[str] = None,
+                     broker_account_id: Optional[str] = None,
+                     product: Optional[str] = None) -> int:
+    """Σ still-held qty for `symbol` across OTHER sessions ON THE SAME BROKER
+    ACCOUNT (status OPEN or EXIT_FAILED — an EXIT_FAILED sibling still holds its
+    shares at the broker). When instrument_type is given it must match (so a cash
+    EQ lot and a FUT contract of the same base name never cross-count).
+
+    CLUSTER 9 ITEM 3 (2026-07-11) — THE CORE MULTI-USER/MULTI-ACCOUNT ISOLATION FIX.
+    `broker_net` (in our_held_at_broker) is a PER-ACCOUNT figure: it is the net qty
+    of ONE broker client (selected by broker_profile, bound to ONE vaulted
+    broker_account_id). So the siblings we subtract from it MUST be on the SAME
+    account — a DIFFERENT account's same-symbol lot (another USER, or the same
+    user's OTHER account) is NOT in this account's net and must NEVER be
+    subtracted, else session A would misread its own still-held shares as flat.
+    When broker_account_id / broker_profile / product are given, siblings are
+    scoped to the SAME value via COALESCE('') matching (so NULL==NULL). All
+    default None → no extra filter → byte-for-byte the old cross-account behaviour
+    for the single-account world (where every row shares the same NULL account)."""
+    clauses = ["symbol=?", "session_id<>?",
+               "status IN ('OPEN','EXIT_FAILED')", "qty>0"]
+    params: list = [symbol, session_id]
+    if instrument_type is not None:
+        clauses.append("COALESCE(instrument_type,'EQ')=COALESCE(?,'EQ')")
+        params.append(instrument_type)
+    if broker_account_id is not None:
+        clauses.append("COALESCE(broker_account_id,'')=COALESCE(?,'')")
+        params.append(broker_account_id)
+    if broker_profile is not None:
+        clauses.append("COALESCE(broker_profile,'')=COALESCE(?,'')")
+        params.append(broker_profile)
+    if product is not None:
+        clauses.append("COALESCE(product,'')=COALESCE(?,'')")
+        params.append(product)
+    sql = ("SELECT COALESCE(SUM(qty),0) AS q FROM autotrade_positions WHERE "
+           + " AND ".join(clauses))
     with falcon_conn() as con:
-        if instrument_type is not None:
-            r = con.execute(
-                """SELECT COALESCE(SUM(qty),0) AS q FROM autotrade_positions
-                   WHERE symbol=? AND session_id<>?
-                     AND status IN ('OPEN','EXIT_FAILED') AND qty>0
-                     AND COALESCE(instrument_type,'EQ')=COALESCE(?,'EQ')""",
-                (symbol, session_id, instrument_type)).fetchone()
-        else:
-            r = con.execute(
-                """SELECT COALESCE(SUM(qty),0) AS q FROM autotrade_positions
-                   WHERE symbol=? AND session_id<>?
-                     AND status IN ('OPEN','EXIT_FAILED') AND qty>0""",
-                (symbol, session_id)).fetchone()
+        r = con.execute(sql, params).fetchone()
     return int(r["q"] or 0) if r else 0
 
 
 def our_held_at_broker(session_id: str, symbol: str,
                        instrument_type: Optional[str],
-                       our_qty: int, broker_net) -> Optional[int]:
+                       our_qty: int, broker_net,
+                       *, broker_profile: Optional[str] = None,
+                       broker_account_id: Optional[str] = None,
+                       product: Optional[str] = None) -> Optional[int]:
     """The qty attributable to THIS session that is STILL held at the broker:
 
-        clamp(|broker_net| - Σ(other sessions' held qty), 0, our_qty)
+        clamp(|broker_net| - Σ(same-account other sessions' held qty), 0, our_qty)
 
-    `broker_net` is the broker's ACCOUNT net for the symbol (signed; abs() so a
+    `broker_net` is the broker's PER-ACCOUNT net for the symbol (signed; abs() so a
     short's negative net counts as held). Returns None when broker_net is None
     (paper / unknown) → the caller proceeds with its normal exit (paper is
     byte-for-byte unchanged). The position is "already closed FOR THIS SESSION"
@@ -71,7 +94,11 @@ def our_held_at_broker(session_id: str, symbol: str,
     When there are NO siblings this equals min(our_qty, |broker_net|), so a
     fully-flat broker (0) → 0 and a fully-held broker (>=our_qty) → our_qty,
     byte-identical to the old `broker_net == 0` decision for the single-session
-    case."""
+    case.
+
+    CLUSTER 9 ITEM 3: broker_profile / broker_account_id / product scope the
+    sibling subtraction to the SAME broker account so a DIFFERENT account's
+    same-symbol lot is never subtracted (never misread as flat)."""
     if broker_net is None:
         return None
     try:
@@ -79,7 +106,10 @@ def our_held_at_broker(session_id: str, symbol: str,
         oq = int(our_qty)
     except (TypeError, ValueError):
         return None
-    other = sibling_open_qty(session_id, symbol, instrument_type)
+    other = sibling_open_qty(session_id, symbol, instrument_type,
+                             broker_profile=broker_profile,
+                             broker_account_id=broker_account_id,
+                             product=product)
     return max(0, min(oq, net - other))
 
 

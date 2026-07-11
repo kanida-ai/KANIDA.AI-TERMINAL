@@ -393,6 +393,16 @@ def run_migrations() -> dict:
                     "ALTER TABLE autotrade_positions ADD COLUMN slm_order_id TEXT")
                 added_cols.append("slm_order_id")
 
+        # ── 2j. CLUSTER 9 ITEM 5 — order_events dedup key now includes the
+        # broker_profile (COALESCE'') so the SAME broker_order_id on two different
+        # accounts/brokers never false-dedups. The new profile-scoped UNIQUE index
+        # is created by _SCHEMA_SQL above (idempotent); here we DROP the pre-ITEM-5
+        # 2-col index for existing DBs. Idempotent (DROP IF EXISTS). SQLite treats
+        # the COALESCE expression index as a valid conflict target for INSERT OR
+        # IGNORE, so append_event's dedup keeps working unchanged for single-account.
+        if _table_exists(con, "autotrade_order_events"):
+            con.execute("DROP INDEX IF EXISTS uq_autotrade_order_events_bid_type")
+
         for t in (
             "autotrade_positions",
             "autotrade_sessions", "autotrade_config_presets",
@@ -706,8 +716,15 @@ CREATE TABLE IF NOT EXISTS autotrade_order_events (
     detail          TEXT
 );
 -- Dedup real broker events; NULL broker_order_id rows are exempt (distinct NULLs).
-CREATE UNIQUE INDEX IF NOT EXISTS uq_autotrade_order_events_bid_type
-    ON autotrade_order_events(broker_order_id, event_type);
+-- CLUSTER 9 ITEM 5 (2026-07-11): the dedup key includes broker_profile so the SAME
+-- broker_order_id on TWO different broker accounts/brokers (each broker mints its
+-- own order-id space — the ids CAN collide across accounts) never false-dedups into
+-- ONE row. COALESCE(broker_profile,'') keeps NULL-profile rows deduping as before
+-- (a plain 3-col index would make NULL profiles distinct → lost dedup for the
+-- global/operator path). The pre-ITEM-5 2-col index is dropped in db_migrations.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_autotrade_order_events_bid_type_prof
+    ON autotrade_order_events(broker_order_id, event_type,
+                             COALESCE(broker_profile,''));
 CREATE INDEX IF NOT EXISTS idx_autotrade_order_events_session
     ON autotrade_order_events(session_id, symbol);
 CREATE INDEX IF NOT EXISTS idx_autotrade_order_events_coid

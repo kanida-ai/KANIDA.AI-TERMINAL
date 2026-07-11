@@ -212,11 +212,21 @@ def test_fix2_working_exit_netting_blocks_second_placement(clean_positions,
     Revert verified: delete the WORKING-EXIT NETTING block in
     _exit_single_position_inner -> our_held (10) passes unclamped -> a SECOND exit
     is placed -> broker.exit_calls is non-empty & status EXITED -> asserts FAIL.
+
+    CLUSTER 9 ITEM 4: the resting order is OUR own exit, so it carries our compact
+    tag (recognised as Falcon-owned); a foreign resting SELL would NOT block (see
+    test_item4_foreign_working_exit_not_counted).
     """
+    from autotrade.order_ledger import compact_tag
+    _coid = "FAL-COID-A-1"
     pending = [{"tradingsymbol": "A", "transaction_type": "SELL",
-                "quantity": 10, "order_id": "exit-A", "status": "OPEN"}]
+                "quantity": 10, "order_id": "exit-A", "status": "OPEN",
+                "tag": compact_tag(_coid)}]
     sess = _mk_live(monkeypatch, {"A": 10}, pending=pending)
     _register(sess, "A", 10)
+    # Persist the exit client_order_id so its compact tag marks the resting order ours.
+    sess.registry.set_exit_client_order_id(
+        "A", _coid, broker_profile=sess.config.broker_profiles[0].profile_id)
     pos = sess.registry.get_open_positions()[0]
     broker = next(iter(sess.brokers.values()))
 

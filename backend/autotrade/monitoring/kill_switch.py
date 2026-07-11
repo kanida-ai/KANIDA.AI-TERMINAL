@@ -158,19 +158,24 @@ class KillSwitchExecutor:
         sliced_jobs: List[Any] = []
         for pos in positions:
             symbol = pos["symbol"]
-            broker = self.brokers.get(pos.get("broker_profile")) \
+            prof_id = pos.get("broker_profile")
+            acct_id = pos.get("broker_account_id")
+            broker = self.brokers.get(prof_id) \
                 or next(iter(self.brokers.values()), None)
             if broker is None:
                 continue
             # Single exit gate (session-scoped on autotrade_positions): claim
             # first. If another mechanism already owns this exit (e.g. day-bound
             # fired the same second), skip — no duplicate order.
-            if not exit_gate.claim_exit_session(self.session_id, symbol, close_reason):
+            # CLUSTER 9 ITEM 1: scoped to the (session, symbol, broker_profile) leg
+            # so the same symbol on two profiles locks independently.
+            if not exit_gate.claim_exit_session(self.session_id, symbol,
+                                                close_reason,
+                                                broker_profile=prof_id):
                 exit_meta.append({"symbol": symbol, "claimed": False})
                 continue
             qty = int(pos.get("qty") or 0)   # recompute open qty (spec rule)
             itype = pos.get("instrument_type") or "EQ"
-            prof_id = pos.get("broker_profile")
             # FUTURES long/short: exit the CLOSING side. long→SELL (unchanged),
             # short→BUY-to-cover. Threaded from the position's stored direction.
             direction = pos.get("direction") or "long"
@@ -199,15 +204,22 @@ class KillSwitchExecutor:
                 net_qty = None
                 probe_raised = True
             if probe_raised:
-                exit_gate.release_exit_session(self.session_id, symbol)
+                exit_gate.release_exit_session(self.session_id, symbol,
+                                               broker_profile=prof_id)
                 exit_meta.append({"symbol": symbol, "claimed": False,
                                   "probe_failed": True})
                 continue
             # SESSION-SCOPED flat decision (C1): subtract OTHER sessions' still-held
             # qty so session A never treats session B's shares as flat / sells into
             # B's lot. our_held==0 ⟺ THIS session's shares are gone (not the account).
+            # CLUSTER 9 ITEM 3: sibling subtraction is scoped to the SAME
+            # broker_account_id/profile (+ product) so a DIFFERENT account's
+            # same-symbol lot (another user, or this user's other account) is NEVER
+            # subtracted → never misread as flat.
             from .registry import our_held_at_broker as _our_held
-            our_held = _our_held(self.session_id, symbol, itype, qty, net_qty)
+            our_held = _our_held(self.session_id, symbol, itype, qty, net_qty,
+                                 broker_profile=prof_id, broker_account_id=acct_id,
+                                 product=pos.get("product"))
             if net_qty is not None and our_held == 0:
                 log.warning("kill: %s/%s already flat at broker — reconciling, "
                             "no exit order", self.session_id, symbol)
@@ -234,7 +246,8 @@ class KillSwitchExecutor:
                         exit_price=ev.get("exit_price"),
                         broker_profile=prof_id,
                         exit_order_id=ev.get("exit_order_id"))
-                    exit_gate.release_exit_session(self.session_id, symbol)
+                    exit_gate.release_exit_session(self.session_id, symbol,
+                                                   broker_profile=prof_id)
                     exit_meta.append({"symbol": symbol, "claimed": False,
                                       "reconciled_flat": True,
                                       "exit_price": ev.get("exit_price")})
@@ -242,7 +255,8 @@ class KillSwitchExecutor:
                     self.registry.mark_closed(
                         symbol, f"{close_reason}_RECONCILED_FLAT",
                         broker_profile=prof_id)
-                    exit_gate.release_exit_session(self.session_id, symbol)
+                    exit_gate.release_exit_session(self.session_id, symbol,
+                                                   broker_profile=prof_id)
                     exit_meta.append({"symbol": symbol, "claimed": False,
                                       "reconciled_flat": True})
                 else:
@@ -267,6 +281,49 @@ class KillSwitchExecutor:
                             "live-held; broker shrank under us)",
                             self.session_id, symbol, qty, int(our_held))
                 qty = int(our_held)
+            # ── CLUSTER 9 ITEM 2 — STABLE EXIT client_order_id for the kill path ──
+            # The single-order (and parent-iceberg) kill exit previously carried NO
+            # client_order_id, unlike the retry/iceberg-child paths — so a crash
+            # AFTER the broker accepted the exit but BEFORE the close was recorded
+            # would, on resume, place a SECOND exit (query-before-place had no tag to
+            # match). Mint + PERSIST a stable exit client_order_id BEFORE the broker
+            # call and thread it onto the placement so its compact_tag rides on the
+            # order. When a PRIOR attempt already persisted one, QUERY-BEFORE-PLACE:
+            # adopt the tagged order already at the broker (confirm it) and place
+            # ZERO new orders. Paper's get_orders() is None → adopt None → place
+            # exactly as before (byte-for-byte unchanged; the mock records the
+            # client_order_id but ignores it).
+            _exit_coid = pos.get("exit_client_order_id")
+            if _exit_coid:
+                from .exit_poller import adopt_tagged_exit_if_present
+                try:
+                    _adopted = await adopt_tagged_exit_if_present(
+                        session_id=self.session_id, symbol=symbol,
+                        exit_client_order_id=_exit_coid, qty=int(qty),
+                        broker=broker, registry=self.registry,
+                        close_reason=close_reason, broker_profile=prof_id,
+                        direction=direction)
+                except Exception as _ae:  # pragma: no cover - never block the kill
+                    log.warning("kill %s/%s: query-before-place adopt raised: %s",
+                                self.session_id, symbol, _ae)
+                    _adopted = None
+                if _adopted is not None:
+                    log.warning("kill %s/%s: ADOPTED an existing tagged exit "
+                                "(status=%s) — placed NO new order",
+                                self.session_id, symbol, _adopted.get("status"))
+                    exit_gate.release_exit_session(self.session_id, symbol,
+                                                   broker_profile=prof_id)
+                    exit_meta.append({"symbol": symbol, "claimed": False,
+                                      "adopted": True, "broker_profile": prof_id,
+                                      "status": _adopted.get("status", "ADOPTED"),
+                                      "exit_price": _adopted.get("exit_price")})
+                    continue
+            else:
+                from .. import order_ledger as _ol_mint
+                _exit_coid = _ol_mint.make_client_order_id(
+                    self.session_id, symbol, attempt=1)
+                self.registry.set_exit_client_order_id(
+                    symbol, _exit_coid, broker_profile=prof_id)
             # ── EXIT ICEBERG (SPRINT CLUSTER 8) — slice a large kill exit ──────
             # `qty` is ALREADY clamped to our_held (clamp above) → we slice the
             # CLAMPED qty (clamp-BEFORE-slice; the sliced total can never exceed
@@ -286,6 +343,7 @@ class KillSwitchExecutor:
                     _meta_ice = {"symbol": symbol, "claimed": True, "qty": qty,
                                  "broker_profile": prof_id, "direction": direction,
                                  "instrument_type": itype,
+                                 "broker_account_id": acct_id,
                                  "kite_product": kite_product, "iceberg": True}
                     sliced_jobs.append((_meta_ice, slice_and_confirm_exit(
                         session_id=self.session_id, symbol=symbol,
@@ -294,14 +352,16 @@ class KillSwitchExecutor:
                         broker_profile=prof_id, direction=direction,
                         instrument_type=itype, kite_product=kite_product,
                         exec_cfg=self.config,
-                        parent_exit_coid=pos.get("exit_client_order_id"))))
+                        parent_exit_coid=_exit_coid)))
                     continue
             exit_coros.append(broker.place_market_exit(
                 symbol, qty, itype, kite_product=kite_product,
-                direction=direction, exec_cfg=self.config))
+                direction=direction, exec_cfg=self.config,
+                client_order_id=_exit_coid))
             exit_meta.append({"symbol": symbol, "claimed": True, "qty": qty,
                               "broker_profile": prof_id, "direction": direction,
-                              "instrument_type": itype, "kite_product": kite_product})
+                              "instrument_type": itype, "kite_product": kite_product,
+                              "broker_account_id": acct_id})
 
         results = await asyncio.gather(*exit_coros, return_exceptions=True)
 
@@ -365,7 +425,8 @@ class KillSwitchExecutor:
                         max_retries=3, direction=meta.get("direction", "long"),
                         instrument_type=meta.get("instrument_type", "EQ"),
                         kite_product=meta.get("kite_product"),
-                        broker_profile=prof_id)
+                        broker_profile=prof_id,
+                        broker_account_id=meta.get("broker_account_id"))
                     if retry_result.get("status") == "COMPLETE":
                         return True, {**meta, "status": "COMPLETE_AFTER_PARTIAL",
                                       "broker_order_id": order_id}
@@ -387,7 +448,8 @@ class KillSwitchExecutor:
                     max_retries=3, direction=meta.get("direction", "long"),
                     instrument_type=meta.get("instrument_type", "EQ"),
                     kite_product=meta.get("kite_product"),
-                    broker_profile=prof_id)
+                    broker_profile=prof_id,
+                    broker_account_id=meta.get("broker_account_id"))
                 if retry_result.get("status") == "COMPLETE":
                     return True, {**meta, "status": "COMPLETE_AFTER_TIMEOUT",
                                   "broker_order_id": order_id}
@@ -410,6 +472,12 @@ class KillSwitchExecutor:
         details: List[Dict[str, Any]] = []
         confirm_jobs: List[Any] = []       # (meta, coro) for the LIVE placed legs
         for meta in exit_meta:
+            # CLUSTER 9 ITEM 2 — a leg ADOPTED via query-before-place is already
+            # confirmed/closed (no coro was appended for it); count it as OK.
+            if meta.get("adopted"):
+                n_ok += 1
+                details.append({**meta})
+                continue
             if not meta["claimed"]:
                 details.append({**meta, "status": "BLOCKED"})
                 continue

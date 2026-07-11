@@ -243,13 +243,28 @@ async def confirm_exit(
                         "remaining_qty": remaining, "exit_price": fill_price}
 
         elif kite_status in ("REJECTED", "CANCELLED"):
+            # CLUSTER 9 ITEM 7 (2026-07-11) — a CANCELLED/REJECTED order can still
+            # carry a PARTIAL fill (some lots executed before the cancel/reject).
+            # Booking NOTHING here left the DB qty OVERSTATED → the guarded retry
+            # would try to exit the WHOLE original qty again → oversell into a
+            # reverse/naked position. Reduce the DB qty by the filled portion FIRST
+            # (profile-scoped), so the retry exits only the REMAINDER. filled_qty==0
+            # (the common full-reject) is byte-for-byte unchanged (no partial call).
+            if filled_qty > 0:
+                fill_price = avg_price if avg_price > 0 else None
+                registry.update_partial_exit(symbol, filled_qty, fill_price,
+                                             broker_profile=broker_profile)
+                log.warning("confirm_exit %s/%s: order %s with PARTIAL fill=%d — "
+                            "booked filled portion before EXIT_FAILED (remainder "
+                            "%d)", session_id, symbol, kite_status, filled_qty,
+                            max(0, qty - filled_qty))
             registry.mark_exit_failed(
                 symbol, f"order {kite_status}",
                 broker_profile=broker_profile, exit_order_id=order_id)
             log.error("confirm_exit %s/%s: order %s — gate released for retry",
                       session_id, symbol, kite_status)
             return {"status": kite_status, "filled_qty": filled_qty,
-                    "exit_price": None}
+                    "remaining_qty": max(0, qty - filled_qty), "exit_price": None}
 
         elif kite_status == "DRY_RUN":
             # Synthetic status from mock/paper broker.
@@ -262,10 +277,25 @@ async def confirm_exit(
         await asyncio.sleep(poll_interval_sec)
 
     # Deadline passed without terminal status.
+    # CLUSTER 9 ITEM 7 — a TIMEOUT can still have a PARTIAL fill (some lots executed
+    # while the rest stayed pending). Book the filled portion (profile-scoped) so
+    # the DB qty is the REMAINDER before the caller cancels + retries, otherwise the
+    # retry would re-exit the whole original qty → oversell. The caller's
+    # cancel_and_retry_exit cancels the still-pending order FIRST and re-probes the
+    # net (our_held clamp) so the remainder is never double-covered; total realised
+    # P&L = partial + remainder = correct. filled_qty==0 is byte-for-byte unchanged.
+    if filled_qty > 0:
+        fill_price = avg_price if avg_price > 0 else None
+        registry.update_partial_exit(symbol, filled_qty, fill_price,
+                                     broker_profile=broker_profile)
+        log.warning("confirm_exit %s/%s: TIMEOUT with PARTIAL fill=%d — booked "
+                    "filled portion (remainder %d) before retry", session_id,
+                    symbol, filled_qty, max(0, qty - filled_qty))
     log.error(
         "confirm_exit %s/%s: TIMEOUT after %ds (last_status=%s filled=%d)",
         session_id, symbol, max_wait_sec, last_kite_status, filled_qty)
-    return {"status": "TIMEOUT", "filled_qty": filled_qty, "exit_price": None}
+    return {"status": "TIMEOUT", "filled_qty": filled_qty,
+            "remaining_qty": max(0, qty - filled_qty), "exit_price": None}
 
 
 async def poll_order_fill(
@@ -559,6 +589,8 @@ async def cancel_and_retry_exit(
     direction: str = "long",
     instrument_type: str = "EQ",
     broker_profile: str | None = None,
+    broker_account_id: str | None = None,
+    product: str | None = None,
 ) -> Dict[str, Any]:
     """Cancel a pending exit order and place a fresh market sell, with retries.
 
@@ -652,7 +684,12 @@ async def cancel_and_retry_exit(
                 symbol, "retry aborted: net probe raised",
                 broker_profile=broker_profile)
             return {"status": "EXIT_ABORTED_PROBE_FAILED", "symbol": symbol}
-        our_held = _our_held(session_id, symbol, instrument_type, qty, net_qty)
+        # CLUSTER 9 ITEM 3: scope the sibling subtraction to the SAME broker account
+        # so a different account's same-symbol lot is never subtracted.
+        our_held = _our_held(session_id, symbol, instrument_type, qty, net_qty,
+                             broker_profile=broker_profile,
+                             broker_account_id=broker_account_id,
+                             product=product)
         if net_qty is not None and our_held == 0:
             log.warning(
                 "cancel_and_retry_exit %s/%s: broker already flat FOR THIS SESSION "

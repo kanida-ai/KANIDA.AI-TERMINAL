@@ -890,24 +890,77 @@ def estimate_session_charges_rs(session_id: str, product: str) -> float:
     return round(total, 2)
 
 
+def _falcon_owned_exit_ids_tags(session_id: str, symbol: str,
+                                broker_profile: Optional[str] = None):
+    """CLUSTER 9 ITEM 4 (2026-07-11) — the set of broker order-ids AND compact tags
+    that provably belong to THIS session's (symbol[, profile]) leg: the recorded
+    entry/exit/GTT order-ids + the compact_tag of the persisted client_order_id /
+    exit_client_order_id. A resting broker order is ONLY ours if its order-id is in
+    the id-set OR its `tag` is in the tag-set. Scoped to (session, symbol
+    [, broker_profile]) so a foreign / other-session / manual resting order is
+    never mistaken for ours. Best-effort → empty sets on any error."""
+    ids: set = set()
+    tags: set = set()
+    try:
+        from autotrade.order_ledger import compact_tag
+        with falcon_conn() as con:
+            if broker_profile is not None:
+                rows = con.execute(
+                    """SELECT entry_order_id, exit_order_id, gtt_id,
+                              client_order_id, exit_client_order_id
+                       FROM autotrade_positions
+                       WHERE session_id=? AND symbol=?
+                         AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
+                    (session_id, symbol, broker_profile)).fetchall()
+            else:
+                rows = con.execute(
+                    """SELECT entry_order_id, exit_order_id, gtt_id,
+                              client_order_id, exit_client_order_id
+                       FROM autotrade_positions
+                       WHERE session_id=? AND symbol=?""",
+                    (session_id, symbol)).fetchall()
+        for r in rows:
+            for v in (r["entry_order_id"], r["exit_order_id"], r["gtt_id"]):
+                if v not in (None, ""):
+                    ids.add(str(v))
+            for c in (r["client_order_id"], r["exit_client_order_id"]):
+                if c not in (None, ""):
+                    tags.add(compact_tag(str(c)))
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("_falcon_owned_exit_ids_tags(%s/%s) failed: %s",
+                  session_id, symbol, e)
+    return ids, tags
+
+
 async def _our_working_exit_qty(broker: Any, symbol: str,
-                                direction: str = "long") -> int:
+                                direction: str = "long",
+                                owned_ids: Optional[set] = None,
+                                owned_tags: Optional[set] = None) -> int:
     """Best-effort Σ qty of our still-RESTING exit-side orders for `symbol` at the
     broker (Fix 2 Part 2, 2026-07-11). A resting/unfilled exit does NOT reduce
     positions()['net'], so without netting it a next-tick re-fire would place a
     SECOND exit while the first still rests → both fill on a tick-back → OVERSELL.
 
     Reads broker.get_pending_orders() ONLY. Counts a pending order iff it matches
-    BOTH the symbol AND the CLOSING transaction side (long→SELL, short→BUY-cover) —
-    so a resting ENTRY (or an order on another symbol) is never counted. Any error
-    / unknown shape / missing field → 0 (fall back to the existing behaviour; the
-    resting-order CANCEL is the primary guard, this is belt-and-suspenders)."""
+    the symbol AND the CLOSING transaction side (long→SELL, short→BUY-cover) — so a
+    resting ENTRY (or an order on another symbol) is never counted. Any error /
+    unknown shape / missing field → 0 (fall back to the existing behaviour; the
+    resting-order CANCEL is the primary guard, this is belt-and-suspenders).
+
+    CLUSTER 9 ITEM 4 (2026-07-11): a matching order is counted ONLY when it is
+    provably FALCON-OWNED — its order-id is in `owned_ids` OR its `tag` is in
+    `owned_tags` (the recorded ids / compact tags for THIS session+account leg).
+    A manual / foreign / other-session resting same-side order is NEVER counted, so
+    it can never block a legit exit. When both sets are empty/None NOTHING is
+    counted (a foreign order must never gate our exit)."""
     try:
         pending = await broker.get_pending_orders()
     except Exception:  # pragma: no cover - defensive; primary guard is the cancel
         return 0
     if not pending:
         return 0
+    owned_ids = owned_ids or set()
+    owned_tags = owned_tags or set()
     exit_side = "BUY" if str(direction).lower() == "short" else "SELL"
     base = str(symbol).split(":", 1)[0]
     total = 0
@@ -919,6 +972,11 @@ async def _our_working_exit_qty(broker: Any, symbol: str,
             continue
         txn = str(o.get("transaction_type") or "").upper()
         if txn != exit_side:
+            continue
+        # OWNERSHIP GATE (ITEM 4): only our own recorded id / tag counts.
+        oid = str(o.get("order_id") or "")
+        otag = str(o.get("tag") or "")
+        if not ((oid and oid in owned_ids) or (otag and otag in owned_tags)):
             continue
         q = o.get("pending_quantity")
         if q in (None, ""):
@@ -950,7 +1008,13 @@ async def _exit_single_position(
     double-place either. The legitimate sequential EXIT_FAILED retry is preserved:
     the prior flight has ended (slot cleared) before the next tick re-attempts."""
     symbol = position["symbol"]
-    if not _exit_gate_mod.begin_exit_flight(session_id, symbol):
+    # CLUSTER 9 ITEM 1: the single-flight slot is keyed by the FULL leg identity
+    # (session_id, symbol, broker_profile) so the same symbol on two broker
+    # profiles flies independently — one profile's in-flight exit never blocks the
+    # other's.
+    _prof = position.get("broker_profile")
+    if not _exit_gate_mod.begin_exit_flight(session_id, symbol,
+                                            broker_profile=_prof):
         log.warning("exit %s/%s: an exit order is already IN FLIGHT — skipping "
                     "(no second order, reason=%s)", session_id, symbol, reason)
         return {"symbol": symbol, "status": "BLOCKED_INFLIGHT", "reason": reason}
@@ -960,7 +1024,7 @@ async def _exit_single_position(
             brokers=brokers, registry=registry, gtt_manager=gtt_manager,
             kite_product=kite_product, exec_cfg=exec_cfg)
     finally:
-        _exit_gate_mod.end_exit_flight(session_id, symbol)
+        _exit_gate_mod.end_exit_flight(session_id, symbol, broker_profile=_prof)
 
 
 async def _exit_single_position_inner(
@@ -995,7 +1059,9 @@ async def _exit_single_position_inner(
         return {"symbol": symbol, "status": "NO_BROKER"}
 
     # 1. Claim the exit gate so no other path double-fires this position.
-    if not _exit_gate_mod.claim_exit_session(session_id, symbol, reason):
+    # CLUSTER 9 ITEM 1: scoped to the (session, symbol, broker_profile) leg.
+    if not _exit_gate_mod.claim_exit_session(session_id, symbol, reason,
+                                             broker_profile=prof_id):
         log.info("per-stock stop %s/%s: exit already claimed — skip",
                  session_id, symbol)
         return {"symbol": symbol, "status": "BLOCKED"}
@@ -1098,15 +1164,22 @@ async def _exit_single_position_inner(
         net_qty = None
         probe_raised = True
     if probe_raised:
-        _exit_gate_mod.release_exit_session(session_id, symbol)
+        _exit_gate_mod.release_exit_session(session_id, symbol,
+                                            broker_profile=prof_id)
         return {"symbol": symbol, "status": "EXIT_ABORTED_PROBE_FAILED",
                 "reason": reason}
     # SESSION-SCOPED flat decision (C1): the broker net is ACCOUNT-wide, so when a
     # sibling session holds the same symbol we must NOT read its shares as ours.
     # our_held = the qty attributable to THIS session still at the broker; 0 ⟺ our
     # shares are gone (reconcile + place nothing), never the whole-account net.
+    # CLUSTER 9 ITEM 3: sibling subtraction scoped to the SAME broker_account_id/
+    # profile (+ product) so a DIFFERENT account's same-symbol lot is never
+    # subtracted (never misread as flat).
     from autotrade.monitoring.registry import our_held_at_broker as _our_held
-    our_held = _our_held(session_id, position.get("symbol"), itype, qty, net_qty)
+    our_held = _our_held(session_id, position.get("symbol"), itype, qty, net_qty,
+                         broker_profile=prof_id,
+                         broker_account_id=position.get("broker_account_id"),
+                         product=position.get("product"))
     if net_qty is not None and our_held == 0:
         log.warning(
             "pre-exit reconcile %s/%s: broker net qty is 0 (already closed "
@@ -1131,13 +1204,15 @@ async def _exit_single_position_inner(
                                  exit_price=ev.get("exit_price"),
                                  broker_profile=prof_id,
                                  exit_order_id=ev.get("exit_order_id"))
-            _exit_gate_mod.release_exit_session(session_id, symbol)
+            _exit_gate_mod.release_exit_session(session_id, symbol,
+                                                broker_profile=prof_id)
             return {"symbol": symbol, "status": "RECONCILED_FLAT", "reason": reason,
                     "exit_price": ev.get("exit_price")}
         if ltp_val and float(ltp_val) > 0:
             registry.mark_closed(symbol, f"{reason}_RECONCILED_FLAT",
                                  exit_price=ltp_val, broker_profile=prof_id)
-            _exit_gate_mod.release_exit_session(session_id, symbol)
+            _exit_gate_mod.release_exit_session(session_id, symbol,
+                                                broker_profile=prof_id)
             return {"symbol": symbol, "status": "RECONCILED_FLAT", "reason": reason}
         # Flat at broker, NO attributable fill AND no positive mark → do NOT book a
         # phantom CLOSED@0. mark_exit_failed releases the gate itself.
@@ -1169,15 +1244,23 @@ async def _exit_single_position_inner(
     # effort: a probe error → 0 (the resting-order CANCEL above is the primary
     # guard).
     if our_held is not None:
+        # CLUSTER 9 ITEM 4: count ONLY our own resting exit orders (recorded id /
+        # our compact tag for this session+profile leg) — a foreign/manual resting
+        # order must never block our exit.
+        _owned_ids, _owned_tags = _falcon_owned_exit_ids_tags(
+            session_id, position.get("symbol"), broker_profile=prof_id)
         working = await _our_working_exit_qty(broker, position.get("symbol"),
-                                              direction)
+                                              direction,
+                                              owned_ids=_owned_ids,
+                                              owned_tags=_owned_tags)
         if working > 0:
             placeable = qty - working
             if placeable <= 0:
                 log.warning("per-stock stop %s/%s: a working exit for %d already "
                             "rests (>= intended %d) — placing NO second order, "
                             "leaving for retry", session_id, symbol, working, qty)
-                _exit_gate_mod.release_exit_session(session_id, symbol)
+                _exit_gate_mod.release_exit_session(session_id, symbol,
+                                                    broker_profile=prof_id)
                 return {"symbol": symbol, "status": "EXIT_PENDING_WORKING",
                         "reason": reason, "working_qty": working}
             log.warning("per-stock stop %s/%s: netting a working exit of %d — "
@@ -2934,7 +3017,8 @@ class TradingSession:
                 _exit_coros = []
                 for fp in failed_positions:
                     if _exit_gate_mod.claim_exit_session(
-                            self.session_id, fp["symbol"], "EXIT_RETRY"):
+                            self.session_id, fp["symbol"], "EXIT_RETRY",
+                            broker_profile=fp.get("broker_profile")):
                         _exit_coros.append(_exit_single_position(
                             session_id=self.session_id,
                             position=fp,
