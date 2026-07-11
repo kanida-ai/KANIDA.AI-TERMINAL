@@ -49,11 +49,18 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _active_sessions() -> List[Dict[str, Any]]:
-    """RUNNING + SCHEDULED sessions (the only states with live in-memory threads)."""
+    """Sessions that need an in-memory thread re-armed after a restart:
+      * RUNNING / SCHEDULED — the normal live states (tick / entry threads), and
+      * KILLING / KILLING_INCOMPLETE (CLUSTER 3 ITEM 1) — a crash MID-FLATTEN
+        leaves the kill half-done: some legs OPEN / EXIT_FAILED with NO driver, so
+        the EXIT_FAILED retry sweep never runs and real exposure sits unmanaged.
+        We resume them (reconcile → re-flatten OPEN legs → re-arm the tick driver
+        so the sweep drives the rest to CLOSED)."""
     with falcon_conn() as con:
         rows = con.execute(
             """SELECT session_id, status FROM autotrade_sessions
-               WHERE status IN ('RUNNING', 'SCHEDULED')
+               WHERE status IN ('RUNNING', 'SCHEDULED',
+                                'KILLING', 'KILLING_INCOMPLETE')
                ORDER BY created_at ASC"""
         ).fetchall()
     return [dict(r) for r in rows]
@@ -187,6 +194,107 @@ def _resume_running(session_id: str) -> str:
     return "tick_already_armed"
 
 
+def _resume_killing(session_id: str, status: str) -> str:
+    """CLUSTER 3 ITEM 1 — resume a session stranded in KILLING / KILLING_INCOMPLETE.
+
+    A crash MID-FLATTEN (kill_switch.fire sets KILLING before it flattens, and
+    KILLING_INCOMPLETE when a leg fails) leaves the session with NO driver: some
+    legs OPEN (never got an exit attempt) and/or EXIT_FAILED (a placement failed).
+    Nothing re-attempts them → real exposure sits unmanaged. This drives it toward
+    CLOSED, safely:
+
+      1. AUTHORITATIVE broker→DB reconcile FIRST — correct any leg the broker
+         already closed (RMS square / manual / GTT fill) while we were down, so we
+         never re-exit a position that is already flat.
+      2. Re-flatten every STILL-OPEN leg via the per-leg exit path (the same
+         _exit_single_position the sweep uses). The pre-exit net-probe guard +
+         working-exit netting + the CLUSTER-3 query-before-place adoption prevent
+         any double order (a leg whose exit was already placed pre-crash is
+         ADOPTED, not re-placed). Each OPEN leg → CLOSED or EXIT_FAILED.
+      3. Re-arm the tick driver so its EXIT_FAILED retry sweep re-attempts the
+         stranded EXIT_FAILED legs and PROMOTES the session to CLOSED once every
+         leg is confirmed flat (tick() already services KILLING_INCOMPLETE).
+
+    Normalises a bare KILLING to KILLING_INCOMPLETE so the tick driver keeps
+    servicing it (the driver loop runs for RUNNING + KILLING_INCOMPLETE). LIVE
+    only for real orders; paper places none. Best-effort throughout — never raises.
+    """
+    from .session import TradingSession
+
+    sess = TradingSession.load(session_id)
+    if sess is None:
+        log.warning("recovery: %s session %s not found — skipping", status,
+                    session_id)
+        return "killing_missing"
+    try:
+        sess._build_brokers()
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("recovery: build_brokers failed for %s (%s): %s",
+                    status, session_id, e)
+    # 1. Authoritative reconcile FIRST (correct broker-closed legs).
+    try:
+        _reconcile_broker_positions(session_id)
+    except Exception as e:  # pragma: no cover - never block recovery
+        log.warning("recovery: kill-resume reconcile failed for %s: %s",
+                    session_id, e)
+
+    # A bare KILLING is a crash BEFORE the flatten finished; normalise it to the
+    # NON-terminal KILLING_INCOMPLETE so the tick driver's servicing loop keeps
+    # running it toward CLOSED (a truly all-flat session is promoted below).
+    try:
+        if sess._current_status() == "KILLING":
+            sess._set_status("KILLING_INCOMPLETE")
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("recovery: could not normalise KILLING for %s: %s",
+                  session_id, e)
+
+    # 2. Re-flatten still-OPEN legs (the sweep only re-attempts EXIT_FAILED, so an
+    #    OPEN leg left by the interrupted kill would otherwise sit forever).
+    try:
+        open_positions = sess.registry.get_open_positions()
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("recovery: get_open_positions failed for %s: %s",
+                    session_id, e)
+        open_positions = []
+    reflattened = 0
+    if open_positions:
+        from .session import _exit_single_position
+        for pos in open_positions:
+            try:
+                asyncio.run(_exit_single_position(
+                    session_id=session_id, position=pos,
+                    reason="KILL_SWITCH", brokers=sess.brokers,
+                    registry=sess.registry, gtt_manager=sess.gtt_manager,
+                    kite_product=sess.config.order_product,
+                    exec_cfg=sess.config))
+                reflattened += 1
+            except Exception as e:  # one bad leg must not abort the rest
+                log.warning("recovery: kill-resume re-flatten failed %s/%s: %s",
+                            session_id, pos.get("symbol"), e)
+
+    # 3. Re-arm the tick driver so the EXIT_FAILED sweep drives the rest to CLOSED.
+    armed = tick_driver.start_for_session(session_id)
+
+    # If, after the reconcile + re-flatten, every leg is already flat, promote to
+    # CLOSED now (the tick() promotion path would do this on its next iteration,
+    # but doing it here means a session with no residual EXIT_FAILED closes cleanly
+    # even if the background driver is disabled, e.g. in tests).
+    try:
+        if (sess._current_status() == "KILLING_INCOMPLETE"
+                and not sess._has_unflat_positions()):
+            from datetime import datetime as _dt
+            sess._set_status("CLOSED", closed_at=_dt.now(IST).isoformat())
+            log.critical("recovery: KILLING resolved on resume — all legs flat, "
+                         "session CLOSED %s", session_id)
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("recovery: post-resume CLOSED promotion failed for %s: %s",
+                  session_id, e)
+
+    log.info("recovery: kill-resume %s — reflattened=%d tick_armed=%s",
+             session_id, reflattened, armed)
+    return "killing_resumed"
+
+
 def _resume_scheduled(session_id: str) -> str:
     """Re-arm the entry scheduler for a SCHEDULED session, OR fire it now if its
     target already passed while the backend was down — BUT ONLY THROUGH THE
@@ -253,7 +361,7 @@ def resume_active_sessions() -> Dict[str, Any]:
     rest of recovery.
     """
     summary: Dict[str, Any] = {
-        "running": 0, "scheduled": 0, "fired": 0, "rearmed": 0,
+        "running": 0, "scheduled": 0, "killing": 0, "fired": 0, "rearmed": 0,
         "errors": 0, "sessions": [],
     }
     try:
@@ -281,6 +389,12 @@ def resume_active_sessions() -> Dict[str, Any]:
                 if "fired" in outcome:
                     summary["fired"] += 1
                 elif "rearmed" in outcome:
+                    summary["rearmed"] += 1
+            elif status in ("KILLING", "KILLING_INCOMPLETE"):
+                # CLUSTER 3 ITEM 1 — resume a stranded mid-flatten kill.
+                outcome = _resume_killing(sid, status)
+                summary["killing"] = summary.get("killing", 0) + 1
+                if outcome == "killing_resumed":
                     summary["rearmed"] += 1
             else:  # pragma: no cover - filtered by the query above
                 outcome = "skipped"

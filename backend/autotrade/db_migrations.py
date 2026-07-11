@@ -142,6 +142,39 @@ def run_migrations() -> dict:
                     "ALTER TABLE autotrade_positions ADD COLUMN client_order_id TEXT")
                 added_cols.append("client_order_id")
 
+        # ── 2b-prod. ALTER-guard `product` on autotrade_positions ─────────────
+        # SPRINT CLUSTER 3 (ITEM 4): the Kite PRODUCT (CNC/MIS/NRML/MTF) this leg
+        # was opened under. Persisted PER POSITION so the reconciler buckets a
+        # position by ITS OWN product (a session whose broker_profiles mix products
+        # — e.g. a CNC leg and an MTF leg — no longer mis-buckets a leg under the
+        # single session-level order_product). NULLABLE → every existing / paper /
+        # pre-migration row stays NULL and the reconciler falls back to the session
+        # config product (byte-for-byte unchanged for those rows). Additive +
+        # idempotent.
+        if _table_exists(con, "autotrade_positions"):
+            have = set(_existing_columns(con, "autotrade_positions"))
+            if "product" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_positions ADD COLUMN product TEXT")
+                added_cols.append("product")
+
+        # ── 2b-xcoid. ALTER-guard `exit_client_order_id` on autotrade_positions ─
+        # SPRINT CLUSTER 3 (ITEM 3b): the durable client_order_id minted for a
+        # position's EXIT intent, persisted the moment the first exit is placed so
+        # the broker tag (compact_tag) is STABLE across a retry / restart. On a
+        # RETRY or a RESTART-resume the exit path queries the broker orderbook for
+        # this id's tag BEFORE placing — if the tagged order already exists it is
+        # ADOPTED (zero new orders), closing the cross-process exactly-once window.
+        # NULLABLE → every existing / paper row stays NULL (no query, place as
+        # today — byte-for-byte unchanged). Additive + idempotent.
+        if _table_exists(con, "autotrade_positions"):
+            have = set(_existing_columns(con, "autotrade_positions"))
+            if "exit_client_order_id" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_positions "
+                    "ADD COLUMN exit_client_order_id TEXT")
+                added_cols.append("exit_client_order_id")
+
         # ── 2b-dir. ALTER-guard `direction` on autotrade_positions ────────────
         # FUTURES long/short. Per-position direction so the P&L sign + exit side
         # invert ONLY for shorts. DEFAULT 'long' → every existing row + every

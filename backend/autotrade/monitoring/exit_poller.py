@@ -178,6 +178,59 @@ async def confirm_exit(
     return {"status": "TIMEOUT", "filled_qty": filled_qty, "exit_price": None}
 
 
+async def adopt_tagged_exit_if_present(
+    session_id: str,
+    symbol: str,
+    exit_client_order_id: Optional[str],
+    qty: int,
+    broker: Any,
+    registry: Any,
+    close_reason: str = "EXIT_ADOPTED",
+    broker_profile: Optional[str] = None,
+    direction: str = "long",
+) -> Optional[Dict[str, Any]]:
+    """CLUSTER 3 ITEM 3(b) — QUERY-BEFORE-PLACE. Before placing a RETRY / RESUME
+    exit, ask the broker orderbook whether OUR exit tag (compact_tag of the
+    position's persisted exit_client_order_id) is ALREADY there. If a tagged order
+    exists (COMPLETE or still working) it is OUR own earlier placement surviving a
+    retry / restart → ADOPT it: confirm/await it and place ZERO new orders. This
+    closes the cross-process exactly-once window the in-process locks cannot.
+
+    Returns a confirm_exit-shaped result dict when an order was adopted, else None
+    (the caller then proceeds to place). Best-effort — any error / no tag / no
+    orderbook → None (place exactly as before; paper is byte-for-byte unchanged
+    because a paper broker's get_orders() returns None)."""
+    if not exit_client_order_id:
+        return None
+    try:
+        orders = await asyncio.to_thread(broker.get_orders)
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("adopt_tagged_exit %s/%s: get_orders raised: %s",
+                  session_id, symbol, e)
+        return None
+    if not orders:
+        return None
+    tag = _order_ledger.compact_tag(exit_client_order_id)
+    closing_side = "BUY" if str(direction).lower() == "short" else "SELL"
+    match = _order_ledger.find_broker_order_by_tag(orders, tag,
+                                                   closing_side=closing_side)
+    if match is None:
+        return None
+    oid = match.get("order_id")
+    if oid in (None, ""):
+        return None
+    log.warning(
+        "adopt_tagged_exit %s/%s: OUR tagged exit order %s already at the broker "
+        "(status=%s) — ADOPTING, placing NO new order (query-before-place)",
+        session_id, symbol, oid, match.get("status"))
+    # Confirm / await the existing order: COMPLETE → mark closed at its fill; still
+    # working → poll to terminal. Uses the ONE universal confirm choke point.
+    return await confirm_exit(
+        session_id=session_id, symbol=symbol, order_id=str(oid), qty=qty,
+        broker=broker, registry=registry, close_reason=close_reason,
+        broker_profile=broker_profile)
+
+
 async def cancel_and_retry_exit(
     session_id: str,
     symbol: str,

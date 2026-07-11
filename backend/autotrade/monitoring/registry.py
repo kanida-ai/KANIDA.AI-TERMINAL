@@ -134,6 +134,7 @@ class PositionRegistry:
                     """UPDATE autotrade_positions
                        SET qty=?, avg_price=?, instrument_type=?, exchange=?,
                            direction=?,
+                           product=COALESCE(?, product),
                            sl_level=COALESCE(?, sl_level),
                            target_price=COALESCE(?, target_price),
                            ltp=COALESCE(ltp, ?),
@@ -142,7 +143,7 @@ class PositionRegistry:
                            status='OPEN'
                        WHERE id=?""",
                     (qty, avg_price, instrument_type, exchange, direction,
-                     sl_level, target_price, avg_price, entry_order_id,
+                     product, sl_level, target_price, avg_price, entry_order_id,
                      client_order_id, existing[0]),
                 )
                 _row_id = existing[0]
@@ -152,12 +153,13 @@ class PositionRegistry:
                        (session_id, broker_profile, broker_account_id, symbol,
                         instrument_type, exchange, qty, avg_price, sl_level,
                         target_price, ltp, unrealised_pnl, status, exit_lock,
-                        opened_at, direction, entry_order_id, client_order_id)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN', 0, ?, ?, ?, ?)""",
+                        opened_at, direction, entry_order_id, client_order_id,
+                        product)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN', 0, ?, ?, ?, ?, ?)""",
                     (self.session_id, broker_profile, broker_account_id, symbol,
                      instrument_type, exchange, qty, avg_price, sl_level,
                      target_price, avg_price, 0.0, now, direction,
-                     entry_order_id, client_order_id),
+                     entry_order_id, client_order_id, product),
                 )
                 _row_id = cur.lastrowid
             con.commit()
@@ -211,6 +213,60 @@ class PositionRegistry:
                 (self.session_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def set_exit_client_order_id(self, symbol: str, exit_client_order_id: str,
+                                 broker_profile: Optional[str] = None) -> None:
+        """CLUSTER 3 ITEM 3(b) — persist the durable EXIT client_order_id for a
+        position the moment its first exit is placed, so the broker tag
+        (compact_tag) is STABLE across a retry / restart and query-before-place can
+        recognise OUR own already-placed exit. Only sets it when currently NULL
+        (COALESCE keeps the first-minted id stable across retries). Best-effort;
+        never raises into the exit path. Scoped by (session, symbol[, profile])."""
+        try:
+            with falcon_conn() as con:
+                if broker_profile is not None:
+                    con.execute(
+                        """UPDATE autotrade_positions
+                           SET exit_client_order_id=
+                               COALESCE(exit_client_order_id, ?)
+                           WHERE session_id=? AND symbol=?
+                             AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
+                        (exit_client_order_id, self.session_id, symbol,
+                         broker_profile))
+                else:
+                    con.execute(
+                        """UPDATE autotrade_positions
+                           SET exit_client_order_id=
+                               COALESCE(exit_client_order_id, ?)
+                           WHERE session_id=? AND symbol=?""",
+                        (exit_client_order_id, self.session_id, symbol))
+                con.commit()
+        except Exception as e:  # pragma: no cover - never block the exit path
+            log.warning("registry.set_exit_client_order_id(%s/%s) failed: %s",
+                        self.session_id, symbol, e)
+
+    def get_exit_client_order_id(self, symbol: str,
+                                 broker_profile: Optional[str] = None
+                                 ) -> Optional[str]:
+        """Read the persisted EXIT client_order_id for a position (or None)."""
+        try:
+            with falcon_conn() as con:
+                if broker_profile is not None:
+                    r = con.execute(
+                        """SELECT exit_client_order_id FROM autotrade_positions
+                           WHERE session_id=? AND symbol=?
+                             AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
+                        (self.session_id, symbol, broker_profile)).fetchone()
+                else:
+                    r = con.execute(
+                        """SELECT exit_client_order_id FROM autotrade_positions
+                           WHERE session_id=? AND symbol=?""",
+                        (self.session_id, symbol)).fetchone()
+            return (r["exit_client_order_id"] if r else None)
+        except Exception as e:  # pragma: no cover - defensive
+            log.debug("registry.get_exit_client_order_id(%s/%s) failed: %s",
+                      self.session_id, symbol, e)
+            return None
 
     def get_exit_failed_all(self) -> List[Dict[str, Any]]:
         """ALL EXIT_FAILED positions (qty>0) for this session, regardless of the

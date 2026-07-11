@@ -82,10 +82,15 @@ def _make_live_session(monkeypatch, net_book, ltps=None, *, gtts=None,
 
 def _register(sess, symbol, qty, avg_price, *, ltp=None, status="OPEN",
               instrument_type="EQ", direction="long", exchange="NSE",
-              gtt_id=None, exit_order_id=None):
+              gtt_id=None, exit_order_id=None, product=None):
     prof = sess.config.broker_profiles[0].profile_id
+    # CLUSTER 3 ITEM 4: the reconciler now buckets by the position's PERSISTED
+    # product, so a leg must carry the SAME product its session/net-book uses.
+    # Default to the session's order_product (the intended bucket for these tests);
+    # a test can override to model a genuinely mixed-product leg.
+    reg_product = product if product is not None else sess.config.order_product
     sess.registry.register(symbol=symbol, broker_profile=prof, qty=qty,
-                           avg_price=avg_price, product="MIS",
+                           avg_price=avg_price, product=reg_product,
                            instrument_type=instrument_type, exchange=exchange,
                            direction=direction)
     if ltp is not None:

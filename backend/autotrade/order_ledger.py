@@ -104,6 +104,43 @@ def compact_tag(client_order_id: str) -> str:
     return ("AT" + h)[:18]
 
 
+def find_broker_order_by_tag(orders: Optional[List[Dict[str, Any]]],
+                             tag: Optional[str],
+                             closing_side: Optional[str] = None
+                             ) -> Optional[Dict[str, Any]]:
+    """CLUSTER 3 ITEM 3(b) — pure orderbook match by OUR compact tag.
+
+    Scan a broker orderbook (list of raw order dicts) for an order whose `tag`
+    equals `tag` (the compact_tag of a client_order_id we minted). Optionally
+    require the CLOSING side (long exit → SELL, short cover → BUY) so a stray
+    same-tag entry can never be mistaken for the exit. Prefers a COMPLETE order,
+    else the most recent still-working order. Returns the matched order dict or
+    None. NEVER a foreign order (a foreign order carries a foreign/absent tag).
+
+    Query-before-place uses this to ADOPT an exit we already placed (surviving a
+    retry / restart) instead of placing a duplicate."""
+    if not orders or not tag:
+        return None
+    want_side = str(closing_side).upper() if closing_side else None
+    matches: List[Dict[str, Any]] = []
+    for o in orders:
+        if not isinstance(o, dict):
+            continue
+        if str(o.get("tag") or "") != str(tag):
+            continue
+        if want_side:
+            txn = str(o.get("transaction_type") or "").upper()
+            if txn and txn != want_side:
+                continue
+        matches.append(o)
+    if not matches:
+        return None
+    for o in matches:
+        if str(o.get("status") or "").upper() == "COMPLETE":
+            return o
+    return matches[-1]
+
+
 def append_event(*, session_id: Optional[str], symbol: Optional[str],
                  event_type: str,
                  position_ref: Optional[str] = None,

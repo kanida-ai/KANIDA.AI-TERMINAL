@@ -191,6 +191,19 @@ def _session_product(session_id: str, _cache: Dict[str, str]) -> str:
     return prod
 
 
+def _position_product(pos: Dict[str, Any], _cache: Dict[str, str]) -> str:
+    """ITEM 4 (source of truth): the Kite product for a POSITION, from its OWN
+    persisted `product` column when present, else the session config product
+    (legacy / pre-migration rows). Uppercased + normalised via _kite_product so a
+    session whose broker_profiles MIX products (a CNC leg + an MTF leg) buckets
+    each leg under ITS OWN product instead of the single session-level
+    order_product (the mis-bucket ITEM 4 closes)."""
+    p = pos.get("product")
+    if p not in (None, ""):
+        return _kite_product(p)
+    return _session_product(str(pos.get("session_id")), _cache)
+
+
 def _account_open_positions_for(bare_sym: str, want_product: str,
                                 prof_scope: Optional[List[str]],
                                 _prod_cache: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -214,7 +227,7 @@ def _account_open_positions_for(bare_sym: str, want_product: str,
         if prof_scope is not None:
             if str(d.get("broker_profile") or "") not in prof_scope:
                 continue
-        if _session_product(str(d.get("session_id")), _prod_cache) != want_product:
+        if _position_product(d, _prod_cache) != want_product:
             continue
         out.append(d)
     return out
@@ -553,6 +566,22 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                       session.session_id, prof_id, e)
             orderbooks[prof_id] = None
 
+    # CLUSTER 3 ITEM 2 — RECONCILE HEALTH. Record whether we got a successful
+    # net-book read for EVERY relevant broker profile this cycle. A single None
+    # (unreachable / expired token) makes the reconcile UNHEALTHY → the sub-second
+    # ws stale-basket guard (basket_gen) will DEFER the fast-path fire so it never
+    # fires on a basket this no-op reconcile never validated. LIVE only (we are
+    # past the paper / disabled early-returns), so paper gating is unchanged.
+    try:
+        _profiles_total = len(brokers)
+        _profiles_ok = sum(1 for b in books.values() if b is not None)
+        _healthy = _profiles_total > 0 and _profiles_ok == _profiles_total
+        from . import basket_gen as _basket_gen
+        _basket_gen.record_reconcile_health(session.session_id, _healthy)
+    except Exception as e:  # pragma: no cover - never block the reconcile
+        log.debug("reconcile: health record failed for %s: %s",
+                  session.session_id, e)
+
     if all(book is None for book in books.values()):
         log.debug("reconcile %s: all broker books None (unreachable/expired) — no-op",
                   session.session_id)
@@ -601,7 +630,7 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
     seen = set()
     for p in my_positions:
         bare = _bare_symbol(str(p.get("symbol") or ""))
-        prod = _session_product(str(p.get("session_id")), _prod_cache)
+        prod = _position_product(p, _prod_cache)
         key = (bare, prod)
         if key not in seen:
             seen.add(key)

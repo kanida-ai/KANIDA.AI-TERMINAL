@@ -909,6 +909,43 @@ async def _exit_single_position_inner(
                  session_id, symbol)
         return {"symbol": symbol, "status": "BLOCKED"}
 
+    # 1b. CLUSTER 3 ITEM 3(b) — QUERY-BEFORE-PLACE (retry / restart-resume
+    # exactly-once). If this position already carries a persisted exit
+    # client_order_id (a PRIOR attempt minted + placed it), ask the broker
+    # orderbook whether OUR tag is already there and ADOPT that order instead of
+    # placing a duplicate — this closes the cross-process window the in-process
+    # single-flight lock can't (a restart mid-flight). On the FIRST exit (no
+    # persisted id) mint one, persist it, and thread it onto the placement so the
+    # tag is STABLE for any future retry / restart. Paper's get_orders() is None →
+    # no adoption, place exactly as today (byte-for-byte unchanged).
+    _direction_pre = position.get("direction") or "long"
+    _exit_qty_pre = int(position.get("qty") or 0)
+    exit_coid = position.get("exit_client_order_id")
+    if exit_coid:
+        try:
+            from autotrade.monitoring.exit_poller import (
+                adopt_tagged_exit_if_present as _adopt_tagged)
+            _adopted = await _adopt_tagged(
+                session_id=session_id, symbol=symbol,
+                exit_client_order_id=exit_coid, qty=_exit_qty_pre,
+                broker=broker, registry=registry, close_reason=reason,
+                broker_profile=prof_id, direction=_direction_pre)
+        except Exception as e:  # pragma: no cover - never block the exit
+            log.warning("query-before-place adopt raised %s/%s: %s",
+                        session_id, symbol, e)
+            _adopted = None
+        if _adopted is not None:
+            log.warning("per-stock stop %s/%s: ADOPTED existing tagged exit "
+                        "(status=%s) — placed NO new order", session_id, symbol,
+                        _adopted.get("status"))
+            return {"symbol": symbol, "status": _adopted.get("status", "ADOPTED"),
+                    "reason": reason, "adopted": True,
+                    "exit_price": _adopted.get("exit_price")}
+    else:
+        exit_coid = order_ledger.make_client_order_id(session_id, symbol, attempt=1)
+        registry.set_exit_client_order_id(symbol, exit_coid,
+                                          broker_profile=prof_id)
+
     # 2. Cancel the broker GTT for this position (best-effort, never block exit).
     # asyncio.wait_for caps the wait at 5s — kiteconnect's default requests.Session
     # has no timeout, so delete_gtt can hang indefinitely on a stale connection,
@@ -1064,7 +1101,8 @@ async def _exit_single_position_inner(
         res = await broker.place_market_exit(symbol, qty, itype,
                                              kite_product=effective_product,
                                              direction=direction,
-                                             exec_cfg=exec_cfg)
+                                             exec_cfg=exec_cfg,
+                                             client_order_id=exit_coid)
     except Exception as e:
         log.error("per-stock stop %s/%s: place_market_exit raised: %s",
                   session_id, symbol, e)
@@ -1629,6 +1667,53 @@ class TradingSession:
                             "mode": self.mode, "when": "fire", "n_placed": 0,
                             "orders": [], "error": str(e),
                             "note": "bound broker account is not ACTIVE"}
+        # CLUSTER 3 ITEM 5 — PROFILE-LEVEL account health gate. The session-level
+        # check above validates the session binding; a MULTI-PROFILE session can
+        # still pair an ACTIVE account with a REVOKED / EXPIRED one, and the revoked
+        # leg would otherwise fire. Validate EVERY enabled profile's BOUND account
+        # here, BEFORE building brokers or placing: a non-tradeable profile is
+        # DEGRADED (disabled in memory) so it is NOT routed/fired while the healthy
+        # legs still fire; a clear per-profile reason surfaces. If NO enabled
+        # profile survives, refuse the whole fire. Unbound profiles (global/operator
+        # path) + a disabled vault are UNAFFECTED (byte-for-byte unchanged).
+        degraded_profiles: List[Dict[str, Any]] = []
+        try:
+            from . import vault as _vault_prof
+            _vault_on = _vault_prof.vault_enabled()
+        except Exception:  # pragma: no cover - defensive; vault import failure
+            _vault_on = False
+        if _vault_on and self.config.broker_profiles:
+            from .broker.account_lifecycle import (assert_account_tradeable,
+                                                   AccountNotTradeable)
+            for prof in self.config.broker_profiles:
+                if not getattr(prof, "enabled", True):
+                    continue
+                acct_id = getattr(prof, "broker_account_id", None)
+                if acct_id is None:
+                    continue  # unbound → global/operator path (validated upstream)
+                try:
+                    assert_account_tradeable(self.user_id, acct_id)
+                except AccountNotTradeable as e:
+                    log.warning("session %s: profile %s account %s NOT tradeable — "
+                                "NOT firing this leg (%s)", self.session_id,
+                                prof.profile_id, acct_id, e)
+                    prof.enabled = False
+                    degraded_profiles.append({
+                        "profile_id": prof.profile_id,
+                        "broker_account_id": acct_id, "reason": str(e)})
+            if degraded_profiles and not any(
+                    getattr(p, "enabled", True)
+                    for p in self.config.broker_profiles):
+                reason = "; ".join(
+                    f"{d['profile_id']}: {d['reason']}" for d in degraded_profiles)
+                log.warning("session %s: ALL enabled profiles non-tradeable — "
+                            "refusing fire (%s)", self.session_id, reason)
+                self._set_status("FAILED", reason=reason)
+                return {"session_id": self.session_id, "status": "FAILED",
+                        "mode": self.mode, "when": "fire", "n_placed": 0,
+                        "orders": [], "error": reason,
+                        "degraded_profiles": degraded_profiles,
+                        "note": "no enabled broker profile has a tradeable account"}
         self._build_brokers()
         # C5 — ENTRY IDEMPOTENCY. Two racing start()/scheduled-fire invocations (or
         # a double call) must place orders ONCE. (1) A DB check: a session that
@@ -1879,9 +1964,15 @@ class TradingSession:
         except Exception as e:  # never block start on the square-off scheduler
             log.warning("square-off arm failed for %s: %s", self.session_id, e)
 
-        return {"session_id": self.session_id, "status": "RUNNING",
-                "mode": self.mode, "n_placed": len(placed), "orders": placed,
-                "gtt": gtt_results, "skipped_picks": skipped_picks}
+        _ok = {"session_id": self.session_id, "status": "RUNNING",
+               "mode": self.mode, "n_placed": len(placed), "orders": placed,
+               "gtt": gtt_results, "skipped_picks": skipped_picks}
+        # CLUSTER 3 ITEM 5 — surface any DEGRADED (non-tradeable) profiles whose
+        # leg(s) were intentionally NOT fired, so the operator sees WHY a broker's
+        # legs are missing (a revoked/expired account needs reconnect).
+        if degraded_profiles:
+            _ok["degraded_profiles"] = degraded_profiles
+        return _ok
 
     def _arm_square_off(self) -> bool:
         """Arm the per-session square-off scheduler at the EARLIEST applicable
@@ -2316,10 +2407,16 @@ class TradingSession:
         # ws_driver (which never runs the broker reconcile) can tell when its view
         # diverged from the last broker-validated basket and DEFER firing on a
         # phantom leg. Cheap (one hash); no broker call.
+        # CLUSTER 3 ITEM 2 — stamp ONLY on a HEALTHY reconcile. When the reconcile
+        # was UNHEALTHY (broker book None/unreachable this cycle) we must NOT stamp
+        # the basket as validated — leaving the last-unhealthy signal in place so
+        # basket_reconcile_validated() defers the fast-path fire. `reconcile_healthy`
+        # is None for paper / reconcile-disabled → stamp as before (unchanged).
         try:
             from .monitoring import basket_gen
-            basket_gen.stamp_reconciled(
-                self.session_id, self.registry.get_open_positions())
+            if basket_gen.reconcile_healthy(self.session_id) is not False:
+                basket_gen.stamp_reconciled(
+                    self.session_id, self.registry.get_open_positions())
         except Exception as e:  # pragma: no cover - never block the tick
             log.debug("basket_gen stamp failed for %s: %s", self.session_id, e)
 
