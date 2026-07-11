@@ -499,6 +499,38 @@ class ZerodhaBroker(BrokerClient):
             log.warning("MTF margin lookup failed for %s (%s) — cash fallback", symbol, e)
             return None
 
+    # ── Available margin (RMS CAP 1 pre-trade gate) ──────────────────────────
+    def available_margin(self) -> Optional[float]:
+        """The account's FREE equity margin via kite.margins()['equity']['net'].
+
+        LIVE-only: returns None unless _live_allowed() (paper / disabled → the
+        pre-trade gate is inert, so paper sizing is byte-for-byte unchanged). Any
+        API/shape error → None (unknown → don't block, log). The 'net' figure is
+        Kite's available cash after utilised margin — the deployable budget the
+        pre-trade gate sizes Σ(planned deployed) against."""
+        if not self._live_allowed():
+            return None
+        try:
+            m = self.kite.margins()
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("available_margin: kite.margins() failed (%s) — "
+                        "unknown budget, gate inert", e)
+            return None
+        try:
+            eq = (m or {}).get("equity") or {}
+            net = eq.get("net")
+            if net is None:
+                # Some responses nest the deployable cash under available.cash /
+                # available.live_balance — fall back before giving up.
+                avail = eq.get("available") or {}
+                net = avail.get("cash", avail.get("live_balance"))
+            if net is None:
+                return None
+            return float(net)
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("available_margin: unexpected margins shape (%s)", e)
+            return None
+
     # ── Instrument master (F&O) — always runtime, never hardcoded ────────────
     def get_lot_size(self, contract: str) -> int:
         now = time.time()
@@ -1077,6 +1109,71 @@ class ZerodhaBroker(BrokerClient):
         except Exception as e:
             log.error("place_gtt_oco failed for %s: %s", symbol, e)
             return None
+
+    # ── MIS broker-side protective SL-M (RMS CAP 3) ──────────────────────────
+    def place_protective_slm(self, symbol: str, qty: int, trigger_price: float,
+                             direction: str = "long", product: str = "MIS",
+                             exchange: str = "NSE",
+                             client_tag: Optional[str] = None) -> Optional[str]:
+        """Place a broker-side DAY SL-M protective order on Kite for an MIS leg.
+
+        long  → SELL SL-M, trigger BELOW entry (stops a long that falls).
+        short → BUY-to-cover SL-M, trigger ABOVE entry (stops a short that rises).
+        DAY validity → auto-cancels at EOD (no orphan). Falcon cancels it at exit.
+
+        Dry-run / live-disabled → None (no real order). Any error → logs + None
+        (best-effort; the entry / square-off is never blocked on the backstop)."""
+        if not self._live_allowed():
+            return None
+        try:
+            from falcon.trade.services.order_executor import _retry_kite_call
+            from falcon.trade.services.mtf_eligibility import get_tick_size
+            from falcon.trade.services.services_round import round_to_tick_size
+            kite = self.kite
+            trading_symbol, exch = self._resolve_symbol(symbol)
+            if exch == "NSE" and exchange and exchange != "NSE":
+                exch = exchange
+            kexch = getattr(kite, f"EXCHANGE_{exch}", exch)
+            kprod = self._resolve_product(product)
+            is_short = str(direction).lower() == "short"
+            txn = (kite.TRANSACTION_TYPE_BUY if is_short
+                   else kite.TRANSACTION_TYPE_SELL)
+            tick = get_tick_size(kite, trading_symbol) or 0.05
+            trig = round_to_tick_size(float(trigger_price), tick)
+            params = dict(
+                variety=kite.VARIETY_REGULAR, exchange=kexch,
+                tradingsymbol=trading_symbol, transaction_type=txn,
+                quantity=int(qty), product=kprod,
+                order_type=kite.ORDER_TYPE_SLM, trigger_price=trig,
+                validity=kite.VALIDITY_DAY)
+            if client_tag:
+                params["tag"] = str(client_tag)[:20]
+            oid = _retry_kite_call(lambda: kite.place_order(**params),
+                                   "place_protective_slm(autotrade)", symbol)
+            log.info("SL-M protective %s: %s trigger=%.2f qty=%d oid=%s",
+                     symbol, "BUY" if is_short else "SELL", trig, qty, oid)
+            return str(oid) if oid is not None else None
+        except Exception as e:
+            log.error("place_protective_slm failed for %s: %s", symbol, e)
+            return None
+
+    def cancel_protective_slm(self, order_id: str) -> bool:
+        """Cancel a protective SL-M by id. Dry-run / disabled → no-op True.
+        Best-effort: an error is logged + returns False (day-validity is the
+        backstop — the order auto-cancels at EOD)."""
+        if not self._live_allowed():
+            return True
+        try:
+            from falcon.trade.services.order_executor import _retry_kite_call
+            kite = self.kite
+            _retry_kite_call(
+                lambda: kite.cancel_order(variety=kite.VARIETY_REGULAR,
+                                          order_id=order_id),
+                "cancel_protective_slm(autotrade)", str(order_id))
+            return True
+        except Exception as e:
+            log.warning("cancel_protective_slm failed for %s: %s", order_id, e)
+            return False
 
     def cancel_gtt(self, gtt_id):
         """Delete a GTT by id. Dry-run / disabled → no-op. Best-effort on error."""

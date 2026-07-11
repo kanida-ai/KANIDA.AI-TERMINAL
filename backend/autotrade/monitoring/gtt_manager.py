@@ -236,8 +236,19 @@ class GTTManager:
                 entry, price_stop_pct, price_target_pct, direction=direction)
             self.registry.set_gtt(symbol, None, gtt_stop=stop_trig,
                                   gtt_target=tgt_trig, broker_profile=prof_id)
-            return {"symbol": symbol, "status": "SUPPRESSED_INTRADAY",
-                    "gtt_id": None, "stop": stop_trig, "target": tgt_trig}
+            # RMS CAP 3 — MIS BROKER-SIDE PROTECTIVE SL-M. An MIS leg gets no GTT,
+            # so (especially for a SHORT, whose downside is otherwise software-only)
+            # place a broker-held DAY SL-M at the capital-basis stop trigger — a
+            # HARD downside cap that survives the monitor process going down.
+            # Day-validity auto-cancels at EOD; Falcon cancels it at exit. Gated by
+            # config.mis_protective_slm_enabled (default on) + LIVE (paper places
+            # nothing). Idempotent: only when this row has no slm_order_id yet.
+            slm_id = self._place_protective_slm(pos, stop_trig)
+            out = {"symbol": symbol, "status": "SUPPRESSED_INTRADAY",
+                   "gtt_id": None, "stop": stop_trig, "target": tgt_trig}
+            if slm_id:
+                out["slm_order_id"] = slm_id
+            return out
 
         # FUTURES long/short: for a short the STOP is ABOVE entry (buy-stop) and
         # the TARGET is BELOW (buy-limit). compute_levels inverts on direction.
@@ -338,6 +349,87 @@ class GTTManager:
                             pos["symbol"], gtt_id, e)
                 out.append({"symbol": pos["symbol"], "gtt_id": gtt_id,
                             "status": "SWEEP_CANCEL_FAILED", "error": str(e)})
+        return out
+
+    # ── MIS broker-side protective SL-M (RMS CAP 3) ──────────────────────────
+    def _place_protective_slm(self, pos: Dict[str, Any],
+                              stop_trigger: float) -> Optional[str]:
+        """Place a broker-held DAY SL-M protective stop for one MIS position at
+        its capital-basis stop trigger, Falcon-tagged, and persist slm_order_id.
+
+        Gated by config.mis_protective_slm_enabled (default on). Idempotent — a
+        row that already carries an slm_order_id is skipped. LIVE-only: paper /
+        stub brokers return None (no real order), so paper is byte-for-byte
+        unchanged. Best-effort — never raises into the entry path."""
+        if not getattr(self.config, "mis_protective_slm_enabled", True):
+            return None
+        if pos.get("slm_order_id"):
+            return None  # already protected — no duplicate SL-M
+        symbol = pos["symbol"]
+        prof_id = pos.get("broker_profile")
+        qty = int(pos.get("qty") or 0)
+        if qty <= 0 or not stop_trigger or stop_trigger <= 0:
+            return None
+        direction = pos.get("direction") or "long"
+        broker = self.brokers.get(prof_id) or next(iter(self.brokers.values()), None)
+        if broker is None:
+            return None
+        _itype = str(pos.get("instrument_type") or "EQ").upper()
+        exch = pos.get("exchange") or (
+            "NFO" if _itype in ("FUT", "OPT", "CE", "PE") else "NSE")
+        # Falcon ownership tag from the position's client_order_id (parity with
+        # our order-id ownership) so a stray SL-M is recognisable as OURS.
+        client_tag = None
+        coid = pos.get("client_order_id")
+        if coid:
+            try:
+                from ..order_ledger import compact_tag
+                client_tag = compact_tag(str(coid))
+            except Exception:  # pragma: no cover - tag is best-effort
+                client_tag = None
+        product = self.config.order_product
+        try:
+            slm_id = broker.place_protective_slm(
+                symbol=symbol, qty=qty, trigger_price=float(stop_trigger),
+                direction=direction, product=product, exchange=exch,
+                client_tag=client_tag)
+        except Exception as e:  # never block the entry on the backstop
+            log.error("place_protective_slm raised for %s: %s", symbol, e)
+            return None
+        if slm_id:
+            self.registry.set_slm(symbol, slm_id, broker_profile=prof_id)
+            log.info("SL-M protective placed for %s/%s trigger=%.2f id=%s",
+                     self.session_id, symbol, float(stop_trigger), slm_id)
+        return slm_id
+
+    def cancel_session_slms(self) -> List[Dict[str, Any]]:
+        """Cancel every open position's Falcon-owned protective SL-M so no orphan
+        stop remains at the broker after a flatten (an orphan SL-M SELL on a now-
+        flat book would go NAKED). Called by the kill switch alongside the GTT
+        cancel sweep. Best-effort — a cancel failure is logged, never blocks the
+        flatten. Clears slm_order_id on success so it isn't chased again."""
+        out: List[Dict[str, Any]] = []
+        for pos in self.registry.get_open_positions():
+            slm_id = pos.get("slm_order_id")
+            if not slm_id:
+                continue
+            prof_id = pos.get("broker_profile")
+            broker = self.brokers.get(prof_id) or next(iter(self.brokers.values()), None)
+            if broker is None:
+                continue
+            try:
+                broker.cancel_protective_slm(slm_id)
+                try:
+                    self.registry.set_slm(pos["symbol"], None, broker_profile=prof_id)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                out.append({"symbol": pos["symbol"], "slm_order_id": slm_id,
+                            "status": "CANCELLED"})
+            except Exception as e:  # never block the flatten
+                log.warning("cancel_protective_slm failed for %s (%s): %s",
+                            pos["symbol"], slm_id, e)
+                out.append({"symbol": pos["symbol"], "slm_order_id": slm_id,
+                            "status": "CANCEL_FAILED", "error": str(e)})
         return out
 
     # ── Cancel all session GTTs (called by kill switch before flatten) ────────

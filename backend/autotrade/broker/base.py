@@ -105,6 +105,25 @@ class BrokerClient(ABC):
         Default None → caller falls back to cash sizing. Live brokers override."""
         return None
 
+    def available_margin(self) -> Optional[float]:
+        """RMS (SPRINT CLUSTER 4, CAP 1): the account's FREE equity margin
+        (deployable cash / net) the pre-trade gate sizes against, or None when the
+        broker can't answer (paper / stub / no live creds / API error).
+
+        SAFETY CONTRACT — None is "unknown, do NOT block":
+          * None  → the pre-trade margin gate is INERT (never refuses on an
+                    unknown budget); the committed-capital ledger still applies
+                    only when a budget is known. Paper / dry-run must return None
+                    so paper sizing is byte-for-byte unchanged.
+          * float → the free equity margin (₹). The gate refuses/scales a session
+                    whose planned deployed exceeds this (minus the user's already-
+                    committed capital across other live sessions).
+
+        Default None. Only the live Zerodha adapter returns a real number
+        (kite.margins()['equity']['net']); every other adapter returns None
+        (unknown → don't block, log)."""
+        return None
+
     def get_margins_batch(self, symbols: List[str],
                           product: str = "MTF") -> dict:
         """Return {symbol: per_share_margin} for many symbols in ONE broker call.
@@ -327,6 +346,37 @@ class BrokerClient(ABC):
         the trigger (fills a gap-down); for a short ABOVE (fills a gap-up).
         Defaults to stop_price when None (stub implementations ignore it)."""
         return None
+
+    # ── MIS broker-side protective stop (SL-M) — RMS CAP 3 ───────────────────
+    def place_protective_slm(self, symbol: str, qty: int, trigger_price: float,
+                             direction: str = "long", product: str = "MIS",
+                             exchange: str = "NSE",
+                             client_tag: Optional[str] = None) -> Optional[str]:
+        """Place a broker-side DAY SL-M (stop-market) protective order for an MIS
+        leg (which gets NO GTT). Returns the broker order-id, or None when not
+        placed (dry-run / unsupported broker).
+
+        This is the HARD downside cap that survives the monitor process going
+        down: an MIS position (especially a SHORT, whose downside is otherwise
+        software-only) has a broker-held stop at its capital-basis stop level.
+
+        direction=="long"  (default) → SELL SL-M with trigger BELOW entry (stops a
+                            long that falls).
+        direction=="short" → BUY-to-cover SL-M with trigger ABOVE entry (stops a
+                            short that rises).
+        client_tag: the compact broker tag so the order is recognisable as OURS in
+                    the orderbook (parity with our order-id ownership). A broker
+                    that can't attach a tag ignores it.
+
+        Default no-op (None). Only the live Zerodha adapter overrides it with a
+        real kite.place_order(order_type=SL-M, trigger_price=...)."""
+        return None
+
+    def cancel_protective_slm(self, order_id: str) -> bool:
+        """Cancel a protective SL-M order by id (parity with cancel_order_sync).
+        Default True (safe no-op for paper / stub brokers). Live Zerodha overrides
+        with kite.cancel_order()."""
+        return True
 
     def cancel_gtt(self, gtt_id: str) -> Any:
         """Cancel a GTT by id. No-op default (returns None)."""

@@ -345,6 +345,23 @@ class DeleteSessionsRequest(BaseModel):
     session_ids: List[str] = Field(..., description="Session ids to delete")
 
 
+class GlobalKillRequest(BaseModel):
+    """RMS CAP 2 break-glass: flatten every live session for a user in one call.
+
+    user_id : optional. Admin may target any user (or None = operator/global
+              sessions). A non-admin is FORCED to their own id (can't kill
+              another user's book).
+    mode    : optional 'paper' | 'live'. Omit → both modes (flatten everything).
+    """
+    user_id: Optional[str] = Field(None, description="Portal user id (optional)")
+    mode: Optional[str] = Field(
+        None, description="'paper' | 'live' — omit to flatten all modes")
+
+    @field_validator('user_id', mode='before')
+    @classmethod
+    def _coerce_str(cls, v): return _coerce_id(v)
+
+
 class AddBrokerRequest(BaseModel):
     profile_id: str
     broker_name: str
@@ -583,6 +600,30 @@ async def session_kill(session_id: str,
     if not sess:
         raise HTTPException(404, "session not found")
     return await sess.kill(reason="OPERATOR")
+
+
+@router.post("/autotrade/global-kill")
+async def global_kill(req: Optional[GlobalKillRequest] = None,
+                      caller: Caller = Depends(resolve_caller)):
+    """RMS CAP 2 BREAK-GLASS — flatten EVERY live session for a user in one sweep.
+
+    Reuses the per-session kill (exit_gate + fire_guard guarded, no double-exit).
+    Admin may target any user_id (or None = operator/global sessions); a non-admin
+    is scoped to their OWN id. mode optional ('paper'|'live'; omit = all)."""
+    caller = _caller(caller)
+    body = req or GlobalKillRequest()
+    if caller.is_admin:
+        target_user = body.user_id
+    else:
+        target_user = caller.user_id
+    mode = body.mode if body.mode in ("paper", "live") else None
+    from .. import risk_manager
+    try:
+        return await risk_manager.global_kill(
+            target_user, mode=mode, reason="GLOBAL_KILL (operator)")
+    except Exception as e:
+        log.exception("global-kill failed: %s", e)
+        raise HTTPException(500, f"global-kill failed: {e}")
 
 
 @router.get("/autotrade/session/{session_id}/positions")

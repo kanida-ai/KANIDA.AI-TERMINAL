@@ -134,6 +134,17 @@ class KillSwitchExecutor:
             except Exception as e:  # never block the flatten on GTT cancels
                 log.warning("kill switch: GTT cancel sweep failed for %s: %s",
                             self.session_id, e)
+            # RMS CAP 3 — also cancel every Falcon-owned protective SL-M (MIS legs)
+            # BEFORE the market exits, so no orphan stop remains to re-fire on a
+            # symbol we just flattened (an orphan SL-M on a flat book goes naked).
+            # Best-effort — never blocks the flatten.
+            try:
+                slm_cancels = self.gtt_manager.cancel_session_slms()
+                if slm_cancels:
+                    gtt_cancels = list(gtt_cancels) + slm_cancels
+            except Exception as e:  # never block the flatten on SL-M cancels
+                log.warning("kill switch: SL-M cancel sweep failed for %s: %s",
+                            self.session_id, e)
 
         # STEP 2 — flatten all open positions across all brokers (parallel).
         positions = self.registry.get_open_positions()

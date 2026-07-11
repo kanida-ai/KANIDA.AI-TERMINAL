@@ -378,6 +378,21 @@ def run_migrations() -> dict:
                     "ADD COLUMN config_version INTEGER NOT NULL DEFAULT 0")
                 added_cols.append("ladder_config_version")
 
+        # ── 2i. RMS (SPRINT CLUSTER 4, CAP 3) — MIS broker-side protective SL-M ─
+        # slm_order_id: the broker order-id of the Falcon-owned DAY SL-M (stop-
+        # market) protective order placed on an MIS leg (which gets NO GTT). It is
+        # a HARD broker-side downside cap even if the monitor process is down, and
+        # is cancelled by Falcon at exit/square-off (day-valid auto-cancels anyway).
+        # NULLABLE → every existing / paper / non-MIS row stays NULL (byte-for-byte
+        # unchanged; SL-M placement is gated by config.mis_protective_slm_enabled +
+        # _live_allowed). Additive + idempotent.
+        if _table_exists(con, "autotrade_positions"):
+            have = set(_existing_columns(con, "autotrade_positions"))
+            if "slm_order_id" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_positions ADD COLUMN slm_order_id TEXT")
+                added_cols.append("slm_order_id")
+
         for t in (
             "autotrade_positions",
             "autotrade_sessions", "autotrade_config_presets",

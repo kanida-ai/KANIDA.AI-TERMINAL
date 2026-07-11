@@ -50,7 +50,8 @@ from falcon.db import falcon_conn
 
 from .config import TradingSessionConfig
 from . import trading_calendar
-from .capital import CapitalAllocator, InsufficientCapitalError
+from .capital import CapitalAllocator, InsufficientCapitalError, _margin_product
+from . import risk_manager
 from .broker.base import Pick
 from .broker.router import BrokerRouter, build_client
 from .execution.orders import build_order, place_order_with_retry
@@ -1785,8 +1786,19 @@ class TradingSession:
                     return {"symbol": pick.symbol, "status": "FAILED",
                             "error": str(e)}
 
-        leg_coros = []
+        # RMS CAP 1: collect the fully-sized leg specs + accumulate the total
+        # PLANNED DEPLOYED capital (Σ plan["deployed"] = the real cash/margin the
+        # orders will consume) across ALL profiles BEFORE placing anything, so the
+        # pre-trade margin gate can refuse an over-deploy and place NOTHING.
+        leg_specs: List[tuple] = []
+        total_planned_deployed = 0.0
         skipped_picks: List[Dict[str, Any]] = []
+        # RMS CAP 4: surface a silent MIS/MTF margin-API fallback as an amber
+        # warning (never silently shrink deployment). A leg cash-falls-back when a
+        # margin-sized product (MTF/MIS) has NO margin cache entry AND its slice
+        # was NOT sized off margin — detected here by comparing the plan's unit
+        # economics to the margin cache.
+        margin_fallback_warnings: List[Dict[str, Any]] = []
         for prof in self.config.broker_profiles:
             if not prof.enabled:
                 continue
@@ -1832,6 +1844,23 @@ class TradingSession:
             plan = allocator.plan_quantities(
                 [p.symbol for p in fund_picks], broker, cache=cache)
             plan_qtys = plan["quantities"]
+            total_planned_deployed += float(plan.get("deployed") or 0.0)
+            # RMS CAP 4: amber margin-fallback warning. When the product is
+            # margin-sized (MTF/MIS) but a leg was priced off LTP (no margin in the
+            # cache), the deployment CASH-fell-back → the operator sized fewer
+            # shares than the leverage would allow. Surface it (never silent).
+            _mprod = _margin_product(self.config)
+            if _mprod and prof.instrument_type in ("EQ", "MTF"):
+                for pick in fund_picks:
+                    if plan_qtys.get(pick.symbol, 0) <= 0:
+                        continue
+                    if not (cache.get(pick.symbol, {}) or {}).get("margin"):
+                        margin_fallback_warnings.append({
+                            "symbol": pick.symbol,
+                            "broker_profile": prof.profile_id,
+                            "product": _mprod,
+                            "reason": (f"{_mprod} margin unavailable — cash-sized "
+                                       f"(fewer shares than leverage allows)")})
             for sk in plan["skipped"]:
                 skipped_picks.append({**sk, "broker_profile": prof.profile_id})
             for pick in fund_picks:
@@ -1839,10 +1868,41 @@ class TradingSession:
                 if not qty or qty <= 0:
                     continue  # skipped/unaffordable — logged in plan["skipped"]
                 amount = amounts.get(pick.symbol, 0.0)
-                leg_coros.append(_guarded_place(
-                    broker, prof, pick, amount, allocator, cache,
-                    forced_qty=qty, quote=quote_cache.get(pick.symbol)))
+                leg_specs.append((broker, prof, pick, amount, allocator, cache,
+                                  qty, quote_cache.get(pick.symbol)))
 
+        # RMS CAP 1 — PRE-TRADE MARGIN GATE + PER-USER CAPITAL LEDGER. Refuse a
+        # session whose planned deployed capital exceeds the account's FREE margin
+        # minus the user's already-committed capital (their other live sessions).
+        # INERT when no broker reports available margin (paper / stub → None), so
+        # paper is byte-for-byte unchanged. On refusal: place NOTHING, mark FAILED.
+        if leg_specs:
+            try:
+                _rms = risk_manager.pre_trade_gate(
+                    user_id=self.user_id, session_id=self.session_id,
+                    planned_deployed=total_planned_deployed, brokers=self.brokers)
+            except Exception as _rms_e:  # never block the fire on a gate bug
+                log.warning("session %s: pre_trade_gate raised (%s) — proceeding "
+                            "(degraded)", self.session_id, _rms_e)
+                _rms = None
+            if _rms is not None and not _rms.allow:
+                self._set_status("FAILED", reason=_rms.reason,
+                                 closed_at=_now_ist_iso())
+                log.error("session %s REFUSED by pre-trade RMS: %s",
+                          self.session_id, _rms.reason)
+                return {"session_id": self.session_id, "status": "FAILED",
+                        "mode": self.mode, "when": "fire", "n_placed": 0,
+                        "orders": [], "skipped_picks": skipped_picks,
+                        "risk_refused": True, "reason": _rms.reason,
+                        "available_margin": _rms.available_margin,
+                        "committed_other": _rms.committed_other,
+                        "planned_deployed": _rms.planned_deployed}
+
+        leg_coros = [
+            _guarded_place(broker, prof, pick, amount, allocator, cache,
+                           forced_qty=qty, quote=quote)
+            for (broker, prof, pick, amount, allocator, cache, qty, quote)
+            in leg_specs]
         placed: List[Dict[str, Any]] = list(
             await asyncio.gather(*leg_coros)) if leg_coros else []
         entry_latency_ms = int((time.monotonic() - _fire_t0) * 1000)
@@ -1967,6 +2027,10 @@ class TradingSession:
         _ok = {"session_id": self.session_id, "status": "RUNNING",
                "mode": self.mode, "n_placed": len(placed), "orders": placed,
                "gtt": gtt_results, "skipped_picks": skipped_picks}
+        # RMS CAP 4: surface any amber MIS/MTF margin-fallback (cash-sized) so the
+        # operator sees the deployment shrank vs the leverage — never silent.
+        if margin_fallback_warnings:
+            _ok["margin_fallback_warnings"] = margin_fallback_warnings
         # CLUSTER 3 ITEM 5 — surface any DEGRADED (non-tradeable) profiles whose
         # leg(s) were intentionally NOT fired, so the operator sees WHY a broker's
         # legs are missing (a revoked/expired account needs reconnect).
@@ -2488,6 +2552,30 @@ class TradingSession:
                 "fire_result": None, "gtt_closed": gtt_closed,
                 "broker_reconciled": broker_reconciled,
                 "killing_incomplete": still_incomplete}
+
+        # RMS CAP 2 — PORTFOLIO DAILY-LOSS CIRCUIT BREAKER. Evaluated by any
+        # session that OPTS IN (max_daily_loss_pct / amount set); it sums the
+        # user's aggregate realised+unrealised P&L across ALL their live sessions
+        # (of this mode) and, on a breach, FLATTENS them all in one sweep. A fresh
+        # default config (both None) NEVER reaches this block → byte-for-byte
+        # unchanged. Cooldown-guarded so N sessions don't each re-fire. If it
+        # fires, THIS session is being flattened too → return early.
+        if (getattr(self.config, "max_daily_loss_pct", None) is not None
+                or getattr(self.config, "max_daily_loss_amount", None) is not None):
+            try:
+                breaker = await risk_manager.maybe_fire_breaker(
+                    self.user_id, self.mode)
+            except Exception as _bk_e:  # never crash a tick on the breaker
+                log.error("breaker check failed for %s: %s", self.session_id, _bk_e)
+                breaker = None
+            if breaker is not None:
+                return {"gross_return": self.monitor.compute_gross_return_invested(),
+                        "gross_return_fund": self.monitor.compute_gross_return(),
+                        "kill_switch_fired": True,
+                        "kill_reason": "PORTFOLIO_DAILY_LOSS_BREAKER",
+                        "fire_result": None, "gtt_closed": gtt_closed,
+                        "broker_reconciled": broker_reconciled,
+                        "portfolio_breaker": breaker}
 
         snap = self.monitor.snapshot()
         # KILL BASIS: both strategies measure the INVESTED-basis gross return

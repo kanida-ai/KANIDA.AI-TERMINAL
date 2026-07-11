@@ -250,6 +250,28 @@ class TradingSessionConfig:
     kill_switch_target_pct: Optional[float] = None
     kill_switch_stop_pct: Optional[float] = None
 
+    # ── RMS: PORTFOLIO DAILY-LOSS CIRCUIT BREAKER (SPRINT CLUSTER 4, CAP 2) ────
+    # A portfolio-level (per-user) daily-loss breaker. When the aggregate
+    # realised+unrealised loss across ALL of a user's LIVE sessions (of the same
+    # mode) breaches EITHER configured limit, every one of the user's live
+    # sessions is FLATTENED in one sweep. BOTH default None → DISABLED (a fresh
+    # config never fires the breaker → byte-for-byte unchanged). FRACTIONS for the
+    # pct (0.05 = 5% of the user's aggregate allocated capital); ₹ for the amount.
+    # When several of the user's sessions set a limit, the TIGHTEST (smallest ₹
+    # equivalent) wins (most protective). Validated in (0, 0.5] / > 0 WHEN SET.
+    max_daily_loss_pct: Optional[float] = None
+    max_daily_loss_amount: Optional[float] = None
+
+    # ── RMS: MIS broker-side protective SL-M (SPRINT CLUSTER 4, CAP 3) ─────────
+    # An MIS leg gets NO broker GTT (correct — a GTT would outlive the intraday
+    # square-off). Instead place a broker-held DAY SL-M (stop-market) at the
+    # per-position capital-basis stop level so an MIS position (especially a
+    # SHORT, whose downside is otherwise software-only) has a HARD broker-side cap
+    # even if the monitor process is down. Falcon-owned (compact tag) + cancelled
+    # by Falcon at exit (day-validity auto-cancels anyway). Default ON for MIS;
+    # inert for CNC/MTF/NRML (those carry a GTT). LIVE-only (paper places nothing).
+    mis_protective_slm_enabled: bool = True
+
     # Per-position GTT-OCO broker backup (FEATURE 1). The portfolio kill switch
     # is the PRIMARY exit (software, ours); the per-position GTT is the broker-
     # held BACKUP floor. Widths default WIDER than kill_switch_pct so the
@@ -546,6 +568,20 @@ class TradingSessionConfig:
                 raise ValueError(
                     f"{_nm} must be a fraction in (0, 0.5] (e.g. 0.01 = 1%) "
                     f"when set, got {_v}")
+        # ── RMS: portfolio daily-loss breaker (CAP 2) — validate WHEN SET ──────
+        # A mis-scaled pct (1.0 for "100%") would move the effective breaker so
+        # far it never fires — reject at the door like every other fraction. The
+        # amount is a positive ₹ figure. Both remain None (disabled) by default.
+        if self.max_daily_loss_pct is not None and \
+                not (0.0 < float(self.max_daily_loss_pct) <= 0.5):
+            raise ValueError(
+                "max_daily_loss_pct must be a fraction in (0, 0.5] "
+                f"(e.g. 0.05 = 5%) when set, got {self.max_daily_loss_pct}")
+        if self.max_daily_loss_amount is not None and \
+                float(self.max_daily_loss_amount) <= 0:
+            raise ValueError(
+                "max_daily_loss_amount must be > 0 (₹) when set, got "
+                f"{self.max_daily_loss_amount}")
         if self.per_position_gtt_enabled:
             if not (0.0 < self.per_position_stop_pct <= 0.5):
                 raise ValueError(
@@ -785,6 +821,14 @@ class TradingSessionConfig:
             kill_switch_stop_pct=(
                 float(d["kill_switch_stop_pct"])
                 if d.get("kill_switch_stop_pct") is not None else None),
+            max_daily_loss_pct=(
+                float(d["max_daily_loss_pct"])
+                if d.get("max_daily_loss_pct") is not None else None),
+            max_daily_loss_amount=(
+                float(d["max_daily_loss_amount"])
+                if d.get("max_daily_loss_amount") is not None else None),
+            mis_protective_slm_enabled=bool(
+                d.get("mis_protective_slm_enabled", True)),
             per_position_gtt_enabled=bool(d.get("per_position_gtt_enabled", True)),
             per_position_stop_pct=float(d.get("per_position_stop_pct", 0.08)),
             per_position_target_pct=float(d.get("per_position_target_pct", 0.20)),

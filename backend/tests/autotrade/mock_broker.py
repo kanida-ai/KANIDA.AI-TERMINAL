@@ -29,8 +29,20 @@ class MockBroker(BrokerClient):
                  reject_symbols: Optional[set] = None,
                  quotes: Optional[Dict[str, dict]] = None,
                  gtts: Optional[Dict[str, dict]] = None,
+                 available_margin: Optional[float] = None,
+                 slm_available: bool = True,
                  order_status: Optional[Dict[str, dict]] = None):
         super().__init__(profile, dry_run=dry_run)
+        # RMS CAP 1: the account's FREE equity margin the pre-trade gate sizes
+        # against. None (DEFAULT) → available_margin() returns None (gate INERT,
+        # paper byte-identical). A number engages the gate (models a live broker).
+        self._available_margin = available_margin
+        # RMS CAP 3: protective SL-M support. When False the broker "can't" place
+        # an SL-M → place_protective_slm returns None (models an uncertified
+        # adapter). Records placed/cancelled SL-Ms so a test can assert them.
+        self._slm_available = slm_available
+        self.slm_orders: List[dict] = []       # placed SL-M args
+        self.slm_cancelled: List[str] = []      # cancelled SL-M order-ids
         # DELIVERY holdings book (list of raw holding rows, or {symbol: {quantity,
         # t1_quantity, average_price}} auto-normalised). None (default) → get_holdings
         # returns None (the reconciler treats a CNC position settled to holdings as
@@ -125,6 +137,25 @@ class MockBroker(BrokerClient):
 
     def set_ltp(self, symbol: str, price: float) -> None:
         self.ltps[symbol] = price
+
+    # RMS CAP 1: available margin (None → gate inert, paper-equivalent).
+    def available_margin(self):
+        return self._available_margin
+
+    # RMS CAP 3: broker-side protective SL-M.
+    def place_protective_slm(self, symbol, qty, trigger_price, direction="long",
+                             product="MIS", exchange="NSE", client_tag=None):
+        if not self._slm_available:
+            return None
+        self.slm_orders.append({"symbol": symbol, "qty": qty,
+                                "trigger_price": trigger_price,
+                                "direction": direction, "product": product,
+                                "exchange": exchange, "client_tag": client_tag})
+        return "slm-" + symbol
+
+    def cancel_protective_slm(self, order_id):
+        self.slm_cancelled.append(order_id)
+        return True
 
     # margin (MTF / MIS leverage sizing)
     def get_margin_per_share(self, symbol: str, product: str = "MTF"):

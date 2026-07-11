@@ -461,6 +461,29 @@ class PositionRegistry:
                 )
             con.commit()
 
+    def set_slm(self, symbol: str, slm_order_id: Optional[str],
+                broker_profile: Optional[str] = None) -> None:
+        """RMS CAP 3 — store (or CLEAR with None) the broker-side protective SL-M
+        order-id on an MIS position row. Scoped to (session_id, symbol[, profile]).
+        Best-effort — never raises into the entry / exit path."""
+        try:
+            with falcon_conn() as con:
+                if broker_profile is not None:
+                    con.execute(
+                        """UPDATE autotrade_positions SET slm_order_id=?
+                           WHERE session_id=? AND symbol=?
+                             AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
+                        (slm_order_id, self.session_id, symbol, broker_profile))
+                else:
+                    con.execute(
+                        "UPDATE autotrade_positions SET slm_order_id=? "
+                        "WHERE session_id=? AND symbol=?",
+                        (slm_order_id, self.session_id, symbol))
+                con.commit()
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("registry.set_slm(%s/%s) failed: %s",
+                        self.session_id, symbol, e)
+
     def get_open_positions_missing_gtt(self) -> List[Dict[str, Any]]:
         """OPEN positions that have NO gtt_id yet — used to backfill the broker
         backup on session start and boot-resume (e.g. positions opened before
