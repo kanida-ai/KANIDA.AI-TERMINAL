@@ -275,11 +275,15 @@ def test_asymmetric_validation_rejects_out_of_range():
 # ── Kill switch cancels pending orders before exits ─────────────────────────
 
 def test_kill_switch_cancels_pending_first(clean_positions):
+    """Fix 5 (2026-07-11): the kill cancels ONLY Falcon's OWN recorded pending
+    orders (here Z's entry order-id 'pend-1'); a FOREIGN pending order-id 'pend-2'
+    (e.g. the operator's manual resting limit) is left INTACT — never cancelled."""
     sid = _session_id()
     cap = 500000.0
     _make_session_row(sid, cap)
     reg = PositionRegistry(sid, cap)
-    reg.register(symbol="Z", broker_profile="zer", qty=10, avg_price=100.0)
+    reg.register(symbol="Z", broker_profile="zer", qty=10, avg_price=100.0,
+                 entry_order_id="pend-1")
     reg.update_ltp("Z", 100.0)
     broker = MockBroker(profile=BrokerProfile("zer", "mock"), dry_run=False,
                         ltps={"Z": 100.0},
@@ -288,7 +292,9 @@ def test_kill_switch_cancels_pending_first(clean_positions):
     cfg = TradingSessionConfig(total_allocated_capital=cap, kill_switch_enabled=True)
     ks = KillSwitchExecutor(sid, cfg, {"zer": broker}, reg)
     asyncio.run(ks.fire("TEST"))
-    assert set(broker.cancelled) == {"pend-1", "pend-2"}
+    # ONLY the Falcon-owned order was cancelled; the foreign one was skipped.
+    assert set(broker.cancelled) == {"pend-1"}
+    assert "pend-2" not in broker.cancelled
     assert ("Z", 10) in broker.exits
 
 

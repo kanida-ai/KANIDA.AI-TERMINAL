@@ -400,17 +400,35 @@ class PositionRegistry:
         RECONCILIATION FRAMEWORK (Phase 1): when the exit order WAS placed but
         then rejected/cancelled, exit_order_id records the order-id that failed so
         the failed broker order is still attributable to this position. Only
-        overwritten when non-None (COALESCE keeps any earlier value)."""
+        overwritten when non-None (COALESCE keeps any earlier value).
+
+        MULTI-PROFILE SCOPING (Fix 4, 2026-07-11): when broker_profile is given the
+        UPDATE is scoped to (session_id, symbol, broker_profile) with the same
+        COALESCE(broker_profile,'') pattern as mark_closed, so a session holding the
+        SAME symbol on two broker profiles mutates ONLY the firing leg — never both.
+        broker_profile None keeps the old symbol-wide behaviour (byte-identical for
+        the single-profile case that has always been the norm)."""
         now = datetime.now(IST).isoformat()
         with falcon_conn() as con:
-            con.execute(
-                """UPDATE autotrade_positions
-                   SET status='EXIT_FAILED', close_reason=?, closed_at=?,
-                       exit_order_id=COALESCE(?, exit_order_id)
-                   WHERE session_id=? AND symbol=?""",
-                (f"EXIT_FAILED: {error}", now, exit_order_id,
-                 self.session_id, symbol),
-            )
+            if broker_profile is not None:
+                con.execute(
+                    """UPDATE autotrade_positions
+                       SET status='EXIT_FAILED', close_reason=?, closed_at=?,
+                           exit_order_id=COALESCE(?, exit_order_id)
+                       WHERE session_id=? AND symbol=?
+                         AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
+                    (f"EXIT_FAILED: {error}", now, exit_order_id,
+                     self.session_id, symbol, broker_profile),
+                )
+            else:
+                con.execute(
+                    """UPDATE autotrade_positions
+                       SET status='EXIT_FAILED', close_reason=?, closed_at=?,
+                           exit_order_id=COALESCE(?, exit_order_id)
+                       WHERE session_id=? AND symbol=?""",
+                    (f"EXIT_FAILED: {error}", now, exit_order_id,
+                     self.session_id, symbol),
+                )
             con.commit()
         # Release the exit gate so a future retry can reclaim it.
         # Import here to avoid circular import at module level.
@@ -427,17 +445,30 @@ class PositionRegistry:
         exit_price (or current ltp when exit_price is None/0).
         Called by exit_poller.confirm_exit when Kite reports COMPLETE but filled_qty
         < expected qty.
-        """
+
+        MULTI-PROFILE SCOPING (Fix 4, 2026-07-11): when broker_profile is given BOTH
+        the read (avg/qty/direction) AND the write are scoped to
+        (session_id, symbol, broker_profile) so a same-symbol-two-profile session
+        reduces ONLY the firing leg. broker_profile None keeps the old symbol-wide
+        behaviour (byte-identical for the single-profile norm)."""
         now = datetime.now(IST).isoformat()
         log.warning(
             "partial exit for %s/%s: filled=%d exit_price=%s",
             self.session_id, symbol, filled_qty, exit_price)
         with falcon_conn() as con:
-            row = con.execute(
-                """SELECT avg_price, qty, direction FROM autotrade_positions
-                   WHERE session_id=? AND symbol=?""",
-                (self.session_id, symbol),
-            ).fetchone()
+            if broker_profile is not None:
+                row = con.execute(
+                    """SELECT avg_price, qty, direction FROM autotrade_positions
+                       WHERE session_id=? AND symbol=?
+                         AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
+                    (self.session_id, symbol, broker_profile),
+                ).fetchone()
+            else:
+                row = con.execute(
+                    """SELECT avg_price, qty, direction FROM autotrade_positions
+                       WHERE session_id=? AND symbol=?""",
+                    (self.session_id, symbol),
+                ).fetchone()
             if row is None:
                 log.warning("update_partial_exit: no row for %s/%s",
                             self.session_id, symbol)
@@ -450,13 +481,25 @@ class PositionRegistry:
             fill_price = float(exit_price) if exit_price else avg_price
             _sign = -1.0 if str(row["direction"]).lower() == "short" else 1.0
             partial_realised = _sign * (fill_price - avg_price) * filled_qty
-            con.execute(
-                """UPDATE autotrade_positions
-                   SET qty=?,
-                       realised_pnl=COALESCE(realised_pnl, 0.0) + ?,
-                       exit_price=COALESCE(?, exit_price)
-                   WHERE session_id=? AND symbol=?""",
-                (remaining_qty, partial_realised, exit_price,
-                 self.session_id, symbol),
-            )
+            if broker_profile is not None:
+                con.execute(
+                    """UPDATE autotrade_positions
+                       SET qty=?,
+                           realised_pnl=COALESCE(realised_pnl, 0.0) + ?,
+                           exit_price=COALESCE(?, exit_price)
+                       WHERE session_id=? AND symbol=?
+                         AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
+                    (remaining_qty, partial_realised, exit_price,
+                     self.session_id, symbol, broker_profile),
+                )
+            else:
+                con.execute(
+                    """UPDATE autotrade_positions
+                       SET qty=?,
+                           realised_pnl=COALESCE(realised_pnl, 0.0) + ?,
+                           exit_price=COALESCE(?, exit_price)
+                       WHERE session_id=? AND symbol=?""",
+                    (remaining_qty, partial_realised, exit_price,
+                     self.session_id, symbol),
+                )
             con.commit()

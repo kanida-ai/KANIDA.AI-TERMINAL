@@ -798,6 +798,46 @@ def preview_session_sizing(config: TradingSessionConfig,
     }
 
 
+async def _our_working_exit_qty(broker: Any, symbol: str,
+                                direction: str = "long") -> int:
+    """Best-effort Σ qty of our still-RESTING exit-side orders for `symbol` at the
+    broker (Fix 2 Part 2, 2026-07-11). A resting/unfilled exit does NOT reduce
+    positions()['net'], so without netting it a next-tick re-fire would place a
+    SECOND exit while the first still rests → both fill on a tick-back → OVERSELL.
+
+    Reads broker.get_pending_orders() ONLY. Counts a pending order iff it matches
+    BOTH the symbol AND the CLOSING transaction side (long→SELL, short→BUY-cover) —
+    so a resting ENTRY (or an order on another symbol) is never counted. Any error
+    / unknown shape / missing field → 0 (fall back to the existing behaviour; the
+    resting-order CANCEL is the primary guard, this is belt-and-suspenders)."""
+    try:
+        pending = await broker.get_pending_orders()
+    except Exception:  # pragma: no cover - defensive; primary guard is the cancel
+        return 0
+    if not pending:
+        return 0
+    exit_side = "BUY" if str(direction).lower() == "short" else "SELL"
+    base = str(symbol).split(":", 1)[0]
+    total = 0
+    for o in pending:
+        if not isinstance(o, dict):
+            continue
+        ts = str(o.get("tradingsymbol") or "")
+        if ts not in (base, str(symbol)):
+            continue
+        txn = str(o.get("transaction_type") or "").upper()
+        if txn != exit_side:
+            continue
+        q = o.get("pending_quantity")
+        if q in (None, ""):
+            q = o.get("quantity") or 0
+        try:
+            total += int(q)
+        except (TypeError, ValueError):
+            continue
+    return int(total)
+
+
 async def _exit_single_position(
         session_id: str,
         position: Dict[str, Any],
@@ -977,16 +1017,44 @@ async def _exit_single_position_inner(
             broker_profile=prof_id)
         return {"symbol": symbol, "status": "EXIT_FAILED",
                 "confirm_status": "RECONCILE_UNATTRIBUTED", "reason": reason}
-    # R3 — GTT cancel timed out (the OCO may still be live / mid-fire). We already
-    # re-probed the SESSION-SCOPED net (our_held) above; CLAMP the exit qty to it
-    # so a GTT that fires concurrently can never make us OVERSELL / go naked-short.
-    # our_held is None in paper (get_net_position_qty None) → no clamp, paper
-    # unchanged. When our_held >= qty (broker fully covers us) this is a no-op.
-    if gtt_cancel_timed_out and our_held is not None and 0 < our_held < qty:
-        log.warning("per-stock stop %s/%s: GTT cancel timed out — clamping exit "
-                    "qty %d→%d (session-scoped live-held; GTT may have partly "
-                    "filled)", session_id, symbol, qty, int(our_held))
+    # STANDING INVARIANT (Fix 3, 2026-07-11): NEVER place an exit larger than the
+    # qty THIS session still holds at the broker — regardless of WHY it shrank. The
+    # clamp is UNCONDITIONAL (was gated on gtt_cancel_timed_out): a partial RMS/GTT
+    # fill can shrink our_held WITHOUT any GTT-cancel timeout, and the old conjunct
+    # would then skip the clamp → a full-qty sell → OVERSELL of (qty-our_held) into
+    # a reverse/naked position. our_held is None in paper (get_net_position_qty
+    # None) → no clamp, byte-for-byte unchanged. our_held >= qty → no-op.
+    # (gtt_cancel_timed_out is retained only for the log context below.)
+    if our_held is not None and 0 < our_held < qty:
+        log.warning("per-stock stop %s/%s: clamping exit qty %d→%d (session-scoped "
+                    "live-held; broker shrank under us%s)", session_id, symbol, qty,
+                    int(our_held),
+                    "; GTT cancel timed out" if gtt_cancel_timed_out else "")
         qty = int(our_held)
+    # WORKING-EXIT NETTING (Fix 2 Part 2, 2026-07-11): a resting exit we ALREADY
+    # placed does NOT reduce the broker net, so the clamp above (net-based) can't
+    # see it — a re-fire would place a SECOND exit alongside the resting one. Net
+    # out our own still-working exit-side qty for this symbol so a resting exit
+    # BLOCKS a second placement. Live only (our_held is not None); paper (None) and
+    # the no-resting-order case are byte-for-byte unchanged (working==0). Best-
+    # effort: a probe error → 0 (the resting-order CANCEL above is the primary
+    # guard).
+    if our_held is not None:
+        working = await _our_working_exit_qty(broker, position.get("symbol"),
+                                              direction)
+        if working > 0:
+            placeable = qty - working
+            if placeable <= 0:
+                log.warning("per-stock stop %s/%s: a working exit for %d already "
+                            "rests (>= intended %d) — placing NO second order, "
+                            "leaving for retry", session_id, symbol, working, qty)
+                _exit_gate_mod.release_exit_session(session_id, symbol)
+                return {"symbol": symbol, "status": "EXIT_PENDING_WORKING",
+                        "reason": reason, "working_qty": working}
+            log.warning("per-stock stop %s/%s: netting a working exit of %d — "
+                        "placing only %d (was %d)", session_id, symbol, working,
+                        placeable, qty)
+            qty = placeable
     # kite_product overrides instrument_type mapping: positions table stores security
     # type ("EQ"), not the trading product ("MTF"/"CNC"). Without this, MTF exits
     # become CNC sells and Kite rejects them with "Holding quantity: 0".
@@ -1026,6 +1094,7 @@ async def _exit_single_position_inner(
         close_reason=reason,
         max_wait_sec=60,
         poll_interval_sec=5.0,
+        broker_profile=prof_id,
     )
     confirm_status = confirm_result.get("status", "UNKNOWN")
     exit_price = confirm_result.get("exit_price") or position.get("ltp")
@@ -1036,13 +1105,39 @@ async def _exit_single_position_inner(
         return {"symbol": symbol, "status": "EXITED", "reason": reason,
                 "exit_price": exit_price,
                 "broker_order_id": order_id}
+    elif confirm_status in ("PARTIAL", "TIMEOUT"):
+        # Fix 2 (2026-07-11 audit): the exit order is STILL RESTING at the broker
+        # (unconfirmed). A resting SELL/BUY-cover does NOT reduce positions()['net'],
+        # so a naive next-tick re-fire would read the FULL net → place a SECOND exit
+        # → both fill on a tick-back → OVERSELL / naked reverse. So:
+        #   (1) CANCEL the resting order (confirm the cancel) so it cannot fill
+        #       alongside the retry, then
+        #   (2) mark the row EXIT_FAILED (records the exit order-id + releases the
+        #       gate) so the GUARDED EXIT_FAILED retry sweep re-attempts it — the
+        #       guard re-probes the broker net AND nets out any still-working exit
+        #       (see the pre-exit block above) — never a naive re-fire.
+        cancelled_ok = False
+        if order_id and not is_dry:
+            try:
+                cancelled_ok = bool(await asyncio.to_thread(
+                    broker.cancel_order_sync, order_id))
+            except Exception as _ce:
+                log.warning("per-stock stop %s/%s: cancel of resting order %s "
+                            "failed: %s", session_id, symbol, order_id, _ce)
+        registry.mark_exit_failed(
+            symbol,
+            f"{confirm_status} (resting order {order_id} "
+            f"cancel={'ok' if cancelled_ok else 'unconfirmed'})",
+            broker_profile=prof_id, exit_order_id=order_id)
+        log.error("per-stock stop EXIT_FAILED %s/%s (confirm_status=%s; resting "
+                  "order cancelled=%s) — routed to guarded retry",
+                  session_id, symbol, confirm_status, cancelled_ok)
+        return {"symbol": symbol, "status": "EXIT_FAILED",
+                "confirm_status": confirm_status,
+                "resting_order_cancelled": cancelled_ok}
     else:
-        # PARTIAL / TIMEOUT / REJECTED — mark_exit_failed already called by confirm_exit
-        # for REJECTED/CANCELLED. For PARTIAL/TIMEOUT the gate was NOT released by
-        # confirm_exit so we release it here to allow a future retry.
-        if confirm_status in ("PARTIAL", "TIMEOUT"):
-            from autotrade.exit_gate import release_exit_session as _release
-            _release(session_id, symbol)
+        # REJECTED / CANCELLED — mark_exit_failed already called by confirm_exit
+        # (which released the gate). Needs a fresh retry next tick.
         log.error("per-stock stop EXIT_FAILED %s/%s (confirm_status=%s)",
                   session_id, symbol, confirm_status)
         return {"symbol": symbol, "status": "EXIT_FAILED",

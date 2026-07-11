@@ -92,6 +92,10 @@ class MockBroker(BrokerClient):
         self.exits: List[tuple] = []          # (symbol, qty) — unchanged shape
         self.exit_calls: List[dict] = []      # full exit args incl. direction
         self.cancelled: List[str] = []
+        # Sync cancels (cancel_order_sync) — the exit-retry / software-stop path.
+        # Tracked SEPARATELY from the async cancel_order book so a test can assert
+        # a resting exit order was cancelled before a retry re-fired (Fix 2).
+        self.sync_cancelled: List[str] = []
         # RECONCILIATION Phase 4: GTT-fill confirmation support.
         #   gtts        : {gtt_id: <kite get_gtt object dict>} — what get_gtt returns.
         #   order_status: {order_id: <kite order dict>} — what get_order_status
@@ -243,6 +247,12 @@ class MockBroker(BrokerClient):
     async def cancel_order(self, order_id: str) -> Any:
         self.cancelled.append(order_id)
         return {"status": "CANCELLED", "order_id": order_id}
+
+    def cancel_order_sync(self, order_id: str) -> bool:
+        # Records the sync cancel (exit-retry / software-stop resting-order cancel)
+        # so a test can prove the resting order was cancelled before a retry.
+        self.sync_cancelled.append(order_id)
+        return True
 
     # ── GTT-fill confirmation (RECONCILIATION Phase 4) ────────────────────────
     def get_gtt(self, gtt_id):

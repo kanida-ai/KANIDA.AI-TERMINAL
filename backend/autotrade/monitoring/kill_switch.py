@@ -77,7 +77,15 @@ class KillSwitchExecutor:
         _exit_t0 = time.monotonic()
         self._set_session_status("KILLING", kill_reason=trigger_reason)
 
-        # STEP 1 — cancel all pending orders across all brokers (parallel).
+        # STEP 1 — cancel THIS SESSION's own pending orders across all brokers.
+        # OWNERSHIP FILTER (Fix 5, 2026-07-11 audit): only cancel order-ids Falcon
+        # RECORDED for this session (entry_order_id / exit_order_id / gtt_id on
+        # autotrade_positions). A kill previously cancelled EVERY pending order on
+        # the account — which would wipe the operator's OWN manual resting limit
+        # orders. We never cancel an order-id we don't own; a foreign/unrecognised
+        # pending order is logged and SKIPPED. (Broker-tag precision is a later
+        # cluster; the recorded-id filter is the precise interim.)
+        owned_ids = self._falcon_owned_order_ids()
         cancel_tasks = []
         for prof_id, broker in self.brokers.items():
             try:
@@ -87,8 +95,15 @@ class KillSwitchExecutor:
                 pending = []
             for o in pending:
                 oid = o.get("order_id") if isinstance(o, dict) else getattr(o, "id", None)
-                if oid:
-                    cancel_tasks.append(broker.cancel_order(oid))
+                if not oid:
+                    continue
+                if str(oid) not in owned_ids:
+                    log.warning("kill %s: SKIP cancel of NON-Falcon pending order "
+                                "%s on %s (not owned by this session — leaving the "
+                                "operator's order intact)", self.session_id, oid,
+                                prof_id)
+                    continue
+                cancel_tasks.append(broker.cancel_order(oid))
         if cancel_tasks:
             await asyncio.gather(*cancel_tasks, return_exceptions=True)
 
@@ -214,6 +229,19 @@ class KillSwitchExecutor:
                     exit_meta.append({"symbol": symbol, "claimed": False,
                                       "reconciled_flat_unattributed": True})
                 continue
+            # STANDING INVARIANT (Fix 3, 2026-07-11): NEVER place an exit larger than
+            # the qty THIS session still holds at the broker — regardless of WHY it
+            # shrank (a partial RMS/GTT fill, an external partial close). The clamp
+            # is UNCONDITIONAL: a partial external fill can shrink our_held without
+            # any GTT-cancel timeout, so gating the clamp on a timeout would let the
+            # full raw qty oversell (qty-our_held) into a reverse/naked position.
+            # our_held is None in paper (get_net_position_qty None) → no clamp,
+            # byte-for-byte unchanged. our_held >= qty → no-op.
+            if our_held is not None and 0 < our_held < qty:
+                log.warning("kill: %s/%s CLAMP exit qty %d→%d (session-scoped "
+                            "live-held; broker shrank under us)",
+                            self.session_id, symbol, qty, int(our_held))
+                qty = int(our_held)
             exit_coros.append(broker.place_market_exit(
                 symbol, qty, itype, kite_product=kite_product,
                 direction=direction, exec_cfg=self.config))
@@ -243,7 +271,8 @@ class KillSwitchExecutor:
                 session_id=self.session_id, symbol=meta["symbol"],
                 order_id=order_id, qty=meta["qty"], broker=broker_for_pos,
                 registry=self.registry, close_reason=close_reason,
-                max_wait_sec=60, poll_interval_sec=5.0)
+                max_wait_sec=60, poll_interval_sec=5.0,
+                broker_profile=prof_id)
             confirm_status = confirm_result.get("status", "UNKNOWN")
 
             if confirm_status == "COMPLETE":
@@ -264,7 +293,8 @@ class KillSwitchExecutor:
                         registry=self.registry, close_reason=close_reason,
                         max_retries=3, direction=meta.get("direction", "long"),
                         instrument_type=meta.get("instrument_type", "EQ"),
-                        kite_product=meta.get("kite_product"))
+                        kite_product=meta.get("kite_product"),
+                        broker_profile=prof_id)
                     if retry_result.get("status") == "COMPLETE":
                         return True, {**meta, "status": "COMPLETE_AFTER_PARTIAL",
                                       "broker_order_id": order_id}
@@ -285,7 +315,8 @@ class KillSwitchExecutor:
                     registry=self.registry, close_reason=close_reason,
                     max_retries=3, direction=meta.get("direction", "long"),
                     instrument_type=meta.get("instrument_type", "EQ"),
-                    kite_product=meta.get("kite_product"))
+                    kite_product=meta.get("kite_product"),
+                    broker_profile=prof_id)
                 if retry_result.get("status") == "COMPLETE":
                     return True, {**meta, "status": "COMPLETE_AFTER_TIMEOUT",
                                   "broker_order_id": order_id}
@@ -403,6 +434,31 @@ class KillSwitchExecutor:
         return summary
 
     # ── DB helpers ────────────────────────────────────────────────────────────
+    def _falcon_owned_order_ids(self) -> set:
+        """The set of broker order-ids Falcon RECORDED for THIS session — the entry
+        fill, the exit fill, and the GTT id on every autotrade_positions row (any
+        status). Used by the kill's STEP 1 so it cancels ONLY our own pending
+        orders and never the operator's manual resting orders. Best-effort: on any
+        DB error return the empty set (→ cancel NOTHING, the fail-safe side: a
+        stranded Falcon order is a manual cleanup, cancelling a foreign order is
+        real-money harm)."""
+        ids: set = set()
+        try:
+            with falcon_conn() as con:
+                rows = con.execute(
+                    "SELECT entry_order_id, exit_order_id, gtt_id "
+                    "FROM autotrade_positions WHERE session_id=?",
+                    (self.session_id,),
+                ).fetchall()
+            for r in rows:
+                for v in (r["entry_order_id"], r["exit_order_id"], r["gtt_id"]):
+                    if v not in (None, ""):
+                        ids.add(str(v))
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("kill %s: could not load owned order-ids (%s) — cancelling "
+                        "NO pending orders (fail-safe)", self.session_id, e)
+        return ids
+
     def _set_session_status(self, status: str, kill_reason: Optional[str] = None) -> None:
         with falcon_conn() as con:
             if kill_reason is not None:
