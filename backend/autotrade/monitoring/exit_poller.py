@@ -17,13 +17,67 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from .. import order_ledger as _order_ledger
 
 log = logging.getLogger("kanida.autotrade.exit_poller")
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+class OrderbookSnapshot:
+    """SPRINT CLUSTER 5 ITEM 6 — ONE broker orderbook fetch per poll CYCLE shared
+    across N in-flight exit legs.
+
+    During a kill flatten of N legs, each confirm_exit used to poll its own leg via
+    broker.get_order_status(order_id), and each of those does a FULL kite.orders()
+    scan → N full-orderbook fetches per 5s cycle. This snapshot fetches the whole
+    orderbook ONCE (broker.get_orders()) and serves every leg's status from the
+    cached map, refreshing at most once per `ttl_sec`. Thread-safe: confirm_exit
+    calls .status() from a worker thread (asyncio.to_thread), and the lock makes
+    concurrent legs share a single fetch. .fetches counts the real broker fetches
+    (for the mutation test). When the broker exposes NO batched orderbook
+    (get_orders() returns None — a paper broker or an adapter without a batched
+    call) the snapshot FALLS BACK to the per-leg broker.get_order_status(order_id),
+    so behaviour is byte-for-byte the pre-Cluster-5 path for those brokers."""
+
+    def __init__(self, broker: Any, ttl_sec: float = 5.0):
+        self._broker = broker
+        self._ttl = float(ttl_sec)
+        self._rows: Optional[Dict[str, dict]] = None
+        self._ts = 0.0
+        self._lock = threading.Lock()
+        self.fetches = 0
+
+    def status(self, order_id: str) -> dict:
+        now = time.monotonic()
+        use_fallback = False
+        with self._lock:
+            if self._rows is None or (now - self._ts) >= self._ttl:
+                try:
+                    ob = self._broker.get_orders()
+                except Exception as e:  # pragma: no cover - defensive
+                    log.debug("OrderbookSnapshot: get_orders failed: %s", e)
+                    ob = None
+                if ob is not None:
+                    self._rows = {str(r.get("order_id")): r for r in ob
+                                  if isinstance(r, dict)}
+                    self._ts = now
+                    self.fetches += 1
+                elif self._rows is None:
+                    # No batched orderbook available at all → per-leg fallback
+                    # (byte-for-byte the pre-Cluster-5 path for this broker).
+                    use_fallback = True
+            rows = None if use_fallback else (self._rows or {})
+        if use_fallback:
+            try:
+                return dict(self._broker.get_order_status(order_id) or {})
+            except Exception:  # pragma: no cover - defensive
+                return {}
+        return dict(rows.get(str(order_id), {}))
 
 # Kite status values that mean "order is still alive" (not terminal).
 _PENDING_STATUSES = frozenset({
@@ -44,8 +98,15 @@ async def confirm_exit(
     max_wait_sec: int = 60,
     poll_interval_sec: float = 5.0,
     broker_profile: Optional[str] = None,
+    status_provider: Optional[Callable[[str], dict]] = None,
 ) -> Dict[str, Any]:
     """Poll the broker until the exit order is fill-confirmed.
+
+    status_provider (CLUSTER 5 ITEM 6): an optional callable order_id -> status
+    dict used INSTEAD of broker.get_order_status. The kill path passes a shared
+    OrderbookSnapshot.status so N concurrent legs resolve from ONE orderbook fetch
+    per poll cycle rather than N full get_order_status scans. None (DEFAULT) keeps
+    the per-leg broker.get_order_status path byte-for-byte (all other callers).
 
     broker_profile (Fix 4, 2026-07-11): when supplied, the registry mutations
     (mark_closed / update_partial_exit / mark_exit_failed) are scoped to this
@@ -105,9 +166,11 @@ async def confirm_exit(
     log.info("confirm_exit %s/%s: polling order %s (max %ds)",
              session_id, symbol, order_id, max_wait_sec)
 
+    _status_fn = status_provider if status_provider is not None \
+        else broker.get_order_status
     while datetime.now(IST) < deadline:
         try:
-            status_dict = await asyncio.to_thread(broker.get_order_status, order_id)
+            status_dict = await asyncio.to_thread(_status_fn, order_id)
         except Exception as e:
             log.warning("confirm_exit %s/%s: get_order_status error: %s — retrying",
                         session_id, symbol, e)
@@ -367,10 +430,25 @@ async def cancel_and_retry_exit(
         if result.get("status") == "COMPLETE":
             return result
 
-    # All retries exhausted.
+    # All retries exhausted. CLUSTER 5 ITEM 4 — distinguish a STRANDED-AT-CIRCUIT
+    # exit (the stock is locked at the adverse circuit so no counterparty exists)
+    # from a generic EXIT_FAILED, so the operator sees the real cause instead of a
+    # spinning retry loop. Best-effort: any error → the generic reason (unchanged).
+    fail_reason = "cancel_and_retry exhausted"
+    try:
+        from ..execution.quote_pricer import exit_circuit_locked_reason
+        qmap = broker.get_quotes([symbol]) or {}
+        locked = exit_circuit_locked_reason(qmap.get(symbol), direction)
+        if locked == "circuit_locked":
+            fail_reason = ("circuit_locked: exit stranded — stock locked at the "
+                           "adverse circuit (no counterparty)")
+            last_result = {**last_result, "status": "EXIT_STRANDED_CIRCUIT_LOCKED",
+                           "reason": "circuit_locked", "symbol": symbol}
+    except Exception as e:  # pragma: no cover - defensive; never block the mark
+        log.debug("cancel_and_retry_exit %s/%s: circuit-lock probe failed: %s",
+                  session_id, symbol, e)
     log.error(
-        "cancel_and_retry_exit %s/%s: all %d retries failed — marking EXIT_FAILED",
-        session_id, symbol, max_retries)
-    registry.mark_exit_failed(symbol, "cancel_and_retry exhausted",
-                              broker_profile=broker_profile)
+        "cancel_and_retry_exit %s/%s: all %d retries failed — marking EXIT_FAILED "
+        "(%s)", session_id, symbol, max_retries, fail_reason)
+    registry.mark_exit_failed(symbol, fail_reason, broker_profile=broker_profile)
     return last_result

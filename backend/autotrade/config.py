@@ -208,9 +208,35 @@ class TradingSessionConfig:
     #                      valid, QUEUED order that fills the instant the lock
     #                      breaks — the 2026-07-06 CEMPRO fix; no rejection, no
     #                      dropped pick). No usable price at all → MARKET fallback.
+    # SPRINT CLUSTER 5 ITEM 5: the SAFE default is now "marketable_limit" (the
+    # circuit-aware execution path) instead of the raw "market" path. The env
+    # FALCON_AUTOTRADE_EXECUTION_MODE still overrides (prod already pins it to
+    # marketable_limit) and an explicit per-session value still wins; PAPER is
+    # byte-identical because get_quotes() returns None off the live path → the
+    # pricer takes the MARKET fallback (no LIMIT ever priced in paper).
     execution_mode: str = field(  # env-switchable DEFAULT (FALCON_AUTOTRADE_EXECUTION_MODE);
         default_factory=lambda: os.environ.get(   # an explicit per-session value still wins.
-            "FALCON_AUTOTRADE_EXECUTION_MODE", "market"))  # market | marketable_limit
+            "FALCON_AUTOTRADE_EXECUTION_MODE", "marketable_limit"))  # market | marketable_limit
+    # ── QUOTE-FRESHNESS SLA for ENTRIES (SPRINT CLUSTER 5 ITEM 3) ─────────────
+    # An ENTRY must be priced off a quote no older than this many seconds. A
+    # stale quote (age > SLA) DEGRADES the leg rather than pricing a LIMIT off a
+    # stale book: per entry_stale_quote_policy it either falls back to a MARKET
+    # order ("market", DEFAULT — always place, never chase a stale book) or is
+    # SKIPPED ("skip" — don't enter on stale data). EXITS never skip on staleness
+    # (a needed exit always proceeds) — they only carry a degraded_quote flag.
+    # Inert unless execution_mode=="marketable_limit"; paper never fetches a quote
+    # (get_quotes None) so this is a no-op in paper.
+    entry_quote_max_age_sec: float = 10.0
+    entry_stale_quote_policy: str = "market"   # market | skip
+    # ── CIRCUIT-LOCKED ENTRY policy (SPRINT CLUSTER 5 ITEM 4) ─────────────────
+    # A stock LOCKED at its circuit at entry is placed as a LIMIT queued AT the
+    # circuit. It DOES NOT sit indefinitely: _reconcile_entry_fill cancels the
+    # unfilled order after the entry reconcile window and DROPS the leg (policy
+    # "drop", DEFAULT — recommended for MIS: don't chase a locked stock). "queue"
+    # (exempt from the reconcile-window cancel, hold to a cutoff) is STAGED-NEXT
+    # and currently treated as "drop" with a log; the wording/comments in the
+    # execution path reflect the DROP policy so code + logs + comments agree.
+    entry_circuit_locked_policy: str = "drop"  # drop | queue(staged-next→drop)
     # marketable_buffer_pct (FRACTION, 0.003 = 0.3%): how far THROUGH the touch
     # the marketable-LIMIT crosses (ask+buffer for a BUY / bid-buffer for a SELL)
     # so it fills as fast as a MARKET order for liquid names. The order is then
@@ -219,6 +245,17 @@ class TradingSessionConfig:
     # stock is placed as a LIMIT exactly AT the circuit (valid, queued, fills when
     # the lock breaks); with no usable price the caller uses a MARKET fallback.
     marketable_buffer_pct: float = 0.003
+
+    # ── MARK-STALENESS ABSTAIN (SPRINT CLUSTER 5 ITEM 2, real-money safety) ───
+    # The mark (LTP) that drives the kill switch / trail can fall back to
+    # yesterday's ohlc_daily close on a live-data outage. A daily-close mark must
+    # NEVER satisfy an intraday PROFIT gate (trail/target). When the freshest mark
+    # feeding the basket is older than this many seconds, the risk path ABSTAINS
+    # from a PROFIT-side exit (trail/target) and flags the tick as stale — but the
+    # DOWNSIDE stop (loss/STOP/square-off) still fires conservatively. 0 disables
+    # the gate (pre-Cluster-5 behaviour). Paper is unaffected: every paper tick
+    # marks to a live mock price so the mark is always fresh.
+    mark_staleness_abstain_sec: int = 30
 
     # Instrument
     instrument_type: str = "EQ"            # EQ | FUT | CE | PE
@@ -490,6 +527,23 @@ class TradingSessionConfig:
             raise ValueError(
                 "marketable_buffer_pct must be a fraction in (0, 0.5] "
                 f"(e.g. 0.003 = 0.3%), got {self.marketable_buffer_pct}")
+        # ── QUOTE-FRESHNESS SLA + CIRCUIT/STALENESS policies (CLUSTER 5) ──────
+        if float(self.entry_quote_max_age_sec) <= 0:
+            raise ValueError(
+                "entry_quote_max_age_sec must be > 0 seconds (the entry quote "
+                f"freshness SLA), got {self.entry_quote_max_age_sec}")
+        if self.entry_stale_quote_policy not in ("market", "skip"):
+            raise ValueError(
+                "entry_stale_quote_policy must be 'market' or 'skip', got "
+                f"{self.entry_stale_quote_policy!r}")
+        if self.entry_circuit_locked_policy not in ("drop", "queue"):
+            raise ValueError(
+                "entry_circuit_locked_policy must be 'drop' or 'queue', got "
+                f"{self.entry_circuit_locked_policy!r}")
+        if int(self.mark_staleness_abstain_sec) < 0:
+            raise ValueError(
+                "mark_staleness_abstain_sec must be an integer >= 0 "
+                f"(0 disables), got {self.mark_staleness_abstain_sec}")
         if self.instrument_type not in ("EQ", "FUT", "CE", "PE", "MTF"):
             raise ValueError(f"invalid instrument_type: {self.instrument_type}")
         # OPTIONS (CE/PE) are half-wired but NOT certified — the ATM-strike /
@@ -807,8 +861,15 @@ class TradingSessionConfig:
             vwap_window_seconds=int(d.get("vwap_window_seconds", 60)),
             execution_mode=(d.get("execution_mode")
                             or os.environ.get("FALCON_AUTOTRADE_EXECUTION_MODE",
-                                              "market")),
+                                              "marketable_limit")),
             marketable_buffer_pct=float(d.get("marketable_buffer_pct", 0.003)),
+            entry_quote_max_age_sec=float(
+                d.get("entry_quote_max_age_sec", 10.0)),
+            entry_stale_quote_policy=d.get("entry_stale_quote_policy", "market"),
+            entry_circuit_locked_policy=d.get("entry_circuit_locked_policy",
+                                              "drop"),
+            mark_staleness_abstain_sec=int(
+                d.get("mark_staleness_abstain_sec", 30)),
             instrument_type=d.get("instrument_type", "EQ"),
             expiry_preference=d.get("expiry_preference", "near"),
             direction=d.get("direction", "long"),

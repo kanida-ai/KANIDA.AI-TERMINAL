@@ -9,6 +9,7 @@ fallback. execution_mode="market" (DEFAULT) is byte-for-byte the old MARKET path
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -26,9 +27,13 @@ def _cfg(**kw) -> TradingSessionConfig:
     return TradingSessionConfig(**base)
 
 
-def _q(ltp, bid=None, ask=None, upper=None, lower=None, ts=0.0):
+def _q(ltp, bid=None, ask=None, upper=None, lower=None, ts=None):
+    # ts defaults to NOW so the CLUSTER 5 ITEM 3 entry quote-freshness SLA sees a
+    # FRESH quote (matching prod, where get_quotes stamps ts=now on every fetch).
+    # Pure pricer tests don't pass now_ts so the SLA is inert for them regardless.
     return {"ltp": ltp, "bid": bid, "ask": ask,
-            "upper_circuit": upper, "lower_circuit": lower, "ts": ts}
+            "upper_circuit": upper, "lower_circuit": lower,
+            "ts": time.time() if ts is None else ts}
 
 
 # ── Pricer math ──────────────────────────────────────────────────────────────
@@ -154,11 +159,23 @@ def test_invalid_side_is_market_fallback():
     assert plan["fallback_market"] is True and plan["order_type"] == "MARKET"
 
 
-# ── Default execution_mode="market" is byte-for-byte the old MARKET path ─────
+# ── CLUSTER 5 ITEM 5 — marketable_limit is the SAFE default (circuit-aware) ───
+# MUTATION: revert the execution_mode default in config.py from "marketable_limit"
+# back to "market" → this assert fails (a freshly-built config no longer resolves
+# to marketable_limit, so the circuit-protection path would not engage by default).
 
-def test_default_execution_mode_builds_market_order_no_price():
+def test_default_execution_mode_is_marketable_limit(monkeypatch):
+    # Ignore any ambient env pin so we test the CODE default specifically.
+    monkeypatch.delenv("FALCON_AUTOTRADE_EXECUTION_MODE", raising=False)
     cfg = TradingSessionConfig(total_allocated_capital=100_000.0)  # default
-    assert cfg.execution_mode == "market"
+    assert cfg.execution_mode == "marketable_limit"
+    # An explicit "market" still works (the raw path stays available via config).
+    mkt = TradingSessionConfig(total_allocated_capital=100_000.0,
+                               execution_mode="market")
+    mkt.validate()
+    assert mkt.execution_mode == "market"
+    # build_order is orthogonal to execution_mode (it sets order_type from
+    # order_type, MARKET here) → the placed order is still MARKET-typed.
     broker = MockBroker(BrokerProfile("p1", "mock"), ltps={"X": 100.0})
     order = build_order("X", 10, cfg, broker)
     assert order.order_type == "MARKET"

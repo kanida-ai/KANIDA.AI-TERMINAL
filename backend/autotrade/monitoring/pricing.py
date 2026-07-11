@@ -74,3 +74,45 @@ def resolve_brokers_ltp(symbol: str, brokers: Dict[str, Any],
     if brokers:
         broker = brokers.get(broker_profile) or next(iter(brokers.values()), None)
     return resolve_ltp(symbol, broker=broker, fallback_entry=fallback_entry)
+
+
+# ── SPRINT CLUSTER 5 ITEM 2 — provenance-aware resolution ──────────────────────
+# The kill/trail mark-staleness gate must know whether a mark is a LIVE broker
+# price or a stale fallback (yesterday's ohlc_daily close / the entry price). A
+# daily-close fallback must NEVER be stamped "fresh" or it could satisfy an
+# intraday PROFIT gate. These variants return (price, source) where source is:
+#   "live"  — a live broker LTP (KiteTicker WS / broker REST) — mark it FRESH.
+#   "close" — yesterday's ohlc_daily close (data outage fallback) — STALE.
+#   "entry" — the position's own avg_price (pre-open placeholder) — STALE.
+#   None    — no price available at all.
+
+def resolve_ltp_with_source(symbol: str, broker: Any = None,
+                            fallback_entry: Optional[float] = None):
+    """(price, source) form of resolve_ltp — see the module note above."""
+    if broker is not None:
+        try:
+            ltp = broker.get_ltp(symbol)
+        except Exception as e:
+            log.debug("broker.get_ltp failed for %s: %s", symbol, e)
+            ltp = None
+        if ltp is not None:
+            return float(ltp), "live"
+
+    close = latest_close(symbol)
+    if close is not None:
+        return close, "close"
+
+    if fallback_entry is not None:
+        return float(fallback_entry), "entry"
+    return None, None
+
+
+def resolve_brokers_ltp_with_source(symbol: str, brokers: Dict[str, Any],
+                                    broker_profile: Optional[str] = None,
+                                    fallback_entry: Optional[float] = None):
+    """(price, source) form of resolve_brokers_ltp — see the module note above."""
+    broker = None
+    if brokers:
+        broker = brokers.get(broker_profile) or next(iter(brokers.values()), None)
+    return resolve_ltp_with_source(symbol, broker=broker,
+                                   fallback_entry=fallback_entry)

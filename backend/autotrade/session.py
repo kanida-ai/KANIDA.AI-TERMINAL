@@ -199,6 +199,43 @@ def _oldest_mark_age_ms(positions) -> Optional[int]:
         return None
 
 
+# CLUSTER 5 ITEM 2 — the trail reasons that are PROFIT-side (abstained on a stale
+# mark). SQUARE_OFF (time) + STOP (downside) are NOT profit-side and still fire.
+_PROFIT_EXIT_REASONS = frozenset({"TRAIL_EXIT", "FLOOR_EXIT", "STEP_LOCK_EXIT"})
+
+
+def _marks_stale_for_profit(positions, bound_sec, now=None) -> bool:
+    """CLUSTER 5 ITEM 2 — True when the freshest mark feeding the basket is OLDER
+    than bound_sec → the caller ABSTAINS from a PROFIT-side exit (trail/target).
+
+    Reads autotrade_positions.ltp_as_of, which refresh_ltps advances to NOW only
+    for a LIVE broker mark; a stale fallback (yesterday's ohlc close / entry price)
+    keeps its last-live stamp so the mark AGES here. A position that HAS a mark
+    (ltp set) but NO ltp_as_of at all is treated as STALE (it never received a
+    live mark). bound_sec <= 0 disables the gate (never stale — pre-Cluster-5).
+    Paper is unaffected: every paper tick marks to a live mock price (fresh)."""
+    if not bound_sec or int(bound_sec) <= 0:
+        return False
+    now = now or datetime.now(IST)
+    worst = None
+    for p in positions or []:
+        if p.get("ltp") is None:
+            continue  # not yet marked → not part of the freshness judgement
+        ts = p.get("ltp_as_of")
+        if not ts:
+            return True  # has a mark but never a live stamp → stale
+        try:
+            dt = datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            continue
+        age = (now - dt).total_seconds()
+        if worst is None or age > worst:
+            worst = age
+    if worst is None:
+        return False
+    return worst > int(bound_sec)
+
+
 def _parse_entry_time_today_ist(entry_time: str) -> datetime:
     """Parse config.entry_time ("HH:MM" or "HH:MM:SS") as a time TODAY in IST.
 
@@ -1461,6 +1498,14 @@ class TradingSession:
         acct_id = getattr(prof, "broker_account_id", None)
         if acct_id is None:
             return  # no bound account → global path (unchanged)
+        # CLUSTER 5 ITEM 5 fix — STASH the ORIGINAL bound account id (runtime-only,
+        # never persisted) BEFORE any clearing below. The profile-level account
+        # gate in _fire_entries runs AFTER prewarm_execution has already called
+        # _build_brokers under execution_mode=="marketable_limit" (now the default),
+        # which clears broker_account_id on an unresolvable binding — that would
+        # SILENTLY DEFEAT the revoked/expired-profile gate. The gate consults this
+        # stash so a non-tradeable profile is still detected + degraded.
+        setattr(prof, "_bound_account_id_original", acct_id)
         from . import vault
         if not vault.vault_enabled():
             # Bound account but vault disabled: we CANNOT trade the right
@@ -1689,7 +1734,11 @@ class TradingSession:
             for prof in self.config.broker_profiles:
                 if not getattr(prof, "enabled", True):
                     continue
-                acct_id = getattr(prof, "broker_account_id", None)
+                # Prefer the live binding; fall back to the ORIGINAL binding stashed
+                # before prewarm/_build_brokers may have cleared it (ITEM 5 fix) so
+                # a revoked/expired profile is still gated even under marketable_limit.
+                acct_id = (getattr(prof, "broker_account_id", None)
+                           or getattr(prof, "_bound_account_id_original", None))
                 if acct_id is None:
                     continue  # unbound → global/operator path (validated upstream)
                 try:
@@ -2147,21 +2196,44 @@ class TradingSession:
             side = "SELL" if getattr(self.config, "direction", "long") == "short" \
                 else "BUY"
             tick = _get_tick_for(broker, order.symbol)
-            plan = plan_marketable_order(side, order.symbol, qty, quote, tick,
-                                         self.config,
-                                         ltp_fallback=(ref_price or None),
-                                         entry=True)
+            # CLUSTER 5 ITEM 3 — enforce the ENTRY quote-freshness SLA: an entry
+            # is NEVER priced off a stale book. plan_marketable_order returns a
+            # skip (policy=="skip") or a degraded MARKET fallback (policy=="market")
+            # when the quote age exceeds entry_quote_max_age_sec.
+            plan = plan_marketable_order(
+                side, order.symbol, qty, quote, tick, self.config,
+                ltp_fallback=(ref_price or None), entry=True,
+                now_ts=time.time(),
+                max_quote_age_sec=getattr(self.config,
+                                          "entry_quote_max_age_sec", 10.0),
+                stale_policy=getattr(self.config,
+                                     "entry_stale_quote_policy", "market"))
+            if plan.get("skip"):
+                # Stale-quote SKIP policy: do NOT place, do NOT register (no
+                # phantom). The leg is dropped with a clear degraded_quote reason.
+                log.warning("ENTRY %s: %s SKIPPED — %s",
+                            symbol, side, plan.get("reason"))
+                return {"symbol": symbol, "status": "SKIPPED",
+                        "reason": plan.get("reason"),
+                        "degraded_quote": True,
+                        "broker_profile": prof.profile_id}
             if plan.get("ok"):
-                # Locked at the circuit → LIMIT queued AT the circuit.
+                # Locked at the circuit → LIMIT queued AT the circuit. Per
+                # entry_circuit_locked_policy="drop", _reconcile_entry_fill DROPS it
+                # if it does not fill within the reconcile window (don't chase).
                 order.order_type = "LIMIT"
                 order.price = float(plan["price"])
-                log.info("ENTRY %s: %s LIMIT @ %.2f (locked at circuit)",
-                         symbol, side, order.price)
+                log.info("ENTRY %s: %s LIMIT @ %.2f (%s)",
+                         symbol, side, order.price, plan.get("reason"))
             else:
-                # Normal book → genuine MARKET order (the intended fast-fill path,
-                # NOT an error). Leave the order as-built (its MARKET path).
-                log.info("ENTRY %s: %s MARKET — %s",
-                         symbol, side, plan.get("reason"))
+                # Normal book (or a stale-quote degrade under policy=="market") →
+                # a genuine MARKET order; NOT priced off the (possibly stale) book.
+                if plan.get("degraded_quote"):
+                    log.warning("ENTRY %s: %s MARKET (degraded quote) — %s",
+                                symbol, side, plan.get("reason"))
+                else:
+                    log.info("ENTRY %s: %s MARKET — %s",
+                             symbol, side, plan.get("reason"))
 
         # VWAP: observe the window then place MARKET (skip the wait in paper to
         # keep smoke tests fast; live honours the window).
@@ -2600,6 +2672,20 @@ class TradingSession:
         # DEFAULT strategy: portfolio_kill_switch (UNCHANGED).
         reason = (self.kill_switch.check_threshold(gr_invested)
                   if self.kill_switch else None)
+        # CLUSTER 5 ITEM 2 — MARK-STALENESS ABSTAIN. A PROFIT_TARGET must NOT fire
+        # on a stale mark (a daily-close fallback masquerading as an intraday
+        # profit). The LOSS side still fires conservatively. Flagged + logged.
+        mark_stale = False
+        if reason and str(reason).startswith("PROFIT_TARGET"):
+            mark_stale = _marks_stale_for_profit(
+                self.registry.get_open_positions(),
+                getattr(self.config, "mark_staleness_abstain_sec", 30))
+            if mark_stale:
+                log.warning("session %s: ABSTAIN profit kill — marks stale "
+                            "(>%ss); holding (downside stop still armed)",
+                            self.session_id,
+                            getattr(self.config, "mark_staleness_abstain_sec", 30))
+                reason = None
         # FEATURE A — MIS DEFENSIVE SQUARE-OFF TICK BACKSTOP. A MIS session must be
         # flattened BEFORE the broker's ~15:20 auto-square even on the kill-switch
         # strategy. The precise-time square_off_scheduler is the primary path; this
@@ -2631,6 +2717,7 @@ class TradingSession:
                 "snapshot": snap, "kill_switch_fired": bool(fired),
                 "kill_reason": reason, "fire_result": fired,
                 "gtt_closed": gtt_closed,
+                "mark_stale_abstain": mark_stale,
                 "broker_reconciled": broker_reconciled}
 
     async def _tick_intraday(self, gr_capital: float, snap: Dict[str, Any],
@@ -2801,28 +2888,47 @@ class TradingSession:
         params = trail_engine.params_from_config(self.config)
         decision = trail_engine.decide(gr_capital, state, params)
 
-        # Persist any state change (arm transition or peak ratchet) so the trail
-        # is durable across restarts BEFORE any exit fires.
-        if decision.state_changed:
-            self.monitor.save_trail_state(decision.state)
-
+        # CLUSTER 5 ITEM 2 — MARK-STALENESS ABSTAIN. A PROFIT-side move (ARM/peak
+        # ratchet or a TRAIL/FLOOR/STEP_LOCK exit) must NOT act on a stale mark: a
+        # daily-close fallback could fake a high peak or a give-back exit. When the
+        # marks are stale we HOLD the profit trail AND do NOT persist a stale-driven
+        # ratchet. The downside STOP and the time SQUARE_OFF are NOT profit-side and
+        # still fire (conservative). bound=0 disables → byte-for-byte unchanged.
+        mark_stale = _marks_stale_for_profit(
+            self.registry.get_open_positions(),  # SELECT * includes ltp_as_of
+            getattr(self.config, "mark_staleness_abstain_sec", 30))
+        _profit_side = (decision.action == "ARM") or (
+            decision.action == "EXIT" and decision.reason in _PROFIT_EXIT_REASONS)
         fired = None
         reason = None
-        if decision.action == "EXIT":
-            reason = decision.reason
-            with fire_guard.claim_fire(self.session_id) as won:
-                if won:
-                    fired = await self.kill_switch.fire(
-                        f"INTRADAY_BASKET {reason} "
-                        f"gross_return={gr_capital:.4f}",
-                        gross_return=gr_capital, close_reason=reason)
-                else:
-                    reason = None  # another path already fired/is firing
+        action = decision.action
+        if mark_stale and _profit_side:
+            log.warning("session %s: ABSTAIN intraday %s (%s) — marks stale "
+                        "(>%ss); holding, not ratcheting (STOP/SQUARE_OFF active)",
+                        self.session_id, decision.action, decision.reason,
+                        getattr(self.config, "mark_staleness_abstain_sec", 30))
+            action = "HOLD"  # do NOT persist a stale-driven ratchet / exit
+        else:
+            # Persist any state change (arm transition or peak ratchet) so the
+            # trail is durable across restarts BEFORE any exit fires.
+            if decision.state_changed:
+                self.monitor.save_trail_state(decision.state)
+            if decision.action == "EXIT":
+                reason = decision.reason
+                with fire_guard.claim_fire(self.session_id) as won:
+                    if won:
+                        fired = await self.kill_switch.fire(
+                            f"INTRADAY_BASKET {reason} "
+                            f"gross_return={gr_capital:.4f}",
+                            gross_return=gr_capital, close_reason=reason)
+                    else:
+                        reason = None  # another path already fired/is firing
         return {"gross_return": gr_capital,
                 "gross_return_fund": snap["gross_return"],
                 "snapshot": snap,
                 "strategy": "intraday_basket",
-                "trail_action": decision.action,
+                "mark_stale_abstain": bool(mark_stale and _profit_side),
+                "trail_action": action,
                 "trail_armed": decision.state.armed,
                 "trail_peak": decision.state.peak,
                 "trail_trigger": decision.trigger,

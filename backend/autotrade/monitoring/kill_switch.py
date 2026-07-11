@@ -278,7 +278,23 @@ class KillSwitchExecutor:
         # serially: each confirm_exit can block up to 60s, so N legs used to take
         # up to N×60s. One bad/slow leg can no longer stall the rest; per-leg
         # EXIT_FAILED handling + fire_guard/exit_gate scoping are preserved.
-        from .exit_poller import confirm_exit, cancel_and_retry_exit
+        from .exit_poller import (confirm_exit, cancel_and_retry_exit,
+                                  OrderbookSnapshot)
+
+        # CLUSTER 5 ITEM 6 — ONE orderbook fetch per poll cycle per broker profile,
+        # shared across all in-flight legs (instead of N× full get_order_status
+        # scans). ttl == the confirm poll interval so concurrent legs coalesce into
+        # a single get_orders() per cycle. Built per profile (a multi-broker kill
+        # keeps each broker's book separate).
+        _POLL_INTERVAL = 5.0
+        _ob_snapshots: Dict[str, Any] = {}
+
+        def _snapshot_for(prof_id, broker):
+            snap = _ob_snapshots.get(prof_id)
+            if snap is None:
+                snap = OrderbookSnapshot(broker, ttl_sec=_POLL_INTERVAL)
+                _ob_snapshots[prof_id] = snap
+            return snap
 
         async def _confirm_live_leg(meta, order_id):
             """Confirm ONE live placed leg (+ partial/timeout retry). Returns
@@ -290,8 +306,9 @@ class KillSwitchExecutor:
                 session_id=self.session_id, symbol=meta["symbol"],
                 order_id=order_id, qty=meta["qty"], broker=broker_for_pos,
                 registry=self.registry, close_reason=close_reason,
-                max_wait_sec=60, poll_interval_sec=5.0,
-                broker_profile=prof_id)
+                max_wait_sec=60, poll_interval_sec=_POLL_INTERVAL,
+                broker_profile=prof_id,
+                status_provider=_snapshot_for(prof_id, broker_for_pos).status)
             confirm_status = confirm_result.get("status", "UNKNOWN")
 
             if confirm_status == "COMPLETE":

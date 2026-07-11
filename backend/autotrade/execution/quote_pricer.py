@@ -56,15 +56,48 @@ def _ceil_to_tick(price: float, tick: float) -> float:
     return round(math.ceil(price / tick - 1e-9) * tick, 2)
 
 
-def _market_fallback(reason: str) -> Dict[str, Any]:
+def _market_fallback(reason: str, degraded_quote: bool = False) -> Dict[str, Any]:
     return {"ok": False, "fallback_market": True, "order_type": "MARKET",
-            "price": None, "reason": reason}
+            "price": None, "reason": reason, "degraded_quote": degraded_quote}
+
+
+def exit_circuit_locked_reason(quote: Optional[Dict[str, Any]],
+                               direction: str = "long") -> Optional[str]:
+    """SPRINT CLUSTER 5 ITEM 4 — DISTINCT 'stranded at circuit' signal for EXITS.
+
+    A needed exit can be UNFILLABLE because the stock is LOCKED at the ADVERSE
+    circuit — a long-exit SELL into a LOWER-circuit lock, or a short-cover BUY
+    into an UPPER-circuit lock. In that case there is no counterparty, so the
+    exit LIMIT/MARKET sits unfilled and the generic exit-retry loop would spin
+    forever emitting EXIT_FAILED. Returns the string "circuit_locked" when the
+    book proves such a lock, else None. Pure (no I/O)."""
+    if not quote:
+        return None
+    ltp = quote.get("ltp")
+    bid = quote.get("bid")
+    ask = quote.get("ask")
+    upper = quote.get("upper_circuit")
+    lower = quote.get("lower_circuit")
+    if str(direction).lower() == "short":
+        # short cover = BUY; stranded when locked at the UPPER circuit
+        # (no offer to buy from AND the last price is at/above the band).
+        locked = (ask is None or ask <= 0) and (
+            upper is not None and upper > 0 and ltp is not None and ltp >= upper)
+        return "circuit_locked" if locked else None
+    # long exit = SELL; stranded when locked at the LOWER circuit
+    # (no bid to sell into AND the last price is at/below the band).
+    locked = (bid is None or bid <= 0) and (
+        lower is not None and lower > 0 and ltp is not None and ltp <= lower)
+    return "circuit_locked" if locked else None
 
 
 def plan_marketable_order(side: str, symbol: str, qty: int,
                           quote: Optional[Dict[str, Any]], tick: float,
                           cfg, *, ltp_fallback: Optional[float] = None,
-                          entry: bool = False
+                          entry: bool = False,
+                          now_ts: Optional[float] = None,
+                          max_quote_age_sec: Optional[float] = None,
+                          stale_policy: Optional[str] = None
                           ) -> Dict[str, Any]:
     """Plan a marketable order for ONE symbol from its live book.
 
@@ -102,6 +135,39 @@ def plan_marketable_order(side: str, symbol: str, qty: int,
         # Unknown side → don't guess a direction; MARKET fallback (still places).
         return _market_fallback(f"{symbol}: invalid side {side!r} - market fallback")
 
+    # ── QUOTE-FRESHNESS SLA (SPRINT CLUSTER 5 ITEM 3) ────────────────────────
+    # Only enforced when the caller passes now_ts (existing callers/tests that
+    # omit it are byte-for-byte unchanged). A quote older than the SLA is STALE:
+    #   ENTRY  → NEVER price a LIMIT off a stale book. Per stale_policy either
+    #            "skip" (don't enter) or "market" (DEFAULT — a MARKET fallback,
+    #            flagged degraded_quote; still an order, but not priced off the
+    #            stale book).
+    #   EXIT   → NEVER skip; price/flatten as normal but carry degraded_quote so
+    #            the caller can log the degraded fill.
+    _max_age = (max_quote_age_sec if max_quote_age_sec is not None
+                else getattr(cfg, "entry_quote_max_age_sec", None))
+    _policy = (stale_policy if stale_policy is not None
+               else getattr(cfg, "entry_stale_quote_policy", "market"))
+    _qts = (quote or {}).get("ts")
+    degraded_quote = False
+    if (now_ts is not None and _qts is not None and _max_age is not None
+            and (float(now_ts) - float(_qts)) > float(_max_age)):
+        _age = float(now_ts) - float(_qts)
+        if entry:
+            if _policy == "skip":
+                return {"ok": False, "fallback_market": False, "skip": True,
+                        "degraded_quote": True, "order_type": None,
+                        "price": None,
+                        "reason": (f"{symbol}: ENTRY quote stale "
+                                   f"({_age:.1f}s > {_max_age:.1f}s SLA) — "
+                                   "SKIPPED (entry_stale_quote_policy=skip)")}
+            return _market_fallback(
+                f"{symbol}: ENTRY quote stale ({_age:.1f}s > {_max_age:.1f}s "
+                "SLA) — MARKET fallback (not priced off the stale book)",
+                degraded_quote=True)
+        # EXIT: proceed (never block a needed exit) but flag the degradation.
+        degraded_quote = True
+
     buffer_pct = float(getattr(cfg, "marketable_buffer_pct", 0.003))
     if tick is None or tick <= 0:
         tick = 0.05
@@ -120,7 +186,8 @@ def plan_marketable_order(side: str, symbol: str, qty: int,
         base = ask if (ask and ask > 0) else ltp
         if base is None or base <= 0:
             # No price data at all — MARKET fallback (still an order).
-            return _market_fallback(f"{symbol}: no usable BUY price - market fallback")
+            return _market_fallback(f"{symbol}: no usable BUY price - market fallback",
+                                    degraded_quote=degraded_quote)
         if entry:
             # ENTRY (guarantee the fill). A NORMAL book — a live ask BELOW the
             # upper circuit — is a genuine MARKET order: it fills instantly at the
@@ -135,10 +202,16 @@ def plan_marketable_order(side: str, symbol: str, qty: int,
                 price = _floor_to_tick(float(upper), tick)
                 if price <= 0:
                     price = round(tick, 2)
+                # ITEM 4: this LIMIT is QUEUED at the circuit but does NOT sit
+                # indefinitely — _reconcile_entry_fill DROPS it if it is unfilled
+                # within the entry reconcile window (entry_circuit_locked_policy=
+                # "drop"). Don't chase a locked stock.
                 return {"ok": True, "fallback_market": False, "order_type": "LIMIT",
-                        "price": price,
-                        "reason": f"BUY entry locked-up — LIMIT @ circuit {price}"}
-            return _market_fallback(f"{symbol}: BUY entry — MARKET (fills at ask)")
+                        "price": price, "degraded_quote": False,
+                        "reason": (f"BUY entry locked-up — LIMIT @ circuit {price} "
+                                   "(dropped if unfilled within reconcile window)")}
+            return _market_fallback(f"{symbol}: BUY entry — MARKET (fills at ask)",
+                                    degraded_quote=degraded_quote)
         raw = base * (1.0 + buffer_pct)
         if upper is not None and upper > 0:
             raw = min(raw, upper)          # CAP at the circuit (only cap)
@@ -151,7 +224,8 @@ def plan_marketable_order(side: str, symbol: str, qty: int,
     else:  # SELL
         base = bid if (bid and bid > 0) else ltp
         if base is None or base <= 0:
-            return _market_fallback(f"{symbol}: no usable SELL price - market fallback")
+            return _market_fallback(f"{symbol}: no usable SELL price - market fallback",
+                                    degraded_quote=degraded_quote)
         if entry:
             # SHORT ENTRY (SELL to open): symmetric — a NORMAL book is a MARKET
             # order (fills at the bid on any gap-down, margined on LTP); ONLY a
@@ -162,10 +236,15 @@ def plan_marketable_order(side: str, symbol: str, qty: int,
                 price = _ceil_to_tick(float(lower), tick)
                 if price <= 0:
                     price = round(tick, 2)
+                # ITEM 4: queued at the circuit; DROPPED if unfilled within the
+                # entry reconcile window (entry_circuit_locked_policy="drop").
                 return {"ok": True, "fallback_market": False, "order_type": "LIMIT",
-                        "price": price,
-                        "reason": f"SELL entry locked-down — LIMIT @ circuit {price}"}
-            return _market_fallback(f"{symbol}: SELL entry — MARKET (fills at bid)")
+                        "price": price, "degraded_quote": False,
+                        "reason": (f"SELL entry locked-down — LIMIT @ circuit "
+                                   f"{price} (dropped if unfilled within "
+                                   "reconcile window)")}
+            return _market_fallback(f"{symbol}: SELL entry — MARKET (fills at bid)",
+                                    degraded_quote=degraded_quote)
         raw = base * (1.0 - buffer_pct)
         if lower is not None and lower > 0:
             raw = max(raw, lower)          # FLOOR at the circuit (only cap)
@@ -174,5 +253,5 @@ def plan_marketable_order(side: str, symbol: str, qty: int,
             price = round(tick, 2)
 
     return {"ok": True, "fallback_market": False, "order_type": "LIMIT",
-            "price": price,
+            "price": price, "degraded_quote": degraded_quote,
             "reason": f"{s} marketable-limit @ {price}"}

@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from falcon.db import falcon_conn
-from .pricing import resolve_brokers_ltp
+from .pricing import resolve_brokers_ltp, resolve_brokers_ltp_with_source
 
 log = logging.getLogger("kanida.autotrade.monitor")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -466,26 +466,35 @@ class PortfolioMonitor:
         with falcon_conn() as con:
             for r in rows:
                 ltp = batched.get((r["broker_profile"], r["symbol"]))
+                # CLUSTER 5 ITEM 2 — track PROVENANCE. A batched hit is a LIVE
+                # WS/REST price (fresh). A residual resolve may be a LIVE broker
+                # probe OR a stale fallback (ohlc close / entry price). We only
+                # advance ltp_as_of to NOW for a LIVE mark; a non-live fallback
+                # keeps the PRIOR ltp_as_of (COALESCE) so the mark AGES — a
+                # daily-close fallback can never masquerade as fresh and satisfy an
+                # intraday PROFIT gate (the staleness abstain reads this age).
+                is_live = ltp is not None
                 if ltp is None:
-                    # Residual miss only → per-symbol resolve (broker single probe
-                    # → ohlc close → entry). Unchanged fallback semantics.
-                    ltp = resolve_brokers_ltp(
+                    # Residual miss only → per-symbol resolve WITH source.
+                    ltp, _src = resolve_brokers_ltp_with_source(
                         r["symbol"], brokers,
                         broker_profile=r["broker_profile"],
                         fallback_entry=r["avg_price"])
+                    is_live = (_src == "live")
                 if ltp is None:
                     continue
                 # FUTURES long/short: sign-aware persisted uPnL so the trail /
                 # kill see profit correctly for shorts. 'long' CASE = +1 →
-                # byte-identical to (ltp-avg)*qty. Lifecycle#8: stamp the mark
-                # time so a stalled tick (stale mark) is visible in status().
+                # byte-identical to (ltp-avg)*qty. Lifecycle#8 + ITEM 2: stamp the
+                # mark time ONLY for a live mark (COALESCE keeps the last-live
+                # timestamp for a fallback mark so it ages).
                 con.execute(
                     """UPDATE autotrade_positions
-                       SET ltp=?, ltp_as_of=?,
+                       SET ltp=?, ltp_as_of=COALESCE(?, ltp_as_of),
                            unrealised_pnl=(CASE WHEN direction='short' THEN -1
                                                 ELSE 1 END) * (? - avg_price)*qty
                        WHERE id=?""",
-                    (ltp, now_iso, ltp, r["id"]),
+                    (ltp, now_iso if is_live else None, ltp, r["id"]),
                 )
                 updated += 1
             con.commit()

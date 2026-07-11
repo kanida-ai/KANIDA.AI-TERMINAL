@@ -367,6 +367,24 @@ class _WSDriver:
             # BASKET scope (default) — single-decide whole-basket flow, unchanged.
             state = sess.monitor.load_trail_state()
             decision = trail_engine.decide(gr_capital, state, params)
+            # CLUSTER 5 ITEM 2 — MARK-STALENESS ABSTAIN (mirrors session.tick). A
+            # PROFIT-side move on a stale mark is suppressed (no ratchet, no exit);
+            # STOP/SQUARE_OFF still fire. Marks are stale when the freshest open
+            # mark is older than mark_staleness_abstain_sec.
+            from ..session import (_marks_stale_for_profit as _stale,
+                                   _PROFIT_EXIT_REASONS as _PROFIT)
+            # Re-fetch so ltp_as_of reflects THIS tick's fresh marks (the loop
+            # above updated the DB, not the in-memory `positions`).
+            _mark_stale = _stale(
+                sess.registry.get_open_positions(),
+                getattr(sess.config, "mark_staleness_abstain_sec", 30))
+            _profit_side = (decision.action == "ARM") or (
+                decision.action == "EXIT" and decision.reason in _PROFIT)
+            if _mark_stale and _profit_side:
+                log.warning("ws_driver: ABSTAIN intraday %s (%s) — marks stale "
+                            "for %s; holding (STOP/SQUARE_OFF still active)",
+                            decision.action, decision.reason, self.session_id)
+                return
             if decision.state_changed:
                 sess.monitor.save_trail_state(decision.state)
             if decision.action != "EXIT":
@@ -386,6 +404,15 @@ class _WSDriver:
                   if sess.kill_switch else None)
         if not reason:
             return
+        # CLUSTER 5 ITEM 2 — do not fire a PROFIT_TARGET kill on a stale mark
+        # (mirrors session.tick); the LOSS side still fires.
+        if str(reason).startswith("PROFIT_TARGET"):
+            from ..session import _marks_stale_for_profit as _stale
+            if _stale(sess.registry.get_open_positions(),
+                      getattr(sess.config, "mark_staleness_abstain_sec", 30)):
+                log.warning("ws_driver: ABSTAIN profit kill — marks stale for %s "
+                            "(downside stop still armed)", self.session_id)
+                return
         with fire_guard.claim_fire(self.session_id) as won:
             if not won:
                 return  # the 5s poll (or a manual kill) already fired

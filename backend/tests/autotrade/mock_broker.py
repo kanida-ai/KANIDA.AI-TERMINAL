@@ -116,6 +116,11 @@ class MockBroker(BrokerClient):
         #                 behaviour), so existing tests are unaffected.
         self._gtts = gtts
         self._order_status_map = order_status
+        # CLUSTER 5 ITEM 6 — call counters so a test can prove the kill flatten
+        # resolves N legs from ONE batched get_orders() per cycle (not N per-leg
+        # get_order_status scans).
+        self.get_orders_calls = 0
+        self.get_order_status_calls = 0
 
     # QUOTE-DRIVEN MARKETABLE-LIMIT: the live order book the mock reports.
     # {symbol: {ltp,bid,ask,upper_circuit,lower_circuit,ts}}. None (DEFAULT) →
@@ -218,6 +223,7 @@ class MockBroker(BrokerClient):
         # None (default) → the reconciler treats the orderbook as unknown and falls
         # back to the per-position floor. A list is the raw Kite-shaped orderbook.
         # A dict {order_id: {...}} is normalised to a list, injecting order_id.
+        self.get_orders_calls += 1
         ob = self._orders
         if ob is None:
             return None
@@ -327,6 +333,7 @@ class MockBroker(BrokerClient):
         }
 
     def get_order_status(self, order_id: str) -> dict:
+        self.get_order_status_calls += 1
         # RECONCILIATION Phase 4: an explicit order_status map takes precedence
         # (used to model a fired GTT order's fill state). {} = unknown/not found.
         if self._order_status_map is not None and str(order_id) in self._order_status_map:

@@ -691,8 +691,17 @@ class ZerodhaBroker(BrokerClient):
             # session with no resolved account — caught here → FAILED leg.
             kite = self.kite
             params = order.to_kite_params(kite)
-            oid = _retry_kite_call(lambda: kite.place_order(**params),
-                                   "place_order(autotrade)", order.symbol)
+            # SPRINT CLUSTER 5 ITEM 1 — kite.place_order (via _retry_kite_call) is a
+            # BLOCKING HTTP call that also blocking-sleeps between retries. Running
+            # the WHOLE retry wrapper in a worker thread (asyncio.to_thread) keeps
+            # the event loop responsive so _fire_entries' asyncio.gather actually
+            # OVERLAPS legs (they no longer serialise) AND the asyncio.wait_for
+            # timeout in place_order_with_retry can fire on a hung placement. The
+            # retry semantics are unchanged (the retry loop runs inside the thread).
+            # Mirrors the exit path (place_market_exit already uses to_thread).
+            oid = await asyncio.to_thread(
+                _retry_kite_call, lambda: kite.place_order(**params),
+                "place_order(autotrade)", order.symbol)
             return OrderResult(status="PLACED", broker_order_id=str(oid),
                                symbol=order.symbol, qty=order.qty)
         except Exception as e:
@@ -846,9 +855,18 @@ class ZerodhaBroker(BrokerClient):
                         ltp_fb = self.get_ltp(symbol)
                     except Exception:  # pragma: no cover - defensive
                         ltp_fb = None
-                    plan = plan_marketable_order(pside, symbol, int(qty), q,
-                                                 tick, exec_cfg,
-                                                 ltp_fallback=ltp_fb)
+                    plan = plan_marketable_order(
+                        pside, symbol, int(qty), q, tick, exec_cfg,
+                        ltp_fallback=ltp_fb,
+                        now_ts=time.time(),
+                        max_quote_age_sec=getattr(
+                            exec_cfg, "entry_quote_max_age_sec", 10.0))
+                    # CLUSTER 5 ITEM 3 — an EXIT NEVER skips on a stale quote; it
+                    # proceeds but carries a degraded flag we log for visibility.
+                    if plan.get("degraded_quote"):
+                        log.warning("marketable-limit EXIT %s: DEGRADED quote "
+                                    "(stale book) — proceeding: %s",
+                                    symbol, plan.get("reason"))
                     if plan.get("ok"):
                         limit_kwargs = dict(order_type=kite.ORDER_TYPE_LIMIT,
                                             price=float(plan["price"]))
