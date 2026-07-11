@@ -801,6 +801,17 @@ def preview_session_sizing(config: TradingSessionConfig,
                 row["lot_size"] = _uq
                 row["margin_per_lot"] = _ub
                 row["notional"] = invested          # qty * price = contract exposure
+            # ICEBERG (CAP 4) — surface when this leg will slice, so the operator
+            # sees n_slices + slice_qty BEFORE Start. Inert (no keys) unless
+            # iceberg is enabled AND the qty exceeds the effective slice cap.
+            from . import iceberg as _iceberg
+            _eff_slice = _iceberg.effective_slice_qty(
+                config, pick.symbol, int(qty), ref_price or None)
+            _legs = _iceberg.plan_iceberg_legs(int(qty), _eff_slice)
+            if config.iceberg_enabled and len(_legs) > 1:
+                row["iceberg"] = True
+                row["n_slices"] = len(_legs)
+                row["slice_qty"] = int(_eff_slice)
             positions.append(row)
 
     total_alloc = float(config.total_allocated_capital)
@@ -2157,6 +2168,21 @@ class TradingSession:
             ref_price = float(prefetch[symbol]["ltp"])
         else:
             ref_price = broker.get_ltp(symbol) or 0.0
+        # ── ICEBERG ENTRY (SPRINT CLUSTER 7, CAP 2/3, additive, DEFAULT-OFF) ────
+        # When iceberg is enabled AND the sized qty exceeds the effective slice cap
+        # (min of the configured slice + the per-symbol exchange FREEZE quantity),
+        # split this ENTRY into child legs each <= the slice, placed SEQUENTIALLY,
+        # each confirmed, then register ONE aggregate position at the qty-weighted-
+        # average fill. A child reject / under-fill STOPS further children and
+        # registers the FILLED-so-far (never the intended qty — the phantom class).
+        # When disabled / qty <= slice this is INERT (a single leg) and the
+        # existing single-order path below runs BYTE-FOR-BYTE unchanged.
+        from . import iceberg as _iceberg
+        _ice_legs = _iceberg.plan_for(
+            self.config, symbol, int(qty), ref_price or None)
+        if getattr(self.config, "iceberg_enabled", False) and len(_ice_legs) > 1:
+            return await self._place_iceberg(
+                broker, prof, symbol, int(qty), _ice_legs, ref_price, quote)
         order = build_order(symbol, qty, self.config, broker)
         # CAP 1 — mint a durable client_order_id BEFORE broker submission and set
         # its compact tag on the order so OUR order is recognisable at the broker.
@@ -2384,6 +2410,211 @@ class TradingSession:
                 "price": fill_price, "broker_order_id": res.broker_order_id,
                 "broker_profile": prof.profile_id, "order_type": order.order_type,
                 "reconciled": reconciled, "ordered_qty": int(qty) if qty else None}
+
+    async def _place_confirm_child(self, broker, prof, symbol: str,
+                                   leg_qty: int, ref_price: float,
+                                   quote: Optional[Dict[str, Any]],
+                                   client_order_id: str, tag: str
+                                   ) -> Dict[str, Any]:
+        """ICEBERG (CAP 2) — place + confirm ONE child leg of an iceberg ENTRY.
+
+        Mirrors _place_one's place+reconcile CORE (marketable-limit pricing,
+        rejection guard, fill reconciliation, phantom-fill guard) but does NOT
+        register a position — the iceberg caller aggregates the confirmed child
+        fills and registers ONE position. Returns a dict:
+          * {skip:True, reason}                    — stale-quote SKIP policy.
+          * {rejected:True, error}                 — child rejected / no fill.
+          * {fill_price, fill_qty, broker_order_id, res_status, reconciled,
+             order_symbol, exchange, under_fill, ordered_qty} — a confirmed
+             (possibly under-)fill.
+        Each child carries the shared PARENT client_order_id + a leg-indexed tag
+        (attributable + idempotent per C2/C3)."""
+        order = build_order(symbol, leg_qty, self.config, broker)
+        order.client_order_id = client_order_id
+        order.tag = tag
+        _entry_side = "SELL" if getattr(self.config, "direction", "long") \
+            == "short" else "BUY"
+        # CAP 3 — durable ORDER_CREATED intent BEFORE the broker call, per child.
+        order_ledger.record_intent(
+            session_id=self.session_id, symbol=symbol,
+            client_order_id=client_order_id, qty=leg_qty, side=_entry_side,
+            product=prof.order_product, broker_profile=prof.profile_id,
+            instrument_type=prof.instrument_type, source="entry_iceberg")
+        if order.order_type == "LIMIT" and ref_price and ref_price > 0:
+            order.price = order.compute_limit_price(ref_price)
+        # QUOTE-DRIVEN pricing (marketable_limit only) — mirrors _place_one.
+        if getattr(self.config, "execution_mode", "market") == "marketable_limit":
+            from .execution.quote_pricer import plan_marketable_order
+            side = "SELL" if getattr(self.config, "direction", "long") \
+                == "short" else "BUY"
+            tick = _get_tick_for(broker, order.symbol)
+            plan = plan_marketable_order(
+                side, order.symbol, leg_qty, quote, tick, self.config,
+                ltp_fallback=(ref_price or None), entry=True, now_ts=time.time(),
+                max_quote_age_sec=getattr(self.config,
+                                          "entry_quote_max_age_sec", 10.0),
+                stale_policy=getattr(self.config,
+                                     "entry_stale_quote_policy", "market"))
+            if plan.get("skip"):
+                log.warning("ICEBERG ENTRY %s: child %s SKIPPED — %s",
+                            symbol, side, plan.get("reason"))
+                return {"skip": True, "reason": plan.get("reason")}
+            if plan.get("ok"):
+                order.order_type = "LIMIT"
+                order.price = float(plan["price"])
+        if order.order_type == "VWAP" and not self.dry_run:
+            await asyncio.sleep(min(self.config.vwap_window_seconds, 1))
+        try:
+            res = await place_order_with_retry(order, broker)
+        except Exception as e:
+            log.error("ICEBERG place failed %s: %s", symbol, e)
+            return {"rejected": True, "error": str(e)}
+        # REJECTION GUARD (same as _place_one).
+        if getattr(res, "status", None) == "FAILED" or (
+                not self.dry_run and not getattr(res, "broker_order_id", None)):
+            err = getattr(res, "error", None) or "order rejected by broker"
+            return {"rejected": True, "error": err}
+        fill_price = res.avg_price
+        fill_qty = res.filled_qty
+        if not self.dry_run and res.broker_order_id and (
+                not fill_price or not fill_qty):
+            rec = await self._reconcile_entry_fill(
+                broker, res.broker_order_id, leg_qty)
+            if rec and rec.get("rejected"):
+                return {"rejected": True,
+                        "error": f"post-placement reject ({rec.get('status')})"}
+            if rec:
+                fill_price = rec.get("avg_price") or fill_price
+                fill_qty = rec.get("filled_qty") or fill_qty
+        reconciled = bool(fill_price and fill_qty)
+        # PHANTOM-FILL GUARD — a LIVE order with no confirmed fill is DROPPED (never
+        # booked at the mark); the mark fallback is DRY-RUN only.
+        if not (fill_price and fill_qty):
+            if not self.dry_run:
+                return {"rejected": True,
+                        "error": "no confirmed fill (phantom guard)"}
+            fill_price = fill_price or ref_price
+            fill_qty = fill_qty or leg_qty
+        _entry_oid = getattr(res, "broker_order_id", None)
+        # CAP 2 — a ledger ORDER_SUBMITTED event PER CHILD (maps this child's
+        # client_order_id → its broker order-id).
+        order_ledger.append_event(
+            session_id=self.session_id, symbol=order.symbol,
+            event_type=order_ledger.EV_ORDER_SUBMITTED,
+            position_ref=f"{self.session_id}:{order.symbol}",
+            product=prof.order_product, broker_profile=prof.profile_id,
+            broker_order_id=_entry_oid, client_order_id=client_order_id,
+            qty=fill_qty, price=fill_price, source="entry_iceberg")
+        _under = (fill_qty is not None and leg_qty
+                  and int(fill_qty) < int(leg_qty))
+        return {"fill_price": float(fill_price), "fill_qty": int(fill_qty),
+                "broker_order_id": _entry_oid, "res_status": res.status,
+                "reconciled": reconciled, "order_symbol": order.symbol,
+                "exchange": getattr(order, "exchange", None),
+                "under_fill": bool(_under), "ordered_qty": int(leg_qty)}
+
+    async def _place_iceberg(self, broker, prof, symbol: str, total_qty: int,
+                             legs: List[int], ref_price: float,
+                             quote: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """ICEBERG (CAP 2 + CAP 3-entry) — place N child ENTRY orders (each <=
+        slice) SEQUENTIALLY, confirm each, then register ONE aggregate position at
+        the QUANTITY-WEIGHTED-AVERAGE fill price with the total filled qty.
+
+        ROBUSTNESS (CAP 3, entry side): a child reject / under-fill STOPS further
+        children and registers the FILLED-so-far as a smaller REAL position
+        (correct qty + avg), surfacing a warning — NEVER the intended qty when
+        less filled (the phantom-fill class). Every child is recorded in the ledger
+        (an ORDER_CREATED intent + an ORDER_SUBMITTED event per child); all child
+        broker order-ids are collected on the result. The registered position's
+        downstream (GTT/SL-M/trail/exit/reconcile) sees ONE aggregate position
+        exactly as a non-iceberg entry."""
+        parent_coid = order_ledger.make_client_order_id(self.session_id, symbol)
+        filled_total = 0
+        weighted_px = 0.0
+        child_oids: List[str] = []
+        n_children = 0
+        stopped_reason: Optional[str] = None
+        order_symbol = symbol
+        exchange: Optional[str] = None
+        any_reconciled = False
+        last_status = "PLACED"
+        for i, leg_qty in enumerate(legs):
+            child_coid = f"{parent_coid}-L{i}"
+            child_tag = order_ledger.compact_tag(child_coid)
+            child = await self._place_confirm_child(
+                broker, prof, symbol, int(leg_qty), ref_price, quote,
+                child_coid, child_tag)
+            if child.get("skip"):
+                stopped_reason = f"child {i} skipped ({child.get('reason')})"
+                log.warning("ICEBERG %s: %s — stopping at %d filled",
+                            symbol, stopped_reason, filled_total)
+                break
+            if child.get("rejected"):
+                stopped_reason = f"child {i} rejected ({child.get('error')})"
+                log.error("ICEBERG %s: %s — STOPPING; registering filled-so-far "
+                          "%d (NOT the intended %d)", symbol, stopped_reason,
+                          filled_total, int(total_qty))
+                break
+            n_children += 1
+            filled_total += child["fill_qty"]
+            weighted_px += child["fill_qty"] * child["fill_price"]
+            if child.get("broker_order_id"):
+                child_oids.append(str(child["broker_order_id"]))
+            order_symbol = child.get("order_symbol") or order_symbol
+            exchange = child.get("exchange") or exchange
+            any_reconciled = any_reconciled or bool(child.get("reconciled"))
+            last_status = child.get("res_status") or last_status
+            if child.get("under_fill"):
+                stopped_reason = (f"child {i} under-filled "
+                                  f"{child['fill_qty']}/{int(leg_qty)}")
+                log.warning("ICEBERG %s: %s — STOPPING; registering filled-so-far "
+                            "%d", symbol, stopped_reason, filled_total)
+                break
+        if filled_total <= 0:
+            # No child filled → NO position (never a phantom). Dropped leg.
+            return {"symbol": symbol, "status": "FAILED",
+                    "error": stopped_reason or "iceberg: no child filled",
+                    "broker_profile": prof.profile_id, "iceberg": True,
+                    "n_children": 0}
+        avg_px = weighted_px / filled_total
+        partial_iceberg = filled_total < int(total_qty)
+        acct_id = getattr(prof, "broker_account_id", None)
+        _direction = getattr(self.config, "direction", "long")
+        register_symbol = order_symbol if prof.instrument_type == "FUT" else symbol
+        # Attribute the aggregate position to the FIRST child's broker order-id
+        # (every child id is on child_oids + in the ledger). The PARENT
+        # client_order_id ties the whole iceberg together on the position row.
+        primary_oid = child_oids[0] if child_oids else None
+        if partial_iceberg:
+            log.warning("session %s: ICEBERG %s PARTIAL — intended %d, filled %d "
+                        "across %d child(ren) [%s]; registering the REAL filled "
+                        "qty (not the intended)", self.session_id, register_symbol,
+                        int(total_qty), filled_total, n_children,
+                        stopped_reason or "")
+            self.registry.register_partial(
+                register_symbol, prof.profile_id, filled_total, avg_px,
+                product=prof.order_product,
+                instrument_type=prof.instrument_type, exchange=exchange,
+                broker_account_id=acct_id, direction=_direction,
+                entry_order_id=primary_oid, client_order_id=parent_coid)
+        else:
+            self.registry.register(
+                symbol=register_symbol, broker_profile=prof.profile_id,
+                qty=filled_total, avg_price=avg_px, product=prof.order_product,
+                instrument_type=prof.instrument_type, exchange=exchange,
+                broker_account_id=acct_id, direction=_direction,
+                entry_order_id=primary_oid, client_order_id=parent_coid)
+        if ref_price and ref_price > 0 and any_reconciled:
+            record_slippage(symbol, ref_price, avg_px, filled_total,
+                            session_id=self.session_id,
+                            broker_profile=prof.profile_id)
+        _status = "PARTIAL" if partial_iceberg else last_status
+        return {"symbol": symbol, "status": _status, "qty": filled_total,
+                "price": avg_px, "broker_order_id": primary_oid,
+                "broker_profile": prof.profile_id, "iceberg": True,
+                "n_children": n_children, "child_order_ids": child_oids,
+                "reconciled": any_reconciled, "ordered_qty": int(total_qty),
+                "partial": partial_iceberg, "stopped_reason": stopped_reason}
 
     async def _reconcile_entry_fill(self, broker, order_id: str,
                                     expected_qty: int,

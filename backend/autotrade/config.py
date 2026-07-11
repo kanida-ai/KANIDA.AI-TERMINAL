@@ -465,6 +465,26 @@ class TradingSessionConfig:
     # restore today's plain floor-each-slice behaviour exactly.
     redistribute_unused_capital: bool = True
 
+    # ── ICEBERG large-order slicing (SPRINT CLUSTER 7, additive, DEFAULT-OFF) ──
+    # Splits ONE logical entry/exit into child legs each <= the effective slice
+    # cap so a single order above the per-symbol NSE FREEZE QUANTITY is never
+    # rejected, and a large market order does not cause impact. INERT by default:
+    # iceberg_enabled=False → a single order, byte-for-byte unchanged. When
+    # enabled, the effective slice = MIN(configured slice, exchange freeze cap) so
+    # slicing always respects the freeze qty even when the operator set no slice.
+    #   iceberg_slice_qty         : explicit slice size (shares/units), optional.
+    #   iceberg_slice_value       : a ₹-notional slice → qty = floor(value/price),
+    #                               optional; needs a live price to resolve.
+    #   iceberg_freeze_qty_default: a conservative per-order freeze cap used when
+    #                               a symbol has no map entry (exchange freeze qty).
+    #   iceberg_freeze_qty_map    : per-symbol freeze-qty overrides {symbol: qty}.
+    # See backend/autotrade/iceberg.py for the pure planner.
+    iceberg_enabled: bool = False
+    iceberg_slice_qty: Optional[int] = None
+    iceberg_slice_value: Optional[float] = None
+    iceberg_freeze_qty_default: Optional[int] = None
+    iceberg_freeze_qty_map: Optional[Dict[str, int]] = None
+
     # ── Universe filter ──────────────────────────────────────────────────────
     # Restricts the Falcon pick pool to a named index membership before ranking.
     # Applied IN the SQL query (so ranked ordering respects the filtered set).
@@ -735,6 +755,39 @@ class TradingSessionConfig:
             raise ValueError(
                 "invalid on_missed_window (expire | carry_next_trading_day): "
                 f"{self.on_missed_window}")
+        # ── ICEBERG large-order slicing — validate WHEN SET; inert by default ──
+        # Each source is validated whenever provided (a saved preset must round-
+        # trip valid values). When ENABLED, at least one slice source must exist,
+        # else "enabled" would silently do nothing (no cap → a single order).
+        if self.iceberg_slice_qty is not None:
+            if int(self.iceberg_slice_qty) < 1:
+                raise ValueError(
+                    "iceberg_slice_qty must be an integer >= 1 when set, got "
+                    f"{self.iceberg_slice_qty}")
+        if self.iceberg_slice_value is not None:
+            if float(self.iceberg_slice_value) <= 0:
+                raise ValueError(
+                    "iceberg_slice_value must be > 0 (₹) when set, got "
+                    f"{self.iceberg_slice_value}")
+        if self.iceberg_freeze_qty_default is not None:
+            if int(self.iceberg_freeze_qty_default) < 1:
+                raise ValueError(
+                    "iceberg_freeze_qty_default must be an integer >= 1 when set, "
+                    f"got {self.iceberg_freeze_qty_default}")
+        if self.iceberg_freeze_qty_map is not None:
+            for _sym, _q in self.iceberg_freeze_qty_map.items():
+                if int(_q) < 1:
+                    raise ValueError(
+                        "iceberg_freeze_qty_map values must be integers >= 1, got "
+                        f"{_sym}={_q}")
+        if self.iceberg_enabled and self.iceberg_slice_qty is None and \
+                self.iceberg_slice_value is None and \
+                self.iceberg_freeze_qty_default is None and \
+                not self.iceberg_freeze_qty_map:
+            raise ValueError(
+                "iceberg_enabled requires a slice source: set iceberg_slice_qty, "
+                "iceberg_slice_value, iceberg_freeze_qty_default, or "
+                "iceberg_freeze_qty_map (else slicing would never engage)")
         # Universe filter
         _VALID_UNIVERSE_FILTERS = ("all500", "nifty50", "nifty100", "nifty200", "fno")
         if self.universe_filter not in _VALID_UNIVERSE_FILTERS:
@@ -924,6 +977,19 @@ class TradingSessionConfig:
             entry_grace_seconds=int(d.get("entry_grace_seconds", 120)),
             universe_filter=d.get("universe_filter", "all500"),
             symbol_whitelist=d.get("symbol_whitelist", None),
+            iceberg_enabled=bool(d.get("iceberg_enabled", False)),
+            iceberg_slice_qty=(int(d["iceberg_slice_qty"])
+                               if d.get("iceberg_slice_qty") is not None else None),
+            iceberg_slice_value=(float(d["iceberg_slice_value"])
+                                 if d.get("iceberg_slice_value") is not None
+                                 else None),
+            iceberg_freeze_qty_default=(
+                int(d["iceberg_freeze_qty_default"])
+                if d.get("iceberg_freeze_qty_default") is not None else None),
+            iceberg_freeze_qty_map=(
+                {str(k): int(v)
+                 for k, v in d["iceberg_freeze_qty_map"].items()}
+                if d.get("iceberg_freeze_qty_map") is not None else None),
         )
         return cfg
 

@@ -27,6 +27,8 @@ class MockBroker(BrokerClient):
                  holdings: Optional[Any] = None,
                  orders: Optional[Any] = None,
                  reject_symbols: Optional[set] = None,
+                 reject_after: Optional[Dict[str, int]] = None,
+                 fill_price_sequence: Optional[Dict[str, list]] = None,
                  quotes: Optional[Dict[str, dict]] = None,
                  gtts: Optional[Dict[str, dict]] = None,
                  available_margin: Optional[float] = None,
@@ -54,6 +56,19 @@ class MockBroker(BrokerClient):
         # reconcile's get_order_status then reports REJECTED. Default empty →
         # existing tests unaffected.
         self.reject_symbols = reject_symbols or set()
+        # ICEBERG (CLUSTER 7): reject a symbol's placement AFTER this many
+        # successful placements of that symbol — so an iceberg's first N children
+        # fill and a LATER child rejects. {symbol: n}. None (default) → no effect
+        # (existing tests unaffected). The rejecting placement returns PLACED with
+        # a "rej-<sym>" order-id whose get_order_status reports REJECTED (0 fill).
+        self._reject_after = reject_after or {}
+        self._placement_counts: Dict[str, int] = {}
+        # ICEBERG (CLUSTER 7): per-symbol fill-price PER PLACEMENT, so an iceberg's
+        # children fill at DIFFERENT prices and a weighted-average aggregation can
+        # be asserted (a naive mean / last-price bug then diverges). {symbol:[p0,
+        # p1,...]}; the i-th placement fills at seq[min(i, len-1)]. None (default)
+        # → avg_price = ltps[symbol] as before (existing tests unaffected).
+        self._fill_price_sequence = fill_price_sequence or {}
         # Pre-exit reconciliation guard: simulate the broker's live net book.
         # {symbol: signed_qty}. None (default) means the mock does NOT answer the
         # net-position probe → the base default (None) is used and the exit path
@@ -261,6 +276,17 @@ class MockBroker(BrokerClient):
     # order lifecycle
     async def place_order(self, order) -> OrderResult:
         self.placed.append(order)
+        # ICEBERG: reject this symbol's placement once it exceeds reject_after[sym]
+        # successful placements (models a mid-iceberg child rejection). Accepted
+        # (order-id issued) but 0 fill → the reconcile poll reports REJECTED.
+        self._placement_counts[order.symbol] = \
+            self._placement_counts.get(order.symbol, 0) + 1
+        _ra = self._reject_after.get(order.symbol)
+        if _ra is not None and self._placement_counts[order.symbol] > int(_ra):
+            return OrderResult(status="PLACED",
+                               broker_order_id="rej-" + order.symbol,
+                               symbol=order.symbol, qty=order.qty,
+                               filled_qty=0, avg_price=None)
         if order.symbol in self.reject_symbols:
             # Accepted (order_id issued) but NO fill — the reconcile poll will see
             # REJECTED. Mirrors a real exchange circuit-limit / RMS rejection.
@@ -273,10 +299,15 @@ class MockBroker(BrokerClient):
                                symbol=order.symbol, qty=order.qty,
                                filled_qty=filled,
                                avg_price=self.ltps.get(order.symbol))
+        _avg = self.ltps.get(order.symbol)
+        _seq = self._fill_price_sequence.get(order.symbol)
+        if _seq:
+            _idx = min(self._placement_counts[order.symbol] - 1, len(_seq) - 1)
+            _avg = _seq[_idx]
         return OrderResult(status="PLACED", broker_order_id="ord-" + order.symbol,
                            symbol=order.symbol, qty=order.qty,
                            filled_qty=order.qty,
-                           avg_price=self.ltps.get(order.symbol))
+                           avg_price=_avg)
 
     async def get_pending_orders(self) -> List[Any]:
         return list(self._pending)
@@ -344,6 +375,11 @@ class MockBroker(BrokerClient):
         # non-dry mock brokers (matches a real broker's near-instant MARKET fill).
         # ENTRY reconcile probe ("ord-<SYM>"): a rejected symbol reports REJECTED
         # (0 fill) so _fire_one drops the leg instead of registering a phantom.
+        if str(order_id).startswith("rej-"):
+            # ICEBERG mid-iceberg reject: the forced-reject placement reports
+            # REJECTED (0 fill) so the entry reconcile drops that child.
+            return {"status": "REJECTED", "filled_quantity": 0,
+                    "average_price": 0.0}
         if str(order_id).startswith("ord-"):
             esym = order_id[len("ord-"):]
             if esym in self.reject_symbols:
