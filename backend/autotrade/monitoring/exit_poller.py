@@ -28,6 +28,33 @@ log = logging.getLogger("kanida.autotrade.exit_poller")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
+def _persisted_exit_coid(session_id: str, symbol: str,
+                         broker_profile: Optional[str] = None) -> Optional[str]:
+    """The exit client_order_id already persisted on the position row (if any),
+    scoped to (session_id, symbol[, broker_profile]). Used by the kill/retry path
+    so the exit tag is STABLE across restarts (query-before-place). Best-effort:
+    any DB error → None (mint a fresh one)."""
+    try:
+        from falcon.db import falcon_conn
+        with falcon_conn() as con:
+            if broker_profile is not None:
+                r = con.execute(
+                    "SELECT exit_client_order_id FROM autotrade_positions "
+                    "WHERE session_id=? AND symbol=? "
+                    "AND COALESCE(broker_profile,'')=COALESCE(?,'')",
+                    (session_id, symbol, broker_profile)).fetchone()
+            else:
+                r = con.execute(
+                    "SELECT exit_client_order_id FROM autotrade_positions "
+                    "WHERE session_id=? AND symbol=?",
+                    (session_id, symbol)).fetchone()
+        v = r["exit_client_order_id"] if r else None
+        return str(v) if v not in (None, "") else None
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("_persisted_exit_coid %s/%s failed: %s", session_id, symbol, e)
+        return None
+
+
 class OrderbookSnapshot:
     """SPRINT CLUSTER 5 ITEM 6 — ONE broker orderbook fetch per poll CYCLE shared
     across N in-flight exit legs.
@@ -241,6 +268,229 @@ async def confirm_exit(
     return {"status": "TIMEOUT", "filled_qty": filled_qty, "exit_price": None}
 
 
+async def poll_order_fill(
+    order_id: Optional[str],
+    qty: int,
+    broker: Any,
+    *,
+    max_wait_sec: int = 60,
+    poll_interval_sec: float = 5.0,
+    status_provider: Optional[Callable[[str], dict]] = None,
+) -> Dict[str, Any]:
+    """SPRINT CLUSTER 8 — poll ONE exit order to a terminal state, returning
+    {status, filled_qty, avg_price} WITHOUT any registry mutation.
+
+    This is the CHILD-level confirmation primitive for the exit iceberg
+    (slice_and_confirm_exit): a large exit is placed as N child orders and each
+    child is confirmed here, but the registry close/partial is performed ONCE at
+    the end by the aggregator. confirm_exit() (which mutates the registry per
+    order) is deliberately NOT reused per child, because a single child COMPLETE
+    must NEVER mark the WHOLE multi-child position CLOSED.
+
+    status is one of COMPLETE / PARTIAL / REJECTED / CANCELLED / TIMEOUT / DRY_RUN.
+    A None / DRY_RUN order-id returns DRY_RUN immediately (paper — filled=qty).
+    Never mutates the registry; never places or cancels an order."""
+    if order_id is None or str(order_id).upper() in ("DRY_RUN", "NONE", ""):
+        return {"status": "DRY_RUN", "filled_qty": int(qty), "avg_price": None}
+    deadline = datetime.now(IST) + timedelta(seconds=max_wait_sec)
+    filled_qty = 0
+    avg_price = 0.0
+    _status_fn = status_provider if status_provider is not None \
+        else broker.get_order_status
+    while datetime.now(IST) < deadline:
+        try:
+            status_dict = await asyncio.to_thread(_status_fn, order_id)
+        except Exception as e:
+            log.warning("poll_order_fill %s: get_order_status error: %s — retrying",
+                        order_id, e)
+            await asyncio.sleep(poll_interval_sec)
+            continue
+        kite_status = str(status_dict.get("status", "")).upper()
+        filled_qty = int(status_dict.get("filled_quantity") or 0)
+        avg_price = float(status_dict.get("average_price") or 0.0)
+        if kite_status == "COMPLETE":
+            px = avg_price if avg_price > 0 else None
+            if filled_qty >= qty:
+                return {"status": "COMPLETE", "filled_qty": filled_qty,
+                        "avg_price": px}
+            return {"status": "PARTIAL", "filled_qty": filled_qty, "avg_price": px}
+        if kite_status == "DRY_RUN":
+            return {"status": "DRY_RUN", "filled_qty": int(qty), "avg_price": None}
+        if kite_status in ("REJECTED", "CANCELLED"):
+            return {"status": kite_status, "filled_qty": filled_qty,
+                    "avg_price": None}
+        await asyncio.sleep(poll_interval_sec)
+    return {"status": "TIMEOUT", "filled_qty": filled_qty, "avg_price": None}
+
+
+async def slice_and_confirm_exit(
+    *,
+    session_id: str,
+    symbol: str,
+    total_qty: int,
+    legs: list,
+    broker: Any,
+    registry: Any,
+    close_reason: str,
+    broker_profile: Optional[str] = None,
+    direction: str = "long",
+    instrument_type: str = "EQ",
+    kite_product: Optional[str] = None,
+    exec_cfg: Any = None,
+    parent_exit_coid: Optional[str] = None,
+    status_provider: Optional[Callable[[str], dict]] = None,
+    max_wait_sec: int = 60,
+    poll_interval_sec: float = 5.0,
+) -> Dict[str, Any]:
+    """SPRINT CLUSTER 8 — EXIT ICEBERG. Place `legs` child exits SEQUENTIALLY
+    (each <= the effective slice), CONFIRM each fill, AGGREGATE, and CLOSE the
+    position ONLY when the FULL `total_qty` is covered.
+
+    `total_qty` MUST already be the C1-clamped qty (never more than our_held): the
+    caller clamps FIRST, then slices the clamped qty — this function never clamps,
+    it only slices what it was given, so it can never place more than total_qty.
+
+    * All children fill (Σ == total_qty) → registry.mark_closed at the
+      quantity-weighted-average exit fill. COMPLETE.
+    * A child reject / partial / timeout STOPS further children: the filled portion
+      is booked via update_partial_exit (row stays OPEN at the remainder) and the
+      REMAINDER is flagged EXIT_FAILED (releases the gate → the guarded EXIT_FAILED
+      retry sweep re-attempts it, re-slicing the remainder). Never a mis-stated
+      full close.
+    * No child filled → EXIT_FAILED (nothing booked).
+
+    Single-flight is the CALLER's responsibility (the whole sliced exit runs under
+    ONE exit_gate claim / begin_exit_flight): this function claims/releases
+    nothing except the release implied by mark_exit_failed on the failure path,
+    matching the existing single-order exit paths."""
+    total = int(total_qty)
+    parent = parent_exit_coid or _order_ledger.make_client_order_id(
+        session_id, symbol)
+    filled_total = 0
+    weighted_px = 0.0
+    n_children = 0
+    child_oids: list = []
+    stopped_reason: Optional[str] = None
+
+    for i, leg_qty in enumerate(legs):
+        leg_qty = int(leg_qty)
+        if leg_qty <= 0:
+            continue
+        child_coid = f"{parent}-X{i}"
+        try:
+            res = await broker.place_market_exit(
+                symbol, leg_qty, instrument_type, kite_product=kite_product,
+                direction=direction, exec_cfg=exec_cfg,
+                client_order_id=child_coid)
+        except Exception as e:
+            stopped_reason = f"child {i} place raised: {e}"
+            log.error("iceberg exit %s/%s: %s — stopping at %d/%d filled",
+                      session_id, symbol, stopped_reason, filled_total, total)
+            break
+        if res is None or getattr(res, "status", None) == "FAILED":
+            stopped_reason = (f"child {i} rejected "
+                              f"({getattr(res, 'error', None)})")
+            log.error("iceberg exit %s/%s: %s — STOPPING; %d/%d covered",
+                      session_id, symbol, stopped_reason, filled_total, total)
+            break
+        oid = getattr(res, "broker_order_id", None)
+        is_dry = (oid is None or str(oid).upper() in ("DRY_RUN", "NONE", ""))
+        # Durable EXIT_PLACED per child (the ONE universal exit choke-point
+        # attribution key). Best-effort — never blocks the flatten.
+        _order_ledger.append_event(
+            session_id=session_id, symbol=symbol,
+            event_type=_order_ledger.EV_EXIT_PLACED,
+            broker_profile=broker_profile, broker_order_id=oid, qty=leg_qty,
+            source="exit", detail=f"{close_reason}:iceberg-child-{i}")
+        if is_dry:
+            filled_total += leg_qty
+            n_children += 1
+            continue
+        fill = await poll_order_fill(
+            oid, leg_qty, broker, max_wait_sec=max_wait_sec,
+            poll_interval_sec=poll_interval_sec, status_provider=status_provider)
+        st = fill.get("status")
+        fq = int(fill.get("filled_qty") or 0)
+        px = fill.get("avg_price")
+        if st in ("COMPLETE", "DRY_RUN"):
+            n_children += 1
+            filled_total += leg_qty
+            if px:
+                weighted_px += float(px) * leg_qty
+            if oid:
+                child_oids.append(str(oid))
+            continue
+        if st == "PARTIAL":
+            if fq > 0:
+                filled_total += fq
+                if px:
+                    weighted_px += float(px) * fq
+                if oid:
+                    child_oids.append(str(oid))
+            # Cancel the resting remainder of THIS child so it can't fill alongside
+            # the retry (a resting order does not reduce the broker net).
+            try:
+                await asyncio.to_thread(broker.cancel_order_sync, oid)
+            except Exception as _ce:  # pragma: no cover - best-effort
+                log.warning("iceberg exit %s/%s: cancel of partial child %s "
+                            "failed: %s", session_id, symbol, oid, _ce)
+            stopped_reason = f"child {i} PARTIAL {fq}/{leg_qty}"
+            break
+        if st == "TIMEOUT":
+            try:
+                await asyncio.to_thread(broker.cancel_order_sync, oid)
+            except Exception as _ce:  # pragma: no cover - best-effort
+                log.warning("iceberg exit %s/%s: cancel of timed-out child %s "
+                            "failed: %s", session_id, symbol, oid, _ce)
+            stopped_reason = f"child {i} TIMEOUT"
+            break
+        # REJECTED / CANCELLED
+        stopped_reason = f"child {i} {st}"
+        break
+
+    avg_px = (weighted_px / filled_total) if (filled_total > 0
+                                              and weighted_px > 0) else None
+    primary_oid = child_oids[0] if child_oids else None
+
+    if filled_total >= total:
+        # FULL cover → CLOSE the aggregate position ONCE, at the weighted-avg fill.
+        registry.mark_closed(symbol, close_reason, exit_price=avg_px,
+                             broker_profile=broker_profile,
+                             exit_order_id=primary_oid)
+        log.warning("iceberg exit %s/%s: FULL cover %d across %d child(ren) "
+                    "@ %s — CLOSED", session_id, symbol, filled_total,
+                    n_children, avg_px)
+        return {"status": "COMPLETE", "filled_qty": filled_total,
+                "exit_price": avg_px, "n_children": n_children,
+                "symbol": symbol, "iceberg": True}
+    if filled_total > 0:
+        # Partial cover → book the filled portion, leave the REMAINDER OPEN and
+        # flag it EXIT_FAILED (guarded retry re-slices it). NEVER a full close.
+        registry.update_partial_exit(symbol, filled_total, avg_px,
+                                     broker_profile=broker_profile)
+        remaining = total - filled_total
+        registry.mark_exit_failed(
+            symbol,
+            f"iceberg exit partial: covered {filled_total}/{total} "
+            f"({stopped_reason})",
+            broker_profile=broker_profile, exit_order_id=primary_oid)
+        log.error("iceberg exit %s/%s: PARTIAL cover %d/%d — remainder %d "
+                  "EXIT_FAILED for guarded retry (%s)", session_id, symbol,
+                  filled_total, total, remaining, stopped_reason)
+        return {"status": "EXIT_FAILED", "filled_qty": filled_total,
+                "remaining_qty": remaining, "exit_price": avg_px,
+                "n_children": n_children, "symbol": symbol, "iceberg": True,
+                "partial": True, "stopped_reason": stopped_reason}
+    # No child filled → nothing booked; flag EXIT_FAILED for retry.
+    registry.mark_exit_failed(
+        symbol, f"iceberg exit: no child filled ({stopped_reason})",
+        broker_profile=broker_profile)
+    log.error("iceberg exit %s/%s: NO child filled — EXIT_FAILED (%s)",
+              session_id, symbol, stopped_reason)
+    return {"status": "EXIT_FAILED", "filled_qty": 0, "n_children": 0,
+            "symbol": symbol, "iceberg": True, "stopped_reason": stopped_reason}
+
+
 async def adopt_tagged_exit_if_present(
     session_id: str,
     symbol: str,
@@ -329,6 +579,40 @@ async def cancel_and_retry_exit(
     last_result: Dict[str, Any] = {"status": "FAILED"}
     current_order_id = order_id
 
+    # ITEM 2 (C3 I3a) — QUERY-BEFORE-PLACE on the KILL/RETRY exit path. Until now
+    # this path placed an UNTAGGED retry exit, so the adopt_tagged_exit_if_present
+    # primitive was dormant here (no persisted exit client_order_id to match). Mint
+    # + persist a STABLE exit client_order_id (reuse an existing one so the tag is
+    # stable across restarts), then ADOPT any already-placed tagged order at the
+    # broker instead of placing a duplicate — cross-restart exactly-once on the kill
+    # path. Best-effort; paper's get_orders() is None → adopt returns None → place
+    # exactly as before (byte-for-byte unchanged).
+    exit_coid = _persisted_exit_coid(session_id, symbol, broker_profile)
+    if not exit_coid:
+        exit_coid = _order_ledger.make_client_order_id(session_id, symbol,
+                                                       attempt=1)
+        try:
+            registry.set_exit_client_order_id(symbol, exit_coid,
+                                              broker_profile=broker_profile)
+        except Exception as e:  # pragma: no cover - never block the retry
+            log.warning("cancel_and_retry_exit %s/%s: persist exit coid failed: %s",
+                        session_id, symbol, e)
+    try:
+        _adopted = await adopt_tagged_exit_if_present(
+            session_id=session_id, symbol=symbol,
+            exit_client_order_id=exit_coid, qty=qty, broker=broker,
+            registry=registry, close_reason=close_reason,
+            broker_profile=broker_profile, direction=direction)
+    except Exception as e:  # pragma: no cover - never block the retry
+        log.warning("cancel_and_retry_exit %s/%s: adopt raised: %s",
+                    session_id, symbol, e)
+        _adopted = None
+    if _adopted is not None:
+        log.warning("cancel_and_retry_exit %s/%s: ADOPTED an existing tagged exit "
+                    "(status=%s) — placed NO new order", session_id, symbol,
+                    _adopted.get("status"))
+        return _adopted
+
     for attempt in range(1, max_retries + 1):
         log.warning(
             "cancel_and_retry_exit %s/%s: attempt %d/%d (cancelling order %s)",
@@ -386,10 +670,13 @@ async def cancel_and_retry_exit(
             qty = int(our_held)
 
         # Step 3: fresh market exit in the CLOSING side (long→SELL, short→BUY).
+        # ITEM 2: thread the stable exit client_order_id so this placement carries
+        # OUR tag → a later retry / restart can ADOPT it (query-before-place).
         try:
             res = await broker.place_market_exit(symbol, qty, instrument_type,
                                                   kite_product=kite_product,
-                                                  direction=direction)
+                                                  direction=direction,
+                                                  client_order_id=exit_coid)
         except Exception as e:
             log.error(
                 "cancel_and_retry_exit %s/%s attempt %d: place_market_exit raised: %s",

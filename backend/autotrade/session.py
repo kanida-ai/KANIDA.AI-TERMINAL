@@ -846,7 +846,48 @@ def preview_session_sizing(config: TradingSessionConfig,
             kill_switch_target_pct=config.kill_switch_target_pct,
             kill_switch_stop_pct=config.kill_switch_stop_pct),
         "skipped_picks": [p for p in positions if p.get("status") == "SKIPPED"],
+        # ITEM 3 — explicit risk_basis label + the ₹ concentration/fat-finger
+        # thresholds so the leverage math is unambiguous in the preview.
+        "risk_basis": getattr(config, "risk_basis", "notional"),
+        "concentration_limits": risk_manager.concentration_thresholds_rs(config),
     }
+
+
+def estimate_session_charges_rs(session_id: str, product: str) -> float:
+    """SPRINT CLUSTER 8 ITEM 5 — estimate the round-trip statutory + broker charges
+    (₹) across a session's positions, for surfacing a NET P&L (gross − charges) in
+    the live panel. For each still-relevant row: buy turnover = qty×avg_price, sell
+    turnover = qty×exit_price (CLOSED) or qty×ltp (OPEN mark = "if exited now").
+    Uses the per-row instrument_type (F&O vs equity charge model) and the session's
+    product. Best-effort — never raises; any error → 0.0 (a floor, not optimistic)."""
+    from .charges import estimate_charges
+    total = 0.0
+    try:
+        with falcon_conn() as con:
+            rows = con.execute(
+                "SELECT qty, avg_price, ltp, exit_price, status, instrument_type "
+                "FROM autotrade_positions WHERE session_id=? "
+                "AND status IN ('OPEN','EXIT_FAILED','CLOSED')",
+                (session_id,)).fetchall()
+        for r in rows:
+            qty = int(r["qty"] or 0)
+            avg = float(r["avg_price"] or 0.0)
+            if qty <= 0 or avg <= 0:
+                continue
+            itype = r["instrument_type"] or "EQ"
+            if str(r["status"]) == "CLOSED":
+                sell_px = float(r["exit_price"] or 0.0) or avg
+            else:
+                sell_px = float(r["ltp"] or 0.0) or avg
+            buy_value = qty * avg
+            sell_value = qty * sell_px
+            ch = estimate_charges(product, buy_value, sell_value, legs=2,
+                                  instrument_type=itype)
+            total += float(ch.get("total") or 0.0)
+    except Exception as e:  # pragma: no cover - never block status()
+        log.debug("estimate_session_charges_rs(%s) failed: %s", session_id, e)
+        return 0.0
+    return round(total, 2)
 
 
 async def _our_working_exit_qty(broker: Any, symbol: str,
@@ -1147,6 +1188,32 @@ async def _exit_single_position_inner(
     # type ("EQ"), not the trading product ("MTF"/"CNC"). Without this, MTF exits
     # become CNC sells and Kite rejects them with "Holding quantity: 0".
     effective_product = kite_product or position.get("order_product")
+    # ── EXIT ICEBERG (SPRINT CLUSTER 8, additive, DEFAULT-OFF) ────────────────
+    # A large exit (qty > the effective slice/freeze cap) is sliced into child
+    # exits placed SEQUENTIALLY, each confirmed, aggregated; the position CLOSES
+    # only at full cover — a child reject/partial leaves the REMAINDER EXIT_FAILED
+    # (guarded retry). `qty` here is ALREADY the C1-clamped live-held qty (clamp +
+    # working-exit netting above), so we slice the CLAMPED qty and can never
+    # oversell (clamp-BEFORE-slice). INERT when iceberg is off or qty <= slice (a
+    # single order, byte-for-byte the path below). The whole sliced exit runs under
+    # this position's single exit-flight (begin_exit_flight in _exit_single_position)
+    # + the exit_gate claim = ONE flight.
+    if getattr(exec_cfg, "iceberg_enabled", False):
+        from autotrade import iceberg as _iceberg_mod
+        _ice_price = position.get("ltp") or position.get("avg_price")
+        _ice_legs = _iceberg_mod.plan_for(exec_cfg, symbol, int(qty),
+                                          _ice_price or None)
+        if len(_ice_legs) > 1:
+            from autotrade.monitoring.exit_poller import slice_and_confirm_exit
+            log.warning("per-stock stop %s/%s: ICEBERG exit %d → %d slices %s",
+                        session_id, symbol, int(qty), len(_ice_legs), _ice_legs)
+            return await slice_and_confirm_exit(
+                session_id=session_id, symbol=symbol, total_qty=int(qty),
+                legs=_ice_legs, broker=broker, registry=registry,
+                close_reason=reason, broker_profile=prof_id,
+                direction=direction, instrument_type=itype,
+                kite_product=effective_product, exec_cfg=exec_cfg,
+                parent_exit_coid=exit_coid)
     try:
         res = await broker.place_market_exit(symbol, qty, itype,
                                              kite_product=effective_product,
@@ -2168,6 +2235,23 @@ class TradingSession:
             ref_price = float(prefetch[symbol]["ltp"])
         else:
             ref_price = broker.get_ltp(symbol) or 0.0
+        # ── CONCENTRATION / FAT-FINGER CAP (SPRINT CLUSTER 8 ITEM 3) ────────────
+        # A per-order safety cap on how much a SINGLE name may take (max_pct_per_name
+        # × capital, an absolute ₹ notional cap, and a qty sanity cap). A breaching
+        # leg is CLAMPED (default) or REFUSED with a clear reason — e.g. a whitelist
+        # collapsing to ONE name would otherwise pour the whole book into it. ALL
+        # caps DEFAULT None → INERT (byte-for-byte unchanged) until an operator opts
+        # in. Applied AFTER sizing, BEFORE the iceberg slice / placement.
+        from .risk_manager import check_concentration as _check_conc
+        _conc = _check_conc(self.config, symbol, int(qty), ref_price or None)
+        if _conc.refused:
+            log.warning("session %s: %s", self.session_id, _conc.reason)
+            return {"symbol": symbol, "status": "SKIPPED",
+                    "reason": _conc.reason, "concentration_refused": True,
+                    "broker_profile": prof.profile_id}
+        if _conc.clamped:
+            log.warning("session %s: %s", self.session_id, _conc.reason)
+            qty = int(_conc.qty)
         # ── ICEBERG ENTRY (SPRINT CLUSTER 7, CAP 2/3, additive, DEFAULT-OFF) ────
         # When iceberg is enabled AND the sized qty exceeds the effective slice cap
         # (min of the configured slice + the per-symbol exchange FREEZE quantity),
@@ -2859,6 +2943,7 @@ class TradingSession:
                             registry=self.registry,
                             gtt_manager=self.gtt_manager,
                             kite_product=self.config.order_product,
+                            exec_cfg=self.config,
                         ))
                 if _exit_coros:
                     await asyncio.gather(*_exit_coros, return_exceptions=True)
@@ -3024,10 +3109,11 @@ class TradingSession:
         even if the timer thread was dropped by a restart.
 
         PER-STOCK SOFTWARE STOP: before running the portfolio trail engine, each
-        open position is checked against config.stop_pct. If a single stock
-        has fallen more than stop_pct from its entry, OUR backend exits just that
-        position (cancel its GTT first, then market sell). The GTT at -3% remains
-        the broker-held backup; our software stop fires earlier (default -1.5%).
+        open position is checked against config.stop_pct (fraction; DEFAULT 0.03 =
+        3%). If a single stock has fallen more than stop_pct from its entry, OUR
+        backend exits just that position (cancel its GTT first, then market sell).
+        The broker-held per-position GTT (config.per_position_stop_pct, DEFAULT
+        0.08 = 8%) remains the wider backup; our software stop fires earlier.
         After per-stock exits the trail engine runs on the remaining positions."""
         from .monitoring import trail_engine
 
@@ -3396,6 +3482,10 @@ class TradingSession:
         invested_basis = self.monitor.invested_basis()
         gr_invested = self.monitor.compute_gross_return_invested()
         gr_fund = self.monitor.compute_gross_return()
+        # ITEM 5 — NET P&L estimate (computed once).
+        _charges_est = estimate_session_charges_rs(self.session_id,
+                                                   self.config.order_product)
+        _gross_pnl_rs = (gr_invested * invested_basis) if invested_basis else 0.0
         out = {
             "session_id": self.session_id,
             "status": status,
@@ -3404,6 +3494,19 @@ class TradingSession:
             "gross_return_fund": gr_fund,         # on-fund (÷ allocated)
             "invested_basis": invested_basis,
             "total_allocated_capital": self.config.total_allocated_capital,
+            # ITEM 3 — explicit risk_basis label + ₹ concentration/fat-finger caps.
+            "risk_basis": getattr(self.config, "risk_basis", "notional"),
+            "concentration_limits":
+                risk_manager.concentration_thresholds_rs(self.config),
+            # ITEM 5 — NET P&L (gross − estimated charges) surfaced alongside gross
+            # so the user sees the REAL number. This is a DISPLAY figure only — the
+            # kill/trail DECISION basis stays the GROSS invested-basis return.
+            "gross_pnl": round(_gross_pnl_rs, 2),
+            "estimated_charges": _charges_est,
+            "net_pnl": round(_gross_pnl_rs - _charges_est, 2)
+            if invested_basis else None,
+            "net_return": round((_gross_pnl_rs - _charges_est) / invested_basis, 6)
+            if invested_basis else None,
             "kill_switch_enabled": self.config.kill_switch_enabled,
             "kill_switch_pct": self.config.kill_switch_pct,
             "kill_switch_direction": self.config.kill_switch_direction,

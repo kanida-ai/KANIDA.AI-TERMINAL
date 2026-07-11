@@ -711,7 +711,19 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
         #    (symbol, product). The invariant's left side. ─────────────────────
         account_positions = _account_open_positions_for(
             bare_sym, product, prof_scope, _prod_cache)
-        db_held_all = sum(int(p.get("qty") or 0) for p in account_positions)
+        # ITEM 6(a) — SIGNED sum so an OPPOSITE-direction sibling position never
+        # inflates the invariant's left side. Two sessions long+short the same
+        # (symbol, product) NET to 0 at the broker (broker_held=abs(net)=0); the OLD
+        # unsigned Σqty gave db_held_all=200 → a false CLOSED_EXTERNAL_FLAT of BOTH.
+        # A SIGNED sum (long +qty, short −qty), abs()'d, matches the broker's signed
+        # net. Byte-for-byte unchanged for any single-direction group (all long OR
+        # all short → |signed| == the old unsigned Σqty); it ONLY differs when the
+        # group genuinely mixes directions (the case this fixes).
+        db_held_signed = sum(
+            (-1 if str(p.get("direction") or "long").lower() == "short" else 1)
+            * int(p.get("qty") or 0)
+            for p in account_positions)
+        db_held_all = abs(db_held_signed)
 
         # ── INVARIANT ─────────────────────────────────────────────────────────
         if broker_held == db_held_all:
@@ -750,6 +762,39 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                     continue
                 sym = pos.get("symbol")
                 prof_id = pos.get("broker_profile")
+                # ITEM 4 (SPRINT CLUSTER 8) — PARTIAL-FILL-AWARE close. A confirmed
+                # exit whose filled_qty is LESS than the position qty (a deliberate
+                # partial that fully filled) must NOT book a FULL close — that would
+                # over-close the row and realise P&L on shares still held. Book ONLY
+                # the filled portion via update_partial_exit and leave the REMAINDER
+                # OPEN. A full/over fill (filled_qty >= qty) keeps the existing full
+                # close (byte-for-byte unchanged for that case).
+                _pos_qty = int(pos.get("qty") or 0)
+                _ev_filled = int(ev.get("filled_qty") or 0)
+                if 0 < _ev_filled < _pos_qty:
+                    try:
+                        registry.update_partial_exit(
+                            sym, _ev_filled, ev.get("exit_price"),
+                            broker_profile=prof_id)
+                    except Exception as e:  # pragma: no cover - defensive
+                        log.warning("reconcile: partial close failed %s/%s: %s",
+                                    session.session_id, sym, e)
+                        continue
+                    changed = True
+                    deficit -= _ev_filled
+                    log.warning(
+                        "reconcile %s/%s: PARTIAL close %d/%d via %s @ %s (order %s) "
+                        "— remainder %d left OPEN", session.session_id, sym,
+                        _ev_filled, _pos_qty, ev["close_reason"], ev["exit_price"],
+                        ev["exit_order_id"], _pos_qty - _ev_filled)
+                    actions.append({
+                        "action": "PARTIAL_CLOSED_RECONCILED", "symbol": sym,
+                        "product": product, "filled_qty": _ev_filled,
+                        "remaining_qty": _pos_qty - _ev_filled,
+                        "exit_price": ev["exit_price"],
+                        "exit_order_id": ev["exit_order_id"],
+                        "close_reason": ev["close_reason"]})
+                    continue
                 try:
                     registry.mark_closed(
                         sym, ev["close_reason"], exit_price=ev["exit_price"],

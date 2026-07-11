@@ -485,6 +485,34 @@ class TradingSessionConfig:
     iceberg_freeze_qty_default: Optional[int] = None
     iceberg_freeze_qty_map: Optional[Dict[str, int]] = None
 
+    # ── CONCENTRATION / FAT-FINGER LIMITS (SPRINT CLUSTER 8 ITEM 3) ────────────
+    # Per-ORDER safety caps checked at sizing (_place_one) + the pre-trade layer.
+    # A leg breaching a cap is CLAMPED down (fatfinger_policy="clamp", DEFAULT) or
+    # REFUSED (policy="refuse") with a clear reason — e.g. a symbol_whitelist that
+    # collapses to ONE name would otherwise pour the whole book into it. ALL DEFAULT
+    # None → INERT (byte-for-byte unchanged) so nothing existing changes until an
+    # operator opts in. Recommended conservative values (operator sets): a
+    # max_pct_per_name ~0.35, fatfinger_max_notional_per_order ~2× a normal slice.
+    #   max_pct_per_name               : max fraction of total_allocated_capital a
+    #                                    SINGLE name's notional (qty×price) may take.
+    #   fatfinger_max_notional_per_order: absolute ₹ notional cap for one order.
+    #   fatfinger_max_qty_per_order     : absolute share/lot qty cap for one order.
+    #   fatfinger_policy                : "clamp" (default, reduce qty to fit) |
+    #                                    "refuse" (drop the leg with a reason).
+    max_pct_per_name: Optional[float] = None
+    fatfinger_max_notional_per_order: Optional[float] = None
+    fatfinger_max_qty_per_order: Optional[int] = None
+    fatfinger_policy: str = "clamp"
+
+    # ── RISK BASIS LABEL (SPRINT CLUSTER 8 ITEM 3) ────────────────────────────
+    # The explicit denominator the kill/return thresholds are measured against, so
+    # the leverage math is unambiguous to the user. The kill switch fires on the
+    # FROZEN INVESTED / NOTIONAL basis (Σ qty×avg), so the default is "notional";
+    # "capital" (= the fund) and "margin" are accepted labels for display/reporting.
+    # This is a LABEL only — it does NOT change the kill denominator (that stays the
+    # frozen invested_basis in monitor/tick/ws_driver). Surfaced in preview/status.
+    risk_basis: str = "notional"
+
     # ── Universe filter ──────────────────────────────────────────────────────
     # Restricts the Falcon pick pool to a named index membership before ranking.
     # Applied IN the SQL query (so ranked ordering respects the filtered set).
@@ -788,6 +816,30 @@ class TradingSessionConfig:
                 "iceberg_enabled requires a slice source: set iceberg_slice_qty, "
                 "iceberg_slice_value, iceberg_freeze_qty_default, or "
                 "iceberg_freeze_qty_map (else slicing would never engage)")
+        # Concentration / fat-finger limits (SPRINT CLUSTER 8 ITEM 3)
+        if self.max_pct_per_name is not None and \
+                not (0.0 < float(self.max_pct_per_name) <= 1.0):
+            raise ValueError(
+                "max_pct_per_name must be a fraction in (0, 1] when set, got "
+                f"{self.max_pct_per_name}")
+        if self.fatfinger_max_notional_per_order is not None and \
+                float(self.fatfinger_max_notional_per_order) <= 0:
+            raise ValueError(
+                "fatfinger_max_notional_per_order must be > 0 (₹) when set, got "
+                f"{self.fatfinger_max_notional_per_order}")
+        if self.fatfinger_max_qty_per_order is not None and \
+                int(self.fatfinger_max_qty_per_order) < 1:
+            raise ValueError(
+                "fatfinger_max_qty_per_order must be an integer >= 1 when set, got "
+                f"{self.fatfinger_max_qty_per_order}")
+        if self.fatfinger_policy not in ("clamp", "refuse"):
+            raise ValueError(
+                "fatfinger_policy must be 'clamp' or 'refuse', got "
+                f"{self.fatfinger_policy!r}")
+        if self.risk_basis not in ("capital", "notional", "margin"):
+            raise ValueError(
+                "risk_basis must be one of capital|notional|margin, got "
+                f"{self.risk_basis!r}")
         # Universe filter
         _VALID_UNIVERSE_FILTERS = ("all500", "nifty50", "nifty100", "nifty200", "fno")
         if self.universe_filter not in _VALID_UNIVERSE_FILTERS:
@@ -990,6 +1042,17 @@ class TradingSessionConfig:
                 {str(k): int(v)
                  for k, v in d["iceberg_freeze_qty_map"].items()}
                 if d.get("iceberg_freeze_qty_map") is not None else None),
+            max_pct_per_name=(float(d["max_pct_per_name"])
+                              if d.get("max_pct_per_name") is not None else None),
+            fatfinger_max_notional_per_order=(
+                float(d["fatfinger_max_notional_per_order"])
+                if d.get("fatfinger_max_notional_per_order") is not None
+                else None),
+            fatfinger_max_qty_per_order=(
+                int(d["fatfinger_max_qty_per_order"])
+                if d.get("fatfinger_max_qty_per_order") is not None else None),
+            fatfinger_policy=d.get("fatfinger_policy", "clamp"),
+            risk_basis=d.get("risk_basis", "notional"),
         )
         return cfg
 

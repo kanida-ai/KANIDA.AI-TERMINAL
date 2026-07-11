@@ -399,7 +399,7 @@ def run_migrations() -> dict:
             "autotrade_broker_profiles", "autotrade_slippage",
             "autotrade_portfolio_snapshots", "autotrade_kill_switch_log",
             "broker_accounts", "autotrade_ladders", "autotrade_recon_alerts",
-            "autotrade_order_events", "autotrade_alerts",
+            "autotrade_order_events", "autotrade_alerts", "autotrade_claims",
         ):
             if _table_exists(con, t):
                 created_tables.append(t)
@@ -745,6 +745,18 @@ CREATE INDEX IF NOT EXISTS idx_autotrade_alerts_incident
     ON autotrade_alerts(incident_id, ts);
 CREATE INDEX IF NOT EXISTS idx_autotrade_alerts_session
     ON autotrade_alerts(session_id, ts DESC);
+
+-- SPRINT CLUSTER 8 ITEM 2 — cross-process DURABLE CLAIMS (CAS + lease). Backs the
+-- in-process fire_guard (_FIRED/_ENTRY_CLAIMED) and the exit single-flight so a
+-- claim survives a restart and holds ACROSS processes. Keyed by claim_key
+-- ("fire:<sid>" | "entry:<sid>" | "exitflight:<sid>:<sym>"); leased_until is an ISO
+-- IST timestamp — a claim whose lease has passed is takeable by a new claimant.
+CREATE TABLE IF NOT EXISTS autotrade_claims (
+    claim_key    TEXT PRIMARY KEY,   -- unique claim identity
+    holder       TEXT,               -- optional holder tag (pid/host/diag)
+    leased_until TEXT NOT NULL,      -- ISO IST; claim is live while now < this
+    created_at   TEXT NOT NULL       -- ISO IST when (re)claimed
+);
 """
 
 

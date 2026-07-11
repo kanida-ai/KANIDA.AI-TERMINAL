@@ -1,12 +1,17 @@
 """Intraday-basket TRAILING-PROFIT decision engine (strategy=="intraday_basket").
 
-PURE decision function over the NOTIONAL / invested-basis basket gross return G
-(= PortfolioMonitor.compute_gross_return_invested) + the persisted trail state
+PURE decision function over the basket gross return G + the persisted trail state
 (armed, peak). It DECIDES only — it never places or cancels an order. The caller
-(session.tick / ws_driver / square-off scheduler) executes the flatten by
+(session._tick_intraday / ws_driver / square-off scheduler) executes the flatten by
 REUSING the existing kill-switch flatten path (KillSwitchExecutor.fire), passing
-the returned reason through as the close_reason. The denominator is the FROZEN
-invested basis, identical to the portfolio kill switch — never the fund.
+the returned reason through as the close_reason.
+
+BASIS (2026-07-07): the caller feeds the ALLOCATED-CAPITAL gross return G =
+PortfolioMonitor.compute_gross_return() = (uPnL + realised) / total_allocated_
+capital — so arm / floor / giveback / stop are "% of deployed CAPITAL", which is
+leverage-correct. (This is DISTINCT from the portfolio KILL SWITCH, which fires on
+the frozen INVESTED/NOTIONAL basis; the trail engine deliberately uses the capital
+basis, never the notional and never the raw fund via a separate denominator.)
 
 DECISION TABLE (evaluated top to bottom, each tick):
 

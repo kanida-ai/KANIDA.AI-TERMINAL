@@ -33,6 +33,7 @@ class MockBroker(BrokerClient):
                  gtts: Optional[Dict[str, dict]] = None,
                  available_margin: Optional[float] = None,
                  slm_available: bool = True,
+                 exit_reject_after: Optional[Dict[str, int]] = None,
                  order_status: Optional[Dict[str, dict]] = None):
         super().__init__(profile, dry_run=dry_run)
         # RMS CAP 1: the account's FREE equity margin the pre-trade gate sizes
@@ -115,6 +116,12 @@ class MockBroker(BrokerClient):
         self._no_future_symbols = no_future_symbols or set()
         self._pending = pending_orders or []
         self.partial_fills = partial_fills or {}
+        # EXIT ICEBERG (CLUSTER 8): after this many SUCCESSFUL exit placements of a
+        # symbol, the next place_market_exit returns FAILED (models a mid-iceberg
+        # child exit rejection). {symbol: n}. None (default) → no effect (existing
+        # tests unaffected). The rejecting placement is NOT recorded in `exits`.
+        self._exit_reject_after = exit_reject_after or {}
+        self._exit_placement_counts: Dict[str, int] = {}
         self.placed: List[Any] = []
         self.exits: List[tuple] = []          # (symbol, qty) — unchanged shape
         self.exit_calls: List[dict] = []      # full exit args incl. direction
@@ -411,6 +418,16 @@ class MockBroker(BrokerClient):
         # (it never places a real order).
         if self.exit_delay_sec:
             await asyncio.sleep(self.exit_delay_sec)
+        # EXIT ICEBERG: reject this symbol's exit AFTER exit_reject_after[sym]
+        # successful placements (mid-iceberg child rejection). Not recorded.
+        _era = self._exit_reject_after.get(symbol)
+        if _era is not None:
+            if self._exit_placement_counts.get(symbol, 0) >= int(_era):
+                return OrderResult(status="FAILED", broker_order_id=None,
+                                   symbol=symbol, qty=qty,
+                                   error="mock exit rejected (iceberg child)")
+            self._exit_placement_counts[symbol] = \
+                self._exit_placement_counts.get(symbol, 0) + 1
         self.exits.append((symbol, qty))
         self.exit_calls.append({"symbol": symbol, "qty": qty,
                                 "instrument_type": instrument_type,

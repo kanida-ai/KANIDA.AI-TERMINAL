@@ -40,6 +40,101 @@ _HOLDING_STATUSES = ("RUNNING", "KILLING_INCOMPLETE")
 _EPS = 1e-6
 
 
+# ── CONCENTRATION / FAT-FINGER LIMITS (SPRINT CLUSTER 8 ITEM 3) ───────────────
+
+@dataclass
+class ConcentrationDecision:
+    qty: int                       # the (possibly clamped) qty to place
+    refused: bool = False          # True → drop the leg entirely
+    clamped: bool = False          # True → qty was reduced from the requested
+    reason: Optional[str] = None
+    notional: float = 0.0          # requested notional (requested_qty × price)
+    cap_rs: Optional[float] = None  # the effective ₹ notional cap that governed
+
+
+def concentration_thresholds_rs(config) -> Dict[str, Optional[float]]:
+    """The ₹ concentration/fat-finger thresholds for a config, for surfacing in the
+    preview/start response so the leverage math is unambiguous. None where a cap is
+    not set (inert)."""
+    account = float(getattr(config, "total_allocated_capital", 0.0) or 0.0)
+    mpn = getattr(config, "max_pct_per_name", None)
+    return {
+        "max_per_name_rs": (float(mpn) * account) if mpn else None,
+        "max_notional_per_order_rs": getattr(
+            config, "fatfinger_max_notional_per_order", None),
+        "max_qty_per_order": getattr(config, "fatfinger_max_qty_per_order", None),
+    }
+
+
+def check_concentration(config, symbol: str, requested_qty: int,
+                        price: Optional[float]) -> ConcentrationDecision:
+    """Apply the per-order concentration / fat-finger caps to ONE leg.
+
+    Caps (each INERT when unset — default None → byte-for-byte unchanged):
+      * max_pct_per_name × total_allocated_capital → a ₹ notional cap per name.
+      * fatfinger_max_notional_per_order            → an absolute ₹ notional cap.
+      * fatfinger_max_qty_per_order                 → an absolute qty cap.
+
+    The SMALLEST governing ₹ notional cap → a max qty = floor(cap / price); the qty
+    cap is applied on top. fatfinger_policy: "clamp" (DEFAULT) reduces the qty to
+    fit; "refuse" drops the whole leg. A cap that collapses the qty to 0 REFUSES
+    regardless of policy (a 0-qty order is meaningless). Returns a decision the
+    caller (sizing/_place_one + pre-trade) acts on."""
+    req = int(requested_qty or 0)
+    px = float(price or 0.0)
+    notional = req * px if px > 0 else 0.0
+    account = float(getattr(config, "total_allocated_capital", 0.0) or 0.0)
+    policy = getattr(config, "fatfinger_policy", "clamp")
+
+    caps_rs: List[float] = []
+    mpn = getattr(config, "max_pct_per_name", None)
+    if mpn and account > 0:
+        caps_rs.append(float(mpn) * account)
+    mno = getattr(config, "fatfinger_max_notional_per_order", None)
+    if mno:
+        caps_rs.append(float(mno))
+    notional_cap = min(caps_rs) if caps_rs else None
+
+    qty = req
+    clamped = False
+    reason: Optional[str] = None
+
+    # ₹ notional cap → a max qty (needs a positive price to convert).
+    if notional_cap is not None and px > 0 and notional > notional_cap + _EPS:
+        max_qty = int(notional_cap // px)
+        if max_qty <= 0:
+            return ConcentrationDecision(
+                qty=0, refused=True, notional=notional, cap_rs=notional_cap,
+                reason=(f"fat-finger REFUSE {symbol}: ₹{px:,.2f}/share exceeds the "
+                        f"₹{notional_cap:,.0f} per-order notional cap (max qty 0)"))
+        if policy == "refuse":
+            return ConcentrationDecision(
+                qty=0, refused=True, notional=notional, cap_rs=notional_cap,
+                reason=(f"fat-finger REFUSE {symbol}: notional ₹{notional:,.0f} "
+                        f"exceeds cap ₹{notional_cap:,.0f} (policy=refuse)"))
+        qty = max_qty
+        clamped = True
+        reason = (f"concentration CLAMP {symbol}: qty {req}→{qty} "
+                  f"(notional ₹{notional:,.0f} > cap ₹{notional_cap:,.0f})")
+
+    # Absolute qty sanity cap (applied on top of any notional clamp).
+    mq = getattr(config, "fatfinger_max_qty_per_order", None)
+    if mq is not None and qty > int(mq):
+        if policy == "refuse":
+            return ConcentrationDecision(
+                qty=0, refused=True, notional=notional, cap_rs=notional_cap,
+                reason=(f"fat-finger REFUSE {symbol}: qty {qty} exceeds the "
+                        f"{int(mq)} per-order qty cap (policy=refuse)"))
+        qty = int(mq)
+        clamped = True
+        reason = (f"fat-finger CLAMP {symbol}: qty {req}→{qty} "
+                  f"(per-order qty cap {int(mq)})")
+
+    return ConcentrationDecision(qty=qty, refused=False, clamped=clamped,
+                                 reason=reason, notional=notional,
+                                 cap_rs=notional_cap)
+
+
 # ── CAP 1: per-user committed-capital ledger + pre-trade margin gate ──────────
 
 @dataclass

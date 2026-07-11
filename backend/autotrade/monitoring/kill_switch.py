@@ -150,6 +150,12 @@ class KillSwitchExecutor:
         positions = self.registry.get_open_positions()
         exit_coros = []
         exit_meta: List[Dict[str, Any]] = []
+        # EXIT ICEBERG (SPRINT CLUSTER 8): positions whose CLAMPED exit qty exceeds
+        # the effective slice/freeze cap are routed to a sequential sliced exit
+        # (one coroutine per position, gathered after the parallel single-order
+        # exits). Empty unless iceberg_enabled → the parallel path below is
+        # byte-for-byte unchanged.
+        sliced_jobs: List[Any] = []
         for pos in positions:
             symbol = pos["symbol"]
             broker = self.brokers.get(pos.get("broker_profile")) \
@@ -261,6 +267,35 @@ class KillSwitchExecutor:
                             "live-held; broker shrank under us)",
                             self.session_id, symbol, qty, int(our_held))
                 qty = int(our_held)
+            # ── EXIT ICEBERG (SPRINT CLUSTER 8) — slice a large kill exit ──────
+            # `qty` is ALREADY clamped to our_held (clamp above) → we slice the
+            # CLAMPED qty (clamp-BEFORE-slice; the sliced total can never exceed
+            # our_held). INERT when iceberg is off or qty <= slice → the unchanged
+            # single-order parallel path below runs. The whole sliced exit for this
+            # symbol runs under the ONE exit_gate claim taken above = one flight.
+            if getattr(self.config, "iceberg_enabled", False):
+                from .. import iceberg as _iceberg_mod
+                _ice_price = pos.get("ltp") or pos.get("avg_price")
+                _ice_legs = _iceberg_mod.plan_for(
+                    self.config, symbol, int(qty), _ice_price or None)
+                if len(_ice_legs) > 1:
+                    from .exit_poller import slice_and_confirm_exit
+                    log.critical("kill %s/%s: ICEBERG exit %d → %d slices %s",
+                                 self.session_id, symbol, int(qty),
+                                 len(_ice_legs), _ice_legs)
+                    _meta_ice = {"symbol": symbol, "claimed": True, "qty": qty,
+                                 "broker_profile": prof_id, "direction": direction,
+                                 "instrument_type": itype,
+                                 "kite_product": kite_product, "iceberg": True}
+                    sliced_jobs.append((_meta_ice, slice_and_confirm_exit(
+                        session_id=self.session_id, symbol=symbol,
+                        total_qty=int(qty), legs=_ice_legs, broker=broker,
+                        registry=self.registry, close_reason=close_reason,
+                        broker_profile=prof_id, direction=direction,
+                        instrument_type=itype, kite_product=kite_product,
+                        exec_cfg=self.config,
+                        parent_exit_coid=pos.get("exit_client_order_id"))))
+                    continue
             exit_coros.append(broker.place_market_exit(
                 symbol, qty, itype, kite_product=kite_product,
                 direction=direction, exec_cfg=self.config))
@@ -441,6 +476,40 @@ class KillSwitchExecutor:
                 n_ok += 1 if ok else 0
                 n_failed += 0 if ok else 1
                 details.append(detail)
+
+        # EXIT ICEBERG (SPRINT CLUSTER 8) — the sliced kill exits (place+confirm
+        # sequentially PER position) gathered CONCURRENTLY across positions. Each
+        # returns COMPLETE (full cover → CLOSED) or EXIT_FAILED (remainder left for
+        # the guarded EXIT_FAILED retry sweep). Merge into the tallies + details.
+        if sliced_jobs:
+            ice_outcomes = await asyncio.gather(
+                *[c for _m, c in sliced_jobs], return_exceptions=True)
+            for (meta, _coro), outcome in zip(sliced_jobs, ice_outcomes):
+                if isinstance(outcome, Exception):
+                    n_failed += 1
+                    alerts.send_urgent(
+                        f"MANUAL EXIT REQUIRED (iceberg): {meta['symbol']} "
+                        f"({self.session_id})")
+                    self.registry.mark_exit_failed(
+                        meta["symbol"], str(outcome),
+                        broker_profile=meta.get("broker_profile"))
+                    details.append({**meta, "status": "EXIT_FAILED",
+                                    "error": str(outcome)})
+                    continue
+                if outcome.get("status") == "COMPLETE":
+                    n_ok += 1
+                    details.append({**meta, "status": "COMPLETE_ICEBERG",
+                                    "n_children": outcome.get("n_children"),
+                                    "exit_price": outcome.get("exit_price")})
+                else:
+                    n_failed += 1
+                    alerts.send_urgent(
+                        f"MANUAL EXIT REQUIRED (iceberg partial): "
+                        f"{meta['symbol']} ({self.session_id})")
+                    details.append({**meta, "status": "EXIT_FAILED_ICEBERG",
+                                    "filled_qty": outcome.get("filled_qty"),
+                                    "remaining_qty": outcome.get("remaining_qty"),
+                                    "stopped_reason": outcome.get("stopped_reason")})
 
         # STEP 4 — close session + log. Record exit_latency_ms (trigger → flat).
         # C2: only mark CLOSED (terminal) when EVERY leg confirmed flat. If any leg

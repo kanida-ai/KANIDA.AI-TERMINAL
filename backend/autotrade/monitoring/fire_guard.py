@@ -22,9 +22,14 @@ gets won=False; it is NOT reentrant for the same thread holding it twice.
 """
 from __future__ import annotations
 
+import logging
 import threading
 from contextlib import contextmanager
 from typing import Dict, Iterator
+
+from .. import durable_claims
+
+log = logging.getLogger("kanida.autotrade.fire_guard")
 
 _LOCK = threading.Lock()
 # session_id -> True once a fire has been claimed (never reset within a session;
@@ -42,12 +47,21 @@ def claim_entry(session_id: str) -> bool:
     — so two racing start()/scheduled-fire invocations place orders ONCE. Kept
     separate from the exit _FIRED guard so a later kill-switch fire is unaffected.
     The durable idempotency check is the DB (a session with OPEN positions already
-    fired); this in-memory claim closes the concurrent double-invocation window."""
+    fired); this in-memory claim closes the concurrent double-invocation window.
+
+    ITEM 2 (C3 I3a): backed by a cross-process DURABLE claim (CAS + lease) so the
+    claim survives a restart and holds across processes. The in-process set is the
+    FAST first check; durable_claims is the AUTHORITY when this process has no local
+    record (a fresh process / restart)."""
     with _LOCK:
         if _ENTRY_CLAIMED.get(session_id):
             return False
+        won = durable_claims.claim(f"entry:{session_id}",
+                                   durable_claims.ENTRY_LEASE_SEC)
+        # Record locally either way: if another process holds it we now know to
+        # fast-reject subsequent local calls.
         _ENTRY_CLAIMED[session_id] = True
-        return True
+        return won
 
 
 def entry_claimed(session_id: str) -> bool:
@@ -63,8 +77,13 @@ def claim_fire(session_id: str) -> Iterator[bool]:
         if _FIRED.get(session_id):
             won = False
         else:
+            # ITEM 2 (C3 I3a): the DURABLE claim (CAS + lease) is the cross-process
+            # / cross-restart authority; the in-process _FIRED set is the fast path.
+            # A fresh process (restart) has an empty _FIRED, so the DB row decides
+            # whether the session already fired.
+            won = durable_claims.claim(f"fire:{session_id}",
+                                       durable_claims.FIRE_LEASE_SEC)
             _FIRED[session_id] = True
-            won = True
     yield won
 
 
@@ -74,7 +93,11 @@ def already_fired(session_id: str) -> bool:
 
 
 def reset(session_id: str) -> None:
-    """Clear the guard for a session. For tests / operator recovery only."""
+    """Clear the guard for a session. For tests / operator recovery only. Also
+    releases the DURABLE (DB) claims so a reused session_id isn't stuck fired/
+    entry-claimed across processes."""
     with _LOCK:
         _FIRED.pop(session_id, None)
         _ENTRY_CLAIMED.pop(session_id, None)
+    durable_claims.release(f"fire:{session_id}")
+    durable_claims.release(f"entry:{session_id}")

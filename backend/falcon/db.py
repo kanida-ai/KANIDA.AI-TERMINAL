@@ -22,7 +22,12 @@ def connect_falcon(timeout: float = 60.0) -> sqlite3.Connection:
     con = sqlite3.connect(str(FALCON_DB), timeout=timeout)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode = WAL")
-    con.execute("PRAGMA synchronous = NORMAL")
+    # SPRINT CLUSTER 8 ITEM 6(b) — WAL durability for the AutoTrade write path.
+    # The AutoTrade session/position store lives in this DB; synchronous=FULL (was
+    # NORMAL) fsyncs the WAL on every commit so a live order-book write survives an
+    # OS crash / power loss, not just an app crash (NORMAL's guarantee). Strictly
+    # safer; the only cost is a marginally slower commit. Reads are unaffected.
+    con.execute("PRAGMA synchronous = FULL")
     return con
 
 

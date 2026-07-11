@@ -64,10 +64,20 @@ def begin_exit_flight(session_id: str, symbol: str) -> bool:
     True  → the caller MAY place the exit order (no other placement in flight).
     False → an exit order is ALREADY in flight for this key → the caller MUST NOT
             place a second order (return a NO-OP). Must be paired with
-            end_exit_flight() in a finally so the slot is always released."""
+            end_exit_flight() in a finally so the slot is always released.
+
+    ITEM 2 (C3 I3a): backed by a cross-process DURABLE claim (CAS + lease). The
+    in-process set is the FAST first check; the DB claim is the AUTHORITY so a
+    second PROCESS (or a restart mid-flight) can't place a duplicate exit. The
+    lease reclaims a crashed holder after EXIT_FLIGHT_LEASE_SEC."""
+    from . import durable_claims
     key = (session_id, symbol)
     with _INFLIGHT_LOCK:
         if key in _INFLIGHT:
+            return False
+        if not durable_claims.claim(
+                f"exitflight:{session_id}:{symbol}",
+                durable_claims.EXIT_FLIGHT_LEASE_SEC):
             return False
         _INFLIGHT.add(key)
         return True
@@ -75,8 +85,10 @@ def begin_exit_flight(session_id: str, symbol: str) -> bool:
 
 def end_exit_flight(session_id: str, symbol: str) -> None:
     """Release the single-flight slot for (session_id, symbol). Idempotent."""
+    from . import durable_claims
     with _INFLIGHT_LOCK:
         _INFLIGHT.discard((session_id, symbol))
+    durable_claims.release(f"exitflight:{session_id}:{symbol}")
 
 
 def is_exit_in_flight(session_id: str, symbol: str) -> bool:
