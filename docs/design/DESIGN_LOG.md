@@ -1727,3 +1727,48 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 - **Deploy path:** worktree `_kanida_falconui/frontend`, branch `feat/falcon-ai-shell`. UI + BFF
   types only; no execution/trade path touched. Verify: `npx tsc --noEmit` clean. NOT committed —
   staged for operator review.
+
+## 2026-07-11 — AutoTrade hardening-sprint controls wired (8 backend clusters; strictly additive)
+
+- **Acting on:** operator request — wire the FRONTEND for the just-deployed AutoTrade hardening
+  sprint. STRICTLY ADDITIVE, integrated into the EXISTING `PortfolioAutoTrade.tsx` create form,
+  the running-session console, and the sessions/list surface. NO new tab/page/route; nothing
+  existing removed, renamed, or collapsed. All field names verified against the running backend
+  (`backend/autotrade/config.py`, `api/autotrade_routes.py`, `session.py`, `risk_manager.py`).
+- **SURFACE 1 — create-form risk knobs** (`PortfolioAutoTrade.tsx`, new collapsible "Risk &
+  protection" section, hidden for Auto-Ladder): Daily-loss circuit breaker (`max_daily_loss_pct`
+  sent ÷100, `max_daily_loss_amount` ₹) with the verbatim note "Flatten all my sessions if
+  combined loss crosses this."; MIS protective SL-M toggle (`mis_protective_slm_enabled`, default
+  true, shown only for MIS) — "Places a broker-side stop so an MIS position is protected even if
+  the monitor is down."; Iceberg toggle + slice-size input (`iceberg_enabled`/`iceberg_slice_qty`)
+  — "Split a large order into slices (needed above the exchange freeze quantity)."; nested
+  Concentration/fat-finger caps (`max_pct_per_name` ÷100, `fatfinger_max_notional_per_order` ₹,
+  `fatfinger_max_qty_per_order` int). Every knob optional; blank = backend default = today's
+  behaviour. Emitted via a `riskExtra` partial in `toWireConfig`, spread into BOTH wire branches.
+- **SURFACE 1 — preview transparency:** `SizingBreakdown` now shows a per-leg iceberg chip
+  ("N× {slice_qty}") on any leg that will slice, plus a `ConcentrationNote` footer surfacing
+  `preview.risk_basis` + the ₹ `concentration_limits` (max/name, max/order ₹, max qty/order) so the
+  leverage math is explicit.
+- **SURFACE 2 — break-glass + observability** (list/console, NOT a new page): a red two-click
+  armed **Global kill** in the sessions header → `POST /autotrade/global-kill` ("Flatten ALL live
+  sessions?" confirm) with an n-killed result line; a **HealthStrip** from `GET /autotrade/health`
+  (per-session reconcile-age amber>120s/red>300s, mark-age amber>60s/red>120s, exit-failed badge,
+  n_open, reconcile_healthy ⚠, + the per-user daily-loss breaker banner); an **AlertsFeed** drawer
+  from `GET /autotrade/alerts` (unacked-first, severity-toned, escalated badge) with an Ack button →
+  `POST /autotrade/alerts/{id}/ack`. Health + alerts poll ~20s, ONLY while the list phase is shown.
+- **SURFACE 3 — status surfacing** (running card): **NET P&L** line (gross_pnl / estimated_charges /
+  net_pnl / net_return) beside the existing gross; **RMS refusal** card on a FAILED start
+  (`risk_refused` + reason + available_margin/committed_other/planned_deployed) instead of a generic
+  error; amber **margin-fallback** note ("Sized on cash (margin unavailable) for {symbols}") from
+  `start.margin_fallback_warnings[]`.
+- **Types** (`lib/autotrade-api.ts`): added the 9 optional risk fields to `SessionConfig`;
+  `ConcentrationLimits`; iceberg intent on `PreviewPosition`; `risk_basis`/`concentration_limits`
+  on Preview+Status; net-P&L fields on Status; `margin_fallback_warnings`/`risk_refused`/refusal
+  figures on `StartResponse`; new `GlobalKillResponse`, `HealthResponse`/`SessionHealth`/
+  `BreakerState`, `AlertItem`/`AlertsResponse` + client methods `globalKill`/`health`/`alerts`/
+  `ackAlert`.
+- **Theme:** reused the locked mint/F2 tokens, `C`/`ICON`/`Field`/`Segmented`/`inputStyle` and the
+  existing toggle/details/card language; no new accent colors; keyboard/focus states preserved.
+- **Deploy path:** worktree `_kanida_falconui/frontend`, branch `feat/falcon-ai-shell`. UI + BFF
+  types only; NO execution/trade path touched. Verify: `npx tsc --noEmit` clean; `next build` →
+  "✓ Compiled successfully in 5.0s". NOT committed — staged for operator review.

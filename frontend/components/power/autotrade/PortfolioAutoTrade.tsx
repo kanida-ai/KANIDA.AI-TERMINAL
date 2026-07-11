@@ -35,6 +35,8 @@ import {
   type Strategy, type SessionConfig, type CreateResponse, type StartResponse,
   type StatusResponse, type SavedConfig, type Broker, type SessionSummary,
   type OpenPosition, type PreviewResponse, type PreviewPosition, type KillPreview, type SkippedPick,
+  type ConcentrationLimits,
+  type MarginFallbackWarning, type SessionHealth, type BreakerState, type AlertItem,
   type BrokerAccount, type SessionScope,
   type UniverseFilter, type PickItem, type PicksResponse,
   type LadderProduct, type LadderEndMode, type LadderKillMode, type LadderStatusName,
@@ -69,6 +71,11 @@ const DEFAULT_CONFIG: SessionConfig = {
   entry_date: '',
   on_missed_window: 'expire',
   entry_grace_seconds: 120,
+  // ── HARDENING SPRINT protection knobs — ALL default to the backend default
+  // (= today's behaviour). mis_protective_slm_enabled defaults true (a broker-side
+  // stop for MIS); the rest are OFF/empty (undefined) until the operator sets them.
+  mis_protective_slm_enabled: true,
+  iceberg_enabled: false,
 }
 
 // ── Intraday-basket VALIDATED PRESET ──────────────────────────────────────────
@@ -666,6 +673,20 @@ export function PortfolioAutoTrade({
   // selector + enable toggle stay visible; only the ladder/large-day are folded.
   const [stepLockAdv, setStepLockAdv] = useState(false)
 
+  // ── HARDENING SPRINT — break-glass + observability (list/console surface) ─────
+  // Global-kill: a two-click armed confirm (never a one-tap flatten). globalKillResult
+  // holds the last sweep's count for a brief confirmation line.
+  const [globalKillArmed, setGlobalKillArmed] = useState(false)
+  const [globalKilling, setGlobalKilling] = useState(false)
+  const [globalKillResult, setGlobalKillResult] = useState<string | null>(null)
+  // Health strip (per active session) + the per-user breaker; polled ~20s on list.
+  const [health, setHealth] = useState<SessionHealth[] | null>(null)
+  const [breaker, setBreaker] = useState<BreakerState | null>(null)
+  // Alerts feed (unacked-first) + ack-in-flight set; polled ~20s on list.
+  const [alerts, setAlerts] = useState<AlertItem[] | null>(null)
+  const [alertsOpen, setAlertsOpen] = useState(false)
+  const [ackingIds, setAckingIds] = useState<Set<number>>(new Set())
+
   const set = <K extends keyof SessionConfig>(k: K, v: SessionConfig[K]) =>
     setConfig((c) => ({ ...c, [k]: v }))
 
@@ -828,6 +849,42 @@ export function PortfolioAutoTrade({
     const dirExtra: Partial<SessionConfig> = {
       direction: c.direction === 'short' && shortOk ? 'short' : 'long',
     }
+    // ── HARDENING SPRINT risk/protection knobs — send ONLY what the operator set,
+    // so an untouched form is byte-identical to today. The two "_pct" fields are
+    // PERCENT in state → FRACTION on the wire (÷100); the ₹/int fields verbatim.
+    // A value is "set" only when it is a finite positive number.
+    const posNum = (v: unknown): number | null => {
+      const n = Number(v)
+      return Number.isFinite(n) && n > 0 ? n : null
+    }
+    const riskExtra: Partial<SessionConfig> = {}
+    {
+      const mdlp = posNum(c.max_daily_loss_pct)
+      if (mdlp != null) riskExtra.max_daily_loss_pct = mdlp / 100
+      const mdla = posNum(c.max_daily_loss_amount)
+      if (mdla != null) riskExtra.max_daily_loss_amount = mdla
+      // MIS protective SL-M — only meaningful for MIS; send the bool only then
+      // (true = default). Non-MIS sessions carry no spurious field.
+      if (c.order_product === 'MIS') {
+        riskExtra.mis_protective_slm_enabled = c.mis_protective_slm_enabled !== false
+      }
+      // Iceberg — only when enabled AND a slice source is set (the backend rejects
+      // iceberg_enabled with no slice source). slice_qty preferred; else slice_value.
+      const sliceQty = posNum(c.iceberg_slice_qty)
+      const sliceVal = posNum(c.iceberg_slice_value)
+      if (c.iceberg_enabled && (sliceQty != null || sliceVal != null)) {
+        riskExtra.iceberg_enabled = true
+        if (sliceQty != null) riskExtra.iceberg_slice_qty = Math.max(1, Math.floor(sliceQty))
+        else if (sliceVal != null) riskExtra.iceberg_slice_value = sliceVal
+      }
+      // Concentration / fat-finger caps — each inert unless set.
+      const mpn = posNum(c.max_pct_per_name)
+      if (mpn != null) riskExtra.max_pct_per_name = Math.min(1, mpn / 100)
+      const mno = posNum(c.fatfinger_max_notional_per_order)
+      if (mno != null) riskExtra.fatfinger_max_notional_per_order = mno
+      const mq = posNum(c.fatfinger_max_qty_per_order)
+      if (mq != null) riskExtra.fatfinger_max_qty_per_order = Math.max(1, Math.floor(mq))
+    }
     if (c.strategy === 'intraday_basket') {
       return {
         ...c,
@@ -836,6 +893,7 @@ export function PortfolioAutoTrade({
         ...capitalExtra,
         ...misExtra,
         ...dirExtra,
+        ...riskExtra,
         arm_pct: (Number(c.arm_pct) || 0) / 100,
         floor_pct: (Number(c.floor_pct) || 0) / 100,
         trail_giveback_pct: (Number(c.trail_giveback_pct) || 0) / 100,
@@ -884,6 +942,7 @@ export function PortfolioAutoTrade({
       ...capitalExtra,
       ...misExtra,
       ...dirExtra,
+      ...riskExtra,
       ...killExtra,
       kill_switch_pct: (Number(c.kill_switch_pct) || 0) / 100,
     }
@@ -1090,6 +1149,72 @@ export function PortfolioAutoTrade({
   }, [userId])
 
   useEffect(() => { loadLadders() }, [loadLadders])
+
+  // ── HARDENING SPRINT — observability loaders (health + alerts) ────────────────
+  // Both are best-effort: a missing endpoint / error leaves the strip/feed absent
+  // (never blocks the sessions list). Scoped server-side by the caller identity.
+  const loadHealth = useCallback(async () => {
+    try {
+      const res = await AutoTradeAPI.health()
+      setHealth(res.sessions ?? [])
+      setBreaker(res.breaker ?? null)
+    } catch {
+      // Calm degrade — keep the last-good strip; never surface a hard error here.
+    }
+  }, [])
+
+  const loadAlerts = useCallback(async () => {
+    try {
+      const res = await AutoTradeAPI.alerts({ limit: 50 })
+      setAlerts(res.alerts ?? [])
+    } catch {
+      // Calm degrade — keep last-good; the feed is informational.
+    }
+  }, [])
+
+  // Poll health + alerts (~20s) ONLY while the list/console is shown, so a create
+  // or live view doesn't add background traffic. Cleared on unmount/phase change.
+  useEffect(() => {
+    if (phase !== 'list') return
+    loadHealth(); loadAlerts()
+    const t = setInterval(() => { loadHealth(); loadAlerts() }, 20_000)
+    return () => clearInterval(t)
+  }, [phase, loadHealth, loadAlerts])
+
+  // Acknowledge one alert — optimistic: mark acking, then reload the feed.
+  const onAckAlert = useCallback(async (id: number) => {
+    setAckingIds((s) => new Set(s).add(id))
+    try {
+      await AutoTradeAPI.ackAlert(id)
+      await loadAlerts()
+    } catch {
+      // best-effort — leave the alert unacked; the next poll re-syncs truth.
+    } finally {
+      setAckingIds((s) => { const n = new Set(s); n.delete(id); return n })
+    }
+  }, [loadAlerts])
+
+  // Break-glass GLOBAL KILL — flatten EVERY live session for this user in one
+  // sweep. Two-click armed confirm (never a one-tap flatten). Scoped to the user
+  // when a user context exists; the backend also scopes a non-admin to their book.
+  const onGlobalKill = useCallback(async () => {
+    setGlobalKilling(true); setGlobalKillResult(null); setError(null)
+    try {
+      const res = await AutoTradeAPI.globalKill(userId != null ? { user_id: userId } : undefined)
+      setGlobalKillArmed(false)
+      const n = res.n_killed ?? res.killed?.length ?? 0
+      setGlobalKillResult(
+        res.skipped
+          ? `Global kill already in progress — ${res.skipped}.`
+          : `Global kill fired — flattened ${n} session${n === 1 ? '' : 's'}.`,
+      )
+      await Promise.all([loadSessions(), loadHealth(), loadAlerts()])
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Global kill failed.')
+    } finally {
+      setGlobalKilling(false)
+    }
+  }, [userId, loadSessions, loadHealth, loadAlerts])
 
   // The LIVE campaigns we render atop the list: RUNNING / PAUSED and now also
   // SCHEDULED (armed for a future start_date). CREATED drafts are deliberately
@@ -1595,6 +1720,29 @@ export function PortfolioAutoTrade({
                   {ICON.close(12)} {deleting ? 'Deleting…' : `Delete selected (${selected.size})`}
                 </button>
               )}
+              {/* BREAK-GLASS · Global kill — flatten ALL my live sessions. Two-click
+                  armed confirm (never a one-tap flatten). */}
+              {!globalKillArmed ? (
+                <button type="button" onClick={() => { setGlobalKillArmed(true); setGlobalKillResult(null) }}
+                  className="flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                  style={{ color: C.red, background: 'rgba(232,115,107,0.10)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.45)' }}
+                  title="Break-glass: immediately flatten every live session you own">
+                  {ICON.shield(12)} Global kill
+                </button>
+              ) : (
+                <span className="flex items-center gap-1.5">
+                  <span className="text-[11px]" style={{ color: C.red }}>Flatten ALL live sessions?</span>
+                  <button type="button" disabled={globalKilling} onClick={onGlobalKill}
+                    className="text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-40"
+                    style={{ color: '#1a0908', background: C.red }}>
+                    {globalKilling ? 'Flattening…' : 'Confirm'}
+                  </button>
+                  <button type="button" disabled={globalKilling} onClick={() => setGlobalKillArmed(false)}
+                    className="text-[11.5px] px-2.5 py-1.5 rounded-lg" style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+                    Cancel
+                  </button>
+                </span>
+              )}
               <button type="button" disabled={sessionsLoading} onClick={loadSessions}
                 className="text-[11.5px] px-2.5 py-1.5 rounded-lg transition-colors disabled:opacity-40"
                 style={{ color: C.muted, border: `1px solid ${C.line}` }}>
@@ -1607,6 +1755,29 @@ export function PortfolioAutoTrade({
               </button>
             </div>
           </div>
+
+          {/* Global-kill result confirmation (count flattened). */}
+          {globalKillResult && (
+            <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[12px] leading-snug"
+              style={{ borderColor: 'rgba(232,115,107,0.35)', background: 'rgba(232,115,107,0.05)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.shield(14)}</span>
+              <span className="flex-1">{globalKillResult}</span>
+              <button type="button" onClick={() => setGlobalKillResult(null)} className="shrink-0" style={{ color: C.faint }}>
+                {ICON.close(13)}
+              </button>
+            </div>
+          )}
+
+          {/* ── HARDENING SPRINT — health strip + alerts feed (observability). Both
+              degrade to nothing when the backend has no data. ─────────────────── */}
+          <HealthStrip sessions={health} breaker={breaker} />
+          <AlertsFeed
+            alerts={alerts}
+            open={alertsOpen}
+            onToggle={() => setAlertsOpen((o) => !o)}
+            onAck={onAckAlert}
+            ackingIds={ackingIds}
+          />
 
           {/* Campaign-created confirmation (parity with the session scheduled note). */}
           {ladderNotice && (
@@ -2439,6 +2610,134 @@ export function PortfolioAutoTrade({
             </div>
           </details>
 
+          {/* ── HARDENING SPRINT — Risk & protection (additive; every knob optional,
+              blank = the backend default = today's behaviour). Hidden for the
+              Auto-Ladder campaign, which takes a fixed validated config. ─────── */}
+          {!isLadder && (
+          <details className="mt-3 group">
+            <summary className="inline-flex items-center gap-1.5 text-[11.5px] cursor-pointer select-none list-none"
+              style={{ color: C.muted }}>
+              <span className="transition-transform group-open:rotate-90" style={{ color: C.faint }}>{ICON.chevronR(11)}</span>
+              Risk &amp; protection
+              <span className="text-[10px] font-mono" style={{ color: C.faint }}>optional</span>
+            </summary>
+            <div className="mt-3 flex flex-col gap-4">
+
+              {/* Daily-loss circuit breaker (RMS) — flatten ALL of your sessions when
+                  the combined loss crosses either threshold. Both blank = OFF. */}
+              <div className="rounded-xl border p-3.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                <div className="text-[12px] font-semibold" style={{ color: C.ink }}>Daily-loss circuit breaker</div>
+                <div className="text-[10.5px] leading-snug mt-0.5 mb-2.5" style={{ color: C.faint }}>
+                  Flatten all my sessions if combined loss crosses this. Leave both blank to keep it off.
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <Field label="Max daily loss (%)" hint="Of your fund. Blank = off.">
+                    <input type="number" min={0} max={50} step={0.5}
+                      value={config.max_daily_loss_pct ?? ''}
+                      onChange={(e) => set('max_daily_loss_pct', e.target.value === '' ? undefined : Number(e.target.value))}
+                      placeholder="off"
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                  </Field>
+                  <Field label="Max daily loss (₹)" hint="Absolute rupee cap. Blank = off.">
+                    <input type="number" min={0} step={1000}
+                      value={config.max_daily_loss_amount ?? ''}
+                      onChange={(e) => set('max_daily_loss_amount', e.target.value === '' ? undefined : Number(e.target.value))}
+                      placeholder="off"
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                  </Field>
+                </div>
+              </div>
+
+              {/* MIS protective SL-M — a broker-side stop so an MIS position is
+                  protected even if the monitor is down. Only relevant for MIS. */}
+              {config.order_product === 'MIS' && (
+                <div className="flex items-center justify-between gap-3 rounded-xl border px-3 py-2.5"
+                  style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-semibold" style={{ color: C.ink }}>MIS protective stop (SL-M)</div>
+                    <div className="text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>
+                      Places a broker-side stop so an MIS position is protected even if the monitor is down.
+                    </div>
+                  </div>
+                  <button type="button"
+                    onClick={() => set('mis_protective_slm_enabled', !(config.mis_protective_slm_enabled !== false))}
+                    className="relative shrink-0 w-11 h-6 rounded-full transition-colors"
+                    style={{ background: config.mis_protective_slm_enabled !== false ? C.mint : 'rgba(255,255,255,0.12)' }}
+                    aria-pressed={config.mis_protective_slm_enabled !== false}>
+                    <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all"
+                      style={{ left: config.mis_protective_slm_enabled !== false ? '22px' : '2px' }} />
+                  </button>
+                </div>
+              )}
+
+              {/* Iceberg — split a large order into slices (needed above the exchange
+                  freeze qty). Slice input shows only when enabled. */}
+              <div className="rounded-xl border px-3 py-2.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-semibold" style={{ color: C.ink }}>Iceberg (slice large orders)</div>
+                    <div className="text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>
+                      Split a large order into slices (needed above the exchange freeze quantity).
+                    </div>
+                  </div>
+                  <button type="button"
+                    onClick={() => set('iceberg_enabled', !config.iceberg_enabled)}
+                    className="relative shrink-0 w-11 h-6 rounded-full transition-colors"
+                    style={{ background: config.iceberg_enabled ? C.mint : 'rgba(255,255,255,0.12)' }}
+                    aria-pressed={!!config.iceberg_enabled}>
+                    <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all"
+                      style={{ left: config.iceberg_enabled ? '22px' : '2px' }} />
+                  </button>
+                </div>
+                {config.iceberg_enabled && (
+                  <div className="mt-3 max-w-[240px]">
+                    <Field label="Slice size (shares)" hint="Shares per slice. Enabling iceberg needs a slice size.">
+                      <input type="number" min={1} step={1}
+                        value={config.iceberg_slice_qty ?? ''}
+                        onChange={(e) => set('iceberg_slice_qty', e.target.value === '' ? undefined : Number(e.target.value))}
+                        placeholder="e.g. 900"
+                        className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                    </Field>
+                  </div>
+                )}
+              </div>
+
+              {/* Concentration / fat-finger caps — nested advanced. Each blank = off. */}
+              <details className="group/ff">
+                <summary className="inline-flex items-center gap-1.5 text-[11px] cursor-pointer select-none list-none"
+                  style={{ color: C.muted }}>
+                  <span className="transition-transform group-open/ff:rotate-90" style={{ color: C.faint }}>{ICON.chevronR(10)}</span>
+                  Concentration &amp; fat-finger caps
+                  <span className="text-[10px] font-mono" style={{ color: C.faint }}>per order · blank = off</span>
+                </summary>
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <Field label="Max % per name" hint="Cap any single name to this % of your fund.">
+                    <input type="number" min={0} max={100} step={1}
+                      value={config.max_pct_per_name ?? ''}
+                      onChange={(e) => set('max_pct_per_name', e.target.value === '' ? undefined : Number(e.target.value))}
+                      placeholder="off"
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                  </Field>
+                  <Field label="Max ₹ per order" hint="Absolute rupee notional cap for one order.">
+                    <input type="number" min={0} step={1000}
+                      value={config.fatfinger_max_notional_per_order ?? ''}
+                      onChange={(e) => set('fatfinger_max_notional_per_order', e.target.value === '' ? undefined : Number(e.target.value))}
+                      placeholder="off"
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                  </Field>
+                  <Field label="Max qty per order" hint="Absolute share/lot qty cap for one order.">
+                    <input type="number" min={0} step={1}
+                      value={config.fatfinger_max_qty_per_order ?? ''}
+                      onChange={(e) => set('fatfinger_max_qty_per_order', e.target.value === '' ? undefined : Number(e.target.value))}
+                      placeholder="off"
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                  </Field>
+                </div>
+              </details>
+            </div>
+          </details>
+          )}
+
           {config.sizing_mode === 'manual' && (
             <div className="mt-3 rounded-xl border px-3.5 py-2.5 text-[11px] leading-snug"
               style={{ borderColor: C.line, background: 'rgba(255,255,255,0.015)', color: C.muted }}>
@@ -3172,8 +3471,52 @@ export function PortfolioAutoTrade({
               Muted/amber so it's obvious the session did NOT place. */}
           {nonPlacedNow && status && <NonPlacedCard status={status} onKill={onKill} busyKill={busy === 'kill'} />}
 
+          {/* RMS pre-trade REFUSAL — the start was refused for insufficient
+              margin/capital; nothing was placed. Clear, non-generic. */}
+          {!scheduledNow && !nonPlacedNow && startResult?.risk_refused && (
+            <div className="rounded-2xl border p-4 sm:p-5"
+              style={{ borderColor: 'rgba(232,115,107,0.4)', background: 'rgba(232,115,107,0.06)' }}>
+              <div className="flex items-center gap-2 mb-2">
+                <span style={{ color: C.red }}>{ICON.shield(15)}</span>
+                <span className="text-[13.5px] font-semibold" style={{ color: C.red }}>Refused — not enough margin / capital</span>
+              </div>
+              <p className="text-[12px] leading-snug mb-2" style={{ color: C.ink2 }}>
+                {startResult.reason || 'The pre-trade risk check refused this start; nothing was placed.'}
+              </p>
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px]" style={{ color: C.faint }}>
+                {typeof startResult.available_margin === 'number' && (
+                  <span>Available margin <b style={{ color: C.ink2 }}>{fmtINR(startResult.available_margin)}</b></span>
+                )}
+                {typeof startResult.committed_other === 'number' && (
+                  <span>Committed (other sessions) <b style={{ color: C.ink2 }}>{fmtINR(startResult.committed_other)}</b></span>
+                )}
+                {typeof startResult.planned_deployed === 'number' && (
+                  <span>This session would deploy <b style={{ color: C.ink2 }}>{fmtINR(startResult.planned_deployed)}</b></span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Amber margin-fallback — one or more legs were cash-sized because the
+              margin was unavailable (fewer shares than the leverage allows). Calm,
+              informational; never an error. */}
+          {!scheduledNow && !nonPlacedNow && (startResult?.margin_fallback_warnings?.length ?? 0) > 0 && (
+            <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
+              style={{ borderColor: 'rgba(230,180,80,0.35)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+              <span>
+                Sized on cash (margin unavailable) for{' '}
+                <b style={{ color: C.ink }}>
+                  {(startResult!.margin_fallback_warnings ?? [])
+                    .map((w: MarginFallbackWarning) => w.symbol).filter(Boolean).join(', ') || 'some names'}
+                </b>
+                {' '}— fewer shares than the leverage would allow.
+              </span>
+            </div>
+          )}
+
           {/* Placement result */}
-          {!scheduledNow && !nonPlacedNow && startResult && (
+          {!scheduledNow && !nonPlacedNow && startResult && !startResult.risk_refused && (
             <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
               <div className="flex items-center gap-2 mb-3">
                 <span style={{ color: C.mint }}>{ICON.bolt(15)}</span>
@@ -3285,6 +3628,36 @@ export function PortfolioAutoTrade({
                     <b style={{ color: C.ink2 }}>{fmtCapital(status.total_allocated_capital)}</b>
                   </span>
                 </div>
+
+                {/* NET P&L — the REAL number after estimated charges, shown beside
+                    the gross so the user isn't fooled by pre-cost P&L. Display only;
+                    the kill/trail decision basis stays the gross invested return. */}
+                {typeof status.net_pnl === 'number' && (
+                  <div className="mb-3 flex flex-wrap items-center gap-x-5 gap-y-1 rounded-xl border px-3.5 py-2.5 text-[11.5px]"
+                    style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                    <span style={{ color: C.faint }}>
+                      Gross P&amp;L{' '}
+                      <b style={{ color: typeof status.gross_pnl === 'number' ? pctTone(status.gross_pnl) : C.ink2 }}>
+                        {typeof status.gross_pnl === 'number' ? signedINR(status.gross_pnl) : '—'}
+                      </b>
+                    </span>
+                    <span style={{ color: C.faint }}>
+                      Est. charges{' '}
+                      <b style={{ color: C.ink2 }}>
+                        {typeof status.estimated_charges === 'number' ? fmtINR(status.estimated_charges) : '—'}
+                      </b>
+                    </span>
+                    <span style={{ color: C.ink2 }}>
+                      <span className="uppercase tracking-[0.05em] text-[10px]" style={{ color: C.faint }}>Net</span>{' '}
+                      <b className="text-[13px] tabular-nums" style={{ color: pctTone(status.net_pnl) }}>
+                        {signedINR(status.net_pnl)}
+                      </b>
+                      {typeof status.net_return === 'number' && (
+                        <span style={{ color: C.faint }}>{' '}({fmtPct(status.net_return * 100)})</span>
+                      )}
+                    </span>
+                  </div>
+                )}
 
                 {/* Skipped-picks banner — names dropped at sizing (live). */}
                 <div className="mb-3">
@@ -4340,7 +4713,18 @@ function SizingBreakdown({ config, preview, loading, err }:
           <tbody>
             {rows.map((p) => (
               <tr key={p.symbol} style={{ borderTop: `1px solid ${C.line2}` }}>
-                <td className="text-left py-1.5 px-2 font-semibold" style={{ color: C.ink }}>{p.symbol}</td>
+                <td className="text-left py-1.5 px-2 font-semibold" style={{ color: C.ink }}>
+                  <span>{p.symbol}</span>
+                  {/* Iceberg intent — this leg will SPLIT into N slices. Surfaced so
+                      the operator sees the order shape before Start. */}
+                  {p.iceberg && (p.n_slices ?? 0) > 1 && (
+                    <span className="ml-1.5 inline-flex items-center gap-1 text-[9px] font-mono rounded-full px-1.5 py-0.5 align-middle"
+                      style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.35)' }}
+                      title={`Will split into ${p.n_slices} slices of ${p.slice_qty}`}>
+                      {p.n_slices}× {p.slice_qty}
+                    </span>
+                  )}
+                </td>
                 {cols.map((c) => (
                   <td key={c.label} className={cell + (c.strong ? ' font-semibold' : '')}
                       style={{ color: c.tone ?? C.ink2 }}>{c.get(p)}</td>
@@ -4371,7 +4755,218 @@ function SizingBreakdown({ config, preview, loading, err }:
             {' '}(<b style={{ color: C.ink2 }}>no broker margin, 1×</b>). Your fund: <b style={{ color: C.ink2 }}>{fmtCapital(myFund)}</b>.</>
         )}
       </p>
+      {/* Risk-basis label + the ₹ concentration / fat-finger thresholds the backend
+          echoes, so the leverage math is explicit. Shows only what is set. */}
+      <ConcentrationNote riskBasis={preview.risk_basis} limits={preview.concentration_limits} />
     </>
+  )
+}
+
+// The explicit risk_basis label + any ₹ concentration/fat-finger caps from the
+// preview/status. Renders nothing when there is nothing to say (no basis, no caps).
+function ConcentrationNote({ riskBasis, limits }:
+    { riskBasis?: string; limits?: ConcentrationLimits | null }) {
+  const perName = limits?.max_per_name_rs
+  const perOrderRs = limits?.max_notional_per_order_rs
+  const perOrderQty = limits?.max_qty_per_order
+  const hasCap = (typeof perName === 'number' && perName > 0)
+    || (typeof perOrderRs === 'number' && perOrderRs > 0)
+    || (typeof perOrderQty === 'number' && perOrderQty > 0)
+  if (!riskBasis && !hasCap) return null
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10.5px]" style={{ color: C.faint }}>
+      {riskBasis && (
+        <span>Risk basis <b style={{ color: C.ink2 }}>{riskBasis}</b></span>
+      )}
+      {typeof perName === 'number' && perName > 0 && (
+        <span>Max/name <b style={{ color: C.ink2 }}>{fmtINR(perName)}</b></span>
+      )}
+      {typeof perOrderRs === 'number' && perOrderRs > 0 && (
+        <span>Max/order <b style={{ color: C.ink2 }}>{fmtINR(perOrderRs)}</b></span>
+      )}
+      {typeof perOrderQty === 'number' && perOrderQty > 0 && (
+        <span>Max qty/order <b style={{ color: C.ink2 }}>{perOrderQty}</b></span>
+      )}
+    </div>
+  )
+}
+
+// ── HARDENING SPRINT — per-session HEALTH strip (GET /autotrade/health) ────────
+// A compact console-level indicator: reconcile age (amber >120s, red >300s),
+// oldest mark age (amber >60s, red >120s), an exit-failed badge + open count, and
+// the per-user breaker banner. Degrades to nothing when there is no active session
+// and the breaker isn't breached.
+function fmtAge(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return '—'
+  const s = Math.max(0, Math.floor(seconds))
+  if (s < 90) return `${s}s`
+  const m = Math.floor(s / 60)
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h`
+}
+function HealthStrip({ sessions, breaker }:
+    { sessions: SessionHealth[] | null; breaker: BreakerState | null }) {
+  const rows = sessions ?? []
+  const breached = breaker?.breached === true
+  if (rows.length === 0 && !breached) return null
+  return (
+    <div className="rounded-2xl border p-3.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.015)' }}>
+      <div className="flex items-center gap-2 mb-2.5">
+        <span style={{ color: C.mint }}>{ICON.shield(14)}</span>
+        <span className="text-[12px] font-semibold" style={{ color: C.ink }}>Monitoring health</span>
+        <span className="ml-auto text-[10px]" style={{ color: C.faint }}>live · every 20s</span>
+      </div>
+
+      {/* Per-user daily-loss breaker — only when breached (calm red banner). */}
+      {breached && (
+        <div className="mb-2.5 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px] leading-snug"
+          style={{ borderColor: 'rgba(232,115,107,0.4)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
+          <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(13)}</span>
+          <span>
+            <b style={{ color: C.red }}>Daily-loss breaker breached.</b>{' '}
+            {breaker?.reason || 'Combined loss crossed your configured limit.'}
+            {typeof breaker?.aggregate_pnl === 'number' && (
+              <> Combined P&amp;L <b style={{ color: C.ink2 }}>{signedINR(breaker.aggregate_pnl)}</b></>
+            )}
+            {typeof breaker?.limit_rs === 'number' && breaker.limit_rs != null && (
+              <> · limit <b style={{ color: C.ink2 }}>{fmtINR(breaker.limit_rs)}</b></>
+            )}
+          </span>
+        </div>
+      )}
+
+      {rows.length === 0 ? (
+        <p className="text-[11px]" style={{ color: C.faint }}>No active sessions.</p>
+      ) : (
+        <ul className="flex flex-col gap-1.5">
+          {rows.map((h) => {
+            const rec = h.last_reconcile_age_seconds
+            const recTone = rec == null ? C.faint : rec > 300 ? C.red : rec > 120 ? C.amber : C.mint
+            const markMs = h.oldest_mark_age_ms
+            const markS = markMs == null ? null : markMs / 1000
+            const markTone = markMs == null ? C.faint : markMs > 120_000 ? C.red : markMs > 60_000 ? C.amber : C.mint
+            return (
+              <li key={h.session_id}
+                className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-3 py-2 text-[11px]"
+                style={{ borderColor: h.has_exit_failed ? 'rgba(232,115,107,0.4)' : C.line, background: 'rgba(255,255,255,0.015)' }}>
+                <span className="font-mono truncate" style={{ color: C.ink2, maxWidth: 160 }}>{h.session_id}</span>
+                {h.status && (
+                  <span className="text-[9px] font-mono uppercase tracking-[0.06em] rounded-full px-1.5 py-0.5"
+                    style={{ color: C.muted, background: 'rgba(255,255,255,0.05)' }}>{h.status}</span>
+                )}
+                {h.has_exit_failed && (
+                  <span className="text-[9px] font-mono uppercase tracking-[0.06em] rounded-full px-1.5 py-0.5"
+                    style={{ color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}>
+                    exit-failed
+                  </span>
+                )}
+                <span className="ml-auto flex items-center gap-3" style={{ color: C.faint }}>
+                  <span>open <b style={{ color: C.ink2 }}>{typeof h.n_open === 'number' ? h.n_open : '—'}</b></span>
+                  <span title="Time since the last successful reconcile">
+                    reconcile <b style={{ color: recTone }}>{fmtAge(rec)}</b>
+                    {h.reconcile_healthy === false && <span style={{ color: C.amber }}> ⚠</span>}
+                  </span>
+                  <span title="Age of the oldest position mark (data freshness)">
+                    mark <b style={{ color: markTone }}>{fmtAge(markS)}</b>
+                  </span>
+                </span>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+// ── HARDENING SPRINT — ALERTS feed (GET /autotrade/alerts + POST …/ack) ───────
+// A compact drawer: unacked-first, severity-toned, with an Ack button. Surfaces
+// naked-position / failed-exit / divergence / daily-loss pages so the operator
+// SEES them. Renders nothing until the feed has loaded (alerts !== null).
+function alertSeverityTone(sev?: string): string {
+  const s = (sev ?? '').toLowerCase()
+  if (s.includes('crit') || s.includes('error') || s.includes('fatal') || s.includes('high')) return C.red
+  if (s.includes('warn') || s.includes('med')) return C.amber
+  return C.muted
+}
+function AlertsFeed({ alerts, open, onToggle, onAck, ackingIds }: {
+  alerts: AlertItem[] | null
+  open: boolean
+  onToggle: () => void
+  onAck: (id: number) => void
+  ackingIds: Set<number>
+}) {
+  if (alerts === null) return null
+  const isAcked = (a: AlertItem) => a.acknowledged === true || a.acknowledged === 1
+  const nUnacked = alerts.filter((a) => !isAcked(a)).length
+  // Unacked first, then most recent.
+  const ordered = alerts.slice().sort((a, b) => {
+    const au = isAcked(a) ? 1 : 0, bu = isAcked(b) ? 1 : 0
+    if (au !== bu) return au - bu
+    const ta = a.ts ? Date.parse(a.ts) : 0, tb = b.ts ? Date.parse(b.ts) : 0
+    return tb - ta
+  })
+  return (
+    <div className="rounded-2xl border" style={{ borderColor: nUnacked > 0 ? 'rgba(230,180,80,0.4)' : C.line2, background: 'rgba(255,255,255,0.015)' }}>
+      <button type="button" onClick={onToggle}
+        className="w-full flex items-center gap-2 px-3.5 py-2.5 text-left">
+        <span style={{ color: nUnacked > 0 ? C.amber : C.faint }}>{ICON.info(14)}</span>
+        <span className="text-[12px] font-semibold" style={{ color: C.ink }}>Alerts</span>
+        {nUnacked > 0 ? (
+          <span className="text-[9px] font-mono uppercase tracking-[0.06em] rounded-full px-1.5 py-0.5"
+            style={{ color: C.amber, background: 'rgba(230,180,80,0.14)', boxShadow: 'inset 0 0 0 1px rgba(230,180,80,0.4)' }}>
+            {nUnacked} unacked
+          </span>
+        ) : (
+          <span className="text-[10px]" style={{ color: C.faint }}>{alerts.length === 0 ? 'none' : 'all acknowledged'}</span>
+        )}
+        <span className="ml-auto text-[10px]" style={{ color: C.faint }}>live · every 20s</span>
+        <span className="transition-transform" style={{ color: C.faint, transform: open ? 'rotate(90deg)' : 'none' }}>{ICON.chevronR(12)}</span>
+      </button>
+      {open && (
+        <div className="px-3.5 pb-3">
+          {ordered.length === 0 ? (
+            <p className="text-[11px] py-1" style={{ color: C.faint }}>No alerts.</p>
+          ) : (
+            <ul className="flex flex-col gap-1.5">
+              {ordered.map((a) => {
+                const acked = isAcked(a)
+                const tone = alertSeverityTone(a.severity)
+                const acking = ackingIds.has(a.id)
+                return (
+                  <li key={a.id}
+                    className="flex items-start gap-2.5 rounded-lg border px-3 py-2 text-[11px] leading-snug"
+                    style={{ borderColor: acked ? C.line : 'rgba(230,180,80,0.3)', background: acked ? 'transparent' : 'rgba(255,255,255,0.02)', opacity: acked ? 0.7 : 1 }}>
+                    <span className="shrink-0 mt-1 inline-block w-1.5 h-1.5 rounded-full" style={{ background: tone }} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        {a.kind && <b style={{ color: C.ink }}>{a.kind}</b>}
+                        {a.symbol && <span className="font-mono" style={{ color: C.ink2 }}>{a.symbol}</span>}
+                        {a.severity && (
+                          <span className="text-[9px] font-mono uppercase tracking-[0.06em]" style={{ color: tone }}>{a.severity}</span>
+                        )}
+                        {a.escalated ? (
+                          <span className="text-[9px] font-mono uppercase tracking-[0.06em] rounded-full px-1.5 py-0.5"
+                            style={{ color: C.red, background: 'rgba(232,115,107,0.12)' }}>escalated</span>
+                        ) : null}
+                      </div>
+                      {a.detail && <div className="mt-0.5" style={{ color: C.ink2 }}>{a.detail}</div>}
+                      {a.ts && <div className="mt-0.5 font-mono text-[9.5px]" style={{ color: C.faint }}>{a.ts}</div>}
+                    </div>
+                    {!acked && (
+                      <button type="button" disabled={acking} onClick={() => onAck(a.id)}
+                        className="shrink-0 text-[10.5px] font-semibold px-2.5 py-1 rounded-lg transition-opacity disabled:opacity-40"
+                        style={{ color: C.mint, border: `1px solid rgba(63,227,164,0.35)` }}>
+                        {acking ? 'Acking…' : 'Ack'}
+                      </button>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 

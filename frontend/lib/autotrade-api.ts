@@ -150,6 +150,41 @@ export type SessionConfig = {
   trail_large_peak_pct?: number
   trail_large_giveback_rel?: number
   per_stock_stop_pct?: number
+  // ── HARDENING SPRINT — additive risk/protection knobs (ALL optional; every one
+  // omitted → the backend default = today's byte-identical behaviour). The two
+  // "_pct" fields below are captured as PERCENTS in the UI and sent as FRACTIONS
+  // (÷100) at the toWireConfig boundary; the ₹/int fields pass through verbatim.
+  //
+  //   • Daily-loss circuit breaker (RMS): flatten ALL of a user's sessions when the
+  //     combined day loss crosses either threshold. max_daily_loss_pct is a FRACTION
+  //     on the wire (0 < x ≤ 0.5); max_daily_loss_amount is ₹ (> 0). Either/both;
+  //     both absent = breaker OFF.
+  max_daily_loss_pct?: number
+  max_daily_loss_amount?: number
+  //   • MIS protective SL-M — a broker-side stop so an MIS position survives even if
+  //     the monitor is down. Backend default true; only meaningful/sent for MIS.
+  mis_protective_slm_enabled?: boolean
+  //   • Iceberg — split a large order into slices (needed above the exchange freeze
+  //     qty). iceberg_slice_qty = shares per slice (int ≥ 1); iceberg_slice_value =
+  //     a ₹-notional slice → qty=floor(value/price). Enabling requires a slice source.
+  iceberg_enabled?: boolean
+  iceberg_slice_qty?: number
+  iceberg_slice_value?: number
+  //   • Concentration / fat-finger caps (per order). max_pct_per_name is a FRACTION
+  //     of total_allocated_capital (0 < x ≤ 1); the two fatfinger_* are absolute ₹
+  //     notional / int-qty caps for ONE order. All absent = no caps (inert).
+  max_pct_per_name?: number
+  fatfinger_max_notional_per_order?: number
+  fatfinger_max_qty_per_order?: number
+}
+
+// The ₹ concentration / fat-finger thresholds the backend echoes on preview + status
+// so the leverage math is unambiguous. Any value is null when that cap is unset.
+export type ConcentrationLimits = {
+  max_per_name_rs?: number | null
+  max_notional_per_order_rs?: number | null
+  max_qty_per_order?: number | null
+  [k: string]: unknown
 }
 
 // A pick the backend SKIPPED because one unit of it costs more than its per-slice
@@ -178,9 +213,21 @@ export type PlacedOrder = {
   reason?: string
 }
 
+// One amber margin-fallback note: a margin-sized (MTF/MIS) leg was priced off LTP
+// because no margin was in the cache, so it CASH-fell-back (fewer shares than the
+// leverage allows). Never an error — a calm "sized on cash" note.
+export type MarginFallbackWarning = {
+  symbol?: string
+  product?: string
+  broker_profile?: string
+  reason?: string
+  [k: string]: unknown
+}
+
 export type StartResponse = {
   // 'now' → RUNNING with placed orders; 'scheduled' → SCHEDULED (nothing placed
-  // yet) carrying the scheduling fields.
+  // yet) carrying the scheduling fields. FAILED → the pre-trade RMS refused the
+  // start (see risk_refused + reason below); nothing was placed.
   status: SessionStatusName
   mode: Mode
   n_placed: number
@@ -188,7 +235,88 @@ export type StartResponse = {
   fires_at?: string
   seconds_remaining?: number
   scheduler_armed?: boolean
+  // ── Hardening sprint — amber margin-fallback (cash-sized) notes on a SUCCESSFUL
+  // start; absent when everything sized on margin as expected.
+  margin_fallback_warnings?: MarginFallbackWarning[]
+  // ── RMS pre-trade refusal (status === 'FAILED'). risk_refused=true + a human
+  // reason, plus the three ₹ figures behind the refusal so the operator sees WHY.
+  risk_refused?: boolean
+  reason?: string
+  available_margin?: number | null
+  committed_other?: number | null
+  planned_deployed?: number | null
 }
+
+// ── Break-glass GLOBAL KILL (POST /autotrade/global-kill) ────────────────────
+// Flatten EVERY live session for the caller (admin may target a user_id / mode).
+// Returns the sessions it killed + the count. Each entry may carry an error string
+// when one session's flatten failed (the sweep never blocks on a single failure).
+export type GlobalKillRequest = { user_id?: number | string; mode?: Mode }
+export type GlobalKilledEntry = {
+  session_id?: string
+  status?: string | null
+  error?: string
+  [k: string]: unknown
+}
+export type GlobalKillResponse = {
+  killed: GlobalKilledEntry[]
+  n_killed?: number
+  user_id?: number | string | null
+  mode?: string | null
+  skipped?: string
+  [k: string]: unknown
+}
+
+// ── Per-session HEALTH (GET /autotrade/health) ───────────────────────────────
+// The one-truth observability surface: for each ACTIVE session the caller owns —
+// reconcile age, oldest mark age, exit-failed flag, open count — plus the per-user
+// portfolio breaker state. Every field is optional-safe (render "—", never crash).
+export type SessionHealth = {
+  session_id: string
+  status?: string
+  mode?: Mode
+  user_id?: number | string | null
+  n_open?: number
+  has_exit_failed?: boolean
+  oldest_mark_age_ms?: number | null
+  last_reconcile_age_seconds?: number | null
+  reconcile_healthy?: boolean
+  [k: string]: unknown
+}
+export type BreakerState = {
+  breached?: boolean
+  aggregate_pnl?: number
+  limit_rs?: number | null
+  reason?: string | null
+  [k: string]: unknown
+}
+export type HealthResponse = {
+  sessions?: SessionHealth[]
+  breaker?: BreakerState | null
+  as_of?: string
+  [k: string]: unknown
+}
+
+// ── ALERTS feed (GET /autotrade/alerts, POST /autotrade/alerts/{id}/ack) ─────
+// Naked-position / failed-exit / divergence / daily-loss pages the operator must
+// SEE. severity/kind are backend strings; acknowledged/escalated/pushed are 0/1.
+export type AlertItem = {
+  id: number
+  ts?: string
+  incident_id?: string | null
+  severity?: string
+  kind?: string
+  session_id?: string | null
+  symbol?: string | null
+  detail?: string
+  acknowledged?: number | boolean
+  escalated?: number | boolean
+  pushed?: number | boolean
+  push_result?: string | null
+  [k: string]: unknown
+}
+export type AlertsResponse = { alerts?: AlertItem[]; [k: string]: unknown }
+export type AckAlertResponse = { acked?: boolean; id?: number; [k: string]: unknown }
 
 export type OpenPosition = {
   symbol?: string
@@ -268,6 +396,18 @@ export type StatusResponse = {
   // the fund (total_allocated_capital, ₹).
   invested_basis?: number
   total_allocated_capital: number
+  // ── Hardening sprint — NET P&L (gross − estimated charges), surfaced alongside
+  // gross so the user sees the REAL number after costs. gross_pnl / estimated_charges
+  // / net_pnl are ₹; net_return is a FRACTION (×100 to display). net_pnl/net_return
+  // may be null when there is no invested basis yet. These are DISPLAY figures only —
+  // the kill/trail decision basis stays the gross invested-basis return.
+  gross_pnl?: number
+  estimated_charges?: number
+  net_pnl?: number | null
+  net_return?: number | null
+  // Explicit risk_basis label + ₹ concentration/fat-finger caps (echo config).
+  risk_basis?: string
+  concentration_limits?: ConcentrationLimits
   // Exact, LIVE kill-switch outcome preview for the running session (mirrors the
   // POST /preview shape). Present when the kill switch is configured.
   kill_preview?: KillPreview
@@ -339,6 +479,12 @@ export type PreviewPosition = {
   notional?: number               // F&O: qty × price = contract exposure
   status?: string                 // 'SKIPPED' when dropped
   reason?: string                 // skip reason (e.g. 1 lot margin > slice)
+  // ── Iceberg intent — present (and true) ONLY on a leg that will SLICE (iceberg
+  // enabled AND qty > the effective slice cap). n_slices × slice_qty describe the
+  // planned split, surfaced BEFORE Start so the operator sees the order shape.
+  iceberg?: boolean
+  n_slices?: number
+  slice_qty?: number
   [k: string]: unknown
 }
 
@@ -353,6 +499,10 @@ export type PreviewResponse = {
   // Picks that WOULD be skipped for this config (1 unit > per-slice budget), so
   // the operator sees them before committing. Absent/[] when nothing is skipped.
   skipped_picks?: SkippedPick[]
+  // ── Hardening sprint — explicit risk_basis LABEL + the ₹ concentration/fat-finger
+  // thresholds, so the leverage math is unambiguous in the preview (echoes config).
+  risk_basis?: string                    // 'capital' | 'notional' | 'margin'
+  concentration_limits?: ConcentrationLimits
 }
 
 export type KillResponse = {
@@ -943,6 +1093,33 @@ export const AutoTradeAPI = {
       method: 'POST',
       body: JSON.stringify({ session_ids: ids }),
     }),
+
+  // ── Hardening sprint — break-glass + observability ──────────────────────────
+  // BREAK-GLASS: flatten EVERY live session for the caller in one sweep. Admin may
+  // target a specific user_id / mode; a non-admin is scoped to their own book
+  // server-side (the body is best-effort). Reuses the guarded per-session kill.
+  globalKill: (req?: GlobalKillRequest) =>
+    call<GlobalKillResponse>('/global-kill', {
+      method: 'POST',
+      body: JSON.stringify(req ?? {}),
+    }),
+
+  // Per-session health for the caller's ACTIVE sessions + the per-user breaker.
+  // Read-only; poll ~15-30s. Scoped server-side by the caller identity.
+  health: () => call<HealthResponse>('/health'),
+
+  // Recent alerts (newest first). unackedOnly filters to acknowledged=0; sessionId
+  // scopes to one session. Read-only; poll ~15-30s.
+  alerts: (opts?: { unackedOnly?: boolean; sessionId?: string; limit?: number }) =>
+    call<AlertsResponse>(`/alerts${q({
+      unacked_only: opts?.unackedOnly ? 'true' : undefined,
+      session_id: opts?.sessionId,
+      limit: opts?.limit,
+    })}`),
+
+  // Acknowledge one alert (flips acknowledged=1). Ownership enforced server-side.
+  ackAlert: (alertId: number) =>
+    call<AckAlertResponse>(`/alerts/${alertId}/ack`, { method: 'POST' }),
 
   positions: (id: string) =>
     call<PositionsResponse>(`/session/${encodeURIComponent(id)}/positions`),
