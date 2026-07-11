@@ -513,34 +513,48 @@ def patch_ladder_config(
         update_fields["child_config_json"] = json.dumps(eff_template)
     for f, v in cap_vals.items():
         update_fields[f] = v
-    # ITEM 10 — CONDITIONAL bump (WHERE config_version=cur) when the caller carried
-    # a version, so a concurrent ladder edit can't clobber (loser → 409).
-    if expected_version is not None:
-        with falcon_conn() as con:
-            probe = con.execute(
-                "UPDATE autotrade_ladders SET config_version=config_version "
-                "WHERE ladder_id=? AND config_version=?",
-                (ladder_id, cur_ladder_version))
-            if probe.rowcount == 0:
-                con.rollback()
-                raise HTTPException(
-                    409, {"code": "CONFIG_VERSION_CONFLICT",
-                          "message": ("stale edit: the ladder config changed "
-                                      "concurrently — re-open and re-apply."),
-                          "expected_config_version": int(expected_version)})
-            con.commit()
-    # Bump the ladder template version whenever anything changed.
+    # ITEM 10 / CLUSTER 9c FIX F6 (2026-07-11) — the REAL update is CONDITIONAL on
+    # config_version being unchanged since we read it, in the SAME statement
+    # (WHERE ladder_id=? AND config_version=cur), mirroring the session path exactly.
+    # The old code ran a SEPARATE version PROBE (UPDATE ... SET config_version=
+    # config_version) then an UNCONDITIONAL real UPDATE — a TOCTOU window in which a
+    # concurrent edit could bump the version BETWEEN the probe's commit and the real
+    # update, so a stale edit still clobbered. Now the loser's rowcount is 0 → 409,
+    # no clobber. Enforced only when the caller carried a version (expected_version
+    # is not None); otherwise byte-identical (unconditional). The +1 bump happens in
+    # the one statement (net effect identical to the old probe-then-bump).
     with falcon_conn() as con:
         if update_fields:
             cols = ", ".join(f"{k}=?" for k in update_fields)
-            con.execute(
-                f"UPDATE autotrade_ladders SET {cols}, "
-                "config_version=config_version+1, updated_at=? WHERE ladder_id=?",
-                list(update_fields.values()) + [_now_iso(), ladder_id])
+            if expected_version is not None:
+                cur = con.execute(
+                    f"UPDATE autotrade_ladders SET {cols}, "
+                    "config_version=config_version+1, updated_at=? "
+                    "WHERE ladder_id=? AND config_version=?",
+                    list(update_fields.values())
+                    + [_now_iso(), ladder_id, cur_ladder_version])
+            else:
+                cur = con.execute(
+                    f"UPDATE autotrade_ladders SET {cols}, "
+                    "config_version=config_version+1, updated_at=? WHERE ladder_id=?",
+                    list(update_fields.values()) + [_now_iso(), ladder_id])
         else:
-            con.execute(
-                "UPDATE autotrade_ladders SET config_version=config_version+1, "
-                "updated_at=? WHERE ladder_id=?", (_now_iso(), ladder_id))
+            if expected_version is not None:
+                cur = con.execute(
+                    "UPDATE autotrade_ladders SET config_version=config_version+1, "
+                    "updated_at=? WHERE ladder_id=? AND config_version=?",
+                    (_now_iso(), ladder_id, cur_ladder_version))
+            else:
+                cur = con.execute(
+                    "UPDATE autotrade_ladders SET config_version=config_version+1, "
+                    "updated_at=? WHERE ladder_id=?", (_now_iso(), ladder_id))
+        if expected_version is not None and cur.rowcount == 0:
+            con.rollback()
+            raise HTTPException(
+                409, {"code": "CONFIG_VERSION_CONFLICT",
+                      "message": ("stale edit: the ladder config changed "
+                                  "concurrently — re-open and re-apply."),
+                      "expected_config_version": int(expected_version)})
         con.commit()
         v2 = con.execute(
             "SELECT config_version FROM autotrade_ladders WHERE ladder_id=?",

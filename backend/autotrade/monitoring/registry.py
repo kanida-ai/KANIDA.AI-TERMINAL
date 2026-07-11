@@ -573,8 +573,14 @@ class PositionRegistry:
             source="exit", detail=error)
         # Release the exit gate so a future retry can reclaim it.
         # Import here to avoid circular import at module level.
+        # CLUSTER 9c FIX F1 (2026-07-11): the RELEASE must be scoped by
+        # broker_profile, exactly like the CLAIM (C9-I1) and the EXIT_FAILED mutate
+        # above. A symbol-wide release here would clear a SIBLING profile's exit lock
+        # while THAT profile's exit is still IN FLIGHT — so p2 could be re-claimed /
+        # re-fired mid-flight when only p1's exit failed. broker_profile=None keeps
+        # the old symbol-wide release (byte-identical for the single-profile norm).
         from autotrade.exit_gate import release_exit_session
-        release_exit_session(self.session_id, symbol)
+        release_exit_session(self.session_id, symbol, broker_profile=broker_profile)
 
     def update_partial_exit(self, symbol: str, filled_qty: int,
                             exit_price: Optional[float],

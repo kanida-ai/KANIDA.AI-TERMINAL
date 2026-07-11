@@ -988,6 +988,57 @@ async def _our_working_exit_qty(broker: Any, symbol: str,
     return int(total)
 
 
+async def _foreign_same_side_pending(broker: Any, symbol: str, side: str,
+                                     owned_ids: Optional[set] = None,
+                                     owned_tags: Optional[set] = None
+                                     ) -> List[Dict[str, Any]]:
+    """CLUSTER 9c FIX F5 (2026-07-11) — FOREIGN (non-Falcon-owned) PENDING orders on
+    the SAME symbol + SAME `side` (BUY/SELL) in the SAME account.
+
+    THE FUNGIBLE-ACCOUNT RISK: when AutoTrade shares the operator's own broker login,
+    a MANUAL resting order and a Falcon order on the same symbol+side can BOTH fill —
+    Falcon has no way to prevent the manual order and cannot tell the account's net
+    apart cleanly. This detector surfaces that conflict so ENTRY can REFUSE it and
+    EXIT can PAGE it (an exit is more urgent than the conflict, so we do NOT block it;
+    the C1 our_held clamp already limits Falcon to ITS qty). THE REAL FIX is a
+    DEDICATED AutoTrade broker account — a shared login makes this irreducible in code.
+
+    Reads broker.get_pending_orders() ONLY (per-account = this profile's own client,
+    so detection is already account-scoped). Returns a list of
+    {order_id, tag, qty, txn} for each pending order matching symbol+side that is NOT
+    provably ours (id not in owned_ids AND tag not in owned_tags). Paper / no pending
+    / probe error → [] (byte-identical; conservative — a probe error never blocks)."""
+    try:
+        pending = await broker.get_pending_orders()
+    except Exception:  # pragma: no cover - defensive; never block on a probe error
+        return []
+    if not pending:
+        return []
+    owned_ids = owned_ids or set()
+    owned_tags = owned_tags or set()
+    want = str(side).upper()
+    base = str(symbol).split(":", 1)[0]
+    out: List[Dict[str, Any]] = []
+    for o in pending:
+        if not isinstance(o, dict):
+            continue
+        ts = str(o.get("tradingsymbol") or "")
+        if ts not in (base, str(symbol)):
+            continue
+        txn = str(o.get("transaction_type") or "").upper()
+        if txn != want:
+            continue
+        oid = str(o.get("order_id") or "")
+        otag = str(o.get("tag") or "")
+        if (oid and oid in owned_ids) or (otag and otag in owned_tags):
+            continue  # provably OURS — not a conflict
+        q = o.get("pending_quantity")
+        if q in (None, ""):
+            q = o.get("quantity") or 0
+        out.append({"order_id": oid, "tag": otag, "qty": q, "txn": txn})
+    return out
+
+
 async def _exit_single_position(
         session_id: str,
         position: Dict[str, Any],
@@ -1249,6 +1300,31 @@ async def _exit_single_position_inner(
         # order must never block our exit.
         _owned_ids, _owned_tags = _falcon_owned_exit_ids_tags(
             session_id, position.get("symbol"), broker_profile=prof_id)
+        # ── CLUSTER 9c FIX F5 — FUNGIBLE-ACCOUNT EXIT CONFLICT PAGE ─────────────
+        # A FOREIGN (manual / non-Falcon) same-EXIT-side order resting for this
+        # symbol in this account means the operator may ALSO be exiting the same
+        # name on a shared login. We do NOT block the exit (needing to exit is more
+        # urgent than the conflict, and the C1 our_held clamp already caps Falcon to
+        # ITS qty) — but we page URGENT so the operator sees the fungible risk. THE
+        # REAL FIX is a DEDICATED AutoTrade account. Best-effort; never blocks.
+        _exit_txn = "BUY" if str(direction).lower() == "short" else "SELL"
+        _foreign_exit = await _foreign_same_side_pending(
+            broker, position.get("symbol"), _exit_txn,
+            owned_ids=_owned_ids, owned_tags=_owned_tags)
+        if _foreign_exit:
+            _foids = ", ".join(f.get("order_id") or "?" for f in _foreign_exit[:5])
+            _detail = (f"MANUAL_CONFLICT_ON_EXIT: a foreign {_exit_txn} order is "
+                       f"resting for {symbol} in this account (order(s) {_foids}) "
+                       f"while AutoTrade is exiting the same leg — proceeding with "
+                       f"our clamped exit, but a shared broker login risks a double "
+                       f"fill. A dedicated AutoTrade account is the real fix.")
+            log.error("exit %s/%s: %s", session_id, symbol, _detail)
+            try:
+                alerts.send_urgent_deduped(
+                    kind="MANUAL_CONFLICT_ON_EXIT", session_id=session_id,
+                    symbol=symbol, detail=_detail)
+            except Exception:  # noqa: BLE001 — paging must never block the exit
+                pass
         working = await _our_working_exit_qty(broker, position.get("symbol"),
                                               direction,
                                               owned_ids=_owned_ids,
@@ -2003,6 +2079,13 @@ class TradingSession:
         # pre-trade margin gate can refuse an over-deploy and place NOTHING.
         leg_specs: List[tuple] = []
         total_planned_deployed = 0.0
+        # CLUSTER 9c FIX F4 (2026-07-11): accumulate planned-deployed + the broker
+        # clients PER broker_account_id, so a session whose profiles resolve to
+        # DIFFERENT accounts is budgeted per-account (not as one pooled account).
+        # Keyed by the profile's broker_account_id (None = operator/global account,
+        # grouped together). Single-account sessions produce ONE group → the
+        # original single gate call (byte-identical).
+        account_groups: Dict[Any, Dict[str, Any]] = {}
         skipped_picks: List[Dict[str, Any]] = []
         # RMS CAP 4: surface a silent MIS/MTF margin-API fallback as an amber
         # warning (never silently shrink deployment). A leg cash-falls-back when a
@@ -2055,7 +2138,16 @@ class TradingSession:
             plan = allocator.plan_quantities(
                 [p.symbol for p in fund_picks], broker, cache=cache)
             plan_qtys = plan["quantities"]
-            total_planned_deployed += float(plan.get("deployed") or 0.0)
+            _leg_deployed = float(plan.get("deployed") or 0.0)
+            total_planned_deployed += _leg_deployed
+            # FIX F4: fold this profile's deployed + its broker client into its
+            # broker_account_id group (for the per-account pre-trade gate below).
+            _grp = account_groups.setdefault(
+                prof.broker_account_id,
+                {"deployed": 0.0, "brokers": {},
+                 "broker_account_id": prof.broker_account_id})
+            _grp["deployed"] += _leg_deployed
+            _grp["brokers"][prof.profile_id] = broker
             # RMS CAP 4: amber margin-fallback warning. When the product is
             # margin-sized (MTF/MIS) but a leg was priced off LTP (no margin in the
             # cache), the deployment CASH-fell-back → the operator sized fewer
@@ -2107,29 +2199,63 @@ class TradingSession:
                             break
                     except Exception:  # pragma: no cover - never block on the probe
                         continue
-            try:
-                _rms = risk_manager.pre_trade_gate(
-                    user_id=self.user_id, session_id=self.session_id,
-                    planned_deployed=total_planned_deployed, brokers=self.brokers,
-                    live=_rms_live, broker_account_id=self.broker_account_id,
-                    allow_unknown_margin=bool(getattr(
-                        self.config, "rms_allow_unknown_margin", False)))
-            except Exception as _rms_e:  # never block the fire on a gate bug
-                log.warning("session %s: pre_trade_gate raised (%s) — proceeding "
-                            "(degraded)", self.session_id, _rms_e)
-                _rms = None
-            if _rms is not None and not _rms.allow:
-                self._set_status("FAILED", reason=_rms.reason,
+            _rms_allow_unknown = bool(getattr(
+                self.config, "rms_allow_unknown_margin", False))
+            # FIX F4 (2026-07-11): run ONE pre-trade decision PER account group. A
+            # single-account session collapses to ONE group whose (deployed,brokers,
+            # broker_account_id) equal the whole-session values → the original single
+            # call (byte-identical). A multi-account session gates each account's Σ
+            # against THAT account's budget; the WHOLE fire is refused if ANY group
+            # fails (with that account's reason).
+            if len(account_groups) <= 1:
+                _rms_groups = [{"deployed": total_planned_deployed,
+                                "brokers": self.brokers,
+                                "broker_account_id": self.broker_account_id}]
+            else:
+                _rms_groups = list(account_groups.values())
+            _rms_refusal = None
+            for _g in _rms_groups:
+                try:
+                    _rms = risk_manager.pre_trade_gate(
+                        user_id=self.user_id, session_id=self.session_id,
+                        planned_deployed=_g["deployed"], brokers=_g["brokers"],
+                        live=_rms_live, broker_account_id=_g["broker_account_id"],
+                        allow_unknown_margin=_rms_allow_unknown)
+                except Exception as _rms_e:
+                    # FIX F3 (2026-07-11): a pre_trade_gate EXCEPTION must FAIL CLOSED
+                    # in LIVE — a gate bug is not permission to deploy real money.
+                    # Paper/non-live (or the explicit rms_allow_unknown_margin
+                    # override) stays INERT: log + proceed (byte-identical for paper).
+                    if _rms_live and not _rms_allow_unknown:
+                        reason = (f"RMS_GATE_ERROR: pre-trade risk gate raised "
+                                  f"({_rms_e}) on a LIVE deploy of "
+                                  f"₹{float(_g['deployed']):,.0f} for account "
+                                  f"{_g['broker_account_id']} — refusing "
+                                  f"(fail-closed).")
+                        log.error("session %s: %s", self.session_id, reason)
+                        _rms_refusal = risk_manager.RiskDecision(
+                            allow=False, reason=reason, available_margin=None,
+                            committed_other=0.0,
+                            planned_deployed=float(_g["deployed"]), free=None)
+                        break
+                    log.warning("session %s: pre_trade_gate raised (%s) — proceeding "
+                                "(degraded, paper/override)", self.session_id, _rms_e)
+                    continue
+                if _rms is not None and not _rms.allow:
+                    _rms_refusal = _rms
+                    break
+            if _rms_refusal is not None:
+                self._set_status("FAILED", reason=_rms_refusal.reason,
                                  closed_at=_now_ist_iso())
                 log.error("session %s REFUSED by pre-trade RMS: %s",
-                          self.session_id, _rms.reason)
+                          self.session_id, _rms_refusal.reason)
                 return {"session_id": self.session_id, "status": "FAILED",
                         "mode": self.mode, "when": "fire", "n_placed": 0,
                         "orders": [], "skipped_picks": skipped_picks,
-                        "risk_refused": True, "reason": _rms.reason,
-                        "available_margin": _rms.available_margin,
-                        "committed_other": _rms.committed_other,
-                        "planned_deployed": _rms.planned_deployed}
+                        "risk_refused": True, "reason": _rms_refusal.reason,
+                        "available_margin": _rms_refusal.available_margin,
+                        "committed_other": _rms_refusal.committed_other,
+                        "planned_deployed": _rms_refusal.planned_deployed}
 
         leg_coros = [
             _guarded_place(broker, prof, pick, amount, allocator, cache,
@@ -2366,6 +2492,38 @@ class TradingSession:
         # registers the FILLED-so-far (never the intended qty — the phantom class).
         # When disabled / qty <= slice this is INERT (a single leg) and the
         # existing single-order path below runs BYTE-FOR-BYTE unchanged.
+        # ── CLUSTER 9c FIX F5 — FUNGIBLE-ACCOUNT ENTRY CONFLICT GUARD ───────────
+        # Before opening a NEW position, refuse if a FOREIGN (manual / non-Falcon)
+        # same-side order is already RESTING for this symbol in this account: on a
+        # shared broker login the manual order and our entry could BOTH fill, so we
+        # do NOT compound the exposure — REFUSE this leg + page (MANUAL_CONFLICT).
+        # THE REAL FIX is a DEDICATED AutoTrade account. Live only (paper's
+        # get_pending_orders → [] → no conflict → byte-identical). A fresh entry has
+        # no position row yet, so owned sets are empty → any same-side resting order
+        # is foreign by definition. Best-effort: a probe error → no conflict.
+        if not self.dry_run:
+            _entry_txn = "SELL" if getattr(self.config, "direction", "long") == \
+                "short" else "BUY"
+            _own_ids, _own_tags = _falcon_owned_exit_ids_tags(
+                self.session_id, symbol, broker_profile=prof.profile_id)
+            _foreign = await _foreign_same_side_pending(
+                broker, symbol, _entry_txn, owned_ids=_own_ids, owned_tags=_own_tags)
+            if _foreign:
+                _oids = ", ".join(f.get("order_id") or "?" for f in _foreign[:5])
+                reason = (f"MANUAL_CONFLICT: a foreign {_entry_txn} order is already "
+                          f"resting for {symbol} in this account (order(s) {_oids}) "
+                          f"— refusing the AutoTrade entry to avoid a double fill on "
+                          f"a shared broker login. A dedicated AutoTrade account is "
+                          f"the real fix.")
+                log.error("session %s: %s", self.session_id, reason)
+                try:
+                    alerts.send_urgent_deduped(
+                        kind="MANUAL_CONFLICT", session_id=self.session_id,
+                        symbol=symbol, detail=reason)
+                except Exception:  # noqa: BLE001 — paging must never block the fire
+                    pass
+                return {"symbol": symbol, "status": "SKIPPED", "reason": reason,
+                        "manual_conflict": True, "broker_profile": prof.profile_id}
         from . import iceberg as _iceberg
         _ice_legs = _iceberg.plan_for(
             self.config, symbol, int(qty), ref_price or None)

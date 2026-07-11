@@ -250,7 +250,15 @@ def _resolve_and_adopt_one(sess, broker, prof, intent, entry_side,
     avg_price = float(order.get("average_price") or order.get("avg_price") or 0.0)
 
     # 2. FILLED → adopt (register at the real fill).
-    if status == "COMPLETE" and filled > 0 and avg_price > 0:
+    # CLUSTER 9c FIX F2 (2026-07-11): adopt ANY TERMINAL order that left a real
+    # fill — not only COMPLETE. A partial-fill-then-CANCELLED / -REJECTED entry
+    # bought real shares (filled>0 @ a real avg) but the order's terminal status is
+    # CANCELLED/REJECTED; the old COMPLETE-only guard paged "nothing to adopt" and
+    # left a REAL unmanaged position (no stop/GTT, invisible to the kill switch).
+    # A still-WORKING order (OPEN/PENDING) with a partial fill is intentionally NOT
+    # adopted here (it may fill more) — it falls through to the await path (§4).
+    _TERMINAL = ("COMPLETE", "CANCELLED", "REJECTED")
+    if status in _TERMINAL and filled > 0 and avg_price > 0:
         instrument_type = getattr(prof, "instrument_type", None) or \
             getattr(sess.config, "instrument_type", "EQ")
         product = intent.get("product") or getattr(prof, "order_product", None) \
@@ -265,16 +273,20 @@ def _resolve_and_adopt_one(sess, broker, prof, intent, entry_side,
             instrument_type=instrument_type, exchange=exchange,
             broker_account_id=acct_id, direction=direction,
             entry_order_id=broker_oid, client_order_id=coid)
-        log.critical("recovery: ADOPTED orphan entry %s/%s — %d @ %.2f (order %s) "
-                     "registered + now managed", sess.session_id, symbol, filled,
-                     avg_price, broker_oid)
+        log.critical("recovery: ADOPTED orphan entry %s/%s — %d @ %.2f (order %s, "
+                     "status=%s) registered + now managed", sess.session_id, symbol,
+                     filled, avg_price, broker_oid, status)
+        _partial = "" if status == "COMPLETE" else \
+            f" (PARTIAL fill on a {status} order)"
         _page_orphan(alerts, sess.session_id, symbol,
-                     f"adopted an orphan FILLED entry ({filled} @ {avg_price:.2f}) "
-                     f"that had no position row — now managed with a stop/GTT.",
-                     kind="ORPHAN_ENTRY_ADOPTED")
+                     f"adopted an orphan FILLED entry ({filled} @ {avg_price:.2f})"
+                     f"{_partial} that had no position row — now managed with a "
+                     f"stop/GTT.", kind="ORPHAN_ENTRY_ADOPTED")
         return "adopted_filled"
 
-    # 3. Rejected / cancelled → nothing to adopt; page.
+    # 3. Rejected / cancelled with NO fill (created-never-accepted / zero-fill) →
+    #    nothing to adopt; page. (A partial-fill terminal order was already adopted
+    #    in §2 above.)
     if status in ("REJECTED", "CANCELLED"):
         _page_orphan(alerts, sess.session_id, symbol,
                      f"entry order {broker_oid} (client {coid}) is {status} at the "
