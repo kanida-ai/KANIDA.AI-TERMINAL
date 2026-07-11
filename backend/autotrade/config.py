@@ -299,6 +299,14 @@ class TradingSessionConfig:
     max_daily_loss_pct: Optional[float] = None
     max_daily_loss_amount: Optional[float] = None
 
+    # ── RMS: pre-trade margin gate FAIL-CLOSED override (CLUSTER 9b ITEM 8) ─────
+    # In LIVE mode the pre-trade gate REFUSES a deploy when the account's available
+    # margin is unknown / the probe raised (real money never deploys on an
+    # unverifiable budget). Set this True ONLY as an explicit operator override to
+    # proceed on an unknown budget (e.g. a broker whose margin API is unreliable but
+    # trusted). Default False = fail-closed. Paper/dry-run is unaffected either way.
+    rms_allow_unknown_margin: bool = False
+
     # ── RMS: MIS broker-side protective SL-M (SPRINT CLUSTER 4, CAP 3) ─────────
     # An MIS leg gets NO broker GTT (correct — a GTT would outlive the intraday
     # square-off). Instead place a broker-held DAY SL-M (stop-market) at the
@@ -995,6 +1003,8 @@ class TradingSessionConfig:
                 if d.get("max_daily_loss_amount") is not None else None),
             mis_protective_slm_enabled=bool(
                 d.get("mis_protective_slm_enabled", True)),
+            rms_allow_unknown_margin=bool(
+                d.get("rms_allow_unknown_margin", False)),
             per_position_gtt_enabled=bool(d.get("per_position_gtt_enabled", True)),
             per_position_stop_pct=float(d.get("per_position_stop_pct", 0.08)),
             per_position_target_pct=float(d.get("per_position_target_pct", 0.20)),

@@ -49,6 +49,41 @@ class BrokerClient(ABC):
         self.profile = profile
         self.dry_run = dry_run
 
+    # ── LIVE-ORDER CERTIFICATION GATE (SPRINT CLUSTER 9b ITEM 9) ──────────────
+    def _certification_block(self, action: str = "order",
+                             symbol: Optional[str] = None) -> Optional[str]:
+        """Block REAL order placement through an UNCERTIFIED broker adapter.
+
+        Returns an UNCERTIFIED_BROKER_BLOCKED reason string (and PAGES via
+        alerts.send_urgent) when this adapter is NOT certified for live orders,
+        else None. Certified brokers (zerodha) → None (byte-for-byte unchanged).
+
+        The caller invokes this ONLY on the LIVE path (after `_live_allowed()` is
+        true) — paper / dry-run returns DRY_RUN before ever reaching here, so paper
+        is unaffected regardless of certification. Never raises (fail-closed on the
+        certification lookup would over-block zerodha; the lookup is deterministic
+        and defaults to certified on an unexpected error only for the known-live
+        zerodha path — see registry.is_certified)."""
+        try:
+            from .registry import is_certified
+            certified = is_certified(self.broker_name)
+        except Exception:  # pragma: no cover - defensive; registry is deterministic
+            certified = True
+        if certified:
+            return None
+        reason = (f"UNCERTIFIED_BROKER_BLOCKED: {self.broker_name} is not certified "
+                  f"for LIVE {action} placement — refused (paper only). Certify the "
+                  f"adapter (orders/margin/GTT/status + client-tag) before enabling "
+                  f"real orders.")
+        try:
+            from .. import alerts
+            alerts.send_urgent_deduped(
+                kind="UNCERTIFIED_BROKER_BLOCKED", session_id=None,
+                symbol=symbol, detail=reason)
+        except Exception:  # pragma: no cover - paging must never block the refusal
+            pass
+        return reason
+
     # ── Market data ──────────────────────────────────────────────────────────
     @abstractmethod
     def get_ltp(self, symbol: str) -> Optional[float]:

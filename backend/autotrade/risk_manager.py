@@ -39,6 +39,17 @@ _HOLDING_STATUSES = ("RUNNING", "KILLING_INCOMPLETE")
 
 _EPS = 1e-6
 
+# Sentinel for "do NOT filter by broker account" (preserves the pre-Cluster-9b
+# UNSCOPED committed-capital / margin-probe behaviour when a caller does not pass a
+# target account). Passing an explicit account (incl. None) engages per-account
+# scoping. `None` is a REAL value here (the operator/global account) so it cannot
+# double as "unset" — hence a dedicated sentinel object.
+_ACCOUNT_UNSET = object()
+
+# Reason tag the LIVE pre-trade gate returns when the account's available margin is
+# unknown / the probe raised (fail-CLOSED for real money — CLUSTER 9b ITEM 8).
+MARGIN_UNKNOWN_REFUSED = "MARGIN_UNKNOWN_REFUSED"
+
 
 # ── CONCENTRATION / FAT-FINGER LIMITS (SPRINT CLUSTER 8 ITEM 3) ───────────────
 
@@ -156,18 +167,29 @@ def _user_match_clause(user_id: Optional[str]) -> tuple:
 
 
 def committed_capital(user_id: Optional[str],
-                      exclude_session_id: Optional[str] = None) -> float:
+                      exclude_session_id: Optional[str] = None,
+                      broker_account_id: Any = _ACCOUNT_UNSET) -> float:
     """Σ total_allocated_capital over the user's sessions currently committing
     capital (RUNNING / SCHEDULED / KILLING_INCOMPLETE), excluding one session.
 
     This is the LEDGER: a new session's slice must fit inside the account's free
     margin MINUS what the user's other live sessions have already committed, so
-    three ₹5L sessions on ₹5L of funds can't each size as if alone."""
+    three ₹5L sessions on ₹5L of funds can't each size as if alone.
+
+    CLUSTER 9b ITEM 8 — PER-ACCOUNT SCOPING: when `broker_account_id` is passed
+    (even None, the operator/global account), the sum is scoped to sessions on the
+    SAME broker account, so account-1's budget check never includes account-2's (or
+    another account's) committed capital. Omitted (`_ACCOUNT_UNSET`, the default)
+    keeps the pre-Cluster-9b UNSCOPED behaviour (sum across all the user's accounts)
+    for any legacy caller."""
     where, params = _user_match_clause(user_id)
     q = (f"SELECT COALESCE(SUM(total_allocated_capital), 0.0) AS c "
          f"FROM autotrade_sessions "
          f"WHERE {where} AND status IN ({','.join('?' * len(_ACTIVE_STATUSES))})")
     args: List[Any] = list(params) + list(_ACTIVE_STATUSES)
+    if broker_account_id is not _ACCOUNT_UNSET:
+        q += " AND COALESCE(broker_account_id,'')=COALESCE(?,'')"
+        args.append(broker_account_id)
     if exclude_session_id is not None:
         q += " AND session_id <> ?"
         args.append(exclude_session_id)
@@ -176,15 +198,40 @@ def committed_capital(user_id: Optional[str],
     return float(row["c"]) if row else 0.0
 
 
-def _probe_available_margin(brokers: Dict[str, Any]) -> Optional[float]:
-    """Sum available_margin() over the DISTINCT broker clients (paper / stub
-    return None). Returns None only when NO broker can answer (unknown budget →
-    the gate is inert). Distinct by object id so a shared account isn't summed
-    twice."""
+def _account_matches(broker: Any, broker_account_id: Any) -> bool:
+    """True when `broker` belongs to the TARGET broker account (or no account
+    filter is requested). The account is read from the broker's own profile
+    (owner-scoped, set at build time). A broker whose account can't be read is
+    INCLUDED under the sentinel (unscoped) path and EXCLUDED under an explicit
+    scope (never leak another account's margin into this account's budget)."""
+    if broker_account_id is _ACCOUNT_UNSET:
+        return True
+    prof = getattr(broker, "profile", None)
+    acct = getattr(prof, "broker_account_id", None)
+    return str(acct or "") == str(broker_account_id or "")
+
+
+def _probe_available_margin(brokers: Dict[str, Any],
+                            broker_account_id: Any = _ACCOUNT_UNSET
+                            ) -> tuple:
+    """Sum available_margin() over the DISTINCT broker clients FOR THE TARGET
+    ACCOUNT (paper / stub return None). Distinct by object id so a shared account
+    isn't summed twice.
+
+    CLUSTER 9b ITEM 8 — returns a (total, raised) tuple:
+      * total  — Σ of the reported margins, or None when NO broker in scope could
+                 answer (unknown budget).
+      * raised — True when at least one in-scope probe RAISED (so the LIVE gate can
+                 distinguish 'broker error' from 'cleanly unknown' and fail CLOSED).
+    Scopes to `broker_account_id` when passed (else all brokers — legacy behaviour),
+    so account-1's budget probe never sums account-2's broker client."""
     seen: set = set()
     total: Optional[float] = None
+    raised = False
     for b in (brokers or {}).values():
         if b is None or id(b) in seen:
+            continue
+        if not _account_matches(b, broker_account_id):
             continue
         seen.add(id(b))
         try:
@@ -193,33 +240,60 @@ def _probe_available_margin(brokers: Dict[str, Any]) -> Optional[float]:
             log.warning("available_margin probe raised (%s) — treating as unknown",
                         e)
             m = None
+            raised = True
         if m is None:
             continue
         total = (total or 0.0) + float(m)
-    return total
+    return total, raised
 
 
 def pre_trade_gate(*, user_id: Optional[str], session_id: str,
                    planned_deployed: float,
-                   brokers: Dict[str, Any]) -> RiskDecision:
+                   brokers: Dict[str, Any],
+                   live: bool = False,
+                   broker_account_id: Any = _ACCOUNT_UNSET,
+                   allow_unknown_margin: bool = False) -> RiskDecision:
     """RMS CAP 1 pre-trade gate. Refuse a session whose planned deployed capital
-    exceeds the account's FREE margin minus the user's already-committed capital.
+    exceeds the TARGET ACCOUNT's FREE margin minus the user's already-committed
+    capital ON THAT ACCOUNT.
 
     planned_deployed: Σ(plan["deployed"]) across the session's broker profiles —
         the real cash / margin the entry orders will consume (MTF = Σ margin,
         CNC = Σ cash).
 
-    SAFE-BY-DEFAULT: when no broker reports available margin (paper / stub / no
-    live creds → available_margin() None) the budget is UNKNOWN and we DO NOT
-    block (log only) — paper sizing is byte-for-byte unchanged. Only when a real
-    budget is known do we compute free = budget - committed_other and refuse an
-    over-deploy."""
-    budget = _probe_available_margin(brokers)
-    committed_other = committed_capital(user_id, exclude_session_id=session_id)
+    CLUSTER 9b ITEM 8 — two changes:
+      (a) FAIL-CLOSED IN LIVE. When `live` is True (the session will place REAL
+          orders) and the account's available margin is UNKNOWN (probe returned
+          None) or the probe RAISED, we REFUSE (reason MARGIN_UNKNOWN_REFUSED) —
+          real money never deploys on an unverifiable budget — UNLESS
+          `allow_unknown_margin` (an explicit operator override, default off).
+          Paper / dry-run (`live` False) stays INERT (byte-for-byte unchanged).
+      (b) PER-ACCOUNT SCOPING. `broker_account_id` scopes BOTH the margin probe and
+          the committed-capital ledger to the target account, so account-1's budget
+          never includes account-2's (or another user's) committed capital + margin.
+    """
+    budget, probe_raised = _probe_available_margin(
+        brokers, broker_account_id=broker_account_id)
+    committed_other = committed_capital(
+        user_id, exclude_session_id=session_id,
+        broker_account_id=broker_account_id)
     if budget is None:
+        # UNKNOWN budget. Paper / override → inert (unchanged). LIVE → fail CLOSED.
+        if live and not allow_unknown_margin:
+            reason = (
+                f"{MARGIN_UNKNOWN_REFUSED}: cannot verify available margin for this "
+                f"account ({'probe error' if probe_raised else 'no margin reported'}) "
+                f"— refusing a LIVE deploy of ₹{float(planned_deployed):,.0f} "
+                f"(fail-closed). Reconnect the broker / retry, or set the operator "
+                f"override to proceed.")
+            log.error("session %s: %s", session_id, reason)
+            return RiskDecision(
+                allow=False, reason=reason, available_margin=None,
+                committed_other=committed_other,
+                planned_deployed=float(planned_deployed), free=None)
         log.debug("pre_trade_gate %s: available margin unknown — gate inert "
-                  "(committed_other=₹%.0f, planned=₹%.0f)",
-                  session_id, committed_other, planned_deployed)
+                  "(live=%s, committed_other=₹%.0f, planned=₹%.0f)",
+                  session_id, live, committed_other, planned_deployed)
         return RiskDecision(
             allow=True, reason="available margin unknown — gate inert",
             available_margin=None, committed_other=committed_other,

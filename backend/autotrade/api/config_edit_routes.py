@@ -158,6 +158,72 @@ def _coerce_and_validate(field: str, value: Any) -> Any:
     raise HTTPException(400, f"unsupported field: {field}")
 
 
+# ── OPTIMISTIC CONCURRENCY + AUDIT (SPRINT CLUSTER 9b ITEM 10) ────────────────
+
+def _pop_expected_version(body: Dict[str, Any]) -> Optional[int]:
+    """Extract + remove the caller's `expected_config_version` from the edit body
+    (so it is not treated as an editable field). Returns the int, or None when the
+    caller did not send one (backward-compatible: the version guard is enforced
+    ONLY when the client opts in by carrying the version it based its edit on —
+    the frontend MUST send it to be protected against a concurrent clobber).
+
+    A malformed value (non-int) is a hard 400."""
+    if not isinstance(body, dict):
+        return None
+    if "expected_config_version" not in body:
+        return None
+    raw = body.pop("expected_config_version")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            400, {"code": "BAD_EXPECTED_VERSION",
+                  "message": f"expected_config_version must be an integer, got {raw!r}"})
+
+
+def _assert_version_or_409(expected: Optional[int], current: int,
+                          target_type: str, target_id: str) -> None:
+    """Optimistic-concurrency check. When the caller carried an expected version
+    that does NOT match the CURRENT config_version, another operator has already
+    edited since — reject 409 CONFLICT and apply NOTHING (the caller must re-read
+    and retry). No-op when the caller sent no expected version."""
+    if expected is None:
+        return
+    if int(expected) != int(current):
+        raise HTTPException(
+            409, {"code": "CONFIG_VERSION_CONFLICT",
+                  "message": (f"stale edit: you based this on config_version "
+                              f"{expected} but {target_type} {target_id} is now at "
+                              f"{current}. Re-open the editor and re-apply."),
+                  "expected_config_version": int(expected),
+                  "current_config_version": int(current)})
+
+
+def _write_config_edit_audit(*, target_type: str, target_id: str,
+                             user_id: Optional[str], from_version: int,
+                             to_version: int, field_changes: Dict[str, Any],
+                             detail: Optional[str] = None) -> None:
+    """Persist ONE durable audit row per applied live config edit (who/when/what).
+    Best-effort — never raises into the edit path (audit must not fail an apply)."""
+    try:
+        with falcon_conn() as con:
+            con.execute(
+                """INSERT INTO autotrade_config_edits
+                   (ts, target_type, target_id, user_id, from_version,
+                    to_version, field_changes, detail)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (_now_iso(), target_type, target_id,
+                 str(user_id) if user_id is not None else None,
+                 int(from_version), int(to_version),
+                 json.dumps(field_changes, default=str), detail))
+            con.commit()
+    except Exception as e:  # pragma: no cover - audit never blocks an apply
+        log.warning("config-edit audit write failed for %s %s: %s",
+                    target_type, target_id, e)
+
+
 def _check_whitelist(body: Dict[str, Any], whitelist: set) -> None:
     """Reject a non-whitelisted / locked key with a 400 naming the offending
     key. Empty body → 400 (nothing to apply)."""
@@ -276,6 +342,9 @@ def patch_session_config(
     Applies → merge into config_json, bump config_version (+1), persist. The
     running tick_driver / ws_driver hot-reload the change within one tick."""
     _assert_session_access(session_id, caller)
+    # ITEM 10 — pull the caller's optimistic-concurrency version BEFORE the
+    # whitelist check (it is not an editable field).
+    expected_version = _pop_expected_version(body)
     _check_whitelist(body, SESSION_WHITELIST)
 
     # Current row (status + version) — read fresh.
@@ -287,6 +356,8 @@ def patch_session_config(
         raise HTTPException(404, "session not found")
     status = row["status"]
     cur_version = int(dict(row).get("config_version") or 0)
+    # ITEM 10 — reject a stale edit (409) BEFORE applying anything.
+    _assert_version_or_409(expected_version, cur_version, "session", session_id)
     if status != "RUNNING":
         raise HTTPException(
             409, {"code": "NOT_RUNNING",
@@ -321,18 +392,39 @@ def patch_session_config(
             "warnings": warnings, "config_version": cur_version,
         }
 
-    # Persist: rewrite config_json + bump config_version atomically.
+    # Persist: rewrite config_json + bump config_version atomically. ITEM 10 —
+    # the UPDATE is CONDITIONAL on config_version being unchanged since we read it
+    # (WHERE config_version=cur_version), so two concurrent edits that both passed
+    # the early check can't BOTH apply — the loser's rowcount is 0 → 409 (closes
+    # the read-check-write race). Only enforced when the caller carried a version.
     new_json = sess.config.to_json()
     with falcon_conn() as con:
-        con.execute(
-            "UPDATE autotrade_sessions "
-            "SET config_json=?, config_version=config_version+1 "
-            "WHERE session_id=?", (new_json, session_id))
+        if expected_version is not None:
+            cur = con.execute(
+                "UPDATE autotrade_sessions "
+                "SET config_json=?, config_version=config_version+1 "
+                "WHERE session_id=? AND config_version=?",
+                (new_json, session_id, cur_version))
+            if cur.rowcount == 0:
+                con.rollback()
+                raise HTTPException(
+                    409, {"code": "CONFIG_VERSION_CONFLICT",
+                          "message": ("stale edit: the session config changed "
+                                      "concurrently — re-open and re-apply."),
+                          "expected_config_version": int(expected_version)})
+        else:
+            con.execute(
+                "UPDATE autotrade_sessions "
+                "SET config_json=?, config_version=config_version+1 "
+                "WHERE session_id=?", (new_json, session_id))
         con.commit()
         v2 = con.execute(
             "SELECT config_version FROM autotrade_sessions WHERE session_id=?",
             (session_id,)).fetchone()
     new_version = int(dict(v2)["config_version"]) if v2 else cur_version + 1
+    _write_config_edit_audit(
+        target_type="session", target_id=session_id, user_id=caller.user_id,
+        from_version=cur_version, to_version=new_version, field_changes=new_vals)
     log.info("session %s config edited v%d->%d by %s: %s", session_id,
              cur_version, new_version, caller.user_id, list(new_vals.keys()))
     return {
@@ -360,11 +452,15 @@ def patch_ladder_config(
     Capital/duration (per_basket_capital/total_capital/end_date) affect FUTURE
     spawns only — running children's frozen basis is never touched."""
     _assert_ladder_access(ladder_id, caller)
+    # ITEM 10 — optimistic-concurrency version (not an editable field).
+    expected_version = _pop_expected_version(body)
     _check_whitelist(body, LADDER_WHITELIST)
 
     lad = LadderCampaign.load(ladder_id)
     if lad is None:
         raise HTTPException(404, "ladder not found")
+    _assert_version_or_409(expected_version, int(lad.config_version or 0),
+                          "ladder", ladder_id)
 
     risk_vals = _split_new_vals(body, LADDER_RISK_EXIT)
     cap_vals = _split_new_vals(body, LADDER_CAPITAL)
@@ -411,11 +507,28 @@ def patch_ladder_config(
         }
 
     # ── Persist template + capital/duration on the ladder row ────────────────
+    cur_ladder_version = int(lad.config_version or 0)
     update_fields: Dict[str, Any] = {}
     if risk_vals:
         update_fields["child_config_json"] = json.dumps(eff_template)
     for f, v in cap_vals.items():
         update_fields[f] = v
+    # ITEM 10 — CONDITIONAL bump (WHERE config_version=cur) when the caller carried
+    # a version, so a concurrent ladder edit can't clobber (loser → 409).
+    if expected_version is not None:
+        with falcon_conn() as con:
+            probe = con.execute(
+                "UPDATE autotrade_ladders SET config_version=config_version "
+                "WHERE ladder_id=? AND config_version=?",
+                (ladder_id, cur_ladder_version))
+            if probe.rowcount == 0:
+                con.rollback()
+                raise HTTPException(
+                    409, {"code": "CONFIG_VERSION_CONFLICT",
+                          "message": ("stale edit: the ladder config changed "
+                                      "concurrently — re-open and re-apply."),
+                          "expected_config_version": int(expected_version)})
+            con.commit()
     # Bump the ladder template version whenever anything changed.
     with falcon_conn() as con:
         if update_fields:
@@ -445,6 +558,11 @@ def patch_ladder_config(
                 log.warning("ladder %s: cascade to child %s failed: %s",
                             ladder_id, cid, e)
 
+    _write_config_edit_audit(
+        target_type="ladder", target_id=ladder_id, user_id=caller.user_id,
+        from_version=cur_ladder_version, to_version=new_version,
+        field_changes={**risk_vals, **cap_vals},
+        detail=f"children_updated={children_updated}")
     log.info("ladder %s config edited v%d by %s: risk=%s cap=%s children=%s",
              ladder_id, new_version, caller.user_id,
              list(risk_vals.keys()), list(cap_vals.keys()), children_updated)

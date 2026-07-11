@@ -252,6 +252,89 @@ def find_intent_by_client_order_id(client_order_id: str
         return None
 
 
+# Terminal event types for an ENTRY client_order_id — its lifecycle is RESOLVED
+# (a position was filled/closed, or the order was rejected) → the orphan-adoption
+# scan skips it (idempotency + don't re-page a resolved intent).
+_ENTRY_TERMINAL_TYPES = (
+    EV_FILLED, EV_REJECTED, EV_POSITION_CLOSED, EV_RECONCILE_CLOSE,
+)
+
+
+def entry_intents(session_id: str) -> List[Dict[str, Any]]:
+    """SPRINT CLUSTER 9b ITEM 6 — the ENTRY order intents for a session, one record
+    per client_order_id, merging its ORDER_CREATED (durable pre-submission intent)
+    with its ORDER_SUBMITTED (broker accepted — carries the broker order-id + the
+    register symbol/qty/price/product). Oldest first.
+
+    Only source='entry' events are considered. Each record:
+      {client_order_id, symbol, broker_profile, product, qty, price,
+       broker_order_id (None until submitted), created (bool), submitted (bool)}
+
+    The recovery path uses this to find a broker-accepted entry with NO position
+    row (a crash between broker-accept and the position insert). Never raises."""
+    try:
+        with falcon_conn() as con:
+            rows = con.execute(
+                """SELECT * FROM autotrade_order_events
+                   WHERE session_id=? AND COALESCE(source,'')='entry'
+                     AND event_type IN (?,?)
+                   ORDER BY id ASC""",
+                (session_id, EV_ORDER_CREATED, EV_ORDER_SUBMITTED)).fetchall()
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("order_ledger.entry_intents(%s) failed: %s", session_id, e)
+        return []
+    by_coid: Dict[str, Dict[str, Any]] = {}
+    for raw in rows:
+        r = dict(raw)
+        coid = r.get("client_order_id")
+        if not coid:
+            continue
+        rec = by_coid.setdefault(coid, {
+            "client_order_id": coid, "session_id": session_id,
+            "symbol": r.get("symbol"), "broker_profile": r.get("broker_profile"),
+            "product": r.get("product"), "qty": r.get("qty"),
+            "price": r.get("price"), "broker_order_id": None,
+            "created": False, "submitted": False,
+        })
+        if r.get("event_type") == EV_ORDER_CREATED:
+            rec["created"] = True
+            if rec["qty"] is None:
+                rec["qty"] = r.get("qty")
+        elif r.get("event_type") == EV_ORDER_SUBMITTED:
+            rec["submitted"] = True
+            # ORDER_SUBMITTED carries the REGISTER symbol (the FUT contract for a
+            # short) + the confirmed qty/price/product + the broker order-id.
+            rec["symbol"] = r.get("symbol") or rec["symbol"]
+            rec["broker_order_id"] = r.get("broker_order_id") or rec["broker_order_id"]
+            if r.get("qty") is not None:
+                rec["qty"] = r.get("qty")
+            if r.get("price") is not None:
+                rec["price"] = r.get("price")
+            if r.get("product"):
+                rec["product"] = r.get("product")
+    # Only records that carry an ORDER_CREATED intent are entry intents.
+    return [rec for rec in by_coid.values() if rec.get("created")]
+
+
+def entry_intent_resolved(session_id: str, client_order_id: str) -> bool:
+    """True when this ENTRY client_order_id already has a TERMINAL event (FILLED /
+    REJECTED / POSITION_CLOSED / RECONCILE_CLOSE) — its lifecycle is resolved, so
+    the orphan-adoption scan skips it (idempotent; never re-pages/re-registers)."""
+    try:
+        with falcon_conn() as con:
+            ph = ",".join("?" for _ in _ENTRY_TERMINAL_TYPES)
+            r = con.execute(
+                f"""SELECT 1 FROM autotrade_order_events
+                    WHERE session_id=? AND client_order_id=?
+                      AND event_type IN ({ph}) LIMIT 1""",
+                (session_id, client_order_id, *_ENTRY_TERMINAL_TYPES)).fetchone()
+        return bool(r)
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("order_ledger.entry_intent_resolved(%s) failed: %s",
+                    client_order_id, e)
+        return False
+
+
 def ledger_exit_evidence(session_id: str, symbol: str,
                          broker_profile: Optional[str] = None,
                          exit_order_id: Optional[str] = None,

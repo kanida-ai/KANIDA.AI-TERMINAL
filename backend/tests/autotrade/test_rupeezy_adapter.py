@@ -330,6 +330,13 @@ def test_dry_run_exit_and_cancel_no_http(fake_requests, master_file):
 
 def _enable_live(monkeypatch):
     monkeypatch.setenv("FALCON_AUTOTRADE_ENABLED", "true")
+    # CLUSTER 9b ITEM 9 — these tests certify the rupeezy adapter's ORDER MAPPING
+    # (the mechanics for WHEN it is certified). The live-order certification gate
+    # (BrokerClient._certification_block, via registry.is_certified) would otherwise
+    # block real placement for the uncertified rupeezy; mark it certified here so the
+    # mapping path runs. The gate itself is proven separately in test_cluster9b_audit.
+    import autotrade.broker.registry as _reg
+    monkeypatch.setattr(_reg, "is_certified", lambda name: True)
 
 
 def test_place_market_order_maps_to_rl_mkt(fake_requests, master_file, monkeypatch):

@@ -95,6 +95,218 @@ def _backfill_live_gtts(session_id: str) -> int:
         return 0
 
 
+def _position_exists_for_intent(session_id: str, symbol: str,
+                                broker_profile: Optional[str],
+                                client_order_id: Optional[str]) -> bool:
+    """True when a position row ALREADY exists for this entry intent — either the
+    exact client_order_id is on a row for (session, symbol, profile), or ANY row
+    (OPEN or CLOSED) already tracks (session, symbol, profile). Idempotency guard so
+    the orphan-adoption NEVER double-registers a leg the fire path already inserted.
+    """
+    try:
+        with falcon_conn() as con:
+            r = con.execute(
+                """SELECT 1 FROM autotrade_positions
+                   WHERE session_id=? AND symbol=?
+                     AND COALESCE(broker_profile,'')=COALESCE(?,'')
+                     AND (client_order_id=? OR status IN ('OPEN','EXIT_FAILED',
+                          'CLOSED','PARTIAL'))
+                   LIMIT 1""",
+                (session_id, symbol, broker_profile, client_order_id)).fetchone()
+        return bool(r)
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("recovery: position-exists probe failed for %s/%s: %s",
+                    session_id, symbol, e)
+        # Fail SAFE for double-registration: if we can't tell, assume it EXISTS
+        # (skip adoption) — never risk a duplicate real position.
+        return True
+
+
+def _adopt_orphan_entry_intents(session_id: str) -> List[Dict[str, Any]]:
+    """SPRINT CLUSTER 9b ITEM 6 — adopt a broker-FILLED entry that has a durable
+    order intent but NO position row (a crash between broker-accept and the
+    position insert leaves a real, UNMANAGED, stop-less position).
+
+    For each ENTRY intent (order_ledger.entry_intents) of a RUNNING session with NO
+    matching OPEN position row (scoped per session + broker_account_id/profile):
+      * query the broker by OUR recorded order-id / compact client-tag,
+      * FILLED at the broker  → REGISTER the position at the REAL fill qty/price
+                                (adopt) so the monitor + GTT backup pick it up,
+      * still OPEN/working     → page (await; the next resume re-checks),
+      * ABSENT / rejected AFTER a recorded ORDER_SUBMITTED → page (nothing to
+                                adopt; a broker-accepted order vanished).
+    A pure ORDER_CREATED intent with NO ORDER_SUBMITTED and NO tag-matched broker
+    order was never accepted (rejected at fire) → skipped SILENTLY (not an orphan).
+
+    LIVE only (paper registers immediately; there is no orphan). Idempotent (skips a
+    resolved intent + any already-registered leg). Best-effort — never raises."""
+    from .session import TradingSession
+    from . import order_ledger, alerts
+
+    sess = TradingSession.load(session_id)
+    if sess is None or sess.dry_run:
+        return []
+    try:
+        intents = order_ledger.entry_intents(session_id)
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("recovery: entry_intents failed for %s: %s", session_id, e)
+        return []
+    if not intents:
+        return []
+    try:
+        sess._build_brokers()
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("recovery: build_brokers failed (adopt) for %s: %s",
+                    session_id, e)
+        return []
+    actions: List[Dict[str, Any]] = []
+    profiles = {p.profile_id: p for p in (sess.config.broker_profiles or [])}
+    entry_side = "SELL" if getattr(sess.config, "direction", "long") == "short" \
+        else "BUY"
+    for it in intents:
+        coid = it.get("client_order_id")
+        symbol = it.get("symbol")
+        prof_id = it.get("broker_profile")
+        if not (coid and symbol):
+            continue
+        # Idempotency: a resolved intent or an already-registered leg is skipped.
+        if order_ledger.entry_intent_resolved(session_id, coid):
+            continue
+        if _position_exists_for_intent(session_id, symbol, prof_id, coid):
+            continue
+        prof = profiles.get(prof_id)
+        broker = sess.brokers.get(prof_id) if prof_id else None
+        if broker is None:
+            log.warning("recovery: adopt %s/%s — no broker for profile %r; skip",
+                        session_id, symbol, prof_id)
+            continue
+        try:
+            outcome = _resolve_and_adopt_one(sess, broker, prof, it,
+                                             entry_side, order_ledger, alerts)
+        except Exception as e:  # one intent must not abort the rest
+            log.warning("recovery: adopt of %s/%s failed: %s",
+                        session_id, symbol, e)
+            outcome = "adopt_error"
+        actions.append({"symbol": symbol, "client_order_id": coid,
+                        "outcome": outcome})
+    if actions:
+        log.info("recovery: orphan-intent scan for %s — %s", session_id,
+                 [(a["symbol"], a["outcome"]) for a in actions])
+    return actions
+
+
+def _resolve_and_adopt_one(sess, broker, prof, intent, entry_side,
+                           order_ledger, alerts) -> str:
+    """Resolve ONE orphan entry intent against the broker and adopt/await/page.
+    Returns an outcome tag. Never raises (caller guards too)."""
+    coid = intent["client_order_id"]
+    symbol = intent["symbol"]
+    prof_id = intent.get("broker_profile")
+    broker_oid = intent.get("broker_order_id")
+    tag = order_ledger.compact_tag(coid)
+
+    # 1. Locate OUR order at the broker: by recorded order-id (submitted) first,
+    #    else by our compact tag in the orderbook.
+    order: Optional[Dict[str, Any]] = None
+    if broker_oid:
+        try:
+            st = broker.get_order_status(str(broker_oid))
+            if isinstance(st, dict) and st:
+                order = dict(st)
+                order.setdefault("order_id", str(broker_oid))
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("recovery: get_order_status(%s) failed: %s", broker_oid, e)
+    if order is None:
+        try:
+            ob = broker.get_orders()
+        except Exception:  # pragma: no cover - defensive
+            ob = None
+        matched = order_ledger.find_broker_order_by_tag(ob, tag,
+                                                        closing_side=entry_side)
+        if matched is not None:
+            order = dict(matched)
+            broker_oid = broker_oid or matched.get("order_id")
+
+    # A pure ORDER_CREATED intent never accepted at the broker (no submitted id AND
+    # no tag match) → the order was rejected/failed at fire; NOT an orphan. Skip.
+    if order is None:
+        if not intent.get("submitted"):
+            return "skip_never_accepted"
+        # Recorded as submitted but now ABSENT at the broker → genuine anomaly.
+        _page_orphan(alerts, sess.session_id, symbol,
+                     f"entry order {broker_oid} (client {coid}) was accepted but is "
+                     f"ABSENT at the broker on recovery — nothing to adopt; verify "
+                     f"the account manually.")
+        order_ledger.append_event(
+            session_id=sess.session_id, symbol=symbol,
+            event_type=order_ledger.EV_REJECTED, position_ref=None,
+            broker_order_id=broker_oid, client_order_id=coid,
+            broker_profile=prof_id, source="recovery",
+            detail="orphan entry intent unresolved — absent at broker on recovery")
+        return "paged_absent"
+
+    status = str(order.get("status") or "").upper()
+    filled = int(order.get("filled_quantity") or order.get("filled_qty") or 0)
+    avg_price = float(order.get("average_price") or order.get("avg_price") or 0.0)
+
+    # 2. FILLED → adopt (register at the real fill).
+    if status == "COMPLETE" and filled > 0 and avg_price > 0:
+        instrument_type = getattr(prof, "instrument_type", None) or \
+            getattr(sess.config, "instrument_type", "EQ")
+        product = intent.get("product") or getattr(prof, "order_product", None) \
+            or sess.config.order_product
+        exchange = "NFO" if str(instrument_type).upper() == "FUT" else "NSE"
+        acct_id = (getattr(prof, "broker_account_id", None)
+                   if prof is not None else None) or sess.broker_account_id
+        direction = getattr(sess.config, "direction", "long")
+        sess.registry.register(
+            symbol=symbol, broker_profile=prof_id, qty=filled,
+            avg_price=avg_price, product=product,
+            instrument_type=instrument_type, exchange=exchange,
+            broker_account_id=acct_id, direction=direction,
+            entry_order_id=broker_oid, client_order_id=coid)
+        log.critical("recovery: ADOPTED orphan entry %s/%s — %d @ %.2f (order %s) "
+                     "registered + now managed", sess.session_id, symbol, filled,
+                     avg_price, broker_oid)
+        _page_orphan(alerts, sess.session_id, symbol,
+                     f"adopted an orphan FILLED entry ({filled} @ {avg_price:.2f}) "
+                     f"that had no position row — now managed with a stop/GTT.",
+                     kind="ORPHAN_ENTRY_ADOPTED")
+        return "adopted_filled"
+
+    # 3. Rejected / cancelled → nothing to adopt; page.
+    if status in ("REJECTED", "CANCELLED"):
+        _page_orphan(alerts, sess.session_id, symbol,
+                     f"entry order {broker_oid} (client {coid}) is {status} at the "
+                     f"broker — no position to adopt.")
+        order_ledger.append_event(
+            session_id=sess.session_id, symbol=symbol,
+            event_type=order_ledger.EV_REJECTED, position_ref=None,
+            broker_order_id=broker_oid, client_order_id=coid,
+            broker_profile=prof_id, source="recovery",
+            detail=f"orphan entry intent {status} at broker on recovery")
+        return "paged_rejected"
+
+    # 4. Still working (OPEN / PENDING / partial-not-complete) → await + page soft.
+    _page_orphan(alerts, sess.session_id, symbol,
+                 f"entry order {broker_oid} (client {coid}) is still WORKING "
+                 f"(status={status or 'unknown'}, filled={filled}) on recovery — "
+                 f"awaiting fill; will re-check on the next resume.",
+                 kind="ORPHAN_ENTRY_WORKING")
+    return "await_working"
+
+
+def _page_orphan(alerts, session_id: str, symbol: str, detail: str,
+                 kind: str = "ORPHAN_ENTRY_UNMANAGED") -> None:
+    """Deduped urgent page for an orphan-entry event. Never raises."""
+    try:
+        alerts.send_urgent_deduped(kind=kind, session_id=session_id,
+                                   symbol=symbol, detail=detail)
+    except Exception as e:  # pragma: no cover - paging must never block recovery
+        log.debug("recovery: orphan page failed for %s/%s: %s",
+                  session_id, symbol, e)
+
+
 def _reconcile_broker_positions(session_id: str) -> int:
     """AUTHORITATIVE broker→DB reconcile on resume: correct any position the
     broker closed (RMS auto-square / manual exit / missed GTT fill) OR whose qty
@@ -159,6 +371,15 @@ def _rearm_square_off(session_id: str) -> None:
 def _resume_running(session_id: str) -> str:
     """Re-arm the tick + WS drivers for a RUNNING session, and backfill any
     missing per-position GTTs (live only). Returns an outcome tag."""
+    # CLUSTER 9b ITEM 6: adopt any broker-FILLED entry that has a durable order
+    # intent but NO position row (crash between broker-accept and the position
+    # insert) BEFORE the GTT backfill — so an adopted position also gets its GTT
+    # backup + reconcile pass this cycle. Best-effort, LIVE only, never blocks.
+    try:
+        _adopt_orphan_entry_intents(session_id)
+    except Exception as e:  # pragma: no cover - never block recovery
+        log.warning("recovery: orphan-intent adoption failed for %s: %s",
+                    session_id, e)
     # FEATURE 1/3: retroactively place the broker GTT backup on live positions
     # that pre-date this feature, BEFORE re-arming the drivers.
     _backfill_live_gtts(session_id)

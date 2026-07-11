@@ -2088,10 +2088,32 @@ class TradingSession:
         # INERT when no broker reports available margin (paper / stub → None), so
         # paper is byte-for-byte unchanged. On refusal: place NOTHING, mark FAILED.
         if leg_specs:
+            # CLUSTER 9b ITEM 8 — the gate FAILS CLOSED on an unknown/errored margin
+            # only when a broker will actually place REAL orders (its own
+            # _live_allowed() = dry_run off AND the master env switch on), and scopes
+            # the budget + committed-capital ledger to THIS session's broker account.
+            # Deriving "live" from the BROKER (not just mode/env) keeps paper + every
+            # paper-style mock broker (no _live_allowed / returns False) byte-for-byte
+            # inert — only a genuinely live-order-capable adapter engages fail-closed.
+            # An explicit operator override (config.rms_allow_unknown_margin, default
+            # off) lets a live deploy proceed on an unknown budget.
+            _rms_live = False
+            if not self.dry_run:
+                for _b in (self.brokers or {}).values():
+                    try:
+                        _la = getattr(_b, "_live_allowed", None)
+                        if callable(_la) and _la():
+                            _rms_live = True
+                            break
+                    except Exception:  # pragma: no cover - never block on the probe
+                        continue
             try:
                 _rms = risk_manager.pre_trade_gate(
                     user_id=self.user_id, session_id=self.session_id,
-                    planned_deployed=total_planned_deployed, brokers=self.brokers)
+                    planned_deployed=total_planned_deployed, brokers=self.brokers,
+                    live=_rms_live, broker_account_id=self.broker_account_id,
+                    allow_unknown_margin=bool(getattr(
+                        self.config, "rms_allow_unknown_margin", False)))
             except Exception as _rms_e:  # never block the fire on a gate bug
                 log.warning("session %s: pre_trade_gate raised (%s) — proceeding "
                             "(degraded)", self.session_id, _rms_e)

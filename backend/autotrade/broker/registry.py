@@ -69,16 +69,25 @@ class BrokerEntry:
     client_cls: Type[BrokerClient]
     auth_cls: Type[BrokerAuthProvider]
     capabilities: BrokerCapabilities
-    live: bool  # True = real certified adapter; False = placeholder auth
+    live: bool  # True = the UI enumerates it as a real broker (has a real adapter)
+    # SPRINT CLUSTER 9b ITEM 9 — LIVE-ORDER CERTIFICATION GATE. `live` means the
+    # adapter EXISTS and the UI shows it; `live_certified` means its order /
+    # margin / GTT / status endpoints have been VERIFIED against a real account so
+    # it may place REAL money orders. An uncertified LIVE broker (rupeezy today)
+    # is BLOCKED from real order placement (paper always allowed) at the adapter —
+    # see BrokerClient._certification_block. Default False (fail-closed): a broker
+    # is only certified when explicitly registered as such.
+    live_certified: bool = False
 
 
 _REGISTRY: Dict[str, BrokerEntry] = {}
 
 
-def _register(broker: str, client_cls, auth_cls, capabilities, *, live: bool):
+def _register(broker: str, client_cls, auth_cls, capabilities, *, live: bool,
+              live_certified: bool = False):
     _REGISTRY[broker.lower()] = BrokerEntry(
         broker=broker.lower(), client_cls=client_cls, auth_cls=auth_cls,
-        capabilities=capabilities, live=live)
+        capabilities=capabilities, live=live, live_certified=live_certified)
 
 
 # Placeholder capability matrices for the stub brokers. Conservative defaults —
@@ -101,8 +110,10 @@ def _build_registry() -> None:
     # ── zerodha: LIVE ────────────────────────────────────────────────────────
     from .zerodha import ZerodhaBroker
     from .zerodha_auth_provider import ZerodhaAuth
+    # zerodha is the ONE certified live adapter (orders/margin/GTT/status verified
+    # against a real account) → may place REAL orders.
     _register("zerodha", ZerodhaBroker, ZerodhaAuth, ZerodhaAuth.capabilities,
-              live=True)
+              live=True, live_certified=True)
 
     # ── rupeezy (Vortex API): LIVE adapter, requires certification ────────────
     # Real execution client + real auth provider (Stage 2). Marked live=True so
@@ -115,8 +126,12 @@ def _build_registry() -> None:
     # in rupeezy.py / rupeezy_auth_provider.py as UNVERIFIED.
     from .rupeezy import RupeezyBroker
     from .rupeezy_auth_provider import RupeezyAuth
+    # rupeezy: LIVE adapter (UI-visible) but NOT yet certified — its positions/
+    # margin/GTT/status are uncertified and it doesn't reliably transmit the client
+    # tag. live_certified=False → BLOCKED from REAL order placement (paper allowed)
+    # until certified against a live account. Flip to True only after certification.
     _register("rupeezy", RupeezyBroker, RupeezyAuth, RupeezyAuth.capabilities,
-              live=True)
+              live=True, live_certified=False)
 
     # ── placeholders: real execution stubs, NotImplementedAuth ───────────────
     from .fyers import FyersBroker
@@ -168,6 +183,15 @@ def get_capabilities(name: str) -> BrokerCapabilities:
 
 def is_live(name: str) -> bool:
     return get_entry(name).live
+
+
+def is_certified(name: str) -> bool:
+    """SPRINT CLUSTER 9b ITEM 9 — whether `name` is CERTIFIED to place REAL orders.
+    An UNKNOWN broker is treated as NOT certified (fail-closed for real money)."""
+    try:
+        return bool(get_entry(name).live_certified)
+    except Exception:
+        return False
 
 
 def list_supported() -> List[dict]:

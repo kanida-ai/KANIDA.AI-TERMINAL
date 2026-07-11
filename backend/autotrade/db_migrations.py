@@ -410,6 +410,7 @@ def run_migrations() -> dict:
             "autotrade_portfolio_snapshots", "autotrade_kill_switch_log",
             "broker_accounts", "autotrade_ladders", "autotrade_recon_alerts",
             "autotrade_order_events", "autotrade_alerts", "autotrade_claims",
+            "autotrade_config_edits",
         ):
             if _table_exists(con, t):
                 created_tables.append(t)
@@ -680,6 +681,28 @@ CREATE TABLE IF NOT EXISTS autotrade_recon_alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_autotrade_recon_alerts_ts
     ON autotrade_recon_alerts(ts DESC);
+
+-- ── LIVE CONFIG-EDIT AUDIT (SPRINT CLUSTER 9b ITEM 10) ──────────────────────
+-- One row per SUCCESSFULLY APPLIED live config edit (session or ladder), for a
+-- durable who/when/what audit of every hot-reload of a running session's risk/
+-- exit knobs. The PATCH endpoint uses OPTIMISTIC CONCURRENCY (the caller carries
+-- the config_version it based its edit on) so two operators can't clobber each
+-- other; a stale edit is 409-rejected and writes NO row here. Additive +
+-- idempotent (CREATE IF NOT EXISTS). Observability only — never gates an edit.
+-- DATA-ISOLATION: autotrade-only; never touches falcon_position_state.
+CREATE TABLE IF NOT EXISTS autotrade_config_edits (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT NOT NULL,                 -- ISO IST when applied
+    target_type  TEXT NOT NULL,                 -- 'session' | 'ladder'
+    target_id    TEXT NOT NULL,                 -- session_id | ladder_id
+    user_id      TEXT,                          -- the caller (who)
+    from_version INTEGER,                       -- config_version before the edit
+    to_version   INTEGER,                       -- config_version after the edit
+    field_changes TEXT,                         -- JSON {field: applied_value}
+    detail       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_autotrade_config_edits_target
+    ON autotrade_config_edits(target_type, target_id, ts DESC);
 
 -- ── DURABLE ORDER-EVENT LEDGER (SPRINT CLUSTER 2) ───────────────────────────
 -- Append-only lifecycle trail for every order our sessions place. One row per

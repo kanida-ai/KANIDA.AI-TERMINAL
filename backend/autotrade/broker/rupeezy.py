@@ -255,6 +255,16 @@ class RupeezyBroker(BrokerClient):
             return OrderResult(status="DRY_RUN", broker_order_id=None,
                                symbol=order.symbol, qty=order.qty,
                                raw={"dry_run": True})
+        # ITEM 9 — hard-block REAL orders through the UNCERTIFIED rupeezy adapter.
+        _blk = self._certification_block(action="entry order", symbol=order.symbol)
+        if _blk:
+            return OrderResult(status="FAILED", broker_order_id=None,
+                               symbol=order.symbol, qty=order.qty, error=_blk)
+        # TODO(certify): the Vortex /trading/orders/regular payload has NO documented
+        # client-tag / client_order_id field (reference §Orders), so OUR
+        # order.client_order_id / compact tag CANNOT be transmitted here yet — do NOT
+        # fabricate a field. Confirm the tag field name at certification and thread it
+        # into _order_body then (order.client_order_id is available on `order`).
         try:
             body = self._order_body(
                 order.symbol, order.qty, "BUY",
@@ -304,6 +314,13 @@ class RupeezyBroker(BrokerClient):
         if not self._live_allowed():
             return OrderResult(status="DRY_RUN", broker_order_id=None,
                                symbol=symbol, qty=qty, raw={"dry_run": True})
+        # ITEM 9 — hard-block REAL exits through the UNCERTIFIED rupeezy adapter.
+        # TODO(certify): transmit client_order_id/compact tag once the Vortex
+        # regular-order tag field is confirmed (no documented field today).
+        _blk = self._certification_block(action="exit order", symbol=symbol)
+        if _blk:
+            return OrderResult(status="FAILED", broker_order_id=None,
+                               symbol=symbol, qty=qty, error=_blk)
         product = kite_product if kite_product else instrument_type
         _side = "BUY" if str(direction).lower() == "short" else "SELL"
         try:
