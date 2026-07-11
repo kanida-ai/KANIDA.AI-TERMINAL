@@ -399,7 +399,7 @@ def run_migrations() -> dict:
             "autotrade_broker_profiles", "autotrade_slippage",
             "autotrade_portfolio_snapshots", "autotrade_kill_switch_log",
             "broker_accounts", "autotrade_ladders", "autotrade_recon_alerts",
-            "autotrade_order_events",
+            "autotrade_order_events", "autotrade_alerts",
         ):
             if _table_exists(con, t):
                 created_tables.append(t)
@@ -712,6 +712,39 @@ CREATE INDEX IF NOT EXISTS idx_autotrade_order_events_session
     ON autotrade_order_events(session_id, symbol);
 CREATE INDEX IF NOT EXISTS idx_autotrade_order_events_coid
     ON autotrade_order_events(client_order_id);
+
+-- ── OBSERVABILITY / ALERTING (SPRINT CLUSTER 6) ─────────────────────────────
+-- Durable record for every alert the notifier (autotrade/alerts.py) raises: the
+-- MANUAL-EXIT-REQUIRED / naked-position / reconcile-divergence / staleness /
+-- daily-loss-breaker pages that must reach a human. One row per fired alert.
+--   incident_id  — stable (kind|session|symbol) dedup key so a condition true on
+--                  every ~5s tick pages at most once per window (send_urgent_deduped).
+--   acknowledged — 1 once an operator acks it (POST .../alerts/{id}/ack).
+--   escalated    — 1 once an UNACKED urgent alert older than the threshold was
+--                  re-pushed (alerts.escalate_stale_alerts).
+--   pushed / push_result — whether the web_push dispatch succeeded + its result
+--                  (a push failure NEVER blocks persistence; the row is still written).
+-- OBSERVABILITY ONLY — never mutates a position. Additive + idempotent.
+CREATE TABLE IF NOT EXISTS autotrade_alerts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT NOT NULL,                 -- ISO IST when raised
+    incident_id  TEXT,                          -- dedup key (kind|session|symbol)
+    severity     TEXT NOT NULL DEFAULT 'info',  -- info | warn | critical | urgent
+    kind         TEXT NOT NULL,                 -- EXIT_FAILED | NAKED_POSITION | ...
+    session_id   TEXT,                          -- owning session (may be NULL)
+    symbol       TEXT,                          -- affected symbol (may be NULL)
+    detail       TEXT,                          -- human-readable detail
+    acknowledged INTEGER NOT NULL DEFAULT 0,    -- 0/1 operator ack
+    escalated    INTEGER NOT NULL DEFAULT 0,    -- 0/1 re-pushed after threshold
+    pushed       INTEGER NOT NULL DEFAULT 0,    -- 0/1 web_push dispatch succeeded
+    push_result  TEXT                           -- transport result / error string
+);
+CREATE INDEX IF NOT EXISTS idx_autotrade_alerts_ts
+    ON autotrade_alerts(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_autotrade_alerts_incident
+    ON autotrade_alerts(incident_id, ts);
+CREATE INDEX IF NOT EXISTS idx_autotrade_alerts_session
+    ON autotrade_alerts(session_id, ts DESC);
 """
 
 

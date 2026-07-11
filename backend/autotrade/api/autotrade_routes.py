@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field, field_validator
 from falcon.db import falcon_conn
 
 from .. import config as cfgmod
+from .. import risk_manager
 from ..config import TradingSessionConfig
 from ..session import TradingSession, preview_session_sizing, load_falcon_picks
 from ..monitoring import tick_driver, entry_scheduler
@@ -705,6 +706,145 @@ def session_delete(session_id: str,
     if not ok:
         raise HTTPException(404, "session not found")
     return {"deleted": 1, "ids": [session_id]}
+
+
+# ── OBSERVABILITY / ALERTING endpoints (SPRINT CLUSTER 6, operator-token gated
+#    + per-user ownership) ───────────────────────────────────────────────────
+
+@router.get("/autotrade/alerts")
+def alerts_list(limit: int = 100, unacked_only: bool = False,
+                session_id: Optional[str] = None,
+                caller: Caller = Depends(resolve_caller)):
+    """Recent AutoTrade alerts (acked/unacked, kind, incident_id) — the operator's
+    alert feed. TENANT ISOLATION: admin sees all; a non-admin user sees ONLY
+    alerts whose owning session belongs to them (NULL-session/global alerts are
+    admin-only). Operator-token gated at the router level."""
+    caller = _caller(caller)
+    limit = max(1, min(int(limit or 100), 500))
+    from .. import alerts as _alerts_mod  # noqa: F401 (ensures module import ok)
+    cols = ("id, ts, incident_id, severity, kind, session_id, symbol, detail, "
+            "acknowledged, escalated, pushed, push_result")
+    params: List[Any] = []
+    if caller.is_admin:
+        where = "WHERE 1=1"
+        if session_id:
+            where += " AND a.session_id = ?"
+            params.append(session_id)
+        sql = (f"SELECT {cols} FROM autotrade_alerts a {where}")
+    else:
+        # Non-admin: only alerts whose session is owned by the caller.
+        sql = (f"SELECT {', '.join('a.' + c.strip() for c in cols.split(','))} "
+               f"FROM autotrade_alerts a "
+               f"JOIN autotrade_sessions s ON a.session_id = s.session_id "
+               f"WHERE s.user_id = ?")
+        params.append(caller.user_id)
+        if session_id:
+            sql += " AND a.session_id = ?"
+            params.append(session_id)
+    if unacked_only:
+        sql += " AND a.acknowledged = 0"
+    sql += " ORDER BY a.ts DESC LIMIT ?"
+    params.append(limit)
+    with falcon_conn() as con:
+        rows = con.execute(sql, tuple(params)).fetchall()
+    return {"alerts": [dict(r) for r in rows]}
+
+
+@router.post("/autotrade/alerts/{alert_id}/ack")
+def alert_ack(alert_id: int, caller: Caller = Depends(resolve_caller)):
+    """Acknowledge one alert (flips acknowledged=1). Ownership: the alert's owning
+    session must belong to the caller (admin may ack any; a NULL-session alert is
+    admin-only)."""
+    caller = _caller(caller)
+    with falcon_conn() as con:
+        row = con.execute(
+            "SELECT session_id FROM autotrade_alerts WHERE id=?",
+            (alert_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "alert not found")
+    sid = row["session_id"]
+    if not caller.is_admin:
+        if sid is None:
+            raise HTTPException(404, "alert not found")
+        _assert_session_access(sid, caller)   # 404 on non-owner (no leak)
+    from .. import alerts as _alerts_mod
+    ok = _alerts_mod.acknowledge(alert_id)
+    if not ok:
+        raise HTTPException(404, "alert not found")
+    return {"acked": True, "id": alert_id}
+
+
+@router.get("/autotrade/health")
+def health(caller: Caller = Depends(resolve_caller)):
+    """The ONE-TRUTH per-session health surface: for each of the caller's ACTIVE
+    sessions — last-reconcile-age, oldest-mark-age, has_exit_failed, n_open,
+    breaker state. TENANT ISOLATION: admin → all active sessions; non-admin →
+    only sessions they own. Read-only; computed from the DB + the process-local
+    reconcile-health stamp."""
+    caller = _caller(caller)
+    from ..monitoring import basket_gen
+    _ACTIVE = ("RUNNING", "KILLING_INCOMPLETE", "SCHEDULED")
+    ph = ",".join("?" * len(_ACTIVE))
+    if caller.is_admin:
+        sql = (f"SELECT session_id, status, mode, user_id FROM autotrade_sessions "
+               f"WHERE status IN ({ph}) ORDER BY created_at DESC")
+        args: List[Any] = list(_ACTIVE)
+    else:
+        sql = (f"SELECT session_id, status, mode, user_id FROM autotrade_sessions "
+               f"WHERE status IN ({ph}) AND user_id = ? ORDER BY created_at DESC")
+        args = list(_ACTIVE) + [caller.user_id]
+    now = datetime.now(IST)
+    out: List[Dict[str, Any]] = []
+    with falcon_conn() as con:
+        sessions = con.execute(sql, tuple(args)).fetchall()
+        for s in sessions:
+            sid = s["session_id"]
+            prow = con.execute(
+                "SELECT COUNT(*) AS n, "
+                "SUM(CASE WHEN status='EXIT_FAILED' THEN 1 ELSE 0 END) AS ef, "
+                "MIN(CASE WHEN status='OPEN' THEN ltp_as_of END) AS oldest_mark "
+                "FROM autotrade_positions "
+                "WHERE session_id=? AND status IN ('OPEN','EXIT_FAILED') AND qty>0",
+                (sid,)).fetchone()
+            n_open_ef = int(prow["n"] or 0)
+            has_exit_failed = int(prow["ef"] or 0) > 0
+            oldest_mark_age_ms = None
+            if prow["oldest_mark"]:
+                try:
+                    dt = datetime.fromisoformat(prow["oldest_mark"])
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=IST)
+                    oldest_mark_age_ms = int(
+                        max(0.0, (now - dt).total_seconds() * 1000))
+                except (ValueError, TypeError):
+                    oldest_mark_age_ms = None
+            out.append({
+                "session_id": sid,
+                "status": s["status"],
+                "mode": s["mode"],
+                "user_id": s["user_id"],
+                "n_open": n_open_ef,
+                "has_exit_failed": has_exit_failed,
+                "oldest_mark_age_ms": oldest_mark_age_ms,
+                "last_reconcile_age_seconds":
+                    basket_gen.last_successful_reconcile_age_seconds(sid, now=now),
+                "reconcile_healthy": basket_gen.reconcile_healthy(sid),
+            })
+    # Per-user portfolio breaker state (best-effort; admin = global/operator None).
+    breaker_state = None
+    try:
+        breaker = risk_manager.check_portfolio_breaker(
+            None if caller.is_admin else caller.user_id)
+        breaker_state = {
+            "breached": breaker.breached,
+            "aggregate_pnl": breaker.aggregate_pnl,
+            "limit_rs": breaker.limit_rs,
+            "reason": breaker.reason,
+        }
+    except Exception as e:  # noqa: BLE001 — health must never 500 on the breaker
+        log.debug("health: breaker probe failed: %s", e)
+    return {"sessions": out, "breaker": breaker_state,
+            "as_of": now.isoformat()}
 
 
 # ── LADDER ORCHESTRATOR endpoints (operator-token gated + per-user ownership) ──

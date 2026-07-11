@@ -57,6 +57,7 @@ from .broker.router import BrokerRouter, build_client
 from .execution.orders import build_order, place_order_with_retry
 from .execution.slippage import record_slippage
 from . import order_ledger
+from . import alerts
 from .monitoring.registry import PositionRegistry
 from .monitoring.monitor import PortfolioMonitor, compute_kill_preview
 from .monitoring.kill_switch import KillSwitchExecutor
@@ -2565,6 +2566,40 @@ class TradingSession:
             _now_ist_tick.replace(hour=15, minute=29, second=0, microsecond=0)
         )
 
+        # ── CLUSTER 6 — money-losing-event PAGING (LIVE only; deduped; NON-mutating).
+        # Route each detected real-money failure through alerts.send_urgent so a
+        # HUMAN is paged. Paper (dry_run) never pages → byte-identical paper. Fully
+        # guarded: an alerting failure NEVER blocks the tick / touches a position.
+        try:
+            if not self.dry_run:
+                from .monitoring import alert_monitor as _am6
+                from .monitoring import basket_gen as _bg6
+                _status6 = self._current_status()
+                _open6 = self.registry.get_open_positions()
+                # (b) reconcile divergences (UNATTRIBUTED_CLOSE / ORPHAN / CORP_ACTION)
+                _am6.page_recon_divergences(self.session_id, broker_reconciled, True)
+                # (a) EXIT_FAILED legs still held.
+                try:
+                    _ef6 = self.monitor.get_exit_failed_positions()
+                except Exception:  # noqa: BLE001
+                    _ef6 = []
+                _am6.page_exit_failed(self.session_id, _ef6, False, True)
+                # (c) reconcile-staleness for a RUNNING session during market hours.
+                _am6.page_reconcile_stale(
+                    self.session_id,
+                    _bg6.last_successful_reconcile_age_seconds(self.session_id),
+                    _status6 == "RUNNING", _in_market_hours, True)
+                # (d) mark-staleness (a stalled ticker → stale marks).
+                _am6.page_mark_stale(
+                    self.session_id, _oldest_mark_age_ms(_open6), False, True)
+                # ITEM 3 — NAKED / unmanaged real broker position (throttled scan).
+                _am6.maybe_detect_naked(self)
+                # Re-push any UNACKED urgent alert past the escalation threshold.
+                alerts.maybe_escalate()
+        except Exception as _al6_e:  # noqa: BLE001 — never block the tick
+            log.warning("cluster6 alert wiring failed for %s: %s",
+                        self.session_id, _al6_e)
+
         # EXIT_FAILED RETRY: after the GTT reconcile step, re-attempt any
         # position whose exit previously failed and whose exit_gate was
         # released by registry.mark_exit_failed. Uses the same
@@ -2617,6 +2652,16 @@ class TradingSession:
                 still_incomplete = False
             else:
                 still_incomplete = True
+            # CLUSTER 6 (a) — page while the kill is still incomplete (live only).
+            if not self.dry_run:
+                try:
+                    from .monitoring import alert_monitor as _am6b
+                    _am6b.page_exit_failed(
+                        self.session_id, self.monitor.get_exit_failed_positions(),
+                        still_incomplete, True)
+                except Exception as _al6b_e:  # noqa: BLE001 — never block the tick
+                    log.warning("cluster6 KILLING_INCOMPLETE page failed for %s: %s",
+                                self.session_id, _al6b_e)
             return {
                 "gross_return": self.monitor.compute_gross_return_invested(),
                 "gross_return_fund": snap["gross_return"], "snapshot": snap,
@@ -2641,6 +2686,14 @@ class TradingSession:
                 log.error("breaker check failed for %s: %s", self.session_id, _bk_e)
                 breaker = None
             if breaker is not None:
+                # CLUSTER 6 (e) — page the daily-loss breaker firing (live only).
+                if not self.dry_run:
+                    try:
+                        from .monitoring import alert_monitor as _am6c
+                        _am6c.page_breaker(self.session_id, breaker, True)
+                    except Exception as _al6c_e:  # noqa: BLE001 — never block tick
+                        log.warning("cluster6 breaker page failed for %s: %s",
+                                    self.session_id, _al6c_e)
                 return {"gross_return": self.monitor.compute_gross_return_invested(),
                         "gross_return_fund": self.monitor.compute_gross_return(),
                         "kill_switch_fired": True,
