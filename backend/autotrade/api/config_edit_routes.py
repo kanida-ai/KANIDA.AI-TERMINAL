@@ -183,6 +183,25 @@ def _pop_expected_version(body: Dict[str, Any]) -> Optional[int]:
                   "message": f"expected_config_version must be an integer, got {raw!r}"})
 
 
+def _require_version_for_live(expected: Optional[int], mode: Optional[str],
+                              target_type: str, target_id: str) -> None:
+    """CLUSTER 9d FIX F7 — make expected_config_version MANDATORY for a LIVE
+    (real-money) session/ladder edit. A stale UI that omits the version could
+    otherwise silently clobber the live risk/trailing config of a running,
+    real-money session. A PAPER (dry-run) edit stays OPTIONAL (backward-compatible).
+    The frontend already sends the version — this enforces it on the backend."""
+    if expected is not None:
+        return
+    if str(mode or "").lower() == "live":
+        raise HTTPException(
+            400, {"code": "VERSION_REQUIRED",
+                  "message": (f"a LIVE {target_type} edit must carry "
+                              f"expected_config_version (re-open the editor to "
+                              f"read the current version and re-apply) — refusing "
+                              f"a versionless edit that could clobber live "
+                              f"risk/exit config of {target_type} {target_id}.")})
+
+
 def _assert_version_or_409(expected: Optional[int], current: int,
                           target_type: str, target_id: str) -> None:
     """Optimistic-concurrency check. When the caller carried an expected version
@@ -347,15 +366,20 @@ def patch_session_config(
     expected_version = _pop_expected_version(body)
     _check_whitelist(body, SESSION_WHITELIST)
 
-    # Current row (status + version) — read fresh.
+    # Current row (status + mode + version) — read fresh.
     with falcon_conn() as con:
         row = con.execute(
-            "SELECT status, config_version FROM autotrade_sessions "
+            "SELECT status, mode, config_version FROM autotrade_sessions "
             "WHERE session_id=?", (session_id,)).fetchone()
     if row is None:
         raise HTTPException(404, "session not found")
     status = row["status"]
+    mode = dict(row).get("mode") or "paper"
     cur_version = int(dict(row).get("config_version") or 0)
+    # CLUSTER 9d FIX F7 — a LIVE session edit MUST carry expected_config_version
+    # (a versionless live edit is rejected 400 so a stale UI can't clobber live
+    # risk/exit config). Paper stays optional. Checked BEFORE applying anything.
+    _require_version_for_live(expected_version, mode, "session", session_id)
     # ITEM 10 — reject a stale edit (409) BEFORE applying anything.
     _assert_version_or_409(expected_version, cur_version, "session", session_id)
     if status != "RUNNING":
@@ -459,6 +483,10 @@ def patch_ladder_config(
     lad = LadderCampaign.load(ladder_id)
     if lad is None:
         raise HTTPException(404, "ladder not found")
+    # CLUSTER 9d FIX F7 — a LIVE ladder edit MUST carry expected_config_version
+    # (paper stays optional), mirroring the session path.
+    _require_version_for_live(expected_version, getattr(lad, "mode", None),
+                              "ladder", ladder_id)
     _assert_version_or_409(expected_version, int(lad.config_version or 0),
                           "ladder", ladder_id)
 

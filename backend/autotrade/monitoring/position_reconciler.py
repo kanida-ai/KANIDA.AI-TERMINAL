@@ -617,13 +617,13 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
         return []
 
     prof_scope = list(brokers.keys()) or None
-    # CLUSTER 9 CROSS-CUTTING: the account scope for the account-wide invariant is
-    # the DISTINCT broker_account_id set on THIS session's own positions (all belong
-    # to this session's bound account(s)). A DIFFERENT account's same-symbol lot is
-    # never summed into this invariant even when it shares the 'zerodha_default'
-    # profile string. Legacy single-account rows are all NULL → {None} → unchanged.
-    acct_scope: List[Optional[str]] = list(
-        {p.get("broker_account_id") for p in my_positions})
+
+    def _acct_of(p: Dict[str, Any]) -> Optional[str]:
+        """Canonical broker_account_id for a position (None == the operator/global
+        account; '' normalised to None so the two never split a bucket)."""
+        a = p.get("broker_account_id")
+        return None if a in (None, "") else str(a)
+
     _prod_cache: Dict[str, str] = {}
     actions: List[Dict[str, Any]] = []
     changed = False
@@ -651,40 +651,55 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
             return next(iter(order_maps.values()))
         return {}
 
-    # Distinct (bare_symbol, product) groups THIS session has OPEN, in a
+    # CLUSTER 9d FIX F3 — bucket the invariant by (bare_symbol, product,
+    # broker_account_id), NOT the session-wide account SET. A session on acctA+acctB
+    # must reconcile symbol X on acctA against ONLY acctA's DB rows + broker book;
+    # acctB's X (this session's OR another session's) must NEVER leak in (it would
+    # false-close / false-alert). A single-account session (all NULL / one account)
+    # produces the SAME groups keyed by that one account → byte-identical.
+    # Distinct (bare_symbol, product, account) groups THIS session has OPEN, in a
     # deterministic order.
-    my_groups: List[Tuple[str, str]] = []
+    my_groups: List[Tuple[str, str, Optional[str]]] = []
     seen = set()
     for p in my_positions:
         bare = _bare_symbol(str(p.get("symbol") or ""))
         prod = _position_product(p, _prod_cache)
-        key = (bare, prod)
+        acct = _acct_of(p)
+        key = (bare, prod, acct)
         if key not in seen:
             seen.add(key)
             my_groups.append(key)
-    my_groups.sort()
+    my_groups.sort(key=lambda k: (k[0], k[1], "" if k[2] is None else k[2]))
 
-    for bare_sym, product in my_groups:
+    for bare_sym, product, grp_acct in my_groups:
+        # A position belongs to THIS group iff its bare symbol AND its account match
+        # (product is intentionally NOT part of this membership test — the pre-F3
+        # per-position close/deficit logic scoped by bare symbol only; F3 adds ONLY
+        # the account scope, so a name held as both CNC + MTF on one account stays
+        # grouped exactly as before).
+        def _in_group(p: Dict[str, Any]) -> bool:
+            return (_bare_symbol(str(p.get("symbol") or "")) == bare_sym
+                    and _acct_of(p) == grp_acct)
+
         is_fno = any(
             _is_fno(p.get("instrument_type")) for p in my_positions
-            if _bare_symbol(str(p.get("symbol") or "")) == bare_sym)
+            if _in_group(p))
         # M#11: the position's stored cash exchange (default NSE) — used to reject
         # a same-name row on a DIFFERENT exchange (e.g. BSE) from the NSE bucket.
         want_exchange = next(
             (str(p.get("exchange") or "NSE").upper() for p in my_positions
-             if _bare_symbol(str(p.get("symbol") or "")) == bare_sym
-             and p.get("exchange")), "NSE")
+             if _in_group(p) and p.get("exchange")), "NSE")
 
         # ── broker_held for (symbol, product): Σ net qty over matching rows, plus
         #    (delivery CNC only) holdings when the net book shows net0/absent
         #    WITHOUT a sell. abs() so a short's negative net counts as held. ─────
         broker_net = 0
         matched_rows: List[dict] = []
-        # Prefer THIS session's profile books; fall back to the single non-None
-        # book for a single-broker session.
+        # Prefer THIS session's profile books FOR THIS ACCOUNT; fall back to the
+        # single non-None book for a single-broker session.
         candidate_books: List[Optional[List[dict]]] = []
         pos_profs = {str(p.get("broker_profile") or "") for p in my_positions
-                     if _bare_symbol(str(p.get("symbol") or "")) == bare_sym}
+                     if _in_group(p)}
         for pid in pos_profs:
             candidate_books.append(books.get(pid))
         non_none_books = [b for b in books.values() if b is not None]
@@ -737,7 +752,7 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
         # ── db_held_ALL: Σ OPEN qty across ALL sessions on the account for
         #    (symbol, product). The invariant's left side. ─────────────────────
         account_positions = _account_open_positions_for(
-            bare_sym, product, prof_scope, _prod_cache, acct_scope)
+            bare_sym, product, prof_scope, _prod_cache, [grp_acct])
         # ITEM 6(a) — SIGNED sum so an OPPOSITE-direction sibling position never
         # inflates the invariant's left side. Two sessions long+short the same
         # (symbol, product) NET to 0 at the broker (broker_held=abs(net)=0); the OLD
@@ -766,8 +781,7 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
             # session's position is closed by ITS OWN reconcile pass.
             deficit = db_held_all - broker_held
             my_group_positions = sorted(
-                (p for p in my_positions
-                 if _bare_symbol(str(p.get("symbol") or "")) == bare_sym),
+                (p for p in my_positions if _in_group(p)),
                 key=lambda p: (int(p.get("id") or 0)))
             _closed_ids: set = set()   # rows this pass already closed (order-id ev.)
             for pos in my_group_positions:

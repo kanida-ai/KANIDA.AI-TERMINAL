@@ -410,7 +410,7 @@ def run_migrations() -> dict:
             "autotrade_portfolio_snapshots", "autotrade_kill_switch_log",
             "broker_accounts", "autotrade_ladders", "autotrade_recon_alerts",
             "autotrade_order_events", "autotrade_alerts", "autotrade_claims",
-            "autotrade_config_edits",
+            "autotrade_config_edits", "autotrade_session_account_allocations",
         ):
             if _table_exists(con, t):
                 created_tables.append(t)
@@ -703,6 +703,28 @@ CREATE TABLE IF NOT EXISTS autotrade_config_edits (
 );
 CREATE INDEX IF NOT EXISTS idx_autotrade_config_edits_target
     ON autotrade_config_edits(target_type, target_id, ts DESC);
+
+-- ── PER-ACCOUNT COMMITTED-CAPITAL ATTRIBUTION (CLUSTER 9d FIX F2) ────────────
+-- A session's total_allocated_capital is a SESSION-LEVEL number, but a MULTI-
+-- ACCOUNT session (profiles bound to DIFFERENT broker accounts) must attribute
+-- its reserved capital PER broker_account_id so the RMS committed-capital ledger
+-- (risk_manager.committed_capital) budgets each account correctly — otherwise the
+-- WHOLE session's capital lands on ONE account and the other account is invisible
+-- to its own budget. One row per (session, broker_account_id), written at fire
+-- time ONLY for sessions that actually span >1 distinct account. A SINGLE-account
+-- session writes NOTHING here → committed_capital falls back to the session-level
+-- total_allocated_capital keyed by the session's own account (byte-identical).
+-- broker_account_id NULL = the operator/global account. Additive + idempotent.
+-- DATA-ISOLATION: autotrade-only; never touches falcon_position_state.
+CREATE TABLE IF NOT EXISTS autotrade_session_account_allocations (
+    session_id        TEXT NOT NULL,
+    broker_account_id TEXT,                       -- NULL = operator/global account
+    allocated_capital REAL NOT NULL DEFAULT 0,
+    updated_at        TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_atsaa_session_account
+    ON autotrade_session_account_allocations(
+        session_id, COALESCE(broker_account_id,''));
 
 -- ── DURABLE ORDER-EVENT LEDGER (SPRINT CLUSTER 2) ───────────────────────────
 -- Append-only lifecycle trail for every order our sessions place. One row per

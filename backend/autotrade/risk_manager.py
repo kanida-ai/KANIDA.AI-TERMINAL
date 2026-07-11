@@ -158,44 +158,114 @@ class RiskDecision:
     free: Optional[float] = None
 
 
-def _user_match_clause(user_id: Optional[str]) -> tuple:
+def _user_match_clause(user_id: Optional[str], alias: str = "") -> tuple:
     """SQL fragment + params matching a user's sessions. NULL (operator/global)
-    sessions all share the single None bucket."""
+    sessions all share the single None bucket. `alias` (e.g. 's') qualifies the
+    column for a JOINed query."""
+    col = f"{alias}.user_id" if alias else "user_id"
     if user_id is None:
-        return ("user_id IS NULL", ())
-    return ("user_id = ?", (str(user_id),))
+        return (f"{col} IS NULL", ())
+    return (f"{col} = ?", (str(user_id),))
+
+
+def record_session_account_allocations(
+        session_id: str, allocations: Dict[Any, float]) -> None:
+    """CLUSTER 9d FIX F2 — persist a session's PER-ACCOUNT reserved capital so the
+    committed-capital ledger can attribute a MULTI-ACCOUNT session's capital to each
+    broker_account_id. `allocations` maps broker_account_id (None = operator/global)
+    → the ₹ reserved for that account. Idempotent per session (replace-on-write).
+
+    Called at fire time ONLY when a session spans >1 distinct broker account. A
+    single-account session writes NOTHING (committed_capital falls back to the
+    session-level total_allocated_capital → byte-identical). Best-effort — a write
+    failure never blocks a fire (the ledger degrades to session-level attribution)."""
+    try:
+        ts = datetime.now(IST).isoformat()
+        with falcon_conn() as con:
+            con.execute(
+                "DELETE FROM autotrade_session_account_allocations "
+                "WHERE session_id=?", (session_id,))
+            for acct, cap in allocations.items():
+                con.execute(
+                    "INSERT INTO autotrade_session_account_allocations "
+                    "(session_id, broker_account_id, allocated_capital, updated_at) "
+                    "VALUES (?,?,?,?)",
+                    (session_id, acct, float(cap or 0.0), ts))
+            con.commit()
+    except Exception as e:  # pragma: no cover - never block a fire on the ledger
+        log.warning("record_session_account_allocations failed for %s: %s",
+                    session_id, e)
 
 
 def committed_capital(user_id: Optional[str],
                       exclude_session_id: Optional[str] = None,
                       broker_account_id: Any = _ACCOUNT_UNSET) -> float:
-    """Σ total_allocated_capital over the user's sessions currently committing
-    capital (RUNNING / SCHEDULED / KILLING_INCOMPLETE), excluding one session.
+    """Σ reserved capital over the user's sessions currently committing capital
+    (RUNNING / SCHEDULED / KILLING_INCOMPLETE), excluding one session.
 
     This is the LEDGER: a new session's slice must fit inside the account's free
     margin MINUS what the user's other live sessions have already committed, so
     three ₹5L sessions on ₹5L of funds can't each size as if alone.
 
     CLUSTER 9b ITEM 8 — PER-ACCOUNT SCOPING: when `broker_account_id` is passed
-    (even None, the operator/global account), the sum is scoped to sessions on the
-    SAME broker account, so account-1's budget check never includes account-2's (or
-    another account's) committed capital. Omitted (`_ACCOUNT_UNSET`, the default)
-    keeps the pre-Cluster-9b UNSCOPED behaviour (sum across all the user's accounts)
-    for any legacy caller."""
-    where, params = _user_match_clause(user_id)
-    q = (f"SELECT COALESCE(SUM(total_allocated_capital), 0.0) AS c "
-         f"FROM autotrade_sessions "
-         f"WHERE {where} AND status IN ({','.join('?' * len(_ACTIVE_STATUSES))})")
-    args: List[Any] = list(params) + list(_ACTIVE_STATUSES)
-    if broker_account_id is not _ACCOUNT_UNSET:
-        q += " AND COALESCE(broker_account_id,'')=COALESCE(?,'')"
-        args.append(broker_account_id)
+    (even None, the operator/global account), the sum is scoped to the SAME broker
+    account, so account-1's budget check never includes account-2's committed
+    capital. Omitted (`_ACCOUNT_UNSET`, the default) keeps the UNSCOPED behaviour
+    (sum across all the user's accounts) for any legacy caller.
+
+    CLUSTER 9d FIX F2 — a MULTI-ACCOUNT session (one session, profiles bound to
+    DIFFERENT accounts) attributes its capital PER account from
+    autotrade_session_account_allocations, so acctB sees this session's acctB
+    portion (not 0, and not the whole session on acctA). A single-account session
+    has NO allocation rows → the session-level total_allocated_capital (keyed by the
+    session's own broker_account_id) is used exactly as before (byte-identical)."""
+    status_ph = ",".join("?" * len(_ACTIVE_STATUSES))
+    # UNSCOPED (legacy) path — the total across ALL the user's accounts. A
+    # multi-account session's whole total_allocated_capital is still the right
+    # grand total here, so this path is unchanged.
+    if broker_account_id is _ACCOUNT_UNSET:
+        where, params = _user_match_clause(user_id)
+        q = (f"SELECT COALESCE(SUM(total_allocated_capital), 0.0) AS c "
+             f"FROM autotrade_sessions "
+             f"WHERE {where} AND status IN ({status_ph})")
+        args: List[Any] = list(params) + list(_ACTIVE_STATUSES)
+        if exclude_session_id is not None:
+            q += " AND session_id <> ?"
+            args.append(exclude_session_id)
+        with falcon_conn() as con:
+            row = con.execute(q, tuple(args)).fetchone()
+        return float(row["c"]) if row else 0.0
+
+    # PER-ACCOUNT scoped path.
+    where_s, params_s = _user_match_clause(user_id, alias="s")
+    excl = " AND s.session_id <> ?" if exclude_session_id is not None else ""
+    # (A) per-account allocation rows — the multi-account sessions that persisted a
+    #     split at fire time. Attribute ONLY the target account's portion.
+    qa = (f"SELECT COALESCE(SUM(a.allocated_capital), 0.0) AS c "
+          f"FROM autotrade_session_account_allocations a "
+          f"JOIN autotrade_sessions s ON s.session_id = a.session_id "
+          f"WHERE {where_s} AND s.status IN ({status_ph}) "
+          f"AND COALESCE(a.broker_account_id,'')=COALESCE(?,''){excl}")
+    args_a: List[Any] = (list(params_s) + list(_ACTIVE_STATUSES)
+                         + [broker_account_id])
     if exclude_session_id is not None:
-        q += " AND session_id <> ?"
-        args.append(exclude_session_id)
+        args_a.append(exclude_session_id)
+    # (B) session-level fallback — sessions WITHOUT an allocation split (single
+    #     account / not-yet-fired / legacy). Keyed by the session's OWN account.
+    qb = (f"SELECT COALESCE(SUM(s.total_allocated_capital), 0.0) AS c "
+          f"FROM autotrade_sessions s "
+          f"WHERE {where_s} AND s.status IN ({status_ph}) "
+          f"AND COALESCE(s.broker_account_id,'')=COALESCE(?,'') "
+          f"AND NOT EXISTS (SELECT 1 FROM autotrade_session_account_allocations x "
+          f"WHERE x.session_id = s.session_id){excl}")
+    args_b: List[Any] = (list(params_s) + list(_ACTIVE_STATUSES)
+                         + [broker_account_id])
+    if exclude_session_id is not None:
+        args_b.append(exclude_session_id)
     with falcon_conn() as con:
-        row = con.execute(q, tuple(args)).fetchone()
-    return float(row["c"]) if row else 0.0
+        ra = con.execute(qa, tuple(args_a)).fetchone()
+        rb = con.execute(qb, tuple(args_b)).fetchone()
+    return (float(ra["c"]) if ra else 0.0) + (float(rb["c"]) if rb else 0.0)
 
 
 def _account_matches(broker: Any, broker_account_id: Any) -> bool:

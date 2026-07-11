@@ -1744,25 +1744,41 @@ class TradingSession:
         # SILENTLY DEFEAT the revoked/expired-profile gate. The gate consults this
         # stash so a non-tradeable profile is still detected + degraded.
         setattr(prof, "_bound_account_id_original", acct_id)
+        # CLUSTER 9d FIX F6 — a profile that SPECIFIED a broker_account_id must NOT
+        # silently trade the operator's GLOBAL account when that account cannot be
+        # resolved. When we clear the binding below, stamp a runtime-only marker so
+        # the broker adapter's _build_kite FAILS CLOSED on a LIVE build — UNLESS the
+        # operator set the explicit break_glass_global override (in which case the
+        # marker is cleared and the historic silent global fallback is allowed).
+        _break_glass = bool(getattr(self.config, "break_glass_global", False))
         from . import vault
         if not vault.vault_enabled():
             # Bound account but vault disabled: we CANNOT trade the right
             # account. Clear the binding so the adapter doesn't error trying to
-            # build a per-account client; it falls back to the global operator
-            # path. (Live trades still need FALCON_AUTOTRADE_ENABLED; this only
-            # affects WHICH account — surfaced via a warning.)
+            # build a per-account client. FAIL CLOSED on a live build (F6) unless
+            # break_glass_global is set — never silently trade the global account
+            # in place of a SPECIFIED one. (Live trades still need
+            # FALCON_AUTOTRADE_ENABLED; this affects WHICH account.)
             log.warning("session %s: profile %s bound to account %s but vault "
-                        "is DISABLED — falling back to global operator creds",
-                        self.session_id, prof.profile_id, acct_id)
+                        "is DISABLED — %s", self.session_id, prof.profile_id,
+                        acct_id, ("break_glass_global set → global fallback"
+                                  if _break_glass else
+                                  "refusing a live build (fail-closed F6)"))
             prof.broker_account_id = None
+            setattr(prof, "_account_specified_unresolvable", not _break_glass)
             return
         creds = vault.get_decrypted_creds(acct_id, user_id=self.user_id)
         if creds is None:
             log.warning("session %s: could not resolve creds for account %s "
-                        "(absent / not owned / decrypt failed) — global fallback",
-                        self.session_id, acct_id)
+                        "(absent / not owned / decrypt failed) — %s",
+                        self.session_id, acct_id,
+                        ("break_glass_global set → global fallback" if _break_glass
+                         else "refusing a live build (fail-closed F6)"))
             prof.broker_account_id = None
+            setattr(prof, "_account_specified_unresolvable", not _break_glass)
             return
+        # Resolved cleanly — ensure no stale fail-closed marker survives a retry.
+        setattr(prof, "_account_specified_unresolvable", False)
         # Populate in-memory creds (NEVER persisted). The adapter's _build_kite
         # uses these to build a dedicated proxy-aware client for this account.
         prof.api_key = creds.api_key or ""
@@ -1774,6 +1790,38 @@ class TradingSession:
         # hardcoded default zerodha leg). Keep the default when the vault omits it.
         if getattr(creds, "broker", None):
             prof.broker_name = creds.broker
+
+    def _record_account_allocations(self) -> None:
+        """CLUSTER 9d FIX F2 — persist a MULTI-ACCOUNT session's PER-ACCOUNT reserved
+        capital so risk_manager.committed_capital budgets each broker account
+        correctly. Sum each enabled profile's allocated_capital by its INTENDED
+        broker account (the live binding, or the original binding stashed before a
+        fail-closed/unresolvable clear). Writes ONLY when the session spans >1
+        distinct account — a single-account session writes NOTHING and
+        committed_capital falls back to the session-level total_allocated_capital
+        (byte-identical). Best-effort — never blocks a fire."""
+        try:
+            profiles = [p for p in (self.config.broker_profiles or [])
+                        if getattr(p, "enabled", True)]
+            if not profiles:
+                return
+            acct_alloc: Dict[Any, float] = {}
+            for p in profiles:
+                acct = (getattr(p, "broker_account_id", None)
+                        or getattr(p, "_bound_account_id_original", None))
+                acct = None if acct in (None, "") else str(acct)
+                acct_alloc[acct] = acct_alloc.get(acct, 0.0) + float(
+                    getattr(p, "allocated_capital", 0.0) or 0.0)
+            # Only a genuinely multi-account session needs the per-account split;
+            # a single-account session stays on the session-level ledger path.
+            if len(acct_alloc) <= 1:
+                return
+            from . import risk_manager
+            risk_manager.record_session_account_allocations(
+                self.session_id, acct_alloc)
+        except Exception as e:  # pragma: no cover - never block a fire
+            log.warning("session %s: account-allocation ledger write skipped (%s)",
+                        self.session_id, e)
 
     # ── Start: now | scheduled ──────────────────────────────────────────────────
     async def start(self, when: str = "now") -> Dict[str, Any]:
@@ -2029,6 +2077,7 @@ class TradingSession:
                     "already_fired": True,
                     "note": "entry already claimed (idempotency guard)"}
         self._set_status("RUNNING", started_at=_now_ist_iso())
+        self._record_account_allocations()
 
         falcon_picks = load_falcon_picks(
             top_n=max(self.config.top_n_stocks, 10),
@@ -2207,12 +2256,23 @@ class TradingSession:
             # call (byte-identical). A multi-account session gates each account's Σ
             # against THAT account's budget; the WHOLE fire is refused if ANY group
             # fails (with that account's reason).
-            if len(account_groups) <= 1:
+            # CLUSTER 9d FIX F1 (2026-07-11): ALWAYS build the groups from the
+            # per-profile account_groups (each group carries its OWN, correct
+            # broker_account_id) — even when there is exactly ONE group. The old
+            # `len<=1` branch reused self.broker_account_id, which mis-budgets a
+            # single explicit BrokerProfile(broker_account_id=acctA) on a session
+            # whose session-level broker_account_id is None against the GLOBAL
+            # (None) budget instead of acctA. A genuine single-account session
+            # (account == self.broker_account_id) is byte-identical. The
+            # session-level fallback is used ONLY when there are no groups at all
+            # (no enabled profiles produced a group — cannot happen inside this
+            # `if leg_specs:` block, but kept as a defensive default).
+            if account_groups:
+                _rms_groups = list(account_groups.values())
+            else:
                 _rms_groups = [{"deployed": total_planned_deployed,
                                 "brokers": self.brokers,
                                 "broker_account_id": self.broker_account_id}]
-            else:
-                _rms_groups = list(account_groups.values())
             _rms_refusal = None
             for _g in _rms_groups:
                 try:

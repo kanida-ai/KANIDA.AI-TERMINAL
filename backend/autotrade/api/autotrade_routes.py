@@ -425,6 +425,11 @@ def _delete_one_session(session_id: str) -> bool:
                     (session_id,))
         con.execute("DELETE FROM autotrade_kill_switch_log WHERE session_id=?",
                     (session_id,))
+        # CLUSTER 9d FIX F2 — drop this session's per-account committed-capital
+        # ledger rows (harmless if none; the committed_capital JOIN already ignores
+        # rows for a deleted session, but keep the table clean).
+        con.execute("DELETE FROM autotrade_session_account_allocations "
+                    "WHERE session_id=?", (session_id,))
         # 3. Delete the session row.
         con.execute("DELETE FROM autotrade_sessions WHERE session_id=?", (session_id,))
         con.commit()

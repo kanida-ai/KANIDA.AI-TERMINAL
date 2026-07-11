@@ -134,6 +134,23 @@ class ZerodhaBroker(BrokerClient):
                 "disabled, account absent / not-owned, or token expired) — "
                 "refusing to build a live client (never the operator's global "
                 "account). Re-connect a broker account for this user.")
+        # CLUSTER 9d FIX F6 — a profile that SPECIFIED a broker_account_id which
+        # could not be resolved (vault disabled / creds absent) must NOT silently
+        # trade the operator's GLOBAL account on a LIVE build — even for an
+        # ADMIN/operator owner (the prior guard only caught non-admin owners). Fail
+        # closed unless the operator set break_glass_global (in which case
+        # _account_specified_unresolvable was never stamped in _resolve_account_creds).
+        # Paper (dry_run) is unaffected. A profile with NO specified account never
+        # gets the marker → the historic global path is byte-identical.
+        if (not self.dry_run and bound is None
+                and getattr(prof, "_account_specified_unresolvable", False)):
+            raise ValueError(
+                "SPECIFIED_ACCOUNT_UNRESOLVABLE: this profile is bound to account "
+                f"{getattr(prof, '_bound_account_id_original', None)} but it could "
+                "not be resolved (vault disabled / creds absent / not-owned) — "
+                "refusing to build a LIVE client on the operator's global account "
+                "(a wrong-account trade). Re-connect the account, or set "
+                "break_glass_global to explicitly allow the global fallback.")
         # Per-account path: explicit creds supplied (vault-resolved) → build a
         # dedicated client. Requires BOTH api_key and access_token; a bound
         # account missing a token is a real error (caller should re-login), but

@@ -168,6 +168,9 @@ def clean_positions():
         con.execute("DELETE FROM autotrade_ladders")
         con.execute("DELETE FROM autotrade_recon_alerts")
         con.execute("DELETE FROM autotrade_alerts")
+        # CLUSTER 9d FIX F2 — clear the per-account committed-capital ledger so a
+        # reused session_id doesn't carry a stale allocation split across tests.
+        con.execute("DELETE FROM autotrade_session_account_allocations")
         # ITEM 2 — clear the cross-process durable claims so a reused session_id
         # isn't stuck fired / entry-claimed / exit-in-flight across tests.
         con.execute("DELETE FROM autotrade_claims")

@@ -307,6 +307,18 @@ class TradingSessionConfig:
     # trusted). Default False = fail-closed. Paper/dry-run is unaffected either way.
     rms_allow_unknown_margin: bool = False
 
+    # ── MULTI-ACCOUNT: break-glass GLOBAL fallback for an UNRESOLVABLE bound
+    #    account (CLUSTER 9d FIX F6) ─────────────────────────────────────────────
+    # When a profile SPECIFIED a broker_account_id that cannot be resolved (the
+    # vault is disabled, or the account is absent / not-owned / decrypt-fails), the
+    # LIVE build FAILS CLOSED by default — it refuses to build a client rather than
+    # silently trade the operator's GLOBAL account in place of the intended one
+    # (a wrong-account trade). Set this True ONLY as an explicit operator override
+    # to allow that leg to fall back to the global operator creds. Default False =
+    # fail-closed. Paper/dry-run is unaffected; a profile with NO specified account
+    # (today's global path) is unchanged either way.
+    break_glass_global: bool = False
+
     # ── RMS: MIS broker-side protective SL-M (SPRINT CLUSTER 4, CAP 3) ─────────
     # An MIS leg gets NO broker GTT (correct — a GTT would outlive the intraday
     # square-off). Instead place a broker-held DAY SL-M (stop-market) at the
@@ -1005,6 +1017,7 @@ class TradingSessionConfig:
                 d.get("mis_protective_slm_enabled", True)),
             rms_allow_unknown_margin=bool(
                 d.get("rms_allow_unknown_margin", False)),
+            break_glass_global=bool(d.get("break_glass_global", False)),
             per_position_gtt_enabled=bool(d.get("per_position_gtt_enabled", True)),
             per_position_stop_pct=float(d.get("per_position_stop_pct", 0.08)),
             per_position_target_pct=float(d.get("per_position_target_pct", 0.20)),
