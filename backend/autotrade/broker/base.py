@@ -179,8 +179,14 @@ class BrokerClient(ABC):
                                 instrument_type: str,
                                 kite_product: str | None = None,
                                 direction: str = "long",
-                                *, exec_cfg: Any = None) -> OrderResult:
+                                *, exec_cfg: Any = None,
+                                client_order_id: str | None = None) -> OrderResult:
         """Flatten one position with a MARKET order in the CLOSING direction.
+
+        client_order_id (SPRINT CLUSTER 2, CAP 1, additive keyword-only, DEFAULT
+        None): when supplied, the live adapter attaches compact_tag(client_order_id)
+        as the broker order tag so OUR exit is recognisable in the broker orderbook.
+        Stub / paper brokers ignore it (no real order is placed).
 
         direction=="long"  (default) → SELL  (today's behaviour, unchanged).
         direction=="short" → BUY-to-cover (close a short future).

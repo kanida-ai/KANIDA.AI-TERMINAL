@@ -20,6 +20,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
+from .. import order_ledger as _order_ledger
+
 log = logging.getLogger("kanida.autotrade.exit_poller")
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -82,6 +84,19 @@ async def confirm_exit(
         registry.mark_closed(symbol, "EXIT_DRY_RUN")
         return {"status": "DRY_RUN", "filled_qty": qty, "exit_price": None}
 
+    # CAP 3/5 — a durable EXIT_PLACED event, keyed by the broker exit order-id, is
+    # written the moment we start confirming a LIVE exit. This is the cross-day
+    # attribution key: if the exit fills but the close never gets recorded (crash /
+    # cross-day settlement), the reconciler finds THIS persisted exit event and
+    # closes the position cleanly instead of looping UNATTRIBUTED_CLOSE. This is
+    # the ONE universal exit choke point (kill switch, per-stock stop, retry all
+    # route here). Best-effort — never blocks the confirm poll.
+    _order_ledger.append_event(
+        session_id=session_id, symbol=symbol,
+        event_type=_order_ledger.EV_EXIT_PLACED,
+        broker_profile=broker_profile, broker_order_id=order_id, qty=qty,
+        source="exit", detail=close_reason)
+
     deadline = datetime.now(IST) + timedelta(seconds=max_wait_sec)
     filled_qty = 0
     avg_price = 0.0
@@ -109,6 +124,14 @@ async def confirm_exit(
                 # Full fill confirmed. RECONCILIATION Phase 1: record the EXIT
                 # order-id on the closed row (attributable by order-id).
                 fill_price = avg_price if avg_price > 0 else None
+                # CAP 2 — durable EXIT_FILLED event carrying the fill price + broker
+                # exit order-id (mark_closed below also records POSITION_CLOSED).
+                _order_ledger.append_event(
+                    session_id=session_id, symbol=symbol,
+                    event_type=_order_ledger.EV_EXIT_FILLED,
+                    broker_profile=broker_profile, broker_order_id=order_id,
+                    qty=filled_qty, price=fill_price, source="exit",
+                    detail=close_reason)
                 registry.mark_closed(symbol, close_reason, exit_price=fill_price,
                                      exit_order_id=order_id,
                                      broker_profile=broker_profile)

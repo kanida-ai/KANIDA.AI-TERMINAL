@@ -1,0 +1,287 @@
+"""Durable append-only ORDER-EVENT LEDGER + client_order_id / broker-tag helpers.
+
+SPRINT CLUSTER 2 — the durable order ledger + idempotency backbone. This module
+is the single home for:
+
+  * client_order_id generation — a unique, durable ownership key minted BEFORE a
+    broker submission ("FAL-<sess8>-<sym>-<epochms>-<attempt>").
+  * compact_tag() — a <=20-char alphanumeric deterministic hash of a
+    client_order_id, small enough for Kite's `tag` param (max 20 chars). The FULL
+    client_order_id is stored in our DB (position row + ledger); the compact tag
+    is what rides on the broker order and lets us recognise OUR OWN orders in the
+    broker orderbook (tag-precise kill-cancel; future query-before-place).
+  * append_event() — INSERT OR IGNORE into autotrade_order_events, the append-only
+    lifecycle trail. Idempotent by a UNIQUE(broker_order_id, event_type) index: a
+    replayed broker event (same broker order-id + type) is a no-op. Best-effort —
+    a ledger write NEVER raises into the order path (it is observability +
+    durability, never a gate that could block a real exit).
+  * ledger_exit_evidence() — CAP 5 cross-day attribution: a persisted exit/close
+    event for a position, consulted by the reconciler BEFORE the single-day
+    orderbook so a carried position closed on a prior day is closed cleanly
+    instead of looping UNATTRIBUTED_CLOSE.
+
+DATA-ISOLATION: reads/writes ONLY autotrade_order_events (created by
+db_migrations). Never touches falcon_position_state or any legacy table.
+
+PAPER-SAFE: a paper (dry_run) order has NO real broker order-id/tag — the ledger
+still records the synthetic client_order_id (broker_order_id NULL). Paper order
+BEHAVIOUR is byte-for-byte unchanged; only rows are appended to the new table.
+"""
+from __future__ import annotations
+
+import hashlib
+import itertools
+import logging
+import re
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+
+from falcon.db import falcon_conn
+
+log = logging.getLogger("kanida.autotrade.order_ledger")
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# Event vocabulary (the lifecycle transitions we record).
+EV_ORDER_CREATED = "ORDER_CREATED"      # durable intent, BEFORE broker submission
+EV_ORDER_SUBMITTED = "ORDER_SUBMITTED"  # broker accepted, order-id assigned
+EV_FILLED = "FILLED"                    # entry filled (full)
+EV_PARTIAL = "PARTIAL"                  # entry partial fill
+EV_REJECTED = "REJECTED"                # entry/exit rejected by broker
+EV_EXIT_PLACED = "EXIT_PLACED"          # exit order placed (order-id known)
+EV_EXIT_FILLED = "EXIT_FILLED"          # exit fill confirmed COMPLETE
+EV_EXIT_PARTIAL = "EXIT_PARTIAL"        # exit partial fill
+EV_EXIT_FAILED = "EXIT_FAILED"          # exit failed / rejected / cancelled
+EV_POSITION_CLOSED = "POSITION_CLOSED"  # position row marked CLOSED
+EV_RECONCILE_CLOSE = "RECONCILE_CLOSE"  # reconciler closed the position
+
+# Events that constitute POSITIVE evidence a position's exit happened / was
+# working — consulted by CAP 5 cross-day attribution.
+_EXIT_EVENT_TYPES = (
+    EV_EXIT_FILLED, EV_POSITION_CLOSED, EV_RECONCILE_CLOSE, EV_EXIT_PLACED,
+)
+# The strongest evidence (an actual close/fill), preferred over EXIT_PLACED.
+_EXIT_CONFIRMED_TYPES = (EV_EXIT_FILLED, EV_POSITION_CLOSED, EV_RECONCILE_CLOSE)
+
+
+def _now_iso() -> str:
+    return datetime.now(IST).isoformat()
+
+
+# Process-local monotone counter — guarantees uniqueness even for two placements
+# minted within the same millisecond (the epoch-ms alone is not fine-grained
+# enough on coarse OS clocks, e.g. Windows).
+_SEQ = itertools.count(1)
+
+
+def make_client_order_id(session_id: str, symbol: str, attempt: int = 0) -> str:
+    """Mint a unique, durable client order-id for one placement attempt.
+
+    Shape: FAL-<sess8>-<sym>-<epochms>-<attempt>-<nonce>. The epoch-ms + attempt +
+    a process-local nonce (a monotone counter + a short uuid fragment) guarantee
+    uniqueness even for two placements in the same millisecond; the session/symbol
+    prefix make it human-readable and self-describing. This is the FULL key stored
+    in our DB; the broker only ever sees compact_tag() of it (Kite's 20-char tag
+    limit)."""
+    sess8 = (str(session_id or "").replace("-", "")[:8]) or "00000000"
+    sym = re.sub(r"[^A-Za-z0-9]", "", str(symbol or "")).upper()[:10] or "SYM"
+    epochms = int(time.time() * 1000)
+    nonce = f"{next(_SEQ)}{uuid.uuid4().hex[:4]}"
+    return f"FAL-{sess8}-{sym}-{epochms}-{int(attempt)}-{nonce}"
+
+
+def compact_tag(client_order_id: str) -> str:
+    """A deterministic <=20-char ALPHANUMERIC tag for a client_order_id.
+
+    Kite's `tag` param is capped at 20 characters. We hash the full
+    client_order_id (sha1) and keep a compact hex prefix with a leading "AT"
+    marker so OUR orders are recognisable in the broker orderbook. 2 + 16 = 18
+    chars, all alphanumeric (hex is 0-9a-f). Deterministic → the SAME
+    client_order_id always yields the SAME tag, so a persisted client_order_id can
+    be matched back to a broker order by recomputing the tag."""
+    h = hashlib.sha1(str(client_order_id or "").encode("utf-8")).hexdigest()
+    return ("AT" + h)[:18]
+
+
+def append_event(*, session_id: Optional[str], symbol: Optional[str],
+                 event_type: str,
+                 position_ref: Optional[str] = None,
+                 product: Optional[str] = None,
+                 broker_profile: Optional[str] = None,
+                 broker_order_id: Optional[str] = None,
+                 client_order_id: Optional[str] = None,
+                 qty: Optional[int] = None,
+                 price: Optional[float] = None,
+                 source: Optional[str] = None,
+                 detail: Optional[str] = None) -> bool:
+    """Append ONE lifecycle event to autotrade_order_events (INSERT OR IGNORE).
+
+    Idempotent via the UNIQUE(broker_order_id, event_type) index: a replayed
+    broker event (same broker order-id + type) is silently ignored (one row).
+    Rows with a NULL broker_order_id (paper orders / pre-submission intent) do
+    NOT conflict (SQLite treats NULLs as distinct) — they are keyed by
+    client_order_id for correlation, and are naturally single per transition.
+
+    Returns True on a successful append/no-op, False on error. NEVER raises — a
+    ledger write must never break the order path."""
+    try:
+        with falcon_conn() as con:
+            con.execute(
+                """INSERT OR IGNORE INTO autotrade_order_events
+                   (ts, session_id, position_ref, symbol, product, broker_profile,
+                    broker_order_id, client_order_id, event_type, qty, price,
+                    source, detail)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (_now_iso(), session_id,
+                 str(position_ref) if position_ref is not None else None,
+                 symbol, product, broker_profile,
+                 str(broker_order_id) if broker_order_id is not None else None,
+                 client_order_id, event_type,
+                 int(qty) if qty is not None else None,
+                 float(price) if price is not None else None,
+                 source, detail))
+            con.commit()
+        return True
+    except Exception as e:  # pragma: no cover - defensive; ledger never blocks
+        log.warning("order_ledger.append_event(%s %s/%s) failed: %s",
+                    event_type, session_id, symbol, e)
+        return False
+
+
+def record_intent(*, session_id: str, symbol: str, client_order_id: str,
+                  qty: Optional[int], side: str,
+                  product: Optional[str] = None,
+                  broker_profile: Optional[str] = None,
+                  instrument_type: Optional[str] = None,
+                  source: str = "entry") -> bool:
+    """CAP 3 — write the durable ORDER_CREATED intent row BEFORE the broker call.
+
+    Persists the intended qty/side + client_order_id so a crash BETWEEN broker
+    accept and the position-row insert leaves a durable orphan the recovery /
+    reconcile path can find (the intent carries the client_order_id whose
+    compact_tag rides on the broker order)."""
+    detail = f"side={side}"
+    if instrument_type:
+        detail += f" itype={instrument_type}"
+    return append_event(
+        session_id=session_id, symbol=symbol, event_type=EV_ORDER_CREATED,
+        position_ref=f"{session_id}:{symbol}", product=product,
+        broker_profile=broker_profile, broker_order_id=None,
+        client_order_id=client_order_id, qty=qty, price=None,
+        source=source, detail=detail)
+
+
+def get_events(session_id: str, symbol: Optional[str] = None
+               ) -> List[Dict[str, Any]]:
+    """The ordered event trail for a session (optionally one symbol), oldest
+    first. Used by tests + audit to reconstruct a position's lifecycle."""
+    try:
+        with falcon_conn() as con:
+            if symbol is not None:
+                rows = con.execute(
+                    """SELECT * FROM autotrade_order_events
+                       WHERE session_id=? AND symbol=? ORDER BY id ASC""",
+                    (session_id, symbol)).fetchall()
+            else:
+                rows = con.execute(
+                    """SELECT * FROM autotrade_order_events
+                       WHERE session_id=? ORDER BY id ASC""",
+                    (session_id,)).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("order_ledger.get_events(%s) failed: %s", session_id, e)
+        return []
+
+
+def find_intent_by_client_order_id(client_order_id: str
+                                   ) -> Optional[Dict[str, Any]]:
+    """Return the ORDER_CREATED intent row for a client_order_id, or None.
+
+    CAP 3 recovery helper: after a crash, a durable intent whose broker order was
+    accepted but never recorded as a position can be located here (then matched to
+    the broker orderbook by recomputing compact_tag)."""
+    try:
+        with falcon_conn() as con:
+            r = con.execute(
+                """SELECT * FROM autotrade_order_events
+                   WHERE client_order_id=? AND event_type=?
+                   ORDER BY id ASC LIMIT 1""",
+                (client_order_id, EV_ORDER_CREATED)).fetchone()
+        return dict(r) if r else None
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("order_ledger.find_intent(%s) failed: %s",
+                    client_order_id, e)
+        return None
+
+
+def ledger_exit_evidence(session_id: str, symbol: str,
+                         broker_profile: Optional[str] = None,
+                         exit_order_id: Optional[str] = None,
+                         client_order_id: Optional[str] = None,
+                         after_ts: Optional[str] = None
+                         ) -> Optional[Dict[str, Any]]:
+    """CAP 5 — the strongest persisted EXIT/close evidence for a position, or None.
+
+    Consulted by the reconciler BEFORE the single-day orderbook so a position
+    whose exit filled / closed on a PRIOR day (its order absent from today's
+    orderbook) is still attributable. Prefers a confirmed exit/close event
+    (EXIT_FILLED / POSITION_CLOSED / RECONCILE_CLOSE, carrying a fill price) over a
+    mere EXIT_PLACED. Scoped to (session_id, symbol[, broker_profile]); optionally
+    narrowed to a known exit_order_id / client_order_id. Never raises.
+
+    Returns {event_type, broker_order_id, exit_price, ts, has_confirmed_close}
+    or None when the ledger holds no exit evidence for this position.
+
+    after_ts: when set, only events at/after this ISO timestamp are considered —
+    pass the position's opened_at so a PRIOR lifecycle's close of the same
+    (session, symbol) can never be mis-attributed to a later re-entry."""
+    try:
+        with falcon_conn() as con:
+            placeholders = ",".join("?" for _ in _EXIT_EVENT_TYPES)
+            params: List[Any] = [session_id, symbol]
+            sql = (f"""SELECT * FROM autotrade_order_events
+                       WHERE session_id=? AND symbol=?
+                         AND event_type IN ({placeholders})""")
+            params.extend(_EXIT_EVENT_TYPES)
+            if after_ts is not None:
+                sql += " AND ts>=?"
+                params.append(after_ts)
+            if broker_profile is not None:
+                sql += " AND COALESCE(broker_profile,'')=COALESCE(?,'')"
+                params.append(broker_profile)
+            if exit_order_id is not None:
+                sql += " AND COALESCE(broker_order_id,'')=COALESCE(?,'')"
+                params.append(str(exit_order_id))
+            if client_order_id is not None:
+                sql += " AND COALESCE(client_order_id,'')=COALESCE(?,'')"
+                params.append(client_order_id)
+            sql += " ORDER BY id ASC"
+            rows = [dict(r) for r in con.execute(sql, params).fetchall()]
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("order_ledger.ledger_exit_evidence(%s/%s) failed: %s",
+                    session_id, symbol, e)
+        return None
+    if not rows:
+        return None
+    # Prefer a CONFIRMED close/fill with a positive price; else any confirmed;
+    # else fall back to the EXIT_PLACED intent (working-order evidence).
+    confirmed = [r for r in rows
+                 if str(r.get("event_type")) in _EXIT_CONFIRMED_TYPES]
+    chosen = None
+    for r in confirmed:
+        px = r.get("price")
+        if px is not None and float(px) > 0:
+            chosen = r
+            break
+    if chosen is None and confirmed:
+        chosen = confirmed[-1]
+    if chosen is None:
+        chosen = rows[-1]  # EXIT_PLACED only (order was working)
+    return {
+        "event_type": chosen.get("event_type"),
+        "broker_order_id": chosen.get("broker_order_id"),
+        "exit_price": chosen.get("price"),
+        "ts": chosen.get("ts"),
+        "has_confirmed_close": bool(confirmed),
+    }

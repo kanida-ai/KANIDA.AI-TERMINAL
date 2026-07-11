@@ -171,7 +171,8 @@ class FyersBroker(BrokerClient):
                                 instrument_type: str,
                                 kite_product: str | None = None,
                                 direction: str = "long",
-                                *, exec_cfg=None) -> OrderResult:
+                                *, exec_cfg=None,
+                                client_order_id: str | None = None) -> OrderResult:
         # kite_product accepted (ignored) + direction for FUTURES cover. Fyers
         # side: -1 = SELL (long exit, default), 1 = BUY-to-cover (short exit).
         if not self._live_allowed():

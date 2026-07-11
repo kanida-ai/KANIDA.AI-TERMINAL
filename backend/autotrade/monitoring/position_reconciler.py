@@ -229,7 +229,34 @@ def _confirmed_close(pos: Dict[str, Any], broker) -> Optional[Dict[str, Any]]:
       2. exit_order_id → broker.get_order_status: COMPLETE → close at that fill.
          close_reason "RECONCILED_EXIT".
     Returns {"exit_price", "exit_order_id", "close_reason", "filled_qty"} on a
-    CONFIRMED close, else None (leave OPEN). Never raises."""
+    CONFIRMED close, else None (leave OPEN). Never raises.
+
+    CAP 5 — the DURABLE ledger is consulted FIRST (before the single-day broker
+    probes) for a persisted CONFIRMED exit/close event tied to THIS position's
+    recorded exit_order_id: cross-day, the fired order is gone from today's
+    single-day orderbook, but the ledger retains it. Order-id-scoped so a prior
+    lifecycle's event can never mis-attribute."""
+    # 0. LEDGER (CAP 5): a confirmed exit/close persisted for our exit_order_id.
+    exit_oid_ledger = pos.get("exit_order_id")
+    if exit_oid_ledger:
+        try:
+            from ..order_ledger import ledger_exit_evidence
+            lev = ledger_exit_evidence(
+                str(pos.get("session_id") or ""), str(pos.get("symbol") or ""),
+                broker_profile=pos.get("broker_profile"),
+                exit_order_id=exit_oid_ledger)
+        except Exception as e:  # pragma: no cover - defensive
+            log.debug("reconcile: ledger_exit_evidence raised for %s: %s",
+                      exit_oid_ledger, e)
+            lev = None
+        if lev and lev.get("has_confirmed_close"):
+            px = lev.get("exit_price")
+            return {
+                "exit_price": float(px) if (px and float(px) > 0) else pos.get("ltp"),
+                "exit_order_id": str(lev.get("broker_order_id") or exit_oid_ledger),
+                "close_reason": "RECONCILE_CLOSE_LEDGER",
+                "filled_qty": int(pos.get("qty") or 0),
+            }
     # 1. GTT fill (positive evidence via the fired order's status).
     gtt_id = pos.get("gtt_id")
     if gtt_id:
@@ -422,6 +449,28 @@ def _has_close_side_evidence(matched_rows: List[dict], is_short: bool) -> bool:
         if (_num(r.get(key)) or 0) > 0:
             return True
     return False
+
+
+def _ledger_settled_away_evidence(pos: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """CAP 5 — persisted DURABLE-ledger exit evidence for a carried position whose
+    fired exit order is gone from TODAY's single-day orderbook (cross-day / prior
+    settlement cycle). Scoped by the position's own exit_order_id when it has one
+    (positive linkage); otherwise by (session, symbol) restricted to events at/after
+    the position's opened_at so a PRIOR lifecycle's close of the same name can never
+    be mis-attributed to this position. Returns the evidence dict or None. Never
+    raises."""
+    try:
+        from ..order_ledger import ledger_exit_evidence
+        exit_oid = pos.get("exit_order_id")
+        return ledger_exit_evidence(
+            str(pos.get("session_id") or ""), str(pos.get("symbol") or ""),
+            broker_profile=pos.get("broker_profile"),
+            exit_order_id=exit_oid,
+            after_ts=(None if exit_oid else pos.get("opened_at")))
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("reconcile: _ledger_settled_away_evidence raised for %s: %s",
+                  pos.get("symbol"), e)
+        return None
 
 
 def _external_flat_exit_price(matched_rows: List[dict]) -> Optional[float]:
@@ -707,7 +756,21 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                 # broker net 0 + sell_q 834, yet the panel tracked it every tick).
                 # Gated on POSITIVE exit evidence (_has_exit_evidence) so a transient
                 # empty/absent book can never flatten us.
-                if broker_held == 0 and _has_exit_evidence(matched_rows):
+                # CAP 5 — a carried position (CNC/MTF/NRML) whose exit settled on a
+                # PRIOR day shows broker_held==0 today but NO sell volume in today's
+                # single-day net book (the sell was yesterday), so _has_exit_evidence
+                # is False and this used to loop UNATTRIBUTED_CLOSE forever. When the
+                # DURABLE ledger holds a persisted exit event for the position AND the
+                # broker is fully flat, close it cleanly as CLOSED_SETTLED_AWAY. The
+                # fully-flat gate itself precludes a re-entry hazard (a re-entered name
+                # would show broker_held>0). Same-day book sell-evidence still closes
+                # as CLOSED_EXTERNAL_FLAT (unchanged).
+                _book_flat_ev = _has_exit_evidence(matched_rows)
+                _group_ledger = {
+                    pos.get("id"): _ledger_settled_away_evidence(pos)
+                    for pos in my_group_positions}
+                _any_ledger = any(v for v in _group_ledger.values())
+                if broker_held == 0 and (_book_flat_ev or _any_ledger):
                     ext_px = _external_flat_exit_price(matched_rows)
                     for pos in my_group_positions:
                         if pos.get("id") in _closed_ids:
@@ -716,28 +779,44 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                             continue
                         sym = pos.get("symbol")
                         prof_id = pos.get("broker_profile")
-                        px = ext_px or _num(pos.get("ltp")) \
-                            or float(pos.get("avg_price") or 0.0)
+                        _lev = _group_ledger.get(pos.get("id"))
+                        if _book_flat_ev:
+                            # Same-day external/manual flat — unchanged path.
+                            _reason = "CLOSED_EXTERNAL_FLAT"
+                            _oid = None
+                            px = ext_px or _num(pos.get("ltp")) \
+                                or float(pos.get("avg_price") or 0.0)
+                        elif _lev:
+                            # Cross-day: settled away, evidenced by the ledger.
+                            _reason = "CLOSED_SETTLED_AWAY"
+                            _oid = _lev.get("broker_order_id")
+                            _lpx = _lev.get("exit_price")
+                            px = (float(_lpx) if (_lpx and float(_lpx) > 0)
+                                  else _num(pos.get("ltp"))
+                                  or float(pos.get("avg_price") or 0.0))
+                        else:
+                            # This leg has neither book nor ledger evidence — leave
+                            # OPEN (a sibling's evidence must not close it).
+                            continue
                         try:
                             registry.mark_closed(
-                                sym, "CLOSED_EXTERNAL_FLAT", exit_price=px,
-                                broker_profile=prof_id, exit_order_id=None)
+                                sym, _reason, exit_price=px,
+                                broker_profile=prof_id, exit_order_id=_oid)
                         except Exception as e:  # pragma: no cover - defensive
-                            log.warning("reconcile: external-flat close failed "
+                            log.warning("reconcile: flat close failed "
                                         "%s/%s: %s", session.session_id, sym, e)
                             continue
                         changed = True
                         _closed_ids.add(pos.get("id"))
                         log.warning(
-                            "reconcile %s/%s: broker FULLY FLAT (held=0, sell "
-                            "evidence) — closing phantom OPEN row @ %s (external / "
-                            "manual exit, no order-id)",
-                            session.session_id, sym, px)
+                            "reconcile %s/%s: broker FULLY FLAT (held=0) — closing "
+                            "phantom OPEN row @ %s via %s",
+                            session.session_id, sym, px, _reason)
                         actions.append({
-                            "action": "CLOSED_EXTERNAL_FLAT", "symbol": sym,
+                            "action": _reason, "symbol": sym,
                             "product": product, "exit_price": px,
-                            "exit_order_id": None,
-                            "close_reason": "CLOSED_EXTERNAL_FLAT"})
+                            "exit_order_id": _oid,
+                            "close_reason": _reason})
                     continue
                 # ── PARTIAL deficit WITH sell/buy evidence, no order-id (C4a) ──
                 # The broker physically holds FEWER shares than we track, so our

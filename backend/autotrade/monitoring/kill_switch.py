@@ -86,6 +86,11 @@ class KillSwitchExecutor:
         # pending order is logged and SKIPPED. (Broker-tag precision is a later
         # cluster; the recorded-id filter is the precise interim.)
         owned_ids = self._falcon_owned_order_ids()
+        # CAP 1 — also own an order by ITS TAG (compact_tag of our client_order_id),
+        # so an order-id we never recorded is still recognised as ours. Additive:
+        # a match on EITHER the recorded id OR our tag → ours; a foreign order
+        # matches neither → left intact.
+        owned_tags = self._falcon_owned_tags()
         cancel_tasks = []
         for prof_id, broker in self.brokers.items():
             try:
@@ -95,13 +100,16 @@ class KillSwitchExecutor:
                 pending = []
             for o in pending:
                 oid = o.get("order_id") if isinstance(o, dict) else getattr(o, "id", None)
+                otag = o.get("tag") if isinstance(o, dict) else getattr(o, "tag", None)
                 if not oid:
                     continue
-                if str(oid) not in owned_ids:
+                owned = (str(oid) in owned_ids) or (
+                    otag is not None and str(otag) in owned_tags)
+                if not owned:
                     log.warning("kill %s: SKIP cancel of NON-Falcon pending order "
-                                "%s on %s (not owned by this session — leaving the "
-                                "operator's order intact)", self.session_id, oid,
-                                prof_id)
+                                "%s (tag=%s) on %s (not owned by this session — "
+                                "leaving the operator's order intact)",
+                                self.session_id, oid, otag, prof_id)
                     continue
                 cancel_tasks.append(broker.cancel_order(oid))
         if cancel_tasks:
@@ -458,6 +466,32 @@ class KillSwitchExecutor:
             log.warning("kill %s: could not load owned order-ids (%s) — cancelling "
                         "NO pending orders (fail-safe)", self.session_id, e)
         return ids
+
+    def _falcon_owned_tags(self) -> set:
+        """CAP 1 — the set of compact broker tags Falcon minted for THIS session,
+        computed from the client_order_id persisted on each position row. A pending
+        broker order carrying one of THESE tags is provably OURS even when we never
+        recorded its order-id (e.g. a broker order-id assigned but the position row
+        not yet updated). Widens the kill's STEP-1 ownership PRECISELY — a foreign
+        order carries a foreign/absent tag, so this can only ever cancel MORE of our
+        OWN orders, never the operator's. Best-effort → empty set on any error."""
+        tags: set = set()
+        try:
+            from ..order_ledger import compact_tag
+            with falcon_conn() as con:
+                rows = con.execute(
+                    "SELECT client_order_id FROM autotrade_positions "
+                    "WHERE session_id=? AND client_order_id IS NOT NULL",
+                    (self.session_id,),
+                ).fetchall()
+            for r in rows:
+                coid = r["client_order_id"]
+                if coid not in (None, ""):
+                    tags.add(compact_tag(str(coid)))
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("kill %s: could not load owned tags (%s)",
+                        self.session_id, e)
+        return tags
 
     def _set_session_status(self, status: str, kill_reason: Optional[str] = None) -> None:
         with falcon_conn() as con:

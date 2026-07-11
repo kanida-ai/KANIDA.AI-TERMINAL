@@ -729,7 +729,8 @@ class ZerodhaBroker(BrokerClient):
                                 instrument_type: str,
                                 kite_product: str | None = None,
                                 direction: str = "long",
-                                *, exec_cfg=None) -> OrderResult:
+                                *, exec_cfg=None,
+                                client_order_id: str | None = None) -> OrderResult:
         """Flatten one position with a direct Kite order in the CLOSING side.
 
         direction=="long"  (default) → SELL  (today's behaviour, unchanged).
@@ -829,6 +830,13 @@ class ZerodhaBroker(BrokerClient):
                     log.warning("marketable-limit EXIT %s pricing raised (%s) — "
                                 "MARKET fallback", symbol, _qe)
 
+            # CAP 1 — attach OUR compact client tag so this exit is recognisable in
+            # the broker orderbook (tag-precise kill-cancel; future query-by-tag).
+            # A supplied client_order_id maps to it; else a self-describing exit tag.
+            from ..order_ledger import compact_tag, make_client_order_id
+            _coid = client_order_id or make_client_order_id(
+                "exit", symbol)
+            exit_tag = compact_tag(_coid)
             order_id = await asyncio.to_thread(
                 lambda: kite.place_order(
                     variety=kite.VARIETY_REGULAR,
@@ -837,6 +845,7 @@ class ZerodhaBroker(BrokerClient):
                     transaction_type=closing_txn,
                     quantity=int(qty),
                     product=product,
+                    tag=exit_tag,
                     **limit_kwargs,
                 )
             )

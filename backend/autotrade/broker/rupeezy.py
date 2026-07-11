@@ -291,7 +291,8 @@ class RupeezyBroker(BrokerClient):
                                 instrument_type: str,
                                 kite_product: str | None = None,
                                 direction: str = "long",
-                                *, exec_cfg=None) -> OrderResult:
+                                *, exec_cfg=None,
+                                client_order_id: str | None = None) -> OrderResult:
         """Flatten one position with a Vortex MARKET order (variety=RL-MKT).
 
         kite_product: explicit trading-product override (e.g. "MTF", "CNC", "MIS")

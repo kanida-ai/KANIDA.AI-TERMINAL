@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from falcon.db import falcon_conn
 from .pricing import resolve_ltp
+from .. import order_ledger as _order_ledger
 
 log = logging.getLogger("kanida.autotrade.registry")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -96,7 +97,9 @@ class PositionRegistry:
                  entry_date: Optional[str] = None,
                  broker_account_id: Optional[str] = None,
                  direction: str = "long",
-                 entry_order_id: Optional[str] = None) -> None:
+                 entry_order_id: Optional[str] = None,
+                 client_order_id: Optional[str] = None,
+                 _fill_event: Optional[str] = None) -> None:
         """Insert or update a session position in autotrade_positions.
 
         Keyed by (session_id, symbol, broker_profile). Seeds the mark (ltp) to
@@ -135,26 +138,39 @@ class PositionRegistry:
                            target_price=COALESCE(?, target_price),
                            ltp=COALESCE(ltp, ?),
                            entry_order_id=COALESCE(?, entry_order_id),
+                           client_order_id=COALESCE(?, client_order_id),
                            status='OPEN'
                        WHERE id=?""",
                     (qty, avg_price, instrument_type, exchange, direction,
                      sl_level, target_price, avg_price, entry_order_id,
-                     existing[0]),
+                     client_order_id, existing[0]),
                 )
+                _row_id = existing[0]
             else:
-                con.execute(
+                cur = con.execute(
                     """INSERT INTO autotrade_positions
                        (session_id, broker_profile, broker_account_id, symbol,
                         instrument_type, exchange, qty, avg_price, sl_level,
                         target_price, ltp, unrealised_pnl, status, exit_lock,
-                        opened_at, direction, entry_order_id)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN', 0, ?, ?, ?)""",
+                        opened_at, direction, entry_order_id, client_order_id)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN', 0, ?, ?, ?, ?)""",
                     (self.session_id, broker_profile, broker_account_id, symbol,
                      instrument_type, exchange, qty, avg_price, sl_level,
                      target_price, avg_price, 0.0, now, direction,
-                     entry_order_id),
+                     entry_order_id, client_order_id),
                 )
+                _row_id = cur.lastrowid
             con.commit()
+        # CAP 2 — the entry fill is now durably recorded; append the FILLED event
+        # (mapping client_order_id → broker entry order-id). Best-effort; never
+        # raises into the order path.
+        _order_ledger.append_event(
+            session_id=self.session_id, symbol=symbol,
+            event_type=(_fill_event or _order_ledger.EV_FILLED),
+            position_ref=str(_row_id),
+            product=product, broker_profile=broker_profile,
+            broker_order_id=entry_order_id, client_order_id=client_order_id,
+            qty=qty, price=avg_price, source="entry")
 
     def register_partial(self, symbol: str, broker_profile: str,
                          filled_qty: int, avg_price: float,
@@ -163,7 +179,8 @@ class PositionRegistry:
                          exchange: Optional[str] = None,
                          broker_account_id: Optional[str] = None,
                          direction: str = "long",
-                         entry_order_id: Optional[str] = None) -> None:
+                         entry_order_id: Optional[str] = None,
+                         client_order_id: Optional[str] = None) -> None:
         """Partial fill: register the FILLED qty (spec parity check #3 — 80 not
         0/100). entry_order_id (RECONCILIATION Phase 1) is persisted the same as
         the normal path so a partial-fill leg is still attributable by order-id."""
@@ -173,7 +190,9 @@ class PositionRegistry:
                       instrument_type=instrument_type, exchange=exchange,
                       broker_account_id=broker_account_id,
                       direction=direction,
-                      entry_order_id=entry_order_id)
+                      entry_order_id=entry_order_id,
+                      client_order_id=client_order_id,
+                      _fill_event=_order_ledger.EV_PARTIAL)
 
     # ── Reads ─────────────────────────────────────────────────────────────────
     def get_open_positions(self) -> List[Dict[str, Any]]:
@@ -302,6 +321,13 @@ class PositionRegistry:
                      self.session_id, symbol),
                 )
             con.commit()
+        # CAP 2/5 — durable POSITION_CLOSED event (cross-day close evidence the
+        # reconciler consults before the single-day orderbook). Best-effort.
+        _order_ledger.append_event(
+            session_id=self.session_id, symbol=symbol,
+            event_type=_order_ledger.EV_POSITION_CLOSED,
+            broker_profile=broker_profile, broker_order_id=exit_order_id,
+            price=exit_price, source="close", detail=reason)
 
     def set_qty(self, symbol: str, qty: int,
                 avg_price: Optional[float] = None,
@@ -430,6 +456,12 @@ class PositionRegistry:
                      self.session_id, symbol),
                 )
             con.commit()
+        # CAP 2 — durable EXIT_FAILED event for the lifecycle trail. Best-effort.
+        _order_ledger.append_event(
+            session_id=self.session_id, symbol=symbol,
+            event_type=_order_ledger.EV_EXIT_FAILED,
+            broker_profile=broker_profile, broker_order_id=exit_order_id,
+            source="exit", detail=error)
         # Release the exit gate so a future retry can reclaim it.
         # Import here to avoid circular import at module level.
         from autotrade.exit_gate import release_exit_session
@@ -503,3 +535,9 @@ class PositionRegistry:
                      self.session_id, symbol),
                 )
             con.commit()
+        # CAP 2 — durable EXIT_PARTIAL event for the lifecycle trail. Best-effort.
+        _order_ledger.append_event(
+            session_id=self.session_id, symbol=symbol,
+            event_type=_order_ledger.EV_EXIT_PARTIAL,
+            broker_profile=broker_profile, qty=filled_qty, price=exit_price,
+            source="exit")

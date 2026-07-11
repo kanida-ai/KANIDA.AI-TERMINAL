@@ -127,6 +127,21 @@ def run_migrations() -> dict:
                         f"ALTER TABLE autotrade_positions ADD COLUMN {name} TEXT")
                     added_cols.append(name)
 
+        # ── 2b-coid. ALTER-guard client_order_id on autotrade_positions ───────
+        # SPRINT CLUSTER 2 (CAP 1): the FULL client_order_id minted for the ENTRY
+        # placement BEFORE broker submission ("FAL-<sess8>-<sym>-<epochms>-<attempt>").
+        # Its compact_tag() rides on the broker order as Kite's `tag`; storing the
+        # full id here makes it the DURABLE ownership key that maps to the broker
+        # order-id (entry_order_id) and lets kill_switch cancel OUR OWN orders
+        # tag-precisely. NULLABLE → every existing / paper / pre-migration row stays
+        # NULL (byte-for-byte unchanged). Additive + idempotent.
+        if _table_exists(con, "autotrade_positions"):
+            have = set(_existing_columns(con, "autotrade_positions"))
+            if "client_order_id" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_positions ADD COLUMN client_order_id TEXT")
+                added_cols.append("client_order_id")
+
         # ── 2b-dir. ALTER-guard `direction` on autotrade_positions ────────────
         # FUTURES long/short. Per-position direction so the P&L sign + exit side
         # invert ONLY for shorts. DEFAULT 'long' → every existing row + every
@@ -336,6 +351,7 @@ def run_migrations() -> dict:
             "autotrade_broker_profiles", "autotrade_slippage",
             "autotrade_portfolio_snapshots", "autotrade_kill_switch_log",
             "broker_accounts", "autotrade_ladders", "autotrade_recon_alerts",
+            "autotrade_order_events",
         ):
             if _table_exists(con, t):
                 created_tables.append(t)
@@ -606,6 +622,48 @@ CREATE TABLE IF NOT EXISTS autotrade_recon_alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_autotrade_recon_alerts_ts
     ON autotrade_recon_alerts(ts DESC);
+
+-- ── DURABLE ORDER-EVENT LEDGER (SPRINT CLUSTER 2) ───────────────────────────
+-- Append-only lifecycle trail for every order our sessions place. One row per
+-- lifecycle transition (ORDER_CREATED intent → ORDER_SUBMITTED → FILLED/PARTIAL,
+-- EXIT_PLACED → EXIT_FILLED → POSITION_CLOSED, plus REJECTED / EXIT_FAILED /
+-- RECONCILE_CLOSE). This converts exactly-once + reconciliation from in-process
+-- accidents into a DURABLE, cross-process, cross-day record:
+--   * CAP 2 — reconstructable ordered event trail for any position.
+--   * CAP 3 — a durable ORDER_CREATED intent written BEFORE the broker call, so a
+--     crash between broker-accept and the position-row insert leaves an orphan the
+--     recovery/reconcile path can find (via the persisted client_order_id).
+--   * CAP 5 — cross-day attribution: the reconciler consults a persisted
+--     EXIT_FILLED/close event before the single-day orderbook.
+-- IDEMPOTENT: the UNIQUE(broker_order_id, event_type) index + INSERT OR IGNORE
+-- make a replayed broker event (same broker order-id + type) a no-op. Rows with a
+-- NULL broker_order_id (paper orders + pre-submission intent) never conflict
+-- (SQLite NULLs are distinct in a UNIQUE index) — correct, since paper/intent have
+-- no broker order-id to dedup on; they are correlated by client_order_id.
+-- DATA-ISOLATION: this table is autotrade-only; never touches falcon_position_state.
+CREATE TABLE IF NOT EXISTS autotrade_order_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT NOT NULL,                 -- ISO IST
+    session_id      TEXT,
+    position_ref    TEXT,                          -- position id or "session:symbol"
+    symbol          TEXT,
+    product         TEXT,
+    broker_profile  TEXT,
+    broker_order_id TEXT,                          -- NULL for paper / pre-submission
+    client_order_id TEXT,                          -- our durable ownership key
+    event_type      TEXT NOT NULL,
+    qty             INTEGER,
+    price           REAL,
+    source          TEXT,                          -- entry|exit|kill|reconcile|...
+    detail          TEXT
+);
+-- Dedup real broker events; NULL broker_order_id rows are exempt (distinct NULLs).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_autotrade_order_events_bid_type
+    ON autotrade_order_events(broker_order_id, event_type);
+CREATE INDEX IF NOT EXISTS idx_autotrade_order_events_session
+    ON autotrade_order_events(session_id, symbol);
+CREATE INDEX IF NOT EXISTS idx_autotrade_order_events_coid
+    ON autotrade_order_events(client_order_id);
 """
 
 

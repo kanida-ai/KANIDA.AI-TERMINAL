@@ -55,6 +55,7 @@ from .broker.base import Pick
 from .broker.router import BrokerRouter, build_client
 from .execution.orders import build_order, place_order_with_retry
 from .execution.slippage import record_slippage
+from . import order_ledger
 from .monitoring.registry import PositionRegistry
 from .monitoring.monitor import PortfolioMonitor, compute_kill_preview
 from .monitoring.kill_switch import KillSwitchExecutor
@@ -1952,6 +1953,24 @@ class TradingSession:
         else:
             ref_price = broker.get_ltp(symbol) or 0.0
         order = build_order(symbol, qty, self.config, broker)
+        # CAP 1 — mint a durable client_order_id BEFORE broker submission and set
+        # its compact tag on the order so OUR order is recognisable at the broker.
+        # The FULL id is persisted on the position row + the ledger (maps to the
+        # broker order-id). Paper: the tag is set but place_order returns DRY_RUN
+        # before to_kite_params, so no real tag is sent (paper byte-identical).
+        client_order_id = order_ledger.make_client_order_id(self.session_id, symbol)
+        order.client_order_id = client_order_id
+        order.tag = order_ledger.compact_tag(client_order_id)
+        _entry_side = "SELL" if getattr(self.config, "direction", "long") == "short" \
+            else "BUY"
+        # CAP 3 — durable ORDER_CREATED intent, written BEFORE the broker call, so a
+        # crash between broker-accept and the position-row insert leaves an orphan
+        # the recovery/reconcile path can find (best-effort; never blocks the order).
+        order_ledger.record_intent(
+            session_id=self.session_id, symbol=symbol,
+            client_order_id=client_order_id, qty=qty, side=_entry_side,
+            product=prof.order_product, broker_profile=prof.profile_id,
+            instrument_type=prof.instrument_type, source="entry")
         if order.order_type == "LIMIT" and ref_price > 0:
             order.price = order.compute_limit_price(ref_price)
 
@@ -2083,6 +2102,17 @@ class TradingSession:
         # order-id (never the account aggregate). None in dry-run / when the
         # broker gave no id (reconcilers handle absent ids).
         _entry_oid = getattr(res, "broker_order_id", None)
+        # CAP 2/3 — the broker accepted (order-id assigned): transition the durable
+        # intent to ORDER_SUBMITTED, mapping client_order_id → broker order-id.
+        # Paper (_entry_oid None) still records the transition keyed by the
+        # synthetic client_order_id (broker id NULL). Best-effort, never blocks.
+        order_ledger.append_event(
+            session_id=self.session_id, symbol=register_symbol,
+            event_type=order_ledger.EV_ORDER_SUBMITTED,
+            position_ref=f"{self.session_id}:{register_symbol}",
+            product=prof.order_product, broker_profile=prof.profile_id,
+            broker_order_id=_entry_oid, client_order_id=client_order_id,
+            qty=fill_qty, price=fill_price, source="entry")
         # Lifecycle#9 — classify a partial ENTRY by fill_qty < ORDERED qty, not
         # only res.status=="PARTIAL". A broker can report COMPLETE while filling
         # fewer shares than ordered (RMS trim / thin book); that under-fill must be
@@ -2104,7 +2134,8 @@ class TradingSession:
                                            exchange=_exchange,
                                            broker_account_id=acct_id,
                                            direction=_direction,
-                                           entry_order_id=_entry_oid)
+                                           entry_order_id=_entry_oid,
+                                           client_order_id=client_order_id)
         else:
             self.registry.register(symbol=register_symbol,
                                    broker_profile=prof.profile_id,
@@ -2114,7 +2145,8 @@ class TradingSession:
                                    exchange=_exchange,
                                    broker_account_id=acct_id,
                                    direction=_direction,
-                                   entry_order_id=_entry_oid)
+                                   entry_order_id=_entry_oid,
+                                   client_order_id=client_order_id)
         if ref_price > 0 and reconciled:
             record_slippage(symbol, ref_price, fill_price, fill_qty,
                             session_id=self.session_id,

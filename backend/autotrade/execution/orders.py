@@ -43,6 +43,14 @@ class Order:
     strike: Optional[float] = None
     limit_offset_pct: float = 0.001
     vwap_window_seconds: int = 60
+    # SPRINT CLUSTER 2 (CAP 1): the durable ownership key + the compact broker tag.
+    # client_order_id is minted BEFORE submission and persisted in our DB; `tag`
+    # (<=20 alphanumeric chars) is compact_tag(client_order_id) and rides on the
+    # broker order so we recognise OUR OWN orders in the broker orderbook. Both
+    # default None → the pre-existing per-symbol tag is used (byte-for-byte
+    # unchanged for any caller that does not set them).
+    client_order_id: Optional[str] = None
+    tag: Optional[str] = None
 
     def compute_limit_price(self, reference_price: float) -> float:
         """Limit = reference * (1 + offset). Used for LIMIT entries."""
@@ -78,7 +86,11 @@ class Order:
             quantity=self.qty,
             product=product_map[self.product],
             order_type=kite_otype,
-            tag=f"at-{self.symbol[:10].lower()}"[:20],
+            # CAP 1: the compact client-order tag (<=20 alnum) when this leg was
+            # minted a client_order_id; else the pre-existing per-symbol tag
+            # (byte-for-byte unchanged). The FULL client_order_id is stored in our
+            # DB (the position row + the order ledger), mapped to the broker id.
+            tag=(self.tag or f"at-{self.symbol[:10].lower()}")[:20],
         )
         if self.order_type == "LIMIT" and self.price:
             params["price"] = self.price

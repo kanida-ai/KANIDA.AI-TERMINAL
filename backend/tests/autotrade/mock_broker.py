@@ -325,7 +325,8 @@ class MockBroker(BrokerClient):
                                 instrument_type: str,
                                 kite_product: str | None = None,
                                 direction: str = "long",
-                                *, exec_cfg=None) -> OrderResult:
+                                *, exec_cfg=None,
+                                client_order_id: str | None = None) -> OrderResult:
         # kite_product accepted (and ignored) to match the real ZerodhaBroker
         # signature after the MTF-exit-product fix; kill_switch/exit paths pass it.
         # direction ("long"|"short") records the CLOSING side so futures-short
@@ -341,7 +342,8 @@ class MockBroker(BrokerClient):
                                 "instrument_type": instrument_type,
                                 "kite_product": kite_product,
                                 "direction": direction,
-                                "exec_cfg": exec_cfg})
+                                "exec_cfg": exec_cfg,
+                                "client_order_id": client_order_id})
         if symbol in self.fail_symbols:
             return OrderResult(status="FAILED", broker_order_id=None,
                                symbol=symbol, qty=qty, error="mock failure")
