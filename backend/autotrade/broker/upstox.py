@@ -161,6 +161,17 @@ class UpstoxBroker(BrokerClient):
             "trigger_price": 0,
             "is_amo": False,
         }
+        # CLUSTER 10 ITEM 4 — transmit OUR compact client tag so this order is
+        # recognisable in the Upstox orderbook. Upstox v2 /order/place DOCUMENTS an
+        # optional `tag` field (alphanumeric); compact_tag is <=18 alnum → within
+        # bounds. Additive + live-gated (this line runs only past _live_allowed);
+        # empty/None → omit (byte-identical to before). NOTE: Upstox live remains
+        # UNVERIFIED (no test account) — the tag rides on the payload here, and OUR
+        # side persists the client_order_id regardless, so attribution works even if
+        # Upstox does not echo the tag.
+        _tag = getattr(order, "tag", None)
+        if _tag:
+            body["tag"] = str(_tag)[:20]
         try:
             import requests
             r = requests.post(f"{_API_BASE}/order/place", json=body,
@@ -231,6 +242,17 @@ class UpstoxBroker(BrokerClient):
             "transaction_type": _side, "disclosed_quantity": 0,
             "trigger_price": 0, "is_amo": False,
         }
+        # CLUSTER 10 ITEM 4 — transmit compact_tag(client_order_id) on the EXIT so
+        # OUR exit is recognisable in the Upstox orderbook (documented v2 `tag`
+        # field). Additive + live-gated; None → omit (byte-identical). OUR side
+        # persists exit_client_order_id + the returned broker order-id regardless,
+        # so reconciliation-by-recorded-order-id works even without a tag echo.
+        if client_order_id:
+            try:
+                from ..order_ledger import compact_tag
+                body["tag"] = compact_tag(str(client_order_id))[:20]
+            except Exception:  # pragma: no cover - tag is best-effort
+                pass
         try:
             import requests
             r = requests.post(f"{_API_BASE}/order/place", json=body,

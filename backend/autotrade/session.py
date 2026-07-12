@@ -1410,6 +1410,7 @@ async def _exit_single_position_inner(
         max_wait_sec=60,
         poll_interval_sec=5.0,
         broker_profile=prof_id,
+        client_order_id=exit_coid,
     )
     confirm_status = confirm_result.get("status", "UNKNOWN")
     exit_price = confirm_result.get("exit_price") or position.get("ltp")

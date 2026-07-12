@@ -126,8 +126,17 @@ async def confirm_exit(
     poll_interval_sec: float = 5.0,
     broker_profile: Optional[str] = None,
     status_provider: Optional[Callable[[str], dict]] = None,
+    client_order_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Poll the broker until the exit order is fill-confirmed.
+
+    client_order_id (SPRINT CLUSTER 10 ITEM 1, additive, DEFAULT None): the durable
+    EXIT client_order_id whose compact_tag rode on this exit order. When supplied it
+    is persisted onto the EXIT_PLACED / EXIT_FILLED ledger events so the ledger — not
+    just the position row — carries OUR ownership key for the exit, letting recovery
+    + the reconciler attribute the fill by our tag even if the broker order-id was
+    never recorded on the row. None (all pre-CLUSTER-10 callers) keeps the ledger
+    rows byte-for-byte (a NULL client_order_id, exactly as before).
 
     status_provider (CLUSTER 5 ITEM 6): an optional callable order_id -> status
     dict used INSTEAD of broker.get_order_status. The kill path passes a shared
@@ -182,7 +191,8 @@ async def confirm_exit(
     _order_ledger.append_event(
         session_id=session_id, symbol=symbol,
         event_type=_order_ledger.EV_EXIT_PLACED,
-        broker_profile=broker_profile, broker_order_id=order_id, qty=qty,
+        broker_profile=broker_profile, broker_order_id=order_id,
+        client_order_id=client_order_id, qty=qty,
         source="exit", detail=close_reason)
 
     deadline = datetime.now(IST) + timedelta(seconds=max_wait_sec)
@@ -220,6 +230,7 @@ async def confirm_exit(
                     session_id=session_id, symbol=symbol,
                     event_type=_order_ledger.EV_EXIT_FILLED,
                     broker_profile=broker_profile, broker_order_id=order_id,
+                    client_order_id=client_order_id,
                     qty=filled_qty, price=fill_price, source="exit",
                     detail=close_reason)
                 registry.mark_closed(symbol, close_reason, exit_price=fill_price,
@@ -430,7 +441,8 @@ async def slice_and_confirm_exit(
         _order_ledger.append_event(
             session_id=session_id, symbol=symbol,
             event_type=_order_ledger.EV_EXIT_PLACED,
-            broker_profile=broker_profile, broker_order_id=oid, qty=leg_qty,
+            broker_profile=broker_profile, broker_order_id=oid,
+            client_order_id=child_coid, qty=leg_qty,
             source="exit", detail=f"{close_reason}:iceberg-child-{i}")
         if is_dry:
             filled_total += leg_qty
@@ -571,7 +583,7 @@ async def adopt_tagged_exit_if_present(
     return await confirm_exit(
         session_id=session_id, symbol=symbol, order_id=str(oid), qty=qty,
         broker=broker, registry=registry, close_reason=close_reason,
-        broker_profile=broker_profile)
+        broker_profile=broker_profile, client_order_id=exit_client_order_id)
 
 
 async def cancel_and_retry_exit(
@@ -749,6 +761,7 @@ async def cancel_and_retry_exit(
             max_wait_sec=max_wait_sec,
             poll_interval_sec=poll_interval_sec,
             broker_profile=broker_profile,
+            client_order_id=exit_coid,
         )
         last_result = result
         if result.get("status") == "COMPLETE":

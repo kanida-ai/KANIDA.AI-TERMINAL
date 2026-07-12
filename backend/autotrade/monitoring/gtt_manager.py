@@ -290,6 +290,34 @@ class GTTManager:
         # and the reconciler care about — the limit offset is a broker mechanic).
         self.registry.set_gtt(symbol, gtt_id, gtt_stop=stop_trig, gtt_target=tgt_trig,
                               broker_profile=prof_id)
+        # ── CLUSTER 10 ITEM 1 — persist the GTT placement in the durable ledger ──
+        # The GTT-OCO is our per-position broker-held backup exit. Kite's place_gtt
+        # payload has NO client-tag field — verified: kiteconnect._get_gtt_payload
+        # rebuilds each leg dict from ONLY {exchange,tradingsymbol,transaction_type,
+        # quantity,order_type,product,price}, silently DROPPING any `tag` — so a tag
+        # CANNOT ride on the GTT legs (TODO(certify): re-check if Kite ever adds a
+        # GTT leg tag). We therefore attribute a fired GTT by its gtt_id (already
+        # persisted on the row + consulted by the reconciler's get_gtt_fill). Here we
+        # additionally record the placement in the ledger keyed by gtt_id, carrying
+        # the position's ENTRY client_order_id as OUR ownership key, so the ledger —
+        # not just the row — links this GTT to us. LIVE only (gtt_id None in paper →
+        # no event → paper byte-identical). Best-effort; never blocks.
+        if gtt_id:
+            try:
+                from .. import order_ledger as _ol
+                _coid = pos.get("client_order_id")
+                _ol.append_event(
+                    session_id=self.session_id, symbol=symbol,
+                    event_type=_ol.EV_ORDER_SUBMITTED,
+                    position_ref=f"{self.session_id}:{symbol}",
+                    product=(pos.get("product") or self.config.order_product),
+                    broker_profile=prof_id, broker_order_id=str(gtt_id),
+                    client_order_id=_coid, qty=qty, source="gtt",
+                    detail="GTT_OCO placed (Kite legs carry no tag; attributed by "
+                           "gtt_id)")
+            except Exception as _le:  # pragma: no cover - ledger never blocks
+                log.debug("gtt ledger append failed for %s/%s: %s",
+                          self.session_id, symbol, _le)
         status = "PLACED" if gtt_id else "RECORDED_ONLY"
         log.info("GTT %s for %s/%s stop_trig=%.2f stop_lim=%.2f "
                  "target=%.2f gtt_id=%s",
@@ -398,6 +426,27 @@ class GTTManager:
             return None
         if slm_id:
             self.registry.set_slm(symbol, slm_id, broker_profile=prof_id)
+            # CLUSTER 10 ITEM 1 — persist the SL-M placement in the durable ledger.
+            # The broker order ALREADY carries OUR compact tag (client_tag above =
+            # compact_tag(entry client_order_id)); here we also record it in the
+            # ledger keyed by the slm broker order-id, carrying that SAME entry
+            # client_order_id as the ownership key, so a fired protective stop is
+            # attributable both by tag AND by our recorded slm order-id. LIVE only
+            # (slm_id None in paper → no event). Best-effort; never blocks the entry.
+            try:
+                from .. import order_ledger as _ol
+                _ol.append_event(
+                    session_id=self.session_id, symbol=symbol,
+                    event_type=_ol.EV_ORDER_SUBMITTED,
+                    position_ref=f"{self.session_id}:{symbol}",
+                    product=product, broker_profile=prof_id,
+                    broker_order_id=str(slm_id), client_order_id=coid,
+                    qty=qty, source="slm",
+                    detail="MIS protective SL-M placed (carries compact tag of the "
+                           "entry client_order_id)")
+            except Exception as _le:  # pragma: no cover - ledger never blocks
+                log.debug("slm ledger append failed for %s/%s: %s",
+                          self.session_id, symbol, _le)
             log.info("SL-M protective placed for %s/%s trigger=%.2f id=%s",
                      self.session_id, symbol, float(stop_trigger), slm_id)
         return slm_id

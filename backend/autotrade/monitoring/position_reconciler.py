@@ -372,6 +372,57 @@ def _orderbook_exit_evidence(pos: Dict[str, Any],
     }
 
 
+def _orderbook_exit_evidence_by_tag(pos: Dict[str, Any],
+                                    orderbook: Optional[List[Dict[str, Any]]]
+                                    ) -> Optional[Dict[str, Any]]:
+    """SPRINT CLUSTER 10 ITEM 2 — POSITIVE order evidence that THIS position closed,
+    matched by OUR CLIENT TAG when the broker exit order-id was never recorded on
+    the row (a crash / miss between placing the exit and persisting its order-id),
+    or None.
+
+    Scans the day orderbook for a COMPLETE, CLOSING-side order carrying
+    compact_tag(exit_client_order_id) — or, as a fallback, compact_tag(entry
+    client_order_id) — i.e. a tag WE minted. A foreign / manual order carries a
+    foreign or absent tag, so `find_broker_order_by_tag` can NEVER match it: our
+    fill is attributed, the foreign same-symbol fill stays invisible. This is a
+    THIRD, tag-keyed evidence source alongside _confirmed_close (per-position
+    get_order_status) and _orderbook_exit_evidence (recorded exit_order_id) — an
+    order we PLACED but whose broker order-id we somehow missed is still provably
+    ours by tag. Requires COMPLETE + filled_quantity > 0. Returns the same evidence
+    shape as _confirmed_close, else None. Never raises."""
+    if not orderbook:
+        return None
+    try:
+        from ..order_ledger import compact_tag, find_broker_order_by_tag
+    except Exception:  # pragma: no cover - defensive
+        return None
+    # OUR tags, exit key first (the placement that closes the position) then the
+    # entry key (same-side entries are filtered out by the closing-side check).
+    coids = [pos.get("exit_client_order_id"), pos.get("client_order_id")]
+    tags = [compact_tag(str(c)) for c in coids if c not in (None, "")]
+    if not tags:
+        return None
+    closing_side = ("BUY" if str(pos.get("direction") or "long").lower() == "short"
+                    else "SELL")
+    for tag in tags:
+        match = find_broker_order_by_tag(orderbook, tag, closing_side=closing_side)
+        if not match:
+            continue
+        if str(match.get("status") or "").upper() != "COMPLETE":
+            continue
+        fq = int(_num(match.get("filled_quantity")) or 0)
+        if fq <= 0:
+            continue
+        price = _num(match.get("average_price"))
+        return {
+            "exit_price": price if (price and price > 0) else pos.get("ltp"),
+            "exit_order_id": str(match.get("order_id") or "") or None,
+            "close_reason": "RECONCILED_EXIT_BY_TAG",
+            "filled_qty": fq,
+        }
+    return None
+
+
 # ── GUARD G3 (mode C3): corporate-action classifier ──────────────────────────
 # A split / bonus changes the BROKER quantity with NO order — so the invariant
 # sees a surplus (broker > db) or deficit (broker < db) it cannot attribute to
@@ -651,6 +702,19 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
             return next(iter(order_maps.values()))
         return {}
 
+    def _order_list_for(prof_id: Optional[str]) -> Optional[List[Dict[str, Any]]]:
+        """CLUSTER 10 ITEM 2 — the RAW day orderbook list for a position's profile
+        (needed by the tag matcher, which scans raw rows), scoped to that broker
+        account so a Zerodha order-id/tag and a Rupeezy one are never conflated. The
+        single-broker session shares its one book; else None (no orderbook)."""
+        ob = orderbooks.get(str(prof_id or ""))
+        if isinstance(ob, list):
+            return ob
+        non_none = [b for b in orderbooks.values() if isinstance(b, list)]
+        if len(non_none) == 1:
+            return non_none[0]
+        return None
+
     # CLUSTER 9d FIX F3 — bucket the invariant by (bare_symbol, product,
     # broker_account_id), NOT the session-wide account SET. A session on acctA+acctB
     # must reconcile symbol X on acctA against ONLY acctA's DB rows + broker book;
@@ -799,6 +863,15 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                     # exit the per-position get_order_status transiently missed.
                     ev = _orderbook_exit_evidence(
                         pos, _order_map_for(pos.get("broker_profile")))
+                if ev is None:
+                    # CLUSTER 10 ITEM 2 — TAG-keyed evidence: an exit we PLACED
+                    # (our compact tag rode on it) whose broker order-id we never
+                    # recorded on the row is STILL provably ours by tag. Scans the
+                    # raw orderbook for a COMPLETE closing-side order carrying OUR
+                    # tag; a foreign same-symbol fill (foreign/absent tag) is never
+                    # matched → attributed to us only, foreign invisible.
+                    ev = _orderbook_exit_evidence_by_tag(
+                        pos, _order_list_for(pos.get("broker_profile")))
                 if ev is None:
                     continue
                 sym = pos.get("symbol")

@@ -345,6 +345,7 @@ class KillSwitchExecutor:
                                  "instrument_type": itype,
                                  "broker_account_id": acct_id,
                                  "kite_product": kite_product, "iceberg": True}
+                    _meta_ice["exit_coid"] = _exit_coid
                     sliced_jobs.append((_meta_ice, slice_and_confirm_exit(
                         session_id=self.session_id, symbol=symbol,
                         total_qty=int(qty), legs=_ice_legs, broker=broker,
@@ -361,7 +362,7 @@ class KillSwitchExecutor:
             exit_meta.append({"symbol": symbol, "claimed": True, "qty": qty,
                               "broker_profile": prof_id, "direction": direction,
                               "instrument_type": itype, "kite_product": kite_product,
-                              "broker_account_id": acct_id})
+                              "broker_account_id": acct_id, "exit_coid": _exit_coid})
 
         results = await asyncio.gather(*exit_coros, return_exceptions=True)
 
@@ -403,7 +404,8 @@ class KillSwitchExecutor:
                 registry=self.registry, close_reason=close_reason,
                 max_wait_sec=60, poll_interval_sec=_POLL_INTERVAL,
                 broker_profile=prof_id,
-                status_provider=_snapshot_for(prof_id, broker_for_pos).status)
+                status_provider=_snapshot_for(prof_id, broker_for_pos).status,
+                client_order_id=meta.get("exit_coid"))
             confirm_status = confirm_result.get("status", "UNKNOWN")
 
             if confirm_status == "COMPLETE":
