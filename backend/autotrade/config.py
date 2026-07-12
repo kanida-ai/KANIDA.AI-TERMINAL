@@ -175,11 +175,41 @@ class TradingSessionConfig:
     #   for portfolio_kill_switch they are inert. Additive + default-off: an
     #   existing session (no strategy in its config_json) loads as the kill-switch
     #   strategy and behaves exactly as before.
+    # "tesla_short" = the order-flow-native intraday SHORT capital-ROTATION
+    #   engine (backend/autotrade/strategies/tesla_short_engine.py +
+    #   tesla_rotation.py). A live-signal seat model on EQ+MIS+SHORT ONLY: it
+    #   reuses the intraday_basket EXIT machinery (per-seat step-lock trail +
+    #   per-seat capital stop + the mandatory MIS ~15:12 buy-to-cover) but fills
+    #   `n_seats` seats over time from live A++/A+++ signals and back-fills a freed
+    #   seat on the next tick. Additive + default-off (no session runs until the
+    #   operator creates one); paper (dry_run) simulates fills, no real orders.
     strategy: str = "portfolio_kill_switch"
 
     # Stock selection
     top_n_stocks: int = 5
     rank_filter: Optional[List[int]] = None
+
+    # ── TESLA SHORT ROTATION (strategy=="tesla_short" only) ───────────────────
+    # All inert unless the tesla_short strategy is selected.
+    #   n_seats                    : max concurrent SHORT positions; the equal
+    #                                allocation per seat = total_allocated_capital
+    #                                / n_seats (a FIXED per-seat slice — the correct
+    #                                rotation stop/trail denominator).
+    #   tesla_min_grade            : "A++" (A++ and A+++) | "A+++" (strongest only).
+    #   tesla_cooldown_minutes     : per-instrument re-entry spacing (batch = 30).
+    #   tesla_personality_window_days : rolling K completed prior trading days used
+    #                                for stock-personality + train-quality (the LIVE
+    #                                replacement for the batch's hardcoded TRAIN_DAYS).
+    #   tesla_allow_reentry        : re-enter a name already traded this session
+    #                                (default False — conservative, avoids churn).
+    #   tesla_signal_db_path       : override the universe poll DB path (None →
+    #                                the engine default universe_engine DB).
+    n_seats: int = 3
+    tesla_min_grade: str = "A++"
+    tesla_cooldown_minutes: int = 30
+    tesla_personality_window_days: int = 5
+    tesla_allow_reentry: bool = False
+    tesla_signal_db_path: Optional[str] = None
 
     # Position sizing
     sizing_mode: str = "equal"             # equal | pct_cap | manual
@@ -670,7 +700,8 @@ class TradingSessionConfig:
             raise ValueError(f"invalid kill_switch_direction: {self.kill_switch_direction}")
         if self.top_n_stocks <= 0:
             raise ValueError("top_n_stocks must be > 0")
-        if self.strategy not in ("portfolio_kill_switch", "intraday_basket"):
+        if self.strategy not in ("portfolio_kill_switch", "intraday_basket",
+                                 "tesla_short"):
             raise ValueError(f"invalid strategy: {self.strategy}")
         # Defensive units check: these percentages are FRACTIONS (0.01 = 1%), not
         # whole-number percents. The UI has historically sent 1.0 (intending
@@ -783,6 +814,63 @@ class TradingSessionConfig:
                 raise ValueError(
                     "positional (no square-off) is not allowed for MIS — MIS "
                     "must square off intraday")
+        # ── TESLA SHORT ROTATION — validate when the strategy is selected ─────
+        # Reuses the equity-MIS-SHORT gate (EQ+MIS+short ONLY) + the intraday
+        # trail EXIT knobs, plus the seat knobs. Additive: never blocks other
+        # strategies.
+        if self.strategy == "tesla_short":
+            if self.direction != "short":
+                raise ValueError(
+                    "tesla_short is a SHORT strategy — set direction='short'")
+            if not (self.instrument_type == "EQ" and self.order_product == "MIS"):
+                raise ValueError(
+                    "tesla_short trades EQUITY INTRADAY ONLY — set "
+                    "instrument_type='EQ' and order_product='MIS' (got "
+                    f"instrument_type={self.instrument_type}, "
+                    f"order_product={self.order_product})")
+            if int(self.n_seats) < 1:
+                raise ValueError(f"n_seats must be >= 1, got {self.n_seats}")
+            if self.tesla_min_grade not in ("A++", "A+++"):
+                raise ValueError(
+                    "tesla_min_grade must be 'A++' or 'A+++', got "
+                    f"{self.tesla_min_grade!r}")
+            if int(self.tesla_cooldown_minutes) < 0:
+                raise ValueError(
+                    "tesla_cooldown_minutes must be an integer >= 0, got "
+                    f"{self.tesla_cooldown_minutes}")
+            if int(self.tesla_personality_window_days) < 1:
+                raise ValueError(
+                    "tesla_personality_window_days must be an integer >= 1, got "
+                    f"{self.tesla_personality_window_days}")
+            # MIS is intraday → a forced square-off is mandatory (no overnight).
+            if self.square_off_enabled is False:
+                raise ValueError(
+                    "tesla_short is MIS intraday — square_off_enabled must be True")
+            # Reuse the intraday trail EXIT knobs (per-seat step-lock + stop).
+            for nm, v in (("arm_pct", self.arm_pct),
+                          ("floor_pct", self.floor_pct),
+                          ("trail_giveback_pct", self.trail_giveback_pct),
+                          ("stop_pct", self.stop_pct)):
+                if not (0.0 < float(v) <= 0.5):
+                    raise ValueError(
+                        f"{nm} must be a fraction in (0, 0.5] (e.g. 0.01 = 1%), "
+                        f"got {v}")
+            if not (0.0 <= float(self.per_stock_stop_pct) <= 0.5):
+                raise ValueError(
+                    "per_stock_stop_pct must be a fraction in [0, 0.5] "
+                    f"(0 disables), got {self.per_stock_stop_pct}")
+            if self.trail_step_lock_enabled and self.trail_step_lock_ladder:
+                validate_step_lock_ladder(self.trail_step_lock_ladder)
+            try:
+                _e_s = _parse_clock_to_seconds(self.entry_time)
+                _q_s = _parse_clock_to_seconds(self.square_off_time)
+            except ValueError as e:
+                raise ValueError(f"tesla_short clock {e}")
+            if _q_s <= _e_s:
+                raise ValueError(
+                    f"square_off_time ({self.square_off_time}) must be after "
+                    f"entry_time ({self.entry_time})")
+
         # MULTI-SESSION MAX-HOLD CAP: a non-negative integer (0 = no cap).
         # Meaningful only for a POSITIONAL intraday_basket; on an intraday
         # (square_off_enabled=True) session it is redundant (the daily square-off
@@ -877,7 +965,7 @@ class TradingSessionConfig:
             _mis_s = _parse_clock_to_seconds(self.mis_square_off_time)
         except ValueError as e:
             raise ValueError(f"mis_square_off_time {e}")
-        if self.strategy == "intraday_basket":
+        if self.strategy in ("intraday_basket", "tesla_short"):
             try:
                 _sq_s = _parse_clock_to_seconds(self.square_off_time)
             except ValueError:
@@ -977,6 +1065,13 @@ class TradingSessionConfig:
             strategy=d.get("strategy", "portfolio_kill_switch"),
             top_n_stocks=int(d.get("top_n_stocks", 5)),
             rank_filter=d.get("rank_filter"),
+            n_seats=int(d.get("n_seats", 3)),
+            tesla_min_grade=d.get("tesla_min_grade", "A++"),
+            tesla_cooldown_minutes=int(d.get("tesla_cooldown_minutes", 30)),
+            tesla_personality_window_days=int(
+                d.get("tesla_personality_window_days", 5)),
+            tesla_allow_reentry=bool(d.get("tesla_allow_reentry", False)),
+            tesla_signal_db_path=(d.get("tesla_signal_db_path") or None),
             sizing_mode=d.get("sizing_mode", "equal"),
             max_pct_per_position=float(d.get("max_pct_per_position", 0.05)),
             manual_amounts=d.get("manual_amounts", {}) or {},

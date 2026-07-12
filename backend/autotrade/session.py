@@ -2080,6 +2080,13 @@ class TradingSession:
         self._set_status("RUNNING", started_at=_now_ist_iso())
         self._record_account_allocations()
 
+        # TESLA SHORT ROTATION: the entry model is a live-signal seat fill, not a
+        # one-shot Falcon basket. Reuses the gate/account/idempotency preamble
+        # above, then fills seats via _place_one + arms the drivers. Existing
+        # strategies fall through to the unchanged Falcon-pick basket path below.
+        if self.config.strategy == "tesla_short":
+            return await self._fire_tesla_initial()
+
         falcon_picks = load_falcon_picks(
             top_n=max(self.config.top_n_stocks, 10),
             universe_filter=self.config.universe_filter)
@@ -3349,6 +3356,15 @@ class TradingSession:
         # on-fund gross_return for the history/charts.
         gr_invested = self.monitor.compute_gross_return_invested()
 
+        if self.config.strategy == "tesla_short":
+            # TESLA SHORT ROTATION: per-seat step-lock + mandatory MIS square-off
+            # + seat back-fill, all on the ALLOCATED-CAPITAL basis (÷ total, a
+            # FIXED denominator — correct for a rotating book). Existing strategies
+            # are untouched by this branch.
+            gr_capital = self.monitor.compute_gross_return()
+            return await self._tick_tesla(gr_capital, snap, gtt_closed,
+                                          broker_reconciled)
+
         if self.config.strategy == "intraday_basket":
             # CAPITAL-BASIS TRAIL (2026-07-07): the intraday_basket trail measures
             # arm/floor/giveback/basket-stop as % of ALLOCATED CAPITAL
@@ -3745,6 +3761,276 @@ class TradingSession:
                     "PER-STOCK EXIT %s/%s: g_stock=%.4f reason=%s",
                     self.session_id, p["symbol"], g_stock, reason)
         return exits
+
+    # ── TESLA SHORT ROTATION (strategy=="tesla_short") ────────────────────────
+    # Order-flow-native intraday SHORT capital-rotation engine. Entries + exits go
+    # through the SAME hardened paths as every other strategy (_place_one /
+    # _exit_single_position / kill_switch.fire / fire_guard / reconciler). The ONLY
+    # new logic is (a) the live signal source, (b) the seat back-fill decision
+    # (strategies/tesla_rotation.py), and (c) the per-SEAT stop denominator (the
+    # FIXED seat allocation = total/n_seats — NOT the frozen basket notional, which
+    # would mis-scale as seats turn over). Paper (dry_run) simulates fills; live is
+    # gated by _live_allowed() exactly like every other order.
+
+    def _tesla_live_signals(self) -> List[Any]:
+        """Fetch the CURRENT A++/A+++ SHORT signals from the live poll. Wrapped so
+        a signal-engine failure NEVER crashes a tick (returns []). Overridable in
+        tests (monkeypatch) so the rotation path is exercised without the DB."""
+        try:
+            from pathlib import Path as _Path
+            from .strategies import tesla_short_engine as _tse
+            now = datetime.now(IST)
+            db = getattr(self.config, "tesla_signal_db_path", None)
+            res = _tse.compute_live_signals(
+                as_of=now.strftime("%Y-%m-%d %H:%M"),
+                db_path=(_Path(db) if db else None),
+                personality_window_days=int(
+                    getattr(self.config, "tesla_personality_window_days", 5)),
+                min_grade=getattr(self.config, "tesla_min_grade", "A++"),
+                cooldown_minutes=int(
+                    getattr(self.config, "tesla_cooldown_minutes", 30)),
+                latest_only=True)
+            return list(res.signals)
+        except Exception as e:  # pragma: no cover - defensive (never crash a tick)
+            log.warning("tesla signal engine failed for %s: %s",
+                        self.session_id, e)
+            return []
+
+    def _tesla_primary_broker(self):
+        """(broker, profile) for the FIRST enabled profile with a built client.
+        None → cannot place (session not built / no enabled profile)."""
+        for prof in (self.config.broker_profiles or []):
+            if not getattr(prof, "enabled", True):
+                continue
+            broker = (self.brokers or {}).get(prof.profile_id)
+            if broker is not None:
+                return broker, prof
+        return None, None
+
+    async def _rotate_tesla_seats(self) -> List[Dict[str, Any]]:
+        """Fill every FREE seat from the current live signals (used at fire AND on
+        every tick). Reuses _place_one for each entry (all entry safety intact).
+        Returns the list of per-entry order-result dicts (may be empty)."""
+        from .strategies import tesla_rotation as _trot
+        open_pos = self.registry.get_open_positions()
+        open_symbols = [p["symbol"] for p in open_pos]
+        n_seats = int(getattr(self.config, "n_seats", 3))
+        if len(open_symbols) >= n_seats:
+            return []
+        signals = self._tesla_live_signals()
+        if not signals:
+            return []
+        all_pos = self.registry.get_all_positions()
+        held_ever = [p["symbol"] for p in all_pos]
+        last_entry_at: Dict[str, datetime] = {}
+        for p in all_pos:
+            ts = p.get("entered_at") or p.get("created_at") or p.get("entry_date")
+            if not ts:
+                continue
+            try:
+                dt = datetime.fromisoformat(str(ts))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=IST)
+                prev = last_entry_at.get(p["symbol"])
+                if prev is None or dt > prev:
+                    last_entry_at[p["symbol"]] = dt
+            except (ValueError, TypeError):
+                pass
+        plan = _trot.plan_backfill(
+            signals=signals, open_symbols=open_symbols, n_seats=n_seats,
+            total_capital=float(self.config.total_allocated_capital),
+            now=datetime.now(IST), last_entry_at=last_entry_at,
+            held_ever=held_ever,
+            cooldown_minutes=int(getattr(self.config, "tesla_cooldown_minutes", 30)),
+            min_grade=getattr(self.config, "tesla_min_grade", "A++"),
+            allow_reentry=bool(getattr(self.config, "tesla_allow_reentry", False)))
+        if not plan:
+            return []
+        broker, prof = self._tesla_primary_broker()
+        if broker is None:
+            log.warning("session %s: tesla rotation has no built broker profile",
+                        self.session_id)
+            return []
+        allocator = CapitalAllocator(self.config)
+        results: List[Dict[str, Any]] = []
+        for entry in plan:
+            pick = Pick(symbol=entry.symbol, rank=0, score=entry.short_drive,
+                        sector=entry.setup or None,
+                        close_at_signal=entry.ref_price)
+            try:
+                res = await self._place_one(broker, prof, pick, entry.allocation,
+                                            allocator)
+            except Exception as e:  # per-seat isolation — one bad seat never aborts
+                log.error("tesla seat entry crashed for %s: %s", entry.symbol, e)
+                res = {"symbol": entry.symbol, "status": "FAILED", "error": str(e)}
+            res["seat_grade"] = entry.grade
+            res["seat_allocation"] = entry.allocation
+            results.append(res)
+        # Keep the display invested_basis current with the live book (the trail
+        # decides on total_allocated_capital, not this — display only).
+        try:
+            self.monitor.freeze_invested_basis()
+        except Exception:  # pragma: no cover - never block on the basis capture
+            pass
+        return results
+
+    async def _run_tesla_seat_step_lock(self, params,
+                                        mark_stale: bool = False
+                                        ) -> List[Dict[str, Any]]:
+        """PER-SEAT step-lock profit trail + per-seat capital stop.
+
+        g_seat = position_uPnL / seat_allocation, where
+            seat_allocation = total_allocated_capital / n_seats (FIXED).
+        This is the CORRECT rotation denominator — it does NOT shrink as sibling
+        seats turn over (the frozen-basket-notional slice used by the basket path
+        would). Each seat carries its OWN (pos_trail_armed, pos_trail_peak). A
+        profit EXIT (STEP_LOCK/TRAIL/FLOOR) is SUPPRESSED when the mark is stale
+        (a daily-close fallback must not fake a give-back); the per-seat downside
+        STOP (STOP_SEAT) still fires. Returns the per-seat exit result dicts."""
+        from dataclasses import replace as _dc_replace
+        positions = self.monitor._open_positions()
+        if not positions:
+            return []
+        seat_alloc = float(self.config.total_allocated_capital) / int(
+            getattr(self.config, "n_seats", 3))
+        if seat_alloc <= 0:
+            return []
+        _ps_stop = float(getattr(self.config, "per_stock_stop_pct", 0.03) or 0.0)
+        ps_params = _dc_replace(params, square_off_enabled=False,
+                                stop_pct=(_ps_stop if _ps_stop > 0 else 10.0))
+        exits: List[Dict[str, Any]] = []
+        for p in positions:
+            ltp = p.get("ltp")
+            avg = float(p.get("avg_price") or 0.0)
+            qty = float(p.get("qty") or 0.0)
+            if ltp is None or avg <= 0 or qty <= 0:
+                continue
+            sign = -1.0 if str(p.get("direction") or "long").lower() == "short" \
+                else 1.0
+            upnl = sign * (float(ltp) - avg) * qty
+            g_seat = upnl / seat_alloc   # FIXED seat allocation (see tesla_rotation.seat_g)
+            state = trail_engine.TrailState(
+                armed=bool(p.get("pos_trail_armed")),
+                peak=float(p.get("pos_trail_peak") or 0.0))
+            decision = trail_engine.decide(g_seat, state, ps_params)
+            _profit = (decision.action == "ARM") or (
+                decision.action == "EXIT"
+                and decision.reason in _PROFIT_EXIT_REASONS)
+            if mark_stale and _profit:
+                # do NOT ratchet or profit-exit on a stale mark; STOP still armed.
+                continue
+            if decision.state_changed:
+                self.monitor.save_per_stock_trail_state(p["symbol"], decision.state)
+            if decision.action == "EXIT":
+                reason = "STOP_SEAT" if decision.reason == "STOP" else decision.reason
+                result = await _exit_single_position(
+                    session_id=self.session_id, position=p, reason=reason,
+                    brokers=self.brokers, registry=self.registry,
+                    gtt_manager=self.gtt_manager,
+                    kite_product=self.config.order_product, exec_cfg=self.config)
+                result["reason"] = reason
+                result["g_seat"] = g_seat
+                exits.append(result)
+                log.warning("TESLA SEAT EXIT %s/%s: g_seat=%.4f reason=%s",
+                            self.session_id, p["symbol"], g_seat, reason)
+        return exits
+
+    async def _tick_tesla(self, gr_capital: float, snap: Dict[str, Any],
+                          gtt_closed,
+                          broker_reconciled: Optional[List[Dict[str, Any]]] = None
+                          ) -> Dict[str, Any]:
+        """One tick for strategy=="tesla_short":
+          1. BASKET SAFETY (flatten ALL): the catastrophic basket stop
+             (basket G <= -stop_pct) + the MANDATORY MIS ~15:12 buy-to-cover
+             square-off. Fires through kill_switch.fire (GTT-cancel-before-exit +
+             fill-confirm), single-fire-guarded.
+          2. PER-SEAT step-lock exits (seat denominator), mark-stale-guarded.
+          3. BACK-FILL free seats from the current signals via _place_one.
+        Downside/mandatory exits ALWAYS proceed; profit exits + new entries abstain
+        on stale marks / are guarded, matching the intraday engine."""
+        from .monitoring import trail_engine as _te
+        broker_reconciled = broker_reconciled or []
+        params = _te.params_from_config(self.config)
+
+        # 1. Basket safety net (catastrophic stop) + MANDATORY MIS square-off.
+        safety_reason = self._basket_safety_decision(gr_capital, params)
+        if safety_reason is None and self.config.is_intraday_product():
+            try:
+                mis_t = _parse_entry_time_today_ist(self.config.mis_square_off_time)
+                if datetime.now(IST) >= mis_t:
+                    safety_reason = "MIS_SQUARE_OFF"
+            except ValueError:  # pragma: no cover - validate() rejects unparseable
+                pass
+        if safety_reason is not None:
+            fired = None
+            with fire_guard.claim_fire(self.session_id) as won:
+                if won:
+                    fired = await self.kill_switch.fire(
+                        f"TESLA_SHORT {safety_reason} gross_return={gr_capital:.4f}",
+                        gross_return=gr_capital, close_reason=safety_reason)
+                else:
+                    safety_reason = None
+            return {"gross_return": gr_capital,
+                    "gross_return_fund": snap["gross_return"], "snapshot": snap,
+                    "strategy": "tesla_short",
+                    "trail_action": "EXIT" if fired else "HOLD",
+                    "kill_switch_fired": bool(fired), "kill_reason": safety_reason,
+                    "fire_result": fired, "gtt_closed": gtt_closed,
+                    "broker_reconciled": broker_reconciled}
+
+        # 2. Per-seat step-lock (profit trail + per-seat capital stop).
+        mark_stale = _marks_stale_for_profit(
+            self.registry.get_open_positions(),
+            getattr(self.config, "mark_staleness_abstain_sec", 30))
+        seat_exits = await self._run_tesla_seat_step_lock(params, mark_stale=mark_stale)
+
+        # 3. Back-fill free seats (never on a stale mark — don't enter on stale data).
+        backfilled: List[Dict[str, Any]] = []
+        if not mark_stale:
+            try:
+                backfilled = await self._rotate_tesla_seats()
+            except Exception as e:  # never block the tick on a backfill error
+                log.warning("tesla backfill failed for %s: %s", self.session_id, e)
+
+        return {"gross_return": gr_capital,
+                "gross_return_fund": snap["gross_return"], "snapshot": snap,
+                "strategy": "tesla_short",
+                "trail_action": "EXIT" if seat_exits else "HOLD",
+                "seat_exits": seat_exits, "backfilled": backfilled,
+                "mark_stale_abstain": bool(mark_stale),
+                "kill_switch_fired": False, "kill_reason": None,
+                "fire_result": None, "gtt_closed": gtt_closed,
+                "broker_reconciled": broker_reconciled}
+
+    async def _fire_tesla_initial(self) -> Dict[str, Any]:
+        """Initial fill for a tesla_short session: fill whatever seats have a
+        signal NOW, freeze the display basis, arm the drivers + the MANDATORY MIS
+        square-off, and go RUNNING. Unlike the basket path this does NOT FAIL on 0
+        fills — a tesla session ARMS and rotates in as signals appear (the regime
+        gate may not have fired yet)."""
+        placed: List[Dict[str, Any]] = []
+        try:
+            placed = await self._rotate_tesla_seats()
+        except Exception as e:
+            log.error("tesla initial fill failed for %s: %s", self.session_id, e)
+        for _label, _starter in (("tick", tick_driver.start_for_session),
+                                 ("ws", ws_driver.start_for_session)):
+            try:
+                _starter(self.session_id)
+            except Exception as e:  # never block start on a driver
+                log.warning("%s driver start failed for %s: %s", _label,
+                            self.session_id, e)
+        try:
+            self._arm_square_off()
+        except Exception as e:  # never block start on the square-off scheduler
+            log.warning("square-off arm failed for %s: %s", self.session_id, e)
+        n_ok = sum(1 for r in placed
+                   if r.get("status") in ("PLACED", "DRY_RUN", "PARTIAL"))
+        return {"session_id": self.session_id, "status": "RUNNING",
+                "mode": self.mode, "n_placed": n_ok, "orders": placed,
+                "strategy": "tesla_short",
+                "note": ("tesla_short armed; seats rotate in on live signals"
+                         if n_ok == 0 else "tesla_short seats filled; rotating")}
 
     # ── Manual kill ────────────────────────────────────────────────────────────
     async def kill(self, reason: str = "MANUAL") -> Dict[str, Any]:
