@@ -511,6 +511,61 @@ def load_falcon_picks(top_n: int = 100,
     return result
 
 
+def _resolve_falcon_selection(
+        config, log_ctx: Optional[str] = None) -> Tuple[List[Pick], int]:
+    """SINGLE shared Falcon-pick resolution for the preview, warm-resolve and
+    real-fire paths (so they can never drift). Does: load → rank_filter →
+    symbol_whitelist filter, and returns ``(picks, router_cap)`` where
+    ``router_cap`` is the value to hand ``BrokerRouter(top_n_stocks=...)`` for
+    its default (no explicit-symbols / no rank_range) branch.
+
+    LOAD DEPTH:
+      * ``symbol_whitelist`` set → load the full Top-50 selectable range, so a
+        whitelisted name at rank 11..50 is actually loaded (the bug this fixes:
+        the old ``max(top_n_stocks, 10)`` silently truncated the custom list).
+      * else → ``max(top_n_stocks, 10)`` — byte-identical to the old default.
+      * ``rank_filter`` set → deepen to cover its highest rank so a rank_filter
+        referencing rank > depth isn't silently dropped (additive; only ADDS
+        coverage, never removes a pick, and never changes ``router_cap``).
+
+    ROUTER CAP:
+      * ``symbol_whitelist`` set → the number of whitelist-matched picks, i.e.
+        "custom list wins" — every matched name routes, the top_n_stocks cap is
+        BYPASSED (operator decision).
+      * else → ``config.top_n_stocks`` — unchanged; governs the DEFAULT top-N.
+
+    ``log_ctx`` (e.g. ``"preview: "`` or ``f"session {sid}: "``) prefixes the
+    "whitelisted symbol(s) not in today's picks" warning for names genuinely
+    absent from the ranked set. ``None`` suppresses it (the best-effort warm
+    path stays silent, as before).
+    """
+    if config.symbol_whitelist:
+        depth = 50
+    else:
+        depth = max(config.top_n_stocks, 10)
+    if config.rank_filter:
+        depth = max(depth, max(config.rank_filter))
+
+    picks = load_falcon_picks(
+        top_n=depth, universe_filter=config.universe_filter)
+    if config.rank_filter:
+        picks = [p for p in picks if p.rank in config.rank_filter]
+
+    if config.symbol_whitelist is not None:
+        whitelist_set = set(config.symbol_whitelist)
+        if log_ctx:
+            missing = whitelist_set - {p.symbol for p in picks}
+            if missing:
+                log.warning("%swhitelisted symbol(s) not in today's picks: %s",
+                            log_ctx, sorted(missing))
+        picks = [p for p in picks if p.symbol in whitelist_set]
+        router_cap = len(picks)
+    else:
+        router_cap = config.top_n_stocks
+
+    return picks, router_cap
+
+
 def _get_tick_for(broker, symbol: str) -> float:
     """The instrument tick size for `symbol` (marketable-limit rounding).
 
@@ -564,15 +619,8 @@ def _resolve_basket_symbols(session) -> List[str]:
     the current-month contract symbol so the FULL subscription + circuit prime hit
     the tradeable instrument."""
     try:
-        picks = load_falcon_picks(
-            top_n=max(session.config.top_n_stocks, 10),
-            universe_filter=session.config.universe_filter)
-        if session.config.rank_filter:
-            picks = [p for p in picks if p.rank in session.config.rank_filter]
-        if session.config.symbol_whitelist is not None:
-            wl = set(session.config.symbol_whitelist)
-            picks = [p for p in picks if p.symbol in wl]
-        router = BrokerRouter(top_n_stocks=session.config.top_n_stocks)
+        picks, router_cap = _resolve_falcon_selection(session.config)
+        router = BrokerRouter(top_n_stocks=router_cap)
         routed = router.route_picks(picks, session.config.broker_profiles)
     except Exception as e:  # pragma: no cover - defensive
         log.debug("prewarm: pick resolution failed for %s: %s",
@@ -722,21 +770,9 @@ def preview_session_sizing(config: TradingSessionConfig,
     for _p in profiles:
         _preview_resolve_creds(_p, user_id)
 
-    falcon_picks = load_falcon_picks(
-        top_n=max(config.top_n_stocks, 10),
-        universe_filter=config.universe_filter)
-    if config.rank_filter:
-        falcon_picks = [p for p in falcon_picks if p.rank in config.rank_filter]
-    if config.symbol_whitelist is not None:
-        whitelist_set = set(config.symbol_whitelist)
-        found = {p.symbol for p in falcon_picks}
-        missing = whitelist_set - found
-        if missing:
-            log.warning("preview: whitelisted symbol(s) not in today's picks: %s",
-                        sorted(missing))
-        falcon_picks = [p for p in falcon_picks if p.symbol in whitelist_set]
-
-    router = BrokerRouter(top_n_stocks=config.top_n_stocks)
+    falcon_picks, router_cap = _resolve_falcon_selection(
+        config, log_ctx="preview: ")
+    router = BrokerRouter(top_n_stocks=router_cap)
     routed = router.route_picks(falcon_picks, profiles)
 
     allocator = CapitalAllocator(config)
@@ -2088,22 +2124,9 @@ class TradingSession:
         if self.config.strategy == "tesla_short":
             return await self._fire_tesla_initial()
 
-        falcon_picks = load_falcon_picks(
-            top_n=max(self.config.top_n_stocks, 10),
-            universe_filter=self.config.universe_filter)
-        if self.config.rank_filter:
-            falcon_picks = [p for p in falcon_picks
-                            if p.rank in self.config.rank_filter]
-        if self.config.symbol_whitelist is not None:
-            whitelist_set = set(self.config.symbol_whitelist)
-            found = {p.symbol for p in falcon_picks}
-            missing = whitelist_set - found
-            if missing:
-                log.warning("session %s: whitelisted symbol(s) not in today's picks: %s",
-                            self.session_id, sorted(missing))
-            falcon_picks = [p for p in falcon_picks if p.symbol in whitelist_set]
-
-        router = BrokerRouter(top_n_stocks=self.config.top_n_stocks)
+        falcon_picks, router_cap = _resolve_falcon_selection(
+            self.config, log_ctx=f"session {self.session_id}: ")
+        router = BrokerRouter(top_n_stocks=router_cap)
         routed = router.route_picks(falcon_picks, self.config.broker_profiles)
 
         # SPEED PASS: time the whole fire (start → all legs settled) for the
