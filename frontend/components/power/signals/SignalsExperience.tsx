@@ -16,13 +16,14 @@
  * No data is fabricated; everything is the real Top20Response / liveDecisions
  * payload fetched by the server page.
  */
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { Top20Card } from '@/components/power/Top20Card'
 import { Top20Filters } from '@/components/power/Top20Filters'
+import { SignalTierBadge } from '@/components/power/PickCard'
 import { CyclePicker } from '@/app/power/live/CyclePicker'
 import type { Top20Response, Top20Universe } from '@/lib/falcon-top20-types'
-import type { LiveCycle, LiveDecision } from '@/lib/power-api'
+import { PowerAPI, type LiveCycle, type LiveDecision, type FalconRankedPick } from '@/lib/power-api'
 
 type LivePayload = {
   cycle:       string | null
@@ -56,14 +57,15 @@ export function SignalsExperience({
         <div className="max-w-5xl mx-auto w-full">
           <h1 className="text-2xl md:text-3xl font-semibold text-neutral-100">Signals</h1>
           <p className="text-sm text-neutral-400 mt-1 max-w-2xl leading-relaxed">
-            Today&apos;s Falcon Top 10 with full explainability, plus the live
+            Today&apos;s Falcon Top 10 with full explainability, the deeper ranked
+            list (to 50) with signal-time tiers, plus the live
             9:30 / 9:45 / 10:00 IST ENTER / WAIT / SKIP overlay.
           </p>
 
           {/* Tab switch */}
           <div className="mt-4 inline-flex items-center gap-1 rounded-lg border border-neutral-800 bg-neutral-950/60 p-1">
             <TabButton active={tab === 'today'} onClick={() => setTab('today')}>
-              Today&apos;s Top 10
+              Today&apos;s Top 50
             </TabButton>
             <TabButton active={tab === 'live'} onClick={() => setTab('live')}>
               Live decisions
@@ -120,6 +122,22 @@ function TodayTab({ top20, top20Error, universe, sector }: {
 }) {
   const picks = top20?.picks ?? []
   const sectorOptions = uniqueSortedSectors(picks.map(p => p.sector))
+
+  // Deeper ranked list (ranks 11–50): rank + signal-time tier, no heavy
+  // explainability. Same LOCKED persona ranking as the Top-10 above. Fetched
+  // from the fast /today/falcon-ranked endpoint so it never blocks the page.
+  const signalDate = top20?.signal_date ?? null
+  const [ranked, setRanked] = useState<FalconRankedPick[]>([])
+  useEffect(() => {
+    if (!signalDate) { setRanked([]); return }
+    const ctrl = new AbortController()
+    let alive = true
+    PowerAPI.falconRanked(universe, sector, 50, signalDate, ctrl.signal)
+      .then(res => { if (alive) setRanked(res.picks ?? []) })
+      .catch(() => { if (alive) setRanked([]) })
+    return () => { alive = false; ctrl.abort() }
+  }, [universe, sector, signalDate])
+  const tail = ranked.filter(p => p.rank > picks.length)
 
   return (
     <div className="space-y-6">
@@ -182,6 +200,45 @@ function TodayTab({ top20, top20Error, universe, sector }: {
           {picks.map(p => (
             <Top20Card key={`${p.symbol}-${p.rank}`} pick={p} defaultExpanded={p.rank <= 3} />
           ))}
+        </div>
+      )}
+
+      {/* Deeper ranked list — ranks (Top-10 + 1) … 50, compact rows with the
+          signal-time tier. The rich explainability above stays the locked
+          Top-10; this is the "browse the full ranked set" surface. */}
+      {tail.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-baseline justify-between">
+            <h3 className="text-sm font-semibold text-neutral-200">
+              More Falcon signals · ranks {picks.length + 1}–{picks.length + tail.length}
+            </h3>
+            <span className="text-xs text-neutral-500">
+              same ranking, quick view
+            </span>
+          </div>
+          <div className="rounded-xl border border-neutral-800 divide-y divide-neutral-800/70 overflow-hidden">
+            {tail.map(p => (
+              <div key={`${p.symbol}-${p.rank}`}
+                   className="flex items-center gap-3 px-3 py-2 hover:bg-neutral-900/60">
+                <span className="w-7 shrink-0 text-right font-mono text-xs text-neutral-500 tabular-nums">
+                  #{p.rank}
+                </span>
+                <span className="font-mono text-sm font-medium text-neutral-100 truncate max-w-[9rem]">
+                  {p.symbol}
+                </span>
+                <SignalTierBadge tier={p.signal_tier} color={p.signal_tier_color}
+                                 reason={p.signal_tier_reason} />
+                {p.sector && (
+                  <span className="hidden md:inline text-[11px] text-neutral-500 truncate">
+                    {p.sector}
+                  </span>
+                )}
+                <span className="ml-auto shrink-0 font-mono text-xs text-neutral-400 tabular-nums">
+                  {p.avg_lift != null ? `avg lift ${p.avg_lift > 0 ? '+' : ''}${p.avg_lift.toFixed(1)}%` : ''}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

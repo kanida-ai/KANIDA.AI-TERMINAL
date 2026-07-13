@@ -27,6 +27,7 @@ import {
   C, ICON, Gear, MECHANISM_CSS, fmtCapital, fmtPct, pctTone, fmtINR, signedINR,
 } from '@/components/power/shared/cotrade-kit'
 import { SessionConfigEditor, type EditableValues, type LockedContext } from '@/components/power/autotrade/SessionConfigEditor'
+import { SignalTierBadge } from '@/components/power/PickCard'
 import {
   AutoTradeAPI,
   type Mode, type StartWhen, type SizingMode, type OrderProduct, type KillDirection,
@@ -387,7 +388,7 @@ const UNIVERSE_OPTIONS: Array<{ key: UniverseFilter; label: string }> = [
   { key: 'fno',      label: 'F&O'       },
 ]
 
-const TOP_N_OPTIONS = [3, 5, 7, 10]
+const TOP_N_OPTIONS = [3, 5, 7, 10, 20, 50]
 const SIZING_OPTIONS: { id: SizingMode; label: string; hint: string }[] = [
   { id: 'equal',   label: 'Equal',   hint: 'Split capital evenly across picks' },
   { id: 'pct_cap', label: '% cap',   hint: 'Cap each position at a max % of capital' },
@@ -2586,7 +2587,10 @@ export function PortfolioAutoTrade({
 
               {/* Picks list */}
               {!picksLoading && !picksErr && picks && picks.length > 0 && checkedSymbols && (
-                <div className="flex flex-col gap-1">
+                <div
+                  className="flex flex-col gap-1 overflow-y-auto pr-1"
+                  style={{ maxHeight: picks.length > 12 ? 420 : undefined }}
+                >
                   {picks.map((p) => {
                     const checked = checkedSymbols.has(p.symbol)
                     const isTopN = p.rank <= config.top_n_stocks
@@ -2616,6 +2620,10 @@ export function PortfolioAutoTrade({
                             <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>
                               {p.symbol}
                             </span>
+                            {/* Signal-time tier (GOLD / ENTERPRISE / PREMIUM / STANDARD /
+                                AVOID) — same classifier the Today/Signals panel uses. */}
+                            <SignalTierBadge tier={p.signal_tier} color={p.signal_tier_color}
+                                             reason={p.signal_tier_reason} />
                             {p.sector && (
                               <span
                                 className="text-[9.5px] uppercase tracking-[0.06em] rounded-full px-1.5 py-0.5"

@@ -860,6 +860,13 @@ export type PickItem = {
   n_fires: number
   avg_lift: number
   close_at_signal: number
+  // Signal-time tier overlay (same classifier as the Today/Signals panel).
+  // Optional: the picker degrades gracefully if enrichment was unavailable.
+  signal_tier?: string | null
+  signal_tier_color?: import('./power-api').TierColor | null
+  signal_tier_reason?: string | null
+  signal_day_ret_pct?: number | null
+  two_day_ret_pct?: number | null
 }
 
 // Response from GET /api/autotrade/session/picks?universe=&top_n=

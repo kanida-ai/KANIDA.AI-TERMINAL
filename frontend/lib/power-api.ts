@@ -35,6 +35,29 @@ function apiBase(): string {
 export type Tier      = 'ELITE' | 'HIGH' | 'MID' | 'LOWER' | 'TAIL'
 export type TierColor = 'amber' | 'green' | 'yellow' | 'orange' | 'gray' | 'red'
 
+// One row of the deeper ranked list (GET /api/power/today/falcon-ranked).
+export type FalconRankedPick = {
+  rank: number
+  symbol: string
+  sector: string | null
+  score: number | null
+  n_fires: number | null
+  avg_lift: number | null
+  close_at_signal: number | null
+  signal_tier?: string | null
+  signal_tier_color?: TierColor | null
+  signal_tier_reason?: string | null
+  signal_day_ret_pct?: number | null
+  two_day_ret_pct?: number | null
+}
+export type FalconRankedResponse = {
+  signal_date: string | null
+  universe: string
+  sector: string | null
+  count: number
+  picks: FalconRankedPick[]
+}
+
 // v2: signal-time tier (distinct axis from the rank `tier`). Derived from
 // signal-day price + volume (see backend signal_tier.py).
 export type SignalTier =
@@ -1032,6 +1055,23 @@ export const PowerAPI = {
     if (signal_date) qs.set('signal_date', signal_date)
     return apiFetch<import('./falcon-top20-types').Top20Response>(
       `/api/power/today/falcon-top-20?${qs.toString()}`, { signal })
+  },
+
+  // Deeper RANKED list (rank + signal-time tier, no heavy explainability) —
+  // same LOCKED persona ranking as falcon-top-20, sliced to top_n. Fast (~ms).
+  // Backs the Signals "Today's Top 50" browse tail below the rich Top-10 cards.
+  falconRanked: (
+    universe: import('./falcon-top20-types').Top20Universe = 'all500',
+    sector?:   string | null,
+    topN: number = 50,
+    signal_date?: string | null,
+    signal?: AbortSignal,
+  ) => {
+    const qs = new URLSearchParams({ universe, top_n: String(topN) })
+    if (sector)      qs.set('sector', sector)
+    if (signal_date) qs.set('signal_date', signal_date)
+    return apiFetch<FalconRankedResponse>(
+      `/api/power/today/falcon-ranked?${qs.toString()}`, { signal })
   },
 
   liveDecisions: (jwt: string, cycle: LiveCycle | 'latest' = 'latest', entry_date?: string) => {
