@@ -814,10 +814,19 @@ class TradingSessionConfig:
                 raise ValueError(
                     f"square_off_time ({self.square_off_time}) must be after "
                     f"entry_time ({self.entry_time})")
-            if self.top_n_stocks < 3 or self.top_n_stocks > 10:
+            # Basket-size cap applies to the ACTUAL traded set. A custom
+            # symbol_whitelist DEFINES the basket (top_n_stocks is then only the
+            # picker's browse depth, which may be 20/50), so validate the
+            # whitelist size; else validate top_n_stocks. Either way the intraday
+            # basket must be 3..10 names (the backtest-validated size).
+            _basket_n = (len(self.symbol_whitelist)
+                         if self.symbol_whitelist else self.top_n_stocks)
+            if _basket_n < 3 or _basket_n > 10:
+                _src = ("custom selection" if self.symbol_whitelist
+                        else "top_n_stocks")
                 raise ValueError(
-                    "intraday_basket basket_size (top_n_stocks) must be 3..10, "
-                    f"got {self.top_n_stocks}")
+                    "intraday_basket basket size must be 3..10 names "
+                    f"({_src}), got {_basket_n}")
             # POSITIONAL (no forced square-off) is incompatible with MIS: an MIS
             # position CANNOT be carried overnight — the broker compulsorily
             # squares it off intraday — so a "positional MIS" is a contradiction
