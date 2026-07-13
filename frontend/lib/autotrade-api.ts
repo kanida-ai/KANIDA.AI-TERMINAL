@@ -201,6 +201,11 @@ export type SessionConfig = {
   tesla_min_grade?: 'A++' | 'A+++'
   tesla_cooldown_minutes?: number
   tesla_personality_window_days?: number
+  //   • tesla_did_layer_enabled — opt-in v3 Difference-in-Differences entry
+  //     filter: only shorts selling off abnormally vs sector while staying an
+  //     orderly continuation. Stricter than the base gate → fewer, higher-
+  //     conviction names. Default false (v2 behaviour, byte-identical when off).
+  tesla_did_layer_enabled?: boolean
 }
 
 // The ₹ concentration / fat-finger thresholds the backend echoes on preview + status

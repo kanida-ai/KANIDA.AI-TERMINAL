@@ -975,6 +975,7 @@ export function PortfolioAutoTrade({
         tesla_min_grade: c.tesla_min_grade === 'A+++' ? 'A+++' : 'A++',
         tesla_cooldown_minutes: Math.max(0, Math.floor(Number(c.tesla_cooldown_minutes) || 0)),
         tesla_personality_window_days: Math.max(1, Math.floor(Number(c.tesla_personality_window_days) || 1)),
+        tesla_did_layer_enabled: !!c.tesla_did_layer_enabled,
         kill_switch_enabled: false,
       }
     }
@@ -2944,6 +2945,27 @@ export function PortfolioAutoTrade({
                       className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
                   </Field>
                 </div>
+
+                {/* v3 DiD exhaustion filter — opt-in stricter entry selection. */}
+                <label className="mt-3 flex items-start gap-2.5 rounded-lg border px-3 py-2.5 cursor-pointer"
+                  style={{ borderColor: config.tesla_did_layer_enabled ? 'rgba(63,227,164,0.4)' : C.line2,
+                           background: config.tesla_did_layer_enabled ? 'rgba(63,227,164,0.06)' : 'rgba(255,255,255,0.02)' }}>
+                  <input type="checkbox" checked={!!config.tesla_did_layer_enabled}
+                    onChange={(e) => set('tesla_did_layer_enabled', e.target.checked)}
+                    className="mt-0.5 shrink-0 w-4 h-4 accent-mint cursor-pointer" />
+                  <span className="min-w-0">
+                    <span className="text-[12px] font-semibold" style={{ color: C.ink }}>
+                      DiD exhaustion filter <span className="font-mono text-[10px]" style={{ color: C.mint }}>v3</span>
+                    </span>
+                    <span className="block text-[11px] leading-snug mt-0.5" style={{ color: C.muted }}>
+                      Only take shorts that are selling off <b>abnormally vs their sector</b> and are
+                      still an orderly continuation (not a panic spike). Stricter than the base gate —
+                      it trades <b>fewer, higher-quality</b> names, and can abstain entirely on a given day.
+                      Thin-validated; run in Paper.
+                    </span>
+                  </span>
+                </label>
+
                 <div className="mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11px] leading-snug"
                   style={{ borderColor: 'rgba(230,180,80,0.32)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
                   <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(13)}</span>
