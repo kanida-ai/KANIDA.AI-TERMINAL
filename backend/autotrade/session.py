@@ -1659,6 +1659,7 @@ class TradingSession:
                       s.last_gross_return,
                       s.last_gross_return AS gross_return,
                       s.user_id, s.broker_account_id,
+                      json_extract(s.config_json, '$.strategy') AS strategy,
                       (SELECT COUNT(*) FROM autotrade_positions p
                        WHERE p.session_id = s.session_id
                          AND p.status = 'OPEN') AS n_open_positions
@@ -3773,28 +3774,65 @@ class TradingSession:
     # gated by _live_allowed() exactly like every other order.
 
     def _tesla_live_signals(self) -> List[Any]:
-        """Fetch the CURRENT A++/A+++ SHORT signals from the live poll. Wrapped so
-        a signal-engine failure NEVER crashes a tick (returns []). Overridable in
-        tests (monkeypatch) so the rotation path is exercised without the DB."""
+        """Fetch the CURRENT A++/A+++ SHORT signals used to back-fill FREE seats.
+
+        This reads a PROCESS CACHE that a background refresher updates AT MOST
+        once per 1-min bar (tesla_signal_cache) — it NEVER runs the multi-second
+        full-universe recompute inline on the 5s tick (that would block the
+        event loop and stall every session). It:
+          1. triggers a once-per-minute background refresh (returns immediately),
+          2. reads the last cached signals (a few ms),
+          3. ABSTAINS (returns []) when the cache is STALE (> the staleness
+             bound) so NO new seat is opened on stale data — and pages (live,
+             market hours). Exits/square-off do NOT call this, so they are
+             unaffected by a stale signal cache.
+        Never crashes a tick (returns [] on any error). Overridable in tests
+        (monkeypatch) so the rotation path is exercised without the DB."""
         try:
-            from pathlib import Path as _Path
-            from .strategies import tesla_short_engine as _tse
-            now = datetime.now(IST)
+            from .strategies import tesla_signal_cache as _cache
             db = getattr(self.config, "tesla_signal_db_path", None)
-            res = _tse.compute_live_signals(
-                as_of=now.strftime("%Y-%m-%d %H:%M"),
-                db_path=(_Path(db) if db else None),
-                personality_window_days=int(
-                    getattr(self.config, "tesla_personality_window_days", 5)),
-                min_grade=getattr(self.config, "tesla_min_grade", "A++"),
-                cooldown_minutes=int(
-                    getattr(self.config, "tesla_cooldown_minutes", 30)),
-                latest_only=True)
-            return list(res.signals)
+            pwd = int(getattr(self.config, "tesla_personality_window_days", 5))
+            mg = getattr(self.config, "tesla_min_grade", "A++")
+            cd = int(getattr(self.config, "tesla_cooldown_minutes", 30))
+            bound = int(getattr(self.config, "tesla_signal_staleness_sec", 90))
+            now = datetime.now(IST)
+            # 1. trigger (non-blocking) — recompute runs in a background thread.
+            _cache.refresh_if_needed(
+                db_path=db, personality_window_days=pwd, min_grade=mg,
+                cooldown_minutes=cd, now=now, block=False)
+            # 2. read the cached signals + staleness.
+            signals, stale = _cache.get_signals(
+                db_path=db, personality_window_days=pwd, min_grade=mg,
+                now=now, staleness_bound_sec=bound)
+            if stale:
+                # 3. abstain from NEW entries + page (live, market hours only).
+                self._page_tesla_signal_stale()
+                return []
+            return list(signals)
         except Exception as e:  # pragma: no cover - defensive (never crash a tick)
             log.warning("tesla signal engine failed for %s: %s",
                         self.session_id, e)
             return []
+
+    def _page_tesla_signal_stale(self) -> None:
+        """Page (live, market-hours, deduped) that the tesla signal cache is
+        stale → new seat entries are being suppressed. Best-effort; never raises."""
+        try:
+            if self.dry_run:
+                return
+            from .monitoring import alert_monitor as _am
+            now = datetime.now(IST)
+            try:
+                in_hours = trading_calendar.is_market_open(now)
+            except Exception:  # noqa: BLE001
+                in_hours = True
+            _am.page_signal_stale(
+                self.session_id, age_seconds=None, in_market_hours=in_hours,
+                is_live=True,
+                bound_sec=int(getattr(self.config, "tesla_signal_staleness_sec", 90)))
+        except Exception as e:  # noqa: BLE001 — never block the tick on a page
+            log.warning("tesla signal-stale page failed for %s: %s",
+                        self.session_id, e)
 
     def _tesla_primary_broker(self):
         """(broker, profile) for the FIRST enabled profile with a built client.
@@ -4100,6 +4138,7 @@ class TradingSession:
         out = {
             "session_id": self.session_id,
             "status": status,
+            "strategy": getattr(self.config, "strategy", "intraday_basket"),
             "mode": sess.get("mode", self.mode),
             "gross_return": gr_invested,          # kill basis (÷ invested_basis)
             "gross_return_fund": gr_fund,         # on-fund (÷ allocated)

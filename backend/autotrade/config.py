@@ -210,6 +210,13 @@ class TradingSessionConfig:
     tesla_personality_window_days: int = 5
     tesla_allow_reentry: bool = False
     tesla_signal_db_path: Optional[str] = None
+    # Signal-cache staleness bound (seconds): if the once-per-minute signal
+    # refresher has not successfully updated the cache within this many seconds
+    # the tesla tick ABSTAINS from NEW seat entries (never enters on stale
+    # signals) and pages — exits/square-off are unaffected. Default 90s (a
+    # healthy refresh runs every minute). <= 0 disables the abstain (never
+    # stale) — do NOT set 0 in live.
+    tesla_signal_staleness_sec: int = 90
 
     # Position sizing
     sizing_mode: str = "equal"             # equal | pct_cap | manual
@@ -1072,6 +1079,8 @@ class TradingSessionConfig:
                 d.get("tesla_personality_window_days", 5)),
             tesla_allow_reentry=bool(d.get("tesla_allow_reentry", False)),
             tesla_signal_db_path=(d.get("tesla_signal_db_path") or None),
+            tesla_signal_staleness_sec=int(
+                d.get("tesla_signal_staleness_sec", 90)),
             sizing_mode=d.get("sizing_mode", "equal"),
             max_pct_per_position=float(d.get("max_pct_per_position", 0.05)),
             manual_amounts=d.get("manual_amounts", {}) or {},

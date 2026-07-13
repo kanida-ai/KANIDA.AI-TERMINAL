@@ -145,6 +145,22 @@ def page_mark_stale(session_id: str, oldest_mark_age_ms: Optional[int],
                 f"stale price are unsafe."))
 
 
+def page_signal_stale(session_id: str, age_seconds: Optional[float],
+                      in_market_hours: bool, is_live: bool,
+                      bound_sec: Optional[int] = None) -> Optional[int]:
+    """(f) TESLA SIGNAL staleness: the once-per-minute signal refresher has not
+    successfully updated within the bound for a RUNNING live session during
+    market hours (a stalled/failing recompute → we are ABSTAINING from new seat
+    entries and trading only exits until it recovers). Deduped, live-only."""
+    if not is_live or not in_market_hours:
+        return None
+    return alerts.send_urgent_deduped(
+        kind="TESLA_SIGNAL_STALE", session_id=session_id, symbol=None,
+        detail=(f"TESLA_SIGNAL_STALE: session {session_id} signal cache is stale "
+                f"(age={age_seconds if age_seconds is None else f'{age_seconds:.0f}s'}, "
+                f">{bound_sec}s) — abstaining from NEW seat entries; exits still run."))
+
+
 def page_breaker(session_id: str, breaker_result: Optional[Dict[str, Any]],
                  is_live: bool) -> Optional[int]:
     """(e) The RMS portfolio daily-loss breaker (C4) fired → the user's whole book

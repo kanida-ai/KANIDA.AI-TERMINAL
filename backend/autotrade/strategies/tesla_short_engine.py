@@ -29,7 +29,9 @@ execution paths.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
+import threading
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -48,6 +50,7 @@ except Exception:  # pragma: no cover
     pass
 
 IST = timezone(timedelta(hours=5, minutes=30))
+log = logging.getLogger("autotrade.tesla")
 
 # Repo root = <root>/backend/autotrade/strategies/tesla_short_engine.py → parents[3]
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -241,6 +244,72 @@ def score_universe_from_db(con: sqlite3.Connection,
                                    scored["close"].replace(0, np.nan)) * 10000.0
     scored["tick_sell%"] = 100.0 - scored["tick_buy%"]
     return scored
+
+
+def _sector_map(con: sqlite3.Connection,
+                symbols: Sequence[str]) -> pd.DataFrame:
+    """sector/company for `symbols` from mkt_reference (CASH), NULL sector →
+    'UNKNOWN' — matches _get_cash_candidates' sector handling. Returns a frame
+    with columns [symbol, sector, company]."""
+    ref = pd.read_sql_query(
+        "SELECT symbol, sector, company FROM mkt_reference WHERE segment='CASH'",
+        con)
+    ref = ref[ref["symbol"].isin(list(symbols))].drop_duplicates("symbol").copy()
+    ref["sector"] = ref["sector"].fillna("UNKNOWN")
+    return ref[["symbol", "sector", "company"]]
+
+
+def score_universe_for_symbols(con: sqlite3.Connection,
+                               days: Sequence[str],
+                               symbols: Sequence[str]) -> pd.DataFrame:
+    """Score an EXPLICIT symbol list over `days` — the same per-(instrument,day)
+    feature+phase+forward+sector pipeline as score_universe_from_db, but for a
+    caller-supplied symbol set (skips the >=300-row candidate discovery, which
+    the caller has already done for the WINDOW). Used by the once-per-minute
+    fast path so the infer day is scored for the SAME union candidate set the
+    full recompute uses (train ∪ infer candidates). Per-(instrument,day)
+    independence makes this byte-identical to score_universe_from_db for the
+    same rows (proven by the synthetic parity test)."""
+    syms = list(dict.fromkeys(symbols))  # de-dup, preserve order
+    if not syms:
+        return pd.DataFrame()
+    scored_parts = []
+    for symbol in syms:
+        raw = _pull_cash_symbol(con, symbol, days)
+        if raw.empty:
+            continue
+        for _, group in raw.groupby(["instrument", "day"], sort=False):
+            scored_parts.append(tf.add_microstructure_features(group))
+    if not scored_parts:
+        return pd.DataFrame()
+    scored = pd.concat(scored_parts, ignore_index=True)
+    scored["short_drive"] = tf.clamp01(scored["short_drive_core"])
+    scored["long_drive"] = tf.clamp01(scored["long_drive_core"])
+    scored["bid_absorption"] = tf.clamp01(scored["bid_absorption_core"])
+    scored["ask_absorption"] = tf.clamp01(scored["ask_absorption_core"])
+    scored["falcon_tesla_score"] = (scored["long_drive"] - scored["short_drive"]) * 100.0
+    scored["absorption_bias"] = (scored["bid_absorption"] - scored["ask_absorption"]) * 100.0
+    scored = tf.assign_phase(scored)
+    scored = _add_forward_15m(scored)
+    sect = _sector_map(con, syms)
+    scored = scored.merge(sect, left_on="instrument", right_on="symbol",
+                          how="left", suffixes=("", "_ref"))
+    scored["sector"] = scored["sector"].fillna("UNKNOWN")
+    scored["bar_time"] = pd.to_datetime(scored["bar_time"])
+    scored["close_atp_gap_bps"] = ((scored["close"] - scored["atp"]) /
+                                   scored["close"].replace(0, np.nan)) * 10000.0
+    scored["tick_sell%"] = 100.0 - scored["tick_buy%"]
+    return scored
+
+
+def candidate_symbols(con: sqlite3.Connection,
+                      days: Sequence[str]) -> List[str]:
+    """Symbols that qualify as CASH candidates over `days` (>=300 rows on at
+    least one day) — the symbol list of _get_cash_candidates."""
+    cands = _get_cash_candidates(con, days)
+    if cands.empty:
+        return []
+    return list(cands["symbol"].drop_duplicates())
 
 
 # ── NIFTYFUT context (verbatim logic from short_engine_v2.load_nifty_context) ─
@@ -562,6 +631,197 @@ def compute_live_signals(
         # latest_only → what a live tick acts on: the signals AT the current
         # minute only. as_of set → exactly that minute; else → the newest bar
         # that produced a signal today.
+        if latest_only and not selected.empty:
+            target_bar = cutoff if cutoff is not None else selected["bar_time"].max()
+            selected = selected[selected["bar_time"] == target_bar].copy()
+
+        sigs: List[TeslaSignal] = []
+        for _, r in selected.sort_values(["bar_time", "instrument"]).iterrows():
+            sigs.append(TeslaSignal(
+                instrument=str(r["instrument"]), day=str(r["day"]),
+                time=str(r["time"]),
+                bar_time=pd.to_datetime(r["bar_time"]).strftime("%Y-%m-%d %H:%M:%S"),
+                grade=str(r["v2_grade"]), setup=str(r["v2_setup"]),
+                entry_ref_price=float(r["close"]),
+                short_drive=float(r["short_drive"]),
+                sector=(None if pd.isna(r.get("sector")) else str(r.get("sector")))))
+        return TeslaSignalResult(as_of=as_of, infer_day=infer_day,
+                                 train_days=train_days, signals=sigs,
+                                 n_candidates=n_candidates)
+    finally:
+        if owns_con:
+            con.close()
+
+
+# ── OPTIMIZED once-per-minute recompute (train-day cache + latest-minute) ─────
+#
+# compute_live_signals rescored the FULL window (train + infer days) on every
+# call — ~120s. But the ROLLING personality/train-quality inputs derive ONLY
+# from the COMPLETED train days: they change once per DAY, not per minute. This
+# path caches the scored TRAIN frame (+ train NIFTY context) per (db, train_days)
+# and rebuilds it ONLY on a day-roll; per minute it rescored just the INFER day
+# (for the SAME union candidate set the full recompute uses) and feeds the exact
+# same grade pipeline. Result: byte-identical signals to compute_live_signals for
+# a given minute, in a few seconds instead of ~120s (proven by the parity test).
+
+
+@dataclass
+class _TrainDayCache:
+    db_key: str
+    train_days: tuple
+    train_scored: pd.DataFrame
+    train_nifty: pd.DataFrame
+    covered: set          # symbols whose TRAIN-day rows are in train_scored
+    built_at: str
+
+
+_TRAIN_CACHE: Dict[str, _TrainDayCache] = {}
+_TRAIN_CACHE_LOCK = threading.RLock()
+# Diagnostics — full REBUILDs (day-roll) vs incremental EXTENDs (new symbol).
+_train_cache_build_count = 0
+_train_cache_extend_count = 0
+
+
+def reset_train_cache() -> None:
+    """Drop the train-day cache (tests / a forced refresh)."""
+    global _train_cache_build_count, _train_cache_extend_count
+    with _TRAIN_CACHE_LOCK:
+        _TRAIN_CACHE.clear()
+        _train_cache_build_count = 0
+        _train_cache_extend_count = 0
+
+
+def _train_cache_key(db_key: str, train_days: Sequence[str]) -> str:
+    return f"{db_key}|{','.join(train_days)}"
+
+
+def _build_train_cache(con: sqlite3.Connection, db_key: str,
+                       train_days: Sequence[str],
+                       symbols: Sequence[str]) -> _TrainDayCache:
+    """FULL build of the train-day scored frame + NIFTY context (a day-roll).
+    Scores `symbols` over the completed train days ONCE."""
+    global _train_cache_build_count
+    tdays = tuple(train_days)
+    if tdays:
+        train_scored = score_universe_for_symbols(con, list(tdays), symbols)
+        train_nifty = load_nifty_context(con, list(tdays))
+    else:  # first trading day in the poll — no completed prior days
+        train_scored = pd.DataFrame()
+        train_nifty = pd.DataFrame()
+    covered = set(symbols) if not train_scored.empty else set(symbols)
+    entry = _TrainDayCache(
+        db_key=db_key, train_days=tdays, train_scored=train_scored,
+        train_nifty=train_nifty, covered=set(symbols),
+        built_at=datetime.now(IST).isoformat())
+    _train_cache_build_count += 1
+    return entry
+
+
+def _get_train_cache(con: sqlite3.Connection, db_key: str,
+                     train_days: Sequence[str],
+                     need_symbols: Sequence[str]) -> _TrainDayCache:
+    """Return the train-day cache for (db_key, train_days), REBUILDING only on a
+    day-roll (train_days change) and INCREMENTALLY extending it if the infer-day
+    candidate set has grown to include symbols not yet covered on the train days
+    (keeps parity with the full recompute's union candidate set without a full
+    rebuild)."""
+    global _train_cache_extend_count
+    key = _train_cache_key(db_key, train_days)
+    need = set(need_symbols)
+    with _TRAIN_CACHE_LOCK:
+        entry = _TRAIN_CACHE.get(key)
+        if entry is None or entry.train_days != tuple(train_days):
+            entry = _build_train_cache(con, db_key, train_days, sorted(need))
+            _TRAIN_CACHE.clear()  # only ever ONE train-day window is live
+            _TRAIN_CACHE[key] = entry
+            return entry
+        missing = need - entry.covered
+        if missing and tuple(train_days):
+            extra = score_universe_for_symbols(con, list(train_days),
+                                               sorted(missing))
+            if not extra.empty:
+                entry.train_scored = (
+                    extra if entry.train_scored.empty
+                    else pd.concat([entry.train_scored, extra],
+                                   ignore_index=True))
+            entry.covered |= missing
+            _train_cache_extend_count += 1
+        elif missing:
+            entry.covered |= missing
+        return entry
+
+
+def compute_live_signals_fast(
+    *,
+    as_of: Optional[str] = None,
+    infer_day: Optional[str] = None,
+    db_path: Optional[Path] = None,
+    personality_window_days: int = 5,
+    min_grade: str = "A++",
+    cooldown_minutes: int = 30,
+    latest_only: bool = True,
+    con: Optional[sqlite3.Connection] = None,
+) -> TeslaSignalResult:
+    """Optimized equivalent of compute_live_signals: caches the scored TRAIN
+    frame per day-roll and rescored only the INFER day per call. Produces the
+    SAME A++/A+++ signals for a given minute (parity test), far faster. Same
+    signature/semantics as compute_live_signals; NEVER raises on empty data."""
+    owns_con = con is None
+    if owns_con:
+        con = connect_db_readonly(db_path)
+    db_key = Path(db_path).as_posix() if db_path else DEFAULT_DB_PATH.as_posix()
+    try:
+        days_all = available_trading_days(con)
+        if not days_all:
+            return TeslaSignalResult(as_of=as_of, infer_day=infer_day or "",
+                                     train_days=[], note="no poll data")
+        if infer_day is None:
+            infer_day = str(as_of)[:10] if as_of else days_all[-1]
+        train_days = resolve_window(con, infer_day, personality_window_days)
+        if infer_day not in set(days_all):
+            return TeslaSignalResult(as_of=as_of, infer_day=infer_day,
+                                     train_days=train_days,
+                                     note=f"infer_day {infer_day} has no poll data")
+
+        # Union candidate set = train candidates ∪ infer candidates == the window
+        # candidate set _get_cash_candidates(train+infer) would produce.
+        train_cands = candidate_symbols(con, train_days) if train_days else []
+        infer_cands = candidate_symbols(con, [infer_day])
+        all_syms = sorted(set(train_cands) | set(infer_cands))
+        if not all_syms:
+            return TeslaSignalResult(as_of=as_of, infer_day=infer_day,
+                                     train_days=train_days,
+                                     note="no scored candidates")
+
+        cache = _get_train_cache(con, db_key, train_days, all_syms)
+        infer_scored = score_universe_for_symbols(con, [infer_day], all_syms)
+        parts = [f for f in (cache.train_scored, infer_scored)
+                 if f is not None and not f.empty]
+        if not parts:
+            return TeslaSignalResult(as_of=as_of, infer_day=infer_day,
+                                     train_days=train_days,
+                                     note="no scored candidates")
+        scored = pd.concat(parts, ignore_index=True)
+        n_candidates = int(scored["instrument"].nunique())
+
+        infer_nifty = load_nifty_context(con, [infer_day])
+        nctx_parts = [f for f in (cache.train_nifty, infer_nifty)
+                      if f is not None and not f.empty]
+        nifty_ctx = (pd.concat(nctx_parts, ignore_index=True)
+                     if nctx_parts else pd.DataFrame())
+
+        graded = grade_scored_frame(scored, nifty_ctx, train_days)
+        selected = select_trade_lifecycle(
+            graded, cooldown_minutes=cooldown_minutes,
+            grades=_min_grades(min_grade))
+        selected = selected[selected["day"] == infer_day].copy()
+        if selected.empty:
+            return TeslaSignalResult(as_of=as_of, infer_day=infer_day,
+                                     train_days=train_days, n_candidates=n_candidates,
+                                     note="no A++/A+++ signals for infer_day")
+        cutoff = pd.to_datetime(as_of) if as_of is not None else None
+        if cutoff is not None:
+            selected = selected[selected["bar_time"] <= cutoff].copy()
         if latest_only and not selected.empty:
             target_bar = cutoff if cutoff is not None else selected["bar_time"].max()
             selected = selected[selected["bar_time"] == target_bar].copy()
