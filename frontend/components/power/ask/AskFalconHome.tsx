@@ -32,7 +32,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { PowerAPI, PowerAPIError } from '@/lib/power-api'
-import type { Quote, AnalyzeStockResponse } from '@/lib/power-api'
+import type { Quote, AnalyzeStockResponse, FalconRankedPick } from '@/lib/power-api'
 import { CompassLogo } from '@/components/power/CompassLogo'
 import type {
   Top20Pick, Top20Response, Top20Universe, Rating,
@@ -117,6 +117,15 @@ export function AskFalconHome({ firstName, data: seed }: Props) {
   const [sel, setSel] = useState<string | null>(null)
   const [ws, setWs] = useState<Workspace>({ kind: 'pick' })
 
+  // ── Deeper RANKED list (ranks 1–50) for the rail + lazy full explainability ──
+  // The rich Top-10 (`data`/`picks`) still drives the top of the list and its
+  // instant explanation. `ranked` (fast /falcon-ranked) fills the rail out to 50
+  // with rank + tier; selecting a rank-11–50 name lazily fetches its full card
+  // (/falcon-explain) into `explained`. The locked Top-10 ordering is preserved.
+  const [ranked, setRanked] = useState<FalconRankedPick[]>([])
+  const [explained, setExplained] = useState<Record<string, Top20Response>>({})
+  const [explaining, setExplaining] = useState<string | null>(null)
+
   // EOD quotes for the loaded Top 10 (PowerAPI.quote, batched ≤60). Keyed by
   // symbol. last_close/prev_close are last EOD closes, NOT live ticks.
   const [quotes, setQuotes] = useState<Record<string, Quote>>({})
@@ -148,10 +157,31 @@ export function AskFalconHome({ firstName, data: seed }: Props) {
     return () => { alive = false }
   }, [universe, sector, signalDate])
 
+  // Fetch the deeper ranked list (to 50) for the rail. Fires on mount and on
+  // every filter change, in parallel with falconTop20. Best-effort — on failure
+  // the rail simply falls back to the Top-10.
+  useEffect(() => {
+    let alive = true
+    const ctrl = new AbortController()
+    PowerAPI.falconRanked(universe, sector, 50, signalDate, ctrl.signal)
+      .then(res => { if (alive) setRanked(res.picks ?? []) })
+      .catch(() => { if (alive) setRanked([]) })
+    // reset the per-day explain cache when the filter set changes
+    setExplained({}); setExplaining(null)
+    return () => { alive = false; ctrl.abort() }
+  }, [universe, sector, signalDate])
+
   // Selected pick (defaults to #1 when nothing chosen).
   const selectedSymbol = sel ?? picks[0]?.symbol ?? null
+  // Resolve the selected pick + the Top20Response that renders it:
+  //   • in the rich Top-10 → use `data` (instant)
+  //   • a ranks-11–50 name already explained → use its /falcon-explain response
+  //   • otherwise null (a fetch is in flight → the right panel shows loading)
+  const richCurrent = picks.find(p => p.symbol === selectedSymbol) ?? null
+  const deepResponse = (!richCurrent && selectedSymbol) ? explained[selectedSymbol] ?? null : null
   const current: Top20Pick | null =
-    picks.find(p => p.symbol === selectedSymbol) ?? picks[0] ?? null
+    richCurrent ?? (deepResponse?.picks?.[0] ?? null) ?? (selectedSymbol ? null : picks[0] ?? null)
+  const currentResponse: Top20Response | null = richCurrent ? data : (deepResponse ?? data)
 
   // Sector options come from the loaded picks (no hard-coded drift).
   const sectorOptions = useMemo(
@@ -164,7 +194,29 @@ export function AskFalconHome({ firstName, data: seed }: Props) {
   function selectPick(symbol: string) {
     setSel(symbol)
     setWs({ kind: 'pick' })
+    // Rank 11–50 (not in the rich Top-10): lazily fetch its full explainability.
+    if (!picks.find(p => p.symbol === symbol) && !explained[symbol] && explaining !== symbol) {
+      setExplaining(symbol)
+      PowerAPI.falconExplain(symbol, universe, signalDate)
+        .then(res => setExplained(prev => ({ ...prev, [symbol]: res })))
+        .catch(() => {/* right panel falls back to the empty state */})
+        .finally(() => setExplaining(cur => (cur === symbol ? null : cur)))
+    }
   }
+
+  // Normalized rail list (1–50). Prefer the deeper `ranked` set; until it loads
+  // (or if it failed) fall back to the rich Top-10 so the rail is never empty.
+  const railRows: RailRow[] = ranked.length > 0
+    ? ranked.map(r => ({
+        rank: r.rank, symbol: r.symbol, sector: r.sector,
+        signal_tier: r.signal_tier ?? null, signal_tier_reason: r.signal_tier_reason ?? null,
+        day_pct: r.signal_day_ret_pct ?? null,
+      }))
+    : picks.map(p => ({
+        rank: p.rank, symbol: p.symbol, sector: p.sector,
+        signal_tier: p.signal_tier ?? null, signal_tier_reason: p.signal_tier_reason ?? null,
+        day_pct: p.flags?.day_return_pct ?? null,
+      }))
   function analyzeStock(symbol: string, name: string | null, sector: string | null) {
     // If the searched symbol is in the loaded Top 10, treat as a pick (REAL data).
     const inTop10 = picks.find(p => p.symbol === symbol)
@@ -239,7 +291,7 @@ export function AskFalconHome({ firstName, data: seed }: Props) {
         {/* list header + FILTERS (swing only) — TOP region, shrink-0 */}
         <div className="shrink-0 px-3.5 pt-2 pb-1.5 border-b" style={{ borderColor: C.line }}>
           <div className="flex items-center justify-between mb-1.5">
-            <span className="text-xs font-semibold" style={{ color: C.ink }}>Falcon Top 10</span>
+            <span className="text-xs font-semibold" style={{ color: C.ink }}>Falcon Top 50</span>
             {style === 'swing' && (
               <span className="flex items-center gap-1.5 text-[11px]" style={{ color: C.muted }}>
                 {loading
@@ -283,14 +335,15 @@ export function AskFalconHome({ firstName, data: seed }: Props) {
             ? <MiddleStylePending style={cur} />
             : fetchErr
               ? <MiddleFetchError />
-              : picks.length === 0
+              : railRows.length === 0
                 ? (loading ? <MiddleLoading /> : <MiddleEmpty />)
-                : picks.map(p => (
-                    <ListRow
-                      key={p.symbol}
-                      pick={p}
-                      selected={ws.kind === 'pick' && current?.symbol === p.symbol}
-                      onSelect={() => selectPick(p.symbol)}
+                : railRows.map(r => (
+                    <RailListRow
+                      key={r.symbol}
+                      row={r}
+                      selected={ws.kind === 'pick' && current?.symbol === r.symbol}
+                      loading={explaining === r.symbol}
+                      onSelect={() => selectPick(r.symbol)}
                     />
                   ))}
         </div>
@@ -328,27 +381,31 @@ export function AskFalconHome({ firstName, data: seed }: Props) {
             <RightStylePending style={cur} />
           ) : fetchErr ? (
             <RightEmpty hasData={false} />
-          ) : current ? (
-            <DetailCard key={current.symbol} pick={current} response={data!} quote={quotes[current.symbol] ?? null} />
+          ) : current && currentResponse ? (
+            <DetailCard key={current.symbol} pick={current} response={currentResponse} quote={quotes[current.symbol] ?? null} />
+          ) : explaining ? (
+            <div className="pt-10 text-sm animate-pulse" style={{ color: C.muted }}>
+              Loading the full analysis for {explaining}…
+            </div>
           ) : (
             <RightEmpty hasData={data != null} />
           )}
 
           {/* Mobile fallback: the middle column is hidden on small screens. */}
-          {style === 'swing' && picks.length > 0 && ws.kind === 'pick' && (
+          {style === 'swing' && railRows.length > 0 && ws.kind === 'pick' && (
             <div className="md:hidden mt-8">
               <div className="text-[10px] uppercase tracking-[0.07em] mb-2" style={{ color: C.faint }}>
-                Falcon Top 10 — tap to explain
+                Falcon Top 50 — tap to explain
               </div>
               <div className="rounded-xl border divide-y" style={{ borderColor: C.line }}>
-                {picks.map(p => (
-                  <button key={p.symbol} type="button" onClick={() => selectPick(p.symbol)}
+                {railRows.map(r => (
+                  <button key={r.symbol} type="button" onClick={() => selectPick(r.symbol)}
                           className="w-full flex items-center gap-3 px-3 py-2.5 text-left"
                           style={{ borderColor: C.line }}>
-                    <span className="w-6 text-center font-mono text-[11px]" style={{ color: C.faint }}>#{p.rank}</span>
-                    <span className="font-semibold text-[13.5px]" style={{ color: C.ink }}>{p.symbol}</span>
-                    <span className="ml-auto"><TierBadgeF2 pick={p} /></span>
-                    <DayPct pct={p.flags?.day_return_pct ?? null} />
+                    <span className="w-6 text-center font-mono text-[11px]" style={{ color: C.faint }}>#{r.rank}</span>
+                    <span className="font-semibold text-[13.5px]" style={{ color: C.ink }}>{r.symbol}</span>
+                    <span className="ml-auto"><TierBadgeF2 pick={r} /></span>
+                    <DayPct pct={r.day_pct} />
                   </button>
                 ))}
               </div>
@@ -606,8 +663,8 @@ function Greeting({ firstName }: { firstName: string }) {
         <span>Good {part}, {firstName}</span>
       </div>
       <div className="text-[12.5px] mt-1 max-w-[560px] leading-snug" style={{ color: C.muted }}>
-        Here&apos;s today&apos;s Falcon Top 10 — pick any name on the left for the full
-        explanation, or search any Nifty 500 stock to analyze it.
+        Here&apos;s today&apos;s Falcon Top 50 — pick any name on the left for the full
+        explanation (the top 10 are the traded set), or search any Nifty 500 stock to analyze it.
       </div>
     </div>
   )
@@ -651,7 +708,17 @@ function RightCTACard({
 
 // ── Top 10 list row — SINGLE tight line so all 10 fit one screen, no scroll.
 //    rank · symbol (sector as dim inline suffix) · tier badge · signal-day % ─
-function ListRow({ pick, selected, onSelect }: { pick: Top20Pick; selected: boolean; onSelect: () => void }) {
+// One normalized rail row (works for both the rich Top-10 and the ranks-11–50
+// tail — see `railRows`). day_pct is the signal-day return in both cases.
+type RailRow = {
+  rank: number; symbol: string; sector: string | null
+  signal_tier: string | null; signal_tier_reason: string | null
+  day_pct: number | null
+}
+
+function RailListRow({ row, selected, loading, onSelect }: {
+  row: RailRow; selected: boolean; loading: boolean; onSelect: () => void
+}) {
   return (
     <button
       type="button"
@@ -660,15 +727,16 @@ function ListRow({ pick, selected, onSelect }: { pick: Top20Pick; selected: bool
       style={selected ? { background: C.mintDim } : undefined}
     >
       <span className="text-center font-mono tabular-nums text-[11px]" style={{ color: selected ? C.mint : C.faint }}>
-        {pick.rank}
+        {row.rank}
       </span>
       <span className="min-w-0 flex items-baseline gap-1.5">
-        <span className="text-[13px] font-[550] shrink-0" style={{ color: C.ink }}>{pick.symbol}</span>
-        <span className="text-[10px] truncate" style={{ color: C.faint, opacity: 0.8 }}>{pick.sector}</span>
+        <span className="text-[13px] font-[550] shrink-0" style={{ color: C.ink }}>{row.symbol}</span>
+        <span className="text-[10px] truncate" style={{ color: C.faint, opacity: 0.8 }}>{row.sector}</span>
       </span>
       <span className="flex items-center gap-2">
-        <TierBadgeF2 pick={pick} />
-        <DayPct pct={pick.flags?.day_return_pct ?? null} />
+        {loading && <span className="text-[10px]" style={{ color: C.faint }}>…</span>}
+        <TierBadgeF2 pick={row} />
+        <DayPct pct={row.day_pct} />
       </span>
     </button>
   )
@@ -692,7 +760,7 @@ function tierBand(raw: string | null | undefined): string | null {
   return raw.split('-')[0].toUpperCase()
 }
 
-function TierBadgeF2({ pick }: { pick: Top20Pick }) {
+function TierBadgeF2({ pick }: { pick: { signal_tier?: string | null; signal_tier_reason?: string | null } }) {
   const band = tierBand(pick.signal_tier)
   if (!band) return null
   const s = TIER_STYLE[BAND_COLORKEY[band ?? ''] ?? 'gray'] ?? TIER_STYLE.gray
