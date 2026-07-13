@@ -129,6 +129,43 @@ async def place_order_with_retry(order: Order, broker, max_retries: int = 3,
         except asyncio.TimeoutError as e:
             last_exc = e
             log.error("Order timeout attempt %d: %s", attempt + 1, order.symbol)
+            # QUERY-BEFORE-RETRY (2026-07-13 ZENSARTECH in-session double-fill).
+            # A wait_for timeout does NOT mean the broker didn't get the order —
+            # kite.place_order runs in a worker thread that can't be cancelled, so
+            # the order may ALREADY be at the exchange. Blind-retrying places a
+            # SECOND identical order (both filled → 2× position, one untracked).
+            # Before retrying, ASK the broker whether OUR order already reached it.
+            try:
+                existing = broker.find_recent_order(order)
+            except Exception as qe:
+                # INCONCLUSIVE (broker query error / no tag): we CANNOT prove the
+                # order is absent. The dangerous direction is a false-negative
+                # double-place, so FAIL THE LEG instead of blind-retrying. The
+                # caller surfaces OrderTimeoutError (leg dropped, no phantom).
+                log.error("find_recent_order inconclusive for %s (%s) — failing "
+                          "leg, NOT retrying (double-fill guard)",
+                          order.symbol, qe)
+                raise OrderTimeoutError(order)
+            if existing is not None:
+                # ADOPT: the placement SUCCEEDED; the timeout was only on our
+                # confirmation. Return a PLACED result carrying the REAL broker
+                # order-id so the caller reconciles the fill + records it in the
+                # durable ledger + position EXACTLY like a normal live fill (no
+                # phantom, no second order). Shape mirrors ZerodhaBroker.place_order.
+                oid = (existing.get("order_id") if isinstance(existing, dict)
+                       else None)
+                log.warning("Order %s ADOPTED after timeout (broker_order_id=%s, "
+                            "status=%s) — placing NO second order",
+                            order.symbol, oid,
+                            existing.get("status") if isinstance(existing, dict)
+                            else None)
+                from ..broker.base import OrderResult
+                return OrderResult(
+                    status="PLACED",
+                    broker_order_id=str(oid) if oid is not None else None,
+                    symbol=order.symbol, qty=order.qty, raw=existing)
+            # existing is None → queried OK, our order is DEFINITIVELY absent →
+            # safe to retry (the placement genuinely did not reach the broker).
             if attempt == max_retries - 1:
                 raise OrderTimeoutError(order)
     if last_exc:

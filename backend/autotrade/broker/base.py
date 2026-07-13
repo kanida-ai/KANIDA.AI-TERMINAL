@@ -357,6 +357,27 @@ class BrokerClient(ABC):
         adapter (and best-effort Rupeezy) return a list."""
         return None
 
+    def find_recent_order(self, order) -> Optional[dict]:
+        """QUERY-BEFORE-RETRY idempotency guard (2026-07-13 ZENSARTECH double-fill).
+
+        Before a RETRY of an ENTRY order that TIMED OUT on our confirmation, ask
+        the broker whether OUR order already reached it (our compact tag +
+        tradingsymbol + transaction_type + quantity). Return the matching order
+        dict (with order_id + status) so the caller ADOPTS it and places NO second
+        order, or None when the order is DEFINITIVELY absent (safe to retry).
+
+        SAFETY DIRECTION (critical): the dangerous failure is a FALSE-NEGATIVE — we
+        think no order exists and double-place. So None means ONLY "queried the
+        broker successfully and our order is definitely NOT there". A live adapter
+        that CANNOT determine (API error) MUST RAISE (inconclusive) rather than
+        return None, so the caller fails the leg instead of blind-retrying.
+
+        Default (paper / dry-run / stub / uncertified brokers) → None: there is no
+        real broker orderbook, no real order was ever placed, and place_order never
+        times out in dry-run — so paper behaviour is byte-for-byte unchanged and no
+        adoption ever happens. Only the live Zerodha adapter overrides this."""
+        return None
+
     # ── GTT-OCO (broker-held per-position backup floor) ───────────────────────
     # Default no-ops so stub brokers (fyers/upstox/angel/dhan) and dry-run never
     # place real GTTs — they return None. Only the live Zerodha adapter overrides

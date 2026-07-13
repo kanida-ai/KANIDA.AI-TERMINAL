@@ -141,6 +141,60 @@ def find_broker_order_by_tag(orders: Optional[List[Dict[str, Any]]],
     return matches[-1]
 
 
+def match_recent_order(orders: Optional[List[Dict[str, Any]]], *,
+                       tag: Optional[str], symbol: Optional[str],
+                       txn: Optional[str], qty: Optional[int]
+                       ) -> Optional[Dict[str, Any]]:
+    """QUERY-BEFORE-RETRY matcher (2026-07-13 ZENSARTECH in-session double-fill).
+
+    Scan a broker orderbook (raw order dicts) for OUR just-placed ENTRY order so a
+    retry after a confirmation TIMEOUT does NOT place a SECOND identical order.
+    Matches ALL of: our compact `tag` (the strongest key — the two dup ZENSARTECH
+    orders shared the SAME Kite tag), `tradingsymbol`, `transaction_type`, and the
+    ordered `quantity`. The tag alone is per-order-unique, the rest are defence in
+    depth so a stray same-tag row can never be adopted for the wrong instrument.
+
+    A REJECTED / CANCELLED order is NEVER matched: it reached the broker but left
+    NO position, so returning it as "already placed" would create a phantom — and
+    returning None for it (definitely no live/filled order) correctly lets the
+    caller retry (a genuinely rejected order SHOULD be re-placed). Prefers a
+    COMPLETE order, else the most recent still-working order. Returns the matched
+    order dict (order_id + status) or None (definitively absent). NEVER a foreign
+    order — a foreign order carries a foreign/absent tag."""
+    if not orders or not tag:
+        return None
+    want_sym = str(symbol or "").upper()
+    want_txn = str(txn or "").upper()
+    matches: List[Dict[str, Any]] = []
+    for o in orders:
+        if not isinstance(o, dict):
+            continue
+        if str(o.get("tag") or "") != str(tag):
+            continue
+        if want_sym and str(o.get("tradingsymbol") or "").upper() != want_sym:
+            continue
+        if want_txn and str(o.get("transaction_type") or "").upper() != want_txn:
+            continue
+        if qty is not None:
+            try:
+                if int(o.get("quantity") or 0) != int(qty):
+                    continue
+            except (TypeError, ValueError):
+                continue
+        st = str(o.get("status") or "").upper()
+        if st in ("REJECTED", "CANCELLED"):
+            # Reached the broker but produced no position → not an adoptable
+            # success. Excluding it → None → the caller safely re-places.
+            continue
+        matches.append(o)
+    if not matches:
+        return None
+    for o in matches:
+        if str(o.get("status") or "").upper() == "COMPLETE":
+            return o
+    return matches[-1]
+
+
 def append_event(*, session_id: Optional[str], symbol: Optional[str],
                  event_type: str,
                  position_ref: Optional[str] = None,

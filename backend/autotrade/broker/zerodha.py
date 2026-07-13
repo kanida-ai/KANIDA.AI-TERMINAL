@@ -942,6 +942,50 @@ class ZerodhaBroker(BrokerClient):
             log.warning("get_order_status failed for order %s: %s", order_id, e)
             raise
 
+    def find_recent_order(self, order):
+        """QUERY-BEFORE-RETRY idempotency guard (2026-07-13 ZENSARTECH double-fill).
+
+        On a confirmation TIMEOUT, kite.place_order may ALREADY have submitted the
+        order (the timeout was only on OUR wait), so a blind retry places a SECOND
+        identical order → double position. Before retrying we scan the LIVE Kite
+        orderbook for OUR order by its compact tag + tradingsymbol + txn + qty and,
+        if present, ADOPT it (place nothing more).
+
+        Returns:
+          * order dict (order_id + status) → OUR order already reached the broker.
+          * None → queried Kite OK and our order is DEFINITIVELY absent (safe to
+                   retry). Also None in paper / live-disabled (no real book; and
+                   place_order never times out in dry-run — paper is unchanged).
+
+        SAFETY DIRECTION (real money): the fatal case is a FALSE-NEGATIVE (we miss
+        an existing order and double-place). So a Kite API error here is NOT
+        swallowed to None — that would let the caller blind-retry and re-introduce
+        the double-fill. Instead we RE-RAISE (inconclusive), mirroring the 2026-07-10
+        BRIGADE get_net_position_qty fail-safe, so place_order_with_retry FAILS the
+        leg rather than risk a second order. A missing tag is likewise inconclusive
+        (every real entry leg sets one in _place_one)."""
+        if not self._live_allowed():
+            return None
+        tag = getattr(order, "tag", None)
+        if not tag:
+            # Cannot identify OUR order without a tag → NOT determinable-as-absent.
+            # (The entry path always sets order.tag; this is defence in depth.)
+            raise ValueError("find_recent_order: no tag on order — inconclusive")
+        try:
+            trading_symbol, _exchange = self._resolve_symbol(order.symbol)
+            orders = self.kite.orders()
+        except Exception as e:
+            # INCONCLUSIVE broker error — re-raise so the caller fails the leg
+            # (never treat an API error as "no order exists" → blind retry).
+            log.warning("find_recent_order query failed for %s: %s",
+                        getattr(order, "symbol", "?"), e)
+            raise
+        from ..order_ledger import match_recent_order
+        return match_recent_order(
+            list(orders or []), tag=str(tag), symbol=trading_symbol,
+            txn=getattr(order, "transaction_type", None),
+            qty=getattr(order, "qty", None))
+
     def get_net_position_qty(self, symbol: str,
                              instrument_type: str = "EQ"):
         """Signed net quantity Kite currently holds for `symbol` (via
