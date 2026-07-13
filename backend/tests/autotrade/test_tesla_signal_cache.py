@@ -312,25 +312,159 @@ def test_scorer_for_symbols_matches_from_db(synth_db):
     pd.testing.assert_frame_equal(a, b, check_dtype=False)
 
 
+def test_batched_read_matches_per_symbol(synth_db):
+    """The BATCHED DB read (_pull_cash_symbols_batch, one IN(...) query) returns
+    exactly the same raw rows as looping the per-symbol _pull_cash_symbol — this
+    is the opt-1 (N+1 → 1 query) parity floor: same rows, same values."""
+    con = tse.connect_db_readonly(synth_db)
+    days = ["2026-07-08", "2026-07-09"]
+    syms = tse.candidate_symbols(con, days)
+    parts = []
+    for s in syms:
+        r = tse._pull_cash_symbol(con, s, days)
+        if not r.empty:
+            parts.append(r)
+    ref = pd.concat(parts, ignore_index=True)
+    batch = tse._pull_cash_symbols_batch(con, syms, days)
+    con.close()
+    key = ["instrument", "day", "bar_time"]
+    cols = [c for c in ref.columns if c in batch.columns]
+    a = ref[cols].sort_values(key).reset_index(drop=True)
+    b = batch[cols].sort_values(key).reset_index(drop=True)
+    assert len(a) == len(b) and len(a) > 0
+    pd.testing.assert_frame_equal(a, b, check_dtype=False, check_exact=True)
+    # MUTATION: drop the `dayset` day-filter in _pull_cash_symbols_batch (so the
+    # range pulls extra days) or change the WHERE symbol IN clause → rows differ.
+
+
+def test_batched_read_drops_unlisted_days(synth_db):
+    """The batched range read [min(days), max(days)+1) must return ONLY the listed
+    days — a non-contiguous window (skipping 07-08, which HAS data inside the range)
+    proves the dayset filter drops the unlisted intermediate day."""
+    con = tse.connect_db_readonly(synth_db)
+    days = ["2026-07-06", "2026-07-09"]      # 07-08 is inside the range but unlisted
+    syms = tse.candidate_symbols(con, days)
+    batch = tse._pull_cash_symbols_batch(con, syms, days)
+    con.close()
+    assert set(batch["day"].unique()) == {"2026-07-06", "2026-07-09"}
+    # MUTATION: drop the `dayset` filter in _pull_cash_symbols_batch → 07-08 rows
+    # leak in → the day set becomes {06,08,09}.
+
+
+def test_batched_scored_frame_matches_per_symbol_all_columns(synth_db):
+    """The full BATCHED scored frame (score_universe_for_symbols) equals the
+    per-symbol reference (score_universe_from_db) on EVERY shared column, exactly
+    — every microstructure/drive/absorption feature is byte-identical."""
+    con = tse.connect_db_readonly(synth_db)
+    days = ["2026-07-08", "2026-07-09"]
+    full = tse.score_universe_from_db(con, days)          # per-symbol reference
+    syms = tse.candidate_symbols(con, days)
+    fast = tse.score_universe_for_symbols(con, days, syms)  # batched
+    con.close()
+    key = ["instrument", "day", "bar_time"]
+    num = [c for c in full.columns
+           if c in fast.columns and pd.api.types.is_numeric_dtype(full[c])]
+    a = full.sort_values(key).reset_index(drop=True)
+    b = fast.sort_values(key).reset_index(drop=True)
+    assert len(a) == len(b) and len(num) > 30
+    pd.testing.assert_frame_equal(a[num], b[num], check_dtype=False,
+                                  check_exact=True)
+    # MUTATION: batch a different symbol/day set → a feature column diverges.
+
+
+def _grade_pair(con, train_days, infer_day, did=False):
+    tc = tse.candidate_symbols(con, train_days)
+    ic = tse.candidate_symbols(con, [infer_day])
+    syms = sorted(set(tc) | set(ic))
+    train_scored = tse.score_universe_for_symbols(con, train_days, syms)
+    infer_scored = tse.score_universe_for_symbols(con, [infer_day], syms)
+    train_nifty = tse.load_nifty_context(con, train_days)
+    infer_nifty = tse.load_nifty_context(con, [infer_day])
+    scored = pd.concat([train_scored, infer_scored], ignore_index=True)
+    nctx = ([f for f in (train_nifty, infer_nifty) if not f.empty])
+    nifty = pd.concat(nctx, ignore_index=True) if nctx else pd.DataFrame()
+    full = tse.grade_scored_frame(scored, nifty, train_days, did_layer_enabled=did)
+    full_infer = full[full["day"] == infer_day].copy()
+    profile, quality = tse.compute_train_stats(train_scored, train_nifty, train_days)
+    fast = tse.grade_infer_only(infer_scored, infer_nifty, train_days,
+                                profile, quality, did_layer_enabled=did)
+    return full_infer, fast
+
+
+def test_grade_infer_only_matches_full_frame_grade(synth_db):
+    """opt-2 parity: grading the INFER day alone with cached train stats reproduces
+    grade_scored_frame(train+infer) restricted to the infer rows — byte-for-byte on
+    the v2 gate/grade columns and the personality gates (which prove the cached
+    profile + quality are identical to the full-frame derivation)."""
+    con = tse.connect_db_readonly(synth_db)
+    full_infer, fast = _grade_pair(con, ["2026-07-08", "2026-07-09"], "2026-07-10")
+    con.close()
+    key = ["instrument", "day", "bar_time"]
+    cols = ["instrument", "day", "time", "v2_grade", "v2_setup", "base_gate",
+            "personality_quality_ok", "personality_vol_gate",
+            "personality_gap_gate", "personality_short_gate",
+            "train_vol_p90", "short_drive", "close_atp_gap_bps", "volume_ratio"]
+    a = full_infer.sort_values(key)[cols].reset_index(drop=True)
+    b = fast.sort_values(key)[cols].reset_index(drop=True)
+    assert len(a) == len(b) and len(a) > 0
+    pd.testing.assert_frame_equal(a, b, check_dtype=False, check_exact=True)
+    # MUTATION: pass the WRONG train_days to compute_train_stats (or drop the
+    # quality merge in _apply_cached_quality) → personality_quality_ok / base_gate
+    # diverge from the full-frame grade.
+
+
+def test_grade_infer_only_matches_full_frame_grade_did(synth_db):
+    """opt-2 parity WITH the v3 DiD layer on: the infer-only DiD block + v3 regrade
+    equal the full-frame DiD for the infer rows (did_score / v3_grade / v3_rank_score
+    byte-identical — the pre5 rolling means are per-(instrument,day) infer-local)."""
+    con = tse.connect_db_readonly(synth_db)
+    full_infer, fast = _grade_pair(con, ["2026-07-08", "2026-07-09"], "2026-07-10",
+                                   did=True)
+    con.close()
+    key = ["instrument", "day", "bar_time"]
+    cols = ["instrument", "day", "time", "v3_grade", "v3_setup", "v3_did_gate",
+            "did_score", "v3_rank_score", "did_short_vs_sector",
+            "did5_short_vs_sector", "did5_move_vs_sector_pct"]
+    a = full_infer.sort_values(key)[cols].reset_index(drop=True)
+    b = fast.sort_values(key)[cols].reset_index(drop=True)
+    assert len(a) == len(b) and len(a) > 0
+    pd.testing.assert_frame_equal(a, b, check_dtype=False, check_exact=True)
+    # MUTATION: grade the infer frame WITHOUT the full intraday minute series (e.g.
+    # collapse to the latest bar before add_did_features) → the pre5 means and thus
+    # did_score / v3_rank_score diverge.
+
+
 # ── full-path parity: fast latest-minute signals == full recompute ──────────
 
-def _grade_stub(scored, nifty_ctx, train_days, did_layer_enabled=False):
-    """Deterministic non-empty grade applied to BOTH paths: mark every AAA row
-    A++. select_trade_lifecycle + the infer-day + latest-minute filters then pick
-    the same single latest AAA bar in each path (the scored frames are equal per
-    the scorer-parity test), so any assembly divergence would surface.
-
-    Accepts (and ignores) did_layer_enabled so the stub matches the real
-    grade_scored_frame signature — this v2-path test always runs with it False."""
-    out = scored.copy()
+def _mark_aaa(out):
+    out = out.copy()
     out["v2_grade"] = "IGNORE"
     out["v2_setup"] = "SHORT_RELOAD_OR_BREAKDOWN"
     out.loc[out["instrument"] == "AAA", "v2_grade"] = "A++"
     return out
 
 
+def _grade_stub(scored, nifty_ctx, train_days, did_layer_enabled=False):
+    """Deterministic non-empty grade applied to the FULL-recompute path: mark every
+    AAA row A++. select_trade_lifecycle + the infer-day + latest-minute filters then
+    pick the same single latest AAA bar as the fast path, so any assembly divergence
+    would surface.
+
+    Accepts (and ignores) did_layer_enabled so the stub matches the real
+    grade_scored_frame signature — this v2-path test always runs with it False."""
+    return _mark_aaa(scored)
+
+
+def _grade_infer_stub(infer_scored, infer_nifty, train_days, profile, quality,
+                      did_layer_enabled=False):
+    """The fast-path counterpart stub (grade_infer_only signature): same AAA-A++
+    marking on the infer-only frame, so both paths select the identical bar."""
+    return _mark_aaa(infer_scored)
+
+
 def test_fast_signals_match_full_recompute(synth_db, monkeypatch):
     monkeypatch.setattr(tse, "grade_scored_frame", _grade_stub)
+    monkeypatch.setattr(tse, "grade_infer_only", _grade_infer_stub)
     kw = dict(infer_day="2026-07-10", db_path=synth_db,
               personality_window_days=2, min_grade="A++", cooldown_minutes=1,
               latest_only=True)
