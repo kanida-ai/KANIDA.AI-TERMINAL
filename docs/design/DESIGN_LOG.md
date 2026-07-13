@@ -1813,3 +1813,46 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 - **Deploy path:** worktree `_kanida_falconui/frontend`, branch `feat/falcon-ai-shell`. UI + BFF types
   only; NO execution/trade path touched. Verify: `npx tsc --noEmit` clean; `next build` succeeded.
   NOT committed — staged for operator review.
+
+## 2026-07-12 — AutoTrade create form: Falcon Tesla (order-flow short) strategy — strictly additive
+Acting on the operator task "add Falcon Tesla (order-flow short) to the EXISTING AutoTrade Sessions
+create form". Verified the LIVE backend contract in `backend/autotrade/config.py` (strategy
+`tesla_short`; validate() at L821 forces direction='short' + instrument_type='EQ' + order_product='MIS'
+and 400s anything else; seat knobs `n_seats`≥1, `tesla_min_grade`∈{A++,A+++}, `tesla_cooldown_minutes`≥0,
+`tesla_personality_window_days`≥1; REQUIRES `square_off_enabled=True`; REUSES the intraday trail EXIT
+knobs arm/floor/trail_giveback/stop_pct + step-lock ladder + `per_stock_stop_pct`) and `session.py`
+(`_fire_tesla_initial` returns RUNNING even on 0 fills — "armed, waiting for signals" is NORMAL;
+`status()` L4190 always emits `strategy`). NO backend/trade path edited — front-end + BFF types only.
+- **`lib/autotrade-api.ts`:** added `'tesla_short'` to `Strategy`; added the seat-model fields
+  (`n_seats?`, `tesla_min_grade?`, `tesla_cooldown_minutes?`, `tesla_personality_window_days?`) to
+  `SessionConfig`; added optional-safe tesla status fields (`trail_action?`, `mark_stale_abstain?`,
+  `seat_exits?`, `backfilled?` + a permissive `TeslaSeatEvent` shape) to `StatusResponse`; added
+  `strategy?` to `SessionSummary` (so a Tesla list row can show its armed state — currently NOT
+  emitted by `/sessions`; degrades gracefully until the backend adds it).
+- **`PortfolioAutoTrade.tsx`:** `tesla_short` added to `STRATEGY_OPTIONS` + a `TESLA_PRESET` (forces
+  EQ/MIS/short, seeds per-seat trail + seat defaults) applied in `onStrategyChange`. `isTesla` /
+  `trailStrategy` derived flags. When Tesla is selected: the Instrument/Product/Direction Segmented
+  controls are hidden and replaced by a READ-ONLY "Equity · MIS · Short · fixed" note ("Tesla is
+  intraday MIS short by design"); a new **Seat rotation** card exposes seats (with a live
+  `= ₹X per seat` = total÷seats helper), min grade (A++ / A+++ segmented), cooldown minutes, and
+  personality-window days, plus a calm amber "thin-validated — run Paper first" note. The EXISTING
+  trail-exit + step-lock/per-stock-stop/square-off cards are REUSED (gate widened to `trailStrategy`;
+  header reads "Per-seat trailing exit (Tesla)"); the basket-only IntradayStrategySummary/preview is
+  suppressed for Tesla (seats fill live). `toWireConfig` gains a tesla branch emitting
+  strategy + n_seats + tesla_min_grade + tesla_cooldown_minutes + tesla_personality_window_days +
+  the ÷100 trail fractions and forced EQ/MIS/short/square_off_enabled. `validateIntradayStepLock`
+  now also validates tesla. Sessions list row + live status card: a Tesla session RUNNING with 0
+  positions renders "armed" / "armed, waiting for signals" (new `TeslaSeatPanel`), and seat_exits[]/
+  backfilled[] activity is shown when present (last back-fill + recent exits); `StrategyPill` gains a
+  "Tesla · Short" label.
+- **Theme:** reused the locked mint/F2 tokens (`C`/`ICON`), `Field`/`Segmented` primitives, and the
+  existing amber-note language; no new accent colors, no new tab/page/panel.
+- **Deploy path:** worktree `_kanida_falconui/frontend`, branch `feat/falcon-ai-shell`. UI + BFF types
+  only; NO execution/trade path touched. Verify: `npx tsc --noEmit` clean; `next build` succeeded
+  (Compiled successfully). NOT committed — staged for operator review.
+- **Backend needs (handoff):** (1) `GET /api/autotrade/sessions` should echo `strategy` per row so the
+  list can show the Tesla armed state (today it selects only session_id/status/mode/capital/return/
+  n_open_positions). (2) `session.status()` should surface `seat_exits[]` / `backfilled[]` /
+  `trail_action` / `mark_stale_abstain` (currently only on the per-TICK monitor result, not the status
+  poll) so the live panel shows seat activity — the UI renders them defensively meanwhile. (3) Optional:
+  expose `n_seats` in status/editable_config so the panel can show "seats X/N" instead of just X.

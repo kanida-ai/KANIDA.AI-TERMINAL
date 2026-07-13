@@ -139,7 +139,9 @@ const STEP_LOCK_LARGE_GIVEBACK_DEFAULT = 17.5 // percent (wire 0.175)
 // strictly ascending, large-day peak in (0, 50]%, large give-back in (0, 100)%.
 // Returns a human error string, or null when the config is valid.
 function validateIntradayStepLock(c: SessionConfig): string | null {
-  if (c.strategy !== 'intraday_basket') return null
+  // tesla_short REUSES the same intraday trail/step-lock EXIT knobs, so validate
+  // them for it too (per-seat step-lock ladder + per-seat stop).
+  if (c.strategy !== 'intraday_basket' && c.strategy !== 'tesla_short') return null
   const gb = Number(c.trail_giveback_pct)
   const st = Number(c.stop_pct)
   if (!(gb > 0 && gb <= 50)) return 'Trail giveback must be between 0 and 50%.'
@@ -186,6 +188,48 @@ const STRATEGY_OPTIONS: { id: UiStrategy; label: string }[] = [
   { id: 'portfolio_kill_switch', label: 'Fixed — flat ±% basket exit (kill switch)' },
   { id: 'intraday_basket',       label: 'Dynamic (Trailing) — arm, lock a floor & trail, square-off' },
   { id: 'auto_ladder',           label: 'Falcon Positional — Auto-Ladder (monthly campaign)' },
+  { id: 'tesla_short',           label: 'Falcon Tesla (order-flow short) — intraday MIS seat rotation' },
+]
+
+// ── Falcon TESLA (tesla_short) PRESET ─────────────────────────────────────────
+// The order-flow-native intraday SHORT capital-ROTATION engine. The backend FORCES
+// direction='short' / instrument_type='EQ' / order_product='MIS' (rejects anything
+// else), so the preset locks those. It REUSES the intraday trail EXIT knobs (per-
+// SEAT step-lock + per-seat stop) and REQUIRES square_off_enabled (MIS is intraday).
+// The seat model knobs (n_seats + grade/cooldown/window) are Tesla-only and default
+// to the backend defaults. Percent fields stay PERCENTS in state (sent ÷100).
+const TESLA_PRESET: Partial<SessionConfig> = {
+  order_product: 'MIS',
+  instrument_type: 'EQ',
+  direction: 'short',
+  entry_time: '09:15:00',
+  square_off_time: '15:15:00',
+  square_off_enabled: true,      // MIS is intraday — mandatory forced square-off
+  max_hold_sessions: 0,
+  // Reused intraday trail EXIT knobs — per-SEAT step-lock. Sensible short-side
+  // defaults (percents; wired ÷100). arm/floor/giveback/stop are the per-seat trail.
+  arm_pct: 1.0,
+  floor_pct: 0.5,
+  trail_giveback_pct: 0.75,
+  stop_pct: 1.5,
+  // Per-seat step-lock ratchet ON, scope = per-stock (each seat trails on its own).
+  step_lock_scope: 'stock',
+  trail_step_lock_enabled: true,
+  trail_step_lock_ladder: [[1, 0.5], [2, 1.25], [3, 2]],
+  trail_large_peak_pct: 20,
+  trail_large_giveback_rel: 17.5,
+  per_stock_stop_pct: 1.5,       // per-seat capital-basis hard stop
+  // Seat model (Tesla-only) — backend defaults.
+  n_seats: 3,
+  tesla_min_grade: 'A++',
+  tesla_cooldown_minutes: 30,
+  tesla_personality_window_days: 5,
+}
+
+// Tesla min-grade choices (segmented). 'A++' = A++ and A+++; 'A+++' = strongest only.
+const TESLA_GRADE_OPTIONS: { id: 'A++' | 'A+++'; label: string }[] = [
+  { id: 'A++',  label: 'A++ +' },
+  { id: 'A+++', label: 'A+++ only' },
 ]
 
 // Campaign Duration options (Auto-Ladder only). Maps to LadderEndMode on the wire.
@@ -633,6 +677,11 @@ export function PortfolioAutoTrade({
   // the campaign create path; the other two map 1:1 to config.strategy.
   const [uiStrategy, setUiStrategy] = useState<UiStrategy>('portfolio_kill_switch')
   const isLadder = uiStrategy === 'auto_ladder'
+  // Falcon Tesla (order-flow short) — a real backend strategy (unlike auto_ladder).
+  // isTesla drives the read-only EQ/MIS/short controls + the seat-model knobs;
+  // trailStrategy = the two strategies that share the intraday trail EXIT card.
+  const isTesla = config.strategy === 'tesla_short'
+  const trailStrategy = config.strategy === 'intraday_basket' || isTesla
 
   // Campaign Duration (Auto-Ladder only) → LadderEndMode on the wire.
   const [ladderEndMode, setLadderEndMode] = useState<LadderEndMode>('month_end')
@@ -761,6 +810,12 @@ export function PortfolioAutoTrade({
       }))
       return
     }
+    if (next === 'tesla_short') {
+      // Falcon Tesla — seed the seat/rotation preset + FORCE short/EQ/MIS (the
+      // backend rejects anything else). square_off_enabled stays true (MIS intraday).
+      setConfig((c) => ({ ...c, ...TESLA_PRESET, strategy: 'tesla_short', kill_switch_enabled: false }))
+      return
+    }
     setConfig((c) => {
       if (next === 'intraday_basket') {
         return { ...c, ...INTRADAY_PRESET, strategy: next }
@@ -884,6 +939,43 @@ export function PortfolioAutoTrade({
       if (mno != null) riskExtra.fatfinger_max_notional_per_order = mno
       const mq = posNum(c.fatfinger_max_qty_per_order)
       if (mq != null) riskExtra.fatfinger_max_qty_per_order = Math.max(1, Math.floor(mq))
+    }
+    if (c.strategy === 'tesla_short') {
+      // Falcon Tesla — order-flow-native intraday SHORT seat rotation. FORCE
+      // short/EQ/MIS (the backend 400s anything else) + emit the seat knobs and
+      // the REUSED intraday trail EXIT knobs (per-seat step-lock + per-seat stop).
+      return {
+        ...c,
+        ...exec,
+        ...universeExtra,
+        ...capitalExtra,
+        ...misExtra,
+        ...riskExtra,
+        strategy: 'tesla_short',
+        // Forced instrument/direction/product (read-only in the UI; asserted here).
+        instrument_type: 'EQ',
+        order_product: 'MIS',
+        direction: 'short',
+        square_off_enabled: true,          // MIS is intraday — mandatory square-off
+        // Reused intraday trail EXIT knobs — PERCENT → FRACTION (÷100), per seat.
+        arm_pct: (Number(c.arm_pct) || 0) / 100,
+        floor_pct: (Number(c.floor_pct) || 0) / 100,
+        trail_giveback_pct: (Number(c.trail_giveback_pct) || 0) / 100,
+        stop_pct: (Number(c.stop_pct) || 0) / 100,
+        step_lock_scope: c.step_lock_scope === 'basket' ? 'basket' : 'stock',
+        trail_step_lock_enabled: c.trail_step_lock_enabled !== false,
+        trail_step_lock_ladder: (c.trail_step_lock_ladder ?? STEP_LOCK_LADDER_DEFAULT)
+          .map((r) => [(Number(r[0]) || 0) / 100, (Number(r[1]) || 0) / 100]),
+        trail_large_peak_pct: (Number(c.trail_large_peak_pct) || STEP_LOCK_LARGE_PEAK_DEFAULT) / 100,
+        trail_large_giveback_rel: (Number(c.trail_large_giveback_rel) || STEP_LOCK_LARGE_GIVEBACK_DEFAULT) / 100,
+        per_stock_stop_pct: Math.max(0, Number(c.per_stock_stop_pct) || 0) / 100,
+        // Seat-model knobs (Tesla-only) — ints/enum, sent verbatim.
+        n_seats: Math.max(1, Math.floor(Number(c.n_seats) || 3)),
+        tesla_min_grade: c.tesla_min_grade === 'A+++' ? 'A+++' : 'A++',
+        tesla_cooldown_minutes: Math.max(0, Math.floor(Number(c.tesla_cooldown_minutes) || 0)),
+        tesla_personality_window_days: Math.max(1, Math.floor(Number(c.tesla_personality_window_days) || 1)),
+        kill_switch_enabled: false,
+      }
     }
     if (c.strategy === 'intraday_basket') {
       return {
@@ -1910,6 +2002,12 @@ export function PortfolioAutoTrade({
                   // A child basket of an Auto-Ladder campaign carries ladder_id —
                   // tag it with a "Campaign" chip so it's clearly part of a ladder.
                   const isCampaignChild = s.ladder_id != null && s.ladder_id !== ''
+                  // Tesla runs as a seat-rotation short: RUNNING with 0 open seats is
+                  // NORMAL ("armed, waiting for signals"), not an empty/error state.
+                  // (Needs the backend to echo `strategy` on /sessions — degrades to
+                  // the standard row until then.)
+                  const isTeslaRow = s.strategy === 'tesla_short'
+                  const teslaArmed = isTeslaRow && running && (nOpen === 0)
                   return (
                     <li key={s.session_id ?? i}>
                       <div
@@ -1937,6 +2035,12 @@ export function PortfolioAutoTrade({
                               )}
                               {s.mode && <ModePill mode={s.mode} />}
                               {isCampaignChild && <CampaignChip />}
+                              {isTeslaRow && (
+                                <span className="text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+                                  style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+                                  Tesla
+                                </span>
+                              )}
                             </div>
                             <div className="text-[10.5px] mt-0.5 font-mono truncate" style={{ color: C.faint }}>
                               {sched && s.fires_at
@@ -1950,10 +2054,14 @@ export function PortfolioAutoTrade({
                               else an honest "open" / "—" with the live dot. */}
                           {!sched && (
                             <div className="shrink-0 text-right">
-                              <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Positions</div>
+                              <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>
+                                {teslaArmed ? 'Seats' : 'Positions'}
+                              </div>
                               <div className="text-[13px] font-semibold flex items-center justify-end gap-1.5" style={{ color: nOpen ? C.ink : C.ink2 }}>
                                 {running && <span className="inline-block w-1.5 h-1.5 rounded-full live-dot" style={{ background: C.mint }} />}
-                                {nOpen != null ? nOpen : (running ? 'open' : '—')}
+                                {teslaArmed
+                                  ? <span className="text-[11px]" style={{ color: C.mint }}>armed</span>
+                                  : (nOpen != null ? nOpen : (running ? 'open' : '—'))}
                               </div>
                             </div>
                           )}
@@ -2005,6 +2113,8 @@ export function PortfolioAutoTrade({
               label="Strategy"
               hint={isLadder
                 ? 'Set it once — Falcon opens, manages and rolls a positional basket every trading day for the whole campaign. You never manage a basket.'
+                : isTesla
+                ? 'Order-flow-native intraday SHORT seat rotation — fills up to N seats from live A++/A+++ signals and back-fills a freed seat instantly. Equity · MIS · Short (fixed).'
                 : config.strategy === 'intraday_basket'
                 ? 'Arms a trailing exit once the basket profits, locks a floor, trails a giveback %, hard-stops, and squares off at a set time.'
                 : 'A single flat ±% basket exit on the invested return (the kill switch).'}
@@ -2033,6 +2143,23 @@ export function PortfolioAutoTrade({
                   Falcon splits your capital across ~3 baskets and opens a new one every trading day
                   at <b style={{ color: C.ink }}>09:15 IST</b> — each basket is held positional (a fixed
                   3-session hold), and you never manage one.
+                </div>
+              </div>
+            )}
+
+            {/* Falcon Tesla intro strip — order-flow short seat rotation. Factual,
+                calm, paper-first note (the engine is thin-validated). */}
+            {isTesla && (
+              <div className="mt-3 flex items-start gap-2.5 rounded-xl border px-3.5 py-3"
+                style={{ borderColor: 'rgba(63,227,164,0.22)', background: 'linear-gradient(180deg, rgba(63,227,164,0.06), rgba(255,255,255,0.015))' }}>
+                <span className="shrink-0 mt-0.5" style={{ color: C.mint }}>{ICON.loop(16)}</span>
+                <div className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+                  <b style={{ color: C.ink }}>Order-flow short rotation.</b>{' '}
+                  Falcon fills up to <b style={{ color: C.ink }}>N seats</b> with intraday shorts drawn from live
+                  A++/A+++ order-flow signals — equal seat = capital ÷ seats — and back-fills a freed seat the
+                  moment one exits. A running Tesla session with <b style={{ color: C.ink }}>0 positions is normal</b>
+                  {' '}("armed, waiting for signals"). Trades <b style={{ color: C.ink }}>Equity · MIS · Short only</b>.
+                  {' '}Thin-validated — <b style={{ color: C.ink }}>run in Paper first</b>.
                 </div>
               </div>
             )}
@@ -2193,14 +2320,33 @@ export function PortfolioAutoTrade({
             </Field>
 
             {/* Instrument — Equity (existing cash path) | Futures (current-month,
-                NRML set server-side). Hidden for Auto-Ladder (always Equity). */}
-            {!isLadder && (
+                NRML set server-side). Hidden for Auto-Ladder (always Equity) and
+                for Tesla (forced Equity · MIS · Short — see the read-only note). */}
+            {!isLadder && !isTesla && (
             <Field label="Instrument" hint="Equity trades cash; Futures trades the current-month contract (product set automatically).">
               <Segmented
                 options={INSTRUMENT_OPTIONS.map((o) => ({ id: o.id, label: o.label }))}
                 value={config.instrument_type ?? 'EQ'}
                 onChange={(v) => onInstrumentChange(v)}
               />
+            </Field>
+            )}
+
+            {/* Tesla — instrument/direction/product are FORCED by the backend
+                (Equity · MIS · Short). Render them read-only so the operator sees
+                the fixed shape but can't produce a rejected combination. */}
+            {isTesla && (
+            <Field label="Instrument" hint="Tesla is intraday MIS short by design — Falcon forces these; you can't change them.">
+              <div className="flex flex-wrap items-center gap-2">
+                {['Equity', 'MIS', 'Short'].map((t) => (
+                  <span key={t} className="text-[11px] font-mono uppercase tracking-[0.06em] rounded-lg px-2.5 py-1.5"
+                    style={{ color: C.mint, background: 'rgba(63,227,164,0.10)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+                    {t}
+                  </span>
+                ))}
+                <span className="text-[10px] uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+                  style={{ color: C.faint, border: `1px solid ${C.line}` }}>fixed</span>
+              </div>
             </Field>
             )}
 
@@ -2214,7 +2360,7 @@ export function PortfolioAutoTrade({
                   style={inputStyle}
                 />
               </Field>
-            ) : (config.instrument_type ?? 'EQ') !== 'FUT' ? (
+            ) : (config.instrument_type ?? 'EQ') !== 'FUT' && !isTesla ? (
               <Field label="Order product" hint={isLadder ? 'Campaign product — Cash (CNC) or Margin (MTF).' : 'Broker product type for entries.'}>
                 <Segmented
                   options={(isLadder ? (['CNC', 'MTF'] as OrderProduct[]) : PRODUCT_OPTIONS).map((p) => ({ id: p, label: p }))}
@@ -2249,7 +2395,7 @@ export function PortfolioAutoTrade({
               </Field>
             )}
 
-            {config.sizing_mode === 'pct_cap' && (config.instrument_type ?? 'EQ') !== 'FUT' && (
+            {config.sizing_mode === 'pct_cap' && (config.instrument_type ?? 'EQ') !== 'FUT' && !isTesla && (
               <Field label="Order product" hint="Broker product type for entries.">
                 <Segmented
                   options={PRODUCT_OPTIONS.map((p) => ({ id: p, label: p }))}
@@ -2265,7 +2411,7 @@ export function PortfolioAutoTrade({
                 Auto-Ladder are Long-only (the Futures Buy/Sell control is separate),
                 so Short is never offered there — the backend rejects it. Default
                 Long; onProductChange snaps back to Long when product leaves MIS. */}
-            {!isLadder
+            {!isLadder && !isTesla
               && (config.instrument_type ?? 'EQ') === 'EQ'
               && config.order_product === 'MIS' && (
               <Field label="Direction" hint="Long buys to open; Short (MIS only) sells to open and auto-covers before close.">
@@ -2747,13 +2893,69 @@ export function PortfolioAutoTrade({
             </div>
           )}
 
-          {/* ── intraday_basket: four trail %s + square-off + strategy summary ── */}
-          {config.strategy === 'intraday_basket' && (
+          {/* ── Tesla seat model — n_seats + grade/cooldown/window (tesla_short) ── */}
+          {isTesla && (() => {
+            const seats = Math.max(1, Math.floor(Number(config.n_seats) || 1))
+            const cap = Number(config.total_allocated_capital) || 0
+            const perSeat = seats > 0 ? Math.floor(cap / seats) : 0
+            return (
+              <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.04)' }}>
+                <div className="flex items-center gap-2 mb-3">
+                  <span style={{ color: C.mint }}>{ICON.loop(15)}</span>
+                  <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Seat rotation (Tesla)</span>
+                  <span className="ml-auto text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+                    style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+                    Order-flow short
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <Field label="Seats (max concurrent shorts)"
+                    hint={`Equal seat = capital ÷ seats = ${fmtINR(perSeat)} per seat. A freed seat back-fills instantly on the next live signal.`}>
+                    <input type="number" min={1} step={1}
+                      value={config.n_seats ?? 3}
+                      onChange={(e) => set('n_seats', Math.max(1, Math.floor(Number(e.target.value) || 1)))}
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                  </Field>
+                  <Field label="Minimum signal grade" hint="A++ trades A++ and A+++; A+++ only takes the strongest signals (fewer, higher-conviction).">
+                    <Segmented
+                      options={TESLA_GRADE_OPTIONS.map((g) => ({ id: g.id, label: g.label }))}
+                      value={config.tesla_min_grade ?? 'A++'}
+                      onChange={(v) => set('tesla_min_grade', v)}
+                    />
+                  </Field>
+                  <Field label="Cooldown (minutes)" hint="Minimum spacing before the same name can be re-entered.">
+                    <input type="number" min={0} step={1}
+                      value={config.tesla_cooldown_minutes ?? 30}
+                      onChange={(e) => set('tesla_cooldown_minutes', Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                  </Field>
+                  <Field label="Personality window (days)" hint="Rolling completed trading days used to score how short-worthy an instrument is.">
+                    <input type="number" min={1} step={1}
+                      value={config.tesla_personality_window_days ?? 5}
+                      onChange={(e) => set('tesla_personality_window_days', Math.max(1, Math.floor(Number(e.target.value) || 1)))}
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                  </Field>
+                </div>
+                <div className="mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11px] leading-snug"
+                  style={{ borderColor: 'rgba(230,180,80,0.32)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+                  <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(13)}</span>
+                  <span>
+                    <b>Thin-validated engine.</b> Tesla is intraday MIS short by design; downside is software-managed
+                    (kill-on-rise + mandatory square-off). Run it in <b>Paper</b> first. The per-seat trailing exit
+                    below governs each seat.
+                  </span>
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* ── intraday_basket / tesla: four trail %s + square-off + summary ── */}
+          {trailStrategy && (
             <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.04)' }}>
               <div className="flex items-center gap-2 mb-3">
                 <span style={{ color: C.mint }}>{ICON.trend(15)}</span>
                 <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>
-                  {isLadder ? 'Trailing exit (per basket)' : 'Trailing exit (intraday basket)'}
+                  {isTesla ? 'Per-seat trailing exit (Tesla)' : isLadder ? 'Trailing exit (per basket)' : 'Trailing exit (intraday basket)'}
                 </span>
                 <span className="ml-auto text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
                   style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
@@ -2877,21 +3079,26 @@ export function PortfolioAutoTrade({
                 </div>
               )}
 
-              <IntradayStrategySummary
-                config={config}
-                preview={preview}
-                loading={previewLoading}
-                err={previewErr}
-              />
+              {/* The invested-basis / leverage / sizing summary is a BASKET view
+                  (previews the full deployment). Tesla fills seats live from
+                  signals, so a static preview isn't meaningful — suppress it. */}
+              {!isTesla && (
+                <IntradayStrategySummary
+                  config={config}
+                  preview={preview}
+                  loading={previewLoading}
+                  err={previewErr}
+                />
+              )}
             </div>
           )}
 
-          {/* ── Trailing strategy (profit STEP-LOCK) — ADDITIVE, intraday_basket ──
-              NEW controls only: portfolio- vs per-stock trailing + the ratcheting
-              locked-floor ladder + large-day tier. Give-back + the basket hard stop
-              stay in the trail card above (same backend fields — not duplicated).
-              Hidden for Auto-Ladder (fixed validated campaign config). */}
-          {config.strategy === 'intraday_basket' && !isLadder && (() => {
+          {/* ── Trailing strategy (profit STEP-LOCK) — ADDITIVE, intraday_basket
+              + Tesla (per-seat step-lock reuses the SAME knobs). NEW controls only:
+              portfolio- vs per-stock trailing + the ratcheting locked-floor ladder
+              + large-day tier. Give-back + the hard stop stay in the trail card
+              above (same backend fields — not duplicated). Hidden for Auto-Ladder. */}
+          {trailStrategy && !isLadder && (() => {
             const scope = config.step_lock_scope ?? 'basket'
             const lockOn = config.trail_step_lock_enabled !== false
             const rows = config.trail_step_lock_ladder ?? STEP_LOCK_LADDER_DEFAULT
@@ -3680,9 +3887,18 @@ export function PortfolioAutoTrade({
                   </div>
                 )}
 
+                {/* tesla_short → the seat-rotation panel: "armed, waiting for
+                    signals" when 0 seats are filled (NORMAL), plus any seat exits /
+                    back-fills the status reports. */}
+                {status.strategy === 'tesla_short' && (
+                  <div className="mb-4">
+                    <TeslaSeatPanel status={status} />
+                  </div>
+                )}
+
                 {/* portfolio_kill_switch → the kill-switch readout + live preview
-                    (unchanged). Hidden for intraday_basket, which trails instead. */}
-                {status.strategy !== 'intraday_basket' && (
+                    (unchanged). Hidden for intraday_basket + tesla, which trail. */}
+                {status.strategy !== 'intraday_basket' && status.strategy !== 'tesla_short' && (
                   <>
                 {/* Kill-switch state readout — threshold is a backend FRACTION (0.01 = 1%). */}
                 <div className="flex items-center gap-2 mb-3 text-[11.5px]" style={{ color: C.muted }}>
@@ -4265,12 +4481,66 @@ function ModePill({ mode }: { mode: Mode }) {
 // Strategy pill — names the exit engine in the live header. Mint for both; the
 // label disambiguates (kill-switch vs intraday trailing basket).
 function StrategyPill({ strategy }: { strategy: Strategy }) {
-  const label = strategy === 'intraday_basket' ? 'Intraday Basket' : 'Kill Switch'
+  const label = strategy === 'tesla_short' ? 'Tesla · Short'
+    : strategy === 'intraday_basket' ? 'Intraday Basket' : 'Kill Switch'
   return (
     <span className="text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
       style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
       {label}
     </span>
+  )
+}
+
+// ── Tesla seat-rotation panel (tesla_short live status) ──────────────────────
+// Renders the seat state for a RUNNING Falcon Tesla session. 0 filled seats is
+// NORMAL ("armed, waiting for signals") — never an empty/error look. seat_exits /
+// backfilled are OPTIONAL (the backend surfaces them on the per-tick result; they
+// may be absent on a plain status poll) — shown only when present.
+function TeslaSeatPanel({ status }: { status: StatusResponse }) {
+  const running = (status.status ?? '').toUpperCase() === 'RUNNING'
+  const filled = typeof status.n_open_positions === 'number' ? status.n_open_positions : null
+  const armedWaiting = running && filled === 0
+  const exits = Array.isArray(status.seat_exits) ? status.seat_exits : []
+  const fills = Array.isArray(status.backfilled) ? status.backfilled : []
+  const lastFill = fills.length ? fills[fills.length - 1] : null
+  return (
+    <div className="rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.04)' }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span style={{ color: C.mint }}>{ICON.loop(15)}</span>
+        <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Seat rotation</span>
+        <span className="ml-auto text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+          style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+          {armedWaiting ? 'Armed' : 'Rotating'}
+        </span>
+      </div>
+      <p className="text-[11.5px] leading-snug mb-2" style={{ color: C.muted }}>
+        {armedWaiting
+          ? 'Armed — waiting for live A++/A+++ signals. Seats fill in as they fire; a freed seat back-fills instantly.'
+          : <>Seats filled: <b style={{ color: C.ink }}>{filled ?? '—'}</b>. A freed seat back-fills on the next live signal.</>}
+      </p>
+      {status.mark_stale_abstain && (
+        <p className="text-[11px] leading-snug mb-2" style={{ color: C.amber }}>
+          Abstaining this tick — the price mark is stale (won&apos;t enter or profit-exit on stale data; the hard stop stays armed).
+        </p>
+      )}
+      {(exits.length > 0 || lastFill) && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]" style={{ color: C.faint }}>
+          {lastFill && (
+            <span>
+              Last back-fill{' '}
+              <b style={{ color: C.ink2 }}>{lastFill.symbol ?? '—'}</b>
+              {lastFill.grade ? <span> · {lastFill.grade}</span> : null}
+            </span>
+          )}
+          {exits.length > 0 && (
+            <span>
+              Recent exits{' '}
+              <b style={{ color: C.ink2 }}>{exits.map((e) => e.symbol).filter(Boolean).join(', ') || exits.length}</b>
+            </span>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 

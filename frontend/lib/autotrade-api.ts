@@ -50,7 +50,15 @@ export type OnMissedWindow = 'expire' | 'carry_next_trading_day'
 //     basket hits +arm_pct, lock a floor, trail by a giveback %, hard stop at
 //     −stop_pct, and square off at square_off_time. The four trail %s + the
 //     square-off time replace the single kill number.
-export type Strategy = 'portfolio_kill_switch' | 'intraday_basket'
+//   • 'tesla_short' — Falcon Tesla: an order-flow-native intraday SHORT capital-
+//     ROTATION engine. FORCES direction='short', instrument_type='EQ',
+//     order_product='MIS' (the backend validation REJECTS anything else). It fills
+//     up to `n_seats` short positions from live A++/A+++ signals (equal seat =
+//     total_allocated_capital / n_seats) and back-fills a freed seat instantly on
+//     exit. It REUSES the intraday trail/step-lock EXIT knobs + requires
+//     square_off_enabled (MIS is intraday). A tesla session may run RUNNING with 0
+//     positions ("armed, waiting for signals") — that is NORMAL, not an error.
+export type Strategy = 'portfolio_kill_switch' | 'intraday_basket' | 'tesla_short'
 
 export type SessionConfig = {
   strategy: Strategy
@@ -176,6 +184,23 @@ export type SessionConfig = {
   max_pct_per_name?: number
   fatfinger_max_notional_per_order?: number
   fatfinger_max_qty_per_order?: number
+  // ── TESLA SHORT ROTATION ── (strategy === 'tesla_short' only; all inert
+  // otherwise). The seat model + signal gate; the EXIT is the reused intraday
+  // trail/step-lock knobs above (arm/floor/trail_giveback/stop_pct, step-lock
+  // ladder, per_stock_stop_pct, square_off_time) with square_off_enabled=true.
+  // The backend FORCES direction='short' / instrument_type='EQ' /
+  // order_product='MIS' and 400s any other combination, so the UI sends those
+  // three verbatim and renders them read-only.
+  //   • n_seats — max concurrent SHORT positions (int ≥ 1); each seat =
+  //     total_allocated_capital / n_seats (a FIXED per-seat slice). Backend default 3.
+  //   • tesla_min_grade — 'A++' (A++ and A+++) | 'A+++' (strongest only). Default 'A++'.
+  //   • tesla_cooldown_minutes — per-instrument re-entry spacing (int ≥ 0). Default 30.
+  //   • tesla_personality_window_days — rolling K completed prior trading days used
+  //     to score an instrument's short-worthiness (int ≥ 1). Default 5.
+  n_seats?: number
+  tesla_min_grade?: 'A++' | 'A+++'
+  tesla_cooldown_minutes?: number
+  tesla_personality_window_days?: number
 }
 
 // The ₹ concentration / fat-finger thresholds the backend echoes on preview + status
@@ -465,6 +490,31 @@ export type StatusResponse = {
   // re-prefill the form after a conflict reload).
   config_version?: number
   editable_config?: Record<string, unknown>
+  // ── TESLA SHORT ROTATION (strategy === 'tesla_short') ── All OPTIONAL-safe —
+  // render only when present, never crash on absence. A tesla session may be
+  // RUNNING with 0 open positions ("armed, waiting for signals"): that is normal.
+  //   • trail_action — 'EXIT' | 'HOLD' for the latest per-seat step-lock tick.
+  //   • mark_stale_abstain — true when the last tick abstained on a stale mark.
+  //   • seat_exits — seats that exited on the latest tick (symbol + reason).
+  //   • backfilled — seats freshly filled on the latest tick (symbol + grade).
+  // NOTE (unverified in status()): the backend's session.status() currently emits
+  // these on the per-TICK result, not necessarily on every status() poll. The UI
+  // renders them defensively — absent → the "armed / seats X/N" line still shows.
+  trail_action?: 'EXIT' | 'HOLD' | string
+  mark_stale_abstain?: boolean
+  seat_exits?: TeslaSeatEvent[]
+  backfilled?: TeslaSeatEvent[]
+}
+
+// One tesla seat lifecycle event (exit or back-fill). Permissive shape — every
+// field optional so a renamed/partial backend row degrades to "—" not a crash.
+export type TeslaSeatEvent = {
+  symbol?: string
+  reason?: string        // exit reason (TRAIL_EXIT / STOP_STOCK / SQUARE_OFF …)
+  grade?: string         // A++ / A+++ (on a back-fill)
+  qty?: number
+  ts?: string            // ISO IST timestamp, when the backend gives one
+  [k: string]: unknown
 }
 
 // POST /api/autotrade/preview — an ESTIMATE before Start. Creates no session and
@@ -551,6 +601,10 @@ export type SessionSummary = {
   created_at?: string
   top_n_stocks?: number
   n_open_positions?: number
+  // The exit engine this session runs (echoed by GET /sessions when present).
+  // Lets the list render a Tesla session's "armed, waiting for signals" state
+  // (RUNNING + 0 positions is normal for tesla_short, not an empty error).
+  strategy?: Strategy
   // A SCHEDULED session in the list shows its fire time distinctly from
   // RUNNING/CLOSED. These mirror StatusResponse and may be absent for others.
   fires_at?: string
