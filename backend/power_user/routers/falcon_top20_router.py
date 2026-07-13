@@ -182,3 +182,61 @@ def falcon_ranked(
                "sector": sector, "count": len(rows), "picks": rows}
     _cache_put(key, payload)
     return payload
+
+
+# ── Single-stock FULL explainability — expand a ranks-11–50 tail row on demand.
+# Builds the same rich 3-bucket card as the Top-10, but for ONE symbol only, so
+# it costs ~1s (one heavy build) instead of the ~50s a full Top-50 would take.
+# Returns the standard Top20Response shape with a single pick at its true rank.
+@router.get("/falcon-explain")
+def falcon_explain(
+    request:      Request,
+    symbol:       str            = Query(...,      min_length=1, max_length=32),
+    universe:     str            = Query("all500", regex="^(all500|nifty50|nifty100|nifty200|fno)$"),
+    signal_date:  Optional[str]  = Query(None,     regex=r"^\d{4}-\d{2}-\d{2}$"),
+    prod_con:     sqlite3.Connection = Depends(get_db),
+) -> Dict[str, Any]:
+    """Full explainability for a single ranked symbol."""
+    sym = symbol.strip().upper()
+    if signal_date is None:
+        latest_row = prod_con.execute(
+            "SELECT MAX(signal_date) FROM falcon_signals_live WHERE signal_date IS NOT NULL"
+        ).fetchone()
+        resolved_date = latest_row[0] if latest_row else None
+    else:
+        resolved_date = signal_date
+
+    key = ("explain", resolved_date or "empty", universe, sym)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
+    rnd_con = sqlite3.connect(
+        f"file:{POWER_RND_DB_PATH}?mode=ro", uri=True, timeout=10.0
+    )
+    rnd_con.row_factory = sqlite3.Row
+    try:
+        t0 = time.time()
+        # top_n=200 so a deep (rank 11–50+) symbol is present in the ranked set;
+        # only_symbols means only THIS symbol gets the heavy per-pick build.
+        payload = build_falcon_top20(
+            prod_con=prod_con, rnd_con=rnd_con,
+            signal_date=signal_date, universe=universe, sector=None,
+            top_n=200, only_symbols={sym},
+        )
+        elapsed_ms = int((time.time() - t0) * 1000)
+        payload["_built_in_ms"] = elapsed_ms
+        if not (payload.get("picks") or []):
+            raise HTTPException(404, {"code": "SYMBOL_NOT_RANKED",
+                                       "message": f"{sym} is not in today's ranked set."})
+        log.info("falcon_explain: %s universe=%s built in %dms", sym, universe, elapsed_ms)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("falcon_explain build failed: %s", e)
+        raise HTTPException(500, {"code": "EXPLAIN_BUILD_FAILED", "message": str(e)[:200]})
+    finally:
+        rnd_con.close()
+
+    _cache_put(key, payload)
+    return payload

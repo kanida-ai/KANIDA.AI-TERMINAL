@@ -25,6 +25,7 @@ import json
 import logging
 import math
 import sqlite3
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -70,46 +71,61 @@ def _per_stock_persona_stats() -> Dict[str, Dict[str, Any]]:
     if (_STOCK_STATS_CACHE["data"] is not None
             and (_t.time() - _STOCK_STATS_CACHE["ts"]) < _STRAT_WR_TTL_SECONDS):
         return _STOCK_STATS_CACHE["data"]   # type: ignore
-    try:
-        from .persona_simulator import simulate_persona
-        trades = (simulate_persona("falcon-top-10").get("trades") or [])
-    except Exception as e:
-        log.warning("_per_stock_persona_stats: persona unavailable (%s)", e)
-        return {}
+    # SINGLE-FLIGHT: the underlying persona sim is a ~70s (minutes under load)
+    # computation. Without this guard, N concurrent cold callers (e.g. the Today
+    # page + several users expanding ranks-11–50 tail rows at once) each spawn
+    # their OWN sim; the sims thrash the GIL and each takes many minutes — a
+    # thundering herd. Serialise: the first caller computes, the rest block here
+    # and then find the cache warm. Normal (warm) path never touches this lock.
+    with _STOCK_STATS_LOCK:
+        # Re-check under the lock — a prior holder may have just populated it.
+        if (_STOCK_STATS_CACHE["data"] is not None
+                and (_t.time() - _STOCK_STATS_CACHE["ts"]) < _STRAT_WR_TTL_SECONDS):
+            return _STOCK_STATS_CACHE["data"]   # type: ignore
+        try:
+            from .persona_simulator import simulate_persona
+            trades = (simulate_persona("falcon-top-10").get("trades") or [])
+        except Exception as e:
+            log.warning("_per_stock_persona_stats: persona unavailable (%s)", e)
+            return {}
 
-    from collections import defaultdict
-    by_sym: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    for t in trades:
-        sym = t.get("symbol")
-        if sym:
-            by_sym[sym].append(t)
+        from collections import defaultdict
+        by_sym: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for t in trades:
+            sym = t.get("symbol")
+            if sym:
+                by_sym[sym].append(t)
 
-    out: Dict[str, Dict[str, Any]] = {}
-    for sym, ts in by_sym.items():
-        n = len(ts)
-        wins   = [t for t in ts if (t.get("net_pnl_rs") or 0) > 0]
-        losses = [t for t in ts if (t.get("net_pnl_rs") or 0) < 0]
-        rets   = [float(t.get("net_return_pct") or 0) for t in ts]
-        win_rets  = [float(t.get("net_return_pct") or 0) for t in wins]
-        loss_rets = [float(t.get("net_return_pct") or 0) for t in losses]
-        out[sym] = {
-            "n_trades":         n,
-            "n_wins":           len(wins),
-            "n_losses":         len(losses),
-            "win_rate_pct":     round(len(wins) / n * 100, 1) if n else None,
-            "avg_win_pct":      round(sum(win_rets) / len(win_rets), 2) if win_rets else None,
-            "avg_loss_pct":     round(sum(loss_rets) / len(loss_rets), 2) if loss_rets else None,
-            "best_win_pct":     round(max(rets), 2) if rets else None,
-            "worst_loss_pct":   round(min(rets), 2) if rets else None,
-            "first_trade_date": min((t.get("entry_date") for t in ts if t.get("entry_date")), default=None),
-            "last_trade_date":  max((t.get("entry_date") for t in ts if t.get("entry_date")), default=None),
-        }
-    _STOCK_STATS_CACHE.update({"data": out, "ts": _t.time()})
-    log.info("_per_stock_persona_stats: cached %d symbols", len(out))
-    return out
+        out: Dict[str, Dict[str, Any]] = {}
+        for sym, ts in by_sym.items():
+            n = len(ts)
+            wins   = [t for t in ts if (t.get("net_pnl_rs") or 0) > 0]
+            losses = [t for t in ts if (t.get("net_pnl_rs") or 0) < 0]
+            rets   = [float(t.get("net_return_pct") or 0) for t in ts]
+            win_rets  = [float(t.get("net_return_pct") or 0) for t in wins]
+            loss_rets = [float(t.get("net_return_pct") or 0) for t in losses]
+            out[sym] = {
+                "n_trades":         n,
+                "n_wins":           len(wins),
+                "n_losses":         len(losses),
+                "win_rate_pct":     round(len(wins) / n * 100, 1) if n else None,
+                "avg_win_pct":      round(sum(win_rets) / len(win_rets), 2) if win_rets else None,
+                "avg_loss_pct":     round(sum(loss_rets) / len(loss_rets), 2) if loss_rets else None,
+                "best_win_pct":     round(max(rets), 2) if rets else None,
+                "worst_loss_pct":   round(min(rets), 2) if rets else None,
+                "first_trade_date": min((t.get("entry_date") for t in ts if t.get("entry_date")), default=None),
+                "last_trade_date":  max((t.get("entry_date") for t in ts if t.get("entry_date")), default=None),
+            }
+        _STOCK_STATS_CACHE.update({"data": out, "ts": _t.time()})
+        log.info("_per_stock_persona_stats: cached %d symbols", len(out))
+        return out
 
 
 _STOCK_STATS_CACHE: Dict[str, Any] = {"data": None, "ts": 0.0}
+# Single-flight guard for the persona-backed per-stock stats (see the block in
+# _per_stock_persona_stats). Serialises cold rebuilds so concurrent callers wait
+# for ONE sim instead of each spawning their own (the thundering-herd fix).
+_STOCK_STATS_LOCK = threading.Lock()
 
 
 def _strategy_win_rate() -> Tuple[float, int]:
@@ -191,6 +207,7 @@ def build_falcon_top20(
     universe:    str = "all500",
     sector:      Optional[str] = None,
     top_n:       int = 10,        # Falcon Top 10 — locked spec
+    only_symbols: Optional[set] = None,   # build heavy explainability for these only
 ) -> Dict[str, Any]:
     """Build the Falcon Top 20 payload for a given signal date.
 
@@ -280,6 +297,12 @@ def build_falcon_top20(
     # ── 4. Per-pick: compute 3 buckets ──────────────────────────────────
     picks_out: List[Dict[str, Any]] = []
     for rank_pos, p in enumerate(raw_picks, start=1):
+        # only_symbols: skip the ~1s/pick heavy explainability build for every
+        # pick EXCEPT the requested one(s), while keeping rank_pos = the pick's
+        # true position in the full locked ranking. Used by the single-stock
+        # /falcon-explain endpoint (expand a ranks-11–50 tail row on demand).
+        if only_symbols is not None and p.get("symbol") not in only_symbols:
+            continue
         try:
             pick = _build_pick(
                 prod_con, rnd_con,
