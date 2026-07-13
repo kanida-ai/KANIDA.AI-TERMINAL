@@ -1074,6 +1074,21 @@ export const PowerAPI = {
       `/api/power/today/falcon-ranked?${qs.toString()}`, { signal })
   },
 
+  // Full 3-bucket explainability for ONE ranked symbol (expand a tail row on
+  // demand). Returns the same Top20Response shape — the single pick is at its
+  // true rank, rendered by <Top20Card> exactly like a Top-10 card.
+  falconExplain: (
+    symbol: string,
+    universe: import('./falcon-top20-types').Top20Universe = 'all500',
+    signal_date?: string | null,
+    signal?: AbortSignal,
+  ) => {
+    const qs = new URLSearchParams({ symbol, universe })
+    if (signal_date) qs.set('signal_date', signal_date)
+    return apiFetch<import('./falcon-top20-types').Top20Response>(
+      `/api/power/today/falcon-explain?${qs.toString()}`, { signal })
+  },
+
   liveDecisions: (jwt: string, cycle: LiveCycle | 'latest' = 'latest', entry_date?: string) => {
     const qs = new URLSearchParams({ cycle })
     if (entry_date) qs.set('entry_date', entry_date)

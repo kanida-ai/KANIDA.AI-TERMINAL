@@ -22,7 +22,7 @@ import { Top20Card } from '@/components/power/Top20Card'
 import { Top20Filters } from '@/components/power/Top20Filters'
 import { SignalTierBadge } from '@/components/power/PickCard'
 import { CyclePicker } from '@/app/power/live/CyclePicker'
-import type { Top20Response, Top20Universe } from '@/lib/falcon-top20-types'
+import type { Top20Response, Top20Universe, Top20Pick } from '@/lib/falcon-top20-types'
 import { PowerAPI, type LiveCycle, type LiveDecision, type FalconRankedPick } from '@/lib/power-api'
 
 type LivePayload = {
@@ -218,25 +218,8 @@ function TodayTab({ top20, top20Error, universe, sector }: {
           </div>
           <div className="rounded-xl border border-neutral-800 divide-y divide-neutral-800/70 overflow-hidden">
             {tail.map(p => (
-              <div key={`${p.symbol}-${p.rank}`}
-                   className="flex items-center gap-3 px-3 py-2 hover:bg-neutral-900/60">
-                <span className="w-7 shrink-0 text-right font-mono text-xs text-neutral-500 tabular-nums">
-                  #{p.rank}
-                </span>
-                <span className="font-mono text-sm font-medium text-neutral-100 truncate max-w-[9rem]">
-                  {p.symbol}
-                </span>
-                <SignalTierBadge tier={p.signal_tier} color={p.signal_tier_color}
-                                 reason={p.signal_tier_reason} />
-                {p.sector && (
-                  <span className="hidden md:inline text-[11px] text-neutral-500 truncate">
-                    {p.sector}
-                  </span>
-                )}
-                <span className="ml-auto shrink-0 font-mono text-xs text-neutral-400 tabular-nums">
-                  {p.avg_lift != null ? `avg lift ${p.avg_lift > 0 ? '+' : ''}${p.avg_lift.toFixed(1)}%` : ''}
-                </span>
-              </div>
+              <TailRow key={`${p.symbol}-${p.rank}`} pick={p}
+                       universe={universe} signalDate={signalDate} />
             ))}
           </div>
         </div>
@@ -245,6 +228,75 @@ function TodayTab({ top20, top20Error, universe, sector }: {
       {/* Entry to replay outcomes (lives in Performance). */}
       {top20?.signal_date && (
         <ReplayLink signalDate={top20.signal_date} nPicks={picks.length} isLatest={top20.is_latest ?? true} />
+      )}
+    </div>
+  )
+}
+
+// One expandable ranks-11–50 row. Collapsed = compact rank + tier + avg-lift.
+// Expanded = fetch the FULL 3-bucket explainability for this one symbol
+// (/today/falcon-explain, ~1s warm) and render it as a Top20Card, exactly like
+// a Top-10 card. Lazy: nothing is fetched until the row is first opened.
+function TailRow({ pick, universe, signalDate }: {
+  pick: FalconRankedPick; universe: Top20Universe; signalDate: string | null
+}) {
+  const [open, setOpen] = useState(false)
+  const [full, setFull] = useState<Top20Pick | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const toggle = () => {
+    const next = !open
+    setOpen(next)
+    if (next && !full && !loading) {
+      setLoading(true); setErr(null)
+      PowerAPI.falconExplain(pick.symbol, universe, signalDate)
+        .then(res => {
+          const one = (res.picks ?? [])[0] ?? null
+          if (one) setFull(one as Top20Pick)
+          else setErr('No explainability available for this stock.')
+        })
+        .catch(() => setErr('Couldn’t load the full analysis. Try again.'))
+        .finally(() => setLoading(false))
+    }
+  }
+
+  return (
+    <div>
+      <button type="button" onClick={toggle} aria-expanded={open}
+              className="w-full flex items-center gap-3 px-3 py-2 text-left hover:bg-neutral-900/60">
+        <span className="w-7 shrink-0 text-right font-mono text-xs text-neutral-500 tabular-nums">
+          #{pick.rank}
+        </span>
+        <span className="font-mono text-sm font-medium text-neutral-100 truncate max-w-[9rem]">
+          {pick.symbol}
+        </span>
+        <SignalTierBadge tier={pick.signal_tier} color={pick.signal_tier_color}
+                         reason={pick.signal_tier_reason} />
+        {pick.sector && (
+          <span className="hidden md:inline text-[11px] text-neutral-500 truncate">
+            {pick.sector}
+          </span>
+        )}
+        <span className="ml-auto shrink-0 font-mono text-xs text-neutral-400 tabular-nums">
+          {pick.avg_lift != null ? `avg lift ${pick.avg_lift > 0 ? '+' : ''}${pick.avg_lift.toFixed(1)}%` : ''}
+        </span>
+        <span className="shrink-0 text-xs text-neutral-500 w-4 text-center">{open ? '▴' : '▾'}</span>
+      </button>
+      {open && (
+        <div className="px-2 pb-3 pt-1">
+          {loading && (
+            <div className="px-3 py-4 text-sm text-neutral-400 animate-pulse">
+              Loading full analysis for {pick.symbol}…
+            </div>
+          )}
+          {err && !loading && (
+            <div className="px-3 py-3 text-sm text-red-300">{err}</div>
+          )}
+          {full && !loading && (
+            <Top20Card pick={full} defaultExpanded />
+          )}
+        </div>
       )}
     </div>
   )
