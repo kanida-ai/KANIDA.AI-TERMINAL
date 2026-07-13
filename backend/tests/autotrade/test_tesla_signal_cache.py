@@ -21,6 +21,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from autotrade import compute_offload as co
+from autotrade.compute_offload import run_offloaded
 from autotrade.config import TradingSessionConfig
 from autotrade.session import TradingSession
 from autotrade.strategies import tesla_short_engine as tse
@@ -362,3 +364,130 @@ def test_daily_cache_rebuilds_on_day_roll_not_per_minute(synth_db, monkeypatch):
     assert tse._train_cache_build_count == 2
     # MUTATION: rebuild the train cache every call (drop the train_days-equality
     # short-circuit in _get_train_cache) → build_count == 2 after the 2nd call.
+
+
+# ── OFF-PROCESS refresh: the heavy recompute runs in a SEPARATE process ───────
+#
+# WHY: the backend is a single-worker uvicorn (one async loop). The recompute is
+# heavy pandas — it HOLDS the GIL — so running it on a daemon *thread* still
+# stalls the event loop. The non-blocking refresh path therefore runs the
+# recompute OFF-PROCESS (own GIL) via autotrade.compute_offload.run_offloaded.
+# The block=True (test) path stays INLINE (no pool) so the swappable-_recompute
+# spy pattern above remains hermetic.
+
+def test_nonblock_refresh_routes_through_the_offprocess_pool(monkeypatch):
+    """_do_refresh(use_pool=True) submits _recompute_worker to run_offloaded and
+    does NOT run _recompute inline. Proves the daemon-thread path offloads the
+    GIL-holding compute to a separate process."""
+    inline_spy = _RecomputeSpy([_sig("INLINE")])
+    monkeypatch.setattr(sc, "_recompute", inline_spy)   # must stay 0 in pool path
+
+    captured = {}
+
+    def _fake_offloaded(fn, /, timeout=None, **kwargs):
+        captured["fn"] = fn
+        captured["timeout"] = timeout
+        captured["kwargs"] = kwargs
+        return _result([_sig("OFFPROC")])
+
+    # _do_refresh does `from ..compute_offload import run_offloaded` at CALL time,
+    # so patching the attribute on the module is picked up.
+    monkeypatch.setattr(co, "run_offloaded", _fake_offloaded)
+
+    t0 = datetime(2026, 7, 10, 10, 0, 0, tzinfo=IST)
+    key = sc._cache_key(None, 5, "A++")
+    sc._INFLIGHT[key] = True                             # mimic refresh_if_needed
+    sc._do_refresh(key, sc._minute_bucket(t0), t0, db_path=None,
+                   personality_window_days=5, min_grade="A++",
+                   cooldown_minutes=30, use_pool=True)
+
+    assert captured.get("fn") is sc._recompute_worker    # off-process entry point
+    assert captured["kwargs"]["as_of"] == "2026-07-10 10:00"
+    assert inline_spy.calls == 0                          # NEVER ran inline
+    sigs, _ = sc.get_signals(now=t0, staleness_bound_sec=90)
+    assert [s.instrument for s in sigs] == ["OFFPROC"]    # off-process result cached
+    assert sc._INFLIGHT[key] is False                     # in-flight cleared
+    # MUTATION: make _do_refresh call _recompute inline in the pool path →
+    # inline_spy.calls == 1 and run_offloaded never called → fails.
+
+
+def test_block_path_runs_inline_with_no_pool(monkeypatch):
+    """block=True → _do_refresh(use_pool=False) runs _recompute INLINE and NEVER
+    touches the process pool. Keeps the test path hermetic (spy still works)."""
+    inline_spy = _RecomputeSpy([_sig("INLINE")])
+    monkeypatch.setattr(sc, "_recompute", inline_spy)
+
+    def _must_not_run(*a, **k):
+        raise AssertionError("run_offloaded must NOT be called on the block path")
+    monkeypatch.setattr(co, "run_offloaded", _must_not_run)
+
+    t0 = datetime(2026, 7, 10, 10, 0, 0, tzinfo=IST)
+    assert sc.refresh_if_needed(now=t0, block=True) is True
+    assert inline_spy.calls == 1
+    sigs, _ = sc.get_signals(now=t0, staleness_bound_sec=90)
+    assert [s.instrument for s in sigs] == ["INLINE"]
+    # MUTATION: route the block path through the pool (use_pool=True on block) →
+    # _must_not_run raises → the recompute is caught best-effort → cache empty →
+    # the instrument assertion fails.
+
+
+def test_offloaded_recompute_leaves_last_good_cache_on_failure(monkeypatch):
+    """A broken/failed offload (run_offloaded raises OffloadError) is caught
+    best-effort: the last-good cache is left in place and _do_refresh NEVER
+    raises. get_signals still returns (last, stale) exactly as designed."""
+    # Seed a last-good cache via the inline block path.
+    monkeypatch.setattr(sc, "_recompute", _RecomputeSpy([_sig("GOOD")]))
+    t0 = datetime(2026, 7, 10, 10, 0, 0, tzinfo=IST)
+    sc.refresh_if_needed(now=t0, block=True)
+
+    # Next minute: the off-process refresh blows up.
+    def _boom(fn, /, timeout=None, **kwargs):
+        raise co.OffloadError("worker crashed")
+    monkeypatch.setattr(co, "run_offloaded", _boom)
+    t1 = t0.replace(minute=1)
+    key = sc._cache_key(None, 5, "A++")
+    sc._INFLIGHT[key] = True
+    sc._do_refresh(key, sc._minute_bucket(t1), t1, db_path=None,
+                   personality_window_days=5, min_grade="A++",
+                   cooldown_minutes=30, use_pool=True)   # must NOT raise
+
+    # Within the bound of t0 → last-good still fresh; beyond → stale but present.
+    sigs, stale = sc.get_signals(now=t0.replace(second=30), staleness_bound_sec=90)
+    assert [s.instrument for s in sigs] == ["GOOD"] and stale is False
+    sigs2, stale2 = sc.get_signals(now=t0 + timedelta(seconds=200),
+                                   staleness_bound_sec=90)
+    assert [s.instrument for s in sigs2] == ["GOOD"] and stale2 is True
+    assert sc._INFLIGHT[key] is False
+    # MUTATION: let _do_refresh propagate the OffloadError (drop the except) → the
+    # call raises here → fails.
+
+
+# ── PARITY: off-process recompute == in-process recompute (byte-for-byte) ─────
+
+def _sig_tuple(s):
+    return (s.instrument, s.day, s.time, s.bar_time, s.grade, s.setup,
+            s.entry_ref_price, s.short_drive, s.sector, s.rank_score)
+
+
+def test_offprocess_recompute_parity_synth(synth_db):
+    """The OFF-PROCESS _recompute_worker returns a TeslaSignalResult with a
+    signals list IDENTICAL to the SAME in-process _recompute for the same inputs
+    (synthetic poll DB). This is the REVERT safety: the process boundary did NOT
+    change the math (per-signal instrument/grade/short_drive/rank_score + the
+    result note/train_days/n_candidates all match)."""
+    kw = dict(db_path=str(synth_db), personality_window_days=2, min_grade="A++",
+              cooldown_minutes=1, as_of="2026-07-10 10:00", did_layer_enabled=False)
+
+    tse.reset_train_cache()
+    inproc = sc._recompute(**kw)                     # in THIS process
+    offproc = run_offloaded(sc._recompute_worker, timeout=120, **kw)  # spawned child
+
+    assert isinstance(offproc, TeslaSignalResult)
+    assert [_sig_tuple(s) for s in offproc.signals] == \
+           [_sig_tuple(s) for s in inproc.signals]
+    assert offproc.note == inproc.note
+    assert offproc.infer_day == inproc.infer_day
+    assert offproc.train_days == inproc.train_days
+    assert offproc.n_candidates == inproc.n_candidates
+    # MUTATION: have _recompute_worker score a different symbol set / day (or
+    # drop a field on the boundary) → the per-signal tuples or note diverge.

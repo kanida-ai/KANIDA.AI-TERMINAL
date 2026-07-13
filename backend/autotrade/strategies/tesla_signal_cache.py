@@ -24,6 +24,21 @@ DESIGN (never blocks the tick):
 The heavy recompute is `_recompute`, swapped out in tests (spy/stub) so the
 cache logic is verified without the poll DB. Each recompute opens its OWN
 read-only sqlite connection (thread-safe; no shared handles).
+
+OFF-PROCESS (why the background thread no longer stalls the event loop): the
+backend is a SINGLE-worker uvicorn (one async loop). `compute_live_signals_fast`
+is heavy pandas — CPU work that HOLDS the GIL — so running it on a daemon thread
+still starves every other API request. So the non-blocking refresh path now runs
+the recompute in a SEPARATE PROCESS via `autotrade.compute_offload.run_offloaded`
+(own interpreter + own GIL → zero event-loop contention). The daemon thread just
+submits + WAITS on the subprocess (waiting releases the GIL). The subprocess-safe
+entry point is the TOP-LEVEL `_recompute_worker` (spawn re-imports THIS module by
+qualified name — it imports cleanly, no app/uvicorn side effect); `TeslaSignal`/
+`TeslaSignalResult` are plain picklable dataclasses so the result crosses the
+process boundary intact. `block=True` (tests) still runs `_recompute` INLINE with
+NO pool so the swappable-`_recompute` spy pattern stays hermetic. A failed /
+timed-out / crashed offload leaves the last-good cache (ages into staleness) and
+NEVER raises into the tick — identical best-effort semantics as before.
 """
 from __future__ import annotations
 
@@ -94,19 +109,49 @@ def _recompute(*, db_path: Optional[str], personality_window_days: int,
         latest_only=True)
 
 
+def _recompute_worker(**kwargs: Any) -> Any:
+    """TOP-LEVEL, picklable entry point for the OFF-PROCESS recompute.
+
+    Runs inside a spawned worker process (its OWN GIL) — see
+    `autotrade.compute_offload.run_offloaded`. Just calls the module-level
+    `_recompute` (which opens its own read-only sqlite connection) and returns a
+    `TeslaSignalResult` (a plain picklable dataclass). MUST stay top-level and
+    importable by qualified name (`spawn` re-imports this module in a fresh
+    interpreter). NOTE: a test that monkeypatches `sc._recompute` does NOT affect
+    this worker — the child re-imports a clean module — which is why the block=True
+    (inline) path is the one used to exercise the swappable `_recompute` spy."""
+    return _recompute(**kwargs)
+
+
 def _do_refresh(key: Tuple[str, int, str, bool], minute_key: str,
                 now: datetime, *,
                 db_path: Optional[str], personality_window_days: int,
                 min_grade: str, cooldown_minutes: int,
-                did_layer_enabled: bool = False) -> None:
+                did_layer_enabled: bool = False,
+                use_pool: bool = True) -> None:
     """Recompute + store. NEVER raises (best-effort). Clears the in-flight flag
-    when done so the next minute can refresh again."""
+    when done so the next minute can refresh again.
+
+    `use_pool=True` (the default; the non-blocking daemon-thread path) runs the
+    recompute in a SEPARATE PROCESS via `run_offloaded` so the heavy pandas work
+    can't hold the event-loop GIL. `use_pool=False` (the block=True test path)
+    runs `_recompute` INLINE with no pool, so the swappable-`_recompute` spy stays
+    hermetic. A broken/timed-out/failed offload is caught here (best-effort): the
+    last-good cache is left untouched and ages into staleness; nothing propagates."""
+    rkw = dict(db_path=db_path, personality_window_days=personality_window_days,
+               min_grade=min_grade, cooldown_minutes=cooldown_minutes,
+               did_layer_enabled=did_layer_enabled,
+               as_of=now.strftime("%Y-%m-%d %H:%M"))
     try:
-        res = _recompute(
-            db_path=db_path, personality_window_days=personality_window_days,
-            min_grade=min_grade, cooldown_minutes=cooldown_minutes,
-            did_layer_enabled=did_layer_enabled,
-            as_of=now.strftime("%Y-%m-%d %H:%M"))
+        if use_pool:
+            # OFF-PROCESS: own interpreter/GIL → zero event-loop contention. The
+            # calling daemon thread only WAITS here (releases the GIL). Any
+            # failure surfaces as OffloadError, caught by the except below.
+            from ..compute_offload import run_offloaded
+            res = run_offloaded(_recompute_worker, **rkw)
+        else:
+            # INLINE (block=True test path): swappable `_recompute` spy, NO pool.
+            res = _recompute(**rkw)
         with _LOCK:
             _SIGNAL_CACHE[key] = _SignalEntry(
                 minute_key=minute_key, signals=list(res.signals),
@@ -143,11 +188,15 @@ def refresh_if_needed(*, db_path: Optional[str] = None,
               min_grade=min_grade, cooldown_minutes=cooldown_minutes,
               did_layer_enabled=did_layer_enabled)
     if block:
-        _do_refresh(key, minute_key, now, **kw)
+        # INLINE, no pool — keeps tests hermetic (swappable `_recompute` spy).
+        _do_refresh(key, minute_key, now, use_pool=False, **kw)
     else:
         try:
+            # Daemon thread submits the recompute to the OFF-PROCESS pool and
+            # WAITS on it (releasing the GIL) — the event loop is never stalled.
             t = threading.Thread(
-                target=_do_refresh, args=(key, minute_key, now), kwargs=kw,
+                target=_do_refresh, args=(key, minute_key, now),
+                kwargs={**kw, "use_pool": True},
                 name="tesla-signal-refresh", daemon=True)
             t.start()
         except Exception as e:  # thread spawn failure must not crash the tick
