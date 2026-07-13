@@ -567,6 +567,12 @@ def autotrade_preview(req: PreviewRequest,
         cfg = TradingSessionConfig.from_dict(req.config)
         cfg.validate()
     except Exception as e:
+        try:
+            import json as _json
+            log.warning("PREVIEW_400 reason=%s | config=%s",
+                        e, _json.dumps(req.config, default=str)[:2500])
+        except Exception:
+            log.warning("PREVIEW_400 reason=%s (config unloggable)", e)
         raise HTTPException(400, f"invalid config: {e}")
     caller = _caller(caller)
     mode = req.mode if req.mode in ("paper", "live") else "paper"

@@ -1180,6 +1180,14 @@ class ZerodhaBroker(BrokerClient):
                 tradingsymbol=trading_symbol, transaction_type=txn,
                 quantity=int(qty), product=kprod,
                 order_type=kite.ORDER_TYPE_SLM, trigger_price=trig,
+                # An SL-M becomes a MARKET order when triggered, and Kite REJECTS
+                # market/SL-M orders placed via API without an explicit
+                # market_protection ("Market orders without market protection are
+                # not allowed via API"). 5% is deliberately WIDE: this is a
+                # crash-backstop stop — reliability of exit matters more than
+                # fill quality, so it must still fill on a fast gap-down. (The
+                # normal market exits use 1-2%; a stop needs more headroom.)
+                market_protection=5.0,
                 validity=kite.VALIDITY_DAY)
             if client_tag:
                 params["tag"] = str(client_tag)[:20]
