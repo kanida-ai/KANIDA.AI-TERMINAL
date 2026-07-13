@@ -28,7 +28,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from .dependencies import get_db, hash_ip_ua
 from ..config import POWER_RND_DB_PATH
-from ..services.falcon_top20_explainer import build_falcon_top20
+from ..services.falcon_top20_explainer import build_falcon_top20, _fetch_raw_picks
+from ..services.signal_tier import enrich_picks
 
 log = logging.getLogger("kanida.power_user.falcon_top20_router")
 router = APIRouter(prefix="/api/power/today", tags=["power_user_top20"])
@@ -105,6 +106,8 @@ def falcon_top_20(
             # Falcon Top 10 — locked persona (2026-05-23 deployment note).
             # No watchlist; spec says "if the watchlist confuses users about
             # what's actually being traded, just show 10. Simpler is better."
+            # The deeper Top-50 RANKED list (rank + tier, no heavy per-pick
+            # explainability) is served by /today/falcon-ranked below.
             top_n=10,
         )
         elapsed_ms = int((time.time() - t0) * 1000)
@@ -117,5 +120,65 @@ def falcon_top_20(
     finally:
         rnd_con.close()
 
+    _cache_put(key, payload)
+    return payload
+
+
+# ── Falcon RANKED — the deeper Top-N list (rank + tier, no heavy explainability)
+# The Signals "Today's Top 50" browse list + any surface that wants to show more
+# than the locked Top-10 uses this. Same LOCKED persona ranking (avg_lift on
+# falcon_signals_live, min_fires gate) as falcon-top-20 — it just slices deeper
+# and skips the ~1s/pick 3-bucket narrative build, so top_n=50 returns in ms, not
+# the ~50s the full explainer would take. Every row is signal-time tier-enriched.
+@router.get("/falcon-ranked")
+def falcon_ranked(
+    request:      Request,
+    universe:     str            = Query("all500", regex="^(all500|nifty50|nifty100|nifty200|fno)$"),
+    sector:       Optional[str]  = Query(None,    max_length=64),
+    signal_date:  Optional[str]  = Query(None,    regex=r"^\d{4}-\d{2}-\d{2}$"),
+    top_n:        int            = Query(50,      ge=1, le=100),
+    prod_con:     sqlite3.Connection = Depends(get_db),
+) -> Dict[str, Any]:
+    """Ranked Top-N list with signal-time tiers. Fast, persona-correct."""
+    if signal_date is None:
+        latest_row = prod_con.execute(
+            "SELECT MAX(signal_date) FROM falcon_signals_live WHERE signal_date IS NOT NULL"
+        ).fetchone()
+        resolved_date = latest_row[0] if latest_row else None
+    else:
+        resolved_date = signal_date
+
+    key = ("ranked", resolved_date or "empty", universe, sector or "*", int(top_n))
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
+    if not resolved_date:
+        return {"signal_date": None, "universe": universe, "sector": sector,
+                "count": 0, "picks": []}
+
+    try:
+        raw = _fetch_raw_picks(prod_con, resolved_date, universe, sector, int(top_n))
+        rows = [
+            {
+                "rank":            i,
+                "symbol":          r.get("symbol"),
+                "sector":          r.get("sector"),
+                "score":           r.get("score"),
+                "n_fires":         r.get("n_fires"),
+                "avg_lift":        (r["score"] / r["n_fires"]) if r.get("n_fires") else None,
+                "close_at_signal": r.get("close_at_signal"),
+            }
+            for i, r in enumerate(raw, start=1)
+        ]
+        # Signal-time tier (GOLD / ENTERPRISE / PREMIUM / STANDARD / AVOID) — in
+        # place. enrich_picks needs symbol/score/n_fires (present) and reads ohlc.
+        enrich_picks(prod_con, rows, resolved_date)
+    except Exception as e:
+        log.exception("falcon_ranked build failed: %s", e)
+        raise HTTPException(500, {"code": "RANKED_BUILD_FAILED", "message": str(e)[:200]})
+
+    payload = {"signal_date": resolved_date, "universe": universe,
+               "sector": sector, "count": len(rows), "picks": rows}
     _cache_put(key, payload)
     return payload

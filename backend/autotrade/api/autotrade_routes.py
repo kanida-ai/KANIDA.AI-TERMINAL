@@ -492,22 +492,37 @@ def session_picks(
                 used_date = row[0]
     resolved_date = signal_date or used_date or datetime.now(IST).strftime("%Y-%m-%d")
 
+    out_picks = [
+        {
+            "rank": p.rank,
+            "symbol": p.symbol,
+            "sector": p.sector,
+            "score": p.score,
+            "n_fires": p.n_fires,
+            "avg_lift": p.avg_lift,
+            "close_at_signal": p.close_at_signal,
+        }
+        for p in picks
+    ]
+
+    # Attach the SIGNAL-TIME tier (GOLD / ENTERPRISE / PREMIUM / STANDARD / AVOID)
+    # + signal-day price numbers so the AutoTrade picker can show a rank + tier
+    # badge on every pick — the SAME classifier the Today/Signals panel uses
+    # (power_user.services.signal_tier). Best-effort: never breaks the picker.
+    # Function-local import to avoid an import-time coupling between the autotrade
+    # and power_user packages. enrich_picks reads ohlc_daily off falcon_conn().
+    try:
+        from power_user.services.signal_tier import enrich_picks as _enrich_tiers
+        with falcon_conn() as con:
+            _enrich_tiers(con, out_picks, resolved_date)
+    except Exception as e:                                  # noqa: BLE001
+        log.warning("session/picks tier enrich failed (non-fatal): %s", e)
+
     return {
         "signal_date": resolved_date,
         "universe_filter": universe,
         "top_n": top_n,
-        "picks": [
-            {
-                "rank": p.rank,
-                "symbol": p.symbol,
-                "sector": p.sector,
-                "score": p.score,
-                "n_fires": p.n_fires,
-                "avg_lift": p.avg_lift,
-                "close_at_signal": p.close_at_signal,
-            }
-            for p in picks
-        ],
+        "picks": out_picks,
     }
 
 
