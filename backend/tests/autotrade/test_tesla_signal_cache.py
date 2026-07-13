@@ -312,11 +312,14 @@ def test_scorer_for_symbols_matches_from_db(synth_db):
 
 # ── full-path parity: fast latest-minute signals == full recompute ──────────
 
-def _grade_stub(scored, nifty_ctx, train_days):
+def _grade_stub(scored, nifty_ctx, train_days, did_layer_enabled=False):
     """Deterministic non-empty grade applied to BOTH paths: mark every AAA row
     A++. select_trade_lifecycle + the infer-day + latest-minute filters then pick
     the same single latest AAA bar in each path (the scored frames are equal per
-    the scorer-parity test), so any assembly divergence would surface."""
+    the scorer-parity test), so any assembly divergence would surface.
+
+    Accepts (and ignores) did_layer_enabled so the stub matches the real
+    grade_scored_frame signature — this v2-path test always runs with it False."""
     out = scored.copy()
     out["v2_grade"] = "IGNORE"
     out["v2_setup"] = "SHORT_RELOAD_OR_BREAKDOWN"

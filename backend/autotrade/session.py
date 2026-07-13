@@ -3795,15 +3795,16 @@ class TradingSession:
             mg = getattr(self.config, "tesla_min_grade", "A++")
             cd = int(getattr(self.config, "tesla_cooldown_minutes", 30))
             bound = int(getattr(self.config, "tesla_signal_staleness_sec", 90))
+            did = bool(getattr(self.config, "tesla_did_layer_enabled", False))
             now = datetime.now(IST)
             # 1. trigger (non-blocking) — recompute runs in a background thread.
             _cache.refresh_if_needed(
                 db_path=db, personality_window_days=pwd, min_grade=mg,
-                cooldown_minutes=cd, now=now, block=False)
+                cooldown_minutes=cd, did_layer_enabled=did, now=now, block=False)
             # 2. read the cached signals + staleness.
             signals, stale = _cache.get_signals(
                 db_path=db, personality_window_days=pwd, min_grade=mg,
-                now=now, staleness_bound_sec=bound)
+                did_layer_enabled=did, now=now, staleness_bound_sec=bound)
             if stale:
                 # 3. abstain from NEW entries + page (live, market hours only).
                 self._page_tesla_signal_stale()

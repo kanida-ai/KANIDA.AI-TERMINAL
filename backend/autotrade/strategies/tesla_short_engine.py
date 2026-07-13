@@ -74,6 +74,9 @@ class TeslaSignal:
     entry_ref_price: float   # bar close (the batch short entry ref)
     short_drive: float
     sector: Optional[str] = None
+    # v3 DiD seat-rank key (v3_rank_score) when the DiD layer is ON; None for the
+    # v2 path (rotation then ranks by short_drive exactly as before — byte-safe).
+    rank_score: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -81,6 +84,7 @@ class TeslaSignal:
             "bar_time": self.bar_time, "grade": self.grade, "setup": self.setup,
             "entry_ref_price": self.entry_ref_price,
             "short_drive": self.short_drive, "sector": self.sector,
+            "rank_score": self.rank_score,
         }
 
 
@@ -525,8 +529,11 @@ def grade(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def select_trade_lifecycle(df: pd.DataFrame, cooldown_minutes: int = 30,
-                           grades: Sequence[str] = ("A++", "A+++")) -> pd.DataFrame:
-    candidates = df[df["v2_grade"].isin(list(grades))].sort_values(
+                           grades: Sequence[str] = ("A++", "A+++"),
+                           grade_col: str = "v2_grade") -> pd.DataFrame:
+    # grade_col defaults to "v2_grade" (byte-identical to the deployed v2 path);
+    # the v3 DiD layer passes grade_col="v3_grade" to select on the v3 regrade.
+    candidates = df[df[grade_col].isin(list(grades))].sort_values(
         ["instrument", "day", "bar_time"]).copy()
     rows = []
     for _, group in candidates.groupby(["instrument", "day"], sort=False):
@@ -539,15 +546,27 @@ def select_trade_lifecycle(df: pd.DataFrame, cooldown_minutes: int = 30,
 
 
 def grade_scored_frame(scored: pd.DataFrame, nifty_ctx: pd.DataFrame,
-                       train_days: Sequence[str]) -> pd.DataFrame:
+                       train_days: Sequence[str],
+                       did_layer_enabled: bool = False) -> pd.DataFrame:
     """Run the full v2 grade over an already-scored cash frame (+ nifty ctx).
     Personality/quality use train_days only; grade applies to all rows.
-    Returns the graded frame (adds v2_grade / v2_setup / base_gate / gates)."""
+    Returns the graded frame (adds v2_grade / v2_setup / base_gate / gates).
+
+    did_layer_enabled=False (DEFAULT) → returns EXACTLY the v2 graded frame, so
+    the deployed Tesla path is byte-identical. did_layer_enabled=True → additively
+    appends the v3 DiD block + v3 regrade (v3_grade / v3_setup / v3_did_gate /
+    v3_rank_score / did_* columns) WITHOUT mutating any v2 column. The pre5_*
+    rolling means inside add_did_features are computed here, on the FULL intraday
+    minute series (the frame still carries every minute per instrument — the
+    latest-minute collapse happens later in compute_live_signals)."""
     df = add_market_context(scored, nifty_ctx)
     df = add_phase_transition_features(df)
     df = add_stock_personality(df, train_days)
     df = add_train_personality_quality(df, train_days)
     df = grade(df)
+    if did_layer_enabled:
+        from . import tesla_did as _did
+        df = _did.apply_did_layer(df)
     return df
 
 
@@ -559,6 +578,28 @@ def _min_grades(min_grade: str) -> List[str]:
     return ["A++", "A+++"]
 
 
+def _signal_from_row(r: "pd.Series", did_layer_enabled: bool) -> "TeslaSignal":
+    """Build a TeslaSignal from a selected graded row. v2 (default) reads
+    v2_grade/v2_setup and leaves rank_score=None (rotation ranks by short_drive,
+    byte-identical to today). v3 reads v3_grade/v3_setup and carries v3_rank_score
+    so rotation ranks seats by the DiD rank score."""
+    grade_col = "v3_grade" if did_layer_enabled else "v2_grade"
+    setup_col = "v3_setup" if did_layer_enabled else "v2_setup"
+    rank_score = None
+    if did_layer_enabled:
+        rs = r.get("v3_rank_score")
+        rank_score = None if pd.isna(rs) else float(rs)
+    return TeslaSignal(
+        instrument=str(r["instrument"]), day=str(r["day"]),
+        time=str(r["time"]),
+        bar_time=pd.to_datetime(r["bar_time"]).strftime("%Y-%m-%d %H:%M:%S"),
+        grade=str(r[grade_col]), setup=str(r[setup_col]),
+        entry_ref_price=float(r["close"]),
+        short_drive=float(r["short_drive"]),
+        sector=(None if pd.isna(r.get("sector")) else str(r.get("sector"))),
+        rank_score=rank_score)
+
+
 def compute_live_signals(
     *,
     as_of: Optional[str] = None,
@@ -568,10 +609,15 @@ def compute_live_signals(
     min_grade: str = "A++",
     cooldown_minutes: int = 30,
     latest_only: bool = True,
+    did_layer_enabled: bool = False,
     con: Optional[sqlite3.Connection] = None,
 ) -> TeslaSignalResult:
     """Compute the CURRENT A++/A+++ SHORT signals from the live poll.
 
+    did_layer_enabled : False (DEFAULT) → the deployed v2 path (byte-identical).
+                 True → apply the v3 DiD layer: regrade to A++/A+++ via the
+                 stricter v3_did_gate and rank seats by v3_rank_score. Exits/trail
+                 are unaffected (v3 is entry-selection only).
     as_of      : ISO "YYYY-MM-DD HH:MM" — evaluate signals up to and including
                  this minute (bars strictly after it are ignored, so no
                  look-ahead). None → use the latest bar present for infer_day.
@@ -612,10 +658,13 @@ def compute_live_signals(
                                      note="no scored candidates")
         n_candidates = int(scored["instrument"].nunique())
         nifty_ctx = load_nifty_context(con, window_days)
-        graded = grade_scored_frame(scored, nifty_ctx, train_days)
+        graded = grade_scored_frame(scored, nifty_ctx, train_days,
+                                    did_layer_enabled=did_layer_enabled)
 
+        grade_col = "v3_grade" if did_layer_enabled else "v2_grade"
         selected = select_trade_lifecycle(
-            graded, cooldown_minutes=cooldown_minutes, grades=_min_grades(min_grade))
+            graded, cooldown_minutes=cooldown_minutes,
+            grades=_min_grades(min_grade), grade_col=grade_col)
         # Restrict to the inference day.
         selected = selected[selected["day"] == infer_day].copy()
         if selected.empty:
@@ -637,14 +686,7 @@ def compute_live_signals(
 
         sigs: List[TeslaSignal] = []
         for _, r in selected.sort_values(["bar_time", "instrument"]).iterrows():
-            sigs.append(TeslaSignal(
-                instrument=str(r["instrument"]), day=str(r["day"]),
-                time=str(r["time"]),
-                bar_time=pd.to_datetime(r["bar_time"]).strftime("%Y-%m-%d %H:%M:%S"),
-                grade=str(r["v2_grade"]), setup=str(r["v2_setup"]),
-                entry_ref_price=float(r["close"]),
-                short_drive=float(r["short_drive"]),
-                sector=(None if pd.isna(r.get("sector")) else str(r.get("sector")))))
+            sigs.append(_signal_from_row(r, did_layer_enabled))
         return TeslaSignalResult(as_of=as_of, infer_day=infer_day,
                                  train_days=train_days, signals=sigs,
                                  n_candidates=n_candidates)
@@ -760,12 +802,16 @@ def compute_live_signals_fast(
     min_grade: str = "A++",
     cooldown_minutes: int = 30,
     latest_only: bool = True,
+    did_layer_enabled: bool = False,
     con: Optional[sqlite3.Connection] = None,
 ) -> TeslaSignalResult:
     """Optimized equivalent of compute_live_signals: caches the scored TRAIN
     frame per day-roll and rescored only the INFER day per call. Produces the
     SAME A++/A+++ signals for a given minute (parity test), far faster. Same
-    signature/semantics as compute_live_signals; NEVER raises on empty data."""
+    signature/semantics as compute_live_signals (incl. did_layer_enabled); NEVER
+    raises on empty data. The DiD layer is a post-grade step on the same scored
+    frame, so the train-day cache is unaffected (it caches the v2 scored inputs,
+    not the grade)."""
     owns_con = con is None
     if owns_con:
         con = connect_db_readonly(db_path)
@@ -810,10 +856,12 @@ def compute_live_signals_fast(
         nifty_ctx = (pd.concat(nctx_parts, ignore_index=True)
                      if nctx_parts else pd.DataFrame())
 
-        graded = grade_scored_frame(scored, nifty_ctx, train_days)
+        graded = grade_scored_frame(scored, nifty_ctx, train_days,
+                                    did_layer_enabled=did_layer_enabled)
+        grade_col = "v3_grade" if did_layer_enabled else "v2_grade"
         selected = select_trade_lifecycle(
             graded, cooldown_minutes=cooldown_minutes,
-            grades=_min_grades(min_grade))
+            grades=_min_grades(min_grade), grade_col=grade_col)
         selected = selected[selected["day"] == infer_day].copy()
         if selected.empty:
             return TeslaSignalResult(as_of=as_of, infer_day=infer_day,
@@ -828,14 +876,7 @@ def compute_live_signals_fast(
 
         sigs: List[TeslaSignal] = []
         for _, r in selected.sort_values(["bar_time", "instrument"]).iterrows():
-            sigs.append(TeslaSignal(
-                instrument=str(r["instrument"]), day=str(r["day"]),
-                time=str(r["time"]),
-                bar_time=pd.to_datetime(r["bar_time"]).strftime("%Y-%m-%d %H:%M:%S"),
-                grade=str(r["v2_grade"]), setup=str(r["v2_setup"]),
-                entry_ref_price=float(r["close"]),
-                short_drive=float(r["short_drive"]),
-                sector=(None if pd.isna(r.get("sector")) else str(r.get("sector")))))
+            sigs.append(_signal_from_row(r, did_layer_enabled))
         return TeslaSignalResult(as_of=as_of, infer_day=infer_day,
                                  train_days=train_days, signals=sigs,
                                  n_candidates=n_candidates)

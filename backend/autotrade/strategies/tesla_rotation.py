@@ -58,13 +58,20 @@ def _grade_ok(grade: str, min_grade: str) -> bool:
     return grade in ("A++", "A+++")
 
 
+def _rank_key(s):
+    """Secondary rank key = v3_rank_score when the DiD layer supplied one
+    (rank_score is not None), else short_drive. For the v2 path rank_score is
+    None, so this is byte-identical to the pre-DiD ordering."""
+    rs = getattr(s, "rank_score", None)
+    secondary = float(rs) if rs is not None else float(getattr(s, "short_drive", 0.0))
+    return (_GRADE_RANK.get(str(s.grade), 0), secondary)
+
+
 def rank_signals(signals: Sequence) -> List:
-    """Best-first: strongest grade, then highest short_drive. Stable + pure.
-    `signals` items must expose .grade and .short_drive (TeslaSignal-shaped)."""
-    return sorted(
-        signals,
-        key=lambda s: (_GRADE_RANK.get(str(s.grade), 0), float(getattr(s, "short_drive", 0.0))),
-        reverse=True)
+    """Best-first: strongest grade, then the seat rank key. Stable + pure.
+    `signals` items must expose .grade and .short_drive (TeslaSignal-shaped);
+    an optional .rank_score (v3 DiD) is preferred as the secondary key when set."""
+    return sorted(signals, key=_rank_key, reverse=True)
 
 
 def plan_backfill(

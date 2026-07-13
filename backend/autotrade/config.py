@@ -217,6 +217,12 @@ class TradingSessionConfig:
     # healthy refresh runs every minute). <= 0 disables the abstain (never
     # stale) — do NOT set 0 in live.
     tesla_signal_staleness_sec: int = 90
+    # v3 DiD (Difference-in-Differences) ENTRY-SELECTION layer. OPT-IN, default
+    # OFF → the deployed v2 Tesla path is byte-identical. When True the once-per-
+    # minute signal recompute regrades candidates through the stricter v3_did_gate
+    # (A++/A+++) and ranks seats by v3_rank_score (see strategies/tesla_did.py).
+    # Entry-selection only: exits / the intraday step-lock trail are UNCHANGED.
+    tesla_did_layer_enabled: bool = False
 
     # Position sizing
     sizing_mode: str = "equal"             # equal | pct_cap | manual
@@ -1081,6 +1087,8 @@ class TradingSessionConfig:
             tesla_signal_db_path=(d.get("tesla_signal_db_path") or None),
             tesla_signal_staleness_sec=int(
                 d.get("tesla_signal_staleness_sec", 90)),
+            tesla_did_layer_enabled=bool(
+                d.get("tesla_did_layer_enabled", False)),
             sizing_mode=d.get("sizing_mode", "equal"),
             max_pct_per_position=float(d.get("max_pct_per_position", 0.05)),
             manual_amounts=d.get("manual_amounts", {}) or {},
