@@ -554,6 +554,7 @@ async def work_and_confirm_exit(
     now_fn: Optional[Callable[[], float]] = None,
     sleep_fn: Optional[Callable[[float], Any]] = None,
     volume_fn: Optional[Callable[[str], Optional[float]]] = None,
+    child_sizer: Optional[Callable] = None,
 ) -> Dict[str, Any]:
     """WORKED (participation / TWAP) EXIT — the PACED sibling of
     slice_and_confirm_exit. Instead of firing all freeze-cap child legs
@@ -665,9 +666,15 @@ async def work_and_confirm_exit(
         freeze_cap=freeze_cap,
         min_child_qty=int(getattr(exec_cfg, "worked_min_child_qty", 1)),
         max_children=int(getattr(exec_cfg, "worked_max_children", 500)))
+    # v2 (VWAP-curve pacing) for the paced UNWIND: build the pluggable child sizer
+    # when worked_vwap_enabled (else None → v1 flat POV, byte-identical). No profile
+    # → make_vwap_sizer returns None → v1 fallback. Same safety on every child.
+    _sizer = child_sizer
+    if _sizer is None:
+        _sizer = _wo.make_vwap_sizer(exec_cfg, symbol)
     result = await _wo.work_order(
         wp, place_child=_place_child, volume_fn=volume_fn, now_fn=now_fn,
-        sleep_fn=sleep_fn)
+        sleep_fn=sleep_fn, child_sizer=_sizer)
 
     filled_total = int(result.filled_qty)
     avg_px = (agg["weighted"] / filled_total) if (filled_total > 0

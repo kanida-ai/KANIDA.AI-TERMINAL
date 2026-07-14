@@ -145,6 +145,311 @@ def next_child_qty(remaining: int, n_intervals: int,
     return max(0, int(qty))
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# v2 — VWAP-CURVE PACING + ADAPTIVE PARTICIPATION (additive; v1 stays the default)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# v1 paces FLAT. Real intraday volume is U-SHAPED (heavy at the open + close, thin
+# midday), so flat pacing UNDER-fills a deep book and OVER-participates a thin one.
+# v2 paces to a per-symbol intraday VOLUME PROFILE and ADAPTS to realized fills:
+#
+#   1. PROFILE  — a normalized volume curve by 5-min time-of-day bucket over
+#      [09:15,15:30], averaged over recent-N days of `ohlc_1min` (deep 1-min
+#      history; the poller's mkt_orderflow_1min has only a few days of uptime so it
+#      is NOT used for the profile — only v1's real-time POV read uses it).
+#   2. SCHEDULE — over the ACTUAL work window [window_start, deadline] the profile
+#      gives the cumulative fraction of the order that "should" be done by any time
+#      t:  frac(t) = (cum(t) - cum(start)) / (cum(deadline) - cum(start)).  The
+#      child target this interval brings cumulative-filled up to the scheduled
+#      cumulative by the END of the interval:  target = frac(now+interval)*qty -
+#      filled.  BEHIND → a big gap (catch up); AHEAD → a small/zero gap (ease off).
+#      Monotone in (schedule - filled); no oscillation.
+#   3. ADAPTIVE POV — the impact cap is the pct needed to fill that target, clamped
+#      to [participation_pct, worked_max_participation_pct]: on schedule ≈ the
+#      normal cap; BEHIND it leans up toward the HARD ceiling; it NEVER exceeds the
+#      ceiling regardless of schedule. The v1 TWAP floor + freeze cap are preserved
+#      exactly (the deadline/exchange guarantees; the floor may still exceed POV to
+#      finish, identical to v1). No profile / no window → returns None → v1 flat POV.
+
+
+@dataclass
+class SizerContext:
+    """The per-interval state a pluggable child-target strategy sees. All fields are
+    read-only inputs; the strategy returns an int child target (or None to decline
+    → v1 flat POV fallback for that interval)."""
+    remaining: int
+    n_intervals: int
+    recent_volume: Optional[float]
+    now_ts: float
+    deadline_ts: Optional[float]
+    filled: int
+    target_qty: int
+    n_children: int
+
+
+# A pluggable child-target strategy: (parent, ctx) -> child qty | None (decline).
+ChildSizer = Callable[["WorkedParent", SizerContext], Optional[int]]
+
+# The NSE cash session in seconds-of-day (IST): 09:15:00 .. 15:30:00.
+_SESSION_OPEN_SEC = 9 * 3600 + 15 * 60      # 33300
+_SESSION_CLOSE_SEC = 15 * 3600 + 30 * 60    # 55800
+_PROFILE_BUCKET_SEC = 300                    # 5-min buckets
+
+
+def epoch_to_sec_of_day(epoch_ts: float) -> float:
+    """An epoch timestamp → IST seconds-of-day (0..86400). Production maps the real
+    clock onto the profile's time-of-day curve; deterministic (no hidden now())."""
+    dt = datetime.fromtimestamp(float(epoch_ts), IST)
+    return dt.hour * 3600 + dt.minute * 60 + dt.second + dt.microsecond / 1e6
+
+
+@dataclass
+class IntradayVolumeProfile:
+    """A per-symbol normalized intraday volume curve. `buckets` are the NORMALIZED
+    volume shares (Σ == 1.0) of consecutive `bucket_sec`-second buckets starting at
+    `open_sec` seconds-of-day. `cum_fraction(sod)` is the cumulative share from the
+    open to seconds-of-day `sod`, LINEARLY interpolated within a bucket — a smooth,
+    monotone 0→1 schedule curve."""
+    buckets: List[float]
+    open_sec: float = float(_SESSION_OPEN_SEC)
+    bucket_sec: float = float(_PROFILE_BUCKET_SEC)
+    symbol: Optional[str] = None
+    n_days: int = 0
+
+    def __post_init__(self):
+        tot = sum(float(b) for b in (self.buckets or []) if b and float(b) > 0)
+        if self.buckets and tot > 0:
+            self.buckets = [max(0.0, float(b)) / tot for b in self.buckets]
+            # Prefix sums (cum[i] = cumulative share through the END of bucket i).
+            acc = 0.0
+            self._cum: List[float] = []
+            for b in self.buckets:
+                acc += b
+                self._cum.append(acc)
+        else:
+            self.buckets = []
+            self._cum = []
+
+    @property
+    def valid(self) -> bool:
+        return bool(self.buckets)
+
+    def cum_fraction(self, sec_of_day: float) -> float:
+        """Cumulative volume share [0,1] from the session open to `sec_of_day`,
+        interpolated within the containing bucket. Clamped: <= open → 0, >= close
+        → 1."""
+        if not self.buckets:
+            return 0.0
+        rel = float(sec_of_day) - self.open_sec
+        if rel <= 0.0:
+            return 0.0
+        span = len(self.buckets) * self.bucket_sec
+        if rel >= span:
+            return 1.0
+        b = int(rel // self.bucket_sec)
+        within = (rel - b * self.bucket_sec) / self.bucket_sec   # 0..1 in-bucket
+        cum_before = self._cum[b - 1] if b > 0 else 0.0
+        return cum_before + self.buckets[b] * within
+
+
+def _vwap_child_qty(*, profile_frac: Callable[[float], float], target_qty: int,
+                    filled: int, remaining: int, n_intervals: int,
+                    recent_volume: Optional[float], now_ts: float,
+                    interval_sec: float, window_start_ts: float,
+                    deadline_ts: float, participation_pct: float,
+                    max_participation_pct: float, freeze_cap: Optional[int],
+                    min_child_qty: int) -> Optional[int]:
+    """The v2 child target (PURE). `profile_frac(loop_ts)` returns the cumulative
+    volume share [0,1] of the trading session at loop timestamp `loop_ts` (monotone
+    non-decreasing). Returns None to DECLINE (degenerate window → v1 fallback).
+
+        c_start = profile_frac(window_start);  c_end = profile_frac(deadline)
+        denom   = c_end - c_start                    (<= 0 → None → v1 fallback)
+        # scheduled cumulative fraction of the ORDER due by the END of this interval
+        frac_next   = (profile_frac(min(now+interval, deadline)) - c_start) / denom
+        sched_cum   = frac_next * target_qty
+        child_target= ceil(max(0, sched_cum - filled))   # gap to the schedule
+        # ADAPTIVE POV: the pct needed to fill child_target, clamped to the band
+        # [participation_pct, max_participation_pct] — BEHIND leans to the ceiling,
+        # AHEAD (small target) rides the normal cap; NEVER exceeds the ceiling.
+        eff_pct = clamp(child_target / recent_volume, participation, max_participation)
+        pov_cap = floor(eff_pct * recent_volume)
+        child   = min(child_target, pov_cap)
+        # v1 guarantees preserved EXACTLY: freeze cap (hard), TWAP floor (deadline
+        # progress — may exceed POV to finish, as in v1), remaining, min-child.
+    """
+    remaining = int(remaining or 0)
+    if remaining <= 0:
+        return 0
+    tq = int(target_qty or 0)
+    c_start = profile_frac(float(window_start_ts))
+    c_end = profile_frac(float(deadline_ts))
+    denom = c_end - c_start
+    if tq <= 0 or denom <= 0.0:
+        return None                               # degenerate → v1 flat POV
+    look = min(float(now_ts) + float(interval_sec), float(deadline_ts))
+    frac_next = (profile_frac(look) - c_start) / denom
+    frac_next = min(1.0, max(0.0, frac_next))
+    sched_cum_qty = frac_next * tq
+    child_target = int(math.ceil(max(0.0, sched_cum_qty - int(filled or 0))))
+
+    fc = int(freeze_cap) if (freeze_cap and int(freeze_cap) > 0) else None
+    rv = float(recent_volume) if (recent_volume and float(recent_volume) > 0) else 0.0
+    if rv > 0.0 and child_target > 0:
+        # ADAPTIVE participation, bounded to [participation_pct, ceiling].
+        base_pct = float(participation_pct) if participation_pct and \
+            float(participation_pct) > 0 else 0.0
+        ceil_pct = float(max_participation_pct) if max_participation_pct and \
+            float(max_participation_pct) > 0 else base_pct
+        if ceil_pct < base_pct:
+            ceil_pct = base_pct
+        needed_pct = child_target / rv
+        eff_pct = min(max(needed_pct, base_pct), ceil_pct)  # HARD ceiling clamp
+        pov_cap = int(math.floor(eff_pct * rv))
+        child = min(child_target, pov_cap) if pov_cap > 0 else 0
+    else:
+        # No volume read → POV governs nothing; the TWAP floor drives progress
+        # (identical to v1 when the read is 0/None).
+        child = 0
+
+    if fc is not None and child > 0:
+        child = min(child, fc)
+    child = min(child, remaining)
+    # v1 TWAP PROGRESS FLOOR — the deadline-completion guarantee (may exceed POV to
+    # finish a thin name by the deadline, exactly as v1 does; the adaptive ceiling
+    # bounds only the SCHEDULE-driven catch-up, never this hard deadline floor).
+    floor_q = twap_floor(remaining, n_intervals)
+    child = max(child, floor_q)
+    if fc is not None:
+        child = min(child, fc)                    # freeze is a HARD exchange cap
+    child = min(child, remaining)
+    mcq = min(int(min_child_qty or 1), remaining)
+    if fc is not None:
+        mcq = min(mcq, fc)
+    child = max(child, mcq)
+    return max(0, int(child))
+
+
+@dataclass
+class VwapScheduleSizer:
+    """A pluggable `ChildSizer` (v2) that paces to `profile` over the work window
+    and adapts to fills. `clock_fn` maps a loop timestamp → IST seconds-of-day (the
+    profile's coordinate); production uses `epoch_to_sec_of_day`, tests inject a
+    deterministic map. `window_start_ts` is captured on the FIRST call (the moment
+    the work actually begins). Declines (returns None → v1 fallback) when there is
+    no time deadline or no valid profile."""
+    profile: Optional[IntradayVolumeProfile]
+    max_participation_pct: float
+    clock_fn: Callable[[float], float] = epoch_to_sec_of_day
+    window_start_ts: Optional[float] = None
+
+    def _frac(self, loop_ts: float) -> float:
+        return self.profile.cum_fraction(self.clock_fn(loop_ts))  # type: ignore
+
+    def __call__(self, parent: "WorkedParent", ctx: SizerContext) -> Optional[int]:
+        if self.profile is None or not self.profile.valid:
+            return None                           # no profile → v1 flat POV
+        if ctx.deadline_ts is None:
+            return None                           # no time window → v1 flat POV
+        if self.window_start_ts is None:
+            self.window_start_ts = ctx.now_ts     # work begins now
+        return _vwap_child_qty(
+            profile_frac=self._frac, target_qty=ctx.target_qty, filled=ctx.filled,
+            remaining=ctx.remaining, n_intervals=ctx.n_intervals,
+            recent_volume=ctx.recent_volume, now_ts=ctx.now_ts,
+            interval_sec=parent.interval_sec,
+            window_start_ts=float(self.window_start_ts),
+            deadline_ts=float(ctx.deadline_ts),
+            participation_pct=parent.participation_pct,
+            max_participation_pct=self.max_participation_pct,
+            freeze_cap=parent.freeze_cap, min_child_qty=parent.min_child_qty)
+
+
+# Per-(symbol, day-roll) profile cache — a profile is stable within a trading day;
+# rebuilt on the day roll (the IST date changes) so a long-running process refreshes.
+_PROFILE_CACHE: Dict[str, IntradayVolumeProfile] = {}
+
+
+def load_intraday_profile(symbol: str, *, db_path: Optional[str] = None,
+                          lookback_days: int = 20, min_days: int = 5,
+                          day_key: Optional[str] = None
+                          ) -> Optional[IntradayVolumeProfile]:
+    """Build (and cache per symbol+day) the normalized intraday volume profile for
+    `symbol` from the last `lookback_days` DISTINCT trading days of `ohlc_1min`. 5-min
+    buckets over [09:15,15:30]. Returns None on ANY error / a THIN history
+    (< `min_days` days) / a missing DB / no data — the caller then FALLS BACK to v1
+    flat POV. Read-only (mode=ro, query_only), never raises."""
+    try:
+        dk = day_key or datetime.now(IST).strftime("%Y-%m-%d")
+        ck = f"{symbol}|{dk}|{int(lookback_days)}"
+        cached = _PROFILE_CACHE.get(ck)
+        if cached is not None:
+            return cached if cached.valid else None
+        p = Path(db_path) if db_path else _DEFAULT_UNIVERSE_DB
+        if not p.exists():
+            return None
+        n_buckets = int((_SESSION_CLOSE_SEC - _SESSION_OPEN_SEC)
+                        // _PROFILE_BUCKET_SEC)          # 75
+        sums = [0.0] * n_buckets
+        uri = f"file:{p.as_posix()}?mode=ro"
+        con = sqlite3.connect(uri, uri=True, timeout=5)
+        try:
+            con.execute("PRAGMA query_only=ON")
+            days = [r[0] for r in con.execute(
+                "SELECT DISTINCT substr(bar_time,1,10) d FROM ohlc_1min "
+                "WHERE symbol=? ORDER BY d DESC LIMIT ?",
+                (symbol, int(max(1, lookback_days)))).fetchall()]
+            if len(days) < int(min_days):
+                _PROFILE_CACHE[ck] = IntradayVolumeProfile(buckets=[], symbol=symbol)
+                return None
+            ph = ",".join("?" * len(days))
+            rows = con.execute(
+                "SELECT bar_time, volume FROM ohlc_1min "
+                f"WHERE symbol=? AND substr(bar_time,1,10) IN ({ph})",
+                [symbol] + days).fetchall()
+        finally:
+            con.close()
+        for bt, v in rows:
+            try:
+                sod = int(bt[11:13]) * 3600 + int(bt[14:16]) * 60
+            except Exception:
+                continue
+            rel = sod - _SESSION_OPEN_SEC
+            if rel < 0:
+                continue
+            b = rel // _PROFILE_BUCKET_SEC
+            if 0 <= b < n_buckets:
+                sums[b] += float(v or 0)
+        prof = IntradayVolumeProfile(buckets=sums, symbol=symbol, n_days=len(days))
+        _PROFILE_CACHE[ck] = prof
+        return prof if prof.valid else None
+    except Exception as e:  # pragma: no cover - defensive; profile is optional
+        log.debug("load_intraday_profile(%s) failed: %s", symbol, e)
+        return None
+
+
+def make_vwap_sizer(cfg: Any, symbol: str, *, db_path: Optional[str] = None,
+                    clock_fn: Optional[Callable[[float], float]] = None
+                    ) -> Optional[VwapScheduleSizer]:
+    """Build the v2 sizer for `symbol` from `cfg`, or None when v2 is OFF / there is
+    no profile (→ the caller passes no child_sizer → v1 flat POV). Gated on
+    execution_mode=='worked' AND cfg.worked_vwap_enabled so it is INERT by default."""
+    if str(getattr(cfg, "execution_mode", "")) != "worked":
+        return None
+    if not bool(getattr(cfg, "worked_vwap_enabled", False)):
+        return None
+    prof = load_intraday_profile(
+        symbol, db_path=db_path,
+        lookback_days=int(getattr(cfg, "worked_vwap_profile_days", 20)))
+    if prof is None or not prof.valid:
+        return None
+    return VwapScheduleSizer(
+        profile=prof,
+        max_participation_pct=float(getattr(cfg, "worked_max_participation_pct",
+                                            0.25)),
+        clock_fn=clock_fn or epoch_to_sec_of_day)
+
+
 def _clock_to_today_epoch(clock: str) -> Optional[float]:
     """An IST "HH:MM[:SS]" clock → today's epoch seconds (same scale as time.time).
     None on an unparseable clock. Pure-ish (reads the wall clock for today's date)."""
@@ -286,7 +591,8 @@ async def work_order(parent: WorkedParent, *, place_child: PlaceChild,
                      volume_fn: Optional[VolumeFn] = None,
                      now_fn: Optional[Callable[[], float]] = None,
                      sleep_fn: Optional[Callable[[float], Awaitable[None]]] = None,
-                     stop_fn: Optional[Callable[[], bool]] = None) -> WorkedResult:
+                     stop_fn: Optional[Callable[[], bool]] = None,
+                     child_sizer: Optional["ChildSizer"] = None) -> WorkedResult:
     """Work `parent` into child slices until remaining == 0, the deadline, or a
     stop/kill. Returns the WorkedResult (filled_qty, avg_fill_price, n_children,
     shortfall = target - filled, per-child audit).
@@ -300,6 +606,12 @@ async def work_order(parent: WorkedParent, *, place_child: PlaceChild,
       * sleep_fn    : the pacing sleep (default asyncio.sleep).
       * stop_fn     : returns True to STOP working NOW (a manual stop / kill / a
                       portfolio breaker) — whatever filled IS the position.
+      * child_sizer : an OPTIONAL pluggable child-target strategy (v2). None (the
+                      DEFAULT) → EXACTLY v1's flat POV `next_child_qty(...)` — the
+                      byte-identical fallback. A sizer that returns None for a given
+                      interval ALSO falls back to v1 for that interval (e.g. the
+                      VWAP sizer with no time window). Every safety guard below is
+                      applied to the sizer's qty identically to v1's.
 
     FAIL-CLOSED: a child that REJECTS or whose place_child RAISES (e.g. an
     inconclusive query-before-retry → OrderTimeoutError) STOPS working this name
@@ -342,8 +654,23 @@ async def work_order(parent: WorkedParent, *, place_child: PlaceChild,
                 log.debug("worked %s volume_fn raised: %s", parent.symbol, e)
                 vol = None
 
-        qty = next_child_qty(remaining, il, vol, parent.participation_pct,
-                             parent.freeze_cap, parent.min_child_qty)
+        if child_sizer is None:
+            qty = next_child_qty(remaining, il, vol, parent.participation_pct,
+                                 parent.freeze_cap, parent.min_child_qty)
+        else:
+            # v2: a pluggable child-target strategy (VWAP-curve pacing). It shares
+            # this loop + EVERY safety guard below. A None return = the strategy
+            # declined this interval (no profile / no window) → v1 flat POV fallback.
+            ctx = SizerContext(
+                remaining=remaining, n_intervals=il, recent_volume=vol,
+                now_ts=float(now), deadline_ts=parent.deadline_ts, filled=filled,
+                target_qty=int(parent.target_qty or 0), n_children=len(children))
+            qty = child_sizer(parent, ctx)
+            if qty is None:
+                qty = next_child_qty(remaining, il, vol, parent.participation_pct,
+                                     parent.freeze_cap, parent.min_child_qty)
+            else:
+                qty = int(qty)
         if qty <= 0:
             stopped = "no_progress"
             break

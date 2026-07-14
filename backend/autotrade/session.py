@@ -3132,7 +3132,7 @@ class TradingSession:
     async def _work_entry_leg(self, broker, prof, symbol: str, target_qty: int,
                               ref_price: float, *,
                               now_fn=None, sleep_fn=None, volume_fn=None,
-                              deadline_ts=None) -> Dict[str, Any]:
+                              deadline_ts=None, child_sizer=None) -> Dict[str, Any]:
         """WORK one entry leg into `target_qty` shares PACED over time, reusing the
         safe child path (_place_confirm_child: ledger, unique client_order_id per
         child, query-before-retry, fill reconciliation, phantom-fill guard). Each
@@ -3214,9 +3214,15 @@ class TradingSession:
         _vol_fn = volume_fn
         if _vol_fn is None and not self.dry_run:
             _vol_fn = _wo.recent_interval_volume
+        # v2 (VWAP-curve pacing): build the pluggable child sizer when
+        # worked_vwap_enabled (else None → v1 flat POV, byte-identical). A symbol
+        # with no profile → make_vwap_sizer returns None → v1 fallback.
+        _sizer = child_sizer
+        if _sizer is None:
+            _sizer = _wo.make_vwap_sizer(self.config, symbol)
         result = await _wo.work_order(
             parent, place_child=_place_child, volume_fn=_vol_fn,
-            now_fn=now_fn, sleep_fn=sleep_fn)
+            now_fn=now_fn, sleep_fn=sleep_fn, child_sizer=_sizer)
         # GTT-OCO backup on the built worked position (best-effort; positions
         # appear over the window so this runs after the build).
         try:

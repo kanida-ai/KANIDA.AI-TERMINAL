@@ -318,6 +318,29 @@ class TradingSessionConfig:
     worked_min_child_qty: int = 1
     worked_max_children: int = 500
 
+    # ── WORKED-ORDER v2: VWAP-CURVE PACING + ADAPTIVE PARTICIPATION (DEFAULT-OFF) ─
+    # v1 paces FLAT (equal-ish per interval). Real intraday volume is U-SHAPED
+    # (heavy at open + close, thin midday) so flat pacing UNDER-fills when the book
+    # is deep and OVER-participates when it is thin. v2 paces to a per-symbol
+    # intraday VOLUME PROFILE (normalized 5-min buckets over [09:15,15:30], built
+    # from recent-N-days ohlc_1min) and ADAPTS to realized fills: each child brings
+    # cumulative-filled up to where the volume curve says it SHOULD be by the end of
+    # this interval — filling MORE when the market is deep (front/back of day), LESS
+    # midday. Inert unless BOTH execution_mode=="worked" AND worked_vwap_enabled;
+    # when off the child sizer is EXACTLY v1's flat POV (byte-identical). If a symbol
+    # has no profile (thin history) it FALLS BACK to v1 flat POV — never fails.
+    #   worked_vwap_enabled          : opt-in to the VWAP-curve sizer (else v1 flat).
+    #   worked_max_participation_pct : HARD safety ceiling on the adaptive POV cap —
+    #                                  when BEHIND schedule the sizer leans toward
+    #                                  this cap to catch up, but NEVER blows past it
+    #                                  regardless of schedule. FRACTION in (0, 1] and
+    #                                  MUST be >= worked_participation_pct (the normal
+    #                                  impact cap is the floor of the adaptive band).
+    #   worked_vwap_profile_days     : lookback days of ohlc_1min for the profile.
+    worked_vwap_enabled: bool = False
+    worked_max_participation_pct: float = 0.25
+    worked_vwap_profile_days: int = 20
+
     # ── MARK-STALENESS ABSTAIN (SPRINT CLUSTER 5 ITEM 2, real-money safety) ───
     # The mark (LTP) that drives the kill switch / trail can fall back to
     # yesterday's ohlc_daily close on a live-data outage. A daily-close mark must
@@ -682,6 +705,27 @@ class TradingSessionConfig:
                 _parse_clock_to_seconds(self.worked_deadline)
             except ValueError as e:
                 raise ValueError(f"worked_deadline {e}")
+        # WORKED v2 (VWAP-curve) — the adaptive safety CEILING is a FRACTION in
+        # (0, 1] and MUST be >= worked_participation_pct (the normal impact cap is
+        # the FLOOR of the adaptive band; a ceiling below the floor is nonsensical
+        # and, mis-scaled, would silently DISABLE catch-up). Validated whenever set
+        # so a saved preset round-trips valid values regardless of worked_vwap_enabled.
+        if not (0.0 < float(self.worked_max_participation_pct) <= 1.0):
+            raise ValueError(
+                "worked_max_participation_pct must be a fraction in (0, 1] "
+                f"(e.g. 0.25 = 25% of interval volume), got "
+                f"{self.worked_max_participation_pct}")
+        if float(self.worked_max_participation_pct) < float(
+                self.worked_participation_pct):
+            raise ValueError(
+                "worked_max_participation_pct (adaptive ceiling) must be >= "
+                "worked_participation_pct (normal impact cap): got "
+                f"{self.worked_max_participation_pct} < "
+                f"{self.worked_participation_pct}")
+        if int(self.worked_vwap_profile_days) < 1:
+            raise ValueError(
+                "worked_vwap_profile_days must be an integer >= 1, got "
+                f"{self.worked_vwap_profile_days}")
         # marketable_buffer_pct is a FRACTION in (0, 0.5] (same units as every
         # other pct); a mis-scaled 5.0 would push the "marketable" price 500%
         # through the touch (before the circuit cap) — reject at the door. It is
@@ -1168,6 +1212,10 @@ class TradingSessionConfig:
             worked_deadline=(d.get("worked_deadline") or None),
             worked_min_child_qty=int(d.get("worked_min_child_qty", 1)),
             worked_max_children=int(d.get("worked_max_children", 500)),
+            worked_vwap_enabled=bool(d.get("worked_vwap_enabled", False)),
+            worked_max_participation_pct=float(
+                d.get("worked_max_participation_pct", 0.25)),
+            worked_vwap_profile_days=int(d.get("worked_vwap_profile_days", 20)),
             entry_quote_max_age_sec=float(
                 d.get("entry_quote_max_age_sec", 10.0)),
             entry_stale_quote_policy=d.get("entry_stale_quote_policy", "market"),
