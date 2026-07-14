@@ -67,35 +67,51 @@ def test_options_ce_pe_hard_blocked_by_default(monkeypatch):
                          top_n_stocks=5).validate()
 
 
-# ── Custom-whitelist basket-size (2026-07-13 fix) ─────────────────────────────
+# ── Custom-whitelist basket-size (2026-07-13 fix; cap raised 10→50 same day) ──
 # The Top-50 picker lets users set the browse-slider (top_n_stocks) to 20/50 and
-# hand-pick specific names. The basket-size cap (3..10) must apply to the ACTUAL
+# hand-pick specific names. The basket-size bound (3..50) must apply to the ACTUAL
 # traded set: len(symbol_whitelist) when a custom list is set, else top_n_stocks.
+# The upper bound was raised 10→50 so a session can deploy more capital across
+# more names.
 # REVERT (mutation): change the check back to `self.top_n_stocks` and
-# test_custom_whitelist_defines_basket_size FAILS (top_n_stocks=20 → 400).
+# test_custom_whitelist_defines_basket_size FAILS (top_n_stocks=60 → rejected).
 
 def test_custom_whitelist_defines_basket_size():
-    # 7 hand-picked names with the browse-slider at 20 → VALID (basket = 7 names).
-    _cfg(top_n_stocks=20,
+    # 7 hand-picked names with the browse-slider ABOVE the cap (60) → VALID,
+    # because the basket = the 7-name whitelist, NOT top_n_stocks. (Mutation:
+    # validate top_n_stocks instead → 60 > 50 → rejected → this FAILS.)
+    _cfg(top_n_stocks=60,
          symbol_whitelist=["SWIGGY", "MAPMYINDIA", "WELCORP", "NAUKRI",
                            "LODHA", "BLUEJET", "CEMPRO"]).validate()
 
 
-def test_no_whitelist_top_n_still_capped():
-    # Without a custom list, top_n_stocks IS the basket → 20 rejected (unchanged).
+def test_no_whitelist_top_n_now_allows_up_to_50():
+    # Cap raised 10→50: 20 and 50 are now VALID basket sizes (were rejected before).
+    _cfg(top_n_stocks=20).validate()
+    _cfg(top_n_stocks=50).validate()
+
+
+def test_no_whitelist_top_n_over_50_rejected():
+    # Above the new ceiling (50) is still rejected (fat-finger guard).
     try:
-        _cfg(top_n_stocks=20).validate()
-        assert False, "top_n_stocks=20 without a whitelist must be rejected"
+        _cfg(top_n_stocks=51).validate()
+        assert False, "top_n_stocks=51 without a whitelist must be rejected"
     except ValueError as e:
-        assert "3..10" in str(e) and "top_n_stocks" in str(e)
+        assert "3..50" in str(e) and "top_n_stocks" in str(e)
+
+
+def test_whitelist_up_to_50_now_valid():
+    # A 20-name hand-picked basket is now VALID (cap raised 10→50).
+    _cfg(top_n_stocks=50,
+         symbol_whitelist=[f"S{i}" for i in range(20)]).validate()
 
 
 def test_whitelist_over_cap_rejected():
     try:
-        _cfg(top_n_stocks=5, symbol_whitelist=[f"S{i}" for i in range(12)]).validate()
-        assert False, "a 12-name custom basket must be rejected (cap 10)"
+        _cfg(top_n_stocks=5, symbol_whitelist=[f"S{i}" for i in range(51)]).validate()
+        assert False, "a 51-name custom basket must be rejected (cap 50)"
     except ValueError as e:
-        assert "3..10" in str(e) and "custom selection" in str(e)
+        assert "3..50" in str(e) and "custom selection" in str(e)
 
 
 def test_whitelist_under_min_rejected():
@@ -103,4 +119,4 @@ def test_whitelist_under_min_rejected():
         _cfg(top_n_stocks=5, symbol_whitelist=["A", "B"]).validate()
         assert False, "a 2-name custom basket must be rejected (min 3)"
     except ValueError as e:
-        assert "3..10" in str(e)
+        assert "3..50" in str(e)

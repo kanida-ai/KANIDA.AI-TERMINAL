@@ -911,18 +911,22 @@ class TradingSessionConfig:
                 raise ValueError(
                     f"square_off_time ({self.square_off_time}) must be after "
                     f"entry_time ({self.entry_time})")
-            # Basket-size cap applies to the ACTUAL traded set. A custom
+            # Basket-size bound applies to the ACTUAL traded set. A custom
             # symbol_whitelist DEFINES the basket (top_n_stocks is then only the
-            # picker's browse depth, which may be 20/50), so validate the
-            # whitelist size; else validate top_n_stocks. Either way the intraday
-            # basket must be 3..10 names (the backtest-validated size).
+            # picker's browse depth), so validate the whitelist size; else
+            # validate top_n_stocks. The upper bound was raised 10 -> 50 (the max
+            # the Top-50 picker/ranker surfaces) so a session can spread MORE
+            # capital across MORE names: sizing redistributes across whatever
+            # picks exist and never over-deploys, router_cap uses len(picks), and
+            # the basket trail is size-agnostic. A floor of 3 keeps the basket
+            # trail meaningful. (Beyond 50 needs the ranker to surface more names.)
             _basket_n = (len(self.symbol_whitelist)
                          if self.symbol_whitelist else self.top_n_stocks)
-            if _basket_n < 3 or _basket_n > 10:
+            if _basket_n < 3 or _basket_n > 50:
                 _src = ("custom selection" if self.symbol_whitelist
                         else "top_n_stocks")
                 raise ValueError(
-                    "intraday_basket basket size must be 3..10 names "
+                    "intraday_basket basket size must be 3..50 names "
                     f"({_src}), got {_basket_n}")
             # POSITIONAL (no forced square-off) is incompatible with MIS: an MIS
             # position CANNOT be carried overnight — the broker compulsorily
