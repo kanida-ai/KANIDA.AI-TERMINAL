@@ -224,12 +224,13 @@ class TradingSessionConfig:
     # Entry-selection only: exits / the intraday step-lock trail are UNCHANGED.
     tesla_did_layer_enabled: bool = False
     # PERF flag — vectorised (multi-group) once-per-minute feature pipeline.
-    # OPT-IN, default OFF → the committed per-group loop (the reviewed ~46s path)
-    # stays the default. When True the recompute uses the sub-10s vectorised
-    # microstructure + phase-transition + DiD pre-mean, which is BYTE-IDENTICAL to
-    # the loop (proven by the full-day, all-columns, minute-by-minute parity test).
-    # Pure speed: it changes NO signal, threshold, exit, or order behaviour.
-    tesla_vectorized_features: bool = False
+    # DEFAULT ON (activated 2026-07-15 after independent full-day parity review).
+    # The vectorised microstructure + phase-transition + DiD pre-mean is
+    # BYTE-IDENTICAL to the committed per-group loop (proven by the full-day,
+    # all-columns, minute-by-minute parity test, mutation-verified + live-data
+    # identical) and ~2.4x faster. It changes NO signal, threshold, exit, or
+    # order behaviour — pure speed. Set False to fall back to the per-group loop.
+    tesla_vectorized_features: bool = True
 
     # Position sizing
     sizing_mode: str = "equal"             # equal | pct_cap | manual
@@ -1207,7 +1208,7 @@ class TradingSessionConfig:
             tesla_did_layer_enabled=bool(
                 d.get("tesla_did_layer_enabled", False)),
             tesla_vectorized_features=bool(
-                d.get("tesla_vectorized_features", False)),
+                d.get("tesla_vectorized_features", True)),
             sizing_mode=d.get("sizing_mode", "equal"),
             max_pct_per_position=float(d.get("max_pct_per_position", 0.05)),
             manual_amounts=d.get("manual_amounts", {}) or {},
