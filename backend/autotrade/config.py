@@ -289,6 +289,35 @@ class TradingSessionConfig:
     # the lock breaks); with no usable price the caller uses a MARKET fallback.
     marketable_buffer_pct: float = 0.003
 
+    # ── WORKED-ORDER (participation / TWAP) execution (additive, DEFAULT-OFF) ──
+    # execution_mode == "worked" WORKS a large entry BUILD / exit UNWIND into many
+    # child slices PACED OVER TIME (backend/autotrade/execution/worked_order.py),
+    # instead of a single market shot — required for very large size (₹cr/name)
+    # where one order moves the price or exceeds the exchange FREEZE quantity. The
+    # child pacing is POV (participation_pct × recent-interval volume) with a TWAP
+    # FLOOR (guarantees progress when the volume read is stale/zero) and a hard
+    # per-child FREEZE-QTY cap (reuses the iceberg freeze map). Each child goes
+    # through the EXISTING safe place path (durable ledger, unique client_order_id,
+    # query-before-retry, fill reconciliation). It PACES to limit impact — it does
+    # NOT cap the TARGET and never drops a pick; a thin name partial-fills and the
+    # SHORTFALL is surfaced. Inert unless execution_mode=="worked": "market" /
+    # "marketable_limit" are byte-for-byte unchanged (one-shot). Paper simulates
+    # child fills off the live LTP (no real orders).
+    #   worked_participation_pct : FRACTION of recent-interval volume per child (POV).
+    #   worked_interval_sec      : the pacing interval between children (seconds).
+    #   worked_deadline          : IST clock ("HH:MM[:SS]") to stop working; None →
+    #                              use square_off_time (the intraday flatten).
+    #   worked_min_child_qty     : minimum child size (avoid dust), bounded by the
+    #                              remaining qty + the freeze cap.
+    #   worked_max_children      : hard safety cap on the number of child slices.
+    # The per-child FREEZE cap reuses iceberg_freeze_qty_default / _map, so those
+    # can be set independently of iceberg_enabled when execution_mode=="worked".
+    worked_participation_pct: float = 0.10
+    worked_interval_sec: int = 20
+    worked_deadline: Optional[str] = None
+    worked_min_child_qty: int = 1
+    worked_max_children: int = 500
+
     # ── MARK-STALENESS ABSTAIN (SPRINT CLUSTER 5 ITEM 2, real-money safety) ───
     # The mark (LTP) that drives the kill switch / trail can fall back to
     # yesterday's ohlc_daily close on a live-data outage. A daily-close mark must
@@ -624,11 +653,35 @@ class TradingSessionConfig:
             raise ValueError(f"invalid sizing_mode: {self.sizing_mode}")
         if self.order_type not in ("MARKET", "LIMIT", "VWAP"):
             raise ValueError(f"invalid order_type: {self.order_type}")
-        # ── QUOTE-DRIVEN MARKETABLE-LIMIT execution ───────────────────────────
-        if self.execution_mode not in ("market", "marketable_limit"):
+        # ── QUOTE-DRIVEN MARKETABLE-LIMIT + WORKED-ORDER execution ────────────
+        if self.execution_mode not in ("market", "marketable_limit", "worked"):
             raise ValueError(
-                "invalid execution_mode (market | marketable_limit): "
+                "invalid execution_mode (market | marketable_limit | worked): "
                 f"{self.execution_mode}")
+        # WORKED-ORDER knobs — validated whenever SET (a saved preset must round-
+        # trip valid values); the participation pct is a FRACTION in (0, 1].
+        if not (0.0 < float(self.worked_participation_pct) <= 1.0):
+            raise ValueError(
+                "worked_participation_pct must be a fraction in (0, 1] "
+                f"(e.g. 0.10 = 10% of interval volume), got "
+                f"{self.worked_participation_pct}")
+        if int(self.worked_interval_sec) < 1:
+            raise ValueError(
+                "worked_interval_sec must be an integer >= 1 (seconds), got "
+                f"{self.worked_interval_sec}")
+        if int(self.worked_min_child_qty) < 1:
+            raise ValueError(
+                "worked_min_child_qty must be an integer >= 1, got "
+                f"{self.worked_min_child_qty}")
+        if int(self.worked_max_children) < 1:
+            raise ValueError(
+                "worked_max_children must be an integer >= 1, got "
+                f"{self.worked_max_children}")
+        if self.worked_deadline is not None and str(self.worked_deadline).strip():
+            try:
+                _parse_clock_to_seconds(self.worked_deadline)
+            except ValueError as e:
+                raise ValueError(f"worked_deadline {e}")
         # marketable_buffer_pct is a FRACTION in (0, 0.5] (same units as every
         # other pct); a mis-scaled 5.0 would push the "marketable" price 500%
         # through the touch (before the circuit cap) — reject at the door. It is
@@ -1109,6 +1162,12 @@ class TradingSessionConfig:
                             or os.environ.get("FALCON_AUTOTRADE_EXECUTION_MODE",
                                               "marketable_limit")),
             marketable_buffer_pct=float(d.get("marketable_buffer_pct", 0.003)),
+            worked_participation_pct=float(
+                d.get("worked_participation_pct", 0.10)),
+            worked_interval_sec=int(d.get("worked_interval_sec", 20)),
+            worked_deadline=(d.get("worked_deadline") or None),
+            worked_min_child_qty=int(d.get("worked_min_child_qty", 1)),
+            worked_max_children=int(d.get("worked_max_children", 500)),
             entry_quote_max_age_sec=float(
                 d.get("entry_quote_max_age_sec", 10.0)),
             entry_stale_quote_policy=d.get("entry_stale_quote_policy", "market"),

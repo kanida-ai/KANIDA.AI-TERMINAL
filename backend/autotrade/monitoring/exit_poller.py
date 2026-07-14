@@ -533,6 +533,182 @@ async def slice_and_confirm_exit(
             "symbol": symbol, "iceberg": True, "stopped_reason": stopped_reason}
 
 
+async def work_and_confirm_exit(
+    *,
+    session_id: str,
+    symbol: str,
+    total_qty: int,
+    broker: Any,
+    registry: Any,
+    close_reason: str,
+    exec_cfg: Any,
+    broker_profile: Optional[str] = None,
+    direction: str = "long",
+    instrument_type: str = "EQ",
+    kite_product: Optional[str] = None,
+    parent_exit_coid: Optional[str] = None,
+    status_provider: Optional[Callable[[str], dict]] = None,
+    deadline_ts: Optional[float] = None,
+    max_wait_sec: int = 60,
+    poll_interval_sec: float = 5.0,
+    now_fn: Optional[Callable[[], float]] = None,
+    sleep_fn: Optional[Callable[[float], Any]] = None,
+    volume_fn: Optional[Callable[[str], Optional[float]]] = None,
+) -> Dict[str, Any]:
+    """WORKED (participation / TWAP) EXIT — the PACED sibling of
+    slice_and_confirm_exit. Instead of firing all freeze-cap child legs
+    back-to-back, it sizes each child by POV (worked_participation_pct × recent
+    volume) with a TWAP floor + freeze cap and SPACES them by worked_interval_sec
+    until the (tighter) deadline — so a ₹125cr flatten does not slam the book in one
+    burst. Reuses the SAME child primitives (place_market_exit → EXIT_PLACED ledger
+    → poll_order_fill) and books ONCE at the end (mark_closed on full cover; else
+    update_partial_exit + mark_exit_failed on the remainder), IDENTICAL disposition
+    to slice_and_confirm_exit.
+
+    `total_qty` MUST already be the C1-clamped our_held qty (the caller clamps
+    first). Single-flight / the exit_gate claim is the CALLER's responsibility (the
+    whole worked exit runs under ONE claim), matching slice_and_confirm_exit.
+    Injection (tests): now_fn / sleep_fn / volume_fn / deadline_ts.
+
+    DEFAULT-OFF: only reached when exec_cfg.execution_mode == "worked". A paper
+    (DRY_RUN) broker fills each child immediately (no poll), byte-for-byte with the
+    iceberg-exit paper path."""
+    from ..execution import worked_order as _wo
+    from .. import iceberg as _iceberg
+
+    total = int(total_qty)
+    parent = parent_exit_coid or _order_ledger.make_client_order_id(
+        session_id, symbol)
+    agg = {"weighted": 0.0, "oids": [], "n": 0}
+
+    async def _place_child(*, idx: int, qty: int, recent_volume=None):
+        leg_qty = int(qty)
+        child_coid = f"{parent}-XW{idx}"
+        try:
+            res = await broker.place_market_exit(
+                symbol, leg_qty, instrument_type, kite_product=kite_product,
+                direction=direction, exec_cfg=exec_cfg, client_order_id=child_coid)
+        except Exception as e:
+            return {"filled_qty": 0, "avg_price": 0.0, "rejected": True,
+                    "error": f"place raised: {e}"}
+        if res is None or getattr(res, "status", None) == "FAILED":
+            return {"filled_qty": 0, "avg_price": 0.0, "rejected": True,
+                    "error": getattr(res, "error", None) or "exit child rejected"}
+        oid = getattr(res, "broker_order_id", None)
+        is_dry = (oid is None or str(oid).upper() in ("DRY_RUN", "NONE", ""))
+        _order_ledger.append_event(
+            session_id=session_id, symbol=symbol,
+            event_type=_order_ledger.EV_EXIT_PLACED,
+            broker_profile=broker_profile, broker_order_id=oid,
+            client_order_id=child_coid, qty=leg_qty,
+            source="exit", detail=f"{close_reason}:worked-child-{idx}")
+        if is_dry:
+            agg["n"] += 1
+            return {"filled_qty": leg_qty, "avg_price": 0.0, "status": "DRY_RUN",
+                    "broker_order_id": oid, "client_order_id": child_coid}
+        fill = await poll_order_fill(
+            oid, leg_qty, broker, max_wait_sec=max_wait_sec,
+            poll_interval_sec=poll_interval_sec, status_provider=status_provider)
+        st = fill.get("status")
+        fq = int(fill.get("filled_qty") or 0)
+        px = fill.get("avg_price")
+        if st in ("COMPLETE", "DRY_RUN"):
+            # A COMPLETE child filled its FULL leg_qty by definition (mirror
+            # slice_and_confirm_exit — never trust a possibly-cumulative poll
+            # filled_qty for the accounting).
+            agg["n"] += 1
+            if px:
+                agg["weighted"] += float(px) * leg_qty
+            if oid:
+                agg["oids"].append(str(oid))
+            return {"filled_qty": leg_qty, "avg_price": float(px or 0.0),
+                    "status": st, "broker_order_id": oid,
+                    "client_order_id": child_coid}
+        if st == "PARTIAL":
+            if px and fq > 0:
+                agg["weighted"] += float(px) * fq
+            if oid:
+                agg["oids"].append(str(oid))
+            # Cancel the resting remainder so it can't fill alongside a retry, then
+            # STOP the worked exit (remainder → EXIT_FAILED for the guarded retry).
+            try:
+                await asyncio.to_thread(broker.cancel_order_sync, oid)
+            except Exception as _ce:  # pragma: no cover - best-effort
+                log.warning("worked exit %s/%s: cancel of partial child %s failed: %s",
+                            session_id, symbol, oid, _ce)
+            return {"filled_qty": fq, "avg_price": float(px or 0.0),
+                    "stop_after": True, "status": "PARTIAL",
+                    "reason": f"child {idx} PARTIAL {fq}/{leg_qty}"}
+        # TIMEOUT / REJECTED / CANCELLED — cancel any resting order, stop.
+        try:
+            await asyncio.to_thread(broker.cancel_order_sync, oid)
+        except Exception:  # pragma: no cover - best-effort
+            pass
+        return {"filled_qty": 0, "avg_price": 0.0, "stop_after": True,
+                "status": st, "reason": f"child {idx} {st}"}
+
+    freeze_cap = None
+    try:
+        freeze_cap = _iceberg.freeze_cap_for(exec_cfg, symbol)
+    except Exception:  # pragma: no cover - defensive
+        freeze_cap = None
+    if deadline_ts is None:
+        deadline_ts = _wo.resolve_deadline_ts(exec_cfg, tighten_exit=True)
+    _side = "BUY" if str(direction).lower() == "short" else "SELL"
+    wp = _wo.WorkedParent(
+        symbol=symbol, side=_side, target_qty=total, kind="exit",
+        product=(kite_product or instrument_type), instrument_type=instrument_type,
+        session_id=session_id, broker_profile=broker_profile,
+        deadline_ts=deadline_ts,
+        interval_sec=float(getattr(exec_cfg, "worked_interval_sec", 20)),
+        participation_pct=float(getattr(exec_cfg, "worked_participation_pct", 0.10)),
+        freeze_cap=freeze_cap,
+        min_child_qty=int(getattr(exec_cfg, "worked_min_child_qty", 1)),
+        max_children=int(getattr(exec_cfg, "worked_max_children", 500)))
+    result = await _wo.work_order(
+        wp, place_child=_place_child, volume_fn=volume_fn, now_fn=now_fn,
+        sleep_fn=sleep_fn)
+
+    filled_total = int(result.filled_qty)
+    avg_px = (agg["weighted"] / filled_total) if (filled_total > 0
+                                                  and agg["weighted"] > 0) else None
+    primary_oid = agg["oids"][0] if agg["oids"] else None
+    n_children = agg["n"]
+
+    if filled_total >= total:
+        registry.mark_closed(symbol, close_reason, exit_price=avg_px,
+                             broker_profile=broker_profile,
+                             exit_order_id=primary_oid)
+        log.warning("worked exit %s/%s: FULL cover %d across %d child(ren) @ %s "
+                    "— CLOSED", session_id, symbol, filled_total, n_children, avg_px)
+        return {"status": "COMPLETE", "filled_qty": filled_total,
+                "exit_price": avg_px, "n_children": n_children, "symbol": symbol,
+                "worked": True}
+    if filled_total > 0:
+        registry.update_partial_exit(symbol, filled_total, avg_px,
+                                     broker_profile=broker_profile)
+        remaining = total - filled_total
+        registry.mark_exit_failed(
+            symbol, f"worked exit partial: covered {filled_total}/{total} "
+            f"({result.stopped_reason})", broker_profile=broker_profile,
+            exit_order_id=primary_oid)
+        log.error("worked exit %s/%s: PARTIAL cover %d/%d — remainder %d "
+                  "EXIT_FAILED for guarded retry (%s)", session_id, symbol,
+                  filled_total, total, remaining, result.stopped_reason)
+        return {"status": "EXIT_FAILED", "filled_qty": filled_total,
+                "remaining_qty": remaining, "exit_price": avg_px,
+                "n_children": n_children, "symbol": symbol, "worked": True,
+                "partial": True, "stopped_reason": result.stopped_reason}
+    registry.mark_exit_failed(
+        symbol, f"worked exit: no child filled ({result.stopped_reason})",
+        broker_profile=broker_profile)
+    log.error("worked exit %s/%s: NO child filled — EXIT_FAILED (%s)",
+              session_id, symbol, result.stopped_reason)
+    return {"status": "EXIT_FAILED", "filled_qty": 0, "n_children": 0,
+            "symbol": symbol, "worked": True,
+            "stopped_reason": result.stopped_reason}
+
+
 async def adopt_tagged_exit_if_present(
     session_id: str,
     symbol: str,

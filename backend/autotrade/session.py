@@ -1383,6 +1383,27 @@ async def _exit_single_position_inner(
     # type ("EQ"), not the trading product ("MTF"/"CNC"). Without this, MTF exits
     # become CNC sells and Kite rejects them with "Holding quantity: 0".
     effective_product = kite_product or position.get("order_product")
+    # ── WORKED EXIT (participation / TWAP, execution_mode=="worked") ──────────
+    # A large exit for a worked-mode session is PACED over time (POV + TWAP floor
+    # + freeze cap) instead of one shot / one immediate iceberg burst. `qty` here
+    # is ALREADY the C1-clamped our_held qty, so the paced children can never
+    # oversell. Runs under the SAME single exit-flight + exit_gate claim. Default-
+    # off: any other execution_mode falls through to the unchanged iceberg / one-
+    # shot path below (byte-for-byte). Paper fills each child immediately.
+    if getattr(exec_cfg, "execution_mode", "market") == "worked":
+        from autotrade.monitoring.exit_poller import work_and_confirm_exit
+        _vf = None
+        if not (getattr(broker, "dry_run", False)):
+            from autotrade.execution.worked_order import recent_interval_volume
+            _vf = recent_interval_volume
+        log.warning("exit %s/%s: WORKED (paced) exit of %d (reason=%s)",
+                    session_id, symbol, int(qty), reason)
+        return await work_and_confirm_exit(
+            session_id=session_id, symbol=symbol, total_qty=int(qty),
+            broker=broker, registry=registry, close_reason=reason,
+            exec_cfg=exec_cfg, broker_profile=prof_id, direction=direction,
+            instrument_type=itype, kite_product=effective_product,
+            parent_exit_coid=exit_coid, deadline_ts=None, volume_fn=_vf)
     # ── EXIT ICEBERG (SPRINT CLUSTER 8, additive, DEFAULT-OFF) ────────────────
     # A large exit (qty > the effective slice/freeze cap) is sliced into child
     # exits placed SEQUENTIALLY, each confirmed, aggregated; the position CLOSES
@@ -2349,6 +2370,16 @@ class TradingSession:
                         "committed_other": _rms_refusal.committed_other,
                         "planned_deployed": _rms_refusal.planned_deployed}
 
+        # ── WORKED-ORDER (participation / TWAP) entry (execution_mode=="worked").
+        # Default-off: "market" / "marketable_limit" fall through to the unchanged
+        # one-shot gather below (byte-for-byte). Worked mode spawns one background
+        # build task per leg (paced over the window) and returns RUNNING now — the
+        # RMS pre-trade gate + skipped-picks above already ran on the TARGET size.
+        if getattr(self.config, "execution_mode", "market") == "worked":
+            return await self._fire_entries_worked(
+                leg_specs, skipped_picks, _fire_t0, margin_fallback_warnings,
+                degraded_profiles)
+
         leg_coros = [
             _guarded_place(broker, prof, pick, amount, allocator, cache,
                            forced_qty=qty, quote=quote)
@@ -2853,9 +2884,17 @@ class TradingSession:
     async def _place_confirm_child(self, broker, prof, symbol: str,
                                    leg_qty: int, ref_price: float,
                                    quote: Optional[Dict[str, Any]],
-                                   client_order_id: str, tag: str
+                                   client_order_id: str, tag: str,
+                                   force_marketable: bool = False
                                    ) -> Dict[str, Any]:
         """ICEBERG (CAP 2) — place + confirm ONE child leg of an iceberg ENTRY.
+
+        force_marketable (WORKED-ORDER): price the child as a marketable-LIMIT
+        within the circuit band REGARDLESS of execution_mode. A worked-order
+        session uses execution_mode=="worked" (not "marketable_limit"), but every
+        worked CHILD must still be a circuit-aware marketable-limit — this flag
+        makes that pricing engage without changing the one-shot execution_mode
+        semantics. Default False = the existing iceberg behaviour (byte-for-byte).
 
         Mirrors _place_one's place+reconcile CORE (marketable-limit pricing,
         rejection guard, fill reconciliation, phantom-fill guard) but does NOT
@@ -2881,8 +2920,10 @@ class TradingSession:
             instrument_type=prof.instrument_type, source="entry_iceberg")
         if order.order_type == "LIMIT" and ref_price and ref_price > 0:
             order.price = order.compute_limit_price(ref_price)
-        # QUOTE-DRIVEN pricing (marketable_limit only) — mirrors _place_one.
-        if getattr(self.config, "execution_mode", "market") == "marketable_limit":
+        # QUOTE-DRIVEN pricing (marketable_limit OR a forced worked child) —
+        # mirrors _place_one.
+        if force_marketable or getattr(
+                self.config, "execution_mode", "market") == "marketable_limit":
             from .execution.quote_pricer import plan_marketable_order
             side = "SELL" if getattr(self.config, "direction", "long") \
                 == "short" else "BUY"
@@ -3054,6 +3095,225 @@ class TradingSession:
                 "n_children": n_children, "child_order_ids": child_oids,
                 "reconciled": any_reconciled, "ordered_qty": int(total_qty),
                 "partial": partial_iceberg, "stopped_reason": stopped_reason}
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # WORKED ORDER (participation / TWAP) — large-size entry BUILD + exit UNWIND
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _worked_deadline_ts(self, *, exit_side: bool = False) -> Optional[float]:
+        """The epoch-seconds deadline the worked engine paces toward (delegates to
+        worked_order.resolve_deadline_ts — worked_deadline else square_off_time;
+        exit_side tightens it)."""
+        from .execution.worked_order import resolve_deadline_ts
+        return resolve_deadline_ts(self.config, tighten_exit=exit_side)
+
+    def _register_worked_position(self, prof, register_symbol: str,
+                                  filled_total: int, avg_px: float,
+                                  exchange: Optional[str], first_oid: Optional[str],
+                                  parent_coid: str, direction: str) -> None:
+        """Incrementally UPSERT the growing worked position (running total qty +
+        quantity-weighted-average fill) so the monitor/kill/trail see it LIVE during
+        the build, then keep the kill/trail denominator matching the built book
+        (refreeze_invested_basis). register() is an UPSERT keyed by
+        (session, symbol, profile) → the SAME row grows child by child."""
+        acct_id = getattr(prof, "broker_account_id", None)
+        self.registry.register(
+            symbol=register_symbol, broker_profile=prof.profile_id,
+            qty=int(filled_total), avg_price=float(avg_px),
+            product=prof.order_product, instrument_type=prof.instrument_type,
+            exchange=exchange, broker_account_id=acct_id, direction=direction,
+            entry_order_id=first_oid, client_order_id=parent_coid)
+        try:
+            self.monitor.refreeze_invested_basis()
+        except Exception as e:  # pragma: no cover - never block the build
+            log.debug("worked %s refreeze_invested_basis failed: %s",
+                      register_symbol, e)
+
+    async def _work_entry_leg(self, broker, prof, symbol: str, target_qty: int,
+                              ref_price: float, *,
+                              now_fn=None, sleep_fn=None, volume_fn=None,
+                              deadline_ts=None) -> Dict[str, Any]:
+        """WORK one entry leg into `target_qty` shares PACED over time, reusing the
+        safe child path (_place_confirm_child: ledger, unique client_order_id per
+        child, query-before-retry, fill reconciliation, phantom-fill guard). Each
+        confirmed child grows ONE aggregate position (incrementally registered) and
+        refreezes the kill/trail basis. Accepts partials; surfaces the SHORTFALL.
+
+        Injection (tests): now_fn / sleep_fn / volume_fn / deadline_ts. Production
+        uses time.time / asyncio.sleep / the poller volume reader / the resolved
+        worked deadline."""
+        from .execution import worked_order as _wo
+        _direction = getattr(self.config, "direction", "long")
+        _side = "SELL" if _direction == "short" else "BUY"
+        parent_coid = order_ledger.make_client_order_id(self.session_id, symbol)
+        # Accumulators shared with the place_child closure so the position grows
+        # child-by-child (live-monitored) rather than only at the end.
+        agg = {"filled": 0, "weighted": 0.0, "order_symbol": symbol,
+               "exchange": None, "first_oid": None}
+
+        async def _place_child(*, idx: int, qty: int, recent_volume=None):
+            child_coid = f"{parent_coid}-W{idx}"
+            child_tag = order_ledger.compact_tag(child_coid)
+            # A FRESH live book per child (the book moves across the window) so each
+            # child is a circuit-aware marketable-limit.
+            quote = None
+            try:
+                qmap = broker.get_quotes([symbol])
+                quote = (qmap or {}).get(symbol)
+            except Exception:  # pragma: no cover - defensive; MARKET fallback inside
+                quote = None
+            child = await self._place_confirm_child(
+                broker, prof, symbol, int(qty), ref_price, quote,
+                child_coid, child_tag, force_marketable=True)
+            if child.get("skip"):
+                return {"filled_qty": 0, "avg_price": 0.0, "status": "SKIP",
+                        "skip": True, "reason": child.get("reason"),
+                        "client_order_id": child_coid}
+            if child.get("rejected"):
+                return {"filled_qty": 0, "avg_price": 0.0, "status": "REJECTED",
+                        "rejected": True, "error": child.get("error"),
+                        "client_order_id": child_coid}
+            fq = int(child["fill_qty"])
+            fp = float(child["fill_price"])
+            if fq > 0:
+                agg["filled"] += fq
+                agg["weighted"] += fq * fp
+                if agg["first_oid"] is None:
+                    agg["first_oid"] = child.get("broker_order_id")
+                agg["order_symbol"] = child.get("order_symbol") or agg["order_symbol"]
+                agg["exchange"] = child.get("exchange") or agg["exchange"]
+                _reg_symbol = (agg["order_symbol"] if prof.instrument_type == "FUT"
+                               else symbol)
+                self._register_worked_position(
+                    prof, _reg_symbol, agg["filled"],
+                    agg["weighted"] / agg["filled"], agg["exchange"],
+                    agg["first_oid"], parent_coid, _direction)
+            return {"filled_qty": fq, "avg_price": fp,
+                    "status": child.get("res_status") or "OK",
+                    "broker_order_id": child.get("broker_order_id"),
+                    "client_order_id": child_coid}
+
+        freeze_cap = None
+        try:
+            from . import iceberg as _ice
+            freeze_cap = _ice.freeze_cap_for(self.config, symbol)
+        except Exception:  # pragma: no cover - defensive
+            freeze_cap = None
+        parent = _wo.WorkedParent(
+            symbol=symbol, side=_side, target_qty=int(target_qty), kind="entry",
+            product=prof.order_product, instrument_type=prof.instrument_type,
+            session_id=self.session_id, broker_profile=prof.profile_id,
+            deadline_ts=(deadline_ts if deadline_ts is not None
+                         else self._worked_deadline_ts()),
+            interval_sec=float(getattr(self.config, "worked_interval_sec", 20)),
+            participation_pct=float(getattr(self.config,
+                                            "worked_participation_pct", 0.10)),
+            freeze_cap=freeze_cap,
+            min_child_qty=int(getattr(self.config, "worked_min_child_qty", 1)),
+            max_children=int(getattr(self.config, "worked_max_children", 500)))
+        _vol_fn = volume_fn
+        if _vol_fn is None and not self.dry_run:
+            _vol_fn = _wo.recent_interval_volume
+        result = await _wo.work_order(
+            parent, place_child=_place_child, volume_fn=_vol_fn,
+            now_fn=now_fn, sleep_fn=sleep_fn)
+        # GTT-OCO backup on the built worked position (best-effort; positions
+        # appear over the window so this runs after the build).
+        try:
+            if self.config.per_position_gtt_enabled and self.gtt_manager:
+                self.gtt_manager.backfill_missing()
+        except Exception as e:  # pragma: no cover - never block on the backup
+            log.warning("worked %s GTT backfill failed: %s", symbol, e)
+        if result.shortfall > 0:
+            log.warning("session %s: WORKED entry %s SHORTFALL — target %d filled "
+                        "%d (%d short) across %d children (%s)", self.session_id,
+                        symbol, result.target_qty, result.filled_qty,
+                        result.shortfall, result.n_children, result.stopped_reason)
+        _status = ("FAILED" if result.filled_qty == 0
+                   else ("PARTIAL" if result.shortfall > 0 else "PLACED"))
+        return {"symbol": symbol, "status": _status, "qty": result.filled_qty,
+                "price": result.avg_fill_price, "broker_order_id": agg["first_oid"],
+                "broker_profile": prof.profile_id, "worked": True,
+                "n_children": result.n_children, "shortfall": result.shortfall,
+                "target_qty": result.target_qty,
+                "stopped_reason": result.stopped_reason,
+                "ordered_qty": int(target_qty)}
+
+    async def _fire_entries_worked(self, leg_specs: List[tuple],
+                                   skipped_picks: List[Dict[str, Any]],
+                                   fire_t0: float,
+                                   margin_fallback_warnings: List[Dict[str, Any]],
+                                   degraded_profiles: List[Dict[str, Any]]
+                                   ) -> Dict[str, Any]:
+        """WORKED-mode entry: spawn ONE background worked-build task per leg and
+        return RUNNING immediately (the build runs over the pacing window; blocking
+        _fire_entries for hours would be wrong). Each task grows + protects its
+        position as it fills. Drivers/square-off arm now so the growing book is
+        monitored from the first child. A worked session with NO tradeable legs is
+        FAILED like the one-shot path."""
+        specs: List[tuple] = []
+        for (broker, prof, pick, amount, allocator, cache, qty, quote) in leg_specs:
+            ref_price = 0.0
+            if cache and pick.symbol in cache and (cache.get(pick.symbol) or {}).get("ltp"):
+                ref_price = float(cache[pick.symbol]["ltp"])
+            elif ref_price <= 0:
+                try:
+                    ref_price = float(broker.get_ltp(pick.symbol) or 0.0)
+                except Exception:  # pragma: no cover - defensive
+                    ref_price = 0.0
+            specs.append((broker, prof, pick.symbol, int(qty), ref_price))
+        if not specs:
+            reason = ("no positions worked — no tradeable picks for this worked "
+                      "session (all skipped / not eligible)")
+            self._set_status("FAILED", reason=reason, closed_at=_now_ist_iso())
+            log.error("session %s marked FAILED: %s", self.session_id, reason)
+            return {"session_id": self.session_id, "status": "FAILED",
+                    "mode": self.mode, "n_placed": 0, "orders": [],
+                    "skipped_picks": skipped_picks, "reason": reason}
+        # Seed the kill/trail basis (falls back to total_allocated_capital with 0
+        # positions); each leg refreezes to the actual built notional as it fills.
+        try:
+            self.monitor.freeze_invested_basis()
+        except Exception as e:  # pragma: no cover - never block start
+            log.warning("worked invested_basis seed failed for %s: %s",
+                        self.session_id, e)
+        # Arm the monitors NOW so the growing book is watched from the first child.
+        for _name, _fn in (("tick", lambda: tick_driver.start_for_session(self.session_id)),
+                           ("ws", lambda: ws_driver.start_for_session(self.session_id))):
+            try:
+                _fn()
+            except Exception as e:  # pragma: no cover - never block start
+                log.warning("worked %s driver start failed for %s: %s",
+                            _name, self.session_id, e)
+        try:
+            self._arm_square_off()
+        except Exception as e:  # pragma: no cover
+            log.warning("worked square-off arm failed for %s: %s", self.session_id, e)
+        if not hasattr(self, "_worked_entry_tasks"):
+            self._worked_entry_tasks = set()
+        loop = asyncio.get_event_loop()
+        for (broker, prof, symbol, target_qty, ref_price) in specs:
+            task = loop.create_task(
+                self._work_entry_leg(broker, prof, symbol, target_qty, ref_price))
+            self._worked_entry_tasks.add(task)
+            task.add_done_callback(self._worked_entry_tasks.discard)
+        entry_latency_ms = int((time.monotonic() - fire_t0) * 1000)
+        try:
+            self._record_latency(entry_latency_ms=entry_latency_ms)
+        except Exception as e:  # pragma: no cover - observability only
+            log.debug("worked entry_latency record failed for %s: %s",
+                      self.session_id, e)
+        log.info("session %s WORKED entry building %d legs over the pacing window",
+                 self.session_id, len(specs))
+        _ok = {"session_id": self.session_id, "status": "RUNNING",
+               "mode": self.mode, "n_placed": len(specs), "orders": [],
+               "worked_building": True, "worked_legs": len(specs),
+               "skipped_picks": skipped_picks}
+        if margin_fallback_warnings:
+            _ok["margin_fallback_warnings"] = margin_fallback_warnings
+        if degraded_profiles:
+            _ok["degraded_profiles"] = degraded_profiles
+        return _ok
 
     async def _reconcile_entry_fill(self, broker, order_id: str,
                                     expected_qty: int,

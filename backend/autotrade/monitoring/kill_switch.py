@@ -324,6 +324,36 @@ class KillSwitchExecutor:
                     self.session_id, symbol, attempt=1)
                 self.registry.set_exit_client_order_id(
                     symbol, _exit_coid, broker_profile=prof_id)
+            # ── WORKED (paced) KILL EXIT (execution_mode=="worked") ────────────
+            # A worked-mode session PACES its kill flatten (POV + TWAP floor +
+            # freeze cap) over a TIGHTER deadline instead of one market shot / an
+            # immediate iceberg burst — a ₹125cr flatten cannot slam the book. `qty`
+            # is ALREADY the our_held clamp (clamp-BEFORE-work → never oversells).
+            # Runs under the ONE exit_gate claim taken above. Reuses the sliced_jobs
+            # pipeline (same COMPLETE / EXIT_FAILED result shape). Default-off:
+            # every other execution_mode falls through to iceberg / one-shot below.
+            if getattr(self.config, "execution_mode", "market") == "worked":
+                from .exit_poller import work_and_confirm_exit
+                _wvf = None
+                if not getattr(broker, "dry_run", False):
+                    from ..execution.worked_order import recent_interval_volume
+                    _wvf = recent_interval_volume
+                _meta_w = {"symbol": symbol, "claimed": True, "qty": qty,
+                           "broker_profile": prof_id, "direction": direction,
+                           "instrument_type": itype,
+                           "broker_account_id": acct_id,
+                           "kite_product": kite_product, "worked": True,
+                           "exit_coid": _exit_coid}
+                log.critical("kill %s/%s: WORKED (paced) exit of %d",
+                             self.session_id, symbol, int(qty))
+                sliced_jobs.append((_meta_w, work_and_confirm_exit(
+                    session_id=self.session_id, symbol=symbol, total_qty=int(qty),
+                    broker=broker, registry=self.registry,
+                    close_reason=close_reason, exec_cfg=self.config,
+                    broker_profile=prof_id, direction=direction,
+                    instrument_type=itype, kite_product=kite_product,
+                    parent_exit_coid=_exit_coid, deadline_ts=None, volume_fn=_wvf)))
+                continue
             # ── EXIT ICEBERG (SPRINT CLUSTER 8) — slice a large kill exit ──────
             # `qty` is ALREADY clamped to our_held (clamp above) → we slice the
             # CLAMPED qty (clamp-BEFORE-slice; the sliced total can never exceed
