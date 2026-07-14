@@ -1856,3 +1856,35 @@ knobs arm/floor/trail_giveback/stop_pct + step-lock ladder + `per_stock_stop_pct
   `trail_action` / `mark_stale_abstain` (currently only on the per-TICK monitor result, not the status
   poll) so the live panel shows seat activity — the UI renders them defensively meanwhile. (3) Optional:
   expose `n_seats` in status/editable_config so the panel can show "seats X/N" instead of just X.
+
+## 2026-07-13 — AutoTrade create form: Execution mode (Standard vs Worked/paced)
+- **Section:** FALCON AI plan · AutoTrade — panel over raw config (operator feedback: "turn on the
+  WORKED paced engine from the panel"). Additive; integrated into the EXISTING create form, no new
+  tab/page/panel.
+- **What changed:** `PortfolioAutoTrade.tsx` gains an **Execution mode** segmented control (Standard ·
+  Worked (paced)) in the sizing/execution area, shown ONLY for `intraday_basket` / `portfolio_kill_switch`
+  (`!isLadder && !isTesla` — Tesla forces its own path, Auto-Ladder takes a fixed config). **Standard**
+  (default) sends NO `execution_mode` and NO worked fields → byte-identical to today. **Worked** reveals
+  four knobs: Participation % (UI percent → wire FRACTION ÷100), Interval (sec), Stop-working by
+  (`worked_deadline`, prefilled to the session square-off), and Freeze qty per order
+  (`iceberg_freeze_qty_default`). Clear amber note: paces large orders → expect PARTIAL fills + price
+  drift from the 9:15 signal, PAPER-validate first, set freeze qty.
+- **Send mapping (`toWireConfig`):** new `workedExtra` block, spread into the intraday_basket AND
+  portfolio_kill_switch returns (NOT tesla). Emitted only when `execution_mode==='worked'`:
+  `execution_mode:'worked'`; `worked_participation_pct = percent ÷ 100` (UI 10 → wire 0.10);
+  `worked_interval_sec` (int); `worked_deadline` ("HH:MM[:SS]" IST, omitted → backend square-off);
+  `iceberg_freeze_qty_default` (int). `onExecutionModeChange(false)` clears execution_mode + every worked
+  knob so flipping back to Standard is byte-identical; DEFAULT_CONFIG unchanged.
+- **Types:** `lib/autotrade-api.ts` — new `ExecutionMode` = `'market' | 'marketable_limit' | 'worked'`;
+  `SessionConfig` gains `execution_mode`, `worked_participation_pct`, `worked_interval_sec`,
+  `worked_deadline`, `worked_min_child_qty`, `worked_max_children`, `iceberg_freeze_qty_default`
+  (all optional).
+- **Theme:** reused locked mint/F2 tokens (`C`/`ICON`), `Field`/`Segmented` primitives, existing
+  amber-note pattern; no new accent colors.
+- **Deploy path:** worktree `_kanida_falconui/frontend`, branch `feat/falcon-ai-shell`. UI + BFF types
+  only; execution/trade path + Tesla untouched. Verify: `npx tsc --noEmit` clean; `next build` succeeded.
+  NOT committed — operator ships via `git push origin feat/falcon-ai-shell:main`.
+- **Backend needs (handoff):** none new — the fields (`execution_mode:'worked'`, `worked_participation_pct`,
+  `worked_interval_sec`, `worked_deadline`, `iceberg_freeze_qty_default`) match the deployed-capable
+  `TradingSessionConfig` contract. `worked_min_child_qty` / `worked_max_children` are typed but not
+  surfaced in the panel yet (backend defaults 1 / 500 apply).

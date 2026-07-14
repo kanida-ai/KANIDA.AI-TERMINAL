@@ -60,6 +60,16 @@ export type OnMissedWindow = 'expire' | 'carry_next_trading_day'
 //     positions ("armed, waiting for signals") — that is NORMAL, not an error.
 export type Strategy = 'portfolio_kill_switch' | 'intraday_basket' | 'tesla_short'
 
+// How entry (and exit) orders are placed with the broker.
+//   • 'market'            — plain market orders.
+//   • 'marketable_limit'  — the CURRENT default (a limit priced through the touch).
+//   • 'worked'            — the paced execution engine: split a large parent into
+//     small child orders spread over the session (a fraction of recent-interval
+//     volume per child) to limit market impact. Only offered for the
+//     'portfolio_kill_switch' / 'intraday_basket' strategies; Tesla forces its own
+//     path. Omitting execution_mode keeps today's byte-identical behaviour.
+export type ExecutionMode = 'market' | 'marketable_limit' | 'worked'
+
 export type SessionConfig = {
   strategy: Strategy
   total_allocated_capital: number
@@ -206,6 +216,29 @@ export type SessionConfig = {
   //     orderly continuation. Stricter than the base gate → fewer, higher-
   //     conviction names. Default false (v2 behaviour, byte-identical when off).
   tesla_did_layer_enabled?: boolean
+  // ── WORKED (paced) EXECUTION ── (only meaningful for 'portfolio_kill_switch' /
+  // 'intraday_basket'; Tesla forces its own path). ADDITIVE — when execution_mode
+  // is omitted the backend keeps today's byte-identical behaviour. When
+  // execution_mode==='worked' the paced engine splits each parent into small child
+  // orders across the session:
+  //   • worked_participation_pct — a FRACTION of the recent-interval volume worked
+  //     into the market per child (wire 0.10 = 10%). Captured as a PERCENT in the
+  //     UI, sent ÷100 at the toWireConfig boundary. Backend default 0.10.
+  //   • worked_interval_sec — seconds between child orders (int). Backend default 20.
+  //   • worked_deadline — "HH:MM[:SS]" IST to STOP working; null/omitted → the
+  //     session's square_off_time.
+  //   • worked_min_child_qty — floor on a child order size (int). Backend default 1.
+  //   • worked_max_children — cap on the number of child orders (int). Backend default 500.
+  execution_mode?: ExecutionMode
+  worked_participation_pct?: number
+  worked_interval_sec?: number
+  worked_deadline?: string | null
+  worked_min_child_qty?: number
+  worked_max_children?: number
+  // Per-child NSE freeze cap for worked mode — the exchange freeze quantity. Reuses
+  // the iceberg field name (it IS the freeze qty) but is settable independently of
+  // iceberg_enabled when execution_mode==='worked'. Int; omitted → engine default.
+  iceberg_freeze_qty_default?: number | null
 }
 
 // The ₹ concentration / fat-finger thresholds the backend echoes on preview + status

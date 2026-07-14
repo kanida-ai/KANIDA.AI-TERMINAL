@@ -842,6 +842,31 @@ export function PortfolioAutoTrade({
     setConfig((c) => ({ ...c, ...(hold === 'positional' ? POSITIONAL_TRAIL : INTRADAY_TRAIL) }))
   }
 
+  // Switch Execution mode (intraday_basket / portfolio_kill_switch only; Tesla
+  // forces its own path). 'Standard' CLEARS execution_mode + every worked knob so
+  // the wire payload is byte-identical to today. 'Worked' seeds the paced-engine
+  // defaults (participation as a PERCENT in state, interval sec, deadline =
+  // session square-off) so the shown values match exactly what is sent; the freeze
+  // qty is intentionally left for the operator to set per the amber note.
+  const onExecutionModeChange = (worked: boolean) => {
+    setConfig((c) => worked
+      ? {
+          ...c,
+          execution_mode: 'worked',
+          worked_participation_pct: c.worked_participation_pct ?? 10, // PERCENT → wire 0.10
+          worked_interval_sec: c.worked_interval_sec ?? 20,
+          worked_deadline: c.worked_deadline ?? (c.square_off_time || '15:15:00'),
+        }
+      : {
+          ...c,
+          execution_mode: undefined,
+          worked_participation_pct: undefined,
+          worked_interval_sec: undefined,
+          worked_deadline: undefined,
+          iceberg_freeze_qty_default: undefined,
+        })
+  }
+
   // ── Step-lock ladder editing (intraday_basket) — rungs held as PERCENTS ──────
   // Falls back to the validated default ladder when state is empty so the editor
   // always renders at least the seeded rungs.
@@ -941,6 +966,25 @@ export function PortfolioAutoTrade({
       const mq = posNum(c.fatfinger_max_qty_per_order)
       if (mq != null) riskExtra.fatfinger_max_qty_per_order = Math.max(1, Math.floor(mq))
     }
+    // ── WORKED (paced) EXECUTION — only for intraday_basket / portfolio_kill_switch
+    // (Tesla forces its own path, so this is NOT spread into the tesla branch).
+    // When Standard is selected execution_mode is absent → workedExtra is EMPTY →
+    // the wire is byte-identical to today. When 'worked': send execution_mode plus
+    // only the knobs the operator set. worked_participation_pct is a PERCENT in
+    // state → FRACTION on the wire (÷100); interval/freeze are ints (verbatim);
+    // deadline is an "HH:MM[:SS]" IST string, omitted → backend uses square-off.
+    const workedExtra: Partial<SessionConfig> = {}
+    if (c.execution_mode === 'worked') {
+      workedExtra.execution_mode = 'worked'
+      const part = posNum(c.worked_participation_pct)
+      if (part != null) workedExtra.worked_participation_pct = part / 100
+      const iv = posNum(c.worked_interval_sec)
+      if (iv != null) workedExtra.worked_interval_sec = Math.max(1, Math.floor(iv))
+      const dl = typeof c.worked_deadline === 'string' ? c.worked_deadline.trim() : ''
+      if (dl) workedExtra.worked_deadline = dl
+      const fz = posNum(c.iceberg_freeze_qty_default)
+      if (fz != null) workedExtra.iceberg_freeze_qty_default = Math.max(1, Math.floor(fz))
+    }
     if (c.strategy === 'tesla_short') {
       // Falcon Tesla — order-flow-native intraday SHORT seat rotation. FORCE
       // short/EQ/MIS (the backend 400s anything else) + emit the seat knobs and
@@ -988,6 +1032,7 @@ export function PortfolioAutoTrade({
         ...misExtra,
         ...dirExtra,
         ...riskExtra,
+        ...workedExtra,
         arm_pct: (Number(c.arm_pct) || 0) / 100,
         floor_pct: (Number(c.floor_pct) || 0) / 100,
         trail_giveback_pct: (Number(c.trail_giveback_pct) || 0) / 100,
@@ -1038,6 +1083,7 @@ export function PortfolioAutoTrade({
       ...dirExtra,
       ...riskExtra,
       ...killExtra,
+      ...workedExtra,
       kill_switch_pct: (Number(c.kill_switch_pct) || 0) / 100,
     }
   }, [])
@@ -2764,6 +2810,73 @@ export function PortfolioAutoTrade({
               </Field>
             </div>
           </details>
+
+          {/* ── Execution mode — Standard (fire at signal) vs Worked (paced order
+              engine). Offered for the intraday_basket / portfolio_kill_switch
+              strategies only: Tesla forces its own path and the Auto-Ladder
+              campaign takes a fixed config. Standard sends NO execution_mode
+              (byte-identical to today); Worked reveals its pacing knobs. ─────── */}
+          {!isLadder && !isTesla && (
+            <div className="mt-3 rounded-xl border p-3.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="min-w-0">
+                  <div className="text-[12px] font-semibold" style={{ color: C.ink }}>Execution mode</div>
+                  <div className="text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>
+                    How entry orders reach the market. Standard fires at the signal; Worked paces large orders over the session.
+                  </div>
+                </div>
+                <Segmented
+                  options={[{ id: 'standard', label: 'Standard' }, { id: 'worked', label: 'Worked (paced)' }]}
+                  value={config.execution_mode === 'worked' ? 'worked' : 'standard'}
+                  onChange={(v) => onExecutionModeChange(v === 'worked')}
+                />
+              </div>
+
+              {config.execution_mode === 'worked' && (
+                <>
+                  <div className="mt-3.5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <Field label="Participation (%)" hint="Share of the recent-interval volume worked into the market per child order.">
+                      <input type="number" min={0.1} max={100} step={0.5}
+                        value={config.worked_participation_pct ?? ''}
+                        onChange={(e) => set('worked_participation_pct', e.target.value === '' ? undefined : Number(e.target.value))}
+                        placeholder="10"
+                        className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                    </Field>
+                    <Field label="Interval (sec)" hint="Seconds between paced child orders.">
+                      <input type="number" min={1} step={1}
+                        value={config.worked_interval_sec ?? ''}
+                        onChange={(e) => set('worked_interval_sec', e.target.value === '' ? undefined : Number(e.target.value))}
+                        placeholder="20"
+                        className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                    </Field>
+                    <Field label="Stop-working by" hint="IST time to stop pacing. Defaults to the session square-off.">
+                      <input type="text" inputMode="numeric"
+                        value={config.worked_deadline ?? ''}
+                        onChange={(e) => set('worked_deadline', e.target.value === '' ? undefined : e.target.value)}
+                        placeholder={config.square_off_time || '15:15:00'}
+                        className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                    </Field>
+                    <Field label="Freeze qty per order" hint="NSE per-order freeze quantity for the names you trade. Blank = engine default.">
+                      <input type="number" min={1} step={1}
+                        value={config.iceberg_freeze_qty_default ?? ''}
+                        onChange={(e) => set('iceberg_freeze_qty_default', e.target.value === '' ? undefined : Number(e.target.value))}
+                        placeholder="e.g. 900"
+                        className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                    </Field>
+                  </div>
+                  <div className="mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11px] leading-snug"
+                    style={{ borderColor: 'rgba(230,180,80,0.32)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+                    <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(13)}</span>
+                    <span>
+                      Worked mode <b>PACES large orders</b> over the session to limit market impact — expect{' '}
+                      <b>PARTIAL fills</b> on thin names, and fill prices that drift from the 9:15 signal.{' '}
+                      <b>PAPER-validate first.</b> Set the freeze qty for the names you trade.
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           {/* ── HARDENING SPRINT — Risk & protection (additive; every knob optional,
               blank = the backend default = today's behaviour). Hidden for the
