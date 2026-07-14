@@ -38,6 +38,26 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-07-13 — **AutoTrade · Portfolio create · "Pick stocks" custom-selection: Select
+  all / Deselect all + tier filter.** Additive, view-only. In
+  `components/power/autotrade/PortfolioAutoTrade.tsx`: (1) tier-filter chips above the
+  pick list, styled identically to the Universe chips (mint-active, rounded-full,
+  uppercase). Chips = "All" + one per DISTINCT `signal_tier` present in the loaded
+  picks — derived dynamically from the payload (`distinctTiers`) and sorted best-first
+  via a new module const `SIGNAL_TIER_ORDER` (PREMIUM-Pullback → … → AVOID; unknown
+  tiers fall to the end, so the UI can't break if the taxonomy changes). MULTI-select
+  (GOLD + ENTERPRISE together); "All" clears. Shown only when ≥2 distinct tiers exist.
+  The tier field is the SAME `p.signal_tier` string that feeds `SignalTierBadge` (from
+  `PickItem` in `lib/autotrade-api.ts`) — no new tier names invented. (2) A compact
+  "Select all / Deselect all" control row above the list with a live "N of M shown
+  selected" count; both act on the CURRENTLY-VISIBLE (filtered) set only. Deselect-all
+  is one click (the primary need: clear, then hand-pick a few). Rows hidden by the tier
+  filter keep their checkbox state (hiding ≠ deselecting); list now maps `visiblePicks`.
+  Filter/selection reset on universe change, picks reload, phase leave, and New-session.
+  `symbolWhitelist` wiring UNCHANGED — checkboxes still define the basket exactly as
+  before (backend allows 3..50). No execution-path or `toWireConfig` change. Filtered-
+  empty state added ("No picks match the selected tier · Clear filter"). Verified: `npx
+  tsc --noEmit` clean + `npm run build` compiled successfully. Backend needs: none.
 - 2026-07-07 — **AutoTrade · Performance (strategy-level P&L dashboard)** built to the
   approved mockup (scratchpad/autotrade_pnl.html). Placed at `/power/autotrade/pnl`
   (a sub-surface of the AutoTrade mode) — NOT the `/power/performance` mode, which is

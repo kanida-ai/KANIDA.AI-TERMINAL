@@ -388,6 +388,15 @@ const UNIVERSE_OPTIONS: Array<{ key: UniverseFilter; label: string }> = [
   { key: 'fno',      label: 'F&O'       },
 ]
 
+// Best-first ordering for the custom-selection tier-filter chips. Values match
+// the SignalTier enum (backend signal_tier.py) that drives SignalTierBadge — the
+// distinct set is derived dynamically from the loaded picks, this only sorts it.
+// Unknown/new tiers fall to the end (then alphabetical) so the UI never breaks.
+const SIGNAL_TIER_ORDER = [
+  'PREMIUM-Pullback', 'PREMIUM-Compression', 'ENTERPRISE-Dryup',
+  'GOLD', 'GOLD-baseline', 'STANDARD', 'STANDARD-weak', 'AVOID',
+]
+
 const TOP_N_OPTIONS = [3, 5, 7, 10, 20, 50]
 const SIZING_OPTIONS: { id: SizingMode; label: string; hint: string }[] = [
   { id: 'equal',   label: 'Equal',   hint: 'Split capital evenly across picks' },
@@ -657,6 +666,11 @@ export function PortfolioAutoTrade({
   // the picks list once loaded (top_n items pre-checked, rest unchecked), but
   // the user can override freely.
   const [checkedSymbols, setCheckedSymbols] = useState<Set<string> | null>(null)
+
+  // tierFilter: VIEW-ONLY multi-select filter over the loaded picks by signal_tier.
+  // Empty set = "All" (no filter). Purely client-side; hides rows but never changes
+  // their checkbox state. Select-all/Deselect-all act on the visible (filtered) set.
+  const [tierFilter, setTierFilter] = useState<Set<string>>(new Set())
 
   // Live-mode typed confirmation + kill typed confirmation
   const [liveConfirm, setLiveConfirm] = useState('')
@@ -1093,7 +1107,7 @@ export function PortfolioAutoTrade({
   // an inline note and leave checkedSymbols null so create still works normally.
   useEffect(() => {
     if (phase !== 'config') {
-      setPicks(null); setPicksErr(null); setPicksLoading(false); setCheckedSymbols(null)
+      setPicks(null); setPicksErr(null); setPicksLoading(false); setCheckedSymbols(null); setTierFilter(new Set())
       return
     }
     let cancelled = false
@@ -1112,6 +1126,8 @@ export function PortfolioAutoTrade({
             .map((p) => p.symbol),
         )
         setCheckedSymbols(defaultChecked)
+        // Fresh picks → drop any stale tier filter (tiers may differ per universe).
+        setTierFilter(new Set())
       } catch {
         if (cancelled) return
         setPicks(null)
@@ -1149,6 +1165,37 @@ export function PortfolioAutoTrade({
     if (isDefault) return undefined
     return [...checkedSymbols]
   })()
+
+  // ── Custom-selection tier filter + select-all (view-only) ──────────────────
+  // distinctTiers: the signal_tier values actually present in the loaded picks,
+  // best-first, for the filter chips. Derived from the data so it stays correct
+  // if the tier taxonomy changes. visiblePicks: the filtered view the list
+  // renders + the Select-all / Deselect-all controls operate on.
+  const distinctTiers: string[] = (() => {
+    if (!picks) return []
+    const seen = new Set<string>()
+    for (const p of picks) if (p.signal_tier) seen.add(p.signal_tier)
+    return [...seen].sort((a, b) => {
+      const ia = SIGNAL_TIER_ORDER.indexOf(a); const ib = SIGNAL_TIER_ORDER.indexOf(b)
+      return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib) || a.localeCompare(b)
+    })
+  })()
+  const visiblePicks: PickItem[] = picks
+    ? picks.filter((p) => tierFilter.size === 0 || (p.signal_tier != null && tierFilter.has(p.signal_tier)))
+    : []
+  const visibleSymbols = visiblePicks.map((p) => p.symbol)
+  const visibleCheckedCount = checkedSymbols
+    ? visibleSymbols.reduce((n, s) => n + (checkedSymbols.has(s) ? 1 : 0), 0)
+    : 0
+  const allVisibleChecked = visibleSymbols.length > 0 && visibleCheckedCount === visibleSymbols.length
+  // Select-all / Deselect-all operate on the CURRENTLY-VISIBLE (filtered) set only;
+  // rows hidden by the tier filter keep their checkbox state untouched.
+  const selectAllVisible = () => setCheckedSymbols((prev) => {
+    const next = new Set(prev ?? []); visibleSymbols.forEach((s) => next.add(s)); return next
+  })
+  const deselectAllVisible = () => setCheckedSymbols((prev) => {
+    const next = new Set(prev ?? []); visibleSymbols.forEach((s) => next.delete(s)); return next
+  })
 
   const liveReady = mode === 'paper' || liveConfirm.trim().toUpperCase() === 'LIVE'
 
@@ -1794,7 +1841,7 @@ export function PortfolioAutoTrade({
     // Reset the strategy dropdown + campaign duration to defaults.
     setUiStrategy('portfolio_kill_switch'); setLadderEndMode('month_end')
     // Reset universe filter + picker
-    setUniverseFilter('all500'); setPicks(null); setPicksErr(null); setCheckedSymbols(null)
+    setUniverseFilter('all500'); setPicks(null); setPicksErr(null); setCheckedSymbols(null); setTierFilter(new Set())
   }
 
   // "New session" click router. In the split shell's DASHBOARD view the inline
@@ -2614,6 +2661,87 @@ export function PortfolioAutoTrade({
                 )}
               </div>
 
+              {/* ── Tier filter chips — VIEW-ONLY over the loaded picks. Same chip
+                  styling as the Universe row above. Multi-select: each tier toggles;
+                  "All" clears the filter. Only shown when ≥2 distinct tiers exist. */}
+              {!picksLoading && !picksErr && checkedSymbols && distinctTiers.length > 1 && (
+                <div className="flex items-center gap-1.5 flex-wrap mb-2">
+                  <span className="text-[10px] uppercase tracking-[0.06em] mr-0.5" style={{ color: C.faint }}>Tier</span>
+                  {(() => {
+                    const allActive = tierFilter.size === 0
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => setTierFilter(new Set())}
+                        className="px-2.5 py-1 rounded-full text-[10.5px] font-semibold uppercase tracking-wide border transition-colors"
+                        style={allActive ? {
+                          color: C.mint, background: 'rgba(63,227,164,0.12)', borderColor: 'rgba(63,227,164,0.4)',
+                        } : {
+                          color: 'rgba(255,255,255,0.7)', background: 'rgba(255,255,255,0.04)', borderColor: C.line2,
+                        }}
+                        aria-pressed={allActive}
+                      >
+                        All
+                      </button>
+                    )
+                  })()}
+                  {distinctTiers.map((tier) => {
+                    const active = tierFilter.has(tier)
+                    return (
+                      <button
+                        key={tier}
+                        type="button"
+                        onClick={() => setTierFilter((prev) => {
+                          const next = new Set(prev)
+                          if (next.has(tier)) next.delete(tier); else next.add(tier)
+                          return next
+                        })}
+                        className="px-2.5 py-1 rounded-full text-[10.5px] font-semibold uppercase tracking-wide border transition-colors"
+                        style={active ? {
+                          color: C.mint, background: 'rgba(63,227,164,0.12)', borderColor: 'rgba(63,227,164,0.4)',
+                        } : {
+                          color: 'rgba(255,255,255,0.7)', background: 'rgba(255,255,255,0.04)', borderColor: C.line2,
+                        }}
+                        aria-pressed={active}
+                      >
+                        {tier.replace('-', ' ')}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+
+              {/* ── Select all / Deselect all — operate on the VISIBLE (filtered)
+                  set only. Primary need = one-click Deselect all, then hand-pick. */}
+              {!picksLoading && !picksErr && picks && picks.length > 0 && checkedSymbols && (
+                <div className="flex items-center justify-between gap-2 mb-2 px-1">
+                  <span className="text-[10.5px] tabular-nums" style={{ color: C.faint }}>
+                    {visibleCheckedCount} of {visibleSymbols.length} shown selected
+                    {tierFilter.size > 0 && <span> · filtered</span>}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={selectAllVisible}
+                      disabled={visibleSymbols.length === 0 || allVisibleChecked}
+                      className="px-2 py-1 rounded-md text-[10.5px] font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={{ color: C.mint, background: 'rgba(63,227,164,0.08)', borderColor: 'rgba(63,227,164,0.3)' }}
+                    >
+                      Select all
+                    </button>
+                    <button
+                      type="button"
+                      onClick={deselectAllVisible}
+                      disabled={visibleCheckedCount === 0}
+                      className="px-2 py-1 rounded-md text-[10.5px] font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={{ color: C.ink2, background: 'rgba(255,255,255,0.04)', borderColor: C.line2 }}
+                    >
+                      Deselect all
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Loading skeleton */}
               {picksLoading && (
                 <div className="flex flex-col gap-1.5">
@@ -2636,9 +2764,9 @@ export function PortfolioAutoTrade({
               {!picksLoading && !picksErr && picks && picks.length > 0 && checkedSymbols && (
                 <div
                   className="flex flex-col gap-1 overflow-y-auto pr-1"
-                  style={{ maxHeight: picks.length > 12 ? 420 : undefined }}
+                  style={{ maxHeight: visiblePicks.length > 12 ? 420 : undefined }}
                 >
-                  {picks.map((p) => {
+                  {visiblePicks.map((p) => {
                     const checked = checkedSymbols.has(p.symbol)
                     const isTopN = p.rank <= config.top_n_stocks
                     return (
@@ -2707,6 +2835,16 @@ export function PortfolioAutoTrade({
                     )
                   })}
                 </div>
+              )}
+
+              {/* No rows match the active tier filter (picks exist, filter hides all) */}
+              {!picksLoading && !picksErr && picks && picks.length > 0 && checkedSymbols && visiblePicks.length === 0 && (
+                <p className="text-[11.5px] px-1" style={{ color: C.muted }}>
+                  No picks match the selected tier{tierFilter.size > 1 ? 's' : ''}.{' '}
+                  <button type="button" onClick={() => setTierFilter(new Set())} className="underline" style={{ color: C.mint }}>
+                    Clear filter
+                  </button>
+                </p>
               )}
 
               {/* Empty picks list (universe + date with no signals yet) */}
