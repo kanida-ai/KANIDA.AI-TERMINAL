@@ -369,7 +369,8 @@ def _sector_map(con: sqlite3.Connection,
 
 def score_universe_for_symbols(con: sqlite3.Connection,
                                days: Sequence[str],
-                               symbols: Sequence[str]) -> pd.DataFrame:
+                               symbols: Sequence[str],
+                               vectorized: bool = False) -> pd.DataFrame:
     """Score an EXPLICIT symbol list over `days` — the same per-(instrument,day)
     feature+phase+forward+sector pipeline as score_universe_from_db, but for a
     caller-supplied symbol set (skips the >=300-row candidate discovery, which
@@ -388,11 +389,21 @@ def score_universe_for_symbols(con: sqlite3.Connection,
     raw = _pull_cash_symbols_batch(con, syms, days)
     if raw.empty:
         return pd.DataFrame()
-    scored_parts = [tf.add_microstructure_features(group)
-                    for _, group in raw.groupby(["instrument", "day"], sort=False)]
-    if not scored_parts:
-        return pd.DataFrame()
-    scored = pd.concat(scored_parts, ignore_index=True)
+    # DEFAULT (vectorized=False) → the committed per-(instrument,day) loop, the
+    # exact microstructure oracle score_universe_from_db uses. vectorized=True →
+    # the multi-group VECTORISED microstructure (byte-identical to the loop; proven
+    # by the full-day all-columns parity test), the sub-10s once-per-minute path.
+    if vectorized:
+        scored = tf.add_microstructure_features_vectorized(raw)
+        if scored.empty:
+            return pd.DataFrame()
+    else:
+        scored_parts = [tf.add_microstructure_features(group)
+                        for _, group in raw.groupby(["instrument", "day"],
+                                                     sort=False)]
+        if not scored_parts:
+            return pd.DataFrame()
+        scored = pd.concat(scored_parts, ignore_index=True)
     scored["short_drive"] = tf.clamp01(scored["short_drive_core"])
     scored["long_drive"] = tf.clamp01(scored["long_drive_core"])
     scored["bid_absorption"] = tf.clamp01(scored["bid_absorption_core"])
@@ -543,6 +554,58 @@ def add_phase_transition_features(df: pd.DataFrame) -> pd.DataFrame:
         part["day"] = day
         parts.append(part)
     return pd.concat(parts, ignore_index=True)
+
+
+def add_phase_transition_features_vectorized(df: pd.DataFrame) -> pd.DataFrame:
+    """Vectorised, multi-group equivalent of add_phase_transition_features.
+
+    Byte-identical to the per-(instrument,day) loop version (proven by the
+    equivalence test) but computes every group at once with grouped shift/rolling
+    ops instead of a 498-iteration Python loop. Stateless."""
+    out = df.sort_values(["instrument", "day", "bar_time"]).reset_index(drop=True).copy()
+    gkeys = ["instrument", "day"]
+    short_phase = out["falcon_phase"].isin(["SHORT_DRIVE", "ATP_ASK_REVERSAL_DISTRIBUTION"])
+    out["is_short_phase"] = short_phase.astype(int)
+    out["is_relief_phase"] = (
+        out["long_drive"].gt(out["short_drive"])
+        | out["falcon_phase"].isin(["NEUTRAL", "LONG_DRIVE", "ATP_BID_REVERSAL_ABSORPTION"])
+    ).astype(int)
+
+    def _grp(col):
+        return out.groupby(gkeys, sort=False)[col]
+
+    def _align(series):
+        s = series.copy()
+        s.index = s.index.get_level_values(-1)
+        return s.sort_index()
+
+    out["prev_phase"] = _grp("falcon_phase").shift()
+    out["_close_s1"] = _grp("close").shift()
+    out["prev_low_10"] = _align(out.groupby(gkeys, sort=False)["_close_s1"].rolling(10, min_periods=3).min())
+    out["prev_high_10"] = _align(out.groupby(gkeys, sort=False)["_close_s1"].rolling(10, min_periods=3).max())
+    out["_iss_s1"] = _grp("is_short_phase").shift()
+    out["prev_short_count_20"] = _align(out.groupby(gkeys, sort=False)["_iss_s1"].rolling(20, min_periods=1).sum())
+    out["_isr_s1"] = _grp("is_relief_phase").shift()
+    out["prev_relief_count_8"] = _align(out.groupby(gkeys, sort=False)["_isr_s1"].rolling(8, min_periods=1).sum())
+    out = out.drop(columns=["_close_s1", "_iss_s1", "_isr_s1"])
+
+    out["new_breakdown"] = out["close"].le(out["prev_low_10"] * 0.9995)
+    out["first_short_after_pause"] = out["is_short_phase"].eq(1) & ~out["prev_phase"].isin(
+        ["SHORT_DRIVE", "ATP_ASK_REVERSAL_DISTRIBUTION"])
+    out["reload_after_relief"] = (
+        out["falcon_phase"].eq("SHORT_DRIVE")
+        & out["prev_short_count_20"].ge(1)
+        & out["prev_relief_count_8"].ge(2)
+        & out["new_breakdown"])
+    out["ask_distribution_turn"] = (
+        out["falcon_phase"].eq("ATP_ASK_REVERSAL_DISTRIBUTION")
+        & out["atp_ask_reversal_pressure"].ge(0.16)
+        & out["prev_relief_count_8"].ge(1))
+    out["phase_transition_ok"] = (
+        (out["first_short_after_pause"] & out["new_breakdown"])
+        | out["reload_after_relief"]
+        | out["ask_distribution_turn"])
+    return out
 
 
 def add_stock_personality(df: pd.DataFrame, train_days: Sequence[str]) -> pd.DataFrame:
@@ -753,18 +816,25 @@ def _apply_cached_quality(df: pd.DataFrame, quality: pd.DataFrame) -> pd.DataFra
 def grade_infer_only(infer_scored: pd.DataFrame, infer_nifty: pd.DataFrame,
                      train_days: Sequence[str],
                      profile: pd.DataFrame, quality: pd.DataFrame,
-                     did_layer_enabled: bool = False) -> pd.DataFrame:
+                     did_layer_enabled: bool = False,
+                     vectorized: bool = False) -> pd.DataFrame:
     """Grade ONLY the infer-day scored frame using the cached train stats. Returns
     the same graded columns (v2_grade/v2_setup/base_gate/… + DiD when enabled) as
-    grade_scored_frame would for the infer rows — byte-identical (proven)."""
+    grade_scored_frame would for the infer rows — byte-identical (proven).
+
+    vectorized=False (DEFAULT) → the committed per-group phase-transition loop +
+    the per-group DiD pre-mean (the exact oracle grade_scored_frame uses).
+    vectorized=True → the multi-group VECTORISED phase-transition + fast DiD
+    pre-mean (byte-identical to the loop; proven by the full-day parity test)."""
     df = add_market_context(infer_scored, infer_nifty)
-    df = add_phase_transition_features(df)
+    df = (add_phase_transition_features_vectorized(df) if vectorized
+          else add_phase_transition_features(df))
     df = _apply_cached_personality(df, profile)
     df = _apply_cached_quality(df, quality)
     df = grade(df)
     if did_layer_enabled:
         from . import tesla_did as _did
-        df = _did.apply_did_layer(df)
+        df = _did.apply_did_layer(df, fast=vectorized)
     return df
 
 
@@ -944,7 +1014,8 @@ def _train_cache_key(db_key: str, train_days: Sequence[str]) -> str:
 def _build_train_cache(con: sqlite3.Connection, db_key: str,
                        train_days: Sequence[str],
                        train_candidates: Sequence[str],
-                       symbols: Sequence[str]) -> _TrainDayCache:
+                       symbols: Sequence[str],
+                       vectorized: bool = False) -> _TrainDayCache:
     """FULL build of the train-day scored frame + NIFTY context + the cached
     train-derived stat tables (a day-roll). Scores the union `symbols` over the
     completed train days ONCE, then derives the personality profile + train-gate
@@ -952,7 +1023,8 @@ def _build_train_cache(con: sqlite3.Connection, db_key: str,
     global _train_cache_build_count
     tdays = tuple(train_days)
     if tdays:
-        train_scored = score_universe_for_symbols(con, list(tdays), symbols)
+        train_scored = score_universe_for_symbols(con, list(tdays), symbols,
+                                                  vectorized=vectorized)
         train_nifty = load_nifty_context(con, list(tdays))
     else:  # first trading day in the poll — no completed prior days
         train_scored = pd.DataFrame()
@@ -970,7 +1042,8 @@ def _build_train_cache(con: sqlite3.Connection, db_key: str,
 
 def _get_train_cache(con: sqlite3.Connection, db_key: str,
                      train_days: Sequence[str],
-                     infer_candidates: Sequence[str]) -> _TrainDayCache:
+                     infer_candidates: Sequence[str],
+                     vectorized: bool = False) -> _TrainDayCache:
     """Return the train-day cache for (db_key, train_days), REBUILDING only on a
     day-roll (train_days change) and INCREMENTALLY extending it if the infer-day
     candidate set has grown to include symbols not yet covered on the train days
@@ -990,7 +1063,8 @@ def _get_train_cache(con: sqlite3.Connection, db_key: str,
                            if tuple(train_days) else [])
             union = sorted(set(train_cands) | infer_set)
             entry = _build_train_cache(con, db_key, train_days,
-                                       train_cands, union)
+                                       train_cands, union,
+                                       vectorized=vectorized)
             _TRAIN_CACHE.clear()  # only ever ONE train-day window is live
             _TRAIN_CACHE[key] = entry
             return entry
@@ -998,7 +1072,8 @@ def _get_train_cache(con: sqlite3.Connection, db_key: str,
         missing = need - entry.covered
         if missing and tuple(train_days):
             extra = score_universe_for_symbols(con, list(train_days),
-                                               sorted(missing))
+                                               sorted(missing),
+                                               vectorized=vectorized)
             if not extra.empty:
                 entry.train_scored = (
                     extra if entry.train_scored.empty
@@ -1025,6 +1100,7 @@ def compute_live_signals_fast(
     cooldown_minutes: int = 30,
     latest_only: bool = True,
     did_layer_enabled: bool = False,
+    vectorized: bool = False,
     con: Optional[sqlite3.Connection] = None,
 ) -> TeslaSignalResult:
     """Optimized equivalent of compute_live_signals: caches the scored TRAIN
@@ -1033,7 +1109,14 @@ def compute_live_signals_fast(
     signature/semantics as compute_live_signals (incl. did_layer_enabled); NEVER
     raises on empty data. The DiD layer is a post-grade step on the same scored
     frame, so the train-day cache is unaffected (it caches the v2 scored inputs,
-    not the grade)."""
+    not the grade).
+
+    vectorized=False (DEFAULT) → the committed per-group microstructure/phase-
+    transition loop (the reviewed ~46s path). vectorized=True → the multi-group
+    VECTORISED feature pipeline (byte-identical to the loop; proven by the full-day
+    all-columns minute-by-minute parity test) — the sub-10s once-per-minute path.
+    OFF by default: the committed loop stays the default until the parity proof is
+    reviewed and the operator sets tesla_vectorized_features=true."""
     owns_con = con is None
     if owns_con:
         con = connect_db_readonly(db_path)
@@ -1056,7 +1139,8 @@ def compute_live_signals_fast(
         # candidates + train-derived stats are cached per day-roll; only the infer
         # candidates are rediscovered each minute (one batched GROUP BY).
         infer_cands = candidate_symbols(con, [infer_day])
-        cache = _get_train_cache(con, db_key, train_days, infer_cands)
+        cache = _get_train_cache(con, db_key, train_days, infer_cands,
+                                 vectorized=vectorized)
         all_syms = sorted(set(cache.train_candidates) | set(infer_cands))
         if not all_syms:
             return TeslaSignalResult(as_of=as_of, infer_day=infer_day,
@@ -1066,7 +1150,8 @@ def compute_live_signals_fast(
         # Rescore ONLY the infer day (the train frame is cached). n_candidates is
         # the union instrument set with data on ANY window day — matching the full
         # recompute's score_universe_from_db(window).nunique().
-        infer_scored = score_universe_for_symbols(con, [infer_day], all_syms)
+        infer_scored = score_universe_for_symbols(con, [infer_day], all_syms,
+                                                  vectorized=vectorized)
         inst = set()
         if cache.train_scored is not None and not cache.train_scored.empty:
             inst |= set(cache.train_scored["instrument"].unique())
@@ -1086,7 +1171,7 @@ def compute_live_signals_fast(
         graded = grade_infer_only(
             infer_scored, infer_nifty, train_days,
             cache.train_profile, cache.train_quality,
-            did_layer_enabled=did_layer_enabled)
+            did_layer_enabled=did_layer_enabled, vectorized=vectorized)
         grade_col = "v3_grade" if did_layer_enabled else "v2_grade"
         selected = select_trade_lifecycle(
             graded, cooldown_minutes=cooldown_minutes,

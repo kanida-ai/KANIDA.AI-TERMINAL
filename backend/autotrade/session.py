@@ -4085,15 +4085,21 @@ class TradingSession:
             cd = int(getattr(self.config, "tesla_cooldown_minutes", 30))
             bound = int(getattr(self.config, "tesla_signal_staleness_sec", 90))
             did = bool(getattr(self.config, "tesla_did_layer_enabled", False))
+            # DEFAULT-OFF sub-10s vectorised feature path (byte-identical to the
+            # committed loop; proven by the full-day parity test). Loop stays the
+            # default until the operator flips tesla_vectorized_features=true.
+            vec = bool(getattr(self.config, "tesla_vectorized_features", False))
             now = datetime.now(IST)
             # 1. trigger (non-blocking) — recompute runs in a background thread.
             _cache.refresh_if_needed(
                 db_path=db, personality_window_days=pwd, min_grade=mg,
-                cooldown_minutes=cd, did_layer_enabled=did, now=now, block=False)
+                cooldown_minutes=cd, did_layer_enabled=did, vectorized=vec,
+                now=now, block=False)
             # 2. read the cached signals + staleness.
             signals, stale = _cache.get_signals(
                 db_path=db, personality_window_days=pwd, min_grade=mg,
-                did_layer_enabled=did, now=now, staleness_bound_sec=bound)
+                did_layer_enabled=did, vectorized=vec, now=now,
+                staleness_bound_sec=bound)
             if stale:
                 # 3. abstain from NEW entries + page (live, market hours only).
                 self._page_tesla_signal_stale()

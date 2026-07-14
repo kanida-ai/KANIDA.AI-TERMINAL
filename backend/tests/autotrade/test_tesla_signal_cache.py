@@ -456,9 +456,10 @@ def _grade_stub(scored, nifty_ctx, train_days, did_layer_enabled=False):
 
 
 def _grade_infer_stub(infer_scored, infer_nifty, train_days, profile, quality,
-                      did_layer_enabled=False):
+                      did_layer_enabled=False, vectorized=False):
     """The fast-path counterpart stub (grade_infer_only signature): same AAA-A++
-    marking on the infer-only frame, so both paths select the identical bar."""
+    marking on the infer-only frame, so both paths select the identical bar.
+    Accepts (and ignores) vectorized to match the real grade_infer_only signature."""
     return _mark_aaa(infer_scored)
 
 

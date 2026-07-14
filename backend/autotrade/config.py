@@ -223,6 +223,13 @@ class TradingSessionConfig:
     # (A++/A+++) and ranks seats by v3_rank_score (see strategies/tesla_did.py).
     # Entry-selection only: exits / the intraday step-lock trail are UNCHANGED.
     tesla_did_layer_enabled: bool = False
+    # PERF flag — vectorised (multi-group) once-per-minute feature pipeline.
+    # OPT-IN, default OFF → the committed per-group loop (the reviewed ~46s path)
+    # stays the default. When True the recompute uses the sub-10s vectorised
+    # microstructure + phase-transition + DiD pre-mean, which is BYTE-IDENTICAL to
+    # the loop (proven by the full-day, all-columns, minute-by-minute parity test).
+    # Pure speed: it changes NO signal, threshold, exit, or order behaviour.
+    tesla_vectorized_features: bool = False
 
     # Position sizing
     sizing_mode: str = "equal"             # equal | pct_cap | manual
@@ -1199,6 +1206,8 @@ class TradingSessionConfig:
                 d.get("tesla_signal_staleness_sec", 90)),
             tesla_did_layer_enabled=bool(
                 d.get("tesla_did_layer_enabled", False)),
+            tesla_vectorized_features=bool(
+                d.get("tesla_vectorized_features", False)),
             sizing_mode=d.get("sizing_mode", "equal"),
             max_pct_per_position=float(d.get("max_pct_per_position", 0.05)),
             manual_amounts=d.get("manual_amounts", {}) or {},

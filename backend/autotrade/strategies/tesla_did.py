@@ -61,9 +61,45 @@ def add_regular_session_pre_mean(
     return out
 
 
+def add_regular_session_pre_mean_fast(
+    df: pd.DataFrame,
+    source_col: str,
+    out_col: str,
+    window: int = 5,
+    min_periods: int = 3,
+) -> pd.DataFrame:
+    """Vectorised equivalent of add_regular_session_pre_mean.
+
+    The original applies a per-group Python lambda (s.shift(1).rolling().mean())
+    via groupby.transform — over 498 groups × 16 rolling inputs that is the DiD
+    layer's dominant cost. This computes the SAME masked per-(instrument,day)
+    shift(1)→rolling-mean with two grouped (C-level) ops. Byte-identical to
+    add_regular_session_pre_mean (proven by the equivalence test); NO sort (the
+    original relies on the frame's existing intraday order, so this must not
+    reorder either)."""
+    out = df.copy()
+    out[out_col] = np.nan
+    mask = regular_session_mask(out)
+    sub = out.loc[mask, ["instrument", "day", source_col]]
+    if sub.empty:
+        return out
+    grp = sub.groupby(["instrument", "day"], sort=False)
+    shifted = grp[source_col].shift(1)
+    sub = sub.assign(_s1=shifted)
+    rolled = (sub.groupby(["instrument", "day"], sort=False)["_s1"]
+              .rolling(window, min_periods=min_periods).mean())
+    rolled.index = rolled.index.get_level_values(-1)
+    out.loc[mask, out_col] = rolled.sort_index()
+    return out
+
+
 # ── DiD feature block (verbatim from the batch) ──────────────────────────────
 
-def add_did_features(df: pd.DataFrame) -> pd.DataFrame:
+def add_did_features(df: pd.DataFrame, fast: bool = False) -> pd.DataFrame:
+    # fast=False (DEFAULT) → the original per-group lambda pre-mean (parity
+    # oracle). fast=True → the vectorised grouped pre-mean (byte-identical, far
+    # faster); the equivalence test asserts fast==slow on the real universe.
+    _pre_mean = add_regular_session_pre_mean_fast if fast else add_regular_session_pre_mean
     out = df.copy()
 
     out["did_move_vs_sector_pct"] = out["move_from_first_close%"] - out["sector_move_open_pct"]
@@ -101,7 +137,7 @@ def add_did_features(df: pd.DataFrame) -> pd.DataFrame:
         ("nifty_atp_torque", "nifty_atp"),
     ]
     for source_col, name in rolling_inputs:
-        out = add_regular_session_pre_mean(out, source_col, f"pre5_{name}")
+        out = _pre_mean(out, source_col, f"pre5_{name}")
 
     out["did5_move_vs_sector_pct"] = (
         out["move_from_first_close%"] - out["pre5_stock_move"]
@@ -223,12 +259,15 @@ def grade_v3(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── convenience wrapper (live post-processing entry point) ───────────────────
 
-def apply_did_layer(df: pd.DataFrame) -> pd.DataFrame:
+def apply_did_layer(df: pd.DataFrame, fast: bool = False) -> pd.DataFrame:
     """Add the DiD feature block + v3 grade to an already-v2-graded frame.
 
     Input `df` MUST carry the full intraday minute series per (instrument, day)
     (so the pre5 rolling means are correct) and every v2 column the DiD layer
     consumes — exactly the frame tesla_short_engine.grade_scored_frame produces
     right after grade(). Returns a NEW frame; never mutates the input.
+
+    fast=True routes the pre5 rolling means through the vectorised grouped
+    implementation (byte-identical to the default per-group lambda path).
     """
-    return grade_v3(add_did_features(df))
+    return grade_v3(add_did_features(df, fast=fast))

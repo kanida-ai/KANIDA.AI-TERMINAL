@@ -63,8 +63,8 @@ class _SignalEntry:
     result: Any = None              # the full TeslaSignalResult (diagnostics)
 
 
-_SIGNAL_CACHE: Dict[Tuple[str, int, str, bool], _SignalEntry] = {}
-_INFLIGHT: Dict[Tuple[str, int, str, bool], bool] = {}
+_SIGNAL_CACHE: Dict[Tuple[str, int, str, bool, bool], _SignalEntry] = {}
+_INFLIGHT: Dict[Tuple[str, int, str, bool, bool], bool] = {}
 _LOCK = threading.RLock()
 
 
@@ -72,13 +72,16 @@ _LOCK = threading.RLock()
 
 def _cache_key(db_path: Optional[str], personality_window_days: int,
                min_grade: str,
-               did_layer_enabled: bool = False) -> Tuple[str, int, str, bool]:
+               did_layer_enabled: bool = False,
+               vectorized: bool = False) -> Tuple[str, int, str, bool, bool]:
     # did_layer_enabled is part of the key so the v2 and v3 signal sets never
-    # collide in the process cache (a session with the DiD layer on and one with
-    # it off cache independently).
+    # collide in the process cache. vectorized is ALSO part of the key so a
+    # loop-path session and a vectorised-path session never share a cache entry
+    # (they are byte-identical by proof, but keying them apart keeps the flip
+    # observable and lossless if the proof is ever wrong).
     dbk = Path(db_path).as_posix() if db_path else "__default__"
     return (dbk, int(personality_window_days), str(min_grade),
-            bool(did_layer_enabled))
+            bool(did_layer_enabled), bool(vectorized))
 
 
 def _minute_bucket(now: datetime) -> str:
@@ -96,9 +99,12 @@ def reset_cache() -> None:
 
 def _recompute(*, db_path: Optional[str], personality_window_days: int,
                min_grade: str, cooldown_minutes: int, as_of: str,
-               did_layer_enabled: bool = False) -> Any:
+               did_layer_enabled: bool = False,
+               vectorized: bool = False) -> Any:
     """Run the optimized once-per-minute signal recompute. Opens its own RO DB
-    connection. Swap this out in tests to avoid the poll DB."""
+    connection. Swap this out in tests to avoid the poll DB. vectorized=False
+    (DEFAULT) uses the committed per-group loop; True uses the sub-10s vectorised
+    feature pipeline (byte-identical, default-OFF until the parity proof clears)."""
     return _tse.compute_live_signals_fast(
         as_of=as_of,
         db_path=(Path(db_path) if db_path else None),
@@ -106,6 +112,7 @@ def _recompute(*, db_path: Optional[str], personality_window_days: int,
         min_grade=min_grade,
         cooldown_minutes=int(cooldown_minutes),
         did_layer_enabled=bool(did_layer_enabled),
+        vectorized=bool(vectorized),
         latest_only=True)
 
 
@@ -123,11 +130,12 @@ def _recompute_worker(**kwargs: Any) -> Any:
     return _recompute(**kwargs)
 
 
-def _do_refresh(key: Tuple[str, int, str, bool], minute_key: str,
+def _do_refresh(key: Tuple[str, int, str, bool, bool], minute_key: str,
                 now: datetime, *,
                 db_path: Optional[str], personality_window_days: int,
                 min_grade: str, cooldown_minutes: int,
                 did_layer_enabled: bool = False,
+                vectorized: bool = False,
                 use_pool: bool = True) -> None:
     """Recompute + store. NEVER raises (best-effort). Clears the in-flight flag
     when done so the next minute can refresh again.
@@ -140,7 +148,7 @@ def _do_refresh(key: Tuple[str, int, str, bool], minute_key: str,
     last-good cache is left untouched and ages into staleness; nothing propagates."""
     rkw = dict(db_path=db_path, personality_window_days=personality_window_days,
                min_grade=min_grade, cooldown_minutes=cooldown_minutes,
-               did_layer_enabled=did_layer_enabled,
+               did_layer_enabled=did_layer_enabled, vectorized=vectorized,
                as_of=now.strftime("%Y-%m-%d %H:%M"))
     try:
         if use_pool:
@@ -167,6 +175,7 @@ def refresh_if_needed(*, db_path: Optional[str] = None,
                       personality_window_days: int = 5,
                       min_grade: str = "A++", cooldown_minutes: int = 30,
                       did_layer_enabled: bool = False,
+                      vectorized: bool = False,
                       now: Optional[datetime] = None,
                       block: bool = False) -> bool:
     """Trigger a signal recompute AT MOST once per 1-min bar. Returns True when a
@@ -175,7 +184,7 @@ def refresh_if_needed(*, db_path: Optional[str] = None,
     block=True runs it synchronously (tests). NEVER raises."""
     now = now or datetime.now(IST)
     key = _cache_key(db_path, personality_window_days, min_grade,
-                     did_layer_enabled)
+                     did_layer_enabled, vectorized)
     minute_key = _minute_bucket(now)
     with _LOCK:
         entry = _SIGNAL_CACHE.get(key)
@@ -186,7 +195,7 @@ def refresh_if_needed(*, db_path: Optional[str] = None,
         _INFLIGHT[key] = True
     kw = dict(db_path=db_path, personality_window_days=personality_window_days,
               min_grade=min_grade, cooldown_minutes=cooldown_minutes,
-              did_layer_enabled=did_layer_enabled)
+              did_layer_enabled=did_layer_enabled, vectorized=vectorized)
     if block:
         # INLINE, no pool — keeps tests hermetic (swappable `_recompute` spy).
         _do_refresh(key, minute_key, now, use_pool=False, **kw)
@@ -210,6 +219,7 @@ def refresh_if_needed(*, db_path: Optional[str] = None,
 def get_signals(*, db_path: Optional[str] = None,
                 personality_window_days: int = 5, min_grade: str = "A++",
                 did_layer_enabled: bool = False,
+                vectorized: bool = False,
                 now: Optional[datetime] = None,
                 staleness_bound_sec: int = 90) -> Tuple[List[Any], bool]:
     """Read the last cached signals + whether they are STALE.
@@ -220,7 +230,7 @@ def get_signals(*, db_path: Optional[str] = None,
     staleness_bound_sec <= 0 disables the staleness gate (never stale)."""
     now = now or datetime.now(IST)
     key = _cache_key(db_path, personality_window_days, min_grade,
-                     did_layer_enabled)
+                     did_layer_enabled, vectorized)
     with _LOCK:
         entry = _SIGNAL_CACHE.get(key)
     if entry is None:
