@@ -4089,16 +4089,20 @@ class TradingSession:
             # committed loop; proven by the full-day parity test). Loop stays the
             # default until the operator flips tesla_vectorized_features=true.
             vec = bool(getattr(self.config, "tesla_vectorized_features", False))
+            # DEFAULT-OFF incremental infer-day read (round-2). Byte-identical to a
+            # full re-read (the poller's bars are immutable); only takes effect on
+            # the vectorised path, matching tesla_incremental_read's contract.
+            inc = vec and bool(getattr(self.config, "tesla_incremental_read", False))
             now = datetime.now(IST)
             # 1. trigger (non-blocking) — recompute runs in a background thread.
             _cache.refresh_if_needed(
                 db_path=db, personality_window_days=pwd, min_grade=mg,
                 cooldown_minutes=cd, did_layer_enabled=did, vectorized=vec,
-                now=now, block=False)
+                incremental=inc, now=now, block=False)
             # 2. read the cached signals + staleness.
             signals, stale = _cache.get_signals(
                 db_path=db, personality_window_days=pwd, min_grade=mg,
-                did_layer_enabled=did, vectorized=vec, now=now,
+                did_layer_enabled=did, vectorized=vec, incremental=inc, now=now,
                 staleness_bound_sec=bound)
             if stale:
                 # 3. abstain from NEW entries + page (live, market hours only).

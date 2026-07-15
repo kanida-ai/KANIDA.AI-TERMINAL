@@ -387,12 +387,30 @@ def score_universe_for_symbols(con: sqlite3.Connection,
     # the symbol,bar_time-ordered frame yields the groups in the identical order
     # the per-symbol loop did, so the result is byte-identical.
     raw = _pull_cash_symbols_batch(con, syms, days)
-    if raw.empty:
+    return _finalize_scored_from_raw(con, raw, syms, vectorized=vectorized)
+
+
+def _finalize_scored_from_raw(con: sqlite3.Connection, raw: pd.DataFrame,
+                              syms: Sequence[str],
+                              vectorized: bool = False) -> pd.DataFrame:
+    """The scoring pipeline AFTER the raw poll read: microstructure + drive/
+    absorption + phase + fwd + sector, for an already-fetched post-processed raw
+    frame. Split out of score_universe_for_symbols so the INCREMENTAL read path
+    (which assembles `raw` from a per-process bar cache instead of a full DB read)
+    runs the SAME scoring and is therefore byte-identical.
+
+    Row order is irrelevant here: the vectorised microstructure sorts by
+    [instrument, day, bar_time] internally; the loop path groups the same way; and
+    every downstream op (assign_phase / _add_forward_15m sort / the sector merge)
+    is per-(instrument,day) or row-local. So a `raw` reassembled from cached +
+    freshly-read bars yields the identical scored frame as a full re-read of the
+    same rows.
+
+    DEFAULT (vectorized=False) → the committed per-(instrument,day) microstructure
+    loop (the exact oracle score_universe_from_db uses). vectorized=True → the
+    multi-group VECTORISED microstructure (byte-identical to the loop; proven)."""
+    if raw is None or raw.empty:
         return pd.DataFrame()
-    # DEFAULT (vectorized=False) → the committed per-(instrument,day) loop, the
-    # exact microstructure oracle score_universe_from_db uses. vectorized=True →
-    # the multi-group VECTORISED microstructure (byte-identical to the loop; proven
-    # by the full-day all-columns parity test), the sub-10s once-per-minute path.
     if vectorized:
         scored = tf.add_microstructure_features_vectorized(raw)
         if scored.empty:
@@ -404,22 +422,33 @@ def score_universe_for_symbols(con: sqlite3.Connection,
         if not scored_parts:
             return pd.DataFrame()
         scored = pd.concat(scored_parts, ignore_index=True)
-    scored["short_drive"] = tf.clamp01(scored["short_drive_core"])
-    scored["long_drive"] = tf.clamp01(scored["long_drive_core"])
-    scored["bid_absorption"] = tf.clamp01(scored["bid_absorption_core"])
-    scored["ask_absorption"] = tf.clamp01(scored["ask_absorption_core"])
-    scored["falcon_tesla_score"] = (scored["long_drive"] - scored["short_drive"]) * 100.0
-    scored["absorption_bias"] = (scored["bid_absorption"] - scored["ask_absorption"]) * 100.0
+    # DE-FRAGMENTED assembly (round-2 opt 2): add the six drive/absorption columns
+    # in ONE block-consolidated assign() instead of six single-column inserts (the
+    # source of the pandas "highly fragmented DataFrame" PerformanceWarning). The
+    # arithmetic is unchanged, so the values are bit-identical to the per-column
+    # assigns (proven by the all-columns scored-frame parity test).
+    sd = tf.clamp01(scored["short_drive_core"])
+    ld = tf.clamp01(scored["long_drive_core"])
+    ba = tf.clamp01(scored["bid_absorption_core"])
+    aa = tf.clamp01(scored["ask_absorption_core"])
+    scored = scored.assign(
+        short_drive=sd, long_drive=ld,
+        bid_absorption=ba, ask_absorption=aa,
+        falcon_tesla_score=(ld - sd) * 100.0,
+        absorption_bias=(ba - aa) * 100.0)
     scored = tf.assign_phase(scored)
     scored = _add_forward_15m(scored)
     sect = _sector_map(con, syms)
     scored = scored.merge(sect, left_on="instrument", right_on="symbol",
                           how="left", suffixes=("", "_ref"))
-    scored["sector"] = scored["sector"].fillna("UNKNOWN")
-    scored["bar_time"] = pd.to_datetime(scored["bar_time"])
-    scored["close_atp_gap_bps"] = ((scored["close"] - scored["atp"]) /
-                                   scored["close"].replace(0, np.nan)) * 10000.0
-    scored["tick_sell%"] = 100.0 - scored["tick_buy%"]
+    bt = pd.to_datetime(scored["bar_time"])
+    gap = ((scored["close"] - scored["atp"]) /
+           scored["close"].replace(0, np.nan)) * 10000.0
+    scored = scored.assign(
+        sector=scored["sector"].fillna("UNKNOWN"),
+        bar_time=bt,
+        close_atp_gap_bps=gap,
+        **{"tick_sell%": 100.0 - scored["tick_buy%"]})
     return scored
 
 
@@ -431,6 +460,208 @@ def candidate_symbols(con: sqlite3.Connection,
     if cands.empty:
         return []
     return list(cands["symbol"].drop_duplicates())
+
+
+# ── INCREMENTAL infer-day poll read (round-2 warm-tick optimization) ──────────
+#
+# The per-minute recompute re-read the WHOLE infer day (~9.6s on 498 symbols) and
+# re-scanned the day for the candidate row-counts (~1.7s) every tick — even though
+# only the newest minute(s) change. The poller (scripts/mkt_poller.py) writes each
+# 1-min bar EXACTLY ONCE, AFTER the minute closes, via INSERT OR IGNORE — it never
+# rewrites an existing (instrument_key, bar_time) row and bars arrive in monotonic
+# minute order. So the finalized bars are IMMUTABLE: a per-process cache of them is
+# provably identical to a fresh full read, and each tick only needs to fetch bars
+# with bar_time > cached_max. This is BYTE-SAFE (not an approximation): the
+# reassembled raw frame == a full re-read of the same rows, so the scored/graded
+# signals are byte-identical (proven by the full-day incremental parity test). The
+# caches live in the (per-worker) process the offload pool reuses — same lifetime
+# model as _TRAIN_CACHE; each worker warms once per day then reads incrementally.
+
+
+def _read_cash_raw_day(con: sqlite3.Connection, symbols: Sequence[str], day: str,
+                       bar_time_gt: Optional[str] = None,
+                       bar_time_le: Optional[str] = None) -> pd.DataFrame:
+    """RAW (text bar_time, PRE-postprocess) CASH rows for `symbols` on `day`,
+    batched over ~900-symbol IN() chunks with the SAME LEFT JOIN to
+    mkt_trades_1min as _pull_cash_symbols_batch. `bar_time_gt` (exclusive) and/or
+    `bar_time_le` (inclusive) narrow the read to an incremental window; both None
+    → the whole day. bar_time is stored as fixed-format "YYYY-MM-DD HH:MM" text so
+    lexicographic string comparison == chronological (index idx_mktof_sym_dt makes
+    the per-symbol bar_time range seek instant). Returns rows for `day` only."""
+    syms = list(dict.fromkeys(symbols))
+    if not syms:
+        return pd.DataFrame()
+    hi = (pd.Timestamp(day) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    conds = ["of.segment='CASH'"]
+    tail_params: List[Any] = []
+    if bar_time_gt is not None:
+        conds.append("of.bar_time>?")
+        tail_params.append(bar_time_gt)
+    else:
+        conds.append("of.bar_time>=?")
+        tail_params.append(day)
+    conds.append("of.bar_time<?")
+    tail_params.append(hi)
+    if bar_time_le is not None:
+        conds.append("of.bar_time<=?")
+        tail_params.append(bar_time_le)
+    frames = []
+    for i in range(0, len(syms), _SQL_IN_CHUNK):
+        chunk = syms[i:i + _SQL_IN_CHUNK]
+        marks = ",".join("?" * len(chunk))
+        where = (f"WHERE of.symbol IN ({marks}) AND " + " AND ".join(conds) +
+                 " ORDER BY of.symbol, of.bar_time")
+        q = pd.read_sql_query(_CASH_SELECT + where, con,
+                              params=(*chunk, *tail_params))
+        if not q.empty:
+            frames.append(q)
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    keep = df["bar_time"].astype(str).str.slice(0, 10) == day
+    return df[keep].reset_index(drop=True)
+
+
+@dataclass
+class _InferRawCache:
+    db_key: str
+    infer_day: str
+    covered: set                 # symbols whose infer-day rows are in `proc`
+    proc: pd.DataFrame           # POST-PROCESSED raw frame for `covered`
+    max_bar_time: str            # max bar_time TEXT currently cached ("" if none)
+    built_at: str
+
+
+_INFER_RAW_CACHE: Dict[str, _InferRawCache] = {}
+_INFER_RAW_LOCK = threading.RLock()
+_infer_raw_build_count = 0       # full (cold / day-roll) reads
+_infer_raw_incr_count = 0        # incremental (tail) reads
+
+
+@dataclass
+class _InferCountCache:
+    db_key: str
+    infer_day: str
+    ref_cash: tuple              # mkt_reference CASH symbols (invariant intraday)
+    counts: Dict[str, int]       # {symbol: infer-day row count so far}
+    scan_max: str                # max bar_time counted ("" if none)
+
+
+_INFER_COUNT_CACHE: Dict[str, _InferCountCache] = {}
+_INFER_COUNT_LOCK = threading.RLock()
+
+
+def reset_infer_caches() -> None:
+    """Drop the incremental infer-day raw + count caches (tests / forced refresh)."""
+    global _infer_raw_build_count, _infer_raw_incr_count
+    with _INFER_RAW_LOCK:
+        _INFER_RAW_CACHE.clear()
+        _infer_raw_build_count = 0
+        _infer_raw_incr_count = 0
+    with _INFER_COUNT_LOCK:
+        _INFER_COUNT_CACHE.clear()
+
+
+def _incremental_infer_candidates(con: sqlite3.Connection, db_key: str,
+                                  infer_day: str) -> List[str]:
+    """The infer-day CASH candidate symbols (>=300 rows), maintained
+    INCREMENTALLY: the per-symbol row counts are accumulated by scanning only the
+    NEW bars (bar_time > scan_max) each tick, so the full-day GROUP BY runs once
+    (cold) then only the tail is counted. Byte-identical to candidate_symbols(con,
+    [infer_day]): the summed increments equal the full COUNT(*) per symbol, and the
+    result is the mkt_reference-CASH symbols with count>=300 (same set)."""
+    key = f"{db_key}|{infer_day}"
+    hi = (pd.Timestamp(infer_day) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    with _INFER_COUNT_LOCK:
+        entry = _INFER_COUNT_CACHE.get(key)
+        if entry is None or entry.infer_day != infer_day:
+            ref = pd.read_sql_query(
+                "SELECT symbol FROM mkt_reference WHERE segment='CASH' "
+                "ORDER BY symbol", con)
+            ref_cash = tuple(dict.fromkeys(ref["symbol"].tolist()))
+            entry = _InferCountCache(db_key=db_key, infer_day=infer_day,
+                                     ref_cash=ref_cash, counts={}, scan_max="")
+            _INFER_COUNT_CACHE.clear()
+            _INFER_COUNT_CACHE[key] = entry
+        gt = entry.scan_max if entry.scan_max else infer_day
+        op = ">" if entry.scan_max else ">="
+        new_max = None
+        for sym, cnt, mx in con.execute(
+                "SELECT symbol, COUNT(*) AS c, MAX(bar_time) AS m "
+                "FROM mkt_orderflow_1min WHERE segment='CASH' "
+                f"AND bar_time{op}? AND bar_time<? GROUP BY symbol",
+                (gt, hi)):
+            entry.counts[sym] = entry.counts.get(sym, 0) + int(cnt)
+            if mx is not None and (new_max is None or mx > new_max):
+                new_max = mx
+        if new_max is not None:
+            entry.scan_max = new_max
+        refset = set(entry.ref_cash)
+        return [s for s in entry.ref_cash
+                if s in refset and entry.counts.get(s, 0) >= MIN_CANDIDATE_ROWS]
+
+
+def _incremental_infer_raw(con: sqlite3.Connection, db_key: str, infer_day: str,
+                           all_syms: Sequence[str]) -> pd.DataFrame:
+    """Return the POST-PROCESSED raw infer-day frame for `all_syms`, reading from
+    the poll DB INCREMENTALLY. On a cold cache (or day-roll) it does a full read;
+    thereafter each tick reads only the new minute(s) (bar_time > cached_max) for
+    the covered symbols plus the full history of any newly-added symbols. Because
+    stored bars are immutable + monotonic, the reassembled frame is byte-identical
+    to _pull_cash_symbols_batch(con, all_syms, [infer_day])."""
+    global _infer_raw_build_count, _infer_raw_incr_count
+    key = f"{db_key}|{infer_day}"
+    want = set(all_syms)
+    with _INFER_RAW_LOCK:
+        entry = _INFER_RAW_CACHE.get(key)
+        # Full (cold) read on: no cache, a day-roll, OR — defensively — if the
+        # wanted set is NOT a superset of what's cached (all_syms grows monotonically
+        # within a day, so a SHRINK "can't happen"; if it ever did, a stale superset
+        # frame would break parity, so we rebuild instead).
+        if (entry is None or entry.infer_day != infer_day
+                or not want.issuperset(entry.covered)):
+            raw = _read_cash_raw_day(con, sorted(want), infer_day)
+            # Capture the max bar_time as TEXT (DB format "YYYY-MM-DD HH:MM")
+            # BEFORE _postprocess_cash_raw mutates bar_time to datetime in place —
+            # this text feeds the next tick's `bar_time > ?` incremental read.
+            mx = str(raw["bar_time"].max()) if not raw.empty else ""
+            proc = (_postprocess_cash_raw(raw) if not raw.empty
+                    else pd.DataFrame())
+            entry = _InferRawCache(db_key=db_key, infer_day=infer_day,
+                                   covered=set(want), proc=proc, max_bar_time=mx,
+                                   built_at=datetime.now(IST).isoformat())
+            _INFER_RAW_CACHE.clear()
+            _INFER_RAW_CACHE[key] = entry
+            _infer_raw_build_count += 1
+            return entry.proc
+        new_syms = want - entry.covered
+        parts: List[pd.DataFrame] = []
+        if not entry.proc.empty:
+            parts.append(entry.proc)
+        new_max = entry.max_bar_time
+        # (a) HISTORY (bar_time <= cached_max) for newly-added symbols only.
+        if new_syms and entry.max_bar_time:
+            hist = _read_cash_raw_day(con, sorted(new_syms), infer_day,
+                                      bar_time_le=entry.max_bar_time)
+            if not hist.empty:
+                parts.append(_postprocess_cash_raw(hist))
+        elif new_syms:  # cache had no bars yet — new syms get the full day below
+            pass
+        # (b) TAIL (bar_time > cached_max) for ALL wanted symbols (covered + new).
+        gt = entry.max_bar_time if entry.max_bar_time else None
+        tail = _read_cash_raw_day(con, sorted(want), infer_day, bar_time_gt=gt)
+        if not tail.empty:
+            tmax = str(tail["bar_time"].max())   # TEXT max BEFORE postprocess
+            parts.append(_postprocess_cash_raw(tail))
+            if not new_max or tmax > new_max:
+                new_max = tmax
+        proc = (pd.concat(parts, ignore_index=True) if len(parts) > 1
+                else (parts[0] if parts else pd.DataFrame()))
+        entry.proc = proc
+        entry.covered = set(want)
+        entry.max_bar_time = new_max or ""
+        _infer_raw_incr_count += 1
+        return entry.proc
 
 
 # ── NIFTYFUT context (verbatim logic from short_engine_v2.load_nifty_context) ─
@@ -999,12 +1230,15 @@ _train_cache_extend_count = 0
 
 
 def reset_train_cache() -> None:
-    """Drop the train-day cache (tests / a forced refresh)."""
+    """Drop the train-day cache AND the incremental infer-day caches (tests / a
+    forced refresh) — resetting the train window also invalidates the infer state
+    it pairs with, so a test that resets between recomputes gets a clean slate."""
     global _train_cache_build_count, _train_cache_extend_count
     with _TRAIN_CACHE_LOCK:
         _TRAIN_CACHE.clear()
         _train_cache_build_count = 0
         _train_cache_extend_count = 0
+    reset_infer_caches()
 
 
 def _train_cache_key(db_key: str, train_days: Sequence[str]) -> str:
@@ -1101,6 +1335,7 @@ def compute_live_signals_fast(
     latest_only: bool = True,
     did_layer_enabled: bool = False,
     vectorized: bool = False,
+    incremental: bool = False,
     con: Optional[sqlite3.Connection] = None,
 ) -> TeslaSignalResult:
     """Optimized equivalent of compute_live_signals: caches the scored TRAIN
@@ -1116,7 +1351,16 @@ def compute_live_signals_fast(
     VECTORISED feature pipeline (byte-identical to the loop; proven by the full-day
     all-columns minute-by-minute parity test) — the sub-10s once-per-minute path.
     OFF by default: the committed loop stays the default until the parity proof is
-    reviewed and the operator sets tesla_vectorized_features=true."""
+    reviewed and the operator sets tesla_vectorized_features=true.
+
+    incremental=False (DEFAULT) → the infer day + its candidate row-counts are
+    fully re-read from the poll DB each call. incremental=True (round-2 opt) → the
+    finalized infer-day bars + candidate counts are cached in-process and only the
+    NEW minute(s) are read (bar_time > cached_max); the SAME vectorised scoring
+    then runs on the reassembled frame. Byte-identical (the poller's bars are
+    immutable — INSERT OR IGNORE, append-only; proven by the incremental parity
+    test), and it drops the ~11s infer-day DB read/scan to <0.5s. Gated OFF until
+    the operator flips tesla_incremental_read=true."""
     owns_con = con is None
     if owns_con:
         con = connect_db_readonly(db_path)
@@ -1138,7 +1382,9 @@ def compute_live_signals_fast(
         # candidate set _get_cash_candidates(train+infer) would produce. The train
         # candidates + train-derived stats are cached per day-roll; only the infer
         # candidates are rediscovered each minute (one batched GROUP BY).
-        infer_cands = candidate_symbols(con, [infer_day])
+        infer_cands = (_incremental_infer_candidates(con, db_key, infer_day)
+                       if incremental
+                       else candidate_symbols(con, [infer_day]))
         cache = _get_train_cache(con, db_key, train_days, infer_cands,
                                  vectorized=vectorized)
         all_syms = sorted(set(cache.train_candidates) | set(infer_cands))
@@ -1149,9 +1395,17 @@ def compute_live_signals_fast(
 
         # Rescore ONLY the infer day (the train frame is cached). n_candidates is
         # the union instrument set with data on ANY window day — matching the full
-        # recompute's score_universe_from_db(window).nunique().
-        infer_scored = score_universe_for_symbols(con, [infer_day], all_syms,
-                                                  vectorized=vectorized)
+        # recompute's score_universe_from_db(window).nunique(). incremental=True
+        # reassembles the infer-day raw frame from the in-process bar cache (only
+        # new minutes read) and runs the SAME _finalize_scored_from_raw — the
+        # reassembled rows are byte-identical to a full re-read.
+        if incremental:
+            infer_raw = _incremental_infer_raw(con, db_key, infer_day, all_syms)
+            infer_scored = _finalize_scored_from_raw(con, infer_raw, all_syms,
+                                                     vectorized=vectorized)
+        else:
+            infer_scored = score_universe_for_symbols(con, [infer_day], all_syms,
+                                                      vectorized=vectorized)
         inst = set()
         if cache.train_scored is not None and not cache.train_scored.empty:
             inst |= set(cache.train_scored["instrument"].unique())

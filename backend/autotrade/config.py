@@ -231,6 +231,20 @@ class TradingSessionConfig:
     # identical) and ~2.4x faster. It changes NO signal, threshold, exit, or
     # order behaviour — pure speed. Set False to fall back to the per-group loop.
     tesla_vectorized_features: bool = True
+    # PERF flag — INCREMENTAL infer-day DB read (round-2 warm-tick optimization).
+    # DEFAULT OFF (ships behind the flag; the vectorized full-read path stays the
+    # safe fallback until the operator flips it after reviewing the parity proof).
+    # When True, the once-per-minute recompute caches the FINALIZED infer-day bars
+    # in-process and each tick reads only the NEW minute(s) from the poll DB
+    # (WHERE bar_time > cached_max) instead of re-reading the whole day, then runs
+    # the SAME vectorised full-frame scoring on the reassembled frame. This is
+    # byte-SAFE by construction: the poller writes each minute exactly once via
+    # INSERT OR IGNORE, only after the minute closes, and never rewrites an older
+    # bar — so the cached bars are provably identical to a fresh full read
+    # (mkt_poller.py). Signals are byte-identical (proven by the full-day,
+    # minute-by-minute incremental parity test); it cuts the ~9.6s infer-day read
+    # to <0.1s. Only takes effect together with tesla_vectorized_features=True.
+    tesla_incremental_read: bool = False
 
     # Position sizing
     sizing_mode: str = "equal"             # equal | pct_cap | manual
@@ -1209,6 +1223,8 @@ class TradingSessionConfig:
                 d.get("tesla_did_layer_enabled", False)),
             tesla_vectorized_features=bool(
                 d.get("tesla_vectorized_features", True)),
+            tesla_incremental_read=bool(
+                d.get("tesla_incremental_read", False)),
             sizing_mode=d.get("sizing_mode", "equal"),
             max_pct_per_position=float(d.get("max_pct_per_position", 0.05)),
             manual_amounts=d.get("manual_amounts", {}) or {},
