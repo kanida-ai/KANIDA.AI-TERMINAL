@@ -470,6 +470,29 @@ class RupeezyBroker(BrokerClient):
 
     # get_ltps_batch inherits the base loop over get_ltp (safe None fallback).
 
+    def available_margin(self):
+        """Free equity margin (₹) the RMS pre-trade gate sizes against.
+        CERTIFIED 2026-07-15 (live-verified): GET /user/funds returns per-segment
+        blocks (exchange_combined / nse / mcx), each with `net_available`,
+        `total_trading_power`, `withdrawable_balance`. We use `net_available` off
+        the combined view (fall back to nse). Returns None on ANY failure so the
+        RMS fails-closed (never over-deploys on an unknown budget)."""
+        if not self._access_token():
+            return None
+        try:
+            r = self._request("GET", "/user/funds")
+            r.raise_for_status()
+            data = r.json() or {}
+            for seg in ("exchange_combined", "nse"):
+                blk = data.get(seg) or {}
+                v = blk.get("net_available")
+                if isinstance(v, (int, float)) and not isinstance(v, bool) \
+                        and v >= 0:
+                    return float(v)
+        except Exception as e:
+            log.warning("rupeezy available_margin failed: %s", e)
+        return None
+
     # ── Margin / leverage (equity MIS/MTF sizing) ─────────────────────────────
     def _margin_probe(self, symbol: str, prod_vortex: str,
                       ltp: float) -> Optional[float]:
