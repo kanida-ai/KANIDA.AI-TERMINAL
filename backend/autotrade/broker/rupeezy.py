@@ -96,6 +96,66 @@ _EXCHANGE_MAP = {
     "MCX": "MCX_FO",
 }
 
+# REVERSE maps — a Vortex book (positions/holdings) speaks Vortex tokens; the
+# broker-agnostic reconciler + alert monitor consume the KITE vocabulary
+# (exchange ∈ {NSE,BSE,NFO,MCX}, product ∈ {CNC,MIS,NRML,MTF}). get_positions_net
+# / get_holdings therefore NORMALISE each row back to Kite tokens so the
+# reconciler's (symbol, product, exchange) matcher accepts a Rupeezy row.
+# live-verified 2026-07-15: a Vortex net row carries exchange="NSE_EQ",
+# product="DELIVERY"; unmapped, the reconciler rejected every CNC row on BOTH the
+# exchange ("NSE_EQ"!="NSE") and product ("DELIVERY"!="CNC") checks → a held CNC
+# was invisible to the invariant → a false UNATTRIBUTED_CLOSE every tick.
+_VORTEX_EXCHANGE_TO_KITE = {
+    "NSE_EQ": "NSE",
+    "BSE_EQ": "BSE",
+    "NSE_FO": "NFO",
+    "MCX_FO": "MCX",
+}
+_VORTEX_PRODUCT_TO_KITE = {
+    "DELIVERY": "CNC",
+    "INTRADAY": "MIS",
+    "MTF": "MTF",
+}
+
+
+def _vortex_exchange_to_kite(exch: Optional[str]) -> Optional[str]:
+    if exch in (None, ""):
+        return None
+    return _VORTEX_EXCHANGE_TO_KITE.get(str(exch).upper(), str(exch).upper())
+
+
+def _vortex_product_to_kite(prod: Optional[str]) -> Optional[str]:
+    if prod in (None, ""):
+        return None
+    return _VORTEX_PRODUCT_TO_KITE.get(str(prod).upper(), str(prod).upper())
+
+
+def _held_from_row(row: Dict[str, Any]) -> int:
+    """Signed held quantity for a Vortex positions.net row, PRODUCT-AWARE.
+
+    live-verified 2026-07-15: a DELIVERY (CNC) row reports net `quantity`=0 and
+    carries the held shares in `buy_quantity`/`sell_quantity` (the intraday net
+    `quantity` field is populated for MIS/INTRADAY, NOT for delivery). So a held
+    same-day CNC buy of N reads quantity=0 while buy_quantity=N, sell_quantity=0.
+    Rule: when `quantity` is 0/absent, the true held is buy−sell (delivery, or a
+    genuinely flat intraday round-trip → buy−sell=0); when `quantity` is populated
+    (a live MIS/INTRADAY leg, e.g. a −50 short) it IS the signed exposure. This
+    never regresses the MIS path (quantity non-zero → used as-is) and fixes the
+    delivery read (quantity 0 → buy−sell)."""
+    bq = int(_to_int(row.get("buy_quantity", row.get("buy_qty"))))
+    sq = int(_to_int(row.get("sell_quantity", row.get("sell_qty"))))
+    raw_q = row.get("quantity", row.get("net_quantity", row.get("net_qty")))
+    if raw_q in (None, 0, "0"):
+        return bq - sq
+    return int(_to_int(raw_q))
+
+
+def _to_int(v) -> int:
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return 0
+
 
 def _is_transient(status_code: Optional[int]) -> bool:
     """5xx / 429 are transient (retry); 4xx (auth/validation) are permanent."""
@@ -746,25 +806,33 @@ class RupeezyBroker(BrokerClient):
         for r in raw:
             if not isinstance(r, dict):
                 continue
-            # TODO(certify) field names — reference the Vortex positions payload.
+            # live-verified: a Vortex net row names the instrument `symbol` (bare).
             sym = r.get("tradingsymbol") or r.get("trading_symbol") \
                 or r.get("symbol") or r.get("token")
             if not sym:
                 continue
             buy_q = r.get("buy_quantity", r.get("buy_qty"))
             sell_q = r.get("sell_quantity", r.get("sell_qty"))
-            qty = r.get("quantity", r.get("net_quantity", r.get("net_qty")))
+            # PRODUCT-AWARE held: DELIVERY carries the position in buy/sell with
+            # quantity=0; INTRADAY populates quantity. _held_from_row picks the
+            # right source so the reconciler's Kite-shaped `quantity` reflects the
+            # TRUE held net (a held CNC buy → +N, not 0). live-verified 2026-07-15.
+            qty = _held_from_row(r)
             out.append({
                 "tradingsymbol": str(sym),
-                "exchange": r.get("exchange") or r.get("exchange_segment"),
+                # NORMALISE to Kite vocabulary so the reconciler/alert matchers
+                # accept the row (NSE_EQ→NSE, DELIVERY→CNC). See the reverse maps.
+                "exchange": _vortex_exchange_to_kite(
+                    r.get("exchange") or r.get("exchange_segment")),
                 "quantity": qty,
                 "buy_quantity": buy_q,
                 "sell_quantity": sell_q,
                 "buy_price": r.get("buy_price", r.get("buy_average")),
                 "sell_price": r.get("sell_price", r.get("sell_average")),
                 "average_price": r.get("average_price", r.get("avg_price")),
-                "pnl": r.get("pnl", r.get("net_pnl")),
-                "product": r.get("product") or r.get("product_type"),
+                "pnl": r.get("pnl", r.get("net_pnl", r.get("value"))),
+                "product": _vortex_product_to_kite(
+                    r.get("product") or r.get("product_type")),
             })
         return out or None
 
@@ -805,27 +873,78 @@ class RupeezyBroker(BrokerClient):
                        or row.get("symbol") or row.get("token"))
             if str(row_sym) != str(symbol):
                 continue
-            qty = row.get("quantity", row.get("net_quantity", row.get("net_qty")))
-            if qty is None:
-                bq = row.get("buy_quantity", row.get("buy_qty")) or 0
-                sq = row.get("sell_quantity", row.get("sell_qty")) or 0
-                qty = int(bq) - int(sq)
-            return int(qty or 0)
+            # PRODUCT-AWARE held (parity with get_positions_net): a DELIVERY (CNC)
+            # row reports quantity=0 with the position in buy_quantity/sell_quantity;
+            # only MIS/INTRADAY populate the signed `quantity`. _held_from_row reads
+            # buy−sell for the former and the signed `quantity` for the latter — so a
+            # genuinely-held same-day CNC buy returns +N (not 0). This is the
+            # positions.net view ONLY (Kite parity — get_net_position_qty does NOT
+            # consult holdings; a settled/overnight CNC that has moved to holdings
+            # reads 0 here exactly as Zerodha does, and the RECONCILER — which DOES
+            # add holdings — is what tracks the carried BTST leg). live-verified
+            # 2026-07-15: MAPMYINDIA DELIVERY net quantity=0, buy=2, sell=2 → 0.
+            return _held_from_row(row)
         return 0  # book retrieved, symbol absent → flat at the broker
 
     def get_holdings(self) -> List[dict]:
-        """Delivery holdings. TODO(certify) exact path — reference CONFIRM #3
-        (`GET /trading/portfolio/holdings`). Returns [] on any failure."""
+        """Delivery holdings, NORMALISED to the Kite-shaped rows the reconciler
+        consumes (`tradingsymbol`, `quantity`, `t1_quantity`, `product`).
+
+        Why normalise (live-verified 2026-07-15 shape):
+          {"status":"Success","data":[{isin, nse:{token,symbol,...}, bse:{...},
+           total_free, dp_free, pool_free, t1_quantity, average_price, last_price,
+           product:"DELIVERY", ...}]}
+        The symbol lives under `nse.symbol` (NOT a flat `tradingsymbol`) and the
+        held quantity under `total_free` (settled/free demat) + `t1_quantity`
+        (T+1, bought-not-yet-delivered) — NOT a flat `quantity`. Un-normalised, the
+        reconciler read `tradingsymbol`→None and `quantity`→0, so a genuinely-held
+        (settled / overnight BTST) CNC contributed ZERO to broker_held → a false
+        deficit. We emit `quantity`=total_free and `t1_quantity`=t1 so the
+        reconciler's `quantity + t1_quantity` = the true held (the SAME contract as
+        Kite holdings). The two are disjoint in time (a share is EITHER settled-free
+        OR T+1, never both), so the sum never double-counts.
+
+        NOTE(certify): confirmed against an ALL-ZERO live book (today's shares had
+        round-tripped flat). The total_free/t1_quantity non-overlap awaits one
+        NON-zero held-holdings observation; a mis-estimate here fails SAFE — an
+        over-count reads as a broker SURPLUS (invisible, no close), an under-count
+        as a deficit with NO same-day sell evidence (alert at most, never a close).
+        Returns [] on any failure. `nse`/`bse`/`isin` are preserved on each row."""
         if not self._access_token():
             return []
         try:
             r = self._request("GET", "/trading/portfolio/holdings")
             r.raise_for_status()
             data = (r.json() or {}).get("data") or []
-            return list(data)
         except Exception as e:
             log.warning("rupeezy get_holdings failed: %s", e)
             return []
+        out: List[dict] = []
+        for h in (data or []):
+            if not isinstance(h, dict):
+                continue
+            nse = h.get("nse") if isinstance(h.get("nse"), dict) else {}
+            bse = h.get("bse") if isinstance(h.get("bse"), dict) else {}
+            sym = (h.get("tradingsymbol") or nse.get("symbol")
+                   or bse.get("symbol") or h.get("symbol"))
+            if not sym:
+                continue
+            exch = "NSE" if nse.get("symbol") else ("BSE" if bse.get("symbol")
+                                                    else None)
+            settled = _to_int(h.get("total_free", h.get("dp_free")))
+            t1 = _to_int(h.get("t1_quantity"))
+            row = dict(h)  # preserve original fields (isin/nse/bse/last_price/…)
+            row.update({
+                "tradingsymbol": str(sym),
+                "exchange": exch,
+                "token": nse.get("token") or bse.get("token") or h.get("token"),
+                "quantity": settled,
+                "t1_quantity": t1,
+                "average_price": h.get("average_price", h.get("avg_price")),
+                "product": _vortex_product_to_kite(h.get("product")) or "CNC",
+            })
+            out.append(row)
+        return out
 
     # ── GTT-OCO (broker-held per-position backup) ─────────────────────────────
     def place_gtt_oco(self, symbol: str, qty: int, stop_price: float,

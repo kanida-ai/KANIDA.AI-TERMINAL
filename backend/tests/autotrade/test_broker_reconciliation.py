@@ -905,3 +905,52 @@ def test_m11_bse_row_does_not_shadow_nse_hold(clean_positions, monkeypatch):
     assert not any(a.get("action") == "CORP_ACTION_SUSPECTED" for a in actions)
     # Our NSE row is untouched (never mutated from the BSE row).
     assert _row(sess, "A")["qty"] == 10
+
+
+# ── HARDENING: a HELD delivery leg (buy-only, no closing-side sell) must NEVER be
+#    fully-flat false-closed (2026-07-15 Rupeezy CNC BTST blocker) ──────────────
+
+def test_cnc_held_long_buy_only_not_false_closed(clean_positions, monkeypatch):
+    """DEFENSE-IN-DEPTH for the BTST blocker. A genuinely-HELD long delivery leg
+    that reaches the reconciler with net quantity=0, buy_quantity>0, sell_quantity=0
+    (a held ENTRY — no close) and NO holdings must NOT be closed. This is EXACTLY
+    the raw Vortex held-CNC shape if the adapter's buy−sell normalisation ever
+    regressed (broker_held would compute to 0). The OLD group-level gate
+    (_has_exit_evidence) returned True on the BUY alone → CLOSED_EXTERNAL_FLAT of a
+    HELD position. Requiring CLOSING-side evidence (a SELL for a long) leaves the
+    held leg OPEN and un-alerted. Mutation check: reverting to _has_exit_evidence
+    closes the row → this fails."""
+    net_book = {"A": {"quantity": 0, "buy_quantity": 4, "sell_quantity": 0,
+                      "buy_price": 100.0, "average_price": 100.0,
+                      "exchange": "NSE", "product": "CNC"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 101.0},
+                              order_product="CNC")
+    _register(sess, "A", 4, 100.0, ltp=101.0)      # held, no order-ids
+    _freeze(sess)
+    actions = reconcile_broker_positions(sess)
+    kinds = {a["action"] for a in actions}
+    assert "CLOSED_EXTERNAL_FLAT" not in kinds     # NEVER false-close a held leg
+    assert "CLOSED_SETTLED_AWAY" not in kinds
+    assert "UNATTRIBUTED_CLOSE" not in kinds       # a held buy is not a divergence
+    assert _row(sess, "A")["status"] == "OPEN"     # held BTST leg survives
+    assert _row(sess, "A")["qty"] == 4
+
+
+def test_cnc_round_trip_to_flat_still_closes_external(clean_positions, monkeypatch):
+    """CONTROL: the hardening must NOT block a REAL external close. A delivery leg
+    the trader/RMS actually squared off shows the CLOSING side (sell_quantity>0);
+    broker_held==0 WITH sell evidence still closes CLOSED_EXTERNAL_FLAT at the sell
+    avg — the legit path is preserved."""
+    net_book = {"A": {"quantity": 0, "buy_quantity": 4, "sell_quantity": 4,
+                      "sell_price": 99.0, "average_price": 100.0,
+                      "exchange": "NSE", "product": "CNC"}}
+    sess = _make_live_session(monkeypatch, net_book, ltps={"A": 100.0},
+                              order_product="CNC")
+    _register(sess, "A", 4, 100.0, ltp=100.0)      # no order-ids (manual/RMS exit)
+    _freeze(sess)
+    actions = reconcile_broker_positions(sess)
+    kinds = {a["action"] for a in actions}
+    assert "CLOSED_EXTERNAL_FLAT" in kinds         # real sell evidence → closes
+    r = _row(sess, "A")
+    assert r["status"] == "CLOSED"
+    assert r["exit_price"] == pytest.approx(99.0)

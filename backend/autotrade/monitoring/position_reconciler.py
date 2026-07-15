@@ -968,8 +968,24 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                         sym = pos.get("symbol")
                         prof_id = pos.get("broker_profile")
                         _lev = _group_ledger.get(pos.get("id"))
-                        if _book_flat_ev:
-                            # Same-day external/manual flat — unchanged path.
+                        # HARDENING (2026-07-15 Rupeezy CNC BTST): the fully-flat
+                        # unconditional close must be evidenced by CLOSING-side
+                        # volume for THIS position's direction — a SELL for a long, a
+                        # BUY-to-cover for a short — NOT merely "any buy or sell"
+                        # (_has_exit_evidence). A genuinely-HELD long delivery leg
+                        # shows buy_quantity>0, sell_quantity=0 (the ENTRY, not a
+                        # close); the old group-level _has_exit_evidence returned True
+                        # on that BUY alone, so if broker_held ever computed to 0 for
+                        # a held CNC (e.g. a positions-field mis-read) the position
+                        # would be FALSE-CLOSED. Requiring closing-side evidence makes
+                        # a held buy fail SAFE (left OPEN); a real external close still
+                        # closes (a round-trip-to-flat always leaves the closing side).
+                        _is_short_pos = (
+                            str(pos.get("direction") or "long").lower() == "short")
+                        _pos_close_ev = _has_close_side_evidence(
+                            matched_rows, _is_short_pos)
+                        if _pos_close_ev:
+                            # Same-day external/manual flat — closing-side evidenced.
                             _reason = "CLOSED_EXTERNAL_FLAT"
                             _oid = None
                             px = ext_px or _num(pos.get("ltp")) \

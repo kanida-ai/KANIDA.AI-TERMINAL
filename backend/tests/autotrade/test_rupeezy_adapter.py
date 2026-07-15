@@ -703,7 +703,7 @@ def test_positions_net_parses_real_shape(fake_requests, master_file, monkeypatch
     _enable_live(monkeypatch)
     fake_requests.on("/trading/portfolio/positions", _FakeResp(200, {"data": {
         "net": [{"symbol": "INFY", "quantity": 25, "product": "DELIVERY",
-                 "average_price": 1500.0, "token": 408065}],
+                 "exchange": "NSE_EQ", "average_price": 1500.0, "token": 408065}],
         "day": []}}))
     b = RupeezyBroker(_live_profile(), dry_run=False)
     net = b.get_positions_net()
@@ -711,7 +711,10 @@ def test_positions_net_parses_real_shape(fake_requests, master_file, monkeypatch
     assert net[0]["tradingsymbol"] == "INFY"
     assert net[0]["quantity"] == 25
     assert net[0]["average_price"] == 1500.0
-    assert net[0]["product"] == "DELIVERY"
+    # NORMALISED to Kite vocabulary so the reconciler's (symbol,product,exchange)
+    # matcher accepts the row: DELIVERY→CNC, NSE_EQ→NSE.
+    assert net[0]["product"] == "CNC"
+    assert net[0]["exchange"] == "NSE"
 
 
 def test_net_position_qty_real_nested_net_shape(fake_requests, master_file,
@@ -876,3 +879,107 @@ def test_place_error_surfaces_vortex_reason(fake_requests, master_file, monkeypa
     res = _run(b.place_order(order))
     assert res.status == "FAILED"
     assert "Margin shortfall" in (res.error or "")
+
+
+# ── CNC (DELIVERY) HELD-QUANTITY read — 2026-07-15 BTST reconciler blocker ─────
+# live-verified: a same-day DELIVERY buy reports net `quantity`=0 and holds the
+# shares in buy_quantity/sell_quantity (buy−sell = held). INTRADAY populates
+# `quantity`. After T+1 the delivery shares move to HOLDINGS (total_free/t1). The
+# reconciler consumes get_positions_net (net) + get_holdings — both must report the
+# true held for a genuinely-held CNC or it false-alarms/false-closes a BTST leg.
+
+def _cnc_net_row(symbol, buy_q, sell_q, token=408065):
+    """A live-shaped Vortex DELIVERY net row: quantity=0, held in buy/sell."""
+    return {"ticker": f"NSE:{symbol}", "exchange": "NSE_EQ", "symbol": symbol,
+            "token": token, "product": "DELIVERY", "quantity": 0,
+            "buy_quantity": buy_q, "sell_quantity": sell_q,
+            "buy_price": 1000.0, "sell_price": 1000.0, "value": 0.0,
+            "average_price": 0}
+
+
+def test_cnc_held_same_day_net_qty_from_buy_minus_sell(fake_requests, master_file,
+                                                       monkeypatch):
+    """HELD same-day CNC buy of 4 → net quantity=0 but buy=4,sell=0 → held 4 (NOT
+    the intraday `quantity` field). Mutation check: reading `quantity` returns 0."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/trading/portfolio/positions", _FakeResp(200, {"data": {
+        "net": [_cnc_net_row("INFY", 4, 0)], "day": []}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_net_position_qty("INFY", "EQ") == 4
+    net = b.get_positions_net()
+    assert net[0]["quantity"] == 4 and net[0]["product"] == "CNC"
+    assert net[0]["exchange"] == "NSE"
+
+
+def test_cnc_partially_sold_net_qty(fake_requests, master_file, monkeypatch):
+    """A CNC buy 10 partly sold 6 → held buy−sell = 4."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/trading/portfolio/positions", _FakeResp(200, {"data": {
+        "net": [_cnc_net_row("INFY", 10, 6)], "day": []}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_net_position_qty("INFY", "EQ") == 4
+    assert b.get_positions_net()[0]["quantity"] == 4
+
+
+def test_cnc_fully_sold_net_qty_zero(fake_requests, master_file, monkeypatch):
+    """A round-trip-to-flat CNC (buy==sell) → held 0 (live MAPMYINDIA shape)."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/trading/portfolio/positions", _FakeResp(200, {"data": {
+        "net": [_cnc_net_row("MAPMYINDIA", 2, 2, token=7227)], "day": []}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_net_position_qty("MAPMYINDIA", "EQ") == 0
+    # get_positions_net STILL surfaces the round-trip (buy/sell) so the reconciler
+    # can attribute a same-day external close, but quantity nets to 0.
+    net = b.get_positions_net()
+    assert net[0]["quantity"] == 0
+    assert net[0]["buy_quantity"] == 2 and net[0]["sell_quantity"] == 2
+
+
+def test_mis_intraday_qty_uses_quantity_field(fake_requests, master_file,
+                                              monkeypatch):
+    """MIS/INTRADAY DOES populate `quantity` — must NOT be regressed to buy−sell. A
+    short INTRADAY of −50 stays −50 (the signed exposure), buy/sell not consulted."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/trading/portfolio/positions", _FakeResp(200, {"data": {
+        "net": [{"symbol": "INFY", "exchange": "NSE_EQ", "product": "INTRADAY",
+                 "quantity": -50, "buy_quantity": 0, "sell_quantity": 50}],
+        "day": []}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_net_position_qty("INFY", "EQ") == -50
+    net = b.get_positions_net()
+    assert net[0]["quantity"] == -50 and net[0]["product"] == "MIS"
+
+
+def test_holdings_normalises_nested_symbol_and_held_qty(fake_requests, master_file):
+    """live-verified holdings: symbol under nse.symbol, held qty in total_free +
+    t1_quantity. get_holdings must emit Kite-shaped tradingsymbol/quantity/
+    t1_quantity so the reconciler counts a settled/overnight CNC as held.
+    Mutation check: returning the raw row leaves tradingsymbol None → held 0."""
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    fake_requests.on("/trading/portfolio/holdings", _FakeResp(200, {"data": [
+        {"isin": "INE009A01021",
+         "nse": {"token": 408065, "exchange": "NSE_EQ", "symbol": "INFY"},
+         "bse": {"token": 500209, "symbol": "INFY"},
+         "total_free": 4, "dp_free": 4, "pool_free": 0, "t1_quantity": 0,
+         "average_price": 1500.0, "last_price": 1490.0, "product": "DELIVERY"}]}))
+    h = b.get_holdings()
+    assert len(h) == 1
+    row = h[0]
+    assert row["tradingsymbol"] == "INFY"
+    assert row["quantity"] == 4 and row["t1_quantity"] == 0
+    assert row["exchange"] == "NSE" and row["product"] == "CNC"
+    # original nested shape preserved for other consumers / debugging.
+    assert row["nse"]["symbol"] == "INFY"
+
+
+def test_holdings_settled_overnight_t1_counts_as_held(fake_requests, master_file):
+    """A Day-2 BTST leg bought yesterday sits in T+1 (t1_quantity) with total_free
+    still 0 → held = total_free + t1 = the true carried qty (reconciler sums them)."""
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    fake_requests.on("/trading/portfolio/holdings", _FakeResp(200, {"data": [
+        {"isin": "INE009A01021",
+         "nse": {"token": 408065, "symbol": "INFY"},
+         "total_free": 0, "dp_free": 0, "pool_free": 0, "t1_quantity": 7,
+         "average_price": 1500.0, "product": "DELIVERY"}]}))
+    h = b.get_holdings()
+    assert h[0]["quantity"] == 0 and h[0]["t1_quantity"] == 7  # sum = 7 held
