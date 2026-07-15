@@ -1937,3 +1937,32 @@ knobs arm/floor/trail_giveback/stop_pct + step-lock ladder + `per_stock_stop_pct
   `worked_interval_sec`, `worked_deadline`, `iceberg_freeze_qty_default`) match the deployed-capable
   `TradingSessionConfig` contract. `worked_min_child_qty` / `worked_max_children` are typed but not
   surfaced in the panel yet (backend defaults 1 / 500 apply).
+
+## 2026-07-14 — Fix BTST display bug in Auto-Ladder "Trailing exit (per basket)" (display-only)
+- **Bug:** with the Falcon BTST campaign preset selected, the lower "Trailing exit (per basket)"
+  card still showed the POSITIONAL preset — "Positional preset" badge, "validated positional
+  config … fixed 3-session hold" note, arm 3 / floor 1 / giveback 4 / stop 6 fields, and a summary
+  with per-basket fund = capital ÷ 3. This misrepresented BTST (which runs NO trail, 2-session hold,
+  sleeve = capital ÷ 2). The create WIRE was already correct (BTST sends
+  `child_config {max_hold_sessions:2, arm_pct:0.5}`); only the display lied. Fixed the display to
+  match what BTST actually runs, and to AGREE with the existing top BTST summary card (sleeve÷2, no trail).
+- **`PortfolioAutoTrade.tsx` — BTST-aware conditionals added (positional path byte-identical):**
+  - `perBasketCapital`: divisor is now `isBtst ? 2 : 3` (BTST sleeve = capital ÷ 2, matching backend
+    total_capital / max_hold_sessions). Feeds the sizing PREVIEW + capital-field hint only — not the wire.
+  - Capital-field hint: under BTST reads "Falcon BTST splits this across 2 overlapping sleeves. Each
+    sleeve ≈ …" instead of "~3 baskets".
+  - Trail-card badge: "BTST preset" when `isBtst`, else "Positional preset" (ladder) / "Preset loaded".
+  - Trail-card info note: BTST branch replaces the positional 3-session copy with "holds each basket
+    exactly 2 sessions (buy 09:15 Day-1 → sell 15:29 Day-2). NO trailing exit — arm set unreachable …
+    only guards are the −6% hard stop and the Day-2 time-exit. Fixed for the campaign."
+  - Four trail fields: under BTST the number inputs are replaced by read-only display chips —
+    Arm / Floor / Giveback = "OFF — no trail", Stop = "{config.stop_pct ?? 6}%". No inputs, no onChange,
+    nothing new to the wire.
+  - `IntradayStrategySummary`: new `isBtst` prop. BTST summary reads "Enter 09:15 → no trail → −6% stop
+    → sell Day-2 15:29 · 2-session hold · CNC" and per-basket fund = capital ÷ 2 (computed locally,
+    independent of preview). Non-BTST rendering unchanged (byte-identical).
+- **Wire untouched:** the `ladderCreate` body (product + `child_config {max_hold_sessions:2, arm_pct:0.5}`)
+  was not modified — this is display-only.
+- **Theme:** reused locked mint/F2 tokens (`C`/`ICON`), `Field` primitive, `inputStyle`; no new colors.
+- **Verify:** `npx tsc --noEmit` clean; `next build` compiled successfully. NOT committed — operator ships.
+- **Backend needs (handoff):** none.

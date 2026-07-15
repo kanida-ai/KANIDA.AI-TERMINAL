@@ -1236,10 +1236,12 @@ export function PortfolioAutoTrade({
   // AND (for a power user) a selected active account.
   const canGoLive = liveReady && liveAccountReady
 
-  // Auto-Ladder splits the total campaign capital across ~3 baskets. The sizing
-  // preview must reflect what ONE day's basket buys, so we preview on total ÷ 3.
+  // Auto-Ladder splits the total campaign capital across overlapping sleeves. The
+  // sizing preview must reflect what ONE day's basket buys, so we preview on the
+  // per-sleeve slice = total ÷ max_hold_sessions. Positional holds 3 (÷3); Falcon
+  // BTST holds exactly 2 (÷2) — matching the backend total_capital / hold-sessions.
   const perBasketCapital = isLadder
-    ? Math.max(0, Math.floor((config.total_allocated_capital || 0) / 3))
+    ? Math.max(0, Math.floor((config.total_allocated_capital || 0) / (isBtst ? 2 : 3)))
     : config.total_allocated_capital
 
   // ── Debounced P&L preview (CONFIG form, kill switch enabled) ──────────────────
@@ -2459,7 +2461,9 @@ export function PortfolioAutoTrade({
             <Field
               label={isLadder ? 'Total campaign capital' : 'Allocated capital'}
               hint={isLadder
-                ? `Falcon splits this across ~3 baskets. Each basket ≈ ${fmtINR(perBasketCapital)}`
+                ? (isBtst
+                    ? `Falcon BTST splits this across 2 overlapping sleeves. Each sleeve ≈ ${fmtINR(perBasketCapital)}`
+                    : `Falcon splits this across ~3 baskets. Each basket ≈ ${fmtINR(perBasketCapital)}`)
                 : 'Total capital this session may deploy.'}
             >
               <input
@@ -3322,18 +3326,44 @@ export function PortfolioAutoTrade({
                 </span>
                 <span className="ml-auto text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
                   style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
-                  {isLadder ? 'Positional preset' : 'Preset loaded'}
+                  {isBtst ? 'BTST preset' : isLadder ? 'Positional preset' : 'Preset loaded'}
                 </span>
               </div>
-              {isLadder && (
+              {isBtst ? (
+                <div className="mb-3 flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-snug"
+                  style={{ border: `1px solid ${C.line2}`, background: 'rgba(255,255,255,0.02)', color: C.muted }}>
+                  <span className="shrink-0 mt-px" style={{ color: C.mint }}>{ICON.info(12)}</span>
+                  <span>Falcon BTST holds each basket <b style={{ color: C.ink2 }}>exactly 2 sessions</b> (buy 09:15 Day-1 → sell 15:29 Day-2). <b style={{ color: C.ink2 }}>NO trailing exit</b> — the arm is set unreachable so it never arms; the only guards are the <b style={{ color: C.ink2 }}>−6% hard stop</b> and the Day-2 time-exit. <b style={{ color: C.ink2 }}>Fixed for the campaign</b>.</span>
+                </div>
+              ) : isLadder ? (
                 <div className="mb-3 flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-snug"
                   style={{ border: `1px solid ${C.line2}`, background: 'rgba(255,255,255,0.02)', color: C.muted }}>
                   <span className="shrink-0 mt-px" style={{ color: C.mint }}>{ICON.info(12)}</span>
                   <span>Each basket runs the <b style={{ color: C.ink2 }}>validated positional config</b> below — held positional with a fixed 3-session hold; the floor + hard stop carry across days. These values are <b style={{ color: C.ink2 }}>fixed for the campaign</b> (shown for reference).</span>
                 </div>
-              )}
+              ) : null}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {isBtst ? (
+                  <>
+                    {/* BTST runs with NO trail — the arm is set unreachable so it
+                        never arms. Display OFF for arm/floor/giveback and the −6%
+                        hard stop; read-only, sends nothing new to the wire. */}
+                    <Field label="Arm / profit (%)" hint="No trail — BTST never arms (arm set unreachable).">
+                      <div className="w-full rounded-lg px-3 py-2 text-[13px] opacity-60" style={inputStyle}>OFF — no trail</div>
+                    </Field>
+                    <Field label="Lock floor (%)" hint="No trail — nothing to lock.">
+                      <div className="w-full rounded-lg px-3 py-2 text-[13px] opacity-60" style={inputStyle}>OFF — no trail</div>
+                    </Field>
+                    <Field label="Trail giveback (%)" hint="No trail — no giveback exit.">
+                      <div className="w-full rounded-lg px-3 py-2 text-[13px] opacity-60" style={inputStyle}>OFF — no trail</div>
+                    </Field>
+                    <Field label="Stop loss (%)" hint="BTST hard stop — the basket exits if it drops this much.">
+                      <div className="w-full rounded-lg px-3 py-2 text-[13px] opacity-60 tabular-nums" style={inputStyle}>{config.stop_pct ?? 6}%</div>
+                    </Field>
+                  </>
+                ) : (
+                  <>
                 <Field label="Arm / profit (%)" hint={isLadder ? 'Validated positional value (fixed).' : 'Arms trailing once the basket hits this on notional.'}>
                   <input type="number" min={0} step={0.05} disabled={isLadder} readOnly={isLadder}
                     value={config.arm_pct ?? ''}
@@ -3358,6 +3388,8 @@ export function PortfolioAutoTrade({
                     onChange={(e) => set('stop_pct', Number(e.target.value) || 0)}
                     className="w-full rounded-lg px-3 py-2 text-[13px] outline-none disabled:opacity-60 disabled:cursor-not-allowed" style={inputStyle} />
                 </Field>
+                  </>
+                )}
 
                 {/* ── D · Hold mode ── Intraday forces a square-off at the set time;
                     Positional carries the floor + hard stop across days (no forced
@@ -3451,6 +3483,7 @@ export function PortfolioAutoTrade({
                   preview={preview}
                   loading={previewLoading}
                   err={previewErr}
+                  isBtst={isBtst}
                 />
               )}
             </div>
@@ -5626,14 +5659,18 @@ function AlertsFeed({ alerts, open, onToggle, onAck, ackingIds }: {
 }
 
 function IntradayStrategySummary({
-  config, preview, loading, err,
-}: { config: SessionConfig; preview: PreviewResponse | null; loading: boolean; err: string | null }) {
+  config, preview, loading, err, isBtst = false,
+}: { config: SessionConfig; preview: PreviewResponse | null; loading: boolean; err: string | null; isBtst?: boolean }) {
   const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
   const arm = num(config.arm_pct); const floor = num(config.floor_pct)
   const trail = num(config.trail_giveback_pct); const stop = num(config.stop_pct)
   const sq = (config.square_off_time ?? '').slice(0, 5) || '—'
   const entry = (config.entry_time ?? '').slice(0, 5) || '—'
   const trim = (v: number | null) => (v == null ? '—' : String(v))
+  // Falcon BTST sleeve = total capital ÷ 2 (2 overlapping sleeves = full capital);
+  // matches the top BTST summary card + the backend total_capital / hold-sessions.
+  const btstStop = stop == null ? 6 : stop
+  const btstSleeve = Math.max(0, Math.floor((config.total_allocated_capital || 0) / 2))
 
   return (
     <div className="mt-4 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.05)' }}>
@@ -5642,6 +5679,23 @@ function IntradayStrategySummary({
         <span className="text-[12px] font-semibold" style={{ color: C.ink }}>Strategy summary</span>
         <span className="ml-auto text-[10px]" style={{ color: C.faint }}>estimate — places nothing</span>
       </div>
+      {isBtst ? (
+        <>
+          <p className="text-[12px] leading-relaxed" style={{ color: C.ink2 }}>
+            Enter <b style={{ color: C.ink }}>09:15</b>
+            {' → '}<b style={{ color: C.ink }}>no trail</b>
+            {' → '}stop <b style={{ color: C.red }}>−{btstStop}%</b>
+            {' → '}sell <b style={{ color: C.ink }}>Day-2 15:29</b>
+            {' · '}<b style={{ color: C.ink }}>2-session</b> hold
+            {' · '}<b style={{ color: C.ink }}>CNC</b>
+          </p>
+          <p className="text-[10.5px] leading-snug mt-2" style={{ color: C.faint }}>
+            per-basket fund = capital ÷ 2 = <b style={{ color: C.ink2 }}>{config.total_allocated_capital ? fmtCapital(btstSleeve) : '—'}</b>
+            {' '}· CNC 1× cash, no leverage.
+          </p>
+        </>
+      ) : (
+      <>
       <p className="text-[12px] leading-relaxed" style={{ color: C.ink2 }}>
         Enter <b style={{ color: C.ink }}>{entry}</b>
         {' → '}arm <b style={{ color: C.mint }}>+{trim(arm)}%</b>
@@ -5661,6 +5715,8 @@ function IntradayStrategySummary({
             {' '}· fund <b style={{ color: C.ink2 }}>{fmtCapital(preview.total_allocated_capital)}</b></>
         ) : '—'}
       </p>
+      </>
+      )}
     </div>
   )
 }
