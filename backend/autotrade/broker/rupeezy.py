@@ -314,12 +314,15 @@ class RupeezyBroker(BrokerClient):
         try:
             r = self._request("POST", "/trading/orders/regular", json_body=body)
             r.raise_for_status()
-            data = (r.json() or {}).get("data") or {}
+            payload = r.json() or {}
+            data = payload.get("data") or {}
+            # live-verified: a successful place returns data.order_id (which itself
+            # CONTAINS a '?', e.g. "NZXAH00003?7") — keep it verbatim.
             oid = data.get("order_id")
             if not oid:
                 return OrderResult(status="FAILED", broker_order_id=None,
                                    symbol=order.symbol, qty=order.qty,
-                                   error=f"no order_id in response ({data})")
+                                   error=_place_error(payload))
             return OrderResult(status="PLACED", broker_order_id=str(oid),
                                symbol=order.symbol, qty=order.qty)
         except Exception as e:
@@ -364,12 +367,13 @@ class RupeezyBroker(BrokerClient):
         try:
             r = self._request("POST", "/trading/orders/regular", json_body=body)
             r.raise_for_status()
-            data = (r.json() or {}).get("data") or {}
+            payload = r.json() or {}
+            data = payload.get("data") or {}
             oid = data.get("order_id")
             if not oid:
                 return OrderResult(status="FAILED", broker_order_id=None,
                                    symbol=symbol, qty=qty,
-                                   error=f"no order_id in response ({data})")
+                                   error=_place_error(payload))
             log.info("rupeezy place_market_exit: %s qty=%d product=%s order_id=%s",
                      symbol, qty, self._map_product(product), oid)
             return OrderResult(status="PLACED", broker_order_id=str(oid),
@@ -380,16 +384,51 @@ class RupeezyBroker(BrokerClient):
                                symbol=symbol, qty=qty, error=str(e))
 
     async def get_pending_orders(self) -> List[Any]:
+        """Live-still-open orders, NORMALISED to the Kite-shaped dict the
+        cross-broker session guards consume (`tradingsymbol`, `transaction_type`,
+        `pending_quantity`, `quantity`, `order_id`, `tag`, `status`).
+
+        Two live-verified shape facts drive this (2026-07-15):
+          * the order book is `{"status":"success","orders":[...]}` — the rows are
+            under `orders`, NOT `data` (reading `data` returned [] → the OVERSELL /
+            foreign-order guards in session.py were silently disabled for Rupeezy);
+          * a Vortex row names the instrument `symbol` (NOT `tradingsymbol`) and has
+            no client-tag field — so without mapping `symbol → tradingsymbol` those
+            guards would never match a Rupeezy order even after the key fix.
+        Returns [] on any failure (guards then fall back to their primary cancel).
+        """
         if not self._access_token():
             return []
         try:
             r = self._request("GET", "/trading/orders")
             r.raise_for_status()
-            data = (r.json() or {}).get("data") or []
-            # Vortex "still alive" statuses — TODO(certify) exact enum (reference §Orders).
-            alive = {"PENDING", "OPEN", "TRIGGER PENDING", "TRIGGER_PENDING"}
-            return [o for o in data
-                    if str(o.get("status", "")).upper() in alive]
+            payload = r.json() or {}
+            rows = payload.get("orders")
+            if rows is None:
+                rows = payload.get("data") or []
+            # Vortex "still alive" statuses — a PARTIALLY_EXECUTED order still has a
+            # resting pending leg, so it counts as alive.
+            alive = {"PENDING", "OPEN", "TRIGGER PENDING", "TRIGGER_PENDING",
+                     "PARTIALLY_EXECUTED", "PARTIALLY EXECUTED", "AMO_SUBMITTED"}
+            out: List[dict] = []
+            for o in (rows or []):
+                if not isinstance(o, dict):
+                    continue
+                if str(o.get("status", "")).upper() not in alive:
+                    continue
+                out.append({
+                    "order_id": o.get("order_id"),
+                    # Vortex `symbol` → the `tradingsymbol` the guards match on.
+                    "tradingsymbol": o.get("symbol") or o.get("tradingsymbol"),
+                    "transaction_type": o.get("transaction_type"),
+                    "pending_quantity": o.get("pending_quantity"),
+                    "quantity": o.get("total_quantity", o.get("quantity")),
+                    "product": o.get("product"),
+                    "status": o.get("status"),
+                    # No client-tag field on Vortex → attribution is by order_id only.
+                    "tag": o.get("tag"),
+                })
+            return out
         except Exception as e:
             log.warning("rupeezy get_pending_orders failed: %s", e)
             return []
@@ -421,22 +460,29 @@ class RupeezyBroker(BrokerClient):
             return False
 
     def get_order_status(self, order_id: str) -> dict:
-        """Fetch an order's status and NORMALISE to the shape the exit_poller
-        expects: {status, filled_quantity, average_price}.
+        """Fetch an order's status and NORMALISE to the shape the exit_poller /
+        entry reconciler expect: {status, filled_quantity, average_price, ...}.
 
-        The exit poller (monitoring/exit_poller.py) checks:
-          status == "COMPLETE"                → done
+        The exit poller (monitoring/exit_poller.py) + entry reconciler check:
+          status == "COMPLETE"                → done (real fill)
           status in ("REJECTED","CANCELLED")  → terminal fail
-        so we map Vortex order states onto that Kite-compatible vocabulary.
+          anything else                       → STILL PENDING (keep polling)
+        so we map Vortex order states onto that Kite-compatible vocabulary. A
+        PARTIALLY_EXECUTED order maps to "PARTIAL" (which is NOT COMPLETE → the
+        poller keeps waiting) while STILL surfacing the real filled_quantity so a
+        partial that DID fill is honoured, never treated as a full or a zero fill.
 
-        Vortex field mapping (TODO(certify) exact names — reference §Orders,
-        `GET /trading/orders/{order_id}`):
-          status           → order_status | status
-          filled_quantity  → filled_quantity | traded_quantity | filled_qty
-          average_price    → average_price | avg_price | traded_price
-        Returns {} when the order is not found (treated as still-pending)."""
+        Vortex order-book field mapping (live-verified 2026-07-15):
+          status           → status (order_status tolerated)
+          filled_quantity  → traded_quantity (filled_quantity/filled_qty tolerated)
+          average_price    → traded_price   (average_price/avg_price tolerated)
+          pending_quantity → pending_quantity
+          total_quantity   → total_quantity (quantity tolerated)
+        Returns a zero/empty status ({} match) when the order is not yet in the
+        book (treated as still-pending)."""
         if self.dry_run:
-            return {"status": "COMPLETE", "filled_quantity": 0, "average_price": 0.0}
+            return {"status": "COMPLETE", "filled_quantity": 0, "average_price": 0.0,
+                    "pending_quantity": 0, "total_quantity": 0, "partial": False}
         try:
             # Read status from the ORDER-BOOK (GET /trading/orders) and match by
             # order_id. Two live-verified reasons NOT to use /trading/orders/{id}:
@@ -459,19 +505,35 @@ class RupeezyBroker(BrokerClient):
             raw_status = str(data.get("order_status")
                              or data.get("status") or "").upper()
             status = _normalise_status(raw_status)
-            filled = (data.get("filled_quantity")
-                      if data.get("filled_quantity") is not None
-                      else data.get("traded_quantity")
+            filled = (data.get("traded_quantity")
                       if data.get("traded_quantity") is not None
+                      else data.get("filled_quantity")
+                      if data.get("filled_quantity") is not None
                       else data.get("filled_qty") or 0)
-            avg = (data.get("average_price")
+            avg = (data.get("traded_price")
+                   if data.get("traded_price") is not None
+                   else data.get("average_price")
                    if data.get("average_price") is not None
-                   else data.get("avg_price")
-                   if data.get("avg_price") is not None
-                   else data.get("traded_price") or 0.0)
+                   else data.get("avg_price") or 0.0)
+            filled_i = int(filled or 0)
+            total_i = int(data.get("total_quantity")
+                          if data.get("total_quantity") is not None
+                          else data.get("quantity") or 0)
+            _pend = data.get("pending_quantity")
+            pending_i = (int(_pend) if _pend is not None
+                         else max(total_i - filled_i, 0))
+            # PARTIAL when Vortex says so, OR when a fill is in-progress (0 < filled
+            # < total) but the book has not yet reported a terminal state. A
+            # COMPLETE/EXECUTED order (filled == total) is NOT partial.
+            partial = (status == "PARTIAL"
+                       or (status not in ("COMPLETE", "REJECTED", "CANCELLED")
+                           and 0 < filled_i and total_i > 0 and filled_i < total_i))
             return {"status": status,
-                    "filled_quantity": int(filled or 0),
+                    "filled_quantity": filled_i,
                     "average_price": float(avg or 0.0),
+                    "pending_quantity": pending_i,
+                    "total_quantity": total_i,
+                    "partial": bool(partial),
                     "raw_status": raw_status}
         except Exception as e:
             log.warning("rupeezy get_order_status failed for %s: %s", order_id, e)
@@ -524,13 +586,19 @@ class RupeezyBroker(BrokerClient):
         try:
             r = self._request("GET", "/user/funds")
             r.raise_for_status()
-            data = r.json() or {}
-            for seg in ("exchange_combined", "nse"):
-                blk = data.get(seg) or {}
-                v = blk.get("net_available")
-                if isinstance(v, (int, float)) and not isinstance(v, bool) \
-                        and v >= 0:
-                    return float(v)
+            payload = r.json() or {}
+            # live-verified: the per-segment blocks are at the TOP level. Some
+            # deployments wrap them under `data` — check top level first (verified),
+            # then the wrapper, so neither shape silently yields None.
+            for root in (payload, payload.get("data") or {}):
+                if not isinstance(root, dict):
+                    continue
+                for seg in ("exchange_combined", "nse"):
+                    blk = root.get(seg) or {}
+                    v = blk.get("net_available")
+                    if isinstance(v, (int, float)) and not isinstance(v, bool) \
+                            and v >= 0:
+                        return float(v)
         except Exception as e:
             log.warning("rupeezy available_margin failed: %s", e)
         return None
@@ -832,6 +900,21 @@ class RupeezyBroker(BrokerClient):
         raise NotImplementedError("rupeezy option contract not implemented (EQ-first)")
 
 
+def _place_error(payload) -> str:
+    """Best-effort human message from a Vortex order response that carried no
+    order_id — surface Vortex's OWN reason (message / error_reason / status) so a
+    live-order failure is diagnosable, instead of an opaque 'no order_id'."""
+    if not isinstance(payload, dict):
+        return f"no order_id in response ({payload})"
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    for src in (data, payload):
+        for k in ("error_reason", "message", "error", "errorMessage", "reason"):
+            v = src.get(k)
+            if v:
+                return f"rupeezy rejected the order — {v}"
+    return f"no order_id in response ({payload.get('data') or payload})"
+
+
 def _margin_path() -> str:
     """Vortex order-margin endpoint path. CERTIFIED 2026-07-15 (live-verified):
     POST /trading/margins/order → {"required_margin": <per-order ₹>,
@@ -868,21 +951,34 @@ def _extract_margin(payload) -> Optional[float]:
     return None
 
 
-# Vortex order state → exit_poller (Kite-compatible) vocabulary.
-# TODO(certify): confirm the exact Vortex status enum (reference §Orders).
+# Vortex order state → exit_poller (Kite-compatible) vocabulary. live-verified
+# states 2026-07-15: "EXECUTED" (fully filled), "PENDING" (initial). The rest are
+# the documented Vortex enum; anything unmapped passes through and is treated as
+# still-pending by the poller (COMPLETE / REJECTED / CANCELLED / else = pending).
 _STATUS_MAP = {
+    # terminal — filled
     "COMPLETE": "COMPLETE",
     "COMPLETED": "COMPLETE",
     "EXECUTED": "COMPLETE",
     "FILLED": "COMPLETE",
     "TRADED": "COMPLETE",
+    # terminal — rejected
     "REJECTED": "REJECTED",
+    "REJECT": "REJECTED",
+    # terminal — cancelled
     "CANCELLED": "CANCELLED",
     "CANCELED": "CANCELLED",
+    # in-progress partial → NOT terminal; poller keeps waiting, but we still
+    # surface the real filled_quantity so the partial fill is honoured.
+    "PARTIALLY_EXECUTED": "PARTIAL",
+    "PARTIALLY EXECUTED": "PARTIAL",
+    "PARTIAL": "PARTIAL",
 }
 
 
 def _normalise_status(raw: str) -> str:
     """Map a Vortex order status to the exit_poller vocabulary. Unknown/in-flight
-    states pass through unchanged (treated as still-pending by the poller)."""
+    states (PENDING / OPEN / TRIGGER_PENDING / AMO_SUBMITTED …) pass through
+    unchanged — the poller treats anything that is not COMPLETE / REJECTED /
+    CANCELLED as still-pending, so no explicit mapping is needed for them."""
     return _STATUS_MAP.get((raw or "").upper(), (raw or "").upper())

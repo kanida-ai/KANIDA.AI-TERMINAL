@@ -340,14 +340,19 @@ def _enable_live(monkeypatch):
 
 
 def test_place_market_order_maps_to_rl_mkt(fake_requests, master_file, monkeypatch):
+    """live-verified: a MARKET order is variety=RL-MKT and MUST still carry a
+    `price` (the LTP) — a RL-MKT with no price 400s on RegularPlaceOrderRequest.
+    Price. The returned order_id CONTAINS a '?' and is kept verbatim."""
     _enable_live(monkeypatch)
+    fake_requests.on("/data/quotes", _quotes(1500.0))
     fake_requests.on("/trading/orders/regular",
-                     _FakeResp(200, {"data": {"order_id": "OID-777"}}))
+                     _FakeResp(200, {"status": "success",
+                                     "data": {"order_id": "NZXAH00003?7"}}))
     b = RupeezyBroker(_live_profile(), dry_run=False)
     order = SimpleNamespace(symbol="INFY", qty=10, order_type="MARKET",
                             product="CNC", exchange="NSE", price=None)
     res = _run(b.place_order(order))
-    assert res.status == "PLACED" and res.broker_order_id == "OID-777"
+    assert res.status == "PLACED" and res.broker_order_id == "NZXAH00003?7"
     body = [c for c in fake_requests.calls
             if "/trading/orders/regular" in c["url"]][-1]["json"]
     assert body["variety"] == "RL-MKT"
@@ -357,7 +362,7 @@ def test_place_market_order_maps_to_rl_mkt(fake_requests, master_file, monkeypat
     assert body["token"] == 408065           # from master
     assert body["quantity"] == 10
     assert body["validity"] == "DAY"
-    assert "price" not in body               # MARKET carries no price
+    assert body["price"] == 1500.0           # REQUIRED even for RL-MKT — the LTP
 
 
 def test_place_limit_order_maps_to_rl_with_price(fake_requests, master_file, monkeypatch):
@@ -377,18 +382,40 @@ def test_place_limit_order_maps_to_rl_with_price(fake_requests, master_file, mon
 
 
 def test_market_exit_sell_rl_mkt(fake_requests, master_file, monkeypatch):
+    """EXIT SELL: variety=RL-MKT, SELL, kite_product override wins, and the body
+    carries the REQUIRED price=LTP (same market-order rule as the entry)."""
     _enable_live(monkeypatch)
+    fake_requests.on("/data/quotes", _quotes(980.5))
     fake_requests.on("/trading/orders/regular",
-                     _FakeResp(200, {"data": {"order_id": "EX-9"}}))
+                     _FakeResp(200, {"status": "success",
+                                     "data": {"order_id": "NZXAH00009?1"}}))
     b = RupeezyBroker(_live_profile(), dry_run=False)
     res = _run(b.place_market_exit("INFY", 7, "EQ", kite_product="MTF"))
-    assert res.status == "PLACED" and res.broker_order_id == "EX-9"
+    assert res.status == "PLACED" and res.broker_order_id == "NZXAH00009?1"
     body = [c for c in fake_requests.calls
             if "/trading/orders/regular" in c["url"]][-1]["json"]
     assert body["variety"] == "RL-MKT"
     assert body["transaction_type"] == "SELL"
     assert body["product"] == "MTF"          # kite_product override wins
     assert body["quantity"] == 7
+    assert body["price"] == 980.5            # EXIT market order carries the LTP
+
+
+def test_market_exit_short_buys_to_cover(fake_requests, master_file, monkeypatch):
+    """A SHORT exit covers with a BUY (direction='short'), not a SELL."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/data/quotes", _quotes(500.0))
+    fake_requests.on("/trading/orders/regular",
+                     _FakeResp(200, {"status": "success",
+                                     "data": {"order_id": "NZXAH00010?2"}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    res = _run(b.place_market_exit("INFY", 4, "EQ", kite_product="MIS",
+                                   direction="short"))
+    assert res.status == "PLACED"
+    body = [c for c in fake_requests.calls
+            if "/trading/orders/regular" in c["url"]][-1]["json"]
+    assert body["transaction_type"] == "BUY"     # buy-to-cover
+    assert body["product"] == "INTRADAY"         # MIS → INTRADAY
 
 
 def test_order_fails_without_master(fake_requests, monkeypatch):
@@ -410,16 +437,69 @@ def test_order_fails_without_master(fake_requests, monkeypatch):
 
 # ── EXECUTION: order-status normalisation ─────────────────────────────────────
 
-def test_get_order_status_normalises(fake_requests, monkeypatch):
+def _orderbook(*rows):
+    """The live order-book shape: {"status":"success","orders":[...]}."""
+    return _FakeResp(200, {"status": "success", "orders": list(rows)})
+
+
+def test_get_order_status_executed_from_orderbook(fake_requests, monkeypatch):
+    """live-verified: status is read from the ORDER-BOOK (GET /trading/orders),
+    matched by order_id, using traded_quantity / traded_price. EXECUTED→COMPLETE."""
     _enable_live(monkeypatch)
-    fake_requests.on("/trading/orders/OID-1", _FakeResp(200, {"data": {
-        "order_status": "EXECUTED", "filled_quantity": 10,
-        "average_price": 101.25}}))
+    oid = "NZXAH00003?7"
+    fake_requests.on("/trading/orders", _orderbook(
+        {"order_id": "OTHER?9", "status": "PENDING", "traded_quantity": 0},
+        {"order_id": oid, "status": "EXECUTED", "traded_quantity": 10,
+         "traded_price": 101.25, "total_quantity": 10, "pending_quantity": 0}))
     b = RupeezyBroker(_live_profile(), dry_run=False)
-    st = b.get_order_status("OID-1")
+    st = b.get_order_status(oid)
     assert st["status"] == "COMPLETE"        # EXECUTED → COMPLETE
-    assert st["filled_quantity"] == 10
-    assert st["average_price"] == 101.25
+    assert st["filled_quantity"] == 10       # from traded_quantity, NOT 0
+    assert st["average_price"] == 101.25     # from traded_price
+    assert st["partial"] is False
+
+
+def test_get_order_status_pending_is_not_complete(fake_requests, monkeypatch):
+    """A PENDING order → still-pending (NOT COMPLETE/REJECTED/CANCELLED), 0 filled."""
+    _enable_live(monkeypatch)
+    oid = "NZXAH00004?2"
+    fake_requests.on("/trading/orders", _orderbook(
+        {"order_id": oid, "status": "PENDING", "traded_quantity": 0,
+         "total_quantity": 5, "pending_quantity": 5}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    st = b.get_order_status(oid)
+    assert st["status"] not in ("COMPLETE", "REJECTED", "CANCELLED")
+    assert st["filled_quantity"] == 0
+    assert st["partial"] is False
+
+
+def test_get_order_status_partial_surfaces_fill(fake_requests, monkeypatch):
+    """PARTIALLY_EXECUTED → 'PARTIAL' (NOT COMPLETE, so the poller keeps waiting)
+    yet STILL surfaces the real filled qty & price so the partial fill is honoured."""
+    _enable_live(monkeypatch)
+    oid = "NZXAH00005?3"
+    fake_requests.on("/trading/orders", _orderbook(
+        {"order_id": oid, "status": "PARTIALLY_EXECUTED", "traded_quantity": 4,
+         "traded_price": 250.0, "total_quantity": 10, "pending_quantity": 6}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    st = b.get_order_status(oid)
+    assert st["status"] == "PARTIAL"
+    assert st["status"] != "COMPLETE"        # must NOT read as fully filled
+    assert st["filled_quantity"] == 4
+    assert st["average_price"] == 250.0
+    assert st["pending_quantity"] == 6
+    assert st["partial"] is True
+
+
+def test_get_order_status_not_in_book_is_pending(fake_requests, monkeypatch):
+    """Order not yet in the book → zero/empty status (treated as still-pending)."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/trading/orders", _orderbook(
+        {"order_id": "SOMEONE_ELSE?1", "status": "EXECUTED"}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    st = b.get_order_status("MINE?9")
+    assert st["status"] not in ("COMPLETE", "REJECTED", "CANCELLED")
+    assert st["filled_quantity"] == 0
 
 
 def test_status_map():
@@ -427,7 +507,10 @@ def test_status_map():
     assert _normalise_status("FILLED") == "COMPLETE"
     assert _normalise_status("REJECTED") == "REJECTED"
     assert _normalise_status("CANCELED") == "CANCELLED"
-    assert _normalise_status("OPEN") == "OPEN"      # unknown passes through
+    assert _normalise_status("PARTIALLY_EXECUTED") == "PARTIAL"
+    assert _normalise_status("PARTIALLY EXECUTED") == "PARTIAL"
+    assert _normalise_status("PENDING") == "PENDING"    # still-pending passthrough
+    assert _normalise_status("OPEN") == "OPEN"          # unknown passes through
 
 
 def test_dry_run_order_status_synthetic():
@@ -447,15 +530,19 @@ def _clear_margin_cache():
     rupeezy_mod._margin_cache.clear()
 
 
-def _quote(ltp):
-    return _FakeResp(200, {"data": {"ltp": ltp}})
+def _quotes(ltp, tokens=(408065, 2953217)):
+    """The live /data/quotes?mode=ltp shape: {"data":{"<exch>-<token>":
+    {"last_trade_price": px}}}. Includes every master token so a single canned
+    response serves both single-symbol and batch (INFY+TCS) lookups."""
+    return _FakeResp(200, {"status": "success", "data": {
+        f"NSE_EQ-{t}": {"last_trade_price": ltp} for t in tokens}})
 
 
 def test_margin_per_share_parses_required_margin(fake_requests, master_file,
                                                  monkeypatch):
     """MIS margin probe: qty=1 order-margin → per-share margin, and the probe body
     carries INTRADAY product + quantity=1 at the live LTP."""
-    fake_requests.on("/data/quote", _quote(1000.0))
+    fake_requests.on("/data/quotes", _quotes(1000.0))
     fake_requests.on("/trading/margins",
                      _FakeResp(200, {"data": {"required_margin": 200.0}}))
     b = RupeezyBroker(_live_profile(), dry_run=False)
@@ -470,7 +557,7 @@ def test_margin_per_share_parses_required_margin(fake_requests, master_file,
 
 
 def test_margin_mtf_product_mapped(fake_requests, master_file, monkeypatch):
-    fake_requests.on("/data/quote", _quote(500.0))
+    fake_requests.on("/data/quotes", _quotes(500.0))
     fake_requests.on("/trading/margins",
                      _FakeResp(200, {"data": {"total_margin": 175.0}}))
     b = RupeezyBroker(_live_profile(), dry_run=False)
@@ -490,7 +577,7 @@ def test_margin_cnc_returns_none_no_probe(fake_requests, master_file):
 def test_margin_rejects_value_above_ltp(fake_requests, master_file):
     """A margin > full cash price implies leverage < 1x → mis-parse; refuse it
     (cash fallback) rather than mis-size."""
-    fake_requests.on("/data/quote", _quote(1000.0))
+    fake_requests.on("/data/quotes", _quotes(1000.0))
     fake_requests.on("/trading/margins",
                      _FakeResp(200, {"data": {"margin": 5000.0}}))
     b = RupeezyBroker(_live_profile(), dry_run=False)
@@ -498,7 +585,7 @@ def test_margin_rejects_value_above_ltp(fake_requests, master_file):
 
 
 def test_margin_endpoint_error_falls_back_none(fake_requests, master_file):
-    fake_requests.on("/data/quote", _quote(1000.0))
+    fake_requests.on("/data/quotes", _quotes(1000.0))
     fake_requests.on("/trading/margins", _FakeResp(500, {}, text="boom"))
     b = RupeezyBroker(_live_profile(), dry_run=False)
     assert b.get_margin_per_share("INFY", "MIS") is None
@@ -513,7 +600,7 @@ def test_margin_no_ltp_returns_none(fake_requests, master_file):
 
 
 def test_margins_batch_aggregates(fake_requests, master_file):
-    fake_requests.on("/data/quote", _quote(1000.0))     # both symbols priced same
+    fake_requests.on("/data/quotes", _quotes(1000.0))     # both symbols priced same
     fake_requests.on("/trading/margins",
                      _FakeResp(200, {"data": {"required_margin": 250.0}}))
     b = RupeezyBroker(_live_profile(), dry_run=False)
@@ -527,7 +614,7 @@ def test_margins_batch_cash_product_empty(fake_requests, master_file):
 
 
 def test_margin_cache_hit_skips_second_probe(fake_requests, master_file):
-    fake_requests.on("/data/quote", _quote(1000.0))
+    fake_requests.on("/data/quotes", _quotes(1000.0))
     fake_requests.on("/trading/margins",
                      _FakeResp(200, {"data": {"required_margin": 200.0}}))
     b = RupeezyBroker(_live_profile(), dry_run=False)
@@ -540,7 +627,7 @@ def test_margin_cache_hit_skips_second_probe(fake_requests, master_file):
 
 def test_margin_path_env_override(fake_requests, master_file, monkeypatch):
     monkeypatch.setenv("RUPEEZY_MARGIN_PATH", "/v2/margins/order")
-    fake_requests.on("/data/quote", _quote(1000.0))
+    fake_requests.on("/data/quotes", _quotes(1000.0))
     fake_requests.on("/v2/margins/order",
                      _FakeResp(200, {"data": {"required_margin": 300.0}}))
     b = RupeezyBroker(_live_profile(), dry_run=False)
@@ -605,3 +692,187 @@ def test_get_net_position_qty_reraises_on_transport_error(fake_requests,
     b = RupeezyBroker(_live_profile(), dry_run=False)
     with pytest.raises(ConnectionResetError):
         b.get_net_position_qty("INFY")
+
+
+# ── LIVE-VERIFIED SHAPES: positions / holdings / funds / quotes / cancel ──────
+
+def test_positions_net_parses_real_shape(fake_requests, master_file, monkeypatch):
+    """live-verified positions: {"data":{"net":[{symbol,quantity,product,
+    average_price,token}], "day":[]}} — the `net` book maps to the Kite-shaped
+    rows the reconciler consumes (symbol → tradingsymbol)."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/trading/portfolio/positions", _FakeResp(200, {"data": {
+        "net": [{"symbol": "INFY", "quantity": 25, "product": "DELIVERY",
+                 "average_price": 1500.0, "token": 408065}],
+        "day": []}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    net = b.get_positions_net()
+    assert net is not None and len(net) == 1
+    assert net[0]["tradingsymbol"] == "INFY"
+    assert net[0]["quantity"] == 25
+    assert net[0]["average_price"] == 1500.0
+    assert net[0]["product"] == "DELIVERY"
+
+
+def test_net_position_qty_real_nested_net_shape(fake_requests, master_file,
+                                                monkeypatch):
+    """get_net_position_qty on the REAL nested {"net":[{symbol,quantity}]} shape."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/trading/portfolio/positions", _FakeResp(200, {"data": {
+        "net": [{"symbol": "INFY", "quantity": -30, "product": "INTRADAY"},
+                {"symbol": "TCS", "quantity": 5}], "day": []}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_net_position_qty("INFY") == -30   # short = negative
+
+
+def test_positions_net_paper_returns_none(fake_requests, master_file):
+    """Paper / not-live → None (never an authoritative flat book), zero HTTP."""
+    b = RupeezyBroker(_live_profile(), dry_run=True)
+    assert b.get_positions_net() is None
+    assert fake_requests.calls == []
+
+
+def test_holdings_parses_real_shape(fake_requests, master_file):
+    """live-verified holdings: {"data":[{isin, nse:{token,symbol}}]}."""
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    fake_requests.on("/trading/portfolio/holdings", _FakeResp(200, {"data": [
+        {"isin": "INE009A01021", "nse": {"token": 408065, "symbol": "INFY"}}]}))
+    h = b.get_holdings()
+    assert len(h) == 1 and h[0]["nse"]["symbol"] == "INFY"
+
+
+def test_holdings_empty_data_null(fake_requests, master_file):
+    """live-verified: an empty holdings book is {"data":null} → []."""
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    fake_requests.on("/trading/portfolio/holdings", _FakeResp(200, {"data": None}))
+    assert b.get_holdings() == []
+
+
+def test_available_margin_parses_net_available(fake_requests, master_file):
+    """live-verified /user/funds: per-segment blocks with net_available; we use the
+    exchange_combined view."""
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    fake_requests.on("/user/funds", _FakeResp(200, {
+        "nse": {"net_available": 111.0},
+        "exchange_combined": {"net_available": 250000.0,
+                              "total_trading_power": 300000.0},
+        "mcx": {"net_available": 0.0}}))
+    assert b.available_margin() == 250000.0
+
+
+def test_available_margin_error_returns_none(fake_requests, master_file):
+    """RMS fails-closed: a funds error → None (never over-deploys on unknown)."""
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    fake_requests.on("/user/funds", _FakeResp(500, {}, text="boom"))
+    assert b.available_margin() is None
+
+
+def test_get_ltp_parses_last_trade_price(fake_requests, master_file):
+    """live-verified /data/quotes?mode=ltp → data["<exch>-<token>"].last_trade_price
+    and the request carries q=NSE_EQ-<token> + mode=ltp."""
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    fake_requests.on("/data/quotes", _FakeResp(200, {"status": "success", "data": {
+        "NSE_EQ-408065": {"last_trade_price": 1499.75}}}))
+    assert b.get_ltp("INFY") == 1499.75
+    call = [c for c in fake_requests.calls if "/data/quotes" in c["url"]][-1]
+    assert call["params"]["q"] == "NSE_EQ-408065"
+    assert call["params"]["mode"] == "ltp"
+
+
+def test_order_margin_endpoint_and_required_margin(fake_requests, master_file):
+    """live-verified order-margin: POST /trading/margins/order (qty=1) →
+    required_margin. The path is the certified /trading/margins/order."""
+    fake_requests.on("/data/quotes", _quotes(1000.0))
+    fake_requests.on("/trading/margins/order",
+                     _FakeResp(200, {"required_margin": 200.0,
+                                     "available_margin": 500000.0,
+                                     "status": "success"}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.get_margin_per_share("INFY", "MIS") == 200.0
+    call = [c for c in fake_requests.calls
+            if "/trading/margins/order" in c["url"]][-1]
+    assert call["url"].endswith("/trading/margins/order")
+    assert call["json"]["quantity"] == 1
+
+
+def test_cancel_order_url_encodes_question_mark(fake_requests, master_file,
+                                                monkeypatch):
+    """A Vortex order_id CONTAINS a '?' → it MUST be URL-encoded in the DELETE
+    path (a raw '?' would truncate the id into a query string → cancels nothing /
+    the WRONG order). Mutation check: dropping the quote() would leave a raw '?'."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/trading/orders/regular",
+                     _FakeResp(200, {"status": "success"}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    _run(b.cancel_order("NZXAH00003?7"))
+    call = [c for c in fake_requests.calls if "DELETE" == c["method"]][-1]
+    assert "%3F" in call["url"]          # '?' url-encoded
+    assert "?7" not in call["url"]       # never a raw trailing '?'
+    assert call["url"].endswith("/trading/orders/regular/NZXAH00003%3F7")
+
+
+def test_cancel_order_sync_url_encodes(fake_requests, master_file, monkeypatch):
+    """The exit_poller's sync cancel path also URL-encodes the '?'."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/trading/orders/regular", _FakeResp(200, {"status": "success"}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    assert b.cancel_order_sync("NZXAH00003?7") is True
+    call = [c for c in fake_requests.calls if "DELETE" == c["method"]][-1]
+    assert "%3F" in call["url"] and "?7" not in call["url"]
+
+
+def test_pending_orders_reads_orders_key_and_normalises(fake_requests, master_file,
+                                                        monkeypatch):
+    """live-verified order book is {"status":"success","orders":[...]} and names
+    the instrument `symbol`. get_pending_orders MUST (a) read `orders` (NOT `data`)
+    and (b) map symbol → tradingsymbol / total_quantity → quantity so the session
+    OVERSELL + foreign-order guards can match a Rupeezy order.
+
+    Mutation check: reverting to `.get("data")` yields [] → this fails; dropping the
+    symbol→tradingsymbol mapping leaves tradingsymbol None → the sym assert fails."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/trading/orders", _FakeResp(200, {"status": "success",
+        "orders": [
+            {"order_id": "NZXAH1?1", "status": "PENDING", "symbol": "INFY",
+             "transaction_type": "SELL", "pending_quantity": 7,
+             "total_quantity": 10, "product": "MTF"},
+            {"order_id": "NZXAH2?2", "status": "EXECUTED", "symbol": "TCS",
+             "transaction_type": "BUY", "pending_quantity": 0,
+             "total_quantity": 5}]}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    pend = _run(b.get_pending_orders())
+    assert len(pend) == 1                     # only the still-alive PENDING one
+    row = pend[0]
+    assert row["tradingsymbol"] == "INFY"     # symbol → tradingsymbol
+    assert row["transaction_type"] == "SELL"
+    assert row["pending_quantity"] == 7
+    assert row["quantity"] == 10              # total_quantity → quantity
+    assert row["order_id"] == "NZXAH1?1"
+
+
+def test_pending_orders_partial_counts_as_alive(fake_requests, master_file,
+                                                monkeypatch):
+    """A PARTIALLY_EXECUTED order still has a resting leg → counted as pending."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/trading/orders", _FakeResp(200, {"status": "success",
+        "orders": [{"order_id": "NZX?9", "status": "PARTIALLY_EXECUTED",
+                    "symbol": "INFY", "transaction_type": "SELL",
+                    "pending_quantity": 3, "total_quantity": 10}]}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    pend = _run(b.get_pending_orders())
+    assert len(pend) == 1 and pend[0]["pending_quantity"] == 3
+
+
+def test_place_error_surfaces_vortex_reason(fake_requests, master_file, monkeypatch):
+    """A place that returns no order_id surfaces Vortex's OWN error_reason (so a
+    live-order rejection is diagnosable), not an opaque 'no order_id'."""
+    _enable_live(monkeypatch)
+    fake_requests.on("/data/quotes", _quotes(1000.0))
+    fake_requests.on("/trading/orders/regular", _FakeResp(200, {
+        "status": "error", "data": {"error_reason": "RMS:Margin shortfall"}}))
+    b = RupeezyBroker(_live_profile(), dry_run=False)
+    order = SimpleNamespace(symbol="INFY", qty=10, order_type="MARKET",
+                            product="CNC", exchange="NSE", price=None)
+    res = _run(b.place_order(order))
+    assert res.status == "FAILED"
+    assert "Margin shortfall" in (res.error or "")
