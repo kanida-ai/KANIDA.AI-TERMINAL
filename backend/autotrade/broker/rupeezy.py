@@ -450,13 +450,18 @@ class RupeezyBroker(BrokerClient):
             log.debug("rupeezy get_ltp token miss for %s: %s", symbol, e)
             return None
         try:
-            # TODO(certify): exact quotes path + params + field names.
-            r = self._request("GET", "/data/quote",
-                              params={"exchange": "NSE_EQ", "token": token})
+            # CERTIFIED 2026-07-15 (live-verified): the quotes endpoint is PLURAL
+            # `/data/quotes`, keyed by `q=<exchange>-<token>` and REQUIRES
+            # `mode=ltp` (without it → 200 {"message":"invalid mode"}). The
+            # response is {"status":"success","data":{"<exch>-<token>":
+            # {"last_trade_price": <px>}}}. Bearer auth only (no x-api-key).
+            ident = f"NSE_EQ-{token}"
+            r = self._request("GET", "/data/quotes",
+                              params={"q": ident, "mode": "ltp"})
             r.raise_for_status()
-            data = (r.json() or {}).get("data") or {}
-            ltp = data.get("last_trade_price") or data.get("ltp") \
-                or data.get("last_price")
+            row = ((r.json() or {}).get("data") or {}).get(ident) or {}
+            ltp = row.get("last_trade_price") or row.get("ltp") \
+                or row.get("last_price")
             if ltp:
                 return float(ltp)
         except Exception as e:
