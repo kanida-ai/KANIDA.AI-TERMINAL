@@ -22,6 +22,7 @@ list_supported() returns a full BrokerMeta card per broker.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Type
 
@@ -126,12 +127,17 @@ def _build_registry() -> None:
     # in rupeezy.py / rupeezy_auth_provider.py as UNVERIFIED.
     from .rupeezy import RupeezyBroker
     from .rupeezy_auth_provider import RupeezyAuth
-    # rupeezy: LIVE adapter (UI-visible) but NOT yet certified — its positions/
-    # margin/GTT/status are uncertified and it doesn't reliably transmit the client
-    # tag. live_certified=False → BLOCKED from REAL order placement (paper allowed)
-    # until certified against a live account. Flip to True only after certification.
+    # rupeezy: LIVE adapter (UI-visible). Order placement is still uncertified, so
+    # it stays BLOCKED from REAL orders by DEFAULT (paper always allowed). The gate
+    # is env-toggleable for a CONTROLLED placement-certification test: set
+    # RUPEEZY_LIVE_CERTIFIED=true to lift the block (then a restart loads it). MUST
+    # be set back to false after the test — otherwise the ₹-live BTST ladder would
+    # place real Rupeezy orders through the uncertified path. Default (env unset) =
+    # False = blocked, byte-identical to before.
+    _rupeezy_certified = os.environ.get(
+        "RUPEEZY_LIVE_CERTIFIED", "").strip().lower() in ("1", "true", "yes", "on")
     _register("rupeezy", RupeezyBroker, RupeezyAuth, RupeezyAuth.capabilities,
-              live=True, live_certified=False)
+              live=True, live_certified=_rupeezy_certified)
 
     # ── placeholders: real execution stubs, NotImplementedAuth ───────────────
     from .fyers import FyersBroker
