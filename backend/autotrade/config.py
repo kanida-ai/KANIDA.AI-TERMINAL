@@ -244,7 +244,9 @@ class TradingSessionConfig:
     # (mkt_poller.py). Signals are byte-identical (proven by the full-day,
     # minute-by-minute incremental parity test); it cuts the ~9.6s infer-day read
     # to <0.1s. Only takes effect together with tesla_vectorized_features=True.
-    tesla_incremental_read: bool = False
+    # DEFAULT ON (activated 2026-07-15 after independent parity review, commit
+    # c302236) → warm per-minute recompute is now <10s. Set False to fall back.
+    tesla_incremental_read: bool = True
 
     # Position sizing
     sizing_mode: str = "equal"             # equal | pct_cap | manual
@@ -1224,7 +1226,7 @@ class TradingSessionConfig:
             tesla_vectorized_features=bool(
                 d.get("tesla_vectorized_features", True)),
             tesla_incremental_read=bool(
-                d.get("tesla_incremental_read", False)),
+                d.get("tesla_incremental_read", True)),
             sizing_mode=d.get("sizing_mode", "equal"),
             max_pct_per_position=float(d.get("max_pct_per_position", 0.05)),
             manual_amounts=d.get("manual_amounts", {}) or {},
