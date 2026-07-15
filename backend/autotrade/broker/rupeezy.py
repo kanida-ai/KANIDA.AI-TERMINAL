@@ -45,6 +45,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote as _urlquote
 
 import socket as _socket
 import urllib3.util.connection as _urllib3_conn
@@ -397,7 +398,8 @@ class RupeezyBroker(BrokerClient):
         if not self._live_allowed():
             return {"status": "DRY_RUN", "order_id": order_id}
         try:
-            r = self._request("DELETE", f"/trading/orders/regular/{order_id}")
+            r = self._request("DELETE",
+                              f"/trading/orders/regular/{_urlquote(str(order_id), safe='')}")
             r.raise_for_status()
             return r.json()
         except Exception as e:
@@ -410,7 +412,8 @@ class RupeezyBroker(BrokerClient):
         if not self._live_allowed():
             return True
         try:
-            r = self._request("DELETE", f"/trading/orders/regular/{order_id}")
+            r = self._request("DELETE",
+                              f"/trading/orders/regular/{_urlquote(str(order_id), safe='')}")
             r.raise_for_status()
             return True
         except Exception as e:
@@ -435,14 +438,24 @@ class RupeezyBroker(BrokerClient):
         if self.dry_run:
             return {"status": "COMPLETE", "filled_quantity": 0, "average_price": 0.0}
         try:
-            r = self._request("GET", f"/trading/orders/{order_id}")
+            # Read status from the ORDER-BOOK (GET /trading/orders) and match by
+            # order_id. Two live-verified reasons NOT to use /trading/orders/{id}:
+            # (1) Vortex order ids contain a '?' ('NZXAH00003?7') → the single-order
+            # path mis-parses it; (2) even URL-encoded, the single-order endpoint
+            # returns a STALE 'PENDING' while the BOOK carries the CURRENT status
+            # (EXECUTED). Without this, the entry reconciler never sees the fill →
+            # cancels a FILLED order → untracked position. live-verified 2026-07-15.
+            r = self._request("GET", "/trading/orders")
             r.raise_for_status()
             payload = r.json() or {}
-            data = payload.get("data")
-            # Some endpoints return a list (order history) — take the latest.
-            if isinstance(data, list):
-                data = data[-1] if data else {}
-            data = data or {}
+            orders = payload.get("orders")
+            if orders is None:
+                orders = payload.get("data") or []
+            data = {}
+            for _o in (orders or []):
+                if isinstance(_o, dict) and str(_o.get("order_id")) == str(order_id):
+                    data = _o
+                    break
             raw_status = str(data.get("order_status")
                              or data.get("status") or "").upper()
             status = _normalise_status(raw_status)
