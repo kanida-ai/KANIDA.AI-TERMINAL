@@ -9,9 +9,13 @@ further input, while always allowing Pause + Kill and surfacing plain-language
 downturn alerts.
 
 DESIGN (operator-approved, built exactly):
-  * Per-basket sizing = total_capital / 3, FROZEN at create. A new basket opens
-    only when free capital >= that slice → naturally <= 3 concurrent, and the
-    total IS the ceiling (no hard-coded account cap).
+  * Per-basket sizing = total_capital / HOLD_LENGTH, FROZEN at create, where
+    HOLD_LENGTH = the campaign's effective child max_hold_sessions (the number of
+    trading sessions a basket is held = the number of overlapping baskets at
+    steady state). A new basket opens only when free capital >= that slice →
+    naturally <= HOLD_LENGTH concurrent, and the total IS the ceiling (no
+    hard-coded account cap). Default max_hold=3 → total/3 (unchanged); a 2-session
+    "BTST" campaign → total/2, so 2 concurrent sleeves fully deploy the pool.
   * Capital accounting is on the TRADER-MONEY (margin) basis:
         free = total_capital − Σ(child.total_allocated_capital of OPEN children)
     MTF leverage lives INSIDE each child and NEVER inflates this ceiling.
@@ -89,7 +93,11 @@ STATUS_COMPLETED = "COMPLETED"  # terminal: no open children remain
 KILL_FLATTEN_NOW = "flatten_now"
 KILL_STOP_NEW_LET_FINISH = "stop_new_let_finish"
 
-# Per-basket sizing divisor (total_capital / 3 → naturally <= 3 concurrent).
+# Legacy per-basket sizing divisor — the DEFAULT hold length when a campaign
+# carries no max_hold_sessions override. Kept == POSITIONAL_MAX_HOLD_SESSIONS so
+# an un-overridden ladder is byte-identical to the old total_capital/3 sizing.
+# The ACTUAL divisor is the campaign's effective hold length (see
+# _effective_hold_length); sizing is total_capital / hold_length.
 BASKET_DIVISOR = 3
 
 # 5-day trailing window for the downturn alert.
@@ -156,7 +164,9 @@ class LadderCampaign:
                mode: str = "paper", user_id: Optional[str] = None,
                broker_account_id: Optional[str] = None,
                end_date: Optional[str] = None,
-               end_date_mode: str = "month_end") -> "LadderCampaign":
+               end_date_mode: str = "month_end",
+               child_config: Optional[Dict[str, Any]] = None
+               ) -> "LadderCampaign":
         """Create a campaign as a DRAFT (status CREATED). create() places nothing
         and spawns nothing — it just registers the plan. start() then transitions
         it to RUNNING (start now) or SCHEDULED (future start_date). This mirrors
@@ -169,8 +179,18 @@ class LadderCampaign:
             / ended).
           * an explicit end_date (YYYY-MM-DD) overrides both.
 
+        child_config (optional): the risk/exit override applied to EVERY child
+        this campaign spawns, filtered to LADDER_CHILD_WHITELIST (arm_pct,
+        floor_pct, trail_giveback_pct, stop_pct, per_position_*_pct,
+        max_hold_sessions). Persisted as child_config_json at create so a BTST-style
+        campaign can be sized + configured in ONE step (no separate config-edit).
+        Capital / product / duration are NEVER sourced from here.
+
         Rejects MIS (positional can't carry overnight) and anything but CNC|MTF.
-        Freezes per_basket_capital = total_capital / 3.
+        Freezes per_basket_capital = total_capital / HOLD_LENGTH, where HOLD_LENGTH
+        = the effective child max_hold_sessions (default POSITIONAL_MAX_HOLD_SESSIONS
+        = 3 when unset → total/3, unchanged). This deploys the FULL chosen capital
+        as HOLD_LENGTH overlapping sleeves at steady state.
         """
         if total_capital is None or float(total_capital) <= 0:
             raise ValueError("total_capital must be > 0")
@@ -184,7 +204,28 @@ class LadderCampaign:
         if mode not in ("paper", "live"):
             mode = "paper"
 
-        per_basket = round(float(total_capital) / BASKET_DIVISOR, 2)
+        # Filter the child override to the whitelist (drops capital/product/other
+        # keys). Empty → child_config_json stays NULL (byte-identical to legacy).
+        overrides: Dict[str, Any] = {}
+        if child_config:
+            overrides = {k: child_config[k]
+                         for k in cls.LADDER_CHILD_WHITELIST if k in child_config}
+
+        # HOLD-LENGTH-AWARE SIZING: the sleeve = total / hold_length so the pool is
+        # fully deployed at steady state (hold_length overlapping baskets). Default
+        # hold=3 → total/3, IDENTICAL to the old BASKET_DIVISOR path.
+        hold_length = cls._effective_hold_length(overrides)
+        per_basket = round(float(total_capital) / hold_length, 2)
+
+        # Validate the resulting child config at the door (rejects e.g. floor>arm,
+        # an out-of-range pct, a bad max_hold) so a bad override never reaches a
+        # daily spawn. Uses the exact same builder the spawn path uses.
+        try:
+            cls._make_child_config(per_basket, prod, overrides).validate()
+        except ValueError as e:
+            raise ValueError(f"child_config invalid: {e}")
+
+        child_config_json = json.dumps(overrides) if overrides else None
         today = now_ist().date()
         start = today.isoformat()
 
@@ -216,23 +257,27 @@ class LadderCampaign:
             status=STATUS_CREATED, mode=mode, user_id=user_id,
             broker_account_id=broker_account_id, start_date=start,
             end_date=resolved_end, mode_kill=None, daily_returns_json="[]",
-            alert_active=0, last_tick_date=None)
+            alert_active=0, last_tick_date=None,
+            child_config_json=child_config_json, config_version=0)
         with falcon_conn() as con:
             con.execute(
                 """INSERT INTO autotrade_ladders
                    (ladder_id, user_id, broker_account_id, mode, total_capital,
                     order_product, per_basket_capital, status, start_date,
                     end_date, mode_kill, daily_returns_json, alert_active,
-                    last_tick_date, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    last_tick_date, child_config_json, config_version,
+                    created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (ladder_id, user_id, broker_account_id, mode,
                  float(total_capital), prod, per_basket, STATUS_CREATED, start,
-                 resolved_end, None, "[]", 0, None, _now_iso(), _now_iso()),
+                 resolved_end, None, "[]", 0, None, child_config_json, 0,
+                 _now_iso(), _now_iso()),
             )
             con.commit()
         log.info("ladder %s created (DRAFT/CREATED; capital=%.2f product=%s "
-                 "per_basket=%.2f mode=%s end=%s user=%s)", ladder_id,
-                 total_capital, prod, per_basket, mode, resolved_end, user_id)
+                 "per_basket=%.2f hold=%d mode=%s end=%s user=%s child_cfg=%s)",
+                 ladder_id, total_capital, prod, per_basket, hold_length, mode,
+                 resolved_end, user_id, overrides or None)
         return row
 
     @classmethod
@@ -702,21 +747,19 @@ class LadderCampaign:
             out["reason"] = f"error: {e}"
             return out
 
-    def _build_child_config(self) -> TradingSessionConfig:
-        """The positional child config: strategy=intraday_basket,
+    @staticmethod
+    def _make_child_config(per_basket_capital: float, order_product: str,
+                           overrides: Dict[str, Any]) -> TradingSessionConfig:
+        """Build a positional child config: strategy=intraday_basket,
         square_off_enabled=False, max_hold_sessions=3, the validated positional
-        trail preset, product = ladder product, capital = per_basket.
-
-        LIVE CONFIG EDIT: if the operator has edited the child-config template
-        (child_config_json), the whitelisted RISK/EXIT overrides are merged on top
-        of the built-in preset for FUTURE spawns. Capital/product/duration are NOT
-        sourced from the template (they stay on the ladder columns), so an edit
-        can never desync a running basket's frozen basis."""
+        trail preset, given product + per_basket capital, with the whitelisted
+        risk/exit `overrides` merged on top. Pure (no self) so create() (pre-row)
+        and _build_child_config() (post-row) share ONE construction path."""
         cfg = TradingSessionConfig(
-            total_allocated_capital=float(self.per_basket_capital),
+            total_allocated_capital=float(per_basket_capital),
             strategy="intraday_basket",
             top_n_stocks=POSITIONAL_TOP_N,
-            order_product=self.order_product,
+            order_product=order_product,
             instrument_type="EQ",
             arm_pct=POSITIONAL_ARM_PCT,
             floor_pct=POSITIONAL_FLOOR_PCT,
@@ -733,12 +776,41 @@ class LadderCampaign:
             # per-position GTT is the broker floor, wider than the trail — keep the
             # session defaults (3% stop / 6% target).
         )
-        # Merge the operator's saved risk/exit overrides (whitelist only) for
-        # FUTURE children. Never touches capital/product/strategy/square_off_enabled.
-        overrides = self.child_config_overrides()
-        for f, v in overrides.items():
+        # Merge the operator's risk/exit overrides (whitelist only). Never touches
+        # capital/product/strategy/square_off_enabled.
+        for f, v in (overrides or {}).items():
             setattr(cfg, f, v)
         return cfg
+
+    @classmethod
+    def _effective_hold_length(cls, overrides: Dict[str, Any]) -> int:
+        """The number of trading sessions a child holds = the number of
+        overlapping sleeves at steady state = the sizing divisor. Sourced from the
+        effective child max_hold_sessions override, else POSITIONAL_MAX_HOLD_SESSIONS
+        (=3). Must be >= 1 (a 0/negative divisor is nonsensical + would divide-by-
+        zero the sleeve)."""
+        raw = (overrides or {}).get("max_hold_sessions")
+        if raw is None:
+            return POSITIONAL_MAX_HOLD_SESSIONS
+        try:
+            h = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"max_hold_sessions must be an integer, got {raw!r}")
+        if h < 1:
+            raise ValueError(
+                f"max_hold_sessions must be >= 1, got {h}")
+        return h
+
+    def _build_child_config(self) -> TradingSessionConfig:
+        """The positional child config for THIS campaign — the shared preset merged
+        with this ladder's saved whitelisted overrides (child_config_json), at this
+        ladder's frozen per_basket capital + product. Capital/product/duration are
+        NOT sourced from the template (they stay on the ladder columns), so an edit
+        can never desync a running basket's frozen basis."""
+        return self._make_child_config(
+            self.per_basket_capital, self.order_product,
+            self.child_config_overrides())
 
     # The risk/exit knobs a ladder edit may override on FUTURE spawned children.
     # A SUBSET of the session whitelist that is meaningful for a positional child

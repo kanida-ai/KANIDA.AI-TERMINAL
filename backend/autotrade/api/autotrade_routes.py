@@ -322,6 +322,13 @@ class CreateLadderRequest(BaseModel):
         "month_end", description="month_end | manual")
     end_date: Optional[str] = Field(
         None, description="Explicit end date YYYY-MM-DD (overrides end_date_mode)")
+    # Optional risk/exit override applied to every child (filtered to the ladder
+    # child whitelist: arm_pct, floor_pct, trail_giveback_pct, stop_pct,
+    # per_position_*_pct, max_hold_sessions). max_hold_sessions ALSO sets the
+    # sizing divisor at create → per_basket = total_capital / max_hold_sessions.
+    child_config: Optional[Dict[str, Any]] = Field(
+        None, description="Child risk/exit override; max_hold_sessions also sizes "
+                          "the sleeve (per_basket = total_capital / max_hold_sessions)")
 
     @field_validator('user_id', 'broker_account_id', mode='before')
     @classmethod
@@ -880,7 +887,8 @@ def ladder_create(req: CreateLadderRequest,
                   caller: Caller = Depends(resolve_caller)):
     """Create a positional auto-ladder campaign (RUNNING-capable; opens nothing
     until started + the daily tick). Rejects MIS / non-CNC-MTF products. Freezes
-    per_basket_capital = total_capital / 3."""
+    per_basket_capital = total_capital / hold_length (hold_length = the child
+    max_hold_sessions from child_config, default 3 → total/3, unchanged)."""
     from ..ladder import LadderCampaign
     caller = _caller(caller)
     mode = req.mode if req.mode in ("paper", "live") else "paper"
@@ -890,7 +898,8 @@ def ladder_create(req: CreateLadderRequest,
             total_capital=req.total_capital, order_product=req.order_product,
             mode=mode, user_id=owner_user_id,
             broker_account_id=req.broker_account_id,
-            end_date=req.end_date, end_date_mode=req.end_date_mode)
+            end_date=req.end_date, end_date_mode=req.end_date_mode,
+            child_config=req.child_config)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return lad.to_status()

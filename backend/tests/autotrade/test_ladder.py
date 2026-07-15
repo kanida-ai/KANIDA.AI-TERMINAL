@@ -732,3 +732,172 @@ def test_delete_refuses_when_basket_open(clean_positions, patched_brokers):
             lad.delete()
     else:
         assert lad.delete() is True   # nothing opened → safe to delete
+
+
+# ── HOLD-LENGTH-AWARE SLEEVE SIZING (BTST) ────────────────────────────────────
+# per_basket = total_capital / hold_length, hold_length = effective child
+# max_hold_sessions (default POSITIONAL_MAX_HOLD_SESSIONS=3). Full-deploy at
+# steady state = hold_length overlapping sleeves. See ladder.create().
+
+def test_default_hold_length_unchanged_backward_compat(clean_positions):
+    """No child override -> hold_length defaults to 3 -> per_basket == total/3,
+    IDENTICAL to the legacy BASKET_DIVISOR path; child_config_json stays NULL."""
+    lad = LadderCampaign.create(total_capital=900000.0, order_product="CNC")
+    assert lad.per_basket_capital == pytest.approx(300000.0)   # total/3
+    assert lad.child_config_json is None                       # byte-identical
+    got = LadderCampaign.load(lad.ladder_id)
+    assert got.per_basket_capital == pytest.approx(300000.0)
+    assert got.child_config_json is None
+
+
+def test_btst_per_basket_is_total_over_two(clean_positions):
+    """BTST: total=X, child max_hold_sessions=2 -> per_basket == X/2 (NOT X/3).
+    Mutation-verified: the divisor is the hold length, not the constant 3."""
+    X = 1_000_000.0
+    lad = LadderCampaign.create(
+        total_capital=X, order_product="CNC",
+        child_config={"max_hold_sessions": 2})
+    assert lad.per_basket_capital == pytest.approx(X / 2)      # 500,000
+    assert lad.per_basket_capital != pytest.approx(X / 3)      # mutation guard
+    got = LadderCampaign.load(lad.ladder_id)
+    assert got.per_basket_capital == pytest.approx(X / 2)
+    assert got.child_config_overrides().get("max_hold_sessions") == 2
+
+
+def test_btst_arbitrary_capital_over_two(clean_positions):
+    """Capital is the trader's choice; per_basket derives from it + hold length.
+    No hard-coded amount anywhere."""
+    for X in (250000.0, 777777.0, 5_000_000.0):
+        lad = LadderCampaign.create(
+            total_capital=X, child_config={"max_hold_sessions": 2})
+        assert lad.per_basket_capital == pytest.approx(round(X / 2, 2))
+
+
+def test_btst_steady_state_two_concurrent_full_deploy(clean_positions):
+    """2-session hold -> 2 overlapping sleeves of total/2 = the FULL pool at steady
+    state; the free-slice gate never opens a 3rd."""
+    X = 1_000_000.0
+    lad = LadderCampaign.create(
+        total_capital=X, child_config={"max_hold_sessions": 2})
+    assert lad.free_capital() == pytest.approx(X)
+    _insert_child(lad.ladder_id, status="RUNNING", capital=500000.0)
+    assert lad.free_capital() == pytest.approx(500000.0)       # one slice free
+    _insert_child(lad.ladder_id, status="RUNNING", capital=500000.0)
+    assert lad.free_capital() == pytest.approx(0.0)            # full at 2 sleeves
+    assert lad.n_active_baskets() == 2
+
+
+def test_btst_daily_tick_never_opens_third(clean_positions, patched_brokers):
+    """With 2 open sleeves (= total), the daily tick opens NOTHING (caps at
+    hold_length concurrent - never over-deploys the ceiling)."""
+    X = 1_000_000.0
+    lad = LadderCampaign.create(
+        total_capital=X, child_config={"max_hold_sessions": 2})
+    lad.start()
+    for _ in range(2):
+        _insert_child(lad.ladder_id, status="RUNNING", capital=500000.0)
+    assert lad.free_capital() == pytest.approx(0.0)
+    res = lad.daily_tick(ref_now=_trading_day_now())
+    assert res["opened"] is False
+    assert "no free slice" in (res["reason"] or "")
+    assert lad.n_active_baskets() == 2                          # still 2, no 3rd
+
+
+def test_btst_daily_tick_opens_second_when_one_free(clean_positions,
+                                                    patched_brokers):
+    """With one sleeve free (total/2), the daily tick opens exactly ONE more real
+    basket -> 2 concurrent, pool fully deployed."""
+    _basket_signals()
+    X = 1_000_000.0
+    lad = LadderCampaign.create(
+        total_capital=X, child_config={"max_hold_sessions": 2})
+    lad.start()
+    _insert_child(lad.ladder_id, status="RUNNING", capital=500000.0)  # 1 sleeve used
+    res = lad.daily_tick(ref_now=_trading_day_now())
+    assert res["opened"] is True
+    assert lad.n_active_baskets() == 2                          # exactly 2
+    assert _open_positions(lad.ladder_id) == 5                  # Top-5 basket
+    assert lad.free_capital() == pytest.approx(0.0)             # full deploy
+
+
+def test_btst_one_child_per_day(clean_positions, patched_brokers):
+    """Idempotent: a second tick the SAME day opens nothing even with a free
+    sleeve (one child/day)."""
+    _basket_signals()
+    X = 1_000_000.0
+    lad = LadderCampaign.create(
+        total_capital=X, child_config={"max_hold_sessions": 2})
+    lad.start()
+    r1 = lad.daily_tick(ref_now=_trading_day_now())
+    assert r1["opened"] is True
+    assert lad.n_active_baskets() == 1
+    r2 = lad.daily_tick(ref_now=_trading_day_now())
+    assert r2["opened"] is False
+    assert "already opened today" in (r2["reason"] or "")
+    assert lad.n_active_baskets() == 1                          # not 2 same day
+
+
+def test_btst_child_config_applied_to_spawned_config(clean_positions):
+    """The child config carries the overrides: max_hold=2, arm_pct=0.5 (unreachable
+    in a 2-session hold -> trail never arms = 'trail off'), square_off stays False
+    (positional carry), and it VALIDATES."""
+    lad = LadderCampaign.create(
+        total_capital=1_000_000.0, order_product="CNC",
+        child_config={"max_hold_sessions": 2, "arm_pct": 0.5})
+    cfg = lad._build_child_config()
+    assert cfg.max_hold_sessions == 2
+    assert cfg.arm_pct == pytest.approx(0.5)
+    assert cfg.square_off_enabled is False                     # carry across days
+    assert cfg.order_product == "CNC"
+    assert cfg.top_n_stocks == 5                               # POSITIONAL_TOP_N
+    assert cfg.total_allocated_capital == pytest.approx(500000.0)
+    cfg.validate()                                             # passes the gate
+
+
+def test_create_validates_child_override_rejects_out_of_range_arm(clean_positions):
+    """FAIL-FAST: an out-of-range override (arm_pct=0.99 > the intraday 0.5 cap) is
+    rejected AT CREATE - so a campaign that could never open a child is never
+    created."""
+    with pytest.raises(ValueError) as e:
+        LadderCampaign.create(
+            total_capital=1_000_000.0,
+            child_config={"max_hold_sessions": 2, "arm_pct": 0.99})
+    assert "child_config invalid" in str(e.value)
+
+
+def test_create_rejects_bad_max_hold(clean_positions):
+    """max_hold_sessions must be >= 1 (a 0/negative divisor is nonsensical)."""
+    with pytest.raises(ValueError):
+        LadderCampaign.create(
+            total_capital=1_000_000.0, child_config={"max_hold_sessions": 0})
+
+
+def test_btst_cnc_accepted_mis_rejected_with_override(clean_positions):
+    """CNC BTST accepted; MIS still rejected at the door even with a child
+    override (positional can't carry overnight)."""
+    lad = LadderCampaign.create(
+        total_capital=1_000_000.0, order_product="CNC",
+        child_config={"max_hold_sessions": 2})
+    assert lad.order_product == "CNC"
+    with pytest.raises(ValueError) as e:
+        LadderCampaign.create(
+            total_capital=1_000_000.0, order_product="MIS",
+            child_config={"max_hold_sessions": 2})
+    assert "MIS" in str(e.value) or "overnight" in str(e.value)
+
+
+def test_child_config_filtered_to_whitelist(clean_positions):
+    """Non-whitelisted keys (e.g. total_allocated_capital) are dropped; only the
+    whitelisted risk/exit knobs survive - capital can never be smuggled in via the
+    child override."""
+    lad = LadderCampaign.create(
+        total_capital=1_000_000.0,
+        child_config={"max_hold_sessions": 2,
+                      "total_allocated_capital": 99.0,   # dropped
+                      "order_product": "MIS",            # dropped
+                      "arm_pct": 0.4})
+    ov = lad.child_config_overrides()
+    assert set(ov.keys()) == {"max_hold_sessions", "arm_pct"}
+    assert "total_allocated_capital" not in ov
+    assert lad.per_basket_capital == pytest.approx(500000.0)   # total/2, sane
+    assert lad.order_product == "CNC"                          # default, not MIS
