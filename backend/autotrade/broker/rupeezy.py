@@ -768,8 +768,10 @@ class RupeezyBroker(BrokerClient):
 
 
 def _margin_path() -> str:
-    """Vortex order-margin endpoint path (env-overridable until certified — #4)."""
-    return os.environ.get("RUPEEZY_MARGIN_PATH", "").strip() or "/trading/margins"
+    """Vortex order-margin endpoint path. CERTIFIED 2026-07-15 (live-verified):
+    POST /trading/margins/order → {"required_margin": <per-order ₹>,
+    "available_margin": ..., "status":"success"}. Env-overridable."""
+    return os.environ.get("RUPEEZY_MARGIN_PATH", "").strip() or "/trading/margins/order"
 
 
 def _extract_margin(payload) -> Optional[float]:
