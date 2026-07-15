@@ -41,7 +41,7 @@ import {
   type BrokerAccount, type SessionScope,
   type UniverseFilter, type PickItem, type PicksResponse,
   type LadderProduct, type LadderEndMode, type LadderKillMode, type LadderStatusName,
-  type LadderStatus, type LadderSummary,
+  type LadderStatus, type LadderSummary, type LadderChildConfig,
 } from '@/lib/autotrade-api'
 
 // ── Safe defaults — paper + kill switch OFF, per the ships-disabled contract ──
@@ -231,6 +231,19 @@ const TESLA_PRESET: Partial<SessionConfig> = {
 const TESLA_GRADE_OPTIONS: { id: 'A++' | 'A+++'; label: string }[] = [
   { id: 'A++',  label: 'A++ +' },
   { id: 'A+++', label: 'A+++ only' },
+]
+
+// Auto-Ladder PRESET — which validated positional campaign to build. 'positional'
+// = the existing default (Falcon Top-5 held ~3 sessions; the wire body is
+// UNCHANGED, no child_config). 'btst' = Falcon BTST: buy the Top-5 at 09:15, hold
+// EXACTLY 2 sessions, sell Day-2 15:29, CNC (1× cash), no trail (arm 0.5 =
+// unreachable in a 2-day hold), −6% basket stop. BTST forces order_product=CNC and
+// sends child_config { max_hold_sessions: 2, arm_pct: 0.5 } on create — everything
+// else in the create flow is identical. Additive: default path is byte-identical.
+type LadderPreset = 'positional' | 'btst'
+const LADDER_PRESET_OPTIONS: { id: LadderPreset; label: string; hint: string }[] = [
+  { id: 'positional', label: 'Positional (3-session)', hint: 'Falcon Top-5 held ~3 sessions — the default monthly positional campaign.' },
+  { id: 'btst',       label: 'Falcon BTST (2-session)', hint: 'Falcon Top-5 bought 09:15, sold Day-2 15:29 · CNC, no leverage · no trail · −6% stop.' },
 ]
 
 // Campaign Duration options (Auto-Ladder only). Maps to LadderEndMode on the wire.
@@ -700,6 +713,18 @@ export function PortfolioAutoTrade({
 
   // Campaign Duration (Auto-Ladder only) → LadderEndMode on the wire.
   const [ladderEndMode, setLadderEndMode] = useState<LadderEndMode>('month_end')
+
+  // Auto-Ladder PRESET (Auto-Ladder only). 'positional' = default (unchanged wire
+  // body). 'btst' = Falcon BTST → forces CNC + sends child_config on create.
+  const [ladderPreset, setLadderPreset] = useState<LadderPreset>('positional')
+  const isBtst = isLadder && ladderPreset === 'btst'
+  // Choosing BTST forces the campaign product to CNC (positional carries overnight;
+  // MIS is rejected server-side and MTF isn't wanted for BTST). Selecting positional
+  // leaves the product untouched (CNC/MTF still the trader's choice).
+  const pickLadderPreset = (id: LadderPreset) => {
+    setLadderPreset(id)
+    if (id === 'btst') set('order_product', 'CNC')
+  }
 
   // ── Running campaigns (Auto-Ladder) — shown ATOP the sessions list ───────────
   // ladders = the user's campaigns; ladderStatuses = the live per-campaign poll
@@ -1579,7 +1604,11 @@ export function PortfolioAutoTrade({
   // in `createdLadder` and rendered by phase==='created' && createdLadder.
   const onCreateCampaign = useCallback(async () => {
     setError(null); setCampaignErr(null); setCampaignSuggest(null)
-    const product: LadderProduct = config.order_product === 'MTF' ? 'MTF' : 'CNC'
+    // Falcon BTST forces CNC (positional carries overnight; MIS is rejected and
+    // MTF isn't wanted). Positional preset keeps the trader's CNC/MTF choice.
+    const product: LadderProduct = ladderPreset === 'btst'
+      ? 'CNC'
+      : (config.order_product === 'MTF' ? 'MTF' : 'CNC')
     const cap = config.total_allocated_capital || 0
     // DUPLICATE GUARD: don't silently create an identical active campaign. Warn
     // once (the button re-arms); a second click creates it anyway for the rare
@@ -1605,6 +1634,13 @@ export function PortfolioAutoTrade({
         mode,
         end_date_mode: ladderEndMode,
         kill_mode: 'flatten_now',
+        // Falcon BTST: 2-session hold + arm 0.5 (unreachable → no trail). The
+        // backend whitelists these keys and auto-sizes each sleeve to
+        // total_capital / max_hold_sessions (= capital ÷ 2). Omitted for the
+        // default positional campaign, so that wire body is byte-identical.
+        ...(ladderPreset === 'btst'
+          ? { child_config: { max_hold_sessions: 2, arm_pct: 0.5 } as LadderChildConfig }
+          : {}),
         // PARITY FIX: scope the campaign to this user exactly like createSession,
         // so it lands with the same user_id and appears in the ?user_id-scoped
         // Sessions list (a SCHEDULED campaign was being dropped by WHERE user_id=?).
@@ -1624,7 +1660,7 @@ export function PortfolioAutoTrade({
       setBusy(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, config.total_allocated_capital, config.order_product, ladderEndMode, loadLadders, ladders, dupConfirm, userId, brokerAccountId])
+  }, [mode, config.total_allocated_capital, config.order_product, ladderEndMode, ladderPreset, loadLadders, ladders, dupConfirm, userId, brokerAccountId])
 
   // Auto-Ladder — STEP 2: start the held draft. `when==='now'` → ladderStart(id)
   // → RUNNING (first basket next trading morning). `when==='scheduled'` →
@@ -2235,12 +2271,58 @@ export function PortfolioAutoTrade({
                 <span className="shrink-0 mt-0.5" style={{ color: C.mint }}>{ICON.loop(16)}</span>
                 <div className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
                   <b style={{ color: C.ink }}>Monthly campaign.</b>{' '}
-                  Falcon splits your capital across ~3 baskets and opens a new one every trading day
+                  Falcon splits your capital across {isBtst ? '2 overlapping sleeves' : '~3 baskets'} and opens a new one every trading day
                   at <b style={{ color: C.ink }}>09:15 IST</b> — each basket is held positional (a fixed
-                  3-session hold), and you never manage one.
+                  {isBtst ? ' 2-session' : ' 3-session'} hold), and you never manage one.
                 </div>
               </div>
             )}
+
+            {/* Auto-Ladder PRESET toggle — Positional (default) vs Falcon BTST.
+                BTST forces CNC + sends child_config on create; positional is the
+                unchanged default path. */}
+            {isLadder && (
+              <div className="mt-3">
+                <Field label="Campaign preset" hint={LADDER_PRESET_OPTIONS.find((o) => o.id === ladderPreset)?.hint}>
+                  <div className="inline-flex rounded-xl border p-0.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                    {LADDER_PRESET_OPTIONS.map((o) => {
+                      const active = o.id === ladderPreset
+                      return (
+                        <button key={o.id} type="button" onClick={() => pickLadderPreset(o.id)}
+                          className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors"
+                          style={{ color: active ? '#06130c' : C.ink2, background: active ? C.mint : 'transparent' }}>
+                          {o.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </Field>
+              </div>
+            )}
+
+            {/* Falcon BTST read-only summary — exactly what the operator is arming.
+                Capital is the OPERATOR'S input; sleeve = capital ÷ 2, per-name =
+                capital ÷ 10 (5 names × 2 overlapping sleeves). Never hardcoded. */}
+            {isBtst && (() => {
+              const cap = config.total_allocated_capital || 0
+              const sleeve = cap > 0 ? cap / 2 : 0
+              const perName = cap > 0 ? cap / 10 : 0
+              return (
+                <div className="mt-3 rounded-xl border px-3.5 py-3"
+                  style={{ borderColor: 'rgba(63,227,164,0.22)', background: 'linear-gradient(180deg, rgba(63,227,164,0.06), rgba(255,255,255,0.015))' }}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span style={{ color: C.mint }}>{ICON.check(15)}</span>
+                    <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Falcon BTST — what you&apos;re arming</span>
+                  </div>
+                  <ul className="text-[11.5px] leading-relaxed space-y-1" style={{ color: C.ink2 }}>
+                    <li>· Buy the Falcon <b style={{ color: C.ink }}>Top-5</b> at <b style={{ color: C.ink }}>09:15</b>, hold <b style={{ color: C.ink }}>exactly 2 sessions</b>, sell <b style={{ color: C.ink }}>Day-2 at 15:29</b>.</li>
+                    <li>· <b style={{ color: C.ink }}>CNC</b> — 1× cash, no leverage · <b style={{ color: C.ink }}>no trail</b> (arm set 0.5, unreachable in a 2-day hold) · <b style={{ color: C.ink }}>−6% basket hard stop</b>.</li>
+                    <li>· Rolling <b style={{ color: C.ink }}>monthly</b> campaign — auto-spawns one basket per trading day, continuous until cancelled.</li>
+                    <li>· Sleeve = capital ÷ 2 = <b style={{ color: C.ink }}>{cap > 0 ? fmtINR(sleeve) : '—'}</b> per day (2 overlapping sleeves = full capital) · per name = capital ÷ 10 = <b style={{ color: C.ink }}>{cap > 0 ? fmtINR(perName) : '—'}</b>.</li>
+                  </ul>
+                </div>
+              )
+            })()}
 
             {/* Falcon Tesla intro strip — order-flow short seat rotation. Factual,
                 calm, paper-first note (the engine is thin-validated). */}
@@ -2456,10 +2538,10 @@ export function PortfolioAutoTrade({
                 />
               </Field>
             ) : (config.instrument_type ?? 'EQ') !== 'FUT' && !isTesla ? (
-              <Field label="Order product" hint={isLadder ? 'Campaign product — Cash (CNC) or Margin (MTF).' : 'Broker product type for entries.'}>
+              <Field label="Order product" hint={isBtst ? 'Falcon BTST is CNC only (1× cash, no leverage — it carries overnight).' : isLadder ? 'Campaign product — Cash (CNC) or Margin (MTF).' : 'Broker product type for entries.'}>
                 <Segmented
-                  options={(isLadder ? (['CNC', 'MTF'] as OrderProduct[]) : PRODUCT_OPTIONS).map((p) => ({ id: p, label: p }))}
-                  value={config.order_product === 'MIS' && isLadder ? 'CNC' : config.order_product}
+                  options={((isBtst ? (['CNC'] as OrderProduct[]) : isLadder ? (['CNC', 'MTF'] as OrderProduct[]) : PRODUCT_OPTIONS)).map((p) => ({ id: p, label: p }))}
+                  value={config.order_product === 'MIS' && isLadder ? 'CNC' : (isBtst ? 'CNC' : config.order_product)}
                   onChange={(v) => onProductChange(v)}
                 />
               </Field>

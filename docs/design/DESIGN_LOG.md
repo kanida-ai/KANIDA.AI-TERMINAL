@@ -38,6 +38,35 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-07-14 — **AutoTrade · Auto-Ladder (monthly campaign) create · "Falcon BTST"
+  preset.** Additive wiring so the operator can create + arm Falcon BTST end-to-end
+  in the UI (backend already supports it, commit c31804f — no backend change). Two
+  files: `lib/autotrade-api.ts` + `components/power/autotrade/PortfolioAutoTrade.tsx`.
+  Default positional (3-session) path is byte-identical when BTST isn't chosen.
+  (1) **API type** — new `LadderChildConfig` (whitelisted keys: max_hold_sessions,
+  arm_pct, floor_pct, trail_giveback_pct, stop_pct, per_position_stop_pct,
+  per_position_target_pct) + optional `child_config?` on `LadderCreateBody`. Omitted
+  for the default campaign. (2) **Preset toggle** — a segmented "Campaign preset"
+  control shown ONLY in the Auto-Ladder create flow: "Positional (3-session)"
+  (default, unchanged wire body) vs "Falcon BTST (2-session)". Selecting BTST forces
+  order_product=CNC (`pickLadderPreset` calls `set('order_product','CNC')`) and the
+  Order-product segmented locks to CNC-only (MTF removed) with a "CNC only — 1× cash,
+  no leverage" hint. (3) **Read-only BTST summary card** (mint intro-strip styling)
+  states exactly what's being armed: Top-5, 09:15 buy / 2-session hold / Day-2 15:29
+  sell · CNC no-leverage · no trail (arm 0.5 unreachable) · −6% basket stop · monthly
+  roll · sleeve = capital÷2 and per-name = capital÷10, both computed LIVE from the
+  operator's own `total_allocated_capital` input (never hardcoded; "—" until capital
+  entered). The intro strip's "~3 baskets / 3-session hold" copy flips to "2
+  overlapping sleeves / 2-session" under BTST. (4) **Create body assembly**
+  (`onCreateCampaign`): product = `ladderPreset==='btst' ? 'CNC' : (MTF?MTF:CNC)`;
+  body spreads `child_config: { max_hold_sessions: 2, arm_pct: 0.5 }` ONLY when BTST,
+  so the positional create body is unchanged. capital, mode, end_date_mode,
+  kill_mode, user_id/broker scope all as before. A ladder-create UI ALREADY existed
+  (the Auto-Ladder strategy option → `ladderCreate`→`ladderStart` two-step); this
+  extended it, no new tab/page. Theme: mint/F2 tokens only, reused `Field`/
+  `Segmented`/`fmtINR`/`ICON`. No execution-path touched. Verify: `npx tsc --noEmit`
+  clean (EXIT 0) + `npm run build` ✓ Compiled successfully (`/power/autotrade`
+  built, all routes intact). Backend needs: none. NOT committed (operator ships).
 - 2026-07-13 — **AutoTrade · Portfolio create · "Pick stocks" custom-selection: Select
   all / Deselect all + tier filter.** Additive, view-only. In
   `components/power/autotrade/PortfolioAutoTrade.tsx`: (1) tier-filter chips above the

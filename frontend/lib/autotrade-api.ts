@@ -949,9 +949,28 @@ export type LadderKillMode = 'flatten_now' | 'stop_new_let_finish'
 export type LadderStatusName =
   | 'CREATED' | 'SCHEDULED' | 'RUNNING' | 'PAUSED' | 'ENDED' | 'COMPLETED' | string
 
+// Optional per-child-basket overrides sent with a ladder create. The backend
+// (commit c31804f) filters this to a WHITELIST — any key outside it is dropped —
+// so only these are honoured. All are OPTIONAL; omit the object entirely for the
+// default positional (3-session) campaign. Falcon BTST sends
+// { max_hold_sessions: 2, arm_pct: 0.5 } → each daily sleeve auto-sizes to
+// total_capital / max_hold_sessions, and arm_pct=0.5 makes the trail unreachable
+// in a 2-session equity hold (i.e. a pure buy-and-hold to Day-2, no trail).
+export type LadderChildConfig = {
+  max_hold_sessions?: number
+  arm_pct?: number
+  floor_pct?: number
+  trail_giveback_pct?: number
+  stop_pct?: number
+  per_position_stop_pct?: number
+  per_position_target_pct?: number
+}
+
 // POST /ladder/create body. total_capital is ₹; the backend derives the per-
-// basket budget (~total/3). mode defaults paper (no real orders). end_date is
-// optional and only meaningful with an explicit calendar stop.
+// basket budget (default ~total/3, or total/max_hold_sessions when child_config
+// carries max_hold_sessions — BTST = total/2). mode defaults paper (no real
+// orders). end_date is optional and only meaningful with an explicit calendar
+// stop.
 export type LadderCreateBody = {
   total_capital: number
   order_product: LadderProduct
@@ -959,6 +978,9 @@ export type LadderCreateBody = {
   end_date_mode: LadderEndMode
   end_date?: string
   kill_mode?: LadderKillMode
+  // Optional per-child-basket config (whitelisted server-side). Omitted for the
+  // default 3-session positional campaign; set for Falcon BTST.
+  child_config?: LadderChildConfig
   // Ownership scope — MUST be sent (same as createSession) so the campaign is
   // created with the caller's user_id. Otherwise the ?user_id-scoped /ladders
   // list filters it out (WHERE user_id = ?) and a SCHEDULED campaign never
