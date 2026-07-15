@@ -46,10 +46,24 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import socket as _socket
+import urllib3.util.connection as _urllib3_conn
+
 from .base import BrokerClient, OrderResult
 from .rupeezy_auth_provider import _api_base, _proxies
 
 log = logging.getLogger("kanida.autotrade.broker.rupeezy")
+
+
+def _ipv4_only() -> int:
+    """Force IPv4 address selection. Vortex allowlists a STATIC IPv4 for ORDER
+    placement; on a dual-stack host the OS prefers IPv6, so an order egresses an
+    IPv6 address that is NOT on the allowlist → HTTP 403 IP_NOT_ALLOWED (reads do
+    NOT check the allowlist, so they succeed and MASK the problem). Pinning to
+    IPv4 makes the egress the allowlisted IPv4. live-verified 2026-07-15: forcing
+    IPv4 turned the order-write 403 IP_NOT_ALLOWED into a normal 400 payload
+    validation — i.e. the allowlist check then PASSED."""
+    return _socket.AF_INET
 
 _HTTP_TIMEOUT = 15
 _RETRY_MAX_ATTEMPTS = 3
@@ -132,10 +146,18 @@ class RupeezyBroker(BrokerClient):
         last_exc: Optional[BaseException] = None
         for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
             try:
-                r = requests.request(
-                    method, url, headers=self._headers(), json=json_body,
-                    params=params, timeout=_HTTP_TIMEOUT,
-                    proxies=_proxies() or None)
+                # Pin THIS request to IPv4 so the egress is the allowlisted static
+                # IPv4 (see _ipv4_only). Scoped: restored immediately after, so the
+                # rest of the process (e.g. the live Kite path) is untouched.
+                _orig_gai = _urllib3_conn.allowed_gai_family
+                _urllib3_conn.allowed_gai_family = _ipv4_only
+                try:
+                    r = requests.request(
+                        method, url, headers=self._headers(), json=json_body,
+                        params=params, timeout=_HTTP_TIMEOUT,
+                        proxies=_proxies() or None)
+                finally:
+                    _urllib3_conn.allowed_gai_family = _orig_gai
                 if r.status_code >= 400 and _is_transient(r.status_code) \
                         and attempt < _RETRY_MAX_ATTEMPTS:
                     time.sleep(_RETRY_BASE_SLEEP_SEC * attempt)
@@ -243,8 +265,15 @@ class RupeezyBroker(BrokerClient):
             "disclosed_quantity": 0,
             "is_amo": False,
         }
-        if variety == "RL":
-            body["price"] = round(float(price or 0.0), 2)
+        # Vortex REQUIRES a `price` on EVERY order — including RL-MKT (market):
+        # a market order with no price 400s ("RegularPlaceOrderRequest.Price").
+        # live-verified 2026-07-15. For a limit (RL) use the given price; for a
+        # market (RL-MKT) use the given price or the current LTP as the required
+        # reference (variety=RL-MKT still governs market execution).
+        px = price
+        if variety == "RL-MKT" and not px:
+            px = self.get_ltp(symbol)
+        body["price"] = round(float(px or 0.0), 2)
         return body
 
     # ── Order lifecycle ───────────────────────────────────────────────────────
