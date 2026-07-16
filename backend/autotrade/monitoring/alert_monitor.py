@@ -283,6 +283,15 @@ def detect_naked_positions(session) -> List[Dict[str, Any]]:
     prof_scope = list(brokers.keys()) or None
     evidence = _owned_evidence(prof_scope or [])
     _prod_cache: Dict[str, str] = {}
+    # P0 PAPER-LEAK FIX (2026-07-16): the book below is the LIVE broker's net book,
+    # so "is any session managing this position?" must be answered from LIVE rows
+    # only. A PAPER session's identically-keyed row (profile 'default', account
+    # NULL, product 'MIS') would otherwise mark a genuinely NAKED live position
+    # "managed" and SUPPRESS the alert. Same bug class as registry.sibling_open_qty.
+    _sess_mode = str(getattr(session, "mode", "live") or "live").strip().lower()
+    if _sess_mode not in ("live", "paper"):
+        _sess_mode = "live"
+    _mode_cache: Dict[str, Optional[str]] = {}
     naked: List[Dict[str, Any]] = []
     seen: set = set()
 
@@ -322,7 +331,8 @@ def detect_naked_positions(session) -> List[Dict[str, Any]]:
 
             # Is any OPEN autotrade session managing this (symbol, product)?
             account_open = _account_open_positions_for(
-                bare_sym, product, prof_scope, _prod_cache)
+                bare_sym, product, prof_scope, _prod_cache,
+                mode_scope=_sess_mode, _mode_cache=_mode_cache)
             db_open = sum(int(p.get("qty") or 0) for p in account_open)
             if db_open > 0:
                 continue                      # managed by a live session → not naked

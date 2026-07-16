@@ -207,7 +207,9 @@ def _position_product(pos: Dict[str, Any], _cache: Dict[str, str]) -> str:
 def _account_open_positions_for(bare_sym: str, want_product: str,
                                 prof_scope: Optional[List[str]],
                                 _prod_cache: Dict[str, str],
-                                acct_scope: Optional[List[Optional[str]]] = None
+                                acct_scope: Optional[List[Optional[str]]] = None,
+                                mode_scope: Optional[str] = None,
+                                _mode_cache: Optional[Dict[str, Optional[str]]] = None
                                 ) -> List[Dict[str, Any]]:
     """ALL OPEN/EXIT_FAILED positions on the ACCOUNT for (bare_sym, want_product),
     across EVERY session on THIS broker account (the invariant's left-hand side).
@@ -228,7 +230,20 @@ def _account_open_positions_for(bare_sym: str, want_product: str,
     invariant (which would false-close / false-alert across accounts). acct_scope
     None (legacy caller) keeps the profile-only behaviour; the reconciler always
     passes it now. Legacy single-account rows (all NULL account) stay byte-identical
-    (acct_scope == {None} matches only NULL-account rows)."""
+    (acct_scope == {None} matches only NULL-account rows).
+
+    🔴 P0 PAPER-LEAK FIX (2026-07-16) — MODE SCOPING (same bug class as the
+    registry.sibling_open_qty fix). The invariant's RIGHT-hand side (broker_held)
+    is BROKER REALITY = LIVE fills only, so its LEFT-hand side (db_held_all) must
+    count only LIVE rows. A PAPER session's rows carry IDENTICAL scope keys
+    (profile 'default', broker_account_id NULL, product 'MIS') and so inflated
+    db_held_all against a live account (a false surplus → suppressed deficit
+    resolution; and in alert_monitor a paper row made a genuinely NAKED live
+    position look "managed"). `mode_scope` ('live'|'paper') keeps only rows whose
+    session is in that mode (autotrade_sessions.mode, memoised in _mode_cache). A
+    row whose session row is UNKNOWN has no mode evidence → excluded when
+    mode_scope is set. mode_scope None (legacy caller) = NO mode filter =
+    byte-identical to the pre-fix behaviour."""
     with falcon_conn() as con:
         rows = con.execute(
             """SELECT * FROM autotrade_positions
@@ -237,6 +252,10 @@ def _account_open_positions_for(bare_sym: str, want_product: str,
     _acct_norm = None
     if acct_scope is not None:
         _acct_norm = {("" if a is None else str(a)) for a in acct_scope}
+    _want_mode = (str(mode_scope).strip().lower()
+                  if mode_scope is not None else None)
+    if _mode_cache is None:
+        _mode_cache = {}
     out: List[Dict[str, Any]] = []
     for r in rows:
         d = dict(r)
@@ -251,6 +270,11 @@ def _account_open_positions_for(bare_sym: str, want_product: str,
                 continue
         if _position_product(d, _prod_cache) != want_product:
             continue
+        if _want_mode is not None:
+            from .registry import session_mode_cached
+            if session_mode_cached(str(d.get("session_id") or ""),
+                                   _mode_cache) != _want_mode:
+                continue
         out.append(d)
     return out
 
@@ -678,6 +702,13 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
         return None if a in (None, "") else str(a)
 
     _prod_cache: Dict[str, str] = {}
+    # P0 PAPER-LEAK FIX: this reconcile is LIVE-only (dry_run early-return above), so
+    # the account invariant must be computed over LIVE rows only. Read the mode off
+    # the session; default 'live' (reaching here means dry_run is False).
+    _sess_mode = str(getattr(session, "mode", "live") or "live").strip().lower()
+    if _sess_mode not in ("live", "paper"):
+        _sess_mode = "live"
+    _mode_cache: Dict[str, Optional[str]] = {}
     actions: List[Dict[str, Any]] = []
     changed = False
 
@@ -817,8 +848,14 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
 
         # ── db_held_ALL: Σ OPEN qty across ALL sessions on the account for
         #    (symbol, product). The invariant's left side. ─────────────────────
+        # P0 MODE SCOPE: broker_held above is LIVE broker reality; this function is
+        # LIVE-only already (the dry_run early-return at the top), so the DB side
+        # must count LIVE rows ONLY — a paper session's identically-keyed rows
+        # would otherwise inflate db_held_all. _sess_mode is read from the session
+        # (falls back to 'live', which is what reaching this line implies).
         account_positions = _account_open_positions_for(
-            bare_sym, product, prof_scope, _prod_cache, [grp_acct])
+            bare_sym, product, prof_scope, _prod_cache, [grp_acct],
+            mode_scope=_sess_mode, _mode_cache=_mode_cache)
         # ITEM 6(a) — SIGNED sum so an OPPOSITE-direction sibling position never
         # inflates the invariant's left side. Two sessions long+short the same
         # (symbol, product) NET to 0 at the broker (broker_held=abs(net)=0); the OLD

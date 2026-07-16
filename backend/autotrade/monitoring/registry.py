@@ -24,6 +24,36 @@ log = logging.getLogger("kanida.autotrade.registry")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
+# ── SESSION MODE resolution (P0 PAPER-LEAK FIX, 2026-07-16) ──────────────────
+def session_mode(session_id: str) -> Optional[str]:
+    """'live' | 'paper' for a session, or None when the session row is UNKNOWN.
+
+    None (unknown) is meaningful: the mode-scoped sibling filters fall back to
+    their pre-fix, un-scoped behaviour rather than guess — so a synthetic /
+    orphan session_id (no autotrade_sessions row) behaves byte-for-byte as
+    before. Never raises."""
+    try:
+        with falcon_conn() as con:
+            r = con.execute(
+                "SELECT mode FROM autotrade_sessions WHERE session_id=?",
+                (session_id,)).fetchone()
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("session_mode(%s) failed: %s", session_id, e)
+        return None
+    if r is None:
+        return None
+    m = str(r["mode"] or "").strip().lower()
+    return m if m in ("live", "paper") else None
+
+
+def session_mode_cached(session_id: str, cache: Dict[str, Optional[str]]
+                        ) -> Optional[str]:
+    """session_mode() memoised in a caller-supplied dict (per reconcile cycle)."""
+    if session_id not in cache:
+        cache[session_id] = session_mode(session_id)
+    return cache[session_id]
+
+
 # ── SESSION-SCOPED pre-exit flat guard (C1) ──────────────────────────────────
 # The broker's net book is ACCOUNT-wide: when two sessions hold the same symbol
 # a plain `broker_net == 0` (or `broker_net < our_qty`) test cannot tell whose
@@ -37,11 +67,28 @@ def sibling_open_qty(session_id: str, symbol: str,
                      instrument_type: Optional[str] = None,
                      *, broker_profile: Optional[str] = None,
                      broker_account_id: Optional[str] = None,
-                     product: Optional[str] = None) -> int:
+                     product: Optional[str] = None,
+                     mode: Optional[str] = None) -> int:
     """Σ still-held qty for `symbol` across OTHER sessions ON THE SAME BROKER
-    ACCOUNT (status OPEN or EXIT_FAILED — an EXIT_FAILED sibling still holds its
-    shares at the broker). When instrument_type is given it must match (so a cash
-    EQ lot and a FUT contract of the same base name never cross-count).
+    ACCOUNT **AND IN THE SAME MODE** (status OPEN or EXIT_FAILED — an EXIT_FAILED
+    sibling still holds its shares at the broker). When instrument_type is given
+    it must match (so a cash EQ lot and a FUT contract of the same base name never
+    cross-count).
+
+    🔴 P0 PAPER-LEAK FIX (2026-07-16) — MODE SCOPING. `broker_net` (in
+    our_held_at_broker) is BROKER REALITY: it contains ONLY LIVE fills. A PAPER
+    session places no order, so its rows are NOT in that net — yet its position
+    rows carry IDENTICAL scope keys (profile 'default', broker_account_id NULL,
+    product 'MIS'), so before this fix a paper sibling's qty was subtracted from a
+    LIVE session's broker net. PROVEN 2026-07-15 (live b447b0d7f6dc, MAPMYINDIA):
+    max(0, min(706, 2030 − (1324 live + 843 PAPER))) = 0 → the live session
+    "reconciled flat" and NEVER SOLD 706 real shares (~₹8.33L). Without the paper
+    term: 2030 − 1324 = 706 = correct. Siblings are now scoped to the CALLING
+    session's mode (resolved from autotrade_sessions.mode): a live computation
+    counts only live rows; a paper computation only paper rows. `mode` may be
+    passed explicitly; when None it is resolved from `session_id`, and if THAT is
+    unknown (synthetic/orphan id, no session row) NO mode filter is applied —
+    byte-for-byte the pre-fix behaviour for those.
 
     CLUSTER 9 ITEM 3 (2026-07-11) — THE CORE MULTI-USER/MULTI-ACCOUNT ISOLATION FIX.
     `broker_net` (in our_held_at_broker) is a PER-ACCOUNT figure: it is the net qty
@@ -54,22 +101,32 @@ def sibling_open_qty(session_id: str, symbol: str,
     scoped to the SAME value via COALESCE('') matching (so NULL==NULL). All
     default None → no extra filter → byte-for-byte the old cross-account behaviour
     for the single-account world (where every row shares the same NULL account)."""
-    clauses = ["symbol=?", "session_id<>?",
-               "status IN ('OPEN','EXIT_FAILED')", "qty>0"]
+    clauses = ["p.symbol=?", "p.session_id<>?",
+               "p.status IN ('OPEN','EXIT_FAILED')", "p.qty>0"]
     params: list = [symbol, session_id]
     if instrument_type is not None:
-        clauses.append("COALESCE(instrument_type,'EQ')=COALESCE(?,'EQ')")
+        clauses.append("COALESCE(p.instrument_type,'EQ')=COALESCE(?,'EQ')")
         params.append(instrument_type)
     if broker_account_id is not None:
-        clauses.append("COALESCE(broker_account_id,'')=COALESCE(?,'')")
+        clauses.append("COALESCE(p.broker_account_id,'')=COALESCE(?,'')")
         params.append(broker_account_id)
     if broker_profile is not None:
-        clauses.append("COALESCE(broker_profile,'')=COALESCE(?,'')")
+        clauses.append("COALESCE(p.broker_profile,'')=COALESCE(?,'')")
         params.append(broker_profile)
     if product is not None:
-        clauses.append("COALESCE(product,'')=COALESCE(?,'')")
+        clauses.append("COALESCE(p.product,'')=COALESCE(?,'')")
         params.append(product)
-    sql = ("SELECT COALESCE(SUM(qty),0) AS q FROM autotrade_positions WHERE "
+    # P0 MODE SCOPE: only siblings in the SAME mode. A sibling whose session row is
+    # missing has NO mode evidence → LOWER(COALESCE(s.mode,'')) is '' → it matches
+    # neither 'live' nor 'paper' → it is NOT subtracted (an unattributable row is
+    # not evidence that our shares are gone; the min(our_qty, ...) clamp still
+    # bounds the exit size). Skipped entirely when the caller's mode is unknown.
+    want_mode = mode if mode is not None else session_mode(session_id)
+    if want_mode is not None:
+        clauses.append("LOWER(COALESCE(s.mode,''))=?")
+        params.append(str(want_mode).strip().lower())
+    sql = ("SELECT COALESCE(SUM(p.qty),0) AS q FROM autotrade_positions p "
+           "LEFT JOIN autotrade_sessions s ON s.session_id=p.session_id WHERE "
            + " AND ".join(clauses))
     with falcon_conn() as con:
         r = con.execute(sql, params).fetchone()
@@ -81,7 +138,8 @@ def our_held_at_broker(session_id: str, symbol: str,
                        our_qty: int, broker_net,
                        *, broker_profile: Optional[str] = None,
                        broker_account_id: Optional[str] = None,
-                       product: Optional[str] = None) -> Optional[int]:
+                       product: Optional[str] = None,
+                       mode: Optional[str] = None) -> Optional[int]:
     """The qty attributable to THIS session that is STILL held at the broker:
 
         clamp(|broker_net| - Σ(same-account other sessions' held qty), 0, our_qty)
@@ -98,7 +156,12 @@ def our_held_at_broker(session_id: str, symbol: str,
 
     CLUSTER 9 ITEM 3: broker_profile / broker_account_id / product scope the
     sibling subtraction to the SAME broker account so a DIFFERENT account's
-    same-symbol lot is never subtracted (never misread as flat)."""
+    same-symbol lot is never subtracted (never misread as flat).
+
+    🔴 P0 PAPER-LEAK FIX (2026-07-16): the subtraction is ALSO mode-scoped —
+    `broker_net` contains only LIVE fills, so a PAPER sibling must never reduce a
+    LIVE session's held qty (it once zeroed a real 706-share MAPMYINDIA exit).
+    See sibling_open_qty. `mode` is resolved from session_id when not passed."""
     if broker_net is None:
         return None
     try:
@@ -109,7 +172,7 @@ def our_held_at_broker(session_id: str, symbol: str,
     other = sibling_open_qty(session_id, symbol, instrument_type,
                              broker_profile=broker_profile,
                              broker_account_id=broker_account_id,
-                             product=product)
+                             product=product, mode=mode)
     return max(0, min(oq, net - other))
 
 
