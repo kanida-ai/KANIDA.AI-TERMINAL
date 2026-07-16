@@ -12,6 +12,7 @@ Usage everywhere:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
@@ -105,12 +106,77 @@ def _apply_request_timeout(kite, timeout_sec: float = 10.0):
     return kite
 
 
-def _new_kite(api_key: str):
-    """Construct a KiteConnect client, applying BROKER_PROXY_URL if set.
+# ── PER-ACCOUNT static egress (SEBI one-IP-per-broker-account) ───────────────
+# 2026-07-16: onboarding a SECOND power user. SEBI's registered-IP rule is
+# enforced PER BROKER ACCOUNT — Zerodha allows exactly ONE static IP per Kite
+# Connect account. The global BROKER_PROXY_URL above reroutes EVERY account
+# through ONE proxy, which would break the operator's own account (which must
+# keep egressing DIRECT from the home IP 174.61.231.194). So we add an OPTIONAL
+# per-broker_account override: BROKER_PROXY_MAP is a JSON object mapping
+# broker_account_id -> proxy URL. An account IN the map gets its dedicated Kite
+# client routed through THAT account's proxy; accounts NOT in the map fall back
+# to the global BROKER_PROXY_URL (normally unset → direct, unchanged).
+#
+# ADDITIVE + DEFAULT-OFF: BROKER_PROXY_MAP unset (or malformed) → every lookup
+# returns None → callers fall back to global/direct → byte-identical to today.
+# Format (one line, JSON object; set once per-account static proxies exist):
+#     BROKER_PROXY_MAP={"<broker_account_id>":"http://user:pass@13.203.129.136:8888"}
+# The value contains a PASSWORD → NEVER log the URL; log only the account id
+# and whether a mapping was found.
+_PROXY_MAP_WARNED = False
 
-    Single construction helper so all sites share the default-off proxy logic."""
+
+def resolve_account_proxy(broker_account_id: Optional[str]) -> Optional[str]:
+    """Resolve a per-account egress proxy URL from BROKER_PROXY_MAP.
+
+    Returns the mapped proxy URL for `broker_account_id`, or None when the id is
+    None / unmapped / the map is unset, malformed, or not a JSON object. NEVER
+    raises — a bad map degrades to "no per-account override" so the caller falls
+    back to the global hook / direct egress (fail-open to TODAY's behaviour, not
+    to someone else's proxy).
+
+    Malformed JSON is logged ONCE at WARNING. The proxy URL VALUE is never
+    logged (it carries a password) — only the account id + found yes/no.
+    """
+    global _PROXY_MAP_WARNED
+    if not broker_account_id:
+        return None
+    _load_env_file()
+    raw = os.environ.get("BROKER_PROXY_MAP", "").strip()
+    if not raw:
+        return None
+    try:
+        mapping = json.loads(raw)
+        if not isinstance(mapping, dict):
+            raise ValueError("BROKER_PROXY_MAP is not a JSON object")
+    except Exception as e:
+        if not _PROXY_MAP_WARNED:
+            log.warning("BROKER_PROXY_MAP malformed (%s) — ignoring per-account "
+                        "proxy overrides (falling back to global/direct)", e)
+            _PROXY_MAP_WARNED = True
+        return None
+    url = mapping.get(broker_account_id)
+    url = url.strip() if isinstance(url, str) else None
+    log.info("resolve_account_proxy: account=%s per-account-proxy=%s",
+             broker_account_id, "yes" if url else "no")
+    return url or None
+
+
+def _new_kite(api_key: str, proxy_url: Optional[str] = None):
+    """Construct a KiteConnect client, applying a proxy if configured.
+
+    Single construction helper so all sites share the default-off proxy logic.
+      - proxy_url non-empty → build the proxies dict from IT (per-account egress,
+        overrides the global hook)
+      - proxy_url None/blank → fall back to the global BROKER_PROXY_URL hook
+      - neither set → NO proxies kwarg → direct egress (unchanged).
+    """
     from kiteconnect import KiteConnect
 
+    if isinstance(proxy_url, str) and proxy_url.strip():
+        u = proxy_url.strip()
+        return _apply_request_timeout(
+            KiteConnect(api_key=api_key, proxies={"http": u, "https": u}))
     proxies = _kite_proxies()
     if proxies is not None:
         kite = KiteConnect(api_key=api_key, proxies=proxies)

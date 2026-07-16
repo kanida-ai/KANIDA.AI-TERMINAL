@@ -5,7 +5,10 @@ single-tenant login flow: it builds a Kite login URL for a SPECIFIC account's
 api_key and exchanges the returned request_token using THAT account's
 api_key+secret, then stores the resulting access_token (encrypted) back into the
 vault. It REUSES services.kite_auth._new_kite (the proxy-aware constructor) so
-the static-egress hook (BROKER_PROXY_URL) applies identically.
+the static-egress hooks apply identically: the PER-ACCOUNT map (BROKER_PROXY_MAP,
+resolved here via resolve_account_proxy so the token exchange egresses from the
+same static IP as that account's order client) and the global BROKER_PROXY_URL
+fallback.
 
 It NEVER touches the legacy kite_tokens table or the operator's global token —
 each account's token is isolated in broker_accounts.access_token_enc.
@@ -47,8 +50,12 @@ def login_url(broker_account_id: str, user_id: Optional[str] = None) -> str:
             "not zerodha")
     if not creds.api_key:
         raise AccountAuthError("account has no api_key")
-    from services.kite_auth import _new_kite
-    kite = _new_kite(creds.api_key)
+    from services.kite_auth import _new_kite, resolve_account_proxy
+    # Per-account egress: keep this account's auth client on the SAME provisioned
+    # static IP as its order client (SEBI one-IP-per-account). login_url() itself
+    # makes no network call, but this keeps both auth entrypoints symmetric.
+    proxy_url = resolve_account_proxy(broker_account_id)
+    kite = _new_kite(creds.api_key, proxy_url=proxy_url)
     return kite.login_url()
 
 
@@ -71,9 +78,14 @@ def exchange_token(broker_account_id: str, request_token: str,
             "not zerodha")
     if not creds.api_key or not creds.api_secret:
         raise AccountAuthError("account missing api_key/api_secret")
-    from services.kite_auth import _new_kite
+    from services.kite_auth import _new_kite, resolve_account_proxy
+    # generate_session() is a REAL Kite REST egress (token exchange against this
+    # account's api_key/secret) → it MUST originate from the SAME per-account
+    # static IP as the order client, or the exchange itself 403s once that user's
+    # Kite IP allowlist is set. Thread the per-account proxy through.
+    proxy_url = resolve_account_proxy(broker_account_id)
     try:
-        kite = _new_kite(creds.api_key)
+        kite = _new_kite(creds.api_key, proxy_url=proxy_url)
         session = kite.generate_session(request_token,
                                         api_secret=creds.api_secret)
         access_token = session["access_token"]
