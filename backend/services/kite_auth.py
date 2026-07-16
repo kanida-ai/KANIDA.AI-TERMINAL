@@ -92,12 +92,70 @@ def _kite_proxies() -> Optional[dict]:
     return {"http": url, "https": url}
 
 
-def _new_kite(api_key: str):
-    """Construct a KiteConnect client, applying BROKER_PROXY_URL if set.
+# ── PER-ACCOUNT static egress (SEBI one-IP-per-broker-account) ───────────────
+# 2026-07-15: onboarding a SECOND Zerodha power user. SEBI's registered-IP rule
+# is enforced per broker account, and Zerodha allows exactly ONE IP per account.
+# The global BROKER_PROXY_URL reroutes EVERY account through ONE proxy, which
+# would break the admin account (which egresses DIRECT from the home IP). So we
+# add an OPTIONAL per-broker_account override: BROKER_PROXY_MAP is a JSON object
+# mapping broker_account_id -> proxy URL. When an account is in the map its
+# dedicated Kite client egresses through THAT account's proxy; accounts NOT in
+# the map fall back to the global BROKER_PROXY_URL (usually unset → direct).
+#
+# ADDITIVE + DEFAULT-OFF: BROKER_PROXY_MAP unset (or malformed) → every lookup
+# returns None → callers fall back to global/direct → byte-identical to before.
+# Format (set ONCE per-account static proxies are provisioned):
+#     BROKER_PROXY_MAP={"<broker_account_id>":"http://user:pass@ORACLE_IP:8888"}
+# The value contains a password → NEVER log the URL; log only the account id.
+_PROXY_MAP_WARNED = False
 
-    Single construction helper so all sites share the default-off proxy logic."""
+
+def resolve_account_proxy(broker_account_id: Optional[str]) -> Optional[str]:
+    """Resolve a per-account egress proxy URL from BROKER_PROXY_MAP.
+
+    Returns the mapped proxy URL for `broker_account_id`, or None when the id is
+    absent / unmapped / the map is unset or malformed. Never raises — a bad map
+    degrades to "no per-account override" (caller falls back to global/direct).
+    Malformed JSON is logged ONCE at WARNING; the proxy URL VALUE is never
+    logged (it carries a password)."""
+    global _PROXY_MAP_WARNED
+    if not broker_account_id:
+        return None
+    _load_env_file()
+    import json
+    raw = os.environ.get("BROKER_PROXY_MAP", "").strip()
+    if not raw:
+        return None
+    try:
+        mapping = json.loads(raw)
+        if not isinstance(mapping, dict):
+            raise ValueError("BROKER_PROXY_MAP is not a JSON object")
+    except Exception as e:
+        if not _PROXY_MAP_WARNED:
+            log.warning("BROKER_PROXY_MAP malformed (%s) — ignoring "
+                        "per-account proxy overrides", e)
+            _PROXY_MAP_WARNED = True
+        return None
+    url = mapping.get(broker_account_id)
+    url = url.strip() if isinstance(url, str) else None
+    found = bool(url)
+    log.info("resolve_account_proxy: account=%s per-account-proxy=%s",
+             broker_account_id, "yes" if found else "no")
+    return url or None
+
+
+def _new_kite(api_key: str, proxy_url: Optional[str] = None):
+    """Construct a KiteConnect client, applying a proxy if configured.
+
+    Single construction helper so all sites share the default-off proxy logic.
+      - proxy_url set (non-empty)  → build proxies dict from IT (per-account egress)
+      - proxy_url None             → fall back to the global BROKER_PROXY_URL hook
+      - neither set                → NO proxies kwarg → direct (unchanged)."""
     from kiteconnect import KiteConnect
 
+    if isinstance(proxy_url, str) and proxy_url.strip():
+        u = proxy_url.strip()
+        return KiteConnect(api_key=api_key, proxies={"http": u, "https": u})
     proxies = _kite_proxies()
     if proxies is not None:
         return KiteConnect(api_key=api_key, proxies=proxies)

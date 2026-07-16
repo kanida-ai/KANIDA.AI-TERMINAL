@@ -162,9 +162,10 @@ def test_zerodha_per_account_client_uses_account_creds(test_key, monkeypatch):
         def set_access_token(self, tok):
             self.access_token = tok
 
-    def fake_new_kite(api_key):
+    def fake_new_kite(api_key, proxy_url=None):
         k = FakeKite(api_key=api_key)
         built["api_key"] = api_key
+        built["proxy_url"] = proxy_url
         return k
 
     def fake_global(check=False):
@@ -201,7 +202,7 @@ def test_zerodha_no_account_uses_global(monkeypatch):
         calls["global"] += 1
         return object()
 
-    def fake_new_kite(api_key):
+    def fake_new_kite(api_key, proxy_url=None):
         calls["new"] += 1
         return object()
 
@@ -213,6 +214,72 @@ def test_zerodha_no_account_uses_global(monkeypatch):
     _ = broker.kite
     assert calls["global"] == 1
     assert calls["new"] == 0
+
+
+# ── 5. per-account EGRESS PROXY threads through the dedicated client build ─────
+
+def _build_per_account_broker(monkeypatch, api_key="ACCOUNT_KEY", token="TOK"):
+    """Vault an account, build a bound ZerodhaBroker, and capture the proxy_url
+    that _build_kite passes into _new_kite. Returns (broker_account_id, captured)."""
+    import services.kite_auth as ka
+
+    captured = {}
+
+    class FakeKite:
+        def __init__(self, api_key=None, proxies=None, **kw):
+            self.api_key = api_key
+
+        def set_access_token(self, tok):
+            self.access_token = tok
+
+    def fake_new_kite(api_key, proxy_url=None):
+        captured["api_key"] = api_key
+        captured["proxy_url"] = proxy_url
+        return FakeKite(api_key=api_key)
+
+    monkeypatch.setattr(ka, "_new_kite", fake_new_kite)
+    # keep the REAL resolve_account_proxy — that's what we're exercising
+    monkeypatch.setattr(ka, "_load_env_file", lambda: None)
+
+    pub = vault.put_account(user_id="u1", broker="zerodha",
+                            account_label="Main", api_key=api_key,
+                            api_secret="sek")
+    bid = pub["broker_account_id"]
+    vault.store_access_token(bid, token, user_id="u1")
+    creds = vault.get_decrypted_creds(bid, user_id="u1")
+    prof = BrokerProfile(profile_id="p1", broker_name="zerodha",
+                         broker_account_id=bid,
+                         api_key=creds.api_key, access_token=creds.access_token)
+    broker = ZerodhaBroker(prof, dry_run=True)
+    return bid, captured, broker
+
+
+def test_per_account_client_resolves_mapped_proxy(test_key, monkeypatch):
+    """A broker_account_id present in BROKER_PROXY_MAP → its dedicated client is
+    built with THAT account's proxy URL."""
+    bid, captured, broker = _build_per_account_broker(monkeypatch)
+    proxy = "http://kanida:pw@203.0.113.7:8888"
+    monkeypatch.setenv("BROKER_PROXY_MAP", '{"%s":"%s"}' % (bid, proxy))
+    _ = broker.kite
+    assert captured["proxy_url"] == proxy
+    assert captured["api_key"] == "ACCOUNT_KEY"
+
+
+def test_per_account_client_unmapped_passes_none(test_key, monkeypatch):
+    """A broker_account_id NOT in the map → proxy_url None → falls back to
+    global/direct (admin account unaffected)."""
+    bid, captured, broker = _build_per_account_broker(monkeypatch)
+    monkeypatch.setenv("BROKER_PROXY_MAP", '{"some-other-account":"http://u:p@1.1.1.1:8888"}')
+    _ = broker.kite
+    assert captured["proxy_url"] is None
+
+
+def test_per_account_client_no_map_passes_none(test_key, monkeypatch):
+    """No BROKER_PROXY_MAP at all → proxy_url None (default-off)."""
+    bid, captured, broker = _build_per_account_broker(monkeypatch)
+    monkeypatch.delenv("BROKER_PROXY_MAP", raising=False)
+    _ = broker.kite
+    assert captured["proxy_url"] is None
 
 
 def test_two_concurrent_accounts_isolate(test_key, monkeypatch):
@@ -228,7 +295,7 @@ def test_two_concurrent_accounts_isolate(test_key, monkeypatch):
         def set_access_token(self, tok):
             self.access_token = tok
 
-    monkeypatch.setattr(ka, "_new_kite", lambda api_key: FakeKite(api_key=api_key))
+    monkeypatch.setattr(ka, "_new_kite", lambda api_key, proxy_url=None: FakeKite(api_key=api_key))
     monkeypatch.setattr(ka, "get_kite_client",
                         lambda check=False: (_ for _ in ()).throw(
                             AssertionError("global must not be used")))
@@ -300,7 +367,7 @@ def test_session_create_with_account_resolves_creds(test_key, monkeypatch,
         def set_access_token(self, tok):
             self.access_token = tok
 
-    monkeypatch.setattr(ka, "_new_kite", lambda api_key: FakeKite(api_key=api_key))
+    monkeypatch.setattr(ka, "_new_kite", lambda api_key, proxy_url=None: FakeKite(api_key=api_key))
 
     sess._build_brokers()
     prof = sess.config.broker_profiles[0]
@@ -344,7 +411,7 @@ def test_null_account_session_is_legacy(test_key, monkeypatch, clean_positions):
                                                               calls["global"] + 1)
                         or object())
     monkeypatch.setattr(ka, "_new_kite",
-                        lambda api_key: calls.__setitem__("new",
+                        lambda api_key, proxy_url=None: calls.__setitem__("new",
                                                           calls["new"] + 1)
                         or object())
 
@@ -370,7 +437,7 @@ def test_bound_account_but_vault_disabled_falls_back(vault_off, monkeypatch,
     import services.kite_auth as ka
     monkeypatch.setattr(ka, "get_kite_client", lambda check=False: object())
     monkeypatch.setattr(ka, "_new_kite",
-                        lambda api_key: (_ for _ in ()).throw(
+                        lambda api_key, proxy_url=None: (_ for _ in ()).throw(
                             AssertionError("must not build per-account when "
                                            "vault disabled")))
 

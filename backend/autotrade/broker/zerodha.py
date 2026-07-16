@@ -61,8 +61,13 @@ class ZerodhaBroker(BrokerClient):
                     f"broker_account {bound}: api_key/access_token not resolved "
                     "(vault disabled, account missing, or token expired — "
                     "re-connect the account)")
-            from services.kite_auth import _new_kite  # proxy-aware constructor
-            kite = _new_kite(api_key)
+            from services.kite_auth import _new_kite, resolve_account_proxy
+            # PER-ACCOUNT EGRESS (SEBI one-IP-per-account): route THIS account's
+            # dedicated client through its provisioned static-IP proxy if mapped
+            # in BROKER_PROXY_MAP; None → fall back to global BROKER_PROXY_URL /
+            # direct (default-off, admin account stays byte-for-byte unchanged).
+            proxy_url = resolve_account_proxy(bound)
+            kite = _new_kite(api_key, proxy_url=proxy_url)
             kite.set_access_token(access_token)
             log.info("zerodha: built per-account KiteConnect for account %s",
                      bound)

@@ -120,3 +120,102 @@ def test_exchange_and_save_applies_proxy_when_set(_patch_kite, monkeypatch):
     monkeypatch.setattr(ka, "_save_token_to_db", lambda *a, **k: None)
     ka.exchange_and_save("req-token")
     assert _FakeKite.last_kwargs.get("proxies") == _EXPECT
+
+
+# ── _new_kite(proxy_url=...) — per-account override precedence ────────────────
+
+def test_new_kite_explicit_proxy_builds_from_that_url(_patch_kite, monkeypatch):
+    """Explicit proxy_url → proxies built from IT (per-account egress)."""
+    # Global unset: prove the dict comes from the explicit arg, not the env.
+    monkeypatch.delenv("BROKER_PROXY_URL", raising=False)
+    acct = "http://acctuser:acctpw@9.9.9.9:8888"
+    ka._new_kite("apikey", proxy_url=acct)
+    assert _FakeKite.last_kwargs.get("proxies") == {"http": acct, "https": acct}
+
+
+def test_new_kite_explicit_proxy_overrides_global(_patch_kite, monkeypatch):
+    """Explicit proxy_url wins even when the global BROKER_PROXY_URL is set."""
+    monkeypatch.setenv("BROKER_PROXY_URL", _PROXY)
+    acct = "http://acctuser:acctpw@9.9.9.9:8888"
+    ka._new_kite("apikey", proxy_url=acct)
+    assert _FakeKite.last_kwargs.get("proxies") == {"http": acct, "https": acct}
+
+
+def test_new_kite_none_falls_back_to_global(_patch_kite, monkeypatch):
+    """proxy_url None + BROKER_PROXY_URL set → falls back to the global hook."""
+    monkeypatch.setenv("BROKER_PROXY_URL", _PROXY)
+    ka._new_kite("apikey", proxy_url=None)
+    assert _FakeKite.last_kwargs.get("proxies") == _EXPECT
+
+
+def test_new_kite_none_and_no_global_is_direct(_patch_kite, monkeypatch):
+    """proxy_url None + no global → NO proxies kwarg → direct (unchanged)."""
+    monkeypatch.delenv("BROKER_PROXY_URL", raising=False)
+    ka._new_kite("apikey")
+    assert "proxies" not in _FakeKite.last_kwargs
+
+
+def test_new_kite_blank_proxy_falls_back_to_global(_patch_kite, monkeypatch):
+    """A blank/whitespace explicit proxy_url is treated as unset → global path."""
+    monkeypatch.setenv("BROKER_PROXY_URL", _PROXY)
+    ka._new_kite("apikey", proxy_url="   ")
+    assert _FakeKite.last_kwargs.get("proxies") == _EXPECT
+
+
+# ── resolve_account_proxy(broker_account_id) — BROKER_PROXY_MAP resolver ──────
+
+def test_resolve_account_proxy_known_id(monkeypatch):
+    monkeypatch.setattr(ka, "_load_env_file", lambda: None)
+    monkeypatch.setenv(
+        "BROKER_PROXY_MAP",
+        '{"acct-1":"http://u:p@1.1.1.1:8888","acct-2":"http://u:p@2.2.2.2:8888"}',
+    )
+    assert ka.resolve_account_proxy("acct-1") == "http://u:p@1.1.1.1:8888"
+    assert ka.resolve_account_proxy("acct-2") == "http://u:p@2.2.2.2:8888"
+
+
+def test_resolve_account_proxy_unknown_id(monkeypatch):
+    monkeypatch.setattr(ka, "_load_env_file", lambda: None)
+    monkeypatch.setenv("BROKER_PROXY_MAP", '{"acct-1":"http://u:p@1.1.1.1:8888"}')
+    assert ka.resolve_account_proxy("acct-UNKNOWN") is None
+
+
+def test_resolve_account_proxy_env_absent(monkeypatch):
+    monkeypatch.setattr(ka, "_load_env_file", lambda: None)
+    monkeypatch.delenv("BROKER_PROXY_MAP", raising=False)
+    assert ka.resolve_account_proxy("acct-1") is None
+
+
+def test_resolve_account_proxy_none_id(monkeypatch):
+    monkeypatch.setattr(ka, "_load_env_file", lambda: None)
+    monkeypatch.setenv("BROKER_PROXY_MAP", '{"acct-1":"http://u:p@1.1.1.1:8888"}')
+    assert ka.resolve_account_proxy(None) is None
+
+
+def test_resolve_account_proxy_malformed_warns_no_raise(monkeypatch, caplog):
+    monkeypatch.setattr(ka, "_load_env_file", lambda: None)
+    monkeypatch.setenv("BROKER_PROXY_MAP", "{not valid json")
+    # reset the once-flag so this test observes the WARNING deterministically
+    monkeypatch.setattr(ka, "_PROXY_MAP_WARNED", False)
+    with caplog.at_level("WARNING", logger="kanida.kite_auth"):
+        out = ka.resolve_account_proxy("acct-1")  # must NOT raise
+    assert out is None
+    assert any("BROKER_PROXY_MAP malformed" in r.message for r in caplog.records)
+
+
+def test_resolve_account_proxy_non_object_json(monkeypatch):
+    """A valid-JSON-but-not-an-object map degrades to empty (no raise)."""
+    monkeypatch.setattr(ka, "_load_env_file", lambda: None)
+    monkeypatch.setenv("BROKER_PROXY_MAP", '["not","an","object"]')
+    monkeypatch.setattr(ka, "_PROXY_MAP_WARNED", False)
+    assert ka.resolve_account_proxy("acct-1") is None
+
+
+def test_resolve_account_proxy_never_logs_url(monkeypatch, caplog):
+    """The proxy URL value (carries a password) must never be logged."""
+    monkeypatch.setattr(ka, "_load_env_file", lambda: None)
+    secret = "http://kanida:SUPERSECRET@3.3.3.3:8888"
+    monkeypatch.setenv("BROKER_PROXY_MAP", '{"acct-1":"%s"}' % secret)
+    with caplog.at_level("INFO", logger="kanida.kite_auth"):
+        assert ka.resolve_account_proxy("acct-1") == secret
+    assert not any("SUPERSECRET" in r.getMessage() for r in caplog.records)
