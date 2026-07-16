@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
@@ -22,6 +23,38 @@ from typing import Any, List, Optional
 from .base import BrokerClient, OrderResult
 
 log = logging.getLogger("kanida.autotrade.broker.zerodha")
+
+# ── Protective SL-M market-protection band (2026-07-15 rejection-16448 fix) ──────
+# A protective SL-M becomes a MARKET order on trigger; Kite REJECTS API market/SL-M
+# orders without an explicit `market_protection` %, AND internally converts the SL-M
+# into an SL-LIMIT whose limit = trigger ± protection%. If that limit is too far from
+# the trigger Kite rejects it with "16448 : Difference between limit price and trigger
+# price is beyond permissible range". A 5% band (used 2026-07-15) exceeded Kite's
+# permissible SL execution band → EVERY protective stop was rejected (no broker-side
+# stop existed on any live leg that day). Kite's own default market protection is ~3%
+# and the SL band is tighter, so we default to a conservative 1.0% (the same value the
+# live market-exit path uses in order_executor/trail_manager) which stays in-band for
+# normal equities. This is a crash BACKSTOP behind the primary software stop, so we
+# err toward the order being ACCEPTED over maximal fill headroom. Env-tunable, but
+# HARD-CLAMPED to (0, 3.0] so the 5% mistake can never be reintroduced via config.
+_SLM_PROTECTION_DEFAULT_PCT = 1.0
+_SLM_PROTECTION_MAX_PCT = 3.0
+
+
+def _slm_market_protection_pct() -> float:
+    """In-band market_protection % for a protective SL-M (default 1.0, clamped to
+    (0, 3.0]). Never raises — a bad env value falls back to the default."""
+    raw = os.getenv("FALCON_AUTOTRADE_SLM_PROTECTION_PCT")
+    if raw is None or str(raw).strip() == "":
+        return _SLM_PROTECTION_DEFAULT_PCT
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return _SLM_PROTECTION_DEFAULT_PCT
+    if val <= 0:
+        return _SLM_PROTECTION_DEFAULT_PCT
+    return min(val, _SLM_PROTECTION_MAX_PCT)
+
 
 # ── Process-wide caches for the (slow) NFO instrument master + derived contract
 # facts. kite.instruments("NFO") downloads + parses ~34k rows (~2s) and was called
@@ -1219,6 +1252,7 @@ class ZerodhaBroker(BrokerClient):
                    else kite.TRANSACTION_TYPE_SELL)
             tick = get_tick_size(kite, trading_symbol) or 0.05
             trig = round_to_tick_size(float(trigger_price), tick)
+            prot_pct = _slm_market_protection_pct()
             params = dict(
                 variety=kite.VARIETY_REGULAR, exchange=kexch,
                 tradingsymbol=trading_symbol, transaction_type=txn,
@@ -1227,22 +1261,73 @@ class ZerodhaBroker(BrokerClient):
                 # An SL-M becomes a MARKET order when triggered, and Kite REJECTS
                 # market/SL-M orders placed via API without an explicit
                 # market_protection ("Market orders without market protection are
-                # not allowed via API"). 5% is deliberately WIDE: this is a
-                # crash-backstop stop — reliability of exit matters more than
-                # fill quality, so it must still fill on a fast gap-down. (The
-                # normal market exits use 1-2%; a stop needs more headroom.)
-                market_protection=5.0,
+                # not allowed via API"). Kite also converts the SL-M into an
+                # SL-LIMIT with limit = trigger ± protection%; a band that exceeds
+                # Kite's permissible SL execution range is rejected with error
+                # 16448. `prot_pct` is a conservative IN-BAND % (default 1.0,
+                # clamped ≤3.0) so the order is ACCEPTED — this is the crash
+                # BACKSTOP behind the software stop, so acceptance beats headroom.
+                market_protection=prot_pct,
                 validity=kite.VALIDITY_DAY)
             if client_tag:
                 params["tag"] = str(client_tag)[:20]
             oid = _retry_kite_call(lambda: kite.place_order(**params),
                                    "place_protective_slm(autotrade)", symbol)
-            log.info("SL-M protective %s: %s trigger=%.2f qty=%d oid=%s",
-                     symbol, "BUY" if is_short else "SELL", trig, qty, oid)
-            return str(oid) if oid is not None else None
+            log.info("SL-M protective %s: %s trigger=%.2f qty=%d prot=%.2f%% oid=%s",
+                     symbol, "BUY" if is_short else "SELL", trig, qty, prot_pct, oid)
+            if oid is None:
+                return None
+            # POST-PLACEMENT REJECTION DETECTION (2026-07-15 fix). place_order
+            # SUCCEEDS (returns an order-id) even when Kite's RMS then REJECTS the
+            # order asynchronously — that is exactly how 2026-07-15's SL-Ms failed
+            # SILENTLY (accepted the id, rejected in the book, caller never knew a
+            # position had NO working broker stop). Best-effort single status probe:
+            # if the order is REJECTED/CANCELLED, LOG loudly + PAGE (a naked position
+            # with no backstop must page) + return None so the caller does NOT record
+            # a dead order-id as "protected". Never raises; unknown/pending → treat
+            # as placed (the in-band protection makes rejection rare now).
+            if self._alert_if_slm_rejected(str(oid), symbol, trig, qty, prot_pct):
+                return None  # rejected → NOT protected; caller must not persist it
+            return str(oid)
         except Exception as e:
             log.error("place_protective_slm failed for %s: %s", symbol, e)
             return None
+
+    def _alert_if_slm_rejected(self, order_id: str, symbol: str,
+                               trigger: float, qty: int, prot_pct: float) -> bool:
+        """Best-effort: probe a just-placed protective SL-M's status once. Returns
+        True when it is REJECTED/CANCELLED (position has NO working broker stop) —
+        logs loudly + PAGES an urgent naked-stop alert. False on OK/pending/unknown
+        or any probe error (fail-open: never block the entry, never raise)."""
+        try:
+            o = self.get_order_status(order_id)
+        except Exception as e:  # inconclusive — do not page on a probe error
+            log.warning("SL-M status probe raised for %s (%s): %s",
+                        symbol, order_id, e)
+            return False
+        status = str((o or {}).get("status") or "").upper()
+        if status not in ("REJECTED", "CANCELLED"):
+            return False
+        reason = str((o or {}).get("status_message")
+                     or (o or {}).get("status_message_raw") or "")
+        log.error("SL-M protective REJECTED for %s (oid=%s, trig=%.2f, qty=%d, "
+                  "prot=%.2f%%): %s — position has NO working broker stop",
+                  symbol, order_id, trigger, qty, prot_pct, reason)
+        try:
+            from .. import alerts
+            alerts.send_urgent_deduped(
+                kind="PROTECTIVE_STOP_REJECTED",
+                session_id=getattr(self.profile, "session_id", None),
+                symbol=symbol,
+                detail=(f"PROTECTIVE_STOP_REJECTED: broker SL-M for {symbol} "
+                        f"(oid={order_id}, trigger={trigger:.2f}, qty={qty}, "
+                        f"market_protection={prot_pct:.2f}%) came back {status} "
+                        f"({reason}). This position has NO working broker-side stop "
+                        f"— the software kill is the only protection. Verify/replace "
+                        f"the stop manually."))
+        except Exception as e:  # pragma: no cover - alert is best-effort
+            log.warning("SL-M reject alert failed for %s: %s", symbol, e)
+        return True
 
     def cancel_protective_slm(self, order_id: str) -> bool:
         """Cancel a protective SL-M by id. Dry-run / disabled → no-op True.
