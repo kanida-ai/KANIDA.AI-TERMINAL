@@ -295,6 +295,23 @@ class RefreshTokenRequest(BaseModel):
     def _coerce_str(cls, v): return _coerce_id(v)
 
 
+class AssignEgressRequest(BaseModel):
+    """Assign a dedicated static egress IP to a broker account.
+
+    proxy_url is ADMIN-ONLY and optional — the normal (self-service) path leaves
+    it unset and draws the next free IP from the operator's pool. It is a
+    write-only credential-bearing value: it is never echoed back by any
+    response."""
+    user_id: Optional[str] = Field(None, description="Portal user id (enforced if given)")
+    proxy_url: Optional[str] = Field(
+        None, description="ADMIN-ONLY explicit proxy URL "
+                          "(http://user:pass@HOST:PORT). Omit to draw from the pool.")
+
+    @field_validator('user_id', mode='before')
+    @classmethod
+    def _coerce_str(cls, v): return _coerce_id(v)
+
+
 class StartSessionRequest(BaseModel):
     when: str = Field(
         "now",
@@ -1244,6 +1261,97 @@ def broker_account_refresh_token(broker_account_id: str,
             scope, broker_account_id, req.request_token)
     except account_lifecycle.AccountLifecycleError as e:
         raise HTTPException(400, str(e))
+
+
+# ── SELF-SERVICE STATIC EGRESS IP (SEBI one-static-IP-per-broker-account) ────
+# The proxy URL is a SECRET (it embeds a password): no endpoint here ever
+# returns it or logs it — only the bare IP the user must register on their
+# broker app. Broker-agnostic: every endpoint is keyed on broker_account_id and
+# none inspects the broker.
+
+@router.get("/autotrade/broker-account/{broker_account_id}/egress")
+def broker_account_egress(broker_account_id: str,
+                          user_id: Optional[str] = None,
+                          caller: Caller = Depends(resolve_caller)):
+    """The account's egress status for the CONNECT UI — the IP the user must
+    register on their broker app + profile (the SEBI step).
+
+    Returns {broker_account_id, configured, egress_ip, source, instructions}.
+    `egress_ip` is a bare IP/host (never the proxy URL); None + source="direct"
+    means no dedicated IP is assigned and orders leave from the shared server IP.
+
+    TENANT ISOLATION: a non-admin caller is scoped to their OWN user_id."""
+    scope = _assert_user_scope(user_id, caller)
+    from .. import vault
+    from ..broker import egress
+    if vault.get_account_public(broker_account_id, user_id=scope) is None:
+        raise HTTPException(404, "broker account not found")
+    return egress.egress_status(broker_account_id, user_id=scope)
+
+
+@router.post("/autotrade/broker-account/{broker_account_id}/egress")
+def broker_account_egress_assign(broker_account_id: str,
+                                 req: AssignEgressRequest,
+                                 caller: Caller = Depends(resolve_caller)):
+    """Assign a dedicated static egress IP to this account — the SELF-SERVICE
+    step that replaces hand-editing BROKER_PROXY_MAP + a backend restart. The
+    assignment is a DB write, so it takes effect on the NEXT order with NO
+    restart.
+
+    Default: take the first free URL from the operator's pool (BROKER_EGRESS_POOL).
+    ADMIN-ONLY: an explicit `proxy_url` (a raw credential-bearing URL) — a normal
+    user may only draw from the pool, never name their own egress.
+
+    IDEMPOTENT: an account that already has an IP keeps it. Returns the same
+    public shape as GET. 409 when the pool is exhausted (the operator must
+    provision another static-IP box first)."""
+    scope = _assert_user_scope(req.user_id, caller)
+    from .. import vault
+    from ..broker import egress
+    if vault.get_account_public(broker_account_id, user_id=scope) is None:
+        raise HTTPException(404, "broker account not found")
+    try:
+        if req.proxy_url:
+            if not _caller(caller).is_admin:
+                raise HTTPException(
+                    403, "only an admin may set an explicit proxy_url")
+            egress.set_account_proxy(broker_account_id, req.proxy_url,
+                                     user_id=scope)
+            return egress.egress_status(broker_account_id, user_id=scope)
+        return egress.assign_from_pool(broker_account_id, user_id=scope)
+    except egress.NoEgressAvailableError as e:
+        raise HTTPException(409, str(e))
+    except vault.VaultDisabledError as e:
+        raise HTTPException(400, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.delete("/autotrade/broker-account/{broker_account_id}/egress")
+def broker_account_egress_clear(broker_account_id: str,
+                                user_id: Optional[str] = None,
+                                caller: Caller = Depends(resolve_caller)):
+    """Release this account's dedicated egress IP back to the pool → the account
+    reverts to DIRECT egress on the next order (no restart).
+
+    TENANT ISOLATION: a non-admin caller is scoped to their OWN user_id."""
+    scope = _assert_user_scope(user_id, caller)
+    from .. import vault
+    from ..broker import egress
+    if vault.get_account_public(broker_account_id, user_id=scope) is None:
+        raise HTTPException(404, "broker account not found")
+    egress.clear_account_proxy(broker_account_id, user_id=scope)
+    return egress.egress_status(broker_account_id, user_id=scope)
+
+
+@router.get("/autotrade/egress-pool")
+def egress_pool_status(caller: Caller = Depends(resolve_caller)):
+    """Operator view of the static-IP pool: counts + bare IPs, never the URLs.
+    ADMIN-ONLY (it reveals every user's assigned IP)."""
+    if not _caller(caller).is_admin:
+        raise HTTPException(403, "admin only")
+    from ..broker import egress
+    return egress.pool_status()
 
 
 @router.get("/autotrade/brokers/supported")

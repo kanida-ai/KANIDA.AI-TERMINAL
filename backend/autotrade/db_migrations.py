@@ -304,7 +304,15 @@ def run_migrations() -> dict:
                     ("last_health_at", "TEXT"),
                     ("last_health_status", "TEXT"),
                     ("last_error", "TEXT"),
-                    ("redirect_state", "TEXT")):
+                    ("redirect_state", "TEXT"),
+                    # SELF-SERVICE STATIC EGRESS IP (SEBI one-IP-per-broker-
+                    # account). FERNET-ENCRYPTED like api_secret_enc — the value
+                    # is a proxy URL that embeds a password, so it is treated as
+                    # a secret everywhere (never returned by an API, never
+                    # logged; only the bare IP is surfaced). NULLABLE: every
+                    # EXISTING row gets NULL = no per-account proxy = DIRECT
+                    # egress, byte-for-byte today's behaviour.
+                    ("egress_proxy_url_enc", "BLOB")):
                 if name not in have:
                     con.execute(
                         f"ALTER TABLE broker_accounts ADD COLUMN {name} {ddl_type}")
@@ -640,6 +648,11 @@ CREATE TABLE IF NOT EXISTS broker_accounts (
     last_health_status TEXT,   -- ACTIVE | EXPIRED | REVOKED | ERROR
     last_error         TEXT,   -- last health/refresh error detail
     redirect_state     TEXT,   -- CSRF `state` for the OAuth round-trip
+    -- SELF-SERVICE STATIC EGRESS (SEBI one-static-IP-per-broker-account):
+    -- Fernet-ENCRYPTED proxy URL (it embeds a password → treated as a secret,
+    -- never returned by an API, never logged; only the bare IP is surfaced).
+    -- NULL = no dedicated egress = DIRECT (the default for every account).
+    egress_proxy_url_enc BLOB,
     UNIQUE (user_id, broker, account_label)
 );
 CREATE INDEX IF NOT EXISTS idx_broker_accounts_user

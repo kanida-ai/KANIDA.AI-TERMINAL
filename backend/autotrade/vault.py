@@ -246,7 +246,26 @@ def _row_to_public(row, provider: KeyProvider) -> Dict[str, Any]:
         # card + the Admin all-users monitoring table. No secrets.
         "last_health_at": d.get("last_health_at"),
         "last_health_status": d.get("last_health_status"),
+        # SELF-SERVICE STATIC EGRESS. `egress_ip` is the BARE IP/host only — the
+        # stored value is a credential-bearing proxy URL and is NEVER returned.
+        # None = this account egresses DIRECT (the default).
+        "has_egress_proxy": bool(d.get("egress_proxy_url_enc")),
+        "egress_ip": _egress_ip_of(d, provider),
     }
+
+
+def _egress_ip_of(d: Dict[str, Any], provider: KeyProvider) -> Optional[str]:
+    """Bare egress IP for the public dict. Best-effort: a disabled vault, an
+    absent column or a decrypt failure → None ("direct"), never a raise and
+    never the URL."""
+    blob = d.get("egress_proxy_url_enc")
+    if not blob:
+        return None
+    try:
+        from .broker.egress import egress_host
+        return egress_host(_decrypt(blob, provider))
+    except Exception:  # pragma: no cover - defensive
+        return None
 
 
 def _derive_status(stored_status: Optional[str], token_date: Optional[str],

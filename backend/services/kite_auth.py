@@ -126,8 +126,13 @@ def _apply_request_timeout(kite, timeout_sec: float = 10.0):
 _PROXY_MAP_WARNED = False
 
 
-def resolve_account_proxy(broker_account_id: Optional[str]) -> Optional[str]:
-    """Resolve a per-account egress proxy URL from BROKER_PROXY_MAP.
+def _resolve_account_proxy_env(broker_account_id: Optional[str]) -> Optional[str]:
+    """LEGACY/FALLBACK layer: resolve a per-account egress proxy URL from the
+    hand-written BROKER_PROXY_MAP env.
+
+    Kept as a DOCUMENTED fallback beneath the DB (see resolve_account_proxy) so
+    the mapping the operator hand-wrote for the first onboarded power user keeps
+    working unchanged until it is migrated into the vault.
 
     Returns the mapped proxy URL for `broker_account_id`, or None when the id is
     None / unmapped / the map is unset, malformed, or not a JSON object. NEVER
@@ -157,9 +162,49 @@ def resolve_account_proxy(broker_account_id: Optional[str]) -> Optional[str]:
         return None
     url = mapping.get(broker_account_id)
     url = url.strip() if isinstance(url, str) else None
-    log.info("resolve_account_proxy: account=%s per-account-proxy=%s",
+    log.info("resolve_account_proxy(env): account=%s per-account-proxy=%s",
              broker_account_id, "yes" if url else "no")
     return url or None
+
+
+def resolve_account_proxy(broker_account_id: Optional[str]) -> Optional[str]:
+    """Resolve a broker account's dedicated egress proxy URL.
+
+    RESOLUTION ORDER (first hit wins):
+      (a) the account's DB `broker_accounts.egress_proxy_url_enc` (Fernet-
+          decrypted) — the SELF-SERVICE path. DB-first is what makes onboarding
+          a new user a DB write with **no backend restart**: config/.env is only
+          read once per process (see _load_env_file), so an env-only mechanism
+          can never be self-service.
+      (b) the legacy hand-written BROKER_PROXY_MAP env — kept as a documented
+          fallback so the already-live mapping for the first onboarded power
+          user does not break.
+      (c) / (d) global BROKER_PROXY_URL, else None = DIRECT — both applied by
+          _new_kite() when this returns None (not duplicated here).
+
+    BROKER-AGNOSTIC: keyed only on broker_account_id; nothing here inspects the
+    broker. (a) is implemented in autotrade.broker.egress, which any adapter can
+    call.
+
+    NEVER raises and NEVER logs the URL. A None/empty id (the operator's own
+    process-global path) short-circuits BEFORE any lookup — his account must
+    never be routed through a user's proxy.
+    """
+    if not broker_account_id:
+        return None
+    # (a) DB — imported lazily: services.* must not hard-depend on autotrade.*,
+    # and a missing/broken autotrade package must degrade to the env path rather
+    # than break the shared real-money auth module.
+    try:
+        from autotrade.broker.egress import get_account_proxy
+        url = get_account_proxy(broker_account_id)
+        if url:
+            return url
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("resolve_account_proxy: DB egress lookup unavailable (%s) — "
+                    "falling back to BROKER_PROXY_MAP/global", e)
+    # (b) legacy env map
+    return _resolve_account_proxy_env(broker_account_id)
 
 
 def _new_kite(api_key: str, proxy_url: Optional[str] = None):
