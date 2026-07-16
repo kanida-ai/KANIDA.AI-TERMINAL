@@ -25,6 +25,7 @@ USAGE:
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -349,6 +350,33 @@ _CACHE: Dict[str, Dict[str, Any]] = {}
 # when the previous 1h TTL expired mid-day.
 _CACHE_TTL_SECONDS = 86400
 
+# ── SINGLE-FLIGHT (2026-07-16, DoS hardening) ────────────────────────────
+# The persona GET endpoints are intentionally PUBLIC (user-facing: Co-Trading
+# and /power/portfolios/{slug} call them with no auth), so they cannot be
+# token-gated without breaking those pages. The abuse vector is therefore a
+# CACHE STAMPEDE: on a cold/expired cache, N concurrent requests each launched
+# their own 30-90s sim (P5 BTST ~85s), so a handful of parallel requests could
+# pin the CPU indefinitely.
+#
+# Fix: one lock per slug. The first caller runs the sim; concurrent callers
+# block on the lock and then re-check the cache, so they return the first
+# caller's result instead of recomputing. Bounded work = 1 sim per slug per
+# TTL, regardless of request volume. Purely additive: same result, same cache
+# semantics, no signature change. `force=True` (admin-gated) still recomputes,
+# but is serialised per slug so it can't be used to stack parallel sims either.
+_LOCKS: Dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _slug_lock(slug: str) -> threading.Lock:
+    """Get-or-create the per-slug sim lock (guarded, so the dict itself is safe)."""
+    with _LOCKS_GUARD:
+        lock = _LOCKS.get(slug)
+        if lock is None:
+            lock = threading.Lock()
+            _LOCKS[slug] = lock
+        return lock
+
 
 def _cache_valid(slug: str) -> bool:
     entry = _CACHE.get(slug)
@@ -363,7 +391,36 @@ def _cache_valid(slug: str) -> bool:
 # ════════════════════════════════════════════════════════════════════════
 
 def simulate_persona(persona_slug: str, force: bool = False) -> Dict[str, Any]:
+    """Run the backtest for one persona (single-flighted). Returns the result dict.
+
+    Public entry point. Behaviour is unchanged for callers; this only collapses
+    CONCURRENT cold-cache calls for the same slug into ONE sim run (see the
+    single-flight note above) so the public persona endpoints can't be used to
+    stack unbounded 30-90s simulations. Result shape/caching are identical.
+    """
+    if persona_slug not in PERSONA_CONFIGS:
+        raise ValueError(f"Unknown persona: {persona_slug}. "
+                          f"Valid: {list(PERSONA_CONFIGS.keys())}")
+
+    # Fast path: warm cache, no lock contention at all (the common case).
+    if not force and _cache_valid(persona_slug):
+        log.info("persona_simulator: cache hit for %s", persona_slug)
+        return _CACHE[persona_slug]["result"]
+
+    with _slug_lock(persona_slug):
+        # Re-check under the lock: while we waited, the caller that held the
+        # lock may have just populated the cache → reuse it, don't recompute.
+        if not force and _cache_valid(persona_slug):
+            log.info("persona_simulator: cache hit after single-flight wait for %s",
+                     persona_slug)
+            return _CACHE[persona_slug]["result"]
+        return _simulate_persona_uncached(persona_slug, force=force)
+
+
+def _simulate_persona_uncached(persona_slug: str, force: bool = False) -> Dict[str, Any]:
     """Run the backtest for one persona. Returns the full result dict.
+
+    INTERNAL — call `simulate_persona()` instead (it single-flights this).
 
     Cached for `_CACHE_TTL_SECONDS` (1 hour) per persona. Pass `force=True`
     to bypass cache (e.g., after a config change).
