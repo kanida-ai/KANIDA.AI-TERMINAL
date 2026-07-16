@@ -251,7 +251,45 @@ class KillSwitchExecutor:
                     exit_meta.append({"symbol": symbol, "claimed": False,
                                       "reconciled_flat": True,
                                       "exit_price": ev.get("exit_price")})
+                elif net_qty and float(net_qty) != 0:
+                    # PHANTOM-CLOSE GUARD (2026-07-15 MAPMYINDIA shared-login
+                    # incident). our_held==0 was INFERRED by subtracting sibling
+                    # sessions' DB qty from the account net — NOT positive proof that
+                    # OUR shares left. The broker STILL holds shares in this
+                    # (symbol,product) (net_qty!=0). On a shared Kite login a sibling
+                    # whose shares are already sold at the broker but whose DB row is
+                    # not yet marked closed inflates the subtraction and drives
+                    # our_held to a FALSE 0. With NO confirmed close of OUR order
+                    # (ev is None) a mark-price RECONCILED_FLAT would PHANTOM-CLOSE a
+                    # still-held position (exit_order_id NULL, a fabricated mark) — the
+                    # exact MAPMYINDIA false-flat where 706 real shares stayed live and
+                    # the operator had to sell them manually. NEVER close here: leave
+                    # the leg OPEN (mark_exit_failed → the tick driver retries once the
+                    # sibling's DB settles) + PAGE urgently.
+                    self.registry.mark_exit_failed(
+                        symbol,
+                        (f"{close_reason}: our_held==0 by sibling-subtraction but "
+                         f"broker still holds net={net_qty} and no confirmed exit "
+                         f"fill — NOT phantom-closing (kept OPEN)"),
+                        broker_profile=prof_id)
+                    alerts.send_urgent_deduped(
+                        kind="PHANTOM_CLOSE_PREVENTED",
+                        session_id=self.session_id, symbol=symbol,
+                        detail=(f"PHANTOM_CLOSE_PREVENTED: {symbol} ({self.session_id}) "
+                                f"kill/{close_reason} computed our_held==0 (shared-login "
+                                f"sibling subtraction) while broker net={net_qty}!=0 and "
+                                f"there is NO confirmed exit fill for our order. Kept the "
+                                f"position OPEN and placed NO exit — verify the live "
+                                f"holding / attribution manually."))
+                    exit_meta.append({"symbol": symbol, "claimed": False,
+                                      "phantom_close_prevented": True,
+                                      "net_qty": net_qty})
                 elif ltp_val and float(ltp_val) > 0:
+                    # Broker is GENUINELY flat for this (symbol,product): net_qty==0
+                    # holdings-inclusive → the shares are OBJECTIVELY gone (closed by a
+                    # GTT/manual/RMS order we do not own). Pre-existing RECONCILED_FLAT
+                    # at the positive mark (never a 0 price). Safe: nothing of ours is
+                    # left at the broker to strand.
                     self.registry.mark_closed(
                         symbol, f"{close_reason}_RECONCILED_FLAT",
                         broker_profile=prof_id)
