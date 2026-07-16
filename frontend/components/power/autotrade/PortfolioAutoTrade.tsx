@@ -290,7 +290,7 @@ const TESLA_GRADE_OPTIONS: { id: 'A++' | 'A+++'; label: string }[] = [
 type LadderPreset = 'positional' | 'btst'
 const LADDER_PRESET_OPTIONS: { id: LadderPreset; label: string; hint: string }[] = [
   { id: 'positional', label: 'Positional (3-session)', hint: 'Falcon Top-5 held ~3 sessions — the default monthly positional campaign.' },
-  { id: 'btst',       label: 'Falcon BTST Oscillator', hint: 'Top-15 high-tier (~9 names) · 50/50 split entry @09:15+09:16 · CNC, hold 2 sessions, sell Day-2 15:29 · no trail · −6% stop.' },
+  { id: 'btst',       label: 'Falcon BTST Oscillator', hint: 'Top-15 → high-tier subset (count varies daily) · 50/50 split entry @09:15+09:16 · CNC, hold 2 sessions, sell Day-2 15:29 · no trail · −6% stop.' },
 ]
 
 // Campaign Duration options (Auto-Ladder only). Maps to LadderEndMode on the wire.
@@ -436,7 +436,7 @@ function ladderLocked(l: LadderSummary, st?: LadderStatus): LockedContext {
   const ct = String((st as Record<string, unknown> | undefined)?.campaign_type
     ?? (l as Record<string, unknown>).campaign_type ?? 'positional')
   const picks = (ct === 'btst' || ct === 'magnifier')
-    ? 'Falcon Top-15 high-tier (~9)'
+    ? 'Falcon Top-15 → high-tier'
     : 'Falcon Top 5'
   return {
     allocatedCapital: st?.total_capital ?? l.total_capital,
@@ -1376,9 +1376,10 @@ export function PortfolioAutoTrade({
   // toWireConfig at the send boundary.
   const intraday = config.strategy === 'intraday_basket'
   useEffect(() => {
-    // Magnifier is a fixed validated campaign sized by "cash per day" — it never
-    // shows the live sizing preview, so skip the estimate entirely for it.
-    if (phase !== 'config' || isMagnifier || (!intraday && !config.kill_switch_enabled)) {
+    // Magnifier AND BTST are fixed validated campaigns whose basket is the Top-15
+    // high-tier SUBSET (resolved at fire time) — the generic preview can't represent
+    // it (it would size the wrong top-N-by-rank names), so skip the estimate for both.
+    if (phase !== 'config' || isMagnifier || isBtst || (!intraday && !config.kill_switch_enabled)) {
       setPreview(null); setPreviewErr(null); setPreviewLoading(false)
       return
     }
@@ -1438,6 +1439,7 @@ export function PortfolioAutoTrade({
     toWireConfig,
     isLadder,
     isMagnifier,
+    isBtst,
     perBasketCapital,
   ])
 
@@ -2462,14 +2464,12 @@ export function PortfolioAutoTrade({
             )}
 
             {/* Falcon BTST read-only summary — exactly what the operator is arming.
-                Capital is the OPERATOR'S input; sleeve = capital ÷ 2, per-name =
-                capital ÷ 10 (5 names × 2 overlapping sleeves). Never hardcoded. */}
+                Capital is the OPERATOR'S input; sleeve = capital ÷ 2 (2 overlapping
+                sleeves = full pool). Per-name isn't shown because the high-tier count
+                varies day to day. Never hardcoded. */}
             {isBtst && (() => {
               const cap = config.total_allocated_capital || 0
               const sleeve = cap > 0 ? cap / 2 : 0
-              // Per-name is an ESTIMATE: the daily sleeve spreads across that
-              // morning's high-tier basket (~9 names, varies day to day).
-              const perName = cap > 0 ? sleeve / 9 : 0
               return (
                 <div className="mt-3 rounded-xl border px-3.5 py-3"
                   style={{ borderColor: 'rgba(63,227,164,0.22)', background: 'linear-gradient(180deg, rgba(63,227,164,0.06), rgba(255,255,255,0.015))' }}>
@@ -2478,10 +2478,10 @@ export function PortfolioAutoTrade({
                     <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Falcon BTST Oscillator — what you&apos;re arming</span>
                   </div>
                   <ul className="text-[11.5px] leading-relaxed space-y-1" style={{ color: C.ink2 }}>
-                    <li>· Buy the daily <b style={{ color: C.ink }}>Top-15 high-tier</b> basket (~9 names) via a <b style={{ color: C.ink }}>50/50 split</b> entry (<b style={{ color: C.ink }}>09:15 + 09:16</b>), hold <b style={{ color: C.ink }}>exactly 2 sessions</b>, sell <b style={{ color: C.ink }}>Day-2 at 15:29</b>.</li>
+                    <li>· Buy the daily <b style={{ color: C.ink }}>Top-15 → high-tier</b> subset (the high-tier names within that morning&apos;s Falcon Top-15 — count varies) via a <b style={{ color: C.ink }}>50/50 split</b> entry (<b style={{ color: C.ink }}>09:15 + 09:16</b>), hold <b style={{ color: C.ink }}>exactly 2 sessions</b>, sell <b style={{ color: C.ink }}>Day-2 at 15:29</b>.</li>
                     <li>· <b style={{ color: C.ink }}>CNC</b> — 1× cash, no leverage · <b style={{ color: C.ink }}>no trail</b> (inert at 1×) · <b style={{ color: C.ink }}>−6% disaster stop</b> on the blended cost.</li>
                     <li>· Rolling <b style={{ color: C.ink }}>monthly</b> campaign — auto-spawns one basket per trading day, continuous until cancelled.</li>
-                    <li>· Sleeve = capital ÷ 2 = <b style={{ color: C.ink }}>{cap > 0 ? fmtINR(sleeve) : '—'}</b> per day (2 overlapping sleeves = full capital) · ≈ per name (~9) = <b style={{ color: C.ink }}>{cap > 0 ? fmtINR(perName) : '—'}</b>.</li>
+                    <li>· Sleeve = capital ÷ 2 = <b style={{ color: C.ink }}>{cap > 0 ? fmtINR(sleeve) : '—'}</b> per day (2 overlapping sleeves = full capital), spread equally across that day&apos;s high-tier basket.</li>
                   </ul>
                 </div>
               )
@@ -2498,7 +2498,7 @@ export function PortfolioAutoTrade({
                   Falcon fills up to <b style={{ color: C.ink }}>N seats</b> with intraday shorts drawn from live
                   A++/A+++ order-flow signals — equal seat = capital ÷ seats — and back-fills a freed seat the
                   moment one exits. A running Tesla session with <b style={{ color: C.ink }}>0 positions is normal</b>
-                  {' '}("armed, waiting for signals"). Trades <b style={{ color: C.ink }}>Equity · MIS · Short only</b>.
+                  {' '}(&quot;armed, waiting for signals&quot;). Trades <b style={{ color: C.ink }}>Equity · MIS · Short only</b>.
                   {' '}Thin-validated — <b style={{ color: C.ink }}>run in Paper first</b>.
                 </div>
               </div>
@@ -2730,14 +2730,14 @@ export function PortfolioAutoTrade({
 
             {isBtst ? (
               // Falcon BTST Oscillator has a FIXED basket baked into the backend
-              // preset (Top-15 → high-tier filter → ~9 names); the generic Top-N
-              // selector doesn't apply and would contradict the strategy, so show a
-              // locked indicator instead.
-              <Field label="Basket" hint="Fixed by the Falcon BTST Oscillator strategy — not adjustable.">
+              // preset (today's Falcon Top-15 → high-tier filter → the high-tier
+              // subset, count varies daily); the generic Top-N selector doesn't apply
+              // and would contradict the strategy, so show a locked indicator.
+              <Field label="Basket" hint="Fixed by the Falcon BTST Oscillator strategy — resolved each morning, not adjustable.">
                 <div className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-[12.5px]"
                   style={{ color: C.ink2, border: `1px solid ${C.line}`, background: 'rgba(255,255,255,0.02)' }}>
                   <span style={{ color: C.mint }}>{ICON.check(14)}</span>
-                  <span>Falcon <b style={{ color: C.ink }}>Top-15 → high-tier</b> (~9 names/day) · set by preset</span>
+                  <span>Falcon <b style={{ color: C.ink }}>Top-15 → high-tier</b> subset · set by preset</span>
                 </div>
               </Field>
             ) : (
@@ -2953,13 +2953,14 @@ export function PortfolioAutoTrade({
               Both controls are progressive-disclosure refinements above
               the strategy section — the defaults (all500 + top-N) are
               exactly current behaviour, so the form is backward-compatible. */}
+          {/* Universe filter + manual picker + live sizing preview. For SESSIONS and
+              the generic positional campaign. The Falcon BTST Oscillator has a FIXED
+              preset basket (all500 → Top-15 → high-tier SUBSET), and the generic
+              preview would size the WRONG names (top-N by rank, not the high-tier
+              subset), so the WHOLE refinements card is hidden for BTST — matching the
+              Magnifier, which also shows no live sizing preview. */}
+          {!isBtst && (
           <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.015)' }}>
-            {/* Universe filter + manual pick override apply to sessions and the
-                generic positional campaign only. The Falcon BTST Oscillator has a
-                FIXED basket baked into the preset (all500 → Top-15 → high-tier ~9),
-                so these controls are hidden for it — the leftover-capital toggle and
-                the per-name sizing breakdown below still show. */}
-            {!isBtst && (<>
             <div className="flex items-center gap-2 mb-3">
               {ICON.trend(15) /* reuse trend icon = filter context */}
               <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Universe</span>
@@ -3232,7 +3233,6 @@ export function PortfolioAutoTrade({
                 </div>
               )}
             </div>
-            </>)}
 
             {/* ── C · Use leftover capital ── redistribute the capital freed by any
                 skipped pick (1 unit > its slice) across the remaining picks. On by
@@ -3265,6 +3265,7 @@ export function PortfolioAutoTrade({
                 product & instrument (CNC cash · MTF/MIS margin · FUT lots+margin). */}
             <SizingBreakdown config={config} preview={preview} loading={previewLoading} err={previewErr} />
           </div>
+          )}
 
           {/* A · MIS defensive square-off note — for MIS sessions, the backend
               force-squares at ~15:12 IST (before the broker's window). Read-only
