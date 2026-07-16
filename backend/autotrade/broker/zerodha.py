@@ -760,10 +760,22 @@ class ZerodhaBroker(BrokerClient):
                                symbol=order.symbol, qty=order.qty, error=str(e))
 
     async def get_pending_orders(self) -> List[Any]:
+        """Today's WORKING (pending) orders for this account.
+
+        PERF (2026-07-16): `kite.orders()` is a BLOCKING HTTP call that returns the
+        WHOLE day order book, so it gets slower as the book grows through the
+        session. Called directly inside this coroutine it BLOCKED the event loop and
+        serialised every gathered entry/exit leg behind one full round-trip per
+        symbol (measured: 3.7-4.8s gap between consecutive ORDER_CREATED mid-day on
+        2026-07-15; a 3-name basket cost 20.1s). Running it in a worker thread keeps
+        the loop free so the asyncio.gather over the legs ACTUALLY overlaps — the
+        same fix (and precedent) as place_order / place_market_exit above.
+        Semantics are unchanged: same filter, same return, same fail-soft on error.
+        """
         if self.dry_run:
             return []
         try:
-            orders = self.kite.orders()
+            orders = await asyncio.to_thread(self.kite.orders)
             return [o for o in orders
                     if o.get("status") in ("OPEN", "TRIGGER PENDING", "PENDING")]
         except Exception as e:

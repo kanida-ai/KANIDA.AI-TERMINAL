@@ -1106,7 +1106,8 @@ async def _our_working_exit_qty(broker: Any, symbol: str,
 
 async def _foreign_same_side_pending(broker: Any, symbol: str, side: str,
                                      owned_ids: Optional[set] = None,
-                                     owned_tags: Optional[set] = None
+                                     owned_tags: Optional[set] = None,
+                                     pending: Optional[List[Dict[str, Any]]] = None
                                      ) -> List[Dict[str, Any]]:
     """CLUSTER 9c FIX F5 (2026-07-11) — FOREIGN (non-Falcon-owned) PENDING orders on
     the SAME symbol + SAME `side` (BUY/SELL) in the SAME account.
@@ -1123,11 +1124,21 @@ async def _foreign_same_side_pending(broker: Any, symbol: str, side: str,
     so detection is already account-scoped). Returns a list of
     {order_id, tag, qty, txn} for each pending order matching symbol+side that is NOT
     provably ours (id not in owned_ids AND tag not in owned_tags). Paper / no pending
-    / probe error → [] (byte-identical; conservative — a probe error never blocks)."""
-    try:
-        pending = await broker.get_pending_orders()
-    except Exception:  # pragma: no cover - defensive; never block on a probe error
-        return []
+    / probe error → [] (byte-identical; conservative — a probe error never blocks).
+
+    PERF (2026-07-16) — `pending`: an ALREADY-FETCHED order book for THIS account,
+    fetched ONCE per fire by the caller and threaded in, so an N-leg basket costs ONE
+    kite.orders() round-trip instead of N (the book is identical across the legs of a
+    single fire — this is a deterministic hand-off, NOT a time-based cache; there is
+    no freshness assumption baked into the conflict guard). When None (default) this
+    fetches exactly as before → every existing caller is byte-for-byte unchanged. The
+    MATCHING/ownership logic below is untouched either way: same book in, same
+    verdict out."""
+    if pending is None:
+        try:
+            pending = await broker.get_pending_orders()
+        except Exception:  # pragma: no cover - defensive; never block on a probe error
+            return []
     if not pending:
         return []
     owned_ids = owned_ids or set()
@@ -2262,12 +2273,13 @@ class TradingSession:
         sem = asyncio.Semaphore(_ENTRY_CONCURRENCY)
 
         async def _guarded_place(broker, prof, pick, amount, allocator, cache,
-                                 forced_qty=None, quote=None):
+                                 forced_qty=None, quote=None, pending_book=None):
             async with sem:
                 try:
                     return await self._place_one(
                         broker, prof, pick, amount, allocator, prefetch=cache,
-                        forced_qty=forced_qty, quote=quote)
+                        forced_qty=forced_qty, quote=quote,
+                        pending_book=pending_book)
                 except Exception as e:  # belt-and-braces leg isolation
                     log.error("entry leg crashed for %s: %s", pick.symbol, e)
                     return {"symbol": pick.symbol, "status": "FAILED",
@@ -2478,9 +2490,41 @@ class TradingSession:
                 leg_specs, skipped_picks, _fire_t0, margin_fallback_warnings,
                 degraded_profiles)
 
+        # ── PERF (2026-07-16) — ONE pending-order fetch PER ACCOUNT, PER FIRE ─────
+        # The F5 fungible-account conflict probe in _place_one reads the account's
+        # WORKING-order book. Fetched per-leg it cost ONE FULL kite.orders() round-
+        # trip per symbol (the book grows all session → 3.7-4.8s each mid-day on
+        # 2026-07-15), making the basket LINEAR in N. The book is IDENTICAL across
+        # the legs of a single fire, so we fetch it ONCE per distinct broker client
+        # (NEVER pooled across accounts — a session's profiles can resolve to
+        # DIFFERENT accounts, cf. F4 above) and thread it into every leg. The basket
+        # is now FLAT in N. This is a deterministic per-fire hand-off, not a TTL
+        # cache — no freshness assumption enters the double-fill guard.
+        # A fetch error → get_pending_orders returns [] → the leg sees "no conflict",
+        # EXACTLY as the per-leg probe behaves on error today (no weakening).
+        # Paper (dry_run) skips the fetch entirely → byte-for-byte unchanged.
+        _books: Dict[int, List[Dict[str, Any]]] = {}
+        if not self.dry_run and leg_specs:
+            _uniq = {}
+            for _spec in leg_specs:
+                _uniq.setdefault(id(_spec[0]), _spec[0])
+            _keys = list(_uniq.keys())
+            _fetched = await asyncio.gather(
+                *[_uniq[k].get_pending_orders() for k in _keys],
+                return_exceptions=True)
+            for _k, _res in zip(_keys, _fetched):
+                # An exception here → None → the leg's probe fetches its own book
+                # (the pre-fix path), so the F5 guard still runs. Never fail a fire
+                # on a probe fetch.
+                _books[_k] = _res if isinstance(_res, list) else None
+            log.info("session %s: pre-fetched pending book for %d account(s) "
+                     "(F5 probe now costs 0 extra round-trips/leg)",
+                     self.session_id, len(_keys))
+
         leg_coros = [
             _guarded_place(broker, prof, pick, amount, allocator, cache,
-                           forced_qty=qty, quote=quote)
+                           forced_qty=qty, quote=quote,
+                           pending_book=_books.get(id(broker)))
             for (broker, prof, pick, amount, allocator, cache, qty, quote)
             in leg_specs]
         placed: List[Dict[str, Any]] = list(
@@ -2570,7 +2614,15 @@ class TradingSession:
         gtt_results: List[Dict[str, Any]] = []
         try:
             if self.config.per_position_gtt_enabled and self.gtt_manager:
-                gtt_results = self.gtt_manager.backfill_missing()
+                # PERF (2026-07-16): backfill_missing is SYNC and issues BLOCKING
+                # Kite calls per position (place_gtt / place_protective_slm, and the
+                # SL-M reject probe scans the WHOLE order book). Called bare in this
+                # coroutine it FROZE the event loop for the whole backfill — stalling
+                # the tick/ws drivers (i.e. the kill switch) right after a fire. Run
+                # it in a worker thread: identical work, identical order, identical
+                # results — the loop just stays responsive.
+                gtt_results = await asyncio.to_thread(
+                    self.gtt_manager.backfill_missing)
         except Exception as e:  # never block start on the backup floor
             log.warning("GTT backfill failed for %s: %s", self.session_id, e)
 
@@ -2664,7 +2716,13 @@ class TradingSession:
                          prefetch: Optional[Dict[str, Any]] = None,
                          forced_qty: Optional[int] = None,
                          quote: Optional[Dict[str, Any]] = None,
-                         register_mode: str = "replace") -> Dict[str, Any]:
+                         register_mode: str = "replace",
+                         pending_book: Optional[List[Dict[str, Any]]] = None
+                         ) -> Dict[str, Any]:
+        # pending_book (PERF 2026-07-16): the account's WORKING-order book fetched
+        # ONCE for this fire and threaded in, so the F5 conflict probe below costs
+        # ZERO extra broker round-trips per leg. None → the probe fetches its own
+        # (unchanged). The F5 verdict is identical: same book, same matching.
         # register_mode: "replace" (DEFAULT — register()/UPSERT, byte-for-byte the
         # existing entry) or "add" (register_add() — AVERAGE this fill INTO the
         # existing position for the Falcon Intraday Magnifier's SECOND split leg,
@@ -2733,7 +2791,8 @@ class TradingSession:
             _own_ids, _own_tags = _falcon_owned_exit_ids_tags(
                 self.session_id, symbol, broker_profile=prof.profile_id)
             _foreign = await _foreign_same_side_pending(
-                broker, symbol, _entry_txn, owned_ids=_own_ids, owned_tags=_own_tags)
+                broker, symbol, _entry_txn, owned_ids=_own_ids, owned_tags=_own_tags,
+                pending=pending_book)
             if _foreign:
                 _oids = ", ".join(f.get("order_id") or "?" for f in _foreign[:5])
                 reason = (f"MANUAL_CONFLICT: a foreign {_entry_txn} order is already "
@@ -3343,7 +3402,7 @@ class TradingSession:
         # appear over the window so this runs after the build).
         try:
             if self.config.per_position_gtt_enabled and self.gtt_manager:
-                self.gtt_manager.backfill_missing()
+                await asyncio.to_thread(self.gtt_manager.backfill_missing)
         except Exception as e:  # pragma: no cover - never block on the backup
             log.warning("worked %s GTT backfill failed: %s", symbol, e)
         if result.shortfall > 0:
@@ -4808,7 +4867,7 @@ class TradingSession:
         # cost — the FIRST stop this basket has ever had (arming, deferred).
         try:
             if self.config.per_position_gtt_enabled and self.gtt_manager:
-                self.gtt_manager.backfill_missing()
+                await asyncio.to_thread(self.gtt_manager.backfill_missing)
         except Exception as e:
             log.warning("magnifier GTT/SL-M backfill failed for %s: %s",
                         self.session_id, e)
@@ -5075,7 +5134,7 @@ class TradingSession:
         # cost — the broker floor, WIDER than the −6% software disaster stop.
         try:
             if self.config.per_position_gtt_enabled and self.gtt_manager:
-                self.gtt_manager.backfill_missing()
+                await asyncio.to_thread(self.gtt_manager.backfill_missing)
         except Exception as e:
             log.warning("btst GTT backfill failed for %s: %s",
                         self.session_id, e)
