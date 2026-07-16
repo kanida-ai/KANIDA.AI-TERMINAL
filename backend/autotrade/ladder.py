@@ -113,6 +113,21 @@ POSITIONAL_STOP_PCT = 0.06
 POSITIONAL_MAX_HOLD_SESSIONS = 3
 POSITIONAL_TOP_N = 5
 
+# ── FALCON INTRADAY MAGNIFIER campaign preset (fractions of CAPITAL) ──────────
+# The validated intraday-magnifier trail: arm 6% / floor 2% / giveback 5% /
+# stop 3% on the CAPITAL basis, Falcon Top-15 high-tier (~9 names), 5× MIS, split
+# entry (50% @09:15 + 50% @09:16), squared off same day. Because MIS recycles
+# daily the campaign holds ONE basket at a time (hold_length=1 → per_basket =
+# total = the operator-chosen cash/day, never hard-coded).
+MAGNIFIER_ARM_PCT = 0.06
+MAGNIFIER_FLOOR_PCT = 0.02
+MAGNIFIER_GIVEBACK_PCT = 0.05
+MAGNIFIER_STOP_PCT = 0.03
+MAGNIFIER_TOP_N = 15
+MAGNIFIER_HOLD_LENGTH = 1
+CAMPAIGN_POSITIONAL = "positional"
+CAMPAIGN_MAGNIFIER = "magnifier"
+
 
 def _now_iso() -> str:
     return now_ist().isoformat()
@@ -143,6 +158,7 @@ class LadderCampaign:
     order_product: str
     per_basket_capital: float
     status: str
+    campaign_type: str = "positional"   # positional | magnifier
     mode: str = "paper"
     user_id: Optional[str] = None
     broker_account_id: Optional[str] = None
@@ -161,6 +177,7 @@ class LadderCampaign:
     # ── Factory / persistence ─────────────────────────────────────────────────
     @classmethod
     def create(cls, *, total_capital: float, order_product: str = "CNC",
+               campaign_type: str = "positional",
                mode: str = "paper", user_id: Optional[str] = None,
                broker_account_id: Optional[str] = None,
                end_date: Optional[str] = None,
@@ -194,13 +211,24 @@ class LadderCampaign:
         """
         if total_capital is None or float(total_capital) <= 0:
             raise ValueError("total_capital must be > 0")
-        prod = str(order_product or "CNC").upper()
-        if prod not in ("CNC", "MTF"):
-            # Positional carries overnight → MIS (and any intraday product) is a
-            # contradiction and is rejected at the door.
+        ct = str(campaign_type or CAMPAIGN_POSITIONAL).lower()
+        if ct not in (CAMPAIGN_POSITIONAL, CAMPAIGN_MAGNIFIER):
             raise ValueError(
-                f"order_product must be CNC or MTF for a positional ladder "
-                f"(got {order_product!r}); MIS cannot carry overnight")
+                f"campaign_type must be 'positional' or 'magnifier', got "
+                f"{campaign_type!r}")
+        if ct == CAMPAIGN_MAGNIFIER:
+            # The Falcon Intraday Magnifier is MIS intraday (5×) by construction —
+            # force the product regardless of what was sent (an intraday campaign
+            # can only be MIS). MIS recycles daily so it holds ONE basket at a time.
+            prod = "MIS"
+        else:
+            prod = str(order_product or "CNC").upper()
+            if prod not in ("CNC", "MTF"):
+                # Positional carries overnight → MIS (and any intraday product) is a
+                # contradiction and is rejected at the door.
+                raise ValueError(
+                    f"order_product must be CNC or MTF for a positional ladder "
+                    f"(got {order_product!r}); MIS cannot carry overnight")
         if mode not in ("paper", "live"):
             mode = "paper"
 
@@ -213,15 +241,21 @@ class LadderCampaign:
 
         # HOLD-LENGTH-AWARE SIZING: the sleeve = total / hold_length so the pool is
         # fully deployed at steady state (hold_length overlapping baskets). Default
-        # hold=3 → total/3, IDENTICAL to the old BASKET_DIVISOR path.
-        hold_length = cls._effective_hold_length(overrides)
+        # hold=3 → total/3, IDENTICAL to the old BASKET_DIVISOR path. The MAGNIFIER
+        # is intraday (MIS recycles daily) → hold_length=1 → per_basket = total (one
+        # day's full cash/day, since only one basket is ever open at a time).
+        if ct == CAMPAIGN_MAGNIFIER:
+            hold_length = MAGNIFIER_HOLD_LENGTH
+        else:
+            hold_length = cls._effective_hold_length(overrides)
         per_basket = round(float(total_capital) / hold_length, 2)
 
         # Validate the resulting child config at the door (rejects e.g. floor>arm,
         # an out-of-range pct, a bad max_hold) so a bad override never reaches a
         # daily spawn. Uses the exact same builder the spawn path uses.
         try:
-            cls._make_child_config(per_basket, prod, overrides).validate()
+            cls._make_child_config(per_basket, prod, overrides,
+                                   campaign_type=ct).validate()
         except ValueError as e:
             raise ValueError(f"child_config invalid: {e}")
 
@@ -254,7 +288,7 @@ class LadderCampaign:
         row = cls(
             ladder_id=ladder_id, total_capital=float(total_capital),
             order_product=prod, per_basket_capital=per_basket,
-            status=STATUS_CREATED, mode=mode, user_id=user_id,
+            status=STATUS_CREATED, campaign_type=ct, mode=mode, user_id=user_id,
             broker_account_id=broker_account_id, start_date=start,
             end_date=resolved_end, mode_kill=None, daily_returns_json="[]",
             alert_active=0, last_tick_date=None,
@@ -263,13 +297,15 @@ class LadderCampaign:
             con.execute(
                 """INSERT INTO autotrade_ladders
                    (ladder_id, user_id, broker_account_id, mode, total_capital,
-                    order_product, per_basket_capital, status, start_date,
+                    order_product, per_basket_capital, status, campaign_type,
+                    start_date,
                     end_date, mode_kill, daily_returns_json, alert_active,
                     last_tick_date, child_config_json, config_version,
                     created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (ladder_id, user_id, broker_account_id, mode,
-                 float(total_capital), prod, per_basket, STATUS_CREATED, start,
+                 float(total_capital), prod, per_basket, STATUS_CREATED, ct,
+                 start,
                  resolved_end, None, "[]", 0, None, child_config_json, 0,
                  _now_iso(), _now_iso()),
             )
@@ -294,6 +330,7 @@ class LadderCampaign:
             ladder_id=d["ladder_id"], total_capital=d["total_capital"],
             order_product=d["order_product"],
             per_basket_capital=d["per_basket_capital"], status=d["status"],
+            campaign_type=d.get("campaign_type") or CAMPAIGN_POSITIONAL,
             mode=d.get("mode", "paper"), user_id=d.get("user_id"),
             broker_account_id=d.get("broker_account_id"),
             start_date=d.get("start_date"), end_date=d.get("end_date"),
@@ -324,6 +361,7 @@ class LadderCampaign:
         return {
             "ladder_id": d["ladder_id"],
             "status": d["status"],
+            "campaign_type": d.get("campaign_type") or CAMPAIGN_POSITIONAL,
             "mode": d.get("mode", "paper"),
             "total_capital": d["total_capital"],
             "per_basket_capital": d["per_basket_capital"],
@@ -749,12 +787,42 @@ class LadderCampaign:
 
     @staticmethod
     def _make_child_config(per_basket_capital: float, order_product: str,
-                           overrides: Dict[str, Any]) -> TradingSessionConfig:
-        """Build a positional child config: strategy=intraday_basket,
-        square_off_enabled=False, max_hold_sessions=3, the validated positional
-        trail preset, given product + per_basket capital, with the whitelisted
-        risk/exit `overrides` merged on top. Pure (no self) so create() (pre-row)
-        and _build_child_config() (post-row) share ONE construction path."""
+                           overrides: Dict[str, Any],
+                           campaign_type: str = CAMPAIGN_POSITIONAL
+                           ) -> TradingSessionConfig:
+        """Build a child config for this campaign. Pure (no self) so create()
+        (pre-row) and _build_child_config() (post-row) share ONE construction path.
+
+        * MAGNIFIER: strategy=intraday_magnifier, EQ + MIS (5×), long, the
+          validated magnifier trail (arm6/floor2/give5/stop3, capital basis),
+          Falcon Top-15 high-tier, split entry (50% @09:15 + 50% @09:16), squared
+          off same day (square_off_enabled=True). The overrides whitelist still
+          applies (risk/exit knobs only).
+        * POSITIONAL (default): strategy=intraday_basket, square_off_enabled=False,
+          max_hold_sessions=3, the validated positional trail — byte-for-byte
+          unchanged."""
+        if campaign_type == CAMPAIGN_MAGNIFIER:
+            cfg = TradingSessionConfig(
+                total_allocated_capital=float(per_basket_capital),
+                strategy="intraday_magnifier",
+                top_n_stocks=MAGNIFIER_TOP_N,
+                order_product="MIS",
+                instrument_type="EQ",
+                direction="long",
+                arm_pct=MAGNIFIER_ARM_PCT,
+                floor_pct=MAGNIFIER_FLOOR_PCT,
+                trail_giveback_pct=MAGNIFIER_GIVEBACK_PCT,
+                stop_pct=MAGNIFIER_STOP_PCT,
+                square_off_enabled=True,       # INTRADAY: flatten same day
+                square_off_time="15:29:00",
+                # The magnifier uses the intraday trail's fixed-floor path (its
+                # arm/floor/give are the validated set); the step-lock ladder tuned
+                # for the standard intraday basket does not apply.
+                trail_step_lock_enabled=False,
+            )
+            for f, v in (overrides or {}).items():
+                setattr(cfg, f, v)
+            return cfg
         cfg = TradingSessionConfig(
             total_allocated_capital=float(per_basket_capital),
             strategy="intraday_basket",
@@ -810,7 +878,7 @@ class LadderCampaign:
         can never desync a running basket's frozen basis."""
         return self._make_child_config(
             self.per_basket_capital, self.order_product,
-            self.child_config_overrides())
+            self.child_config_overrides(), campaign_type=self.campaign_type)
 
     # The risk/exit knobs a ladder edit may override on FUTURE spawned children.
     # A SUBSET of the session whitelist that is meaningful for a positional child
@@ -1012,6 +1080,7 @@ class LadderCampaign:
         return {
             "ladder_id": self.ladder_id,
             "status": self.status,
+            "campaign_type": self.campaign_type,
             "mode": self.mode,
             "total_capital": self.total_capital,
             "capital_deployed": round(committed, 2),

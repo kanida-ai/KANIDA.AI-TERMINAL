@@ -204,6 +204,67 @@ class PositionRegistry:
             broker_order_id=entry_order_id, client_order_id=client_order_id,
             qty=qty, price=avg_price, source="entry")
 
+    def register_add(self, *, symbol: str, broker_profile: str, add_qty: int,
+                     add_price: float, product: str = "CNC",
+                     instrument_type: str = "EQ", exchange: Optional[str] = None,
+                     broker_account_id: Optional[str] = None,
+                     direction: str = "long",
+                     entry_order_id: Optional[str] = None,
+                     client_order_id: Optional[str] = None) -> Dict[str, Any]:
+        """AVERAGE a second fill INTO an existing open position (blended cost).
+
+        Used by the Falcon Intraday Magnifier's SECOND (09:16) leg: the first leg
+        already registered qty1@avg1; this adds qty2@avg2 so the position becomes
+        (qty1+qty2) @ (qty1*avg1 + qty2*avg2)/(qty1+qty2). Distinct from
+        register() (which REPLACES qty/avg) — this ACCUMULATES. When no row exists
+        yet (the first leg was skipped/failed) it falls back to a plain register()
+        of the add leg. Scoped to (session_id, symbol, broker_profile).
+
+        Returns {blended_qty, blended_avg} (the resulting row's qty + avg)."""
+        now = datetime.now(IST).isoformat()
+        direction = "short" if str(direction).lower() == "short" else "long"
+        with falcon_conn() as con:
+            row = con.execute(
+                """SELECT id, qty, avg_price FROM autotrade_positions
+                   WHERE session_id=? AND symbol=?
+                     AND COALESCE(broker_profile,'')=COALESCE(?,'')""",
+                (self.session_id, symbol, broker_profile),
+            ).fetchone()
+        if row is None:
+            # No first leg → just register the add leg as the whole position.
+            self.register(symbol=symbol, broker_profile=broker_profile,
+                          qty=int(add_qty), avg_price=float(add_price),
+                          product=product, instrument_type=instrument_type,
+                          exchange=exchange, broker_account_id=broker_account_id,
+                          direction=direction, entry_order_id=entry_order_id,
+                          client_order_id=client_order_id)
+            return {"blended_qty": int(add_qty), "blended_avg": float(add_price)}
+        old_qty = int(row["qty"] or 0)
+        old_avg = float(row["avg_price"] or 0.0)
+        new_qty = old_qty + int(add_qty)
+        if new_qty <= 0:
+            return {"blended_qty": old_qty, "blended_avg": old_avg}
+        new_avg = ((old_qty * old_avg) + (int(add_qty) * float(add_price))) / new_qty
+        with falcon_conn() as con:
+            con.execute(
+                """UPDATE autotrade_positions
+                   SET qty=?, avg_price=?, ltp=COALESCE(ltp, ?),
+                       entry_order_id=COALESCE(?, entry_order_id),
+                       client_order_id=COALESCE(?, client_order_id),
+                       status='OPEN'
+                   WHERE id=?""",
+                (new_qty, new_avg, new_avg, entry_order_id, client_order_id,
+                 row["id"]))
+            con.commit()
+        # Durable FILLED event for the second leg (best-effort).
+        _order_ledger.append_event(
+            session_id=self.session_id, symbol=symbol,
+            event_type=_order_ledger.EV_FILLED, position_ref=str(row["id"]),
+            product=product, broker_profile=broker_profile,
+            broker_order_id=entry_order_id, client_order_id=client_order_id,
+            qty=int(add_qty), price=float(add_price), source="entry")
+        return {"blended_qty": new_qty, "blended_avg": new_avg}
+
     def register_partial(self, symbol: str, broker_profile: str,
                          filled_qty: int, avg_price: float,
                          product: str = "CNC",

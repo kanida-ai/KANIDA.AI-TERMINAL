@@ -39,6 +39,7 @@ gated by config.kill_switch_enabled (default False).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -564,6 +565,55 @@ def _resolve_falcon_selection(
         router_cap = config.top_n_stocks
 
     return picks, router_cap
+
+
+def _magnifier_high_tier_filter(picks: List[Pick], high_tier: List[str]
+                                ) -> Tuple[List[Pick], Dict[str, Optional[str]]]:
+    """FALCON INTRADAY MAGNIFIER universe: keep only the picks whose SIGNAL TIER
+    is in the high-tier set. Reuses the SAME classifier the Today/Signals panel
+    uses (power_user.services.signal_tier.enrich_picks over ohlc_daily) so the
+    tier vocabulary is the real one — never an invented tier. Returns
+    (kept_picks_in_rank_order, {symbol: tier}). Best-effort: if the tier enrich
+    fails, no pick is classified high-tier → empty basket (fail-safe, never
+    fabricates a tier). NEVER writes anything."""
+    if not picks:
+        return [], {}
+    high = set(high_tier or [])
+    pdicts = [{"symbol": p.symbol, "score": p.score, "n_fires": p.n_fires}
+              for p in picks]
+    try:
+        from power_user.services.signal_tier import enrich_picks as _enrich
+        with falcon_conn() as con:
+            latest = con.execute(
+                "SELECT MAX(signal_date) FROM falcon_signals_live").fetchone()[0]
+            _enrich(con, pdicts, latest)
+    except Exception as e:  # noqa: BLE001 - fail safe (no tiers → empty basket)
+        log.warning("magnifier tier enrich failed: %s", e)
+    tiers: Dict[str, Optional[str]] = {d["symbol"]: d.get("signal_tier")
+                                       for d in pdicts}
+    kept = [p for p in picks if tiers.get(p.symbol) in high]
+    return kept, tiers
+
+
+def _schedule_magnifier_second_leg(session_id: str, delay_sec: float) -> None:
+    """Arm a one-shot timer to fire the Magnifier's SECOND (09:16) split leg after
+    `delay_sec`. Loads a FRESH session by id (so it works after the fire coroutine
+    returns) and runs complete_magnifier_entry(). Daemon timer (never blocks
+    shutdown); idempotent at the callee (already-complete → no-op)."""
+    import threading
+
+    def _run() -> None:
+        try:
+            sess = TradingSession.load(session_id)
+            if sess is None:
+                return
+            asyncio.run(sess.complete_magnifier_entry())
+        except Exception as e:  # pragma: no cover - never crash the timer thread
+            log.exception("magnifier second-leg fire failed for %s: %s",
+                          session_id, e)
+    t = threading.Timer(max(0.0, float(delay_sec)), _run)
+    t.daemon = True
+    t.start()
 
 
 def _get_tick_for(broker, symbol: str) -> float:
@@ -2145,6 +2195,12 @@ class TradingSession:
         if self.config.strategy == "tesla_short":
             return await self._fire_tesla_initial()
 
+        # FALCON INTRADAY MAGNIFIER: split-entry (50% @09:15) + deferred trail arm.
+        # Reuses the same gate/account/idempotency preamble above, then places the
+        # FIRST half-leg (NO stop/trail) and schedules the second leg + arm.
+        if self.config.strategy == "intraday_magnifier":
+            return await self._fire_magnifier_initial()
+
         falcon_picks, router_cap = _resolve_falcon_selection(
             self.config, log_ctx=f"session {self.session_id}: ")
         router = BrokerRouter(top_n_stocks=router_cap)
@@ -2534,7 +2590,7 @@ class TradingSession:
         # POSITIONAL (square_off_enabled False): do NOT arm the basket square-off
         # — the trail carries across days. The MIS defensive candidate below is
         # unaffected (positional can't be MIS per validate(), so no collision).
-        if (self.config.strategy == "intraday_basket"
+        if (self.config.strategy in ("intraday_basket", "intraday_magnifier")
                 and getattr(self.config, "square_off_enabled", True)):
             try:
                 candidates.append(
@@ -2565,7 +2621,12 @@ class TradingSession:
                          allocator: CapitalAllocator,
                          prefetch: Optional[Dict[str, Any]] = None,
                          forced_qty: Optional[int] = None,
-                         quote: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                         quote: Optional[Dict[str, Any]] = None,
+                         register_mode: str = "replace") -> Dict[str, Any]:
+        # register_mode: "replace" (DEFAULT — register()/UPSERT, byte-for-byte the
+        # existing entry) or "add" (register_add() — AVERAGE this fill INTO the
+        # existing position for the Falcon Intraday Magnifier's SECOND split leg,
+        # producing the blended cost). "add" only affects the registration call.
         symbol = pick.symbol
         # FEATURE C: when the whole-portfolio planner already computed the qty
         # (with redistribution / skip), use it verbatim so the placed size matches
@@ -2845,7 +2906,20 @@ class TradingSession:
         _under_fill = (fill_qty is not None and qty
                        and int(fill_qty) < int(qty))
         _is_partial = (res.status == "PARTIAL") or bool(_under_fill)
-        if _is_partial:
+        if register_mode == "add":
+            # MAGNIFIER second leg — AVERAGE this fill into the existing position
+            # (blended cost). Whatever filled (full or partial) is accumulated.
+            self.registry.register_add(symbol=register_symbol,
+                                       broker_profile=prof.profile_id,
+                                       add_qty=fill_qty, add_price=fill_price,
+                                       product=prof.order_product,
+                                       instrument_type=prof.instrument_type,
+                                       exchange=_exchange,
+                                       broker_account_id=acct_id,
+                                       direction=_direction,
+                                       entry_order_id=_entry_oid,
+                                       client_order_id=client_order_id)
+        elif _is_partial:
             if _under_fill and res.status != "PARTIAL":
                 log.warning("session %s: entry UNDER-FILL for %s — ordered %d, "
                             "filled %d (broker status=%s) → flagged PARTIAL",
@@ -3655,6 +3729,32 @@ class TradingSession:
             return await self._tick_tesla(gr_capital, snap, gtt_closed,
                                           broker_reconciled)
 
+        if self.config.strategy == "intraday_magnifier":
+            # FALCON INTRADAY MAGNIFIER: reuses the intraday_basket trail EXIT
+            # machinery, BUT the trail/stop stays DORMANT until BOTH split-entry
+            # legs are in (the deferred-arm edge). Before completion we ONLY refresh
+            # marks — no ARM, no stop, no trail exit. The precise-time square-off
+            # scheduler is armed independently, so the 15:29 flatten is safe even if
+            # the second leg never completes.
+            gr_capital = self.monitor.compute_gross_return()
+            if not self._magnifier_entry_complete():
+                return {"gross_return": gr_capital,
+                        "gross_return_fund": snap["gross_return"], "snapshot": snap,
+                        "strategy": "intraday_magnifier",
+                        "magnifier_entry_complete": False,
+                        "trail_action": "PENDING_SPLIT_ENTRY",
+                        "kill_switch_fired": False, "kill_reason": None,
+                        "fire_result": None, "gtt_closed": gtt_closed,
+                        "broker_reconciled": broker_reconciled}
+            res = await self._tick_intraday(gr_capital, snap, gtt_closed,
+                                            broker_reconciled)
+            # Relabel the shared intraday-trail result as the magnifier (the
+            # trail machinery is reused but this is a distinct strategy).
+            if isinstance(res, dict):
+                res["strategy"] = "intraday_magnifier"
+                res["magnifier_entry_complete"] = True
+            return res
+
         if self.config.strategy == "intraday_basket":
             # CAPITAL-BASIS TRAIL (2026-07-07): the intraday_basket trail measures
             # arm/floor/giveback/basket-stop as % of ALLOCATED CAPITAL
@@ -4339,6 +4439,247 @@ class TradingSession:
                 "kill_switch_fired": False, "kill_reason": None,
                 "fire_result": None, "gtt_closed": gtt_closed,
                 "broker_reconciled": broker_reconciled}
+
+    # ── FALCON INTRADAY MAGNIFIER (strategy=="intraday_magnifier") ────────────
+    def _magnifier_entry_complete(self) -> bool:
+        """True once BOTH split-entry legs are in (mag_entry_complete=1). Until
+        then the tick/ws trail is DORMANT (the deferred-arm edge)."""
+        try:
+            with falcon_conn() as con:
+                r = con.execute(
+                    "SELECT mag_entry_complete FROM autotrade_sessions "
+                    "WHERE session_id=?", (self.session_id,)).fetchone()
+            return bool(r["mag_entry_complete"]) if r else False
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+    def _set_magnifier_entry_complete(self, v: bool = True) -> None:
+        with falcon_conn() as con:
+            con.execute(
+                "UPDATE autotrade_sessions SET mag_entry_complete=? "
+                "WHERE session_id=?", (1 if v else 0, self.session_id))
+            con.commit()
+
+    def _persist_mag_leg2_plan(self, plan: List[Dict[str, Any]]) -> None:
+        with falcon_conn() as con:
+            con.execute(
+                "UPDATE autotrade_sessions SET mag_leg2_plan_json=? "
+                "WHERE session_id=?", (json.dumps(plan), self.session_id))
+            con.commit()
+
+    def _load_mag_leg2_plan(self) -> List[Dict[str, Any]]:
+        try:
+            with falcon_conn() as con:
+                r = con.execute(
+                    "SELECT mag_leg2_plan_json FROM autotrade_sessions "
+                    "WHERE session_id=?", (self.session_id,)).fetchone()
+            if not r or not r["mag_leg2_plan_json"]:
+                return []
+            return list(json.loads(r["mag_leg2_plan_json"]))
+        except Exception:  # pragma: no cover - defensive
+            return []
+
+    def _select_magnifier_picks(self) -> List[Pick]:
+        """The Magnifier universe: the Falcon Top-N (top_n_stocks, default 15) by
+        rank, narrowed to the high-tier names (~9). Rank order preserved."""
+        depth = max(int(self.config.top_n_stocks), 3)
+        picks = load_falcon_picks(top_n=depth,
+                                  universe_filter=self.config.universe_filter)
+        picks = picks[:depth]
+        kept, _tiers = _magnifier_high_tier_filter(
+            picks, self.config.magnifier_high_tier)
+        return kept
+
+    async def _fire_magnifier_initial(self) -> Dict[str, Any]:
+        """MAGNIFIER split-entry PHASE 1 (the 09:15 half-leg).
+
+        Selects the Falcon Top-N high-tier basket (~9 names), sizes the FULL
+        target qty per name at 5× MIS, places `magnifier_split_fraction` (50%) NOW
+        with NO stop/trail, persists the remaining-half plan, arms the drivers +
+        the square-off, and schedules the SECOND leg. The trail is armed only when
+        that leg completes (on the BLENDED cost) — the core edge."""
+        from .capital import CapitalAllocator
+        picks = self._select_magnifier_picks()
+        if not picks:
+            reason = ("magnifier: no high-tier picks today (the Falcon Top-N "
+                      "basket had no name in the high-tier set)")
+            self._set_status("FAILED", reason=reason, closed_at=_now_ist_iso())
+            log.warning("session %s FAILED: %s", self.session_id, reason)
+            return {"session_id": self.session_id, "status": "FAILED",
+                    "mode": self.mode, "n_placed": 0, "orders": [],
+                    "reason": reason, "strategy": "intraday_magnifier"}
+        router = BrokerRouter(top_n_stocks=len(picks))
+        routed = router.route_picks(picks, self.config.broker_profiles)
+        frac = float(self.config.magnifier_split_fraction)
+        _fire_t0 = time.monotonic()
+        placed: List[Dict[str, Any]] = []
+        leg2_plan: List[Dict[str, Any]] = []
+        for prof in self.config.broker_profiles:
+            if not prof.enabled:
+                continue
+            broker = self.brokers[prof.profile_id]
+            prof_picks = routed.get(prof.profile_id, [])
+            allocator = CapitalAllocator(self.config)
+            amounts = allocator.allocate([p.symbol for p in prof_picks])
+            fund_picks = [p for p in prof_picks if amounts.get(p.symbol, 0.0) > 0]
+            try:
+                cache = allocator.prefetch([p.symbol for p in fund_picks], broker)
+            except Exception:  # pragma: no cover - per-symbol fallback inside
+                cache = {}
+            quote_cache: Dict[str, Any] = {}
+            if getattr(self.config, "execution_mode", "market") == "marketable_limit":
+                try:
+                    quote_cache = broker.get_quotes(
+                        [p.symbol for p in fund_picks]) or {}
+                except Exception:  # pragma: no cover - defensive
+                    quote_cache = {}
+            plan = allocator.plan_quantities(
+                [p.symbol for p in fund_picks], broker, cache=cache)
+            plan_qtys = plan["quantities"]
+            for pick in fund_picks:
+                target = int(plan_qtys.get(pick.symbol) or 0)
+                if target <= 0:
+                    continue
+                leg1 = int(target * frac)
+                leg2 = target - leg1
+                amount = amounts.get(pick.symbol, 0.0)
+                if leg1 > 0:
+                    r = await self._place_one(
+                        broker, prof, pick, amount, allocator, prefetch=cache,
+                        forced_qty=leg1, quote=quote_cache.get(pick.symbol))
+                    placed.append(r)
+                if leg2 > 0:
+                    leg2_plan.append({
+                        "profile_id": prof.profile_id, "symbol": pick.symbol,
+                        "qty": int(leg2), "amount": amount})
+        entry_latency_ms = int((time.monotonic() - _fire_t0) * 1000)
+        try:
+            self._record_latency(entry_latency_ms=entry_latency_ms)
+        except Exception:  # pragma: no cover
+            pass
+        n_filled = sum(1 for p in placed
+                       if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE",
+                                               "DRY_RUN"))
+        if n_filled == 0 and not leg2_plan:
+            reason = ("magnifier: nothing placed and no second-leg plan (all picks "
+                      "unaffordable for the per-slice budget)")
+            self._set_status("FAILED", reason=reason, closed_at=_now_ist_iso())
+            log.error("session %s FAILED: %s", self.session_id, reason)
+            return {"session_id": self.session_id, "status": "FAILED",
+                    "mode": self.mode, "n_placed": 0, "orders": placed,
+                    "reason": reason, "strategy": "intraday_magnifier"}
+        # DEFERRED ARM: do NOT freeze the basis, and place NO GTT/SL-M — the 09:15
+        # half-leg carries NO stop (the whole point). Persist the second-leg plan
+        # (restart-durable) and mark the entry INCOMPLETE.
+        self._set_magnifier_entry_complete(False)
+        self._persist_mag_leg2_plan(leg2_plan)
+        for _label, _starter in (("tick", tick_driver.start_for_session),
+                                 ("ws", ws_driver.start_for_session)):
+            try:
+                _starter(self.session_id)
+            except Exception as e:  # never block start on a driver
+                log.warning("%s driver start failed for %s: %s", _label,
+                            self.session_id, e)
+        try:
+            self._arm_square_off()
+        except Exception as e:  # never block start on the square-off scheduler
+            log.warning("square-off arm failed for %s: %s", self.session_id, e)
+        _schedule_magnifier_second_leg(
+            self.session_id, float(self.config.magnifier_second_leg_offset_sec))
+        log.info("magnifier %s: 09:15 half-leg placed (%d legs, NO stop); second "
+                 "leg + trail arm in %ds", self.session_id, n_filled,
+                 int(self.config.magnifier_second_leg_offset_sec))
+        return {"session_id": self.session_id, "status": "RUNNING",
+                "mode": self.mode, "n_placed": n_filled, "orders": placed,
+                "strategy": "intraday_magnifier", "magnifier_stage": 1,
+                "magnifier_entry_complete": False,
+                "second_leg_in_sec": int(self.config.magnifier_second_leg_offset_sec),
+                "note": ("magnifier 09:15 half-leg placed with NO stop; the basket "
+                         "trail arms at the second leg on the blended cost")}
+
+    async def complete_magnifier_entry(self) -> Dict[str, Any]:
+        """MAGNIFIER split-entry PHASE 2 (the 09:16 leg): place the remaining half,
+        AVERAGE it into each position (blended cost), freeze the invested basis on
+        the blended basket, place the per-position broker backup (SL-M for MIS),
+        then set mag_entry_complete=1 so the tick/ws trail engages FROM the blended
+        cost. Idempotent (already-complete → no-op). ALWAYS marks complete at the
+        end (even if a second leg fails) so the trail/square-off engages on the
+        filled basket rather than staying dormant forever."""
+        if self._magnifier_entry_complete():
+            return {"session_id": self.session_id, "already_complete": True,
+                    "strategy": "intraday_magnifier"}
+        if not self.brokers:
+            self._build_brokers()
+        from .capital import CapitalAllocator
+        plan = self._load_mag_leg2_plan()
+        prof_by_id = {p.profile_id: p for p in self.config.broker_profiles}
+        by_prof: Dict[str, List[Dict[str, Any]]] = {}
+        for item in plan:
+            by_prof.setdefault(item["profile_id"], []).append(item)
+        placed: List[Dict[str, Any]] = []
+        for pid, items in by_prof.items():
+            prof = prof_by_id.get(pid)
+            if prof is None or not getattr(prof, "enabled", True):
+                continue
+            broker = self.brokers.get(pid)
+            if broker is None:
+                continue
+            allocator = CapitalAllocator(self.config)
+            syms = [it["symbol"] for it in items]
+            try:
+                cache = allocator.prefetch(syms, broker)
+            except Exception:  # pragma: no cover
+                cache = {}
+            quote_cache: Dict[str, Any] = {}
+            if getattr(self.config, "execution_mode", "market") == "marketable_limit":
+                try:
+                    quote_cache = broker.get_quotes(syms) or {}
+                except Exception:  # pragma: no cover
+                    quote_cache = {}
+            for it in items:
+                pick = Pick(symbol=it["symbol"], rank=0, score=0.0, sector=None,
+                            close_at_signal=None, n_fires=None, avg_lift=None)
+                try:
+                    r = await self._place_one(
+                        broker, prof, pick, float(it.get("amount") or 0.0),
+                        allocator, prefetch=cache, forced_qty=int(it["qty"]),
+                        quote=quote_cache.get(it["symbol"]), register_mode="add")
+                except Exception as e:  # per-leg isolation
+                    log.error("magnifier second leg crashed for %s: %s",
+                              it["symbol"], e)
+                    r = {"symbol": it["symbol"], "status": "FAILED",
+                         "error": str(e)}
+                placed.append(r)
+        # BOTH legs now in → freeze the invested basis on the BLENDED basket.
+        try:
+            self.monitor.freeze_invested_basis()
+        except Exception as e:  # never block on the basis capture
+            log.warning("magnifier invested_basis freeze failed for %s: %s",
+                        self.session_id, e)
+        try:
+            self.monitor.freeze_entry_basket_notional()
+        except Exception:  # pragma: no cover
+            pass
+        # NOW place the per-position broker backup (SL-M for MIS) on the blended
+        # cost — the FIRST stop this basket has ever had (arming, deferred).
+        try:
+            if self.config.per_position_gtt_enabled and self.gtt_manager:
+                self.gtt_manager.backfill_missing()
+        except Exception as e:
+            log.warning("magnifier GTT/SL-M backfill failed for %s: %s",
+                        self.session_id, e)
+        # ARM the trail: from the next tick the intraday trail engine runs on the
+        # blended-cost basket.
+        self._set_magnifier_entry_complete(True)
+        n_filled = sum(1 for p in placed
+                       if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE",
+                                               "DRY_RUN"))
+        log.info("magnifier %s: second leg done (%d legs) — trail ARMED on blended "
+                 "cost", self.session_id, n_filled)
+        return {"session_id": self.session_id, "status": self._current_status(),
+                "strategy": "intraday_magnifier", "magnifier_stage": 2,
+                "magnifier_entry_complete": True, "n_placed": n_filled,
+                "orders": placed}
 
     async def _fire_tesla_initial(self) -> Dict[str, Any]:
         """Initial fill for a tesla_short session: fill whatever seats have a

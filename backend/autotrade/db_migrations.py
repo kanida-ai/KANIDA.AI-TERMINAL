@@ -393,6 +393,44 @@ def run_migrations() -> dict:
                     "ALTER TABLE autotrade_positions ADD COLUMN slm_order_id TEXT")
                 added_cols.append("slm_order_id")
 
+        # ── 2k. FALCON INTRADAY MAGNIFIER — split-entry / deferred-arm state ──
+        # A Magnifier session (strategy=='intraday_magnifier') fills its basket in
+        # TWO legs (50% @ 09:15, 50% @ 09:16) and arms NO stop/trail until BOTH
+        # legs are in (the core edge). These NULLABLE columns make that two-phase
+        # entry restart-durable:
+        #   mag_entry_complete (INT 0/1): 0 while only the 09:15 leg is filled (the
+        #     tick keeps the trail/stop DORMANT); 1 once the 09:16 leg is in and the
+        #     basket trail is armed on the BLENDED cost. DEFAULT 0.
+        #   mag_leg2_plan_json (TEXT): the second-leg plan (per-name remaining qty +
+        #     broker_profile) captured at 09:15 so a restart between 09:15 and 09:16
+        #     can still complete the second leg. NULL for every non-Magnifier row.
+        # Additive + idempotent; every existing/non-Magnifier session ignores them.
+        if _table_exists(con, "autotrade_sessions"):
+            have = set(_existing_columns(con, "autotrade_sessions"))
+            if "mag_entry_complete" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_sessions "
+                    "ADD COLUMN mag_entry_complete INTEGER NOT NULL DEFAULT 0")
+                added_cols.append("mag_entry_complete")
+            if "mag_leg2_plan_json" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_sessions "
+                    "ADD COLUMN mag_leg2_plan_json TEXT")
+                added_cols.append("mag_leg2_plan_json")
+
+        # ── 2l. CAMPAIGN TYPE on the ladder — positional (default) vs magnifier ─
+        # campaign_type distinguishes the existing POSITIONAL Auto-Ladder (default,
+        # byte-for-byte unchanged) from the INTRADAY MAGNIFIER monthly campaign
+        # (MIS intraday children squared off same day). NULL/'positional' = the
+        # existing behaviour. Additive + idempotent.
+        if _table_exists(con, "autotrade_ladders"):
+            have = set(_existing_columns(con, "autotrade_ladders"))
+            if "campaign_type" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_ladders "
+                    "ADD COLUMN campaign_type TEXT NOT NULL DEFAULT 'positional'")
+                added_cols.append("campaign_type")
+
         # ── 2j. CLUSTER 9 ITEM 5 — order_events dedup key now includes the
         # broker_profile (COALESCE'') so the SAME broker_order_id on two different
         # accounts/brokers never false-dedups. The new profile-scoped UNIQUE index
@@ -411,6 +449,7 @@ def run_migrations() -> dict:
             "broker_accounts", "autotrade_ladders", "autotrade_recon_alerts",
             "autotrade_order_events", "autotrade_alerts", "autotrade_claims",
             "autotrade_config_edits", "autotrade_session_account_allocations",
+            "strategy_visibility",
         ):
             if _table_exists(con, t):
                 created_tables.append(t)
@@ -818,6 +857,21 @@ CREATE TABLE IF NOT EXISTS autotrade_claims (
     holder       TEXT,               -- optional holder tag (pid/host/diag)
     leased_until TEXT NOT NULL,      -- ISO IST; claim is live while now < this
     created_at   TEXT NOT NULL       -- ISO IST when (re)claimed
+);
+
+-- ── STRATEGY VISIBILITY (admin-controlled per-strategy show/hide) ────────────
+-- An admin toggle deciding whether a given strategy is offered to NON-admin
+-- power users in the create-form strategy list. A row here is an EXPLICIT admin
+-- override; when NO row exists the effective visibility falls back to the
+-- registry descriptor's default_visible (see strategy_registry.py) — so an
+-- experimental strategy (Falcon BTST Oscillator, Falcon Intraday Magnifier)
+-- ships HIDDEN until an admin flips it, while the long-shipped strategies stay
+-- visible. Admins ALWAYS see every strategy regardless of this table.
+CREATE TABLE IF NOT EXISTS strategy_visibility (
+    strategy_id             TEXT PRIMARY KEY,       -- registry strategy_id
+    visible_to_power_users  INTEGER NOT NULL DEFAULT 0,  -- 0 hidden | 1 visible
+    updated_by              TEXT,                   -- admin user_id / 'operator'
+    updated_at              TEXT
 );
 """
 

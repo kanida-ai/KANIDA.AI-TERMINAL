@@ -248,6 +248,31 @@ class TradingSessionConfig:
     # c302236) → warm per-minute recompute is now <10s. Set False to fall back.
     tesla_incremental_read: bool = True
 
+    # ── FALCON INTRADAY MAGNIFIER (strategy=="intraday_magnifier" only) ───────
+    # A NEW intraday strategy (NOT a variant of intraday_basket). It fills the
+    # basket in TWO legs and arms NO stop/trail until BOTH legs are in — the core
+    # edge (dodging the opening-whipsaw stop-out). All knobs inert unless the
+    # magnifier strategy is selected. It REUSES the intraday_basket trail EXIT
+    # machinery (arm/floor/giveback/stop on the capital basis) + the 15:29
+    # square-off; only the ENTRY (split + deferred arm) + the Top-15 high-tier
+    # selection are new. Locked to EQ + MIS + long (5× intraday), validated below.
+    #   magnifier_split_fraction        : fraction of each name's TARGET qty filled
+    #                                     at the first (09:15) leg; the remainder
+    #                                     fills at the second leg. 0.5 = the spec's
+    #                                     50/50. FRACTION in (0, 1).
+    #   magnifier_second_leg_offset_sec : seconds after entry_time to fire the
+    #                                     SECOND leg (60 = the spec's 09:16). The
+    #                                     basket trail arms only AFTER this leg
+    #                                     fills, on the BLENDED cost.
+    #   magnifier_high_tier             : the SIGNAL tiers counted as "high-tier".
+    #                                     Defaults to the spec's set; validated
+    #                                     against the real signal_tier vocabulary.
+    magnifier_split_fraction: float = 0.5
+    magnifier_second_leg_offset_sec: int = 60
+    magnifier_high_tier: List[str] = field(default_factory=lambda: [
+        "ENTERPRISE-Dryup", "GOLD", "GOLD-baseline",
+        "PREMIUM-Compression", "PREMIUM-Pullback"])
+
     # Position sizing
     sizing_mode: str = "equal"             # equal | pct_cap | manual
     max_pct_per_position: float = 0.05
@@ -835,7 +860,7 @@ class TradingSessionConfig:
         if self.top_n_stocks <= 0:
             raise ValueError("top_n_stocks must be > 0")
         if self.strategy not in ("portfolio_kill_switch", "intraday_basket",
-                                 "tesla_short"):
+                                 "tesla_short", "intraday_magnifier"):
             raise ValueError(f"invalid strategy: {self.strategy}")
         # Defensive units check: these percentages are FRACTIONS (0.01 = 1%), not
         # whole-number percents. The UI has historically sent 1.0 (intending
@@ -1018,6 +1043,74 @@ class TradingSessionConfig:
                     f"square_off_time ({self.square_off_time}) must be after "
                     f"entry_time ({self.entry_time})")
 
+        # ── FALCON INTRADAY MAGNIFIER — validate when the strategy is selected ─
+        # Locked to EQ + MIS + long (5× intraday). Reuses the intraday trail EXIT
+        # knobs (arm/floor/giveback/stop) + the split-entry knobs. Additive; never
+        # blocks another strategy.
+        if self.strategy == "intraday_magnifier":
+            if self.direction != "long":
+                raise ValueError(
+                    "intraday_magnifier is long-only — set direction='long'")
+            if not (self.instrument_type == "EQ" and self.order_product == "MIS"):
+                raise ValueError(
+                    "intraday_magnifier trades EQUITY INTRADAY (5× MIS) ONLY — set "
+                    "instrument_type='EQ' and order_product='MIS' (got "
+                    f"instrument_type={self.instrument_type}, "
+                    f"order_product={self.order_product})")
+            if self.square_off_enabled is False:
+                raise ValueError(
+                    "intraday_magnifier is MIS intraday — square_off_enabled must "
+                    "be True (no overnight carry)")
+            # Split-entry knobs.
+            if not (0.0 < float(self.magnifier_split_fraction) < 1.0):
+                raise ValueError(
+                    "magnifier_split_fraction must be a fraction in (0, 1) "
+                    f"(0.5 = 50/50), got {self.magnifier_split_fraction}")
+            if int(self.magnifier_second_leg_offset_sec) < 1:
+                raise ValueError(
+                    "magnifier_second_leg_offset_sec must be an integer >= 1 "
+                    f"(seconds after entry), got {self.magnifier_second_leg_offset_sec}")
+            # high-tier set must be non-empty + drawn from the REAL signal_tier
+            # vocabulary (never an invented tier that would silently match nothing).
+            if not self.magnifier_high_tier:
+                raise ValueError("magnifier_high_tier must be a non-empty list")
+            _VALID_TIERS = {
+                "PREMIUM-Pullback", "PREMIUM-Compression", "ENTERPRISE-Dryup",
+                "GOLD", "GOLD-baseline", "STANDARD", "STANDARD-weak", "AVOID"}
+            _bad = [t for t in self.magnifier_high_tier if t not in _VALID_TIERS]
+            if _bad:
+                raise ValueError(
+                    f"magnifier_high_tier has unknown tier(s) {_bad}; valid tiers: "
+                    f"{sorted(_VALID_TIERS)}")
+            # Reuse the intraday trail EXIT knobs (capital basis).
+            for nm, v in (("arm_pct", self.arm_pct),
+                          ("floor_pct", self.floor_pct),
+                          ("trail_giveback_pct", self.trail_giveback_pct),
+                          ("stop_pct", self.stop_pct)):
+                if not (0.0 < float(v) <= 0.5):
+                    raise ValueError(
+                        f"{nm} must be a fraction in (0, 0.5] (e.g. 0.01 = 1%), "
+                        f"got {v}")
+            if self.floor_pct > self.arm_pct + 1e-12:
+                raise ValueError(
+                    f"floor_pct ({self.floor_pct}) must be <= arm_pct "
+                    f"({self.arm_pct})")
+            try:
+                _me_s = _parse_clock_to_seconds(self.entry_time)
+                _mq_s = _parse_clock_to_seconds(self.square_off_time)
+            except ValueError as e:
+                raise ValueError(f"intraday_magnifier clock {e}")
+            if _mq_s <= _me_s:
+                raise ValueError(
+                    f"square_off_time ({self.square_off_time}) must be after "
+                    f"entry_time ({self.entry_time})")
+            # Basket size bound (same 3..50 rule as intraday_basket): the traded
+            # set is the high-tier subset of the Top-N, so validate top_n_stocks.
+            if self.top_n_stocks < 3 or self.top_n_stocks > 50:
+                raise ValueError(
+                    "intraday_magnifier top_n_stocks must be 3..50 (the ranked "
+                    f"pool to draw the high-tier basket from), got {self.top_n_stocks}")
+
         # MULTI-SESSION MAX-HOLD CAP: a non-negative integer (0 = no cap).
         # Meaningful only for a POSITIONAL intraday_basket; on an intraday
         # (square_off_enabled=True) session it is redundant (the daily square-off
@@ -1112,7 +1205,8 @@ class TradingSessionConfig:
             _mis_s = _parse_clock_to_seconds(self.mis_square_off_time)
         except ValueError as e:
             raise ValueError(f"mis_square_off_time {e}")
-        if self.strategy in ("intraday_basket", "tesla_short"):
+        if self.strategy in ("intraday_basket", "tesla_short",
+                             "intraday_magnifier"):
             try:
                 _sq_s = _parse_clock_to_seconds(self.square_off_time)
             except ValueError:
@@ -1227,6 +1321,14 @@ class TradingSessionConfig:
                 d.get("tesla_vectorized_features", True)),
             tesla_incremental_read=bool(
                 d.get("tesla_incremental_read", True)),
+            magnifier_split_fraction=float(
+                d.get("magnifier_split_fraction", 0.5)),
+            magnifier_second_leg_offset_sec=int(
+                d.get("magnifier_second_leg_offset_sec", 60)),
+            magnifier_high_tier=(list(d["magnifier_high_tier"])
+                                 if d.get("magnifier_high_tier") is not None
+                                 else ["ENTERPRISE-Dryup", "GOLD", "GOLD-baseline",
+                                       "PREMIUM-Compression", "PREMIUM-Pullback"]),
             sizing_mode=d.get("sizing_mode", "equal"),
             max_pct_per_position=float(d.get("max_pct_per_position", 0.05)),
             manual_amounts=d.get("manual_amounts", {}) or {},

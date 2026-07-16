@@ -310,8 +310,16 @@ class SavePresetRequest(BaseModel):
 # ── LADDER ORCHESTRATOR request models ────────────────────────────────────────
 
 class CreateLadderRequest(BaseModel):
-    total_capital: float = Field(..., description="Deployed-capital ceiling (₹)")
-    order_product: str = Field("CNC", description="CNC | MTF (MIS rejected)")
+    total_capital: float = Field(..., description="Deployed-capital ceiling (₹); "
+                                 "for the magnifier campaign this is the cash/day")
+    # campaign_type: 'positional' (DEFAULT, the existing Auto-Ladder) or
+    # 'magnifier' (Falcon Intraday Magnifier — MIS intraday children, one basket
+    # per trading day squared off same evening). Additive; omitting it is
+    # byte-for-byte the existing positional ladder.
+    campaign_type: str = Field(
+        "positional", description="positional (default) | magnifier")
+    order_product: str = Field("CNC", description="CNC | MTF (positional); MIS is "
+                               "forced for magnifier")
     mode: str = Field("paper", description="'paper' (default) | 'live'")
     user_id: Optional[str] = Field(None, description="Portal user id (optional)")
     broker_account_id: Optional[str] = Field(
@@ -896,6 +904,7 @@ def ladder_create(req: CreateLadderRequest,
     try:
         lad = LadderCampaign.create(
             total_capital=req.total_capital, order_product=req.order_product,
+            campaign_type=req.campaign_type,
             mode=mode, user_id=owner_user_id,
             broker_account_id=req.broker_account_id,
             end_date=req.end_date, end_date_mode=req.end_date_mode,
@@ -903,6 +912,53 @@ def ladder_create(req: CreateLadderRequest,
     except ValueError as e:
         raise HTTPException(400, str(e))
     return lad.to_status()
+
+
+# ── STRATEGY REGISTRY + admin-controlled visibility ─────────────────────────────
+
+class StrategyVisibilityRequest(BaseModel):
+    strategy_id: str = Field(..., description="Registry strategy_id")
+    visible: bool = Field(..., description="Show to non-admin power users?")
+
+
+@router.get("/autotrade/strategies")
+def list_strategies(caller: Caller = Depends(resolve_caller)):
+    """The create-form strategy list, filtered for the caller:
+      * admin (operator / JWT role admin) → EVERY strategy, each annotated with
+        visible_to_power_users + visibility_overridden + default_visible;
+      * non-admin power user → ONLY strategies visible to power users.
+    Falcon BTST Oscillator + Falcon Intraday Magnifier ship HIDDEN (default) →
+    a non-admin does not see them until an admin enables them."""
+    from .. import strategy_registry
+    caller = _caller(caller)
+    return {"strategies": strategy_registry.list_for_caller(caller.is_admin)}
+
+
+@router.get("/autotrade/admin/strategies")
+def admin_list_strategies(caller: Caller = Depends(resolve_caller)):
+    """ADMIN: every strategy + its effective visible-to-power-users flag."""
+    from .. import strategy_registry
+    caller = _caller(caller)
+    if not caller.is_admin:
+        raise HTTPException(403, "admin only")
+    return {"strategies": strategy_registry.list_for_caller(is_admin=True)}
+
+
+@router.post("/autotrade/admin/strategy-visibility")
+def admin_set_strategy_visibility(req: StrategyVisibilityRequest,
+                                  caller: Caller = Depends(resolve_caller)):
+    """ADMIN: show/hide a strategy for non-admin power users."""
+    from .. import strategy_registry
+    caller = _caller(caller)
+    if not caller.is_admin:
+        raise HTTPException(403, "admin only")
+    try:
+        res = strategy_registry.set_visibility(
+            req.strategy_id, req.visible,
+            updated_by=(caller.user_id or "operator"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return res
 
 
 @router.post("/autotrade/ladder/{ladder_id}/start")

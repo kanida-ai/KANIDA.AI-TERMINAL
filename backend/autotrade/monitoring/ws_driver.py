@@ -325,8 +325,16 @@ class _WSDriver:
         # giveback/floor trigger, hard stop, square-off) — mirrors session.tick's
         # intraday branch. State changes are persisted so a restart resumes the
         # trail; on EXIT we reuse kill_switch.fire with the trail close_reason.
-        if getattr(sess.config, "strategy", "portfolio_kill_switch") \
-                == "intraday_basket":
+        _strat = getattr(sess.config, "strategy", "portfolio_kill_switch")
+        if _strat in ("intraday_basket", "intraday_magnifier"):
+            # MAGNIFIER DEFERRED ARM (core edge): while the split entry is still
+            # incomplete (only the 09:15 half-leg is in) the stop/trail is DORMANT
+            # — skip the sub-second trail entirely until BOTH legs are filled and
+            # the basket is armed on the blended cost (the 5s square-off scheduler
+            # is still the flatten safety net if the second leg never completes).
+            if _strat == "intraday_magnifier" and \
+                    not sess._magnifier_entry_complete():
+                return
             from . import trail_engine
             # CAPITAL-BASIS TRAIL (2026-07-07): the intraday trail decides on the
             # ALLOCATED-CAPITAL gross return (÷ total_allocated_capital), NOT the
