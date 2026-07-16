@@ -41,6 +41,7 @@ import { PortfolioAutoTrade } from '@/components/power/autotrade/PortfolioAutoTr
 import { BrokerAccountsPanel } from '@/components/power/autotrade/BrokerAccountsPanel'
 import { TradeJournalPanel } from '@/components/power/autotrade/TradeJournalPanel'
 import { PnlDashboard } from '@/components/power/autotrade/PnlDashboard'
+import { StrategyVisibilityPanel } from '@/components/power/autotrade/StrategyVisibilityPanel'
 
 // Legacy operator screens — reused verbatim (default exports rendered as tabs).
 import PremarketPage from '@/app/falcon/premarket/page'
@@ -49,24 +50,25 @@ import TrailConfigPage from '@/app/falcon/config/page'
 import FalconAdminPage from '@/app/falcon/admin/page'
 import FalconTradePage from '@/app/falcon/trade/page'
 
-type Tab = 'sessions' | 'journal' | 'pnl' | 'brokers' | 'trade' | 'premarket' | 'positions' | 'config' | 'engine'
+type Tab = 'sessions' | 'journal' | 'pnl' | 'brokers' | 'trade' | 'premarket' | 'positions' | 'config' | 'engine' | 'strategies'
 
 const TABS: { id: Tab; label: string; icon: (n: number) => React.ReactNode }[] = [
-  { id: 'sessions',  label: 'Sessions',       icon: ICON.bolt },
-  { id: 'journal',   label: 'Journal',        icon: ICON.book },
-  { id: 'pnl',       label: 'P&L',            icon: ICON.wallet },
-  { id: 'brokers',   label: 'Broker accounts', icon: ICON.link },
-  { id: 'trade',     label: 'Trade',          icon: ICON.arrow },
-  { id: 'premarket', label: 'Pre-Market',     icon: ICON.clock },
-  { id: 'positions', label: 'Positions',      icon: ICON.shield },
-  { id: 'config',    label: 'Config',         icon: ICON.trend },
-  { id: 'engine',    label: 'Engine',         icon: ICON.bot },
+  { id: 'sessions',   label: 'Sessions',        icon: ICON.bolt },
+  { id: 'journal',    label: 'Journal',         icon: ICON.book },
+  { id: 'pnl',        label: 'P&L',             icon: ICON.wallet },
+  { id: 'brokers',    label: 'Broker accounts', icon: ICON.link },
+  { id: 'trade',      label: 'Trade',           icon: ICON.arrow },
+  { id: 'premarket',  label: 'Pre-Market',      icon: ICON.clock },
+  { id: 'positions',  label: 'Positions',       icon: ICON.shield },
+  { id: 'config',     label: 'Config',          icon: ICON.trend },
+  { id: 'engine',     label: 'Engine',          icon: ICON.bot },
+  { id: 'strategies', label: 'Strategies',      icon: ICON.bot },
 ]
 
 // Read the initial tab from ?attab= (deep links point at ?attab=sessions&…).
 // Falls back to 'sessions'. Auto-Ladder is now a strategy INSIDE Sessions — it
-// is no longer a tab of its own.
-const VALID_TABS: Tab[] = ['sessions', 'journal', 'pnl', 'brokers', 'trade', 'premarket', 'positions', 'config', 'engine']
+// is no longer a tab of its own. 'strategies' = the admin visibility control.
+const VALID_TABS: Tab[] = ['sessions', 'journal', 'pnl', 'brokers', 'trade', 'premarket', 'positions', 'config', 'engine', 'strategies']
 function initialTab(): Tab {
   if (typeof window === 'undefined') return 'sessions'
   const t = new URLSearchParams(window.location.search).get('attab')
@@ -181,6 +183,13 @@ export function AutoTradePanel({ firstName, userId, jwt }: { firstName: string; 
             <div className="mt-4">
               <LegacyMount><FalconAdminPage /></LegacyMount>
             </div>
+          </div>
+        )}
+
+        {/* Strategies — ADMIN visibility control (which strategies power users see). */}
+        {tab === 'strategies' && (
+          <div className="mx-auto w-full max-w-3xl px-5 pb-10 sm:px-8 pt-4">
+            <StrategyVisibilityPanel />
           </div>
         )}
       </div>

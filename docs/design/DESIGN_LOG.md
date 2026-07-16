@@ -38,6 +38,62 @@ Spec lives in `docs/specs/FALCON_AI_FRONTEND_PLAN.md`.
 
 ## Feedback / change entries
 <!-- newest first; falcon-ui appends here -->
+- 2026-07-15 — **AutoTrade · three operator asks: (3) Falcon Intraday Magnifier
+  strategy, (2) admin-controlled strategy visibility, (1) rename BTST →
+  "Falcon BTST Oscillator".** Built to backend contracts a parallel autotrade
+  build is implementing; operator reconciles drift at integration. UI-ONLY, no
+  execution path touched. Files: `lib/autotrade-api.ts`,
+  `components/power/autotrade/PortfolioAutoTrade.tsx`,
+  `components/power/autotrade/AutoTradePanel.tsx`, and NEW
+  `components/power/autotrade/StrategyVisibilityPanel.tsx`. `npx tsc --noEmit`
+  clean (EXIT 0) + `npx next build` ✓ (`/power/autotrade` + all routes intact).
+  NOT committed (operator ships).
+  - **(3) MAGNIFIER — a SEPARATE strategy, not folded into Dynamic/BTST.** New
+    `magnifier` UI-construct strategy option (like `auto_ladder`): its own entry in
+    the create-form strategy selector with a read-only mint "validated preset" card
+    (Falcon Top-15 high-tier ~9 names/day · MIS 5× · split entry 50%@09:15 +
+    50%@09:16 blended cost · stop/trail arms only at 09:16, no stop on the 09:15 leg
+    · trail arm6/floor2/giveback5/stop3 capital basis · square-off 15:29 · monthly
+    rolling). The ONLY operator input is **"Cash per day"** (₹, never hardcoded) +
+    Duration; the card shows the 5× notional (cash×5) and ~per-name (÷~9) computed
+    LIVE. When Magnifier is selected the entire STANDARD config region is hidden
+    (wrapped `{!isMagnifier && (<>…</>)}`), so positional/BTST/dynamic/tesla/fixed
+    paths are byte-identical when it isn't. Create is a THIN isolated call —
+    `AutoTradeAPI.magnifierCreate(body)` → POST `/ladder/create` body `{ strategy:
+    'falcon_intraday_magnifier', cash_per_day, order_product:'MIS', end_date_mode,
+    mode, preset:{…all knobs…}, user_id?, broker_account_id? }` → returns
+    `ladder_id`, reusing the campaign CREATED phase (Start now / Schedule via
+    `ladderStart`). `MAGNIFIER_PRESET` + `MAGNIFIER_STRATEGY_ID` are single rewire
+    points. Preview is skipped for Magnifier.
+  - **(2) ADMIN strategy visibility.** New admin-gated **"Strategies"** sub-tab in
+    the operator `AutoTradePanel` (the existing admin/operator AutoTrade area —
+    rendered only for `role==='admin'`; not a new top-level portal mode). Clean
+    per-strategy on/off list ("Visible to Power Users") via
+    `AutoTradeAPI.adminStrategies()` (GET `/admin/strategies`) +
+    `setStrategyVisibility(id, visible)` (POST `/admin/strategy-visibility`), with a
+    note that new/experimental strategies default OFF. The create-form strategy
+    selector now consumes the caller-appropriate list from
+    `AutoTradeAPI.strategies()` (GET `/strategies`) — `STRATEGY_OPTIONS` are
+    intersected with the returned `strategy_id`s (each option carries a stable
+    `backendId` + `experimental` flag), so hidden strategies (Magnifier, and the
+    BTST Oscillator preset gated on `falcon_btst_oscillator`) don't appear for power
+    users; admins see all. Fail-safe when the endpoint is absent: admins see
+    everything, power users see non-experimental only. A selected-then-hidden
+    strategy snaps back to the default.
+  - **(1) RENAME.** Every user-facing occurrence of the Auto-Ladder BTST 2-session
+    preset now reads **"Falcon BTST Oscillator"** (preset toggle label, summary-card
+    title + copy, capital/product hints, the "BTST Oscillator" preset tag). The
+    wire value/key is UNCHANGED (`ladderPreset='btst'` → `child_config
+    {max_hold_sessions:2, arm_pct:0.5}`). The BTST *persona* (`btst-trader`,
+    launch-pending) is a different concept and was left untouched.
+  - **Backend needs:** GET `/api/autotrade/strategies` → `{ strategies:[{
+    strategy_id, label, visible_to_power_users }] }` (caller-appropriate: admin all,
+    power user enabled-only); GET `/api/autotrade/admin/strategies` (all + flag);
+    POST `/api/autotrade/admin/strategy-visibility {strategy_id, visible}`; and the
+    Magnifier campaign create (path/shape above) + its `ladderStart` lifecycle.
+    Strategy_ids the UI keys on: `portfolio_kill_switch`, `intraday_basket`,
+    `auto_ladder`, `tesla_short`, `falcon_intraday_magnifier`,
+    `falcon_btst_oscillator`. UI degrades gracefully until each lands.
 - 2026-07-14 — **AutoTrade · Auto-Ladder (monthly campaign) create · "Falcon BTST"
   preset.** Additive wiring so the operator can create + arm Falcon BTST end-to-end
   in the UI (backend already supports it, commit c31804f — no backend change). Two

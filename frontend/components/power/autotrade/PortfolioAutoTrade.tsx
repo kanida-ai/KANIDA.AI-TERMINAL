@@ -42,6 +42,8 @@ import {
   type UniverseFilter, type PickItem, type PicksResponse,
   type LadderProduct, type LadderEndMode, type LadderKillMode, type LadderStatusName,
   type LadderStatus, type LadderSummary, type LadderChildConfig,
+  type MagnifierCreateBody, type MagnifierPreset,
+  MAGNIFIER_STRATEGY_ID,
 } from '@/lib/autotrade-api'
 
 // ── Safe defaults — paper + kill switch OFF, per the ships-disabled contract ──
@@ -180,17 +182,61 @@ function validateIntradayStepLock(c: SessionConfig): string | null {
 // NOT a backend strategy: selecting it builds a Falcon Positional Auto-Ladder
 // (a monthly campaign) whose children are positional intraday_basket sessions,
 // created via the LADDER API (ladderCreate → ladderStart), never session/create.
-type UiStrategy = Strategy | 'auto_ladder'
+type UiStrategy = Strategy | 'auto_ladder' | 'magnifier'
+
+// Each UI option carries a stable `backendId` (the strategy_id the admin
+// visibility system keys on — the create-form selector shows an option ONLY when
+// its backendId is in the caller-appropriate list the backend returns) and an
+// optional `experimental` flag (new/experimental strategies default OFF for power
+// users, so if the visibility endpoint isn't reporting yet we fail safe by hiding
+// them from non-admins). The Falcon Intraday Magnifier is a SEPARATE strategy — a
+// monthly rolling MIS 5× campaign — not folded into Dynamic (Trailing) or BTST.
+type StrategyOption = { id: UiStrategy; label: string; backendId: string; experimental?: boolean }
 
 // Protection mode = the exit engine. 'Fixed' is the flat ±% kill switch;
 // 'Dynamic (Trailing)' is the arm-and-trail intraday basket; 'Auto-Ladder' is
-// the set-once monthly campaign (positional baskets rolled daily by the backend).
-const STRATEGY_OPTIONS: { id: UiStrategy; label: string }[] = [
-  { id: 'portfolio_kill_switch', label: 'Fixed — flat ±% basket exit (kill switch)' },
-  { id: 'intraday_basket',       label: 'Dynamic (Trailing) — arm, lock a floor & trail, square-off' },
-  { id: 'auto_ladder',           label: 'Falcon Positional — Auto-Ladder (monthly campaign)' },
-  { id: 'tesla_short',           label: 'Falcon Tesla (order-flow short) — intraday MIS seat rotation' },
+// the set-once monthly campaign (positional baskets rolled daily by the backend);
+// 'Magnifier' is the Top-15 high-tier MIS 5× intraday split-entry campaign.
+const STRATEGY_OPTIONS: StrategyOption[] = [
+  { id: 'portfolio_kill_switch', label: 'Fixed — flat ±% basket exit (kill switch)',                   backendId: 'portfolio_kill_switch' },
+  { id: 'intraday_basket',       label: 'Dynamic (Trailing) — arm, lock a floor & trail, square-off',  backendId: 'intraday_basket' },
+  { id: 'auto_ladder',           label: 'Falcon Positional — Auto-Ladder (monthly campaign)',          backendId: 'auto_ladder' },
+  { id: 'tesla_short',           label: 'Falcon Tesla (order-flow short) — intraday MIS seat rotation', backendId: 'tesla_short' },
+  { id: 'magnifier',             label: 'Falcon Intraday Magnifier — Top-15 high-tier · MIS 5×',        backendId: MAGNIFIER_STRATEGY_ID, experimental: true },
 ]
+
+// The Falcon BTST Oscillator campaign is a PRESET inside Auto-Ladder, but its
+// visibility is toggled on its OWN strategy_id (so an admin can hide it from power
+// users until enabled). experimental = default OFF for non-admins on a cold list.
+const BTST_STRATEGY_ID = 'falcon_btst_oscillator'
+
+// ── Falcon Intraday Magnifier PRESET (validated, read-only) ───────────────────
+// The operator only sizes it with a single "cash per day" input; every knob below
+// is fixed. MIS 5×, Falcon Top-15 high-tier (~9 names/day). Split entry: 50% @
+// 09:15 open + 50% @ 09:16 (blended cost); the stop/trail arms ONLY at 09:16 on
+// the blended cost (no stop on the 09:15 leg — the opening-whipsaw guard). Trail:
+// arm 6 / floor 2 / giveback 5 / stop 3 (capital basis). Square-off 15:29. Monthly
+// rolling campaign. These values are sent verbatim in the create body for the
+// backend to verify/echo — the UI never lets the operator edit them.
+const MAGNIFIER_LEVERAGE = 5
+const MAGNIFIER_NAMES_PER_DAY = 9    // ~9 high-tier names/day out of Top-15
+const MAGNIFIER_PRESET: MagnifierPreset = {
+  top_n: 15,
+  tier_filter: 'high',
+  leverage: MAGNIFIER_LEVERAGE,
+  order_product: 'MIS',
+  split_entry: [
+    { fraction: 0.5, time: '09:15:00' },
+    { fraction: 0.5, time: '09:16:00' },
+  ],
+  stop_arm_time: '09:16:00',
+  arm_pct: 6,
+  floor_pct: 2,
+  trail_giveback_pct: 5,
+  stop_pct: 3,
+  trail_basis: 'capital',
+  square_off_time: '15:29:00',
+}
 
 // ── Falcon TESLA (tesla_short) PRESET ─────────────────────────────────────────
 // The order-flow-native intraday SHORT capital-ROTATION engine. The backend FORCES
@@ -243,7 +289,7 @@ const TESLA_GRADE_OPTIONS: { id: 'A++' | 'A+++'; label: string }[] = [
 type LadderPreset = 'positional' | 'btst'
 const LADDER_PRESET_OPTIONS: { id: LadderPreset; label: string; hint: string }[] = [
   { id: 'positional', label: 'Positional (3-session)', hint: 'Falcon Top-5 held ~3 sessions — the default monthly positional campaign.' },
-  { id: 'btst',       label: 'Falcon BTST (2-session)', hint: 'Falcon Top-5 bought 09:15, sold Day-2 15:29 · CNC, no leverage · no trail · −6% stop.' },
+  { id: 'btst',       label: 'Falcon BTST Oscillator', hint: 'Falcon Top-5 bought 09:15, sold Day-2 15:29 · CNC, no leverage · no trail · −6% stop.' },
 ]
 
 // Campaign Duration options (Auto-Ladder only). Maps to LadderEndMode on the wire.
@@ -705,11 +751,41 @@ export function PortfolioAutoTrade({
   // the campaign create path; the other two map 1:1 to config.strategy.
   const [uiStrategy, setUiStrategy] = useState<UiStrategy>('portfolio_kill_switch')
   const isLadder = uiStrategy === 'auto_ladder'
+  // Falcon Intraday Magnifier — a SEPARATE strategy (its own monthly rolling MIS 5×
+  // campaign). Like auto_ladder it's a UI construct that drives a dedicated create
+  // call; under the hood config.strategy is set to 'intraday_basket' so shared
+  // machinery doesn't choke, but the whole standard config region is hidden and a
+  // read-only validated preset is shown instead.
+  const isMagnifier = uiStrategy === 'magnifier'
   // Falcon Tesla (order-flow short) — a real backend strategy (unlike auto_ladder).
   // isTesla drives the read-only EQ/MIS/short controls + the seat-model knobs;
   // trailStrategy = the two strategies that share the intraday trail EXIT card.
   const isTesla = config.strategy === 'tesla_short'
   const trailStrategy = config.strategy === 'intraday_basket' || isTesla
+
+  // ── Admin-controlled strategy visibility ────────────────────────────────────
+  // The backend returns the caller-appropriate strategy list (admin → all; power
+  // user → enabled only). null = not-yet-loaded / endpoint absent → fail safe:
+  // admins see every option, power users see all non-experimental ones. Once the
+  // list loads, the selector shows ONLY options whose backendId is present.
+  const [visibleStrategyIds, setVisibleStrategyIds] = useState<Set<string> | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    AutoTradeAPI.strategies()
+      .then((res) => {
+        if (cancelled) return
+        const ids = (res.strategies ?? []).map((s) => s.strategy_id).filter(Boolean)
+        setVisibleStrategyIds(new Set(ids))
+      })
+      .catch(() => { if (!cancelled) setVisibleStrategyIds(null) })
+    return () => { cancelled = true }
+  }, [])
+  const strategyVisible = (o: StrategyOption): boolean =>
+    visibleStrategyIds == null ? (isAdmin || !o.experimental) : visibleStrategyIds.has(o.backendId)
+  const visibleStrategyOptions = STRATEGY_OPTIONS.filter(strategyVisible)
+  // The BTST Oscillator campaign preset gates on its OWN strategy_id.
+  const btstAllowed = visibleStrategyIds == null ? isAdmin : visibleStrategyIds.has(BTST_STRATEGY_ID)
+  const visibleLadderPresets = LADDER_PRESET_OPTIONS.filter((o) => o.id !== 'btst' || btstAllowed)
 
   // Campaign Duration (Auto-Ladder only) → LadderEndMode on the wire.
   const [ladderEndMode, setLadderEndMode] = useState<LadderEndMode>('month_end')
@@ -746,7 +822,7 @@ export function PortfolioAutoTrade({
   // Start-now / Schedule choice. It is rendered by the campaign CREATED phase
   // (phase==='created' && createdLadder && !session), parallel to the session
   // created-phase (phase==='created' && session).
-  const [createdLadder, setCreatedLadder] = useState<{ ladder_id: string; mode: Mode; product: LadderProduct } | null>(null)
+  const [createdLadder, setCreatedLadder] = useState<{ ladder_id: string; mode: Mode; product: LadderProduct | 'MIS' } | null>(null)
   // campaignDate — the picked future start day for Schedule (YYYY-MM-DD; '' = none).
   const [campaignDate, setCampaignDate] = useState<string>('')
   // busy flag for the campaign Start/Schedule action (parallel to `busy`).
@@ -856,6 +932,30 @@ export function PortfolioAutoTrade({
       setConfig((c) => ({ ...c, ...TESLA_PRESET, strategy: 'tesla_short', kill_switch_enabled: false }))
       return
     }
+    if (next === 'magnifier') {
+      // Falcon Intraday Magnifier (a SEPARATE strategy) — a fixed, validated MIS 5×
+      // monthly campaign. Under the hood we mark strategy 'intraday_basket' so the
+      // shared machinery is happy; the whole standard config region is hidden and a
+      // read-only preset card is shown. The create call is dedicated (magnifierCreate),
+      // NOT toWireConfig — so these values are just for a coherent internal state.
+      setConfig((c) => ({
+        ...c,
+        strategy: 'intraday_basket',
+        order_product: 'MIS',
+        instrument_type: 'EQ',
+        direction: 'long',
+        top_n_stocks: MAGNIFIER_PRESET.top_n,
+        entry_time: MAGNIFIER_PRESET.split_entry[0]?.time ?? '09:15:00',
+        arm_pct: MAGNIFIER_PRESET.arm_pct,
+        floor_pct: MAGNIFIER_PRESET.floor_pct,
+        trail_giveback_pct: MAGNIFIER_PRESET.trail_giveback_pct,
+        stop_pct: MAGNIFIER_PRESET.stop_pct,
+        square_off_time: MAGNIFIER_PRESET.square_off_time,
+        square_off_enabled: true,
+        kill_switch_enabled: false,
+      }))
+      return
+    }
     setConfig((c) => {
       if (next === 'intraday_basket') {
         return { ...c, ...INTRADAY_PRESET, strategy: next }
@@ -873,6 +973,18 @@ export function PortfolioAutoTrade({
       }
     })
   }
+
+  // If the visibility list loads and the currently-selected strategy is no longer
+  // permitted for this caller (e.g. a power user had a now-hidden strategy), snap
+  // back to the always-on default so a hidden strategy can't be created. Likewise
+  // fall back off the BTST Oscillator preset when it isn't allowed.
+  useEffect(() => {
+    if (visibleStrategyIds == null) return
+    const cur = STRATEGY_OPTIONS.find((o) => o.id === uiStrategy)
+    if (cur && !visibleStrategyIds.has(cur.backendId)) onStrategyChange('portfolio_kill_switch')
+    if (ladderPreset === 'btst' && !btstAllowed) setLadderPreset('positional')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleStrategyIds])
 
   // Switch Hold mode (Intraday ↔ Positional). Re-seeds that mode's validated
   // trail preset (arm/floor/giveback/stop + square-off + max-hold) — product,
@@ -1256,7 +1368,9 @@ export function PortfolioAutoTrade({
   // toWireConfig at the send boundary.
   const intraday = config.strategy === 'intraday_basket'
   useEffect(() => {
-    if (phase !== 'config' || (!intraday && !config.kill_switch_enabled)) {
+    // Magnifier is a fixed validated campaign sized by "cash per day" — it never
+    // shows the live sizing preview, so skip the estimate entirely for it.
+    if (phase !== 'config' || isMagnifier || (!intraday && !config.kill_switch_enabled)) {
       setPreview(null); setPreviewErr(null); setPreviewLoading(false)
       return
     }
@@ -1315,6 +1429,7 @@ export function PortfolioAutoTrade({
     brokerAccountId,
     toWireConfig,
     isLadder,
+    isMagnifier,
     perBasketCapital,
   ])
 
@@ -1664,6 +1779,40 @@ export function PortfolioAutoTrade({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, config.total_allocated_capital, config.order_product, ladderEndMode, ladderPreset, loadLadders, ladders, dupConfirm, userId, brokerAccountId])
 
+  // Falcon Intraday Magnifier — STEP 1: create the campaign (thin, isolated). The
+  // ONLY operator input is `cash_per_day` (stored in config.total_allocated_capital
+  // so the shared capital input can drive it); the validated preset is sent verbatim.
+  // Returns a ladder_id → the SAME campaign CREATED phase (Start now / Schedule)
+  // reused via createdLadder + onCampaignStart. NOTHING about the positional/BTST/
+  // dynamic paths changes when Magnifier isn't selected — this is a separate call.
+  const onCreateMagnifier = useCallback(async () => {
+    setError(null); setCampaignErr(null); setCampaignSuggest(null)
+    const cashPerDay = config.total_allocated_capital || 0
+    if (cashPerDay <= 0) { setError('Enter the cash per day first.'); return }
+    setDupConfirm(null); setBusy('create')
+    try {
+      const body: MagnifierCreateBody = {
+        total_capital: cashPerDay,
+        campaign_type: 'magnifier',
+        end_date_mode: ladderEndMode,
+        mode,
+        ...(userId != null ? { user_id: userId } : {}),
+        ...(brokerAccountId ? { broker_account_id: brokerAccountId } : {}),
+      }
+      const created = await AutoTradeAPI.magnifierCreate(body)
+      setCreatedLadder({ ladder_id: created.ladder_id, mode, product: 'MIS' })
+      setCampaignDate('')
+      setSession(null)
+      setPhase('created')
+      loadLadders()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not create the Magnifier campaign.')
+    } finally {
+      setBusy(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, config.total_allocated_capital, ladderEndMode, loadLadders, userId, brokerAccountId])
+
   // Auto-Ladder — STEP 2: start the held draft. `when==='now'` → ladderStart(id)
   // → RUNNING (first basket next trading morning). `when==='scheduled'` →
   // ladderStart(id, startDate) → SCHEDULED (auto-activates on that date). A
@@ -1876,8 +2025,8 @@ export function PortfolioAutoTrade({
     setCreateSuggest(null)
     // Clear any in-flight campaign draft (Auto-Ladder two-step).
     setCreatedLadder(null); setCampaignDate(''); setCampaignErr(null); setCampaignSuggest(null); setDupConfirm(null)
-    // Reset the strategy dropdown + campaign duration to defaults.
-    setUiStrategy('portfolio_kill_switch'); setLadderEndMode('month_end')
+    // Reset the strategy dropdown + campaign duration + preset to defaults.
+    setUiStrategy('portfolio_kill_switch'); setLadderEndMode('month_end'); setLadderPreset('positional')
     // Reset universe filter + picker
     setUniverseFilter('all500'); setPicks(null); setPicksErr(null); setCheckedSymbols(null); setTierFilter(new Set())
   }
@@ -2244,7 +2393,9 @@ export function PortfolioAutoTrade({
           <div className="mb-5">
             <Field
               label="Strategy"
-              hint={isLadder
+              hint={isMagnifier
+                ? 'Falcon Top-15 high-tier, MIS 5× intraday. Split entry (50% @ 09:15 + 50% @ 09:16, blended cost); stop/trail arms only at 09:16. Set it once — a monthly rolling campaign. A validated preset — you only choose the cash per day.'
+                : isLadder
                 ? 'Set it once — Falcon opens, manages and rolls a positional basket every trading day for the whole campaign. You never manage a basket.'
                 : isTesla
                 ? 'Order-flow-native intraday SHORT seat rotation — fills up to N seats from live A++/A+++ signals and back-fills a freed seat instantly. Equity · MIS · Short (fixed).'
@@ -2258,7 +2409,7 @@ export function PortfolioAutoTrade({
                 className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
                 style={inputStyle}
               >
-                {STRATEGY_OPTIONS.map((o) => (
+                {visibleStrategyOptions.map((o) => (
                   <option key={o.id} value={o.id} style={{ background: '#0b1410', color: C.ink }}>
                     {o.label}
                   </option>
@@ -2287,7 +2438,7 @@ export function PortfolioAutoTrade({
               <div className="mt-3">
                 <Field label="Campaign preset" hint={LADDER_PRESET_OPTIONS.find((o) => o.id === ladderPreset)?.hint}>
                   <div className="inline-flex rounded-xl border p-0.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
-                    {LADDER_PRESET_OPTIONS.map((o) => {
+                    {visibleLadderPresets.map((o) => {
                       const active = o.id === ladderPreset
                       return (
                         <button key={o.id} type="button" onClick={() => pickLadderPreset(o.id)}
@@ -2314,7 +2465,7 @@ export function PortfolioAutoTrade({
                   style={{ borderColor: 'rgba(63,227,164,0.22)', background: 'linear-gradient(180deg, rgba(63,227,164,0.06), rgba(255,255,255,0.015))' }}>
                   <div className="flex items-center gap-2 mb-2">
                     <span style={{ color: C.mint }}>{ICON.check(15)}</span>
-                    <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Falcon BTST — what you&apos;re arming</span>
+                    <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Falcon BTST Oscillator — what you&apos;re arming</span>
                   </div>
                   <ul className="text-[11.5px] leading-relaxed space-y-1" style={{ color: C.ink2 }}>
                     <li>· Buy the Falcon <b style={{ color: C.ink }}>Top-5</b> at <b style={{ color: C.ink }}>09:15</b>, hold <b style={{ color: C.ink }}>exactly 2 sessions</b>, sell <b style={{ color: C.ink }}>Day-2 at 15:29</b>.</li>
@@ -2342,6 +2493,35 @@ export function PortfolioAutoTrade({
                 </div>
               </div>
             )}
+
+            {/* Falcon Intraday Magnifier — read-only VALIDATED preset. Everything
+                here is fixed; the operator only picks the cash per day below.
+                Notional (cash × 5) and ~per-name (÷ ~9) are computed LIVE from the
+                operator's own cash-per-day input — never hardcoded. */}
+            {isMagnifier && (() => {
+              const cash = config.total_allocated_capital || 0
+              const notional = cash > 0 ? cash * MAGNIFIER_LEVERAGE : 0
+              const perName = notional > 0 ? notional / MAGNIFIER_NAMES_PER_DAY : 0
+              return (
+                <div className="mt-3 rounded-xl border px-3.5 py-3"
+                  style={{ borderColor: 'rgba(63,227,164,0.22)', background: 'linear-gradient(180deg, rgba(63,227,164,0.06), rgba(255,255,255,0.015))' }}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span style={{ color: C.mint }}>{ICON.check(15)}</span>
+                    <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Falcon Intraday Magnifier — validated preset</span>
+                    <span className="ml-auto text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+                      style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.42)' }}>fixed</span>
+                  </div>
+                  <ul className="text-[11.5px] leading-relaxed space-y-1" style={{ color: C.ink2 }}>
+                    <li>· Falcon <b style={{ color: C.ink }}>Top-15 high-tier</b> basket (~<b style={{ color: C.ink }}>9 names</b>/day) · <b style={{ color: C.ink }}>MIS 5×</b> intraday.</li>
+                    <li>· <b style={{ color: C.ink }}>Split entry</b> — 50% @ <b style={{ color: C.ink }}>09:15</b> open + 50% @ <b style={{ color: C.ink }}>09:16</b> (blended cost).</li>
+                    <li>· Stop/trail <b style={{ color: C.ink }}>arms only at 09:16</b> on the blended cost — <b style={{ color: C.ink }}>no stop on the 09:15 leg</b> (opening-whipsaw guard).</li>
+                    <li>· Trail: <b style={{ color: C.ink }}>arm 6%</b> · <b style={{ color: C.ink }}>floor 2%</b> · <b style={{ color: C.ink }}>giveback 5%</b> · <b style={{ color: C.red }}>stop 3%</b> (capital basis) · <b style={{ color: C.ink }}>square-off 15:29</b>.</li>
+                    <li>· Rolling <b style={{ color: C.ink }}>monthly</b> campaign — auto-spawns one basket per trading day until cancelled.</li>
+                    <li>· Cash/day <b style={{ color: C.ink }}>{cash > 0 ? fmtINR(cash) : '—'}</b> → 5× notional <b style={{ color: C.ink }}>{cash > 0 ? fmtINR(notional) : '—'}</b> · ~per-name <b style={{ color: C.ink }}>{cash > 0 ? fmtINR(perName) : '—'}</b>.</li>
+                  </ul>
+                </div>
+              )
+            })()}
           </div>
 
           {/* Broker account selector — Phase-2 multi-tenant. Optional; only shown
@@ -2456,13 +2636,67 @@ export function PortfolioAutoTrade({
             </div>
           )}
 
+          {/* ── Magnifier config — the ONLY inputs: Cash per day + Duration. Every
+              other knob is the validated preset (shown read-only above). The whole
+              standard config region below is hidden for Magnifier. ─────────────── */}
+          {isMagnifier && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Field
+                label="Cash per day"
+                hint={(() => {
+                  const cash = config.total_allocated_capital || 0
+                  return cash > 0
+                    ? `MIS 5× → ${fmtINR(cash * MAGNIFIER_LEVERAGE)} notional/day · ~${fmtINR((cash * MAGNIFIER_LEVERAGE) / MAGNIFIER_NAMES_PER_DAY)} per name.`
+                    : 'Cash you commit each trading day. MIS 5× multiplies it into the day’s notional.'
+                })()}
+              >
+                <input
+                  type="number" min={0} step={10000}
+                  value={config.total_allocated_capital}
+                  onChange={(e) => set('total_allocated_capital', Number(e.target.value) || 0)}
+                  className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums"
+                  style={inputStyle}
+                />
+                <div className="flex flex-wrap gap-1.5 mt-1">
+                  {CAPITAL_PRESETS.map((p) => (
+                    <button key={p} type="button" onClick={() => set('total_allocated_capital', p)}
+                      className="px-2 py-1 rounded-md text-[10.5px] transition-colors"
+                      style={{ color: C.muted, border: `1px solid ${C.line}`, background: 'rgba(255,255,255,0.02)' }}>
+                      {fmtCapital(p)}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+
+              <Field label="Duration" hint={LADDER_DURATION_OPTIONS.find((o) => o.id === ladderEndMode)?.hint}>
+                <div className="inline-flex rounded-xl border p-0.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                  {LADDER_DURATION_OPTIONS.map((o) => {
+                    const active = o.id === ladderEndMode
+                    return (
+                      <button key={o.id} type="button" onClick={() => setLadderEndMode(o.id)}
+                        className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors"
+                        style={{ color: active ? '#06130c' : C.ink2, background: active ? C.mint : 'transparent' }}>
+                        {o.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </Field>
+            </div>
+          )}
+
+          {/* ── STANDARD config region (hidden for Magnifier, which is a fixed,
+              preset-only campaign). Positional/BTST/Dynamic/Tesla/Fixed paths are
+              byte-identical when Magnifier isn't selected. ────────────────────── */}
+          {!isMagnifier && (<>
+
           {/* Config grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field
               label={isLadder ? 'Total campaign capital' : 'Allocated capital'}
               hint={isLadder
                 ? (isBtst
-                    ? `Falcon BTST splits this across 2 overlapping sleeves. Each sleeve ≈ ${fmtINR(perBasketCapital)}`
+                    ? `Falcon BTST Oscillator splits this across 2 overlapping sleeves. Each sleeve ≈ ${fmtINR(perBasketCapital)}`
                     : `Falcon splits this across ~3 baskets. Each basket ≈ ${fmtINR(perBasketCapital)}`)
                 : 'Total capital this session may deploy.'}
             >
@@ -2542,7 +2776,7 @@ export function PortfolioAutoTrade({
                 />
               </Field>
             ) : (config.instrument_type ?? 'EQ') !== 'FUT' && !isTesla ? (
-              <Field label="Order product" hint={isBtst ? 'Falcon BTST is CNC only (1× cash, no leverage — it carries overnight).' : isLadder ? 'Campaign product — Cash (CNC) or Margin (MTF).' : 'Broker product type for entries.'}>
+              <Field label="Order product" hint={isBtst ? 'Falcon BTST Oscillator is CNC only (1× cash, no leverage — it carries overnight).' : isLadder ? 'Campaign product — Cash (CNC) or Margin (MTF).' : 'Broker product type for entries.'}>
                 <Segmented
                   options={((isBtst ? (['CNC'] as OrderProduct[]) : isLadder ? (['CNC', 'MTF'] as OrderProduct[]) : PRODUCT_OPTIONS)).map((p) => ({ id: p, label: p }))}
                   value={config.order_product === 'MIS' && isLadder ? 'CNC' : (isBtst ? 'CNC' : config.order_product)}
@@ -3326,14 +3560,14 @@ export function PortfolioAutoTrade({
                 </span>
                 <span className="ml-auto text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
                   style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
-                  {isBtst ? 'BTST preset' : isLadder ? 'Positional preset' : 'Preset loaded'}
+                  {isBtst ? 'BTST Oscillator' : isLadder ? 'Positional preset' : 'Preset loaded'}
                 </span>
               </div>
               {isBtst ? (
                 <div className="mb-3 flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-snug"
                   style={{ border: `1px solid ${C.line2}`, background: 'rgba(255,255,255,0.02)', color: C.muted }}>
                   <span className="shrink-0 mt-px" style={{ color: C.mint }}>{ICON.info(12)}</span>
-                  <span>Falcon BTST holds each basket <b style={{ color: C.ink2 }}>exactly 2 sessions</b> (buy 09:15 Day-1 → sell 15:29 Day-2). <b style={{ color: C.ink2 }}>NO trailing exit</b> — the arm is set unreachable so it never arms; the only guards are the <b style={{ color: C.ink2 }}>−6% hard stop</b> and the Day-2 time-exit. <b style={{ color: C.ink2 }}>Fixed for the campaign</b>.</span>
+                  <span>Falcon BTST Oscillator holds each basket <b style={{ color: C.ink2 }}>exactly 2 sessions</b> (buy 09:15 Day-1 → sell 15:29 Day-2). <b style={{ color: C.ink2 }}>NO trailing exit</b> — the arm is set unreachable so it never arms; the only guards are the <b style={{ color: C.ink2 }}>−6% hard stop</b> and the Day-2 time-exit. <b style={{ color: C.ink2 }}>Fixed for the campaign</b>.</span>
                 </div>
               ) : isLadder ? (
                 <div className="mb-3 flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-snug"
@@ -3764,18 +3998,21 @@ export function PortfolioAutoTrade({
             </div>
           )}
 
-          {/* Primary CTA — "Create campaign" for Auto-Ladder (ladderCreate → a
-              CREATED draft; the campaign CREATED phase then offers Start-now /
+          </>)}
+          {/* ── end STANDARD config region ─────────────────────────────────────── */}
+
+          {/* Primary CTA — "Create campaign" for Auto-Ladder + Magnifier (create →
+              a CREATED draft; the campaign CREATED phase then offers Start-now /
               Schedule, mirroring the session flow). "Create session" otherwise. */}
           <div className="mt-5 flex items-center gap-3">
             <button
               type="button"
-              disabled={busy === 'create' || !canGoLive || (isLadder && (config.total_allocated_capital || 0) <= 0)}
-              onClick={isLadder ? onCreateCampaign : onCreate}
+              disabled={busy === 'create' || !canGoLive || ((isLadder || isMagnifier) && (config.total_allocated_capital || 0) <= 0)}
+              onClick={isMagnifier ? onCreateMagnifier : isLadder ? onCreateCampaign : onCreate}
               className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-semibold transition-opacity disabled:opacity-40"
               style={{ color: '#06130c', background: C.mint }}
             >
-              {isLadder
+              {(isLadder || isMagnifier)
                 ? (busy === 'create' ? 'Creating…' : <>{ICON.loop(14)} Create campaign</>)
                 : (busy === 'create' ? 'Creating…' : <>Create {mode} session {ICON.arrow(13)}</>)}
             </button>
@@ -3784,6 +4021,8 @@ export function PortfolioAutoTrade({
                 ? 'Type LIVE above to enable.'
                 : mode === 'live' && !liveAccountReady
                 ? 'Select your connected broker account — live needs your own active account.'
+                : isMagnifier
+                ? `Creates the ${mode} Magnifier campaign as a draft — next you choose Start now or Schedule. No baskets open yet.`
                 : isLadder
                 ? `Creates the ${mode} campaign as a draft — next you choose Start now or Schedule for a future date. No baskets open yet.`
                 : `Creates a ${mode} session — no orders are placed yet.`}

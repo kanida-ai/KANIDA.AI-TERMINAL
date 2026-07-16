@@ -995,6 +995,73 @@ export type LadderCreateResponse = {
   [k: string]: unknown
 }
 
+// ── Falcon Intraday Magnifier (a SEPARATE strategy — monthly rolling campaign) ──
+// A validated, read-only preset the operator only sizes with a single "cash per
+// day" figure. It is NOT the Dynamic (Trailing) intraday basket and NOT the BTST
+// Oscillator campaign — it is its own campaign strategy. The knobs below are FIXED
+// (the operator can't edit them in the UI); we send them anyway so the backend can
+// verify/echo them. THIN + ISOLATED: this is the single create call the operator
+// can rewire once the backend contract lands. Nothing about the ladder/BTST/
+// positional/dynamic paths changes when Magnifier isn't selected.
+// Matches the backend strategy_registry id (autotrade/strategy_registry.py).
+export const MAGNIFIER_STRATEGY_ID = 'intraday_magnifier' as const
+
+// The fixed, validated Magnifier preset. Percentages are PERCENTS (the backend can
+// convert to fractions if it wants). Times are IST "HH:MM:SS".
+export type MagnifierPreset = {
+  top_n: number                 // Falcon Top-15 high-tier basket (~9 names/day)
+  tier_filter: 'high'           // high-tier only
+  leverage: number              // MIS 5×
+  order_product: 'MIS'
+  // Split entry — 50% @ 09:15 open + 50% @ 09:16 (blended cost).
+  split_entry: { fraction: number; time: string }[]
+  // Stop/trail arms ONLY at 09:16 on the blended cost (no stop on the 09:15 leg).
+  stop_arm_time: string
+  arm_pct: number               // 6
+  floor_pct: number             // 2
+  trail_giveback_pct: number    // 5
+  stop_pct: number              // 3
+  trail_basis: 'capital'        // capital basis
+  square_off_time: string       // 15:29
+}
+
+// POST body for the Magnifier campaign create. cash_per_day is the ONLY operator
+// input (₹, never hardcoded); the 5× notional (cash × leverage) and ~per-name
+// (÷ ~9) are derived. end_date_mode reuses the campaign duration semantics; mode
+// defaults paper. Scope (user_id / broker_account_id) mirrors ladderCreate so the
+// campaign lands owned by the caller. `strategy` is the stable discriminator.
+// Backend contract (autotrade ladder/create, campaign_type='magnifier'): the
+// operator's cash/day is sent as total_capital; the backend FORCES MIS and applies
+// the validated Magnifier preset server-side, so no strategy/preset/product fields
+// are sent. MagnifierPreset is display-only (the read-only card).
+export type MagnifierCreateBody = {
+  total_capital: number
+  campaign_type: 'magnifier'
+  end_date_mode: LadderEndMode
+  end_date?: string
+  mode: Mode
+  user_id?: number | string
+  broker_account_id?: string
+}
+
+// ── Admin-controlled strategy visibility ──────────────────────────────────────
+// The backend returns the caller-appropriate strategy list: admins see ALL (each
+// carrying visible_to_power_users), power users see only the ENABLED ones. The UI
+// intersects its own option metadata (labels + wiring) with these strategy_ids to
+// decide what appears in the create-form strategy selector.
+export type StrategyInfo = {
+  strategy_id: string
+  label?: string
+  visible_to_power_users?: boolean
+}
+export type StrategiesResponse = { strategies: StrategyInfo[] }
+export type StrategyVisibilityResponse = {
+  strategy_id?: string
+  visible_to_power_users?: boolean
+  ok?: boolean
+  [k: string]: unknown
+}
+
 // A child basket of a running campaign (an ordinary session carrying ladder_id).
 // Every field is optional-safe — render "—" for anything absent, never crash.
 export type LadderSession = {
@@ -1344,4 +1411,30 @@ export const AutoTradeAPI = {
   // List a user's campaigns (newest first) so they can re-open a running one.
   ladders: (userId: number | string) =>
     call<LaddersListResponse>(`/ladders${q({ user_id: userId })}`),
+
+  // ── Falcon Intraday Magnifier — campaign create (thin, isolated) ───────────
+  // Creates the Magnifier monthly-rolling campaign as a draft (places nothing);
+  // returns a ladder_id you then Start with the SAME ladderStart lifecycle. The
+  // path is the single rewire point if the backend chooses a different route.
+  magnifierCreate: (body: MagnifierCreateBody) =>
+    call<LadderCreateResponse>('/ladder/create', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  // ── Strategy visibility ────────────────────────────────────────────────────
+  // Caller-appropriate strategy list — the create-form selector shows ONLY these.
+  // Admin → all (each with visible_to_power_users); power user → enabled only.
+  strategies: () => call<StrategiesResponse>('/strategies'),
+
+  // Admin-only: the full list with the per-strategy visibility flag (for the
+  // admin toggle panel). Separate from strategies() so power users never call it.
+  adminStrategies: () => call<StrategiesResponse>('/admin/strategies'),
+
+  // Admin-only: toggle whether a strategy is visible to power users.
+  setStrategyVisibility: (strategy_id: string, visible: boolean) =>
+    call<StrategyVisibilityResponse>('/admin/strategy-visibility', {
+      method: 'POST',
+      body: JSON.stringify({ strategy_id, visible }),
+    }),
 }
