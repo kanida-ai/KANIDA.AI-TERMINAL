@@ -832,7 +832,16 @@ def preview_session_sizing(config: TradingSessionConfig,
     if not profiles:
         from .config import BrokerProfile
         profiles = [BrokerProfile(
-            profile_id="zerodha_default", broker_name="zerodha",
+            # BROKER-NEUTRAL default profile id (2026-07-15). The internal grouping
+            # key must NOT imply a broker — a bound Rupeezy/Upstox/… account resolves
+            # its real adapter via _preview_resolve_creds (broker_name rebind), and
+            # the OLD "zerodha_default" label actively MISLED the Rupeezy-incident
+            # diagnosis (the position row read broker_profile="zerodha_default" for a
+            # Rupeezy order). broker_name stays "zerodha" here only as the UNBOUND
+            # fallback = the operator's GLOBAL Kite account; it is overridden per bound
+            # account. Nothing keys off this string for correctness (reconciler scopes
+            # by list(brokers.keys()) + broker_account_id, not the literal).
+            profile_id="default", broker_name="zerodha",
             allocated_capital=config.total_allocated_capital,
             order_product=config.order_product,
             instrument_type=config.instrument_type,
@@ -1816,7 +1825,12 @@ class TradingSession:
             # bound to a vaulted account trades that account (None → global).
             from .config import BrokerProfile
             profiles = [BrokerProfile(
-                profile_id="zerodha_default", broker_name="zerodha",
+                # BROKER-NEUTRAL default profile id (2026-07-15) — see the preview
+                # default above. Live path must MATCH preview so a bound account's
+                # position rows carry the SAME grouping key in both. broker_name
+                # "zerodha" is only the UNBOUND fallback (operator global Kite);
+                # _resolve_account_creds rebinds it to the bound account's broker.
+                profile_id="default", broker_name="zerodha",
                 allocated_capital=self.config.total_allocated_capital,
                 order_product=self.config.order_product,
                 instrument_type=self.config.instrument_type,
@@ -4614,14 +4628,49 @@ class TradingSession:
         n_filled = sum(1 for p in placed
                        if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE",
                                                "DRY_RUN"))
-        if n_filled == 0 and not leg2_plan:
-            reason = ("magnifier: nothing placed and no second-leg plan (all picks "
-                      "unaffordable for the per-slice budget)")
+        n_attempted = len(placed)
+        # BROKER-AGNOSTIC ZERO-PLACEMENT GUARD (2026-07-15 Rupeezy incident). A
+        # split-entry whose leg-1 placed ZERO broker orders — every leg blocked or
+        # rejected (an uncertified adapter's hard-block, a broker RMS refusal, an IP
+        # block, …) — has NOTHING to manage. It MUST FAIL LOUDLY, NOT persist a
+        # leg-2 plan, NOT schedule the second leg, NOT arm the drivers, and NOT go
+        # RUNNING holding nothing. Driven purely by the placement RESULT (no broker
+        # branch). The OLD guard `n_filled==0 and not leg2_plan` NEVER tripped for a
+        # split entry (which ALWAYS builds a leg2_plan for the deferred half) → a
+        # fully-blocked leg-1 silently proceeded and complete_*_entry then marked
+        # the entry complete on an empty basket (the incident: 10 ORDER_CREATED,
+        # broker_order_id=None, mag_entry_complete=1, RUNNING, 0 positions).
+        if n_filled == 0:
+            _causes = sorted({str(p.get("error") or p.get("reason")
+                                  or p.get("status")) for p in placed})
+            cause = "; ".join(_causes)[:300] if _causes else \
+                "no leg-1 orders attempted (all picks unaffordable for the slice)"
+            reason = (f"magnifier: entry placed 0/{n_attempted} leg-1 orders — all "
+                      f"legs blocked or rejected: {cause}. Second leg NOT scheduled.")
             self._set_status("FAILED", reason=reason, closed_at=_now_ist_iso())
             log.error("session %s FAILED: %s", self.session_id, reason)
+            try:
+                alerts.send_urgent_deduped(
+                    kind="ENTRY_ZERO_PLACEMENT", session_id=self.session_id,
+                    symbol=None, detail=reason)
+            except Exception:  # noqa: BLE001 — paging must never block the fail
+                pass
             return {"session_id": self.session_id, "status": "FAILED",
                     "mode": self.mode, "n_placed": 0, "orders": placed,
                     "reason": reason, "strategy": "intraday_magnifier"}
+        # PARTIAL leg-1 (some legs placed, some blocked): KEEP the placed legs but
+        # page LOUDLY — the basket entered smaller than intended (naked/partial).
+        if n_filled < n_attempted:
+            _pr = (f"magnifier: leg-1 PARTIAL — {n_filled}/{n_attempted} legs "
+                   f"placed; continuing with the placed legs (some names blocked "
+                   f"or rejected).")
+            log.warning("session %s: %s", self.session_id, _pr)
+            try:
+                alerts.send_urgent_deduped(
+                    kind="ENTRY_PARTIAL", session_id=self.session_id,
+                    symbol=None, detail=_pr)
+            except Exception:  # noqa: BLE001
+                pass
         # DEFERRED ARM: do NOT freeze the basis, and place NO GTT/SL-M — the 09:15
         # half-leg carries NO stop (the whole point). Persist the second-leg plan
         # (restart-durable) and mark the entry INCOMPLETE.
@@ -4704,6 +4753,47 @@ class TradingSession:
                     r = {"symbol": it["symbol"], "status": "FAILED",
                          "error": str(e)}
                 placed.append(r)
+        n_filled = sum(1 for p in placed
+                       if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE",
+                                               "DRY_RUN"))
+        # BROKER-AGNOSTIC ENTRY-OUTCOME GUARD (2026-07-15). Do NOT freeze a basis,
+        # arm a stop, or mark the entry complete on an EMPTY basket. If the session
+        # holds ZERO open positions after BOTH legs (leg-1 + leg-2 both placed
+        # nothing) → FAIL LOUDLY instead of the old "ALWAYS mark complete". Checked
+        # against the position registry (result-driven), never the broker.
+        try:
+            _open = self.registry.get_open_positions()
+        except Exception:  # pragma: no cover - never crash the completion
+            _open = []
+        if not _open:
+            reason = ("magnifier: entry placed 0 positions across both legs — "
+                      "nothing held; failing loudly instead of marking complete on "
+                      "an empty basket.")
+            self._set_status("FAILED", reason=reason, closed_at=_now_ist_iso())
+            log.error("session %s FAILED: %s", self.session_id, reason)
+            try:
+                alerts.send_urgent_deduped(
+                    kind="ENTRY_ZERO_PLACEMENT", session_id=self.session_id,
+                    symbol=None, detail=reason)
+            except Exception:  # noqa: BLE001
+                pass
+            return {"session_id": self.session_id, "status": "FAILED",
+                    "strategy": "intraday_magnifier", "magnifier_stage": 2,
+                    "magnifier_entry_complete": False, "n_placed": 0,
+                    "orders": placed, "reason": reason}
+        # Second leg PARTIAL / all-failed but leg-1 positions held → KEEP them and
+        # engage the trail, but page: the intended blended size wasn't reached.
+        if placed and n_filled < len(placed):
+            _pr = (f"magnifier: second leg PARTIAL — {n_filled}/{len(placed)} legs "
+                   f"placed; the basket is held at less than the intended blended "
+                   f"size.")
+            log.warning("session %s: %s", self.session_id, _pr)
+            try:
+                alerts.send_urgent_deduped(
+                    kind="ENTRY_PARTIAL", session_id=self.session_id,
+                    symbol=None, detail=_pr)
+            except Exception:  # noqa: BLE001
+                pass
         # BOTH legs now in → freeze the invested basis on the BLENDED basket.
         try:
             self.monitor.freeze_invested_basis()
@@ -4725,9 +4815,6 @@ class TradingSession:
         # ARM the trail: from the next tick the intraday trail engine runs on the
         # blended-cost basket.
         self._set_magnifier_entry_complete(True)
-        n_filled = sum(1 for p in placed
-                       if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE",
-                                               "DRY_RUN"))
         log.info("magnifier %s: second leg done (%d legs) — trail ARMED on blended "
                  "cost", self.session_id, n_filled)
         return {"session_id": self.session_id, "status": self._current_status(),
@@ -4816,14 +4903,42 @@ class TradingSession:
         n_filled = sum(1 for p in placed
                        if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE",
                                                "DRY_RUN"))
-        if n_filled == 0 and not leg2_plan:
-            reason = ("btst: nothing placed and no second-leg plan (all picks "
-                      "unaffordable for the per-slice budget)")
+        n_attempted = len(placed)
+        # BROKER-AGNOSTIC ZERO-PLACEMENT GUARD (2026-07-15 Rupeezy incident). See
+        # _fire_magnifier_initial for the full rationale: a split-entry whose leg-1
+        # placed ZERO broker orders MUST FAIL LOUDLY and NOT schedule the second
+        # leg. Result-driven; no broker branch. (This IS the exact path the Rupeezy
+        # BTST child hit — the cert-block FAILED all 10 legs, yet the old
+        # `and not leg2_plan` clause let it proceed to a complete-on-empty.)
+        if n_filled == 0:
+            _causes = sorted({str(p.get("error") or p.get("reason")
+                                  or p.get("status")) for p in placed})
+            cause = "; ".join(_causes)[:300] if _causes else \
+                "no leg-1 orders attempted (all picks unaffordable for the slice)"
+            reason = (f"btst: entry placed 0/{n_attempted} leg-1 orders — all legs "
+                      f"blocked or rejected: {cause}. Second leg NOT scheduled.")
             self._set_status("FAILED", reason=reason, closed_at=_now_ist_iso())
             log.error("session %s FAILED: %s", self.session_id, reason)
+            try:
+                alerts.send_urgent_deduped(
+                    kind="ENTRY_ZERO_PLACEMENT", session_id=self.session_id,
+                    symbol=None, detail=reason)
+            except Exception:  # noqa: BLE001 — paging must never block the fail
+                pass
             return {"session_id": self.session_id, "status": "FAILED",
                     "mode": self.mode, "n_placed": 0, "orders": placed,
                     "reason": reason, "strategy": "btst_oscillator"}
+        # PARTIAL leg-1 (some legs placed, some blocked): KEEP + page LOUDLY.
+        if n_filled < n_attempted:
+            _pr = (f"btst: leg-1 PARTIAL — {n_filled}/{n_attempted} legs placed; "
+                   f"continuing with the placed legs (some names blocked/rejected).")
+            log.warning("session %s: %s", self.session_id, _pr)
+            try:
+                alerts.send_urgent_deduped(
+                    kind="ENTRY_PARTIAL", session_id=self.session_id,
+                    symbol=None, detail=_pr)
+            except Exception:  # noqa: BLE001
+                pass
         # DEFERRED: do NOT freeze the basis, and place NO GTT/SL — the 09:15
         # half-leg carries NO stop (the whole point). Persist the second-leg plan
         # (restart-durable) and mark the entry INCOMPLETE. NOTE: no square-off is
@@ -4905,6 +5020,47 @@ class TradingSession:
                     r = {"symbol": it["symbol"], "status": "FAILED",
                          "error": str(e)}
                 placed.append(r)
+        n_filled = sum(1 for p in placed
+                       if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE",
+                                               "DRY_RUN"))
+        # BROKER-AGNOSTIC ENTRY-OUTCOME GUARD (2026-07-15) — see
+        # complete_magnifier_entry. Never mark the entry complete / engage the
+        # −6% disaster stop on an EMPTY basket. Zero open positions after both legs
+        # → FAIL LOUDLY. This is the exact fix for the Rupeezy BTST incident, where
+        # both legs were cert-blocked yet the session marked complete and RUNNING
+        # holding nothing.
+        try:
+            _open = self.registry.get_open_positions()
+        except Exception:  # pragma: no cover - never crash the completion
+            _open = []
+        if not _open:
+            reason = ("btst: entry placed 0 positions across both legs — nothing "
+                      "held; failing loudly instead of marking complete on an empty "
+                      "basket.")
+            self._set_status("FAILED", reason=reason, closed_at=_now_ist_iso())
+            log.error("session %s FAILED: %s", self.session_id, reason)
+            try:
+                alerts.send_urgent_deduped(
+                    kind="ENTRY_ZERO_PLACEMENT", session_id=self.session_id,
+                    symbol=None, detail=reason)
+            except Exception:  # noqa: BLE001
+                pass
+            return {"session_id": self.session_id, "status": "FAILED",
+                    "strategy": "btst_oscillator", "magnifier_stage": 2,
+                    "magnifier_entry_complete": False, "n_placed": 0,
+                    "orders": placed, "reason": reason}
+        # Second leg PARTIAL / all-failed but leg-1 positions held → KEEP + page.
+        if placed and n_filled < len(placed):
+            _pr = (f"btst: second leg PARTIAL — {n_filled}/{len(placed)} legs "
+                   f"placed; the basket is held at less than the intended blended "
+                   f"size.")
+            log.warning("session %s: %s", self.session_id, _pr)
+            try:
+                alerts.send_urgent_deduped(
+                    kind="ENTRY_PARTIAL", session_id=self.session_id,
+                    symbol=None, detail=_pr)
+            except Exception:  # noqa: BLE001
+                pass
         # BOTH legs now in → freeze the invested basis on the BLENDED basket.
         try:
             self.monitor.freeze_invested_basis()
@@ -4927,9 +5083,6 @@ class TradingSession:
         # 2-session max-hold cap run on the blended-cost basket. NO trail is armed
         # (arm_pct unreachable) — the profit trail never fires for BTST.
         self._set_magnifier_entry_complete(True)
-        n_filled = sum(1 for p in placed
-                       if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE",
-                                               "DRY_RUN"))
         log.info("btst %s: second leg done (%d legs) — held to 2-session exit under "
                  "the −6%% disaster stop (no trail armed)", self.session_id,
                  n_filled)

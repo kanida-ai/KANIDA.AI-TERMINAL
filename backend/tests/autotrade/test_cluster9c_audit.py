@@ -113,7 +113,7 @@ def test_f1_mark_exit_failed_release_scoped_by_profile(clean_positions):
 def _live_session_with_intent(monkeypatch, *, mb, submitted=True,
                               broker_oid="BOID1", coid="FAL-ORPHAN-1",
                               qty=100, price=100.0, symbol="X",
-                              prof="zerodha_default"):
+                              prof="default"):
     def fake_build_client(profile, dry_run=True):
         return mb
     monkeypatch.setattr(router_mod, "build_client", fake_build_client)
@@ -147,7 +147,7 @@ def test_f2_adopts_partial_fill_terminal_orphan(clean_positions, monkeypatch,
     partial-terminal orphan stays unregistered → the 6-share position-row assert
     FAILS.
     """
-    prof_obj = type("P", (), {"profile_id": "zerodha_default",
+    prof_obj = type("P", (), {"profile_id": "default",
                               "broker_name": "mock"})()
     mb = MockBroker(profile=prof_obj, dry_run=False,
                     order_status={"BOID1": {"status": terminal_status,
@@ -158,7 +158,7 @@ def test_f2_adopts_partial_fill_terminal_orphan(clean_positions, monkeypatch,
     actions = recovery._adopt_orphan_entry_intents(sid)
 
     assert any(a["outcome"] == "adopted_filled" for a in actions)
-    row = _pos_row(sid, "X", "zerodha_default")
+    row = _pos_row(sid, "X", "default")
     assert row is not None and row["status"] == "OPEN"
     assert row["qty"] == 6                          # the REAL partial fill
     assert row["avg_price"] == pytest.approx(100.5)
@@ -170,7 +170,7 @@ def test_f2_zero_fill_terminal_still_paged_no_phantom(clean_positions, monkeypat
     pages = []
     monkeypatch.setattr(alerts, "send_urgent_deduped",
                         lambda **kw: pages.append(kw))
-    prof_obj = type("P", (), {"profile_id": "zerodha_default",
+    prof_obj = type("P", (), {"profile_id": "default",
                               "broker_name": "mock"})()
     mb = MockBroker(profile=prof_obj, dry_run=False,
                     order_status={"BOID1": {"status": "CANCELLED",

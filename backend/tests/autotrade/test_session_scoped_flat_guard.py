@@ -62,7 +62,7 @@ def _mk(monkeypatch, net_positions, ltps=None, build=True):
 
 def _reg(sess, symbol, qty, avg, ltp):
     prof = sess.config.broker_profiles[0].profile_id \
-        if sess.config.broker_profiles else "zerodha_default"
+        if sess.config.broker_profiles else "default"
     sess.registry.register(symbol=symbol, broker_profile=prof, qty=qty,
                            avg_price=avg, product="CNC", instrument_type="EQ",
                            exchange="NSE", direction="long")

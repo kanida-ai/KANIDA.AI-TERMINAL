@@ -84,7 +84,7 @@ def _count_pos(session_id, symbol):
 def _live_session_with_intent(monkeypatch, *, mb, submitted=True,
                               broker_oid="BOID1", coid="FAL-ORPHAN-1",
                               qty=100, price=100.0, symbol="X",
-                              prof="zerodha_default"):
+                              prof="default"):
     """Create a LIVE session, write an ENTRY intent (ORDER_CREATED [+SUBMITTED])
     with NO position row, and monkeypatch build_client → the supplied MockBroker."""
     def fake_build_client(profile, dry_run=True):
@@ -118,7 +118,7 @@ def test_item6_adopts_filled_orphan(clean_positions, monkeypatch):
     orphan scan) → the filled orphan stays unregistered → the position-row assert
     FAILS.
     """
-    prof_obj = type("P", (), {"profile_id": "zerodha_default",
+    prof_obj = type("P", (), {"profile_id": "default",
                               "broker_name": "mock"})()
     mb = MockBroker(profile=prof_obj, dry_run=False,
                     order_status={"BOID1": {"status": "COMPLETE",
@@ -129,7 +129,7 @@ def test_item6_adopts_filled_orphan(clean_positions, monkeypatch):
     actions = recovery._adopt_orphan_entry_intents(sid)
 
     assert any(a["outcome"] == "adopted_filled" for a in actions)
-    row = _pos_row(sid, "X", "zerodha_default")
+    row = _pos_row(sid, "X", "default")
     assert row is not None and row["status"] == "OPEN"
     assert row["qty"] == 100
     assert row["avg_price"] == pytest.approx(101.5)   # the REAL fill, not the mark
@@ -142,7 +142,7 @@ def test_item6_no_double_register(clean_positions, monkeypatch):
     Revert: drop the `_position_exists_for_intent` idempotency skip → the scan
     re-registers → qty is overwritten to 100 → the `qty == 50` assert FAILS.
     """
-    prof_obj = type("P", (), {"profile_id": "zerodha_default",
+    prof_obj = type("P", (), {"profile_id": "default",
                               "broker_name": "mock"})()
     mb = MockBroker(profile=prof_obj, dry_run=False,
                     order_status={"BOID1": {"status": "COMPLETE",
@@ -151,14 +151,14 @@ def test_item6_no_double_register(clean_positions, monkeypatch):
     sid, coid = _live_session_with_intent(monkeypatch, mb=mb)
     # A position row already exists for this leg (the fire path DID insert it).
     reg = PositionRegistry(sid, 300000.0)
-    reg.register(symbol="X", broker_profile="zerodha_default", qty=50,
+    reg.register(symbol="X", broker_profile="default", qty=50,
                  avg_price=100.0, product="CNC", instrument_type="EQ",
                  exchange="NSE", direction="long", client_order_id=coid)
 
     actions = recovery._adopt_orphan_entry_intents(sid)
 
     assert _count_pos(sid, "X") == 1
-    assert _pos_row(sid, "X", "zerodha_default")["qty"] == 50   # untouched
+    assert _pos_row(sid, "X", "default")["qty"] == 50   # untouched
     assert all(a["outcome"] != "adopted_filled" for a in actions)
 
 
@@ -173,7 +173,7 @@ def test_item6_absent_order_paged_no_phantom(clean_positions, monkeypatch):
     pages = []
     monkeypatch.setattr(alerts, "send_urgent_deduped",
                         lambda **kw: pages.append(kw))
-    prof_obj = type("P", (), {"profile_id": "zerodha_default",
+    prof_obj = type("P", (), {"profile_id": "default",
                               "broker_name": "mock"})()
     mb = MockBroker(profile=prof_obj, dry_run=False,
                     order_status={"BOID1": {"status": "REJECTED",
@@ -195,7 +195,7 @@ def test_item6_created_only_never_accepted_silent(clean_positions, monkeypatch):
     pages = []
     monkeypatch.setattr(alerts, "send_urgent_deduped",
                         lambda **kw: pages.append(kw))
-    prof_obj = type("P", (), {"profile_id": "zerodha_default",
+    prof_obj = type("P", (), {"profile_id": "default",
                               "broker_name": "mock"})()
     mb = MockBroker(profile=prof_obj, dry_run=False)      # get_orders() → None
     sid, coid = _live_session_with_intent(monkeypatch, mb=mb, submitted=False)
@@ -210,7 +210,7 @@ def test_item6_created_only_never_accepted_silent(clean_positions, monkeypatch):
 def test_item6_paper_session_inert(clean_positions, monkeypatch):
     """A PAPER (dry_run) session is byte-identical — the orphan scan is a no-op
     (paper registers immediately; there is no orphan)."""
-    prof_obj = type("P", (), {"profile_id": "zerodha_default",
+    prof_obj = type("P", (), {"profile_id": "default",
                               "broker_name": "mock"})()
     mb = MockBroker(profile=prof_obj, dry_run=True)
 
@@ -225,7 +225,7 @@ def test_item6_paper_session_inert(clean_positions, monkeypatch):
     sess = TradingSession.create(cfg, mode="paper")
     order_ledger.record_intent(session_id=sess.session_id, symbol="X",
                                client_order_id="C", qty=100, side="BUY",
-                               broker_profile="zerodha_default", source="entry")
+                               broker_profile="default", source="entry")
     assert recovery._adopt_orphan_entry_intents(sess.session_id) == []
 
 

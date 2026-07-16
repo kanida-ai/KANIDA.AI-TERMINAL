@@ -218,9 +218,11 @@ def _account_open_positions_for(bare_sym: str, want_product: str,
     config_json (cached). Returns the raw position dicts.
 
     CLUSTER 9 CROSS-CUTTING (2026-07-11): broker_profile alone is INSUFFICIENT to
-    separate accounts — every default single-leg session uses profile
-    'zerodha_default' regardless of which vaulted account it is bound to, so two
-    DIFFERENT users' (or one user's two) accounts share the same profile string. The
+    separate accounts — every default single-leg session uses the broker-neutral
+    profile 'default' (was 'zerodha_default' before 2026-07-15) regardless of which
+    vaulted account it is bound to, so two DIFFERENT users' (or one user's two)
+    accounts share the same profile string. This function does NOT key off that
+    literal (it scopes by prof_scope = list(brokers.keys()) + broker_account_id). The
     invariant is therefore ALSO scoped by broker_account_id (COALESCE '' so NULL ==
     NULL): a position on a DIFFERENT account is never summed into this account's
     invariant (which would false-close / false-alert across accounts). acct_scope

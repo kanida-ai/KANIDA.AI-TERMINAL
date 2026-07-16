@@ -154,10 +154,10 @@ def test_tick_breaker_flattens_all_sessions(clean_positions, patched_brokers):
     sb = TradingSession.create(cb, mode="paper", user_id="u1")
     asyncio.run(sa.start(when="now"))
     asyncio.run(sb.start(when="now"))
-    # Both sessions share the cached zerodha_default MockBroker; drop A's price to
-    # 90 so a's tick refresh marks its 1000-share @100 position to -10,000 (well
-    # past the ₹5k limit). A's tick evaluates the breaker → flattens the cohort.
-    patched_brokers["zerodha_default"].set_ltp("A", 90.0)
+    # Both sessions share the cached broker-neutral 'default' MockBroker; drop A's
+    # price to 90 so a's tick refresh marks its 1000-share @100 position to -10,000
+    # (well past the ₹5k limit). A's tick evaluates the breaker → flattens the cohort.
+    patched_brokers["default"].set_ltp("A", 90.0)
     out = asyncio.run(sa.tick())
     assert out.get("kill_reason") == "PORTFOLIO_DAILY_LOSS_BREAKER"
     assert _status(sa.session_id) == "CLOSED"

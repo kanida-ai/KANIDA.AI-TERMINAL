@@ -34,8 +34,19 @@ class MockBroker(BrokerClient):
                  available_margin: Optional[float] = None,
                  slm_available: bool = True,
                  exit_reject_after: Optional[Dict[str, int]] = None,
+                 block_orders: Optional[str] = None,
+                 block_symbols: Optional[set] = None,
                  order_status: Optional[Dict[str, dict]] = None):
         super().__init__(profile, dry_run=dry_run)
+        # BROKER-AGNOSTIC CERT-BLOCK sim (2026-07-15). When set, EVERY place_order
+        # returns FAILED with this reason (broker_order_id=None) — modelling an
+        # uncertified adapter's hard-block (RupeezyBroker._certification_block), a
+        # broker RMS refusal, or an IP block. Default None → unchanged. This drives
+        # the split-entry zero-placement FAIL tests without any real network.
+        self._block_orders = block_orders
+        # Per-symbol variant of block_orders: only these symbols' place_order
+        # returns FAILED (the rest fill) → drives the PARTIAL-placement test.
+        self._block_symbols = block_symbols or set()
         # RMS CAP 1: the account's FREE equity margin the pre-trade gate sizes
         # against. None (DEFAULT) → available_margin() returns None (gate INERT,
         # paper byte-identical). A number engages the gate (models a live broker).
@@ -283,6 +294,12 @@ class MockBroker(BrokerClient):
     # order lifecycle
     async def place_order(self, order) -> OrderResult:
         self.placed.append(order)
+        # CERT-BLOCK / RMS-refusal sim: FAILED, no order-id (broker-agnostic).
+        if self._block_orders or order.symbol in self._block_symbols:
+            return OrderResult(status="FAILED", broker_order_id=None,
+                               symbol=order.symbol, qty=order.qty,
+                               error=(self._block_orders
+                                      or f"blocked {order.symbol} (cert/RMS)"))
         # ICEBERG: reject this symbol's placement once it exceeds reject_after[sym]
         # successful placements (models a mid-iceberg child rejection). Accepted
         # (order-id issued) but 0 fill → the reconcile poll reports REJECTED.
