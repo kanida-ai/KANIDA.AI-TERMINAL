@@ -616,6 +616,27 @@ def _schedule_magnifier_second_leg(session_id: str, delay_sec: float) -> None:
     t.start()
 
 
+def _schedule_btst_second_leg(session_id: str, delay_sec: float) -> None:
+    """Arm a one-shot timer to fire the BTST Oscillator's SECOND (09:16) split leg
+    after `delay_sec`. Loads a FRESH session by id (so it works after the fire
+    coroutine returns) and runs complete_btst_entry(). Daemon timer (never blocks
+    shutdown); idempotent at the callee (already-complete → no-op)."""
+    import threading
+
+    def _run() -> None:
+        try:
+            sess = TradingSession.load(session_id)
+            if sess is None:
+                return
+            asyncio.run(sess.complete_btst_entry())
+        except Exception as e:  # pragma: no cover - never crash the timer thread
+            log.exception("btst second-leg fire failed for %s: %s",
+                          session_id, e)
+    t = threading.Timer(max(0.0, float(delay_sec)), _run)
+    t.daemon = True
+    t.start()
+
+
 def _get_tick_for(broker, symbol: str) -> float:
     """The instrument tick size for `symbol` (marketable-limit rounding).
 
@@ -2201,6 +2222,13 @@ class TradingSession:
         if self.config.strategy == "intraday_magnifier":
             return await self._fire_magnifier_initial()
 
+        # FALCON BTST OSCILLATOR: the SAME split-entry (50% @09:15) as the Magnifier
+        # but CNC/1× positional — places the FIRST half-leg (NO stop/trail) and
+        # schedules the second leg; NO trail is ever armed (the −6% disaster stop +
+        # the 2-session max-hold govern the exit).
+        if self.config.strategy == "btst_oscillator":
+            return await self._fire_btst_initial()
+
         falcon_picks, router_cap = _resolve_falcon_selection(
             self.config, log_ctx=f"session {self.session_id}: ")
         router = BrokerRouter(top_n_stocks=router_cap)
@@ -3755,6 +3783,32 @@ class TradingSession:
                 res["magnifier_entry_complete"] = True
             return res
 
+        if self.config.strategy == "btst_oscillator":
+            # FALCON BTST OSCILLATOR: like the Magnifier, the trail machinery is
+            # DORMANT until BOTH split-entry legs are in (deferred — no stop on the
+            # bare 09:15 half-leg). AFTER completion the SAME _tick_intraday runs,
+            # but the BTST child config makes it positional + trail-free: arm_pct is
+            # unreachable (0.5) so the profit trail never arms, square_off_enabled is
+            # False so there is NO intraday flatten, and the exit is governed by the
+            # MAX-HOLD cap (2 sessions → D2 close) + the −6% disaster stop (stop_pct)
+            # on the blended cost. Capital basis ≈ invested_basis at 1× CNC.
+            gr_capital = self.monitor.compute_gross_return()
+            if not self._magnifier_entry_complete():
+                return {"gross_return": gr_capital,
+                        "gross_return_fund": snap["gross_return"], "snapshot": snap,
+                        "strategy": "btst_oscillator",
+                        "magnifier_entry_complete": False,
+                        "trail_action": "PENDING_SPLIT_ENTRY",
+                        "kill_switch_fired": False, "kill_reason": None,
+                        "fire_result": None, "gtt_closed": gtt_closed,
+                        "broker_reconciled": broker_reconciled}
+            res = await self._tick_intraday(gr_capital, snap, gtt_closed,
+                                            broker_reconciled)
+            if isinstance(res, dict):
+                res["strategy"] = "btst_oscillator"
+                res["magnifier_entry_complete"] = True
+            return res
+
         if self.config.strategy == "intraday_basket":
             # CAPITAL-BASIS TRAIL (2026-07-07): the intraday_basket trail measures
             # arm/floor/giveback/basket-stop as % of ALLOCATED CAPITAL
@@ -4678,6 +4732,209 @@ class TradingSession:
                  "cost", self.session_id, n_filled)
         return {"session_id": self.session_id, "status": self._current_status(),
                 "strategy": "intraday_magnifier", "magnifier_stage": 2,
+                "magnifier_entry_complete": True, "n_placed": n_filled,
+                "orders": placed}
+
+    # ── FALCON BTST OSCILLATOR (strategy=="btst_oscillator") ──────────────────
+    # A CNC / 1× POSITIONAL long that REUSES the Magnifier's split-entry mechanic
+    # and high-tier selection, but carries overnight with NO profit trail. The
+    # split-entry methods are DUPLICATED (not shared) from the Magnifier on
+    # purpose: the Magnifier is a live real-money MIS path whose behaviour must
+    # stay byte-identical, so the BTST variant keeps its own copy with the CNC /
+    # no-square-off / no-trail-arm differences rather than parametrising (and
+    # risking) the Magnifier code. The per-session split-entry STATE helpers
+    # (mag_entry_complete / mag_leg2_plan_json columns) are shared verbatim.
+    async def _fire_btst_initial(self) -> Dict[str, Any]:
+        """BTST split-entry PHASE 1 (the 09:15 half-leg).
+
+        Selects the SAME Falcon Top-N high-tier basket (~9 names) as the Magnifier
+        (via the shared _select_magnifier_picks), sizes the FULL target qty per
+        name at 1× CNC cash, places `magnifier_split_fraction` (50%) NOW with NO
+        stop/trail, persists the remaining-half plan, arms the drivers, and
+        schedules the SECOND leg. Unlike the Magnifier there is NO trail to arm and
+        NO intraday square-off — after both legs fill the basket is held to the
+        2-session exit under only the −6% disaster stop."""
+        from .capital import CapitalAllocator
+        picks = self._select_magnifier_picks()   # SHARED high-tier Top-N selection
+        if not picks:
+            reason = ("btst: no high-tier picks today (the Falcon Top-N basket had "
+                      "no name in the high-tier set)")
+            self._set_status("FAILED", reason=reason, closed_at=_now_ist_iso())
+            log.warning("session %s FAILED: %s", self.session_id, reason)
+            return {"session_id": self.session_id, "status": "FAILED",
+                    "mode": self.mode, "n_placed": 0, "orders": [],
+                    "reason": reason, "strategy": "btst_oscillator"}
+        router = BrokerRouter(top_n_stocks=len(picks))
+        routed = router.route_picks(picks, self.config.broker_profiles)
+        frac = float(self.config.magnifier_split_fraction)
+        _fire_t0 = time.monotonic()
+        placed: List[Dict[str, Any]] = []
+        leg2_plan: List[Dict[str, Any]] = []
+        for prof in self.config.broker_profiles:
+            if not prof.enabled:
+                continue
+            broker = self.brokers[prof.profile_id]
+            prof_picks = routed.get(prof.profile_id, [])
+            allocator = CapitalAllocator(self.config)
+            amounts = allocator.allocate([p.symbol for p in prof_picks])
+            fund_picks = [p for p in prof_picks if amounts.get(p.symbol, 0.0) > 0]
+            try:
+                cache = allocator.prefetch([p.symbol for p in fund_picks], broker)
+            except Exception:  # pragma: no cover - per-symbol fallback inside
+                cache = {}
+            quote_cache: Dict[str, Any] = {}
+            if getattr(self.config, "execution_mode", "market") == "marketable_limit":
+                try:
+                    quote_cache = broker.get_quotes(
+                        [p.symbol for p in fund_picks]) or {}
+                except Exception:  # pragma: no cover - defensive
+                    quote_cache = {}
+            plan = allocator.plan_quantities(
+                [p.symbol for p in fund_picks], broker, cache=cache)
+            plan_qtys = plan["quantities"]
+            for pick in fund_picks:
+                target = int(plan_qtys.get(pick.symbol) or 0)
+                if target <= 0:
+                    continue
+                leg1 = int(target * frac)
+                leg2 = target - leg1
+                amount = amounts.get(pick.symbol, 0.0)
+                if leg1 > 0:
+                    r = await self._place_one(
+                        broker, prof, pick, amount, allocator, prefetch=cache,
+                        forced_qty=leg1, quote=quote_cache.get(pick.symbol))
+                    placed.append(r)
+                if leg2 > 0:
+                    leg2_plan.append({
+                        "profile_id": prof.profile_id, "symbol": pick.symbol,
+                        "qty": int(leg2), "amount": amount})
+        entry_latency_ms = int((time.monotonic() - _fire_t0) * 1000)
+        try:
+            self._record_latency(entry_latency_ms=entry_latency_ms)
+        except Exception:  # pragma: no cover
+            pass
+        n_filled = sum(1 for p in placed
+                       if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE",
+                                               "DRY_RUN"))
+        if n_filled == 0 and not leg2_plan:
+            reason = ("btst: nothing placed and no second-leg plan (all picks "
+                      "unaffordable for the per-slice budget)")
+            self._set_status("FAILED", reason=reason, closed_at=_now_ist_iso())
+            log.error("session %s FAILED: %s", self.session_id, reason)
+            return {"session_id": self.session_id, "status": "FAILED",
+                    "mode": self.mode, "n_placed": 0, "orders": placed,
+                    "reason": reason, "strategy": "btst_oscillator"}
+        # DEFERRED: do NOT freeze the basis, and place NO GTT/SL — the 09:15
+        # half-leg carries NO stop (the whole point). Persist the second-leg plan
+        # (restart-durable) and mark the entry INCOMPLETE. NOTE: no square-off is
+        # armed (positional carry).
+        self._set_magnifier_entry_complete(False)
+        self._persist_mag_leg2_plan(leg2_plan)
+        for _label, _starter in (("tick", tick_driver.start_for_session),
+                                 ("ws", ws_driver.start_for_session)):
+            try:
+                _starter(self.session_id)
+            except Exception as e:  # never block start on a driver
+                log.warning("%s driver start failed for %s: %s", _label,
+                            self.session_id, e)
+        _schedule_btst_second_leg(
+            self.session_id, float(self.config.magnifier_second_leg_offset_sec))
+        log.info("btst %s: 09:15 half-leg placed (%d legs, NO stop); second leg in "
+                 "%ds (positional, no trail)", self.session_id, n_filled,
+                 int(self.config.magnifier_second_leg_offset_sec))
+        return {"session_id": self.session_id, "status": "RUNNING",
+                "mode": self.mode, "n_placed": n_filled, "orders": placed,
+                "strategy": "btst_oscillator", "magnifier_stage": 1,
+                "magnifier_entry_complete": False,
+                "second_leg_in_sec": int(self.config.magnifier_second_leg_offset_sec),
+                "note": ("btst 09:15 half-leg placed with NO stop; the remaining "
+                         "half fills at the second leg, then the basket is held to "
+                         "the 2-session exit under the −6% disaster stop (no trail)")}
+
+    async def complete_btst_entry(self) -> Dict[str, Any]:
+        """BTST split-entry PHASE 2 (the 09:16 leg): place the remaining half,
+        AVERAGE it into each position (blended cost), freeze the invested basis on
+        the blended basket, place the per-position broker backup (CNC GTT-OCO), then
+        set mag_entry_complete=1 so the tick/ws −6% disaster stop + max-hold cap
+        engage FROM the blended cost. Idempotent (already-complete → no-op). Unlike
+        the Magnifier NO profit trail is armed (the BTST child arm_pct is
+        unreachable). ALWAYS marks complete at the end (even if a second leg fails)
+        so the disaster stop / max-hold engages on the filled basket."""
+        if self._magnifier_entry_complete():
+            return {"session_id": self.session_id, "already_complete": True,
+                    "strategy": "btst_oscillator"}
+        if not self.brokers:
+            self._build_brokers()
+        from .capital import CapitalAllocator
+        plan = self._load_mag_leg2_plan()
+        prof_by_id = {p.profile_id: p for p in self.config.broker_profiles}
+        by_prof: Dict[str, List[Dict[str, Any]]] = {}
+        for item in plan:
+            by_prof.setdefault(item["profile_id"], []).append(item)
+        placed: List[Dict[str, Any]] = []
+        for pid, items in by_prof.items():
+            prof = prof_by_id.get(pid)
+            if prof is None or not getattr(prof, "enabled", True):
+                continue
+            broker = self.brokers.get(pid)
+            if broker is None:
+                continue
+            allocator = CapitalAllocator(self.config)
+            syms = [it["symbol"] for it in items]
+            try:
+                cache = allocator.prefetch(syms, broker)
+            except Exception:  # pragma: no cover
+                cache = {}
+            quote_cache: Dict[str, Any] = {}
+            if getattr(self.config, "execution_mode", "market") == "marketable_limit":
+                try:
+                    quote_cache = broker.get_quotes(syms) or {}
+                except Exception:  # pragma: no cover
+                    quote_cache = {}
+            for it in items:
+                pick = Pick(symbol=it["symbol"], rank=0, score=0.0, sector=None,
+                            close_at_signal=None, n_fires=None, avg_lift=None)
+                try:
+                    r = await self._place_one(
+                        broker, prof, pick, float(it.get("amount") or 0.0),
+                        allocator, prefetch=cache, forced_qty=int(it["qty"]),
+                        quote=quote_cache.get(it["symbol"]), register_mode="add")
+                except Exception as e:  # per-leg isolation
+                    log.error("btst second leg crashed for %s: %s",
+                              it["symbol"], e)
+                    r = {"symbol": it["symbol"], "status": "FAILED",
+                         "error": str(e)}
+                placed.append(r)
+        # BOTH legs now in → freeze the invested basis on the BLENDED basket.
+        try:
+            self.monitor.freeze_invested_basis()
+        except Exception as e:  # never block on the basis capture
+            log.warning("btst invested_basis freeze failed for %s: %s",
+                        self.session_id, e)
+        try:
+            self.monitor.freeze_entry_basket_notional()
+        except Exception:  # pragma: no cover
+            pass
+        # NOW place the per-position broker backup (CNC GTT-OCO) on the blended
+        # cost — the broker floor, WIDER than the −6% software disaster stop.
+        try:
+            if self.config.per_position_gtt_enabled and self.gtt_manager:
+                self.gtt_manager.backfill_missing()
+        except Exception as e:
+            log.warning("btst GTT backfill failed for %s: %s",
+                        self.session_id, e)
+        # ENGAGE the exit logic: from the next tick the −6% disaster stop + the
+        # 2-session max-hold cap run on the blended-cost basket. NO trail is armed
+        # (arm_pct unreachable) — the profit trail never fires for BTST.
+        self._set_magnifier_entry_complete(True)
+        n_filled = sum(1 for p in placed
+                       if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE",
+                                               "DRY_RUN"))
+        log.info("btst %s: second leg done (%d legs) — held to 2-session exit under "
+                 "the −6%% disaster stop (no trail armed)", self.session_id,
+                 n_filled)
+        return {"session_id": self.session_id, "status": self._current_status(),
+                "strategy": "btst_oscillator", "magnifier_stage": 2,
                 "magnifier_entry_complete": True, "n_placed": n_filled,
                 "orders": placed}
 

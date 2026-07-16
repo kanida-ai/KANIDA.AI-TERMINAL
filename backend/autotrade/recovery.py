@@ -429,6 +429,16 @@ def _resume_running(session_id: str) -> str:
     except Exception as e:  # pragma: no cover - never block recovery
         log.warning("recovery: magnifier completion failed for %s: %s",
                     session_id, e)
+    # FALCON BTST OSCILLATOR: identical restart concern — a restart between the
+    # 09:15 and 09:16 legs would leave the second leg unfired (its timer thread
+    # died) and the basis unfrozen. Complete the split entry NOW (idempotent), so
+    # the remaining half fills, the basis freezes on the blended cost, and the
+    # per-position GTT backup is placed. Best-effort.
+    try:
+        _complete_btst_if_pending(session_id)
+    except Exception as e:  # pragma: no cover - never block recovery
+        log.warning("recovery: btst completion failed for %s: %s",
+                    session_id, e)
     if armed:
         log.info("recovery: re-armed tick driver for RUNNING session %s", session_id)
         return "tick_rearmed"
@@ -456,6 +466,26 @@ def _complete_magnifier_if_pending(session_id: str) -> None:
     log.info("recovery: completing pending magnifier split entry for %s",
              session_id)
     asyncio.run(sess.complete_magnifier_entry())
+
+
+def _complete_btst_if_pending(session_id: str) -> None:
+    """If a resumed RUNNING session is a Falcon BTST Oscillator whose split entry
+    never completed (only the 09:15 leg is in), fire the second leg + freeze the
+    basis now. Idempotent (already-complete → no-op). LIVE places real orders;
+    paper simulates. Never raises."""
+    from .session import TradingSession
+
+    sess = TradingSession.load(session_id)
+    if sess is None:
+        return
+    if getattr(sess.config, "strategy", None) != "btst_oscillator":
+        return
+    if sess._magnifier_entry_complete():
+        return
+    if not sess.brokers:
+        sess._build_brokers()
+    log.info("recovery: completing pending btst split entry for %s", session_id)
+    asyncio.run(sess.complete_btst_entry())
 
 
 def _resume_killing(session_id: str, status: str) -> str:

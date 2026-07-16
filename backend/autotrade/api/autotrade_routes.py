@@ -317,9 +317,9 @@ class CreateLadderRequest(BaseModel):
     # per trading day squared off same evening). Additive; omitting it is
     # byte-for-byte the existing positional ladder.
     campaign_type: str = Field(
-        "positional", description="positional (default) | magnifier")
+        "positional", description="positional (default) | magnifier | btst")
     order_product: str = Field("CNC", description="CNC | MTF (positional); MIS is "
-                               "forced for magnifier")
+                               "forced for magnifier; CNC is forced for btst")
     mode: str = Field("paper", description="'paper' (default) | 'live'")
     user_id: Optional[str] = Field(None, description="Portal user id (optional)")
     broker_account_id: Optional[str] = Field(

@@ -860,7 +860,8 @@ class TradingSessionConfig:
         if self.top_n_stocks <= 0:
             raise ValueError("top_n_stocks must be > 0")
         if self.strategy not in ("portfolio_kill_switch", "intraday_basket",
-                                 "tesla_short", "intraday_magnifier"):
+                                 "tesla_short", "intraday_magnifier",
+                                 "btst_oscillator"):
             raise ValueError(f"invalid strategy: {self.strategy}")
         # Defensive units check: these percentages are FRACTIONS (0.01 = 1%), not
         # whole-number percents. The UI has historically sent 1.0 (intending
@@ -1110,6 +1111,77 @@ class TradingSessionConfig:
                 raise ValueError(
                     "intraday_magnifier top_n_stocks must be 3..50 (the ranked "
                     f"pool to draw the high-tier basket from), got {self.top_n_stocks}")
+
+        # ── FALCON BTST OSCILLATOR — validate when the strategy is selected ────
+        # A CNC / 1× POSITIONAL long that reuses the Magnifier's split-entry
+        # mechanic (50% @09:15 + 50% @09:16, blended cost) + the SAME Top-N
+        # high-tier selection, BUT carries overnight (square_off_enabled=False),
+        # holds max_hold_sessions trading sessions, arms NO profit trail, and the
+        # only software basket stop is the −stop_pct disaster stop on the blended
+        # cost. Locked to EQ + CNC + long (no leverage). Additive; never blocks
+        # another strategy.
+        if self.strategy == "btst_oscillator":
+            if self.direction != "long":
+                raise ValueError(
+                    "btst_oscillator is long-only — set direction='long'")
+            if not (self.instrument_type == "EQ" and self.order_product == "CNC"):
+                raise ValueError(
+                    "btst_oscillator trades EQUITY on CNC (1×, no leverage) ONLY — "
+                    "set instrument_type='EQ' and order_product='CNC' (got "
+                    f"instrument_type={self.instrument_type}, "
+                    f"order_product={self.order_product})")
+            if self.square_off_enabled is not False:
+                raise ValueError(
+                    "btst_oscillator is a POSITIONAL 2-session BTST carry — "
+                    "square_off_enabled must be False (no intraday square-off)")
+            # A positional BTST holds at least one full session (D1→D2); a 0/neg
+            # hold is nonsensical and would never carry overnight.
+            if int(self.max_hold_sessions) < 1:
+                raise ValueError(
+                    "btst_oscillator max_hold_sessions must be an integer >= 1 "
+                    f"(the BTST spec is 2), got {self.max_hold_sessions}")
+            # Split-entry knobs (SHARED with the Magnifier — same fields/vocab).
+            if not (0.0 < float(self.magnifier_split_fraction) < 1.0):
+                raise ValueError(
+                    "magnifier_split_fraction must be a fraction in (0, 1) "
+                    f"(0.5 = 50/50), got {self.magnifier_split_fraction}")
+            if int(self.magnifier_second_leg_offset_sec) < 1:
+                raise ValueError(
+                    "magnifier_second_leg_offset_sec must be an integer >= 1 "
+                    f"(seconds after entry), got {self.magnifier_second_leg_offset_sec}")
+            if not self.magnifier_high_tier:
+                raise ValueError("magnifier_high_tier must be a non-empty list")
+            _VALID_TIERS = {
+                "PREMIUM-Pullback", "PREMIUM-Compression", "ENTERPRISE-Dryup",
+                "GOLD", "GOLD-baseline", "STANDARD", "STANDARD-weak", "AVOID"}
+            _bad = [t for t in self.magnifier_high_tier if t not in _VALID_TIERS]
+            if _bad:
+                raise ValueError(
+                    f"magnifier_high_tier has unknown tier(s) {_bad}; valid tiers: "
+                    f"{sorted(_VALID_TIERS)}")
+            # The trail knobs are range-checked so a saved preset round-trips, but
+            # arm_pct is set unreachable by the ladder preset (0.5) → the profit
+            # trail never arms; only the −stop_pct disaster stop can fire.
+            for nm, v in (("arm_pct", self.arm_pct),
+                          ("floor_pct", self.floor_pct),
+                          ("trail_giveback_pct", self.trail_giveback_pct),
+                          ("stop_pct", self.stop_pct)):
+                if not (0.0 < float(v) <= 0.5):
+                    raise ValueError(
+                        f"{nm} must be a fraction in (0, 0.5] (e.g. 0.01 = 1%), "
+                        f"got {v}")
+            if self.floor_pct > self.arm_pct + 1e-12:
+                raise ValueError(
+                    f"floor_pct ({self.floor_pct}) must be <= arm_pct "
+                    f"({self.arm_pct})")
+            try:
+                _parse_clock_to_seconds(self.entry_time)
+            except ValueError as e:
+                raise ValueError(f"btst_oscillator entry_time {e}")
+            if self.top_n_stocks < 3 or self.top_n_stocks > 50:
+                raise ValueError(
+                    "btst_oscillator top_n_stocks must be 3..50 (the ranked pool "
+                    f"to draw the high-tier basket from), got {self.top_n_stocks}")
 
         # MULTI-SESSION MAX-HOLD CAP: a non-negative integer (0 = no cap).
         # Meaningful only for a POSITIONAL intraday_basket; on an intraday

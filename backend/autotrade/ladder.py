@@ -125,8 +125,27 @@ MAGNIFIER_GIVEBACK_PCT = 0.05
 MAGNIFIER_STOP_PCT = 0.03
 MAGNIFIER_TOP_N = 15
 MAGNIFIER_HOLD_LENGTH = 1
+
+# ── FALCON BTST OSCILLATOR campaign preset (fractions of CAPITAL) ─────────────
+# The redefined BTST Oscillator: the SAME Falcon Top-15 high-tier basket (~9
+# names) the Magnifier picks, entered with the SAME 50/50 split (50% @09:15 +
+# 50% @09:16, blended cost) — BUT on CNC at 1× (no leverage), carried overnight
+# (square_off_enabled=False), held BTST_MAX_HOLD trading sessions, with NO
+# profit trail (arm set unreachable at 0.5) and ONLY the −6% disaster stop on
+# the blended cost. Because the hold overlaps, the sleeve = total / hold so the
+# full pool is deployed at steady state (e.g. ₹10L = 2 × ₹5L sleeves).
+BTST_ARM_PCT = 0.5            # unreachable → the profit trail never arms (no trail)
+BTST_FLOOR_PCT = 0.01         # inert (floor <= arm), kept range-valid
+BTST_GIVEBACK_PCT = 0.04      # inert, kept range-valid
+BTST_STOP_PCT = 0.06          # the −6% disaster stop on the blended basket cost
+BTST_TOP_N = 15               # Falcon Top-15 pool → high-tier subset (~9 names)
+BTST_MAX_HOLD = 2             # 2-session BTST hold: buy D1 09:15 → sell D2 close
+BTST_SPLIT_FRACTION = 0.5     # 50/50 split entry (shared magnifier knob)
+BTST_SECOND_LEG_OFFSET_SEC = 60   # second leg ~09:16
+
 CAMPAIGN_POSITIONAL = "positional"
 CAMPAIGN_MAGNIFIER = "magnifier"
+CAMPAIGN_BTST = "btst"
 
 
 def _now_iso() -> str:
@@ -212,15 +231,20 @@ class LadderCampaign:
         if total_capital is None or float(total_capital) <= 0:
             raise ValueError("total_capital must be > 0")
         ct = str(campaign_type or CAMPAIGN_POSITIONAL).lower()
-        if ct not in (CAMPAIGN_POSITIONAL, CAMPAIGN_MAGNIFIER):
+        if ct not in (CAMPAIGN_POSITIONAL, CAMPAIGN_MAGNIFIER, CAMPAIGN_BTST):
             raise ValueError(
-                f"campaign_type must be 'positional' or 'magnifier', got "
+                f"campaign_type must be 'positional', 'magnifier' or 'btst', got "
                 f"{campaign_type!r}")
         if ct == CAMPAIGN_MAGNIFIER:
             # The Falcon Intraday Magnifier is MIS intraday (5×) by construction —
             # force the product regardless of what was sent (an intraday campaign
             # can only be MIS). MIS recycles daily so it holds ONE basket at a time.
             prod = "MIS"
+        elif ct == CAMPAIGN_BTST:
+            # The Falcon BTST Oscillator is CNC at 1× (no leverage) by construction
+            # — force CNC regardless of what was sent (BTST carries overnight; MIS
+            # can't, and MTF/leverage is not the validated variant).
+            prod = "CNC"
         else:
             prod = str(order_product or "CNC").upper()
             if prod not in ("CNC", "MTF"):
@@ -246,6 +270,10 @@ class LadderCampaign:
         # day's full cash/day, since only one basket is ever open at a time).
         if ct == CAMPAIGN_MAGNIFIER:
             hold_length = MAGNIFIER_HOLD_LENGTH
+        elif ct == CAMPAIGN_BTST:
+            # BTST overlaps BTST_MAX_HOLD (=2) sleeves at steady state → sleeve =
+            # total / 2 (unless an operator override changes the hold length).
+            hold_length = cls._effective_hold_length(overrides, default=BTST_MAX_HOLD)
         else:
             hold_length = cls._effective_hold_length(overrides)
         per_basket = round(float(total_capital) / hold_length, 2)
@@ -798,6 +826,10 @@ class LadderCampaign:
           Falcon Top-15 high-tier, split entry (50% @09:15 + 50% @09:16), squared
           off same day (square_off_enabled=True). The overrides whitelist still
           applies (risk/exit knobs only).
+        * BTST: strategy=btst_oscillator, EQ + CNC (1×, no leverage), long, the
+          SAME Top-15 high-tier selection + 50/50 split entry as the Magnifier but
+          positional (square_off_enabled=False), 2-session hold, NO profit trail
+          (arm 0.5 unreachable), only the −6% disaster stop on the blended cost.
         * POSITIONAL (default): strategy=intraday_basket, square_off_enabled=False,
           max_hold_sessions=3, the validated positional trail — byte-for-byte
           unchanged."""
@@ -818,6 +850,34 @@ class LadderCampaign:
                 # The magnifier uses the intraday trail's fixed-floor path (its
                 # arm/floor/give are the validated set); the step-lock ladder tuned
                 # for the standard intraday basket does not apply.
+                trail_step_lock_enabled=False,
+            )
+            for f, v in (overrides or {}).items():
+                setattr(cfg, f, v)
+            return cfg
+        if campaign_type == CAMPAIGN_BTST:
+            # FALCON BTST OSCILLATOR: strategy=btst_oscillator, EQ + CNC (1×,
+            # NO leverage), long, the SAME Top-15 high-tier selection + 50/50 split
+            # entry the Magnifier uses, BUT positional (carry overnight,
+            # square_off_enabled=False), 2-session hold, NO profit trail (arm 0.5
+            # unreachable), and ONLY the −6% disaster stop on the blended cost. The
+            # overrides whitelist still applies (risk/exit knobs only).
+            cfg = TradingSessionConfig(
+                total_allocated_capital=float(per_basket_capital),
+                strategy="btst_oscillator",
+                top_n_stocks=BTST_TOP_N,
+                order_product="CNC",           # 1× cash, forced
+                instrument_type="EQ",
+                direction="long",
+                arm_pct=BTST_ARM_PCT,
+                floor_pct=BTST_FLOOR_PCT,
+                trail_giveback_pct=BTST_GIVEBACK_PCT,
+                stop_pct=BTST_STOP_PCT,         # −6% disaster stop (blended cost)
+                square_off_enabled=False,       # POSITIONAL: carry across days
+                max_hold_sessions=BTST_MAX_HOLD,
+                magnifier_split_fraction=BTST_SPLIT_FRACTION,
+                magnifier_second_leg_offset_sec=BTST_SECOND_LEG_OFFSET_SEC,
+                # magnifier_high_tier defaults to the validated tier set.
                 trail_step_lock_enabled=False,
             )
             for f, v in (overrides or {}).items():
@@ -851,15 +911,17 @@ class LadderCampaign:
         return cfg
 
     @classmethod
-    def _effective_hold_length(cls, overrides: Dict[str, Any]) -> int:
+    def _effective_hold_length(cls, overrides: Dict[str, Any],
+                               default: int = POSITIONAL_MAX_HOLD_SESSIONS) -> int:
         """The number of trading sessions a child holds = the number of
         overlapping sleeves at steady state = the sizing divisor. Sourced from the
-        effective child max_hold_sessions override, else POSITIONAL_MAX_HOLD_SESSIONS
-        (=3). Must be >= 1 (a 0/negative divisor is nonsensical + would divide-by-
-        zero the sleeve)."""
+        effective child max_hold_sessions override, else `default`
+        (POSITIONAL_MAX_HOLD_SESSIONS=3 for the positional ladder, BTST_MAX_HOLD=2
+        for the BTST Oscillator). Must be >= 1 (a 0/negative divisor is nonsensical
+        + would divide-by-zero the sleeve)."""
         raw = (overrides or {}).get("max_hold_sessions")
         if raw is None:
-            return POSITIONAL_MAX_HOLD_SESSIONS
+            return default
         try:
             h = int(raw)
         except (TypeError, ValueError):

@@ -86,10 +86,11 @@ STRATEGY_REGISTRY: List[StrategyDescriptor] = [
     StrategyDescriptor(
         strategy_id="falcon_btst_oscillator",
         display_name="Falcon BTST Oscillator",
-        kind="campaign", campaign_type="positional", ladder_preset="btst",
+        kind="campaign", campaign_type="btst", ladder_preset="btst",
         default_visible=False, experimental=True,
-        description=("Falcon Top-5 bought 09:15, sold Day-2 15:29 · CNC, no "
-                     "leverage · no trail · −6% stop (a 2-session BTST campaign).")),
+        description=("Falcon Top-15 high-tier (~9 names) split-entry (50% @09:15 + "
+                     "50% @09:16), sold Day-2 15:29 · CNC, no leverage · no trail · "
+                     "−6% disaster stop (a 2-session BTST campaign).")),
     StrategyDescriptor(
         strategy_id="intraday_magnifier",
         display_name="Falcon Intraday Magnifier",
