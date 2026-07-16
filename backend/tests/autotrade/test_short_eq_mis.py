@@ -241,7 +241,8 @@ def _short_kill_session(created_ltps, price):
     return sess
 
 
-def test_short_eq_mis_kill_FIRES_on_rise(clean_positions, patched_brokers):
+def test_short_eq_mis_kill_FIRES_on_rise(clean_positions, patched_brokers,
+                                         market_hours_clock):
     created, shared = patched_brokers
     sess = _short_kill_session(shared, price=110.0)   # +10% up = short LOSS
     out = asyncio.run(sess.tick())
@@ -252,7 +253,8 @@ def test_short_eq_mis_kill_FIRES_on_rise(clean_positions, patched_brokers):
     assert exit_calls and all(c["direction"] == "short" for c in exit_calls)
 
 
-def test_short_eq_mis_kill_NO_FIRE_on_fall(clean_positions, patched_brokers):
+def test_short_eq_mis_kill_NO_FIRE_on_fall(clean_positions, patched_brokers,
+                                           market_hours_clock):
     created, shared = patched_brokers
     sess = _short_kill_session(shared, price=90.0)    # -10% down = short PROFIT
     out = asyncio.run(sess.tick())

@@ -6,12 +6,15 @@ so falcon.config.FALCON_DB resolves to it), seeds the minimal falcon_position_st
 additive AutoTrade migrations on top. No real broker, no real Kite, no real
 orders are ever used.
 """
+import datetime as _dt
 import os
 import sqlite3
 import tempfile
 import uuid
 
 import pytest
+
+_IST = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
 
 # CRITICAL: set the DB path before importing anything under falcon/autotrade,
 # because falcon.config.FALCON_DB is captured at import time.
@@ -89,6 +92,69 @@ def _db():
         os.remove(_TMP_DB)
     except OSError:
         pass
+
+
+# ── WALL-CLOCK HERMETICITY ───────────────────────────────────────────────────
+# The conftest already declares a deterministic "now" via FALCON_AUTOTRADE_FAKE_NOW
+# (2026-06-25T10:00 IST, an NSE trading day during market hours). That env var is
+# honoured ONLY by autotrade.session.now_ist() — the SEAM. Several TIME-BASED
+# production paths deliberately read the real wall clock directly instead:
+#
+#   * autotrade/session.py     — the MIS defensive square-off TICK BACKSTOP
+#                                (`datetime.now(IST) >= mis_square_off_time`,
+#                                default 15:12 IST) in both tick() and _tick_tesla,
+#                                plus the 09:15–15:29 market-hours guards.
+#   * monitoring/trail_engine.py — decide()'s `now` defaults to datetime.now(IST);
+#                                the SQUARE_OFF branch (15:29 IST) takes precedence
+#                                over ARM / STOP / HOLD.
+#
+# Those production behaviours are CORRECT (a MIS book must be flattened before the
+# broker's ~15:20 compulsory square; a basket must be squared off at 15:29). But
+# they make any test that ticks a MIS / square_off_enabled session pass ONLY when
+# the machine clock happens to sit inside 09:15–15:12 IST, and fail the rest of
+# the day with a SQUARE_OFF / MIS_SQUARE_OFF that has nothing to do with what the
+# test is asserting. That is test flakiness, not a production bug.
+#
+# This fixture freezes the clock those modules read to the SAME instant the
+# conftest already advertises, so the assertion under test is the only variable.
+# It is TEST-ONLY: production code is untouched and keeps reading the real clock.
+_FROZEN_NOW_IST = _dt.datetime(2026, 6, 25, 10, 0, 0, tzinfo=_IST)
+
+
+class _FrozenDatetime(_dt.datetime):
+    """datetime with a pinned now(); everything else (fromisoformat, strptime,
+    arithmetic, isinstance) inherits real behaviour."""
+
+    @classmethod
+    def now(cls, tz=None):
+        if tz is None:
+            return _FROZEN_NOW_IST.replace(tzinfo=None)
+        return _FROZEN_NOW_IST.astimezone(tz)
+
+    @classmethod
+    def utcnow(cls):
+        return _FROZEN_NOW_IST.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+
+
+@pytest.fixture
+def market_hours_clock(monkeypatch):
+    """Pin the wall clock read by the time-based exit paths to 2026-06-25 10:00
+    IST (a trading day, inside market hours, before the 15:12 MIS square-off and
+    the 15:29 basket square-off).
+
+    Use on any test that ticks a MIS session or a square_off_enabled
+    intraday_basket and asserts on a NON-time-based outcome (kill sign, trail
+    arm/stop, reconciliation). Without it the test is a function of the wall clock.
+    """
+    import autotrade.session as _sess
+    from autotrade.monitoring import trail_engine as _te
+
+    monkeypatch.setattr(_sess, "datetime", _FrozenDatetime)
+    monkeypatch.setattr(_te, "datetime", _FrozenDatetime)
+    # Keep the explicit seam in lockstep with the frozen wall clock.
+    _sess.set_fake_now(_FROZEN_NOW_IST)
+    yield _FROZEN_NOW_IST
+    _sess.set_fake_now(None)
 
 
 @pytest.fixture

@@ -63,6 +63,30 @@ def _live_env(monkeypatch):
     monkeypatch.setenv("FALCON_AUTOTRADE_ENABLED", "true")
 
 
+def _patch_token_ok(monkeypatch):
+    """Force the UPSTREAM Kite-token guard (ZerodhaBroker._token_abort_reason,
+    GUARD G2) to 'valid token' so it cannot pre-empt the gate under test.
+
+    WHY THIS EXISTS (2026-07-16 hermeticity fix). _token_abort_reason runs BEFORE
+    the Fix A (owned-account) and Fix B (preflight) gates on every LIVE order, and
+    it reads the REAL machine's Kite token store (services.kite_auth.token_present
+    / get_cached_token_status — a DB/env read). So on a machine with no Kite token
+    (a fresh checkout, CI, a logged-out morning) every live-order test aborted
+    early with "TOKEN_EXPIRED: TOKEN_MISSING" instead of the reason it asserts —
+    A5/B1/B2/B4 failed for an environmental reason, while A1-A4/A6/B3 (which never
+    reach place_order) passed. That was a TEST leak, not a production bug: aborting
+    a live order when no token is present is CORRECT fail-closed behaviour.
+
+    Pinning the token guard here keeps each test a test of ONE gate. The token
+    guard has its own coverage (see the token-abort tests) and is NOT weakened:
+    every one of these tests still runs it, it just returns 'valid'.
+    """
+    monkeypatch.setattr("services.kite_auth.get_cached_token_status",
+                        lambda max_age=60.0: {"valid": True}, raising=False)
+    monkeypatch.setattr("services.kite_auth.token_present",
+                        lambda: "test-access-token", raising=False)
+
+
 # ══ FIX A ════════════════════════════════════════════════════════════════════
 
 def test_A1_user_owned_live_unbound_refuses_no_global(monkeypatch):
@@ -140,6 +164,7 @@ def test_A5_user_owned_live_place_order_fails_leg_not_global(monkeypatch):
     """End-to-end: place_order on a user-owned live unbound session returns a
     FAILED leg (NO_OWNED_BROKER_ACCOUNT), never places at the global client."""
     _live_env(monkeypatch)
+    _patch_token_ok(monkeypatch)   # upstream token guard must not pre-empt Fix A
     # Preflight GREEN so the leg reaches _build_kite — the NO_OWNED refusal (Fix A)
     # must fire on its own even when every reliability check passes.
     _patch_preflight(monkeypatch, ok=True)
@@ -187,6 +212,7 @@ def _patch_preflight(monkeypatch, ok: bool, red_names=None):
 def test_B1_live_order_refused_on_red_preflight(monkeypatch):
     """RED preflight → live order refused with the named reason, NO kite call."""
     _live_env(monkeypatch)
+    _patch_token_ok(monkeypatch)   # upstream token guard must not pre-empt Fix B
     _patch_preflight(monkeypatch, ok=False, red_names=["kite_ip_allowed"])
     spy = _SpyKite("GLOBAL")
     monkeypatch.setattr("services.kite_auth.get_kite_client",
@@ -206,6 +232,7 @@ def test_B1_live_order_refused_on_red_preflight(monkeypatch):
 def test_B2_live_order_proceeds_on_green_preflight(monkeypatch):
     """GREEN preflight → order proceeds to kite."""
     _live_env(monkeypatch)
+    _patch_token_ok(monkeypatch)   # upstream token guard must not pre-empt Fix B
     _patch_preflight(monkeypatch, ok=True)
     spy = _SpyKite("GLOBAL")
     monkeypatch.setattr("services.kite_auth.get_kite_client",
@@ -248,6 +275,7 @@ def test_B4_market_exit_not_blocked_by_preflight(monkeypatch):
     block a capital-protecting exit, or the kill switch / stop-loss could not
     flatten a live position. Only ENTRIES gate on preflight."""
     _live_env(monkeypatch)
+    _patch_token_ok(monkeypatch)   # upstream token guard must not pre-empt the exit
     _patch_preflight(monkeypatch, ok=False, red_names=["signals_fresh"])
     spy = _SpyKite("GLOBAL")
     monkeypatch.setattr("services.kite_auth.get_kite_client",
