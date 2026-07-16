@@ -834,6 +834,16 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
         # then closed by ITS OWN order-id evidence, not this aggregate.
         # MIS / NRML / MTF: no holdings; |signed net| IS the exposure (a short MTF
         # nets negative — abs is the held size; live AARTIIND MTF net -630 → 630).
+        # BROKER-AGNOSTIC OMS (2026-07-16): the COMBINATION rule above used to be
+        # hard-coded HERE — a KITE-tuned formula applied to EVERY broker. It
+        # over-counts a broker whose holdings book already contains today's CNC
+        # buys (the suspected source of 3 bogus CORP_ACTION_SUSPECTED alerts on
+        # Rupeezy CNC same-day buys). We now scrape the two normalised numbers
+        # generically and let THE ADAPTER map its own book semantics
+        # (BrokerClient.broker_held_qty / CNC_HOLDINGS_INCLUDE_SAME_DAY_BUYS). No
+        # `if broker == "..."` branch here, ever. The default implementation IS the
+        # Kite formula, so every adapter is byte-for-byte unchanged until it
+        # declares otherwise on live evidence.
         held = 0
         if product == "CNC":
             for pid in (pos_profs or set(brokers.keys())):
@@ -842,9 +852,20 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                     if _bare_symbol(str(h.get("tradingsymbol") or "")) == bare_sym:
                         held += int((_num(h.get("quantity")) or 0)
                                     + (_num(h.get("t1_quantity")) or 0))
-            broker_held = held + max(0, broker_net)
-        else:
-            broker_held = abs(broker_net)
+        # The adapter that owns this group's book. A group is scoped to ONE account
+        # (grp_acct) so its profiles are one broker in practice; take the first
+        # resolvable client, else any client on the session (single-broker
+        # fallback). No client at all → the base/Kite default rule.
+        _grp_broker = next(
+            (brokers[pid] for pid in sorted(pos_profs) if pid in brokers), None)
+        if _grp_broker is None:
+            _grp_broker = next(iter(brokers.values()), None)
+        if _grp_broker is not None and hasattr(_grp_broker, "broker_held_qty"):
+            broker_held = int(_grp_broker.broker_held_qty(
+                product=product, holdings_qty=held, net_qty=broker_net))
+        else:  # pragma: no cover - no broker client (defensive): the default rule
+            broker_held = (held + max(0, broker_net) if product == "CNC"
+                           else abs(broker_net))
 
         # ── db_held_ALL: Σ OPEN qty across ALL sessions on the account for
         #    (symbol, product). The invariant's left side. ─────────────────────

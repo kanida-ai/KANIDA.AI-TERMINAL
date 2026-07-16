@@ -167,6 +167,23 @@ def _is_transient(status_code: Optional[int]) -> bool:
 class RupeezyBroker(BrokerClient):
     broker_name = "rupeezy"
 
+    # BOOK SEMANTICS (see BrokerClient.broker_held_qty) — ⚠️ UNCERTIFIED, LEFT AT
+    # THE SAFE DEFAULT ON PURPOSE.
+    # SUSPECTED: Vortex's holdings `t1_quantity` already contains TODAY's CNC buys
+    # (unlike Kite, where they sit only in the net book), so the shared
+    # holdings + max(0, net) rule DOUBLE-COUNTS a same-day CNC buy → a ~2× broker
+    # SURPLUS → the 3 bogus CORP_ACTION_SUSPECTED alerts observed on Rupeezy CNC.
+    # If confirmed, flip this to True and held = holdings alone.
+    # NOT FLIPPED: get_holdings() below is still certified only against an
+    # ALL-ZERO live book, so the total_free / t1_quantity split is UNVERIFIED —
+    # this must be set from ONE live, NON-ZERO holdings response observed
+    # alongside the same day's positions() net for the same symbol. Guessing here
+    # would be a real-money reconciliation decision made on no evidence.
+    # FAIL-SAFE while False: the over-count reads as a broker SURPLUS, which the
+    # reconciler treats as INVISIBLE (never closes / never mutates a position) —
+    # the only cost is the spurious non-mutating CORP_ACTION_SUSPECTED alert.
+    CNC_HOLDINGS_INCLUDE_SAME_DAY_BUYS = False
+
     def __init__(self, profile, dry_run: bool = True):
         super().__init__(profile, dry_run=dry_run)
         self._token_cache: Dict[str, int] = {}
