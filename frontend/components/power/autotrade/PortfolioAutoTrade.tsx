@@ -41,7 +41,7 @@ import {
   type BrokerAccount, type SessionScope,
   type UniverseFilter, type PickItem, type PicksResponse,
   type LadderProduct, type LadderEndMode, type LadderKillMode, type LadderStatusName,
-  type LadderStatus, type LadderSummary, type LadderChildConfig,
+  type LadderStatus, type LadderSummary,
   type MagnifierCreateBody, type MagnifierPreset,
   MAGNIFIER_STRATEGY_ID,
 } from '@/lib/autotrade-api'
@@ -281,15 +281,16 @@ const TESLA_GRADE_OPTIONS: { id: 'A++' | 'A+++'; label: string }[] = [
 
 // Auto-Ladder PRESET — which validated positional campaign to build. 'positional'
 // = the existing default (Falcon Top-5 held ~3 sessions; the wire body is
-// UNCHANGED, no child_config). 'btst' = Falcon BTST: buy the Top-5 at 09:15, hold
-// EXACTLY 2 sessions, sell Day-2 15:29, CNC (1× cash), no trail (arm 0.5 =
-// unreachable in a 2-day hold), −6% basket stop. BTST forces order_product=CNC and
-// sends child_config { max_hold_sessions: 2, arm_pct: 0.5 } on create — everything
-// else in the create flow is identical. Additive: default path is byte-identical.
+// UNCHANGED, no child_config). 'btst' = Falcon BTST Oscillator: the daily Top-15
+// HIGH-TIER basket (~9 names) bought via a 50/50 SPLIT entry (50% @09:15 + 50%
+// @09:16, blended cost), held EXACTLY 2 sessions, sold Day-2 15:29, CNC (1× cash),
+// no trail (inert at 1×), −6% disaster stop on the blend. BTST forces
+// order_product=CNC and sends campaign_type:'btst' on create — the backend bakes in
+// the whole preset. Additive: the default positional path is byte-identical.
 type LadderPreset = 'positional' | 'btst'
 const LADDER_PRESET_OPTIONS: { id: LadderPreset; label: string; hint: string }[] = [
   { id: 'positional', label: 'Positional (3-session)', hint: 'Falcon Top-5 held ~3 sessions — the default monthly positional campaign.' },
-  { id: 'btst',       label: 'Falcon BTST Oscillator', hint: 'Falcon Top-5 bought 09:15, sold Day-2 15:29 · CNC, no leverage · no trail · −6% stop.' },
+  { id: 'btst',       label: 'Falcon BTST Oscillator', hint: 'Top-15 high-tier (~9 names) · 50/50 split entry @09:15+09:16 · CNC, hold 2 sessions, sell Day-2 15:29 · no trail · −6% stop.' },
 ]
 
 // Campaign Duration options (Auto-Ladder only). Maps to LadderEndMode on the wire.
@@ -1751,13 +1752,13 @@ export function PortfolioAutoTrade({
         mode,
         end_date_mode: ladderEndMode,
         kill_mode: 'flatten_now',
-        // Falcon BTST: 2-session hold + arm 0.5 (unreachable → no trail). The
-        // backend whitelists these keys and auto-sizes each sleeve to
-        // total_capital / max_hold_sessions (= capital ÷ 2). Omitted for the
-        // default positional campaign, so that wire body is byte-identical.
-        ...(ladderPreset === 'btst'
-          ? { child_config: { max_hold_sessions: 2, arm_pct: 0.5 } as LadderChildConfig }
-          : {}),
+        // Falcon BTST Oscillator: send campaign_type:'btst' so the backend builds
+        // the REDEFINED strategy — Top-15 high-tier basket, 50/50 split entry,
+        // 2-session CNC hold, no trail, −6% disaster stop, sleeve = capital ÷ 2.
+        // The preset bakes in every knob (top_n, split, max_hold, arm-off, stop),
+        // so NO child_config is needed. Omitted for the default positional
+        // campaign, whose wire body stays byte-identical.
+        ...(ladderPreset === 'btst' ? { campaign_type: 'btst' as const } : {}),
         // PARITY FIX: scope the campaign to this user exactly like createSession,
         // so it lands with the same user_id and appears in the ?user_id-scoped
         // Sessions list (a SCHEDULED campaign was being dropped by WHERE user_id=?).
@@ -1828,14 +1829,14 @@ export function PortfolioAutoTrade({
       if (when === 'now') {
         await AutoTradeAPI.ladderStart(createdLadder.ladder_id)
         setLadderNotice(
-          'Campaign started ✓ — it opens its first Falcon Top-5 basket at 09:15 on the '
+          'Campaign started ✓ — it opens its first Falcon basket at 09:15 on the '
           + 'next trading day, then automatically ladders a new basket every trading day. '
           + "It's shown below and runs on its own until it ends or you stop it.")
       } else {
         await AutoTradeAPI.ladderStart(createdLadder.ladder_id, campaignDate)
         setLadderNotice(
           `Campaign scheduled ✓ — it arms for ${campaignDate} and opens its first `
-          + 'Falcon Top-5 basket at 09:15 that morning, then ladders a new basket every '
+          + 'Falcon basket at 09:15 that morning, then ladders a new basket every '
           + "trading day. It's shown below until it activates.")
       }
       setCreatedLadder(null)
@@ -2459,7 +2460,9 @@ export function PortfolioAutoTrade({
             {isBtst && (() => {
               const cap = config.total_allocated_capital || 0
               const sleeve = cap > 0 ? cap / 2 : 0
-              const perName = cap > 0 ? cap / 10 : 0
+              // Per-name is an ESTIMATE: the daily sleeve spreads across that
+              // morning's high-tier basket (~9 names, varies day to day).
+              const perName = cap > 0 ? sleeve / 9 : 0
               return (
                 <div className="mt-3 rounded-xl border px-3.5 py-3"
                   style={{ borderColor: 'rgba(63,227,164,0.22)', background: 'linear-gradient(180deg, rgba(63,227,164,0.06), rgba(255,255,255,0.015))' }}>
@@ -2468,10 +2471,10 @@ export function PortfolioAutoTrade({
                     <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Falcon BTST Oscillator — what you&apos;re arming</span>
                   </div>
                   <ul className="text-[11.5px] leading-relaxed space-y-1" style={{ color: C.ink2 }}>
-                    <li>· Buy the Falcon <b style={{ color: C.ink }}>Top-5</b> at <b style={{ color: C.ink }}>09:15</b>, hold <b style={{ color: C.ink }}>exactly 2 sessions</b>, sell <b style={{ color: C.ink }}>Day-2 at 15:29</b>.</li>
-                    <li>· <b style={{ color: C.ink }}>CNC</b> — 1× cash, no leverage · <b style={{ color: C.ink }}>no trail</b> (arm set 0.5, unreachable in a 2-day hold) · <b style={{ color: C.ink }}>−6% basket hard stop</b>.</li>
+                    <li>· Buy the daily <b style={{ color: C.ink }}>Top-15 high-tier</b> basket (~9 names) via a <b style={{ color: C.ink }}>50/50 split</b> entry (<b style={{ color: C.ink }}>09:15 + 09:16</b>), hold <b style={{ color: C.ink }}>exactly 2 sessions</b>, sell <b style={{ color: C.ink }}>Day-2 at 15:29</b>.</li>
+                    <li>· <b style={{ color: C.ink }}>CNC</b> — 1× cash, no leverage · <b style={{ color: C.ink }}>no trail</b> (inert at 1×) · <b style={{ color: C.ink }}>−6% disaster stop</b> on the blended cost.</li>
                     <li>· Rolling <b style={{ color: C.ink }}>monthly</b> campaign — auto-spawns one basket per trading day, continuous until cancelled.</li>
-                    <li>· Sleeve = capital ÷ 2 = <b style={{ color: C.ink }}>{cap > 0 ? fmtINR(sleeve) : '—'}</b> per day (2 overlapping sleeves = full capital) · per name = capital ÷ 10 = <b style={{ color: C.ink }}>{cap > 0 ? fmtINR(perName) : '—'}</b>.</li>
+                    <li>· Sleeve = capital ÷ 2 = <b style={{ color: C.ink }}>{cap > 0 ? fmtINR(sleeve) : '—'}</b> per day (2 overlapping sleeves = full capital) · ≈ per name (~9) = <b style={{ color: C.ink }}>{cap > 0 ? fmtINR(perName) : '—'}</b>.</li>
                   </ul>
                 </div>
               )
@@ -4106,7 +4109,7 @@ export function PortfolioAutoTrade({
                 {ICON.bolt(14)} {campaignBusy === 'now' ? 'Starting…' : 'Start now'}
               </span>
               <span className="text-[10.5px] leading-snug opacity-80">
-                First Falcon Top-5 basket opens at 09:15 next trading morning.
+                First Falcon basket opens at 09:15 next trading morning.
               </span>
             </button>
 
@@ -5059,7 +5062,7 @@ function LadderCampaignCard({
           {scheduled
             ? 'It activates on its start date — its baskets will appear below then.'
             : (status?.n_active_baskets ?? summary.n_active_baskets ?? 0) === 0
-              ? 'Waiting for the next trading day — it opens its first Falcon Top-5 basket at 09:15.'
+              ? 'Waiting for the next trading day — it opens its first Falcon basket at 09:15.'
               : 'Its baskets appear below, tagged “Campaign”.'}
         </span>
       </div>

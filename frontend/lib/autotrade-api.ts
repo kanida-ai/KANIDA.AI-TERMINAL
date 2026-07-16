@@ -978,6 +978,12 @@ export type LadderCreateBody = {
   end_date_mode: LadderEndMode
   end_date?: string
   kill_mode?: LadderKillMode
+  // Campaign variant. 'positional' (DEFAULT) = the existing Top-5 3-session
+  // Auto-Ladder (wire body byte-identical when omitted). 'btst' = Falcon BTST
+  // Oscillator — Top-15 high-tier basket, 50/50 split entry, 2-session CNC hold,
+  // no trail, −6% disaster stop. The backend bakes the whole preset in and forces
+  // CNC, so no child_config is needed for btst. ('magnifier' has its own body.)
+  campaign_type?: 'positional' | 'btst'
   // Optional per-child-basket config (whitelisted server-side). Omitted for the
   // default 3-session positional campaign; set for Falcon BTST.
   child_config?: LadderChildConfig
