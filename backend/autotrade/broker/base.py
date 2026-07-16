@@ -45,6 +45,63 @@ class BrokerClient(ABC):
 
     broker_name: str = "abstract"
 
+    # ── BOOK SEMANTICS (broker-agnostic reconciliation) ──────────────────────
+    # Does this broker's HOLDINGS book already contain TODAY's unsettled CNC
+    # BUYS? This is the ONE piece of per-broker book semantics the position
+    # reconciler needs, and it is declared BY THE ADAPTER — never branched on a
+    # broker name in the reconciler (`if broker == "zerodha"` is banned).
+    #   False (Kite/Zerodha, live-verified 2026-07-06/07-08): today's CNC buys
+    #     sit in positions()['net'] and reach holdings only on T+1 settlement →
+    #     held = holdings(quantity + t1_quantity) + max(0, net).
+    #   True: the holdings book ALREADY reflects today's buys → adding max(0,net)
+    #     would DOUBLE-COUNT them (the suspected source of the 3 bogus
+    #     CORP_ACTION_SUSPECTED alerts on Rupeezy CNC same-day buys) →
+    #     held = holdings.
+    # Default False = today's behaviour for EVERY adapter (byte-for-byte). An
+    # adapter flips it ONLY on a live, non-zero observation of its own book.
+    CNC_HOLDINGS_INCLUDE_SAME_DAY_BUYS: bool = False
+
+    def broker_held_qty(self, *, product: str, holdings_qty: int,
+                        net_qty: int) -> int:
+        """The qty this broker's book says is HELD for one (symbol, product).
+
+        BROKER-AGNOSTIC OMS (operator HARD requirement): the reconciler must not
+        hard-code one broker's book semantics. It hands each adapter the two
+        already-normalised numbers it scraped from THIS broker's books —
+        `holdings_qty` (Σ quantity + t1_quantity over the matching holdings rows;
+        0 when the broker has no holdings book) and `net_qty` (the signed net) —
+        and the adapter maps them to a held size using ITS OWN semantics, declared
+        via CNC_HOLDINGS_INCLUDE_SAME_DAY_BUYS.
+
+        Non-CNC (MIS / NRML / MTF): there are no holdings; |signed net| IS the
+        exposure (a short MTF nets negative — abs is the held size). Universal
+        across brokers, so it is not adapter-configurable.
+
+        CNC (delivery): a SELL is already removed from holdings (the book reflects
+        the post-sell balance), so a negative net must NOT be subtracted again or
+        the sell is double-counted — hence max(0, net), never net. Verified LIVE on
+        Kite 2026-07-08 (AEGISLOG: holdings t1 35 still held + net -57 from other
+        sessions' exits → true held 35; the old max(0, net+holdings) gave 0, a
+        false UNATTRIBUTED_CLOSE) and 2026-07-06 (holdings 35 + net +57 buys = 92
+        → 35 + max(0,57) = 92; ACUTAAS fully sold: 0 + max(0,-12) = 0).
+
+        Overriding: an adapter normally only sets the class flag. Override this
+        method itself only for a broker whose book needs a genuinely different
+        shape."""
+        prod = str(product or "CNC").upper()
+        try:
+            net = int(net_qty or 0)
+            hq = int(holdings_qty or 0)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return 0
+        if prod != "CNC":
+            return abs(net)
+        if self.CNC_HOLDINGS_INCLUDE_SAME_DAY_BUYS:
+            # Today's buys are already inside holdings → adding net would
+            # double-count them. A fully-sold delivery floors to 0.
+            return max(0, hq)
+        return hq + max(0, net)
+
     def __init__(self, profile, dry_run: bool = True):
         self.profile = profile
         self.dry_run = dry_run

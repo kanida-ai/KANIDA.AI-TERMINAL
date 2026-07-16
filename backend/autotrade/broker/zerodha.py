@@ -116,6 +116,16 @@ def _nfo_instruments(kite):
 class ZerodhaBroker(BrokerClient):
     broker_name = "zerodha"
 
+    # BOOK SEMANTICS (see BrokerClient.broker_held_qty). Kite books today's
+    # unsettled CNC BUYS in positions()['net'], NOT in holdings — they reach
+    # holdings only on T+1 settlement. So held = holdings(quantity + t1_quantity)
+    # + max(0, net). LIVE-VERIFIED: 2026-07-06 AEGISLOG holdings 35 + net +57
+    # today's buys = 92 held ✓; 2026-07-08 AEGISLOG holdings t1 35 + net −57
+    # (other sessions' exits) → 35 ✓; ACUTAAS fully sold → 0 + max(0,−12) = 0 ✓.
+    # Explicit (not inherited) because this is the reference semantics the base
+    # default encodes — stated here so it is auditable per adapter.
+    CNC_HOLDINGS_INCLUDE_SAME_DAY_BUYS = False
+
     def __init__(self, profile, dry_run: bool = True):
         super().__init__(profile, dry_run=dry_run)
         self._kite = None
