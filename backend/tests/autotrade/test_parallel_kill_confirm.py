@@ -5,6 +5,7 @@ Each confirm_exit can block up to 60s; N legs used to confirm one-after-another
 not multiply by N) and that every leg still resolves.
 """
 import asyncio
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -21,12 +22,45 @@ OPEN_NOW = datetime(2026, 6, 25, 10, 0, 0, tzinfo=IST)
 _DELAY = 0.3
 
 
+class _Overlap:
+    """Directly MEASURES how many confirms are in flight at the same instant.
+
+    The property under test is 'the confirms OVERLAP (are not N-serialized)'.
+    This records it as a FACT rather than inferring it from a wall-clock budget:
+    max_inflight >= 2 is only reachable if two confirms were genuinely running
+    concurrently, and (unlike elapsed time) it cannot be faked or broken by how
+    busy the machine is.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.inflight = 0
+        self.max_inflight = 0
+
+    def enter(self):
+        with self.lock:
+            self.inflight += 1
+            self.max_inflight = max(self.max_inflight, self.inflight)
+
+    def exit(self):
+        with self.lock:
+            self.inflight -= 1
+
+
 class _SlowConfirmBroker(MockBroker):
+    overlap: _Overlap = None    # set per-test by _mk
+
     def get_order_status(self, order_id):
         # A real broker's order poll takes network time; a serial confirm would
         # pay this once per leg. Concurrent confirms overlap it.
-        time.sleep(_DELAY)
-        return super().get_order_status(order_id)
+        if self.overlap is not None:
+            self.overlap.enter()
+        try:
+            time.sleep(_DELAY)
+            return super().get_order_status(order_id)
+        finally:
+            if self.overlap is not None:
+                self.overlap.exit()
 
 
 @pytest.fixture(autouse=True)
@@ -36,11 +70,13 @@ def _clock():
     set_fake_now(None)
 
 
-def _mk(monkeypatch):
+def _mk(monkeypatch, overlap=None):
     def fake_build_client(profile, dry_run=True):
-        return _SlowConfirmBroker(profile=profile, dry_run=False,
-                                  ltps={"A": 99.0, "B": 99.0, "C": 99.0,
-                                        "D": 99.0})
+        b = _SlowConfirmBroker(profile=profile, dry_run=False,
+                               ltps={"A": 99.0, "B": 99.0, "C": 99.0,
+                                     "D": 99.0})
+        b.overlap = overlap
+        return b
 
     monkeypatch.setattr(router_mod, "build_client", fake_build_client)
     import autotrade.session as sess_mod
@@ -58,7 +94,8 @@ def _status(sess):
 
 
 def test_confirms_run_concurrently(clean_positions, monkeypatch):
-    sess = _mk(monkeypatch)
+    overlap = _Overlap()
+    sess = _mk(monkeypatch, overlap=overlap)
     prof = sess.config.broker_profiles[0].profile_id
     for sym in ("A", "B", "C", "D"):
         sess.registry.register(symbol=sym, broker_profile=prof, qty=100,
@@ -67,14 +104,23 @@ def test_confirms_run_concurrently(clean_positions, monkeypatch):
         sess.registry.update_ltp(sym, 99.0, broker_profile=prof)
     sess.monitor.freeze_invested_basis()
 
-    t0 = time.monotonic()
     summary = asyncio.run(sess.kill_switch.fire("TEST", gross_return=-0.05))
-    elapsed = time.monotonic() - t0
 
     # All 4 legs closed OK.
     assert summary["n_exited_ok"] == 4
     assert summary["n_exit_failed"] == 0
     assert _status(sess) == "CLOSED"
-    # 4 legs × 0.3s serial ≈ 1.2s; concurrent ≈ 0.3s. Anything under 2×_DELAY
-    # proves the confirms overlapped (not N-serialized).
-    assert elapsed < 2 * _DELAY, f"confirms look serialized: {elapsed:.2f}s"
+    # The confirms OVERLAPPED (were not N-serialized).
+    #
+    # This used to be inferred from a wall-clock budget
+    # (`elapsed < 2*_DELAY` → 0.6s). That budget covered the WHOLE fire()
+    # — order placement, DB writes, the order ledger, the snapshot — not just
+    # the confirms, so on a busy machine it blew for reasons unrelated to
+    # concurrency and failed the suite (reproduced here: 2/2 loaded full-suite
+    # runs red, green in isolation). Serialization is now measured DIRECTLY:
+    # max_inflight counts confirms actually running at the same instant, which
+    # is exactly the property under test and is immune to machine load.
+    # A serial implementation can never exceed 1.
+    assert overlap.max_inflight >= 2, (
+        "confirms look serialized: max concurrent confirms = "
+        f"{overlap.max_inflight} (expected >= 2 of {len(summary['details'])} legs)")

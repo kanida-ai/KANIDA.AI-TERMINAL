@@ -219,28 +219,58 @@ def test_kill_switch_autofires_via_tick_driver(clean_positions, patched_brokers)
             mb.set_ltp("A", 130.0)
             mb.set_ltp("B", 260.0)
         # Wait for the driver to tick + fire (interval default 5s; poll status).
-        fired = False
-        deadline = time.time() + 12.0
+        #
+        # SYNCHRONISATION (do NOT assume write-ordering): kill_switch.fire()
+        # writes status=CLOSED (kill_switch.py:658) and only THEN INSERTs the
+        # audit row via _log_fire (kill_switch.py:670 → :751) in a SEPARATE
+        # transaction, and only then returns so the driver thread can break +
+        # deregister. So `status==CLOSED` is NOT evidence that the log row exists
+        # nor that the driver has stopped — it is observed MID-sequence. Reading
+        # either one immediately after seeing CLOSED is a race the driver thread
+        # loses whenever it is descheduled in that window (proven by widening it:
+        # CLOSED observed with kill_switch_log rows = 0). Under a full-suite run
+        # the extra thread/GC contention makes that window hit occasionally —
+        # which is a TEST race, not a kill-switch bug (the flatten itself had
+        # already completed: n_exited_ok=2).
+        #
+        # Each condition below is therefore polled to its OWN deadline. The
+        # assertions are UNCHANGED in strength: the kill MUST fire, the audit row
+        # MUST be written, and the driver MUST self-stop — we just wait for each
+        # rather than assuming one implies the others.
         from falcon.db import falcon_conn
-        while time.time() < deadline:
+
+        def _wait_for(predicate, timeout=12.0, interval=0.05):
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if predicate():
+                    return True
+                time.sleep(interval)
+            return predicate()
+
+        def _status():
             with falcon_conn() as con:
                 row = con.execute(
                     "SELECT status FROM autotrade_sessions WHERE session_id=?",
                     (sess.session_id,)).fetchone()
-            if row and row["status"] == "CLOSED":
-                fired = True
-                break
-            time.sleep(0.25)
-        assert fired, "kill switch did not auto-fire via the tick driver"
-        # A kill-switch fire was logged for this session.
-        with falcon_conn() as con:
-            n = con.execute(
-                "SELECT COUNT(*) FROM autotrade_kill_switch_log WHERE session_id=?",
-                (sess.session_id,)).fetchone()[0]
-        assert n >= 1
-        # Driver self-stopped (session no longer RUNNING).
-        time.sleep(0.5)
-        assert not tick_driver.is_running(sess.session_id)
+            return row["status"] if row else None
+
+        def _n_kill_log():
+            with falcon_conn() as con:
+                return con.execute(
+                    "SELECT COUNT(*) FROM autotrade_kill_switch_log "
+                    "WHERE session_id=?", (sess.session_id,)).fetchone()[0]
+
+        assert _wait_for(lambda: _status() == "CLOSED"), (
+            "kill switch did not auto-fire via the tick driver "
+            "(status=%s)" % _status())
+        # A kill-switch fire was logged for this session (written just AFTER the
+        # CLOSED status → wait for it rather than reading it immediately).
+        assert _wait_for(lambda: _n_kill_log() >= 1), (
+            "kill switch fired but no autotrade_kill_switch_log row was written")
+        # Driver self-stopped (session no longer RUNNING). It deregisters only
+        # after fire() returns → poll rather than sleeping a fixed 0.5s.
+        assert _wait_for(lambda: not tick_driver.is_running(sess.session_id)), (
+            "tick driver did not self-stop after the kill switch fired")
     finally:
         tick_driver.set_autostart(False)
         tick_driver.stop_for_session(sess.session_id)
