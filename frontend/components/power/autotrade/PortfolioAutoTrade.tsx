@@ -431,10 +431,17 @@ function ladderEditable(l: LadderStatus): EditableValues {
   }
 }
 function ladderLocked(l: LadderSummary, st?: LadderStatus): LockedContext {
+  // Basket label depends on the campaign variant: BTST/Magnifier run the Top-15
+  // high-tier basket; the default positional campaign runs Falcon Top-5.
+  const ct = String((st as Record<string, unknown> | undefined)?.campaign_type
+    ?? (l as Record<string, unknown>).campaign_type ?? 'positional')
+  const picks = (ct === 'btst' || ct === 'magnifier')
+    ? 'Falcon Top-15 high-tier (~9)'
+    : 'Falcon Top 5'
   return {
     allocatedCapital: st?.total_capital ?? l.total_capital,
     product: (st?.order_product ?? l.order_product) || undefined,
-    picks: 'Falcon Top 5',           // campaigns run positional Falcon Top-5 baskets
+    picks,
     entryTime: '09:15:00',
   }
 }
@@ -2721,13 +2728,27 @@ export function PortfolioAutoTrade({
               </div>
             </Field>
 
-            <Field label="Top N stocks" hint="How many of today's picks to trade.">
-              <Segmented
-                options={TOP_N_OPTIONS.map((n) => ({ id: n, label: String(n) }))}
-                value={config.top_n_stocks}
-                onChange={(v) => onTopNChange(v)}
-              />
-            </Field>
+            {isBtst ? (
+              // Falcon BTST Oscillator has a FIXED basket baked into the backend
+              // preset (Top-15 → high-tier filter → ~9 names); the generic Top-N
+              // selector doesn't apply and would contradict the strategy, so show a
+              // locked indicator instead.
+              <Field label="Basket" hint="Fixed by the Falcon BTST Oscillator strategy — not adjustable.">
+                <div className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-[12.5px]"
+                  style={{ color: C.ink2, border: `1px solid ${C.line}`, background: 'rgba(255,255,255,0.02)' }}>
+                  <span style={{ color: C.mint }}>{ICON.check(14)}</span>
+                  <span>Falcon <b style={{ color: C.ink }}>Top-15 → high-tier</b> (~9 names/day) · set by preset</span>
+                </div>
+              </Field>
+            ) : (
+              <Field label="Top N stocks" hint="How many of today's picks to trade.">
+                <Segmented
+                  options={TOP_N_OPTIONS.map((n) => ({ id: n, label: String(n) }))}
+                  value={config.top_n_stocks}
+                  onChange={(v) => onTopNChange(v)}
+                />
+              </Field>
+            )}
 
             <Field label="Sizing mode" hint={SIZING_OPTIONS.find((s) => s.id === config.sizing_mode)?.hint}>
               <Segmented
@@ -2933,6 +2954,12 @@ export function PortfolioAutoTrade({
               the strategy section — the defaults (all500 + top-N) are
               exactly current behaviour, so the form is backward-compatible. */}
           <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.015)' }}>
+            {/* Universe filter + manual pick override apply to sessions and the
+                generic positional campaign only. The Falcon BTST Oscillator has a
+                FIXED basket baked into the preset (all500 → Top-15 → high-tier ~9),
+                so these controls are hidden for it — the leftover-capital toggle and
+                the per-name sizing breakdown below still show. */}
+            {!isBtst && (<>
             <div className="flex items-center gap-2 mb-3">
               {ICON.trend(15) /* reuse trend icon = filter context */}
               <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Universe</span>
@@ -3205,6 +3232,7 @@ export function PortfolioAutoTrade({
                 </div>
               )}
             </div>
+            </>)}
 
             {/* ── C · Use leftover capital ── redistribute the capital freed by any
                 skipped pick (1 unit > its slice) across the remaining picks. On by
@@ -4981,7 +5009,7 @@ function LadderCampaignCard({
           style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
           <div className="flex items-center gap-2 text-[11.5px]" style={{ color: C.ink2 }}>
             <span style={{ color: C.amber }}>{ICON.clock(14)}</span>
-            <span>Fires <b style={{ color: C.ink }}>{startDate} 09:15</b> IST — its first Falcon Top-5 basket</span>
+            <span>Fires <b style={{ color: C.ink }}>{startDate} 09:15</b> IST — its first Falcon basket</span>
           </div>
           <span className="text-[15px] font-semibold tabular-nums shrink-0" style={{ color: C.mint }}>
             {remainMs === 0 ? 'starting…' : fmtCountdown(remainMs)}
