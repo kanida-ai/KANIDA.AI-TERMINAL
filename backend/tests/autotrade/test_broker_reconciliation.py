@@ -788,7 +788,8 @@ def test_exit_failed_fully_flat_closes_external(clean_positions, monkeypatch):
 
 # ── END-TO-END through session.tick(): close surfaces under broker_reconciled ─
 
-def test_close_via_order_id_at_tick(clean_positions, monkeypatch):
+def test_close_via_order_id_at_tick(clean_positions, monkeypatch,
+                                    market_hours_clock):
     net_book = {"A": {"quantity": 0, "buy_quantity": 10, "sell_quantity": 10,
                       "sell_price": 95.0, "average_price": 100.0,
                       "exchange": "NSE", "product": "MIS"},

@@ -110,7 +110,8 @@ def _start_leveraged(cfg, shared_ltps, *, invested_basis):
 
 # ── 1. LEVERAGED: arms on CAPITAL, not NOTIONAL ───────────────────────────────
 
-def test_leveraged_no_arm_below_capital_arm_threshold(clean_positions, lev_brokers):
+def test_leveraged_no_arm_below_capital_arm_threshold(clean_positions, lev_brokers,
+                                                      market_hours_clock):
     """invested_basis = 5× capital. uPnL → capital return +3.25% / notional +0.65%.
     With arm_pct=0.05 the trail is fed the +3.25% CAPITAL number (NOT +0.65%) and
     does NOT arm (3.25% < 5%). Proves the fed basis is capital and the returned
@@ -133,7 +134,8 @@ def test_leveraged_no_arm_below_capital_arm_threshold(clean_positions, lev_broke
 
 
 def test_leveraged_arms_on_capital_where_notional_would_not(clean_positions,
-                                                            lev_brokers):
+                                                            lev_brokers,
+                                                            market_hours_clock):
     """invested_basis = 5× capital. Feed a higher uPnL: capital return +5.5% while
     notional is only +1.1%. arm_pct=0.05 → the CAPITAL-basis trail ARMS (5.5% ≥ 5%)
     whereas the OLD notional basis (1.1% < 5%) would NOT have armed. This is the
@@ -166,7 +168,8 @@ def test_leveraged_arms_on_capital_where_notional_would_not(clean_positions,
     assert r["trail_peak"] == pytest.approx(0.055, abs=1e-6)
 
 
-def test_leveraged_basket_stop_on_capital(clean_positions, lev_brokers):
+def test_leveraged_basket_stop_on_capital(clean_positions, lev_brokers,
+                                          market_hours_clock):
     """invested_basis = 5× capital. Basket down 3% of CAPITAL (uPnL -3000) hits the
     -stop_pct hard stop and flattens. On the OLD notional basis this is only -0.6%
     (3% of capital = 15% of notional would be needed) → it would NOT have stopped."""
@@ -194,7 +197,8 @@ def test_leveraged_basket_stop_on_capital(clean_positions, lev_brokers):
 
 # ── 2. 1x REGRESSION: capital == invested → behaviour identical ───────────────
 
-def test_1x_session_behaviour_unchanged(clean_positions, lev_brokers):
+def test_1x_session_behaviour_unchanged(clean_positions, lev_brokers,
+                                        market_hours_clock):
     """A 1x CNC basket: invested_basis == capital, so capital and notional returns
     are IDENTICAL and the trail arms at exactly the same point as before. arm_pct
     0.03; uPnL +3.5% arms. gross_return == both bases."""
@@ -216,7 +220,8 @@ def test_1x_session_behaviour_unchanged(clean_positions, lev_brokers):
 
 # ── 3. POSITIONAL (square_off_enabled=False): arm ~3% of capital, carry intact ─
 
-def test_positional_arms_at_3pct_capital_and_carries(clean_positions, lev_brokers):
+def test_positional_arms_at_3pct_capital_and_carries(clean_positions, lev_brokers,
+                                                     market_hours_clock):
     """Positional basket (square_off_enabled=False, arm_pct=0.03, 1x CNC): arms at
     +3% of capital and is NOT force-squared-off (carry). max_hold_sessions=0 → no
     time cap fires. Positional behaviour unchanged by the basis switch."""
@@ -237,7 +242,8 @@ def test_positional_arms_at_3pct_capital_and_carries(clean_positions, lev_broker
 
 # ── 4. ws_driver sub-second path uses the SAME capital basis ──────────────────
 
-def test_ws_driver_arms_on_capital_basis(clean_positions, lev_brokers):
+def test_ws_driver_arms_on_capital_basis(clean_positions, lev_brokers,
+                                         market_hours_clock):
     """The sub-second ws_driver._tick_once feeds the trail the ALLOCATED-CAPITAL
     return too: a leveraged session at +5.5% capital / +1.1% notional ARMS
     (arm_pct=0.05) via the WS path, matching session.tick()."""
