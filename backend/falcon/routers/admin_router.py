@@ -1,13 +1,34 @@
-"""/api/falcon/admin/* — operational endpoints (status, manual rerun)."""
+"""/api/falcon/admin/* — operational endpoints (status, manual rerun).
+
+AUTH (2026-07-16): every endpoint on this router EXCEPT `GET /falcon/preflight`
+requires the operator token (`X-Operator-Token`), reusing the exact dependency
+that already gates /api/falcon/trade/* — see
+`falcon.trade.routers.trade_router.require_operator_token`. Imported, not
+re-implemented, so there is ONE source of truth for the secret compare.
+
+Why per-endpoint and not router-level (as trade_router.py:59 does):
+`GET /falcon/preflight` is fetched BROWSER-DIRECT to the backend by
+`components/PreflightBanner.tsx` (`NEXT_PUBLIC_API_URL`, no token), NOT through
+the token-injecting `/api/falcon-proxy`. Router-level auth would 403 the
+preflight banner on /falcon/admin, /falcon/premarket and /falcon/trade. Every
+OTHER endpoint here is either called through the proxy (which injects the token
+server-side) or has no frontend caller at all, so all of them are gated.
+Follow-up to close the last hole: move PreflightBanner onto /api/falcon-proxy,
+then this router can go router-level.
+"""
 from typing import List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..config import FALCON_DB, FALCON_VERSION
 from ..db import falcon_conn
+from ..trade.routers.trade_router import require_operator_token
 
 router = APIRouter()
+
+# Per-endpoint operator gate (see module docstring for why not router-level).
+_OPERATOR = [Depends(require_operator_token)]
 
 
 class JobRun(BaseModel):
@@ -51,7 +72,7 @@ def preflight_endpoint(force: bool = False):
     return result.to_dict()
 
 
-@router.get("/falcon/preflight/summary")
+@router.get("/falcon/preflight/summary", dependencies=_OPERATOR)
 def preflight_summary():
     """Lightweight summary for banner — just ok/red/yellow counts. Hits cache."""
     from .. import preflight
@@ -69,7 +90,7 @@ def preflight_summary():
     }
 
 
-@router.post("/falcon/preflight/smoke")
+@router.post("/falcon/preflight/smoke", dependencies=_OPERATOR)
 def preflight_smoke():
     """Run the daily 1-share integration smoke (places + cancels real Kite orders).
     Marks today's auto-deploy as SMOKE_PASSED on success. Operator-only."""
@@ -77,7 +98,7 @@ def preflight_smoke():
     return run_smoke()
 
 
-@router.get("/falcon/admin/status", response_model=FalconStatus)
+@router.get("/falcon/admin/status", response_model=FalconStatus, dependencies=_OPERATOR)
 def status():
     """Admin/dashboard status. Each table query is wrapped in try/except so a
     missing table on a fresh deployment doesn't 500 the whole endpoint."""
@@ -119,7 +140,7 @@ def status():
     )
 
 
-@router.get("/falcon/admin/runs", response_model=List[JobRun])
+@router.get("/falcon/admin/runs", response_model=List[JobRun], dependencies=_OPERATOR)
 def list_runs(limit: int = 30):
     """Recent cron job runs — for the admin panel."""
     with falcon_conn() as con:
@@ -133,7 +154,7 @@ def list_runs(limit: int = 30):
     return [JobRun(**dict(r)) for r in rows]
 
 
-@router.get("/falcon/admin/inbox")
+@router.get("/falcon/admin/inbox", dependencies=_OPERATOR)
 def inbox(limit: int = 20, unread_only: bool = False):
     """In-app notification feed. Returns latest notifications (in-app channel)
     sorted by created_at desc. The frontend displays these in a bell icon."""
@@ -170,7 +191,7 @@ def inbox(limit: int = 20, unread_only: bool = False):
     return {"unread": unread, "items": items}
 
 
-@router.post("/falcon/admin/inbox/mark-read")
+@router.post("/falcon/admin/inbox/mark-read", dependencies=_OPERATOR)
 def mark_read(ids: List[int]):
     """Mark a list of notification IDs as read."""
     if not ids:
@@ -186,7 +207,7 @@ def mark_read(ids: List[int]):
     return {"updated": cur.rowcount}
 
 
-@router.post("/falcon/admin/rerun/{job_name}")
+@router.post("/falcon/admin/rerun/{job_name}", dependencies=_OPERATOR)
 def manual_rerun(job_name: str):
     """Trigger a job manually (for admin panel button).
     Job runs in background — UI should poll /falcon/admin/runs to see progress.
