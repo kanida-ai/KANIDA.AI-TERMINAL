@@ -5,6 +5,14 @@ A single daemon thread that, once per trading day at/after the ladder open time
 basket per RUNNING ladder that has a free capital slice, refreshes the 5-day
 downturn alert, and auto-completes month-end campaigns.
 
+ALIGNED WAKE (2026-07-17 entry-latency fix): the loop sleeps TO the open target
+rather than polling past it, so the day's tick fires at 09:15:00.000 regardless
+of what second the process booted at. Previously the poll PHASE was the boot
+second — a 07:44:15 restart entered the market at 09:15:15, and a restart 45s
+later would have entered at 09:15:50. Entry time was a lottery decided by the
+last restart. The 60s backstop poll is RETAINED for a missed target (machine
+sleep, clock jump). See _next_wait_seconds.
+
 RESTART-DURABLE by construction (mirrors the session drivers):
   * There is NO per-ladder in-memory timer to lose. The loop derives everything
     from the persisted autotrade_ladders rows every wake.
@@ -40,6 +48,12 @@ _OPEN_CLOCK = os.environ.get("FALCON_LADDER_OPEN_TIME", "09:15:00")
 # missed target (sleep, clock jump) still fires the day's tick.
 _POLL_SECONDS = float(os.environ.get("FALCON_LADDER_POLL_SECONDS", "60"))
 
+# Floor on the interruptible sleep. Guards against a busy-spin if the wake lands
+# a hair BEFORE the target (Event.wait may return marginally early): we'd compute
+# a ~0s remainder and re-loop. Bounds any such spin to ~20 iterations/second for
+# the few ms before the target, instead of a hot loop.
+_MIN_WAIT_SECONDS = 0.05
+
 _thread: Optional[threading.Thread] = None
 _stop = threading.Event()
 _lock = threading.Lock()
@@ -65,6 +79,25 @@ def _now() -> datetime:
     return datetime.now(IST)
 
 
+def _next_wait_seconds(now: datetime, target: datetime) -> float:
+    """How long to sleep before the next wake — the ALIGNED-WAKE rule.
+
+    * BEFORE the target: sleep exactly the remainder, capped at the backstop
+      poll. This is what walks the loop's phase onto the target: from any boot
+      phase we keep taking 60s hops until the last hop is the exact remainder,
+      so the final wake lands ON 09:15:00.000 — not on "whatever :ss the process
+      happened to boot at". (Pre-fix, the phase WAS the boot second: a 07:44:15
+      restart entered at 09:15:15; 45s later would have entered at 09:15:50.)
+    * AT/AFTER the target: the plain backstop poll. `now >= target` stays true
+      for the rest of the day, so this is what stops a busy-loop — the pre-fix
+      code relied on the same unconditional poll sleep for that.
+    """
+    remaining = (target - now).total_seconds()
+    if remaining > 0:
+        return min(_POLL_SECONDS, max(_MIN_WAIT_SECONDS, remaining))
+    return _POLL_SECONDS
+
+
 def _run() -> None:
     from .. import ladder as _ladder
     from .. import trading_calendar as _cal
@@ -74,6 +107,7 @@ def _run() -> None:
              _POLL_SECONDS)
     _last_holiday_refresh_date = None  # dedupe the daily NSE holiday refresh
     while not _stop.is_set():
+        wait_s = _POLL_SECONDS
         try:
             now = _now()
             today = now.date()
@@ -106,10 +140,15 @@ def _run() -> None:
                 if res.get("opened"):
                     log.info("ladder_scheduler: opened %d basket(s) at %s",
                              res.get("opened"), now.isoformat())
+            # ALIGNED WAKE: recomputed from a FRESH `now` each iteration (so a
+            # clock jump in either direction self-corrects on the next beat) and
+            # AFTER the tick (so a slow tick doesn't overshoot the next target).
+            wait_s = _next_wait_seconds(_now(), target)
         except Exception as e:  # never crash the daemon
             log.exception("ladder_scheduler tick failed: %s", e)
-        # Interruptible backstop sleep.
-        if _stop.wait(_POLL_SECONDS):
+            wait_s = _POLL_SECONDS  # degrade to the plain backstop poll
+        # Interruptible sleep: to the target when it's ahead, else the backstop.
+        if _stop.wait(wait_s):
             break
     log.info("ladder_scheduler stopped")
 
