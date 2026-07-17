@@ -339,6 +339,43 @@ def _apply_postgres_schema():
 # ── FastAPI lifespan: start scheduler thread on startup ──────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ── A2: production DB preflight — FAIL LOUD, never a silent R&D fallback ──
+    # The silent fallback in falcon/config.py + power_user/config.py is removed;
+    # this is the startup gate that turns a mis-mounted volume into a refusal to
+    # boot instead of a quiet boot against the wrong (research) database.
+    #
+    # Escape hatch: KANIDA_SKIP_DB_PREFLIGHT=true downgrades the raise to a
+    # warning. A false-positive "DB missing" refusing to start the trading
+    # backend would be worse than the bug it prevents, so the operator keeps a
+    # documented way out. Resolution is __file__-based + absolute (verified
+    # cwd-independent under both launch styles), so false positives are not
+    # expected.
+    try:
+        from falcon.config import ProductionDBMissingError, verify_falcon_db
+        from power_user.config import verify_power_db
+    except Exception as e:                      # pragma: no cover — import guard
+        # If the preflight itself can't even load, do NOT strand the trading
+        # backend: a false-positive refusal to boot is worse than the bug this
+        # check prevents. Log loudly and continue.
+        log.exception("DB preflight unavailable (non-fatal, continuing): %s", e)
+    else:
+        try:
+            verify_falcon_db()
+            verify_power_db()
+            log.info("Production DB preflight OK (falcon + power_user).")
+        except ProductionDBMissingError as e:
+            # ONLY a genuinely missing/unreadable production DB blocks boot.
+            if os.environ.get("KANIDA_SKIP_DB_PREFLIGHT", "").strip().lower() in (
+                "1", "true", "yes"
+            ):
+                log.error("Production DB preflight FAILED but KANIDA_SKIP_DB_PREFLIGHT "
+                          "is set — continuing anyway: %s", e)
+            else:
+                log.critical("%s", e)
+                raise
+        except Exception as e:                  # pragma: no cover — defensive
+            log.exception("DB preflight crashed (non-fatal, continuing): %s", e)
+
     from db import IS_POSTGRES
     if IS_POSTGRES:
         _apply_postgres_schema()

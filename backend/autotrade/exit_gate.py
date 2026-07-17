@@ -127,6 +127,12 @@ VALID_REASONS = {
     "TRAIL_EXIT", "FLOOR_EXIT", "STOP", "SQUARE_OFF", "STEP_LOCK_EXIT",
     # Per-stock software stop (Fix 3: individual stock exits before the GTT fires).
     "STOP_STOCK",
+    # MIS defensive square-off — the ~15:12 flatten ahead of the broker's ~15:20
+    # auto-square (square_off_scheduler, the tick backstop, and the tesla safety
+    # net all fire close_reason="MIS_SQUARE_OFF"). It was always ALLOWED (unknown
+    # reasons fail OPEN by design — an exit must never be blocked by vocabulary),
+    # this just stops the spurious "unrecognised reason" warning on every square-off.
+    "MIS_SQUARE_OFF",
     # Map the existing trail_manager reasons onto the gate vocabulary too, so a
     # minimal wrap there can pass its native reason string through unchanged.
     "BREACHED_SL", "TIME_STOP", "TARGET_HIT",
