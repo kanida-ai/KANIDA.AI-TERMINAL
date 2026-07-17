@@ -868,8 +868,17 @@ async def cancel_and_retry_exit(
         #   * 0 < our_held < qty → CLAMP the retry qty to our_held (never oversell).
         # our_held is None in paper / when the broker can't answer → NO guard, the
         # retry proceeds exactly as before (byte-for-byte unchanged).
+        # EXIT LATENCY: this is a BLOCKING broker round trip (~1.1s Kite /
+        # ~4.8s Vortex). Un-threaded inside a coroutine it stalls the whole event
+        # loop — so N retries gathered in parallel serialise here, and ws_driver/
+        # tick stop being served for the duration. to_thread restores real
+        # concurrency. Semantics are IDENTICAL: to_thread re-raises the broker
+        # exception faithfully, so the fail-loud guard below is untouched.
+        # (No batch hoist here: cancel_and_retry_exit is a SINGLE-leg call site —
+        # there is no loop to hoist out of. One leg = one round trip already.)
         try:
-            net_qty = broker.get_net_position_qty(symbol, instrument_type)
+            net_qty = await asyncio.to_thread(
+                broker.get_net_position_qty, symbol, instrument_type)
         except Exception as _net_e:
             log.error(
                 "cancel_and_retry_exit %s/%s: pre-place net probe RAISED: %s — "

@@ -156,6 +156,63 @@ class KillSwitchExecutor:
         # exits). Empty unless iceberg_enabled → the parallel path below is
         # byte-for-byte unchanged.
         sliced_jobs: List[Any] = []
+        # ── BATCHED PRE-EXIT PROBE (EXIT/KILL LATENCY) ────────────────────────
+        # The per-leg get_net_position_qty() guard below costs ONE broker round
+        # trip PER POSITION, executed SERIALLY here — BEFORE any exit coroutine
+        # reaches the gather. Measured: ~14.4s of a 15.9s 3-leg Vortex kill sat
+        # before the first EXIT_PLACED (the exits themselves are genuinely
+        # concurrent: 8 legs placed in 0.24s). Per-probe cost: Zerodha ~1.1s,
+        # Vortex ~4.8-5.1s, paper ~0 (no round trip). Hoist it: fetch each
+        # broker's FULL net book ONCE (O(N) round trips → O(1)) and answer every
+        # leg from it in memory. to_thread keeps the event loop serving
+        # ws_driver/tick while the blocking HTTP call runs.
+        #
+        # SAFETY (the load-bearing part — do not "simplify" this to
+        # get_positions_net(), which SWALLOWS errors to None; None is also the
+        # PAPER sentinel that the guard reads as "no book, proceed with the
+        # exit", so a broker error would place BLIND exits → the 2026-07-10
+        # BRIGADE double-cover class). Instead fetch_net_position_book() RAISES
+        # on a live error, and:
+        #   * batch RAISES or returns None → NO book entry → that broker's legs
+        #     fall through to TODAY'S EXACT per-leg probe loop below, which
+        #     fails loud per leg (probe_raised → skip the leg, never a blind
+        #     order). A batch failure must NEVER abort all legs — a fail-OPEN
+        #     kill switch is worse than a slow one.
+        #   * paper → None (no round trip) → per-leg probe returns None
+        #     instantly → byte-for-byte unchanged, ZERO round trips.
+        # The batch is a pure FAST PATH: it can only ever make the guard faster,
+        # never weaker. Every qty/clamp decision it yields is produced by the
+        # SAME matcher the per-leg probe uses (_net_qty_match).
+        _probe_brokers: Dict[int, Any] = {}
+        for _p in positions:
+            _b = self.brokers.get(_p.get("broker_profile")) \
+                or next(iter(self.brokers.values()), None)
+            if _b is not None:
+                _probe_brokers[id(_b)] = _b
+
+        async def _fetch_book(_b):
+            # to_thread so N brokers' books overlap AND the event loop keeps
+            # serving ws_driver/tick during the blocking broker call.
+            return await asyncio.to_thread(_b.fetch_net_position_book)
+
+        _probe_books: Dict[int, Any] = {}
+        if _probe_brokers:
+            _bids = list(_probe_brokers.keys())
+            _fetched = await asyncio.gather(
+                *[_fetch_book(_probe_brokers[_i]) for _i in _bids],
+                return_exceptions=True)
+            for _i, _res in zip(_bids, _fetched):
+                if isinstance(_res, BaseException):
+                    # Live broker error on the BATCH → do NOT abort the legs and
+                    # do NOT proceed unguarded: leave no book entry so every leg
+                    # of this broker takes the per-leg fail-loud probe.
+                    log.warning("kill %s: batched net-book fetch FAILED for a "
+                                "broker (%s) — falling back to the per-leg "
+                                "probe for its legs (no blind exit)",
+                                self.session_id, _res)
+                    continue
+                if _res is not None:
+                    _probe_books[_i] = _res
         for pos in positions:
             symbol = pos["symbol"]
             prof_id = pos.get("broker_profile")
@@ -186,23 +243,35 @@ class KillSwitchExecutor:
             # None in paper / when unknown → we proceed with the normal exit
             # (paper unchanged). Best-effort: a probe error never blocks the kill.
             probe_raised = False
-            try:
-                net_qty = broker.get_net_position_qty(symbol, itype)
-            except Exception as _net_e:
-                # FAIL-SAFE (Fix B1, 2026-07-10 BRIGADE double-cover). The pre-exit
-                # position read RAISED (broker connection/timeout — e.g.
-                # ConnectionResetError 10054). We CANNOT confirm the live position,
-                # so a market exit here would be BLIND: a short's buy-to-cover would
-                # DOUBLE into a naked long. NEVER place an exit without a successful
-                # position read — skip this leg (do NOT place), release the gate, and
-                # leave it OPEN so a later kill/tick retries once the broker is
-                # reachable. Paper / not-live returns None WITHOUT raising →
-                # probe_raised stays False → unchanged.
-                log.error("kill: net-position probe RAISED %s/%s: %s — NOT placing "
-                          "exit (no blind order); leg left OPEN for retry",
-                          self.session_id, symbol, _net_e)
-                net_qty = None
-                probe_raised = True
+            # FAST PATH: answer from the hoisted book (no round trip). Absent
+            # book (paper / batch error / broker can't answer this leg) → None →
+            # fall through to the UNCHANGED per-leg probe below.
+            net_qty = None
+            _batched = False
+            _book = _probe_books.get(id(broker))
+            if _book is not None:
+                _bq = broker.net_qty_from_book(_book, symbol, itype)
+                if _bq is not None:
+                    net_qty = _bq
+                    _batched = True
+            if not _batched:
+                try:
+                    net_qty = broker.get_net_position_qty(symbol, itype)
+                except Exception as _net_e:
+                    # FAIL-SAFE (Fix B1, 2026-07-10 BRIGADE double-cover). The pre-exit
+                    # position read RAISED (broker connection/timeout — e.g.
+                    # ConnectionResetError 10054). We CANNOT confirm the live position,
+                    # so a market exit here would be BLIND: a short's buy-to-cover would
+                    # DOUBLE into a naked long. NEVER place an exit without a successful
+                    # position read — skip this leg (do NOT place), release the gate, and
+                    # leave it OPEN so a later kill/tick retries once the broker is
+                    # reachable. Paper / not-live returns None WITHOUT raising →
+                    # probe_raised stays False → unchanged.
+                    log.error("kill: net-position probe RAISED %s/%s: %s — NOT placing "
+                              "exit (no blind order); leg left OPEN for retry",
+                              self.session_id, symbol, _net_e)
+                    net_qty = None
+                    probe_raised = True
             if probe_raised:
                 exit_gate.release_exit_session(self.session_id, symbol,
                                                broker_profile=prof_id)
