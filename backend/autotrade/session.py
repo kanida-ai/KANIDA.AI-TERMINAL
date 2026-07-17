@@ -238,11 +238,24 @@ def _marks_stale_for_profit(positions, bound_sec, now=None) -> bool:
     return worst > int(bound_sec)
 
 
-def _parse_entry_time_today_ist(entry_time: str) -> datetime:
+def _parse_entry_time_today_ist(entry_time: str,
+                                now: Optional[datetime] = None) -> datetime:
     """Parse config.entry_time ("HH:MM" or "HH:MM:SS") as a time TODAY in IST.
 
     Returns an IST-aware datetime for today's date at the given clock time.
     Raises ValueError on an unparseable string so the caller can fall back.
+
+    `now` supplies the DATE this clock time is stamped onto. A caller that also
+    COMPARES against "now" must pass the SAME now it compares with, so the parse
+    and the comparison cannot straddle a date/second boundary — and so a frozen
+    clock (the seam) moves BOTH. The MIS defensive square-off backstops do this.
+
+    The DEFAULT is deliberately the RAW clock, NOT the now_ist() seam. _arm_square_off()
+    hands its parsed target to square_off_scheduler, whose daemon thread sleeps for
+    (target - datetime.now(IST)) REAL seconds — a timer cannot sleep against a fake
+    clock. Defaulting to the seam would stamp the target with the seam's DATE while
+    the daemon (and the `already passed` check) measured it against the real clock:
+    two clocks in one decision. Seam-driven callers pass `now` explicitly instead.
     """
     s = (entry_time or "").strip()
     parsed = None
@@ -254,9 +267,9 @@ def _parse_entry_time_today_ist(entry_time: str) -> datetime:
             continue
     if parsed is None:
         raise ValueError(f"unparseable entry_time: {entry_time!r}")
-    now = datetime.now(IST)
-    return now.replace(hour=parsed.hour, minute=parsed.minute,
-                       second=parsed.second, microsecond=0)
+    base = now or datetime.now(IST)   # see docstring: raw by default, BY DESIGN
+    return base.replace(hour=parsed.hour, minute=parsed.minute,
+                        second=parsed.second, microsecond=0)
 
 
 def _parse_clock_hms(clock: str) -> Tuple[int, int, int]:
@@ -3670,7 +3683,7 @@ class TradingSession:
 
         # Market-hours guard: only fire software stops and retries during 09:15–15:29 IST.
         # After-hours restarts read stale closing prices which falsely trigger exits.
-        _now_ist_tick = datetime.now(IST)
+        _now_ist_tick = now_ist()
         _in_market_hours = (
             _now_ist_tick.replace(hour=9, minute=15, second=0, microsecond=0)
             <= _now_ist_tick <=
@@ -3922,8 +3935,10 @@ class TradingSession:
         mis_square_off = False
         if reason is None and self.kill_switch and self.config.is_intraday_product():
             try:
-                mis_t = _parse_entry_time_today_ist(self.config.mis_square_off_time)
-                if datetime.now(IST) >= mis_t:
+                _mis_now = now_ist()
+                mis_t = _parse_entry_time_today_ist(
+                    self.config.mis_square_off_time, _mis_now)
+                if _mis_now >= mis_t:
                     reason = "MIS_SQUARE_OFF (tick backstop)"
                     mis_square_off = True
             except ValueError:  # pragma: no cover - validate() rejects unparseable
@@ -4027,7 +4042,7 @@ class TradingSession:
         # PER-STOCK SOFTWARE STOP LOOP.
         # Runs BEFORE the portfolio-level trail engine so the trail sees the
         # updated (smaller) basket on this same tick.
-        _now_ist_intraday = datetime.now(IST)
+        _now_ist_intraday = now_ist()
         _in_market_hours = (
             _now_ist_intraday.replace(hour=9, minute=15, second=0, microsecond=0)
             <= _now_ist_intraday <=
@@ -4521,8 +4536,10 @@ class TradingSession:
         safety_reason = self._basket_safety_decision(gr_capital, params)
         if safety_reason is None and self.config.is_intraday_product():
             try:
-                mis_t = _parse_entry_time_today_ist(self.config.mis_square_off_time)
-                if datetime.now(IST) >= mis_t:
+                _mis_now = now_ist()
+                mis_t = _parse_entry_time_today_ist(
+                    self.config.mis_square_off_time, _mis_now)
+                if _mis_now >= mis_t:
                     safety_reason = "MIS_SQUARE_OFF"
             except ValueError:  # pragma: no cover - validate() rejects unparseable
                 pass

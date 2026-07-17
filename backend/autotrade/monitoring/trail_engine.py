@@ -128,6 +128,23 @@ class TrailDecision:
     trigger: Optional[float] = None
 
 
+def _clock_now() -> datetime:
+    """The IST 'now' for this module's time-based decisions, routed through the
+    session clock seam so FALCON_AUTOTRADE_FAKE_NOW / set_fake_now() reach the
+    square-off branch and the trail path is testable.
+
+    Imported LAZILY on purpose: session.py imports this module at import time, so
+    a module-level `from ..session import now_ist` would be circular. When the
+    seam is unset now_ist() returns datetime.now(IST) — byte-identical to the
+    previous raw read. On ANY import/seam failure this falls back to the real IST
+    clock: a time-based flatten must never crash on a clock-seam problem."""
+    try:
+        from ..session import now_ist as _seam_now
+        return _seam_now()
+    except Exception:  # pragma: no cover - defensive; seam must never break a fire
+        return datetime.now(IST)
+
+
 def _parse_square_off_today_ist(square_off_time: str,
                                 now: Optional[datetime] = None) -> Optional[datetime]:
     """Parse square_off_time ("HH:MM"/"HH:MM:SS") as TODAY in IST. None if bad."""
@@ -141,7 +158,7 @@ def _parse_square_off_today_ist(square_off_time: str,
             continue
     if parsed is None:
         return None
-    base = now or datetime.now(IST)
+    base = now or _clock_now()
     return base.replace(hour=parsed.hour, minute=parsed.minute,
                         second=parsed.second, microsecond=0)
 
@@ -197,15 +214,23 @@ def decide(g: float, state: TrailState, params: TrailParams,
            now: Optional[datetime] = None) -> TrailDecision:
     """Pure trail decision for one tick.
 
-    g:     the NOTIONAL / invested-basis basket gross return (a fraction).
+    g:     the gross return to trail, as a FRACTION, on the CAPITAL basis. Every
+           live caller passes the capital-basis return: the basket callers pass
+           gr_capital (session.py, ws_driver.py) and the per-stock / per-seat
+           callers pass that name's g_stock / g_seat. (Historically documented as
+           the NOTIONAL / invested basis — that is stale: the kill switch uses the
+           frozen invested basis, the TRAIL uses allocated capital. This engine is
+           basis-agnostic — it only compares g against the fractional knobs — so
+           the CALLER owns the basis choice.)
     state: the persisted TrailState (armed, peak).
     params: the fractional knobs + square_off_time.
-    now:   IST-aware datetime override for tests; defaults to now in IST.
+    now:   IST-aware datetime override; defaults to the session clock seam
+           (now_ist(), i.e. real IST unless FALCON_AUTOTRADE_FAKE_NOW is set).
 
     Returns a TrailDecision; the caller persists state when state_changed and
     executes the flatten (reusing KillSwitchExecutor.fire) when action=="EXIT".
     """
-    now_ist = now or datetime.now(IST)
+    now_ist = now or _clock_now()
 
     # 1. SQUARE-OFF — time-based flatten takes precedence over everything.
     # POSITIONAL (square_off_enabled False): skip this branch entirely so the
@@ -302,7 +327,7 @@ def seconds_to_square_off(square_off_time: str,
                           now: Optional[datetime] = None) -> Optional[int]:
     """Seconds remaining until today's square-off (>=0), or None if unparseable.
     0 once the time has passed."""
-    now_ist = now or datetime.now(IST)
+    now_ist = now or _clock_now()
     sq = _parse_square_off_today_ist(square_off_time, now_ist)
     if sq is None:
         return None

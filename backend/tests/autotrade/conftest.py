@@ -95,29 +95,31 @@ def _db():
 
 
 # ── WALL-CLOCK HERMETICITY ───────────────────────────────────────────────────
-# The conftest already declares a deterministic "now" via FALCON_AUTOTRADE_FAKE_NOW
-# (2026-06-25T10:00 IST, an NSE trading day during market hours). That env var is
-# honoured ONLY by autotrade.session.now_ist() — the SEAM. Several TIME-BASED
-# production paths deliberately read the real wall clock directly instead:
+# The conftest declares a deterministic "now" via FALCON_AUTOTRADE_FAKE_NOW
+# (2026-06-25T10:00 IST, an NSE trading day during market hours), honoured by
+# autotrade.session.now_ist() — the SEAM.
 #
-#   * autotrade/session.py     — the MIS defensive square-off TICK BACKSTOP
-#                                (`datetime.now(IST) >= mis_square_off_time`,
-#                                default 15:12 IST) in both tick() and _tick_tesla,
-#                                plus the 09:15–15:29 market-hours guards.
-#   * monitoring/trail_engine.py — decide()'s `now` defaults to datetime.now(IST);
-#                                the SQUARE_OFF branch (15:29 IST) takes precedence
-#                                over ARM / STOP / HOLD.
+# HISTORY: the TIME-BASED money paths used to BYPASS that seam and read the raw
+# wall clock, so this fixture had to freeze `datetime` on the modules from the
+# OUTSIDE. As of the clock-seam change those sites are ROUTED through now_ist():
 #
-# Those production behaviours are CORRECT (a MIS book must be flattened before the
-# broker's ~15:20 compulsory square; a basket must be squared off at 15:29). But
-# they make any test that ticks a MIS / square_off_enabled session pass ONLY when
-# the machine clock happens to sit inside 09:15–15:12 IST, and fail the rest of
-# the day with a SQUARE_OFF / MIS_SQUARE_OFF that has nothing to do with what the
-# test is asserting. That is test flakiness, not a production bug.
+#   * autotrade/session.py       — the MIS defensive square-off TICK BACKSTOP
+#                                  (default 15:12 IST) in tick() + _tick_tesla,
+#                                  and the 09:15–15:29 market-hours guards.
+#   * monitoring/trail_engine.py — decide()'s `now` now defaults to the seam
+#                                  (via _clock_now()); the SQUARE_OFF branch
+#                                  (15:29 IST) still takes precedence over
+#                                  ARM / STOP / HOLD.
 #
-# This fixture freezes the clock those modules read to the SAME instant the
-# conftest already advertises, so the assertion under test is the only variable.
-# It is TEST-ONLY: production code is untouched and keeps reading the real clock.
+# so the env var above ALONE is now sufficient to make those paths deterministic.
+# (Boundary coverage of each routed site lives in test_clock_seam.py, driven
+# purely through the seam.)
+#
+# This fixture is RETAINED because it also pins any *unrouted* datetime.now()
+# read on those two modules, and existing tests depend on it. It freezes the
+# clock to the SAME instant the seam already advertises, so the two agree and the
+# assertion under test is the only variable. It stays TEST-ONLY: with the seam
+# unset, production reads the real clock exactly as before.
 _FROZEN_NOW_IST = _dt.datetime(2026, 6, 25, 10, 0, 0, tzinfo=_IST)
 
 
