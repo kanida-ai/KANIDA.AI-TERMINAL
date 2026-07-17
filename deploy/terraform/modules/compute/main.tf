@@ -98,7 +98,31 @@ resource "aws_lb_target_group" "app" {
   }
 }
 
+# HTTP listener (port 80) — ALWAYS created.
+# WHY (load-bearing, not cosmetic): an aws_ecs_service with a load_balancer block
+# fails at APPLY ("The target group ... does not have an associated load
+# balancer") unless the referenced target group is already attached to the ALB
+# via at least one listener. Before this listener existed, a plan with no ACM
+# cert (the default) produced a stack that VALIDATED and PLANNED fine but could
+# NOT be applied. This listener guarantees the target group is always associated.
+# NOTE: the ALB security group only allows 443 inbound (see modules/security), so
+# :80 is NOT reachable from the internet — this listener exists purely to satisfy
+# the ECS association requirement and to give the local/boot path a target. In
+# real prod, once ACM is wired, switch this to a 301 redirect to 443.
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.this.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app.arn
+  }
+}
+
 # HTTPS listener. cert ARN required — supply an ACM cert for the app domain.
+# Conditional: no cert => no 443 listener (the HTTP listener above still keeps
+# the target group associated so the service applies).
 resource "aws_lb_listener" "https" {
   count             = var.acm_certificate_arn == null ? 0 : 1
   load_balancer_arn = aws_lb.this.arn
@@ -133,6 +157,8 @@ resource "aws_ecs_service" "app" {
     container_port   = var.container_port
   }
 
-  # Only attach to the LB once a listener exists.
-  depends_on = [aws_lb_listener.https]
+  # Only attach to the LB once a listener exists. aws_lb_listener.http is always
+  # created, so the target group is always LB-associated (the https listener is
+  # conditional on an ACM cert and may be absent).
+  depends_on = [aws_lb_listener.http, aws_lb_listener.https]
 }

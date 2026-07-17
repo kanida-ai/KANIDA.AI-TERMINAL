@@ -1,0 +1,26 @@
+# ============================================================================
+# deploy/terraform/.gitignore — keep Terraform working files OUT of git
+# ----------------------------------------------------------------------------
+# The parent deploy/.gitignore also covers these, but this local copy makes the
+# rule obvious to anyone working inside deploy/terraform/ and survives if the
+# directory is ever copied/zipped on its own (e.g. uploaded into CloudShell).
+#
+# WHY each is ignored:
+#   .terraform/          provider plugins + module cache — re-created by `init`.
+#   *.tfstate*           STATE. Holds resource IDs, secret ARNs, the generated
+#                        RDS master password. MUST live in the S3 remote backend,
+#                        NEVER in git. (See the backend "s3" stub in versions.tf.)
+#   terraform.tfvars     sizing/topology chosen per-environment; may hint at
+#                        internal CIDRs/handles. Copy from terraform.tfvars.example.
+#   crash.log / *.tfplan generated artifacts, not source.
+# ============================================================================
+
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+crash.log
+crash.*.log
+*.tfplan
+tf.plan

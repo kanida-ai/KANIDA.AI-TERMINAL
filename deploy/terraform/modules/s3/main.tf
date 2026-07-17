@@ -5,8 +5,15 @@
 # access via the task role only.
 # ============================================================================
 
+# S3 bucket names are GLOBALLY unique across ALL AWS accounts. A bare
+# "kanida-prod-artifacts" risks a BucketAlreadyExists failure at apply if anyone
+# (anywhere) already took it — a confusing wall-of-text for the operator. Suffix
+# with this account's ID: account IDs are unique, so the name is effectively
+# collision-proof, yet still deterministic (no perpetual diff, unlike random_id).
+data "aws_caller_identity" "current" {}
+
 resource "aws_s3_bucket" "this" {
-  bucket = "${var.name}-artifacts"
+  bucket = "${var.name}-artifacts-${data.aws_caller_identity.current.account_id}"
   tags   = { Name = "${var.name}-artifacts" }
 }
 
