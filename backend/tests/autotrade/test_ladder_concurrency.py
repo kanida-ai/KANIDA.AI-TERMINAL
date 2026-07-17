@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import autotrade.ladder as ladder_mod
 from autotrade.ladder import LadderCampaign, STATUS_RUNNING
 from falcon.db import falcon_conn
 
@@ -203,3 +204,104 @@ def test_pre_entry_error_releases_claim_but_post_entry_error_does_not(
     assert not res2["opened"]
     assert _last_tick_date(lad2.ladder_id) == now.date().isoformat(), \
         "a post-entry error MUST consume the day (orders may have been placed)"
+
+
+# ── CONCURRENT FIRING (the latency fix itself) ────────────────────────────────
+
+def test_tick_all_running_fires_ladders_concurrently(clean_positions,
+                                                     monkeypatch):
+    """Two ladders whose daily_tick each takes ~1s complete in ~1s wall-clock,
+    not ~2s. This is the Rs36,337 fix: Kite must never queue behind Vortex."""
+    lad_a = _running_ladder()
+    lad_b = _running_ladder()
+    now = _trading_day_now()
+
+    spans = {}
+    lock = threading.Lock()
+
+    def slow_tick(self, ref_now=None):
+        t0 = time.monotonic()
+        time.sleep(1.0)                      # simulate a real broker entry
+        with lock:
+            spans[self.ladder_id] = (t0, time.monotonic())
+        return {"ladder_id": self.ladder_id, "opened": True, "reason": "opened"}
+
+    monkeypatch.setattr(LadderCampaign, "daily_tick", slow_tick)
+
+    t0 = time.monotonic()
+    summary = ladder_mod.tick_all_running(ref_now=now)
+    elapsed = time.monotonic() - t0
+
+    assert summary["ticked"] == 2
+    assert summary["opened"] == 2
+    assert summary["errors"] == 0
+    assert elapsed < 1.8, (
+        f"ladders fired SERIALLY ({elapsed:.2f}s for 2x1s) — the campaign that "
+        "sorts second is paying the first one's broker latency")
+    # Assert genuine OVERLAP, not just a fast wall-clock.
+    (a0, a1), (b0, b1) = spans[lad_a.ladder_id], spans[lad_b.ladder_id]
+    assert min(a1, b1) > max(a0, b0), "the two ladder ticks did not overlap"
+
+
+def test_one_ladder_raising_does_not_block_the_other(clean_positions,
+                                                     monkeypatch):
+    """One ladder's exception must not affect another's fire; counts aggregate."""
+    lad_bad = _running_ladder()
+    lad_good = _running_ladder()
+    now = _trading_day_now()
+    fired = []
+
+    def tick(self, ref_now=None):
+        if self.ladder_id == lad_bad.ladder_id:
+            raise RuntimeError("broker exploded")
+        fired.append(self.ladder_id)
+        return {"opened": True, "reason": "opened"}
+
+    monkeypatch.setattr(LadderCampaign, "daily_tick", tick)
+    summary = ladder_mod.tick_all_running(ref_now=now)
+
+    assert fired == [lad_good.ladder_id], "the healthy ladder did not fire"
+    assert summary["opened"] == 1
+    assert summary["errors"] == 1
+    assert summary["ticked"] == 1
+
+
+def test_tick_all_running_never_raises(clean_positions, monkeypatch):
+    _running_ladder()
+    def boom(self, ref_now=None):
+        raise RuntimeError("kaboom")
+    monkeypatch.setattr(LadderCampaign, "daily_tick", boom)
+    summary = ladder_mod.tick_all_running(ref_now=_trading_day_now())
+    assert summary["errors"] == 1 and summary["opened"] == 0
+
+
+def test_concurrent_tick_all_running_two_beats_one_basket_per_ladder(
+        clean_positions, monkeypatch):
+    """End-to-end: two tick_all_running sweeps racing (e.g. the boot resume and
+    the 09:15 beat) still open at most ONE basket per ladder."""
+    lad_a = _running_ladder()
+    lad_b = _running_ladder()
+    now = _trading_day_now()
+    spawns = []
+    lock = threading.Lock()
+
+    def slow_spawn(self, today):
+        with lock:
+            spawns.append(self.ladder_id)
+        self._entry_attempted = True
+        time.sleep(0.3)
+        return {"opened": True, "session_id": "s", "reason": "opened"}
+
+    monkeypatch.setattr(LadderCampaign, "_spawn_child", slow_spawn)
+    barrier = threading.Barrier(2)
+
+    def sweep():
+        barrier.wait()
+        ladder_mod.tick_all_running(ref_now=now)
+
+    t1 = threading.Thread(target=sweep)
+    t2 = threading.Thread(target=sweep)
+    t1.start(); t2.start(); t1.join(20); t2.join(20)
+
+    assert sorted(spawns) == sorted([lad_a.ladder_id, lad_b.ladder_id]), (
+        f"expected exactly one spawn per ladder, got {spawns}")

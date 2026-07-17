@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -62,6 +63,13 @@ from .config import TradingSessionConfig
 from .session import TradingSession, now_ist
 
 log = logging.getLogger("kanida.autotrade.ladder")
+
+# Max campaigns fired CONCURRENTLY by tick_all_running (2026-07-17 latency fix).
+# Bounded so a large campaign count can't spawn unbounded threads / hammer the
+# broker APIs; in practice only a handful of ladders run at once.
+_TICK_MAX_WORKERS = max(1, int(os.environ.get("FALCON_LADDER_TICK_CONCURRENCY",
+                                              "8")))
+
 
 def _ladder_open_time() -> time:
     """Daily market-open / activation clock (IST). Shared with ladder_scheduler
@@ -1318,7 +1326,22 @@ def tick_all_running(ref_now: Optional[datetime] = None) -> Dict[str, Any]:
     """Run daily_tick for every non-terminal, non-draft ladder (SCHEDULED /
     RUNNING / PAUSED / ENDED — CREATED drafts excluded) — the body of the
     recurring 09:15 scheduler. This is what auto-activates a SCHEDULED campaign on
-    its start_date. Idempotent + never raises."""
+    its start_date. Idempotent + never raises.
+
+    CONCURRENT (2026-07-17 entry-latency fix). Campaigns are INDEPENDENT — often
+    different brokers/accounts entirely — so they fire in PARALLEL. Serially,
+    campaign N+1 paid for campaign N's full entry latency: on 2026-07-17 the Kite
+    Magnifier (7.2s of its own work) waited out an 18.7s Vortex BTST entry and
+    hit the market 37s after the open = a measured Rs36,337 of slippage.
+
+    daily_tick is sync + runs its own event loop internally, so this is a
+    ThreadPoolExecutor, not asyncio. SAFETY: parallelism is only sound because
+    daily_tick's per-ladder+day guard is an ATOMIC claim (LadderCampaign._claim_day
+    — conditional UPDATE + rowcount) — do NOT parallelise this on a read-then-write
+    guard, that is a duplicate-live-basket race. Per-ladder isolation is preserved
+    (daily_tick never raises; the executor wrapper catches anyway) and the summary
+    is aggregated on THIS thread only, so no counter lock is needed.
+    """
     summary: Dict[str, Any] = {"ticked": 0, "opened": 0, "errors": 0}
     try:
         with falcon_conn() as con:
@@ -1330,17 +1353,46 @@ def tick_all_running(ref_now: Optional[datetime] = None) -> Dict[str, Any]:
     except Exception as e:  # pragma: no cover
         log.exception("ladder tick_all: query failed: %s", e)
         return summary
-    for row in rows:
-        lid = row["ladder_id"]
+    lids = [row["ladder_id"] for row in rows]
+    if not lids:
+        return summary
+
+    def _tick_one(lid: str) -> Optional[Dict[str, Any]]:
+        lad = LadderCampaign.load(lid)
+        if lad is None:
+            return None
+        return lad.daily_tick(ref_now=ref_now)
+
+    # Bounded: campaign counts are small (a handful), and each worker holds its
+    # own short-lived SQLite connection (WAL + a 60s busy timeout serialises the
+    # brief writes; the long pole is the broker round-trip, which holds no lock).
+    workers = min(len(lids), _TICK_MAX_WORKERS)
+    if workers <= 1:  # single ladder → no pool, identical to the old path
+        lid = lids[0]
         try:
-            lad = LadderCampaign.load(lid)
-            if lad is None:
-                continue
-            res = lad.daily_tick(ref_now=ref_now)
-            summary["ticked"] += 1
-            if res.get("opened"):
-                summary["opened"] += 1
+            res = _tick_one(lid)
+            if res is not None:
+                summary["ticked"] += 1
+                if res.get("opened"):
+                    summary["opened"] += 1
         except Exception as e:
             log.exception("ladder tick_all: %s failed: %s", lid, e)
             summary["errors"] += 1
+        return summary
+
+    with ThreadPoolExecutor(max_workers=workers,
+                            thread_name_prefix="ladder-tick") as ex:
+        futures = {ex.submit(_tick_one, lid): lid for lid in lids}
+        for fut in as_completed(futures):
+            lid = futures[fut]
+            try:
+                res = fut.result()
+                if res is None:
+                    continue
+                summary["ticked"] += 1
+                if res.get("opened"):
+                    summary["opened"] += 1
+            except Exception as e:  # one ladder must never affect another
+                log.exception("ladder tick_all: %s failed: %s", lid, e)
+                summary["errors"] += 1
     return summary
