@@ -1,0 +1,102 @@
+# ============================================================================
+# deploy/.dockerignore — keep the build context tiny (MB, not GB)
+# ----------------------------------------------------------------------------
+# Cloud-Migration PHASE 0 — AUTHORED, UNVERIFIED (Docker absent on this machine).
+#
+# ACTIVATION NOTE (important): Docker reads the ignore file from the BUILD
+# CONTEXT ROOT (or, under BuildKit, `<dockerfile-path>.dockerignore`). It does
+# NOT auto-read deploy/.dockerignore. So before building, the operator must make
+# this file the active one, e.g. from the repo root:
+#     cp deploy/.dockerignore .dockerignore        # then: docker build -f deploy/Dockerfile .
+#   OR (BuildKit-native, no root file):
+#     cp deploy/.dockerignore deploy/Dockerfile.dockerignore
+# See deploy/PHASE0_README.md for the full build recipe.
+#
+# GOAL: the old `COPY . .` dragged .git (3.4 GB), the prod DB (652 MB), the R&D
+# DB (36 GB), docs and spreadsheets into the context. This image copies ONLY
+# backend/ + scripts/ + requirements.txt, so everything else is excluded here to
+# keep the context small and the build fast.
+# ============================================================================
+
+# ── Version control (3.4 GB — the 680 GiB git-bloat incident lives here) ─────
+.git
+.gitignore
+.gitattributes
+**/.git
+
+# ── Databases — NEVER in the serving image (mounted at runtime instead) ──────
+# Prod SQLite (652 MB) is a mounted volume; the R&D warehouse (36 GB) must never
+# ship. SQLite WAL/SHM sidecars excluded too.
+data/
+**/data/db/
+universe_engine/
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+
+# ── Secrets & env — baked NOWHERE; injected at runtime ───────────────────────
+config/.env
+config/.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+
+# ── Python caches / build junk ───────────────────────────────────────────────
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/*.egg-info/
+.venv/
+venv/
+env/
+
+# ── Docs / reports / office files (docs/ops is full of xlsx/docx) ────────────
+docs/
+**/*.xlsx
+**/*.xlsm
+**/*.docx
+**/*.doc
+**/*.pdf
+**/*.pptx
+README.md
+*.md
+
+# ── Backups & artifacts ──────────────────────────────────────────────────────
+**/*.bak
+**/*.bak.*
+**/_backups/
+data/artifacts/
+data/config/
+*.log
+logs/
+
+# ── Sibling git worktrees (the _kanida_* trees on the operator's Desktop) ────
+# These live OUTSIDE the repo so they aren't normally in-context, but guard
+# anyway in case a build is ever run from a parent directory.
+_kanida_*/
+../_kanida_*/
+
+# ── Frontend / node (backend image never needs these) ────────────────────────
+**/node_modules/
+**/.next/
+**/dist/
+**/build/
+**/coverage/
+
+# ── Tests are not needed to SERVE (uncomment to shrink further; kept by default
+#    so the image can self-test with pytest if desired) ────────────────────────
+# backend/tests/
+# **/tests/
+
+# ── This deploy/ dir itself (compose/terraform/docs aren't app runtime) ──────
+deploy/terraform/
+deploy/*.md
+deploy/docker-compose.yml
+deploy/cloudflared

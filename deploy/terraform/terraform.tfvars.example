@@ -1,0 +1,46 @@
+# ============================================================================
+# terraform.tfvars.example — copy to terraform.tfvars and adjust
+# ----------------------------------------------------------------------------
+# terraform.tfvars is git-ignored (deploy/.gitignore). NO secret VALUES belong
+# here — only sizing + topology. Secret VALUES go into Secrets Manager
+# out-of-band (see deploy/SECRETS_MAP.md).
+# ============================================================================
+
+aws_region  = "ap-south-1"
+environment = "prod"
+name_prefix = "kanida"
+
+# ── Networking ───────────────────────────────────────────────────────────────
+vpc_cidr             = "10.20.0.0/16"
+availability_zones   = ["ap-south-1a", "ap-south-1b"]
+public_subnet_cidrs  = ["10.20.0.0/24", "10.20.1.0/24"]
+private_subnet_cidrs = ["10.20.10.0/24", "10.20.11.0/24"]
+# Lock this down to the Cloudflare/Vercel front-door egress ranges in real prod.
+alb_ingress_cidrs    = ["0.0.0.0/0"]
+
+# ── RDS ──────────────────────────────────────────────────────────────────────
+rds_instance_class        = "db.t4g.medium"
+rds_allocated_storage     = 50
+rds_multi_az              = true
+rds_backup_retention_days = 14
+rds_db_name               = "kanida"
+rds_master_username       = "kanida_admin"
+
+# ── Redis ────────────────────────────────────────────────────────────────────
+redis_node_type = "cache.t4g.micro"
+
+# ── Compute (Fargate) ────────────────────────────────────────────────────────
+# Push the image built from deploy/Dockerfile to ECR, then set its URI here.
+container_image   = "PLACEHOLDER_ECR_IMAGE_URI"
+app_desired_count = 1        # keep 1 until the in-process scheduler is externalized
+app_task_cpu      = 1024
+app_task_memory   = 4096
+
+# ── Egress: one entry per user's broker account needing a static IP ──────────
+# Adding a user is EXACTLY this: append one stable handle. Terraform creates an
+# EIP + tinyproxy box for it; the output egress_ips_by_user gives the IP to
+# register. Empty in Phase 0.
+egress_users               = []
+# egress_users             = ["user_alice_kite", "user_bob_kite"]   # example
+egress_proxy_instance_type = "t4g.nano"
+egress_ssh_key_name        = null

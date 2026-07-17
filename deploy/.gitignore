@@ -1,0 +1,11 @@
+# Local-only, never committed (Phase 0)
+phase0.env
+.env
+# Terraform local state / vars (state must live in a remote backend, not git)
+terraform/**/*.tfstate
+terraform/**/*.tfstate.*
+terraform/**/.terraform/
+terraform/**/.terraform.lock.hcl
+terraform/**/terraform.tfvars
+# Convenience copies of the ignore file made at build time
+Dockerfile.dockerignore

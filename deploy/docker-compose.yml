@@ -1,0 +1,98 @@
+# ============================================================================
+# deploy/docker-compose.yml — LOCAL PARITY stack (no AWS required)
+# ----------------------------------------------------------------------------
+# Cloud-Migration PHASE 0 — AUTHORED, UNVERIFIED. Docker is NOT installed on the
+# authoring machine; this compose file has NEVER been `up`'d. It is the operator's
+# first validation harness once Docker Desktop is installed.
+#
+# WHAT THIS PROVES (the Phase-0 acceptance test):
+#   1. The image builds from deploy/Dockerfile with a tiny context.
+#   2. The container BOOTS with the prod SQLite mounted → the A2 preflight
+#      (main.py lifespan → verify_falcon_db/verify_power_db) PASSES, and GET /
+#      returns 200. Un-mount the DB and it must FAIL LOUD instead — that is the
+#      real thing under test.
+#
+# WHAT IS DELIBERATELY PARALLEL-BUT-UNUSED (Phase-0 scope):
+#   * postgres:15  — stands up EMPTY. The app does NOT connect to it. We do NOT
+#     pass DATABASE_URL to the app, so backend/db.py keeps IS_POSTGRES=False and
+#     the app stays on the mounted SQLite. This service exists so a LATER phase
+#     can flip the app onto Postgres with the datastore already in place.
+#   * redis:7      — stands up EMPTY. Nothing in the app talks to it yet. Placed
+#     now so a later phase (shared cache / session store / rate limiter) has the
+#     dependency already modeled in local parity.
+#
+# SECRETS: this file copies NO real secret values. Gating env vars come from an
+# operator-created env file (./phase0.env — see deploy/phase0.env.example).
+#
+# BUILD-CONTEXT NOTE: the build context is the repo root (..). Docker reads the
+# ignore list from the CONTEXT ROOT, so before `docker compose build` run:
+#     cp deploy/.dockerignore .dockerignore
+# (see deploy/PHASE0_README.md).
+# ============================================================================
+
+services:
+  # ── The backend under test ─────────────────────────────────────────────────
+  app:
+    build:
+      context: ..                       # repo root — Dockerfile copies backend/+scripts/
+      dockerfile: deploy/Dockerfile
+    image: kanida-backend:phase0
+    container_name: kanida-app
+    ports:
+      - "8001:8001"                     # host:container — hit http://localhost:8001/
+    env_file:
+      - ./phase0.env                    # NON-secret placeholders; operator fills real values locally
+    environment:
+      # DB paths point at the mount below. These override anything in phase0.env
+      # and MUST match the volume target. If the mount is wrong/absent, the A2
+      # preflight refuses to boot — which is the behaviour we want to see.
+      FALCON_DB_PATH: /data/db/kanida_universe.db
+      POWER_DB_PATH:  /data/db/kanida_universe.db
+      KANIDA_DB_PATH: /data/db/kanida_quant.db
+      # DATABASE_URL is intentionally ABSENT → app stays on SQLite (IS_POSTGRES=False).
+      # KANIDA_SKIP_DB_PREFLIGHT is intentionally ABSENT → the A2 gate is live.
+    volumes:
+      # Prod SQLite mounted READ-WRITE (SQLite needs RW for the -wal/-shm files
+      # and the app's idempotent boot-time schema upserts). ../ is repo root
+      # relative to this compose file (deploy/). This is a BIND mount to the live
+      # prod DB dir — for a throwaway test, copy the DB elsewhere and point here.
+      - ../data/db:/data/db:rw
+    depends_on:
+      postgres:
+        condition: service_started      # NOT service_healthy — app boot must not wait on pg
+      redis:
+        condition: service_started
+    restart: "no"                       # Phase 0: fail fast + visible, don't crash-loop hide it
+
+  # ── EMPTY Postgres 15 — parallel, UNUSED by the app in Phase 0 ─────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: kanida-postgres
+    environment:
+      POSTGRES_USER: kanida
+      POSTGRES_PASSWORD: kanida_local_only   # local throwaway; NOT a prod secret
+      POSTGRES_DB: kanida
+    ports:
+      - "5432:5432"                     # exposed so the operator can psql in and confirm it's empty
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kanida -d kanida"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── EMPTY Redis 7 — parallel, UNUSED by the app in Phase 0 ─────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: kanida-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:                               # named volume for the empty Postgres datadir
