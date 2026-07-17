@@ -16,7 +16,7 @@ import os
 import secrets
 from pathlib import Path
 
-_HERE = Path(__file__).parent
+_HERE = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent.parent
 
 # ── DB path ──────────────────────────────────────────────────────────────
@@ -28,6 +28,13 @@ _REPO_ROOT = _HERE.parent.parent
 # Important: do NOT fall through to KANIDA_DB_PATH. That env var is set by
 # backend/main.py to kanida_quant.db (legacy auth DB). Resolve in the same
 # way backend/falcon/config.py does: FALCON_DB_PATH if set, else canonical.
+#
+# Cloud-migration A2 (2026-07-16): the SILENT R&D fallback is REMOVED here too.
+# See backend/falcon/config.py for the full rationale. Same narrow rule: the
+# serving path must never IMPLICITLY resolve to the research DB. Explicit
+# opt-in (POWER_DB_PATH / FALCON_DB_PATH / KANIDA_ALLOW_RND_DB_FALLBACK) still
+# works, and POWER_RND_DB_PATH below is unaffected — that is a SEPARATE,
+# explicitly-configured research handle, not a fallback.
 def _resolve_power_db_path() -> str:
     env = os.environ.get("POWER_DB_PATH") or os.environ.get("FALCON_DB_PATH")
     if env:
@@ -36,12 +43,38 @@ def _resolve_power_db_path() -> str:
     if canonical.exists():
         return str(canonical)
     rnd_path = _REPO_ROOT / "universe_engine" / "data" / "db" / "kanida_universe.db"
-    if rnd_path.exists():
-        return str(rnd_path)
+    if (
+        os.environ.get("KANIDA_ALLOW_RND_DB_FALLBACK", "").strip().lower()
+        in ("1", "true", "yes")
+        and rnd_path.exists()
+    ):
+        return str(rnd_path)          # EXPLICIT opt-in only.
+    # No silent substitution — verify_power_db() fails loud on this path.
     return str(canonical)
 
 
 POWER_DB_PATH = _resolve_power_db_path()
+
+
+def verify_power_db(path: str | None = None) -> str:
+    """Fail loud if the Power-User production DB is missing/unreadable.
+
+    Thin wrapper over the shared Falcon verifier so both surfaces emit the
+    same actionable error. Names POWER_DB_PATH, the var that sets this path.
+    """
+    from pathlib import Path as _P
+
+    from falcon.config import ProductionDBMissingError, _db_error_message
+
+    p = path if path is not None else POWER_DB_PATH
+    if not _P(p).exists():
+        raise ProductionDBMissingError(_db_error_message(_P(p), "POWER_DB_PATH"))
+    if not os.access(str(p), os.R_OK):
+        raise ProductionDBMissingError(
+            _db_error_message(_P(p), "POWER_DB_PATH")
+            + "\n  (File EXISTS but is not readable - check permissions/ownership.)"
+        )
+    return p
 
 # RND DB — holds falcon_outcomes (827k historical rows) used by the Falcon
 # Top 20 "Historical evidence" bucket. Read-only access; PROD stays primary.

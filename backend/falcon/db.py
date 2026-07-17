@@ -9,16 +9,16 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from .config import FALCON_DB, LEGACY_DB
+from .config import FALCON_DB, LEGACY_DB, verify_falcon_db
 
 
 def connect_falcon(timeout: float = 60.0) -> sqlite3.Connection:
     """Open the Falcon (universe) DB. Read-mostly in API requests."""
-    if not FALCON_DB.exists():
-        raise FileNotFoundError(
-            f"Falcon DB not found at {FALCON_DB}. "
-            "Did you bundle kanida_universe.db into the Docker image?"
-        )
+    # A2: same fail-loud contract as startup — names the expected path and the
+    # env var that sets it, and never silently substitutes the R&D DB.
+    # ProductionDBMissingError subclasses FileNotFoundError, so this raises the
+    # same exception type as before; existing handlers are unaffected.
+    verify_falcon_db(FALCON_DB)
     con = sqlite3.connect(str(FALCON_DB), timeout=timeout)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode = WAL")
