@@ -125,10 +125,13 @@ variable "app_task_memory" {
 variable "managed_secret_keys" {
   description = "Secret KEY NAMES to create empty placeholders for in Secrets Manager (values set out-of-band by the operator). See deploy/SECRETS_MAP.md."
   type        = list(string)
+  # NOTE: FALCON_JWT_SECRET was REMOVED here (was drift). The auth code reads
+  # POWER_JWT_SECRET (power_user/config.py) — verified against deploy/SECRETS_MAP.md.
+  # Nothing reads FALCON_JWT_SECRET, so creating a placeholder for it would give
+  # the operator a secret to set that no code path consumes. Do not re-add it.
   default = [
     "FALCON_VAULT_KEY",
     "POWER_JWT_SECRET",
-    "FALCON_JWT_SECRET",
     "POWER_ADMIN_SECRET",
     "ADMIN_SECRET",
     "FALCON_OPERATOR_TOKEN",
@@ -147,6 +150,25 @@ variable "managed_secret_keys" {
     "BROKER_EGRESS_POOL",
     "RUPEEZY_LIVE_CERTIFIED",
   ]
+}
+
+# ── EFS (persistent SQLite volume for the single Fargate task) ───────────────
+variable "efs_posix_uid" {
+  description = "POSIX uid the EFS access point squashes to. MUST equal the deploy/Dockerfile appuser uid (10001)."
+  type        = number
+  default     = 10001
+}
+
+variable "efs_posix_gid" {
+  description = "POSIX gid the EFS access point squashes to. Matches the deploy/Dockerfile appuser gid (10001)."
+  type        = number
+  default     = 10001
+}
+
+variable "efs_throughput_mode" {
+  description = "EFS throughput mode ('bursting' = zero idle cost, fine for ~683 MB SQLite w/ one writer; 'elastic' if it ever throttles)."
+  type        = string
+  default     = "bursting"
 }
 
 # ── Egress (per-user static IPs) ─────────────────────────────────────────────

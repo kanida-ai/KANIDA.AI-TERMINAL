@@ -12,7 +12,8 @@ so one key governs all encryption at rest.
 - `FALCON_VAULT_KEY` — gates per-user egress-proxy decryption + broker-credential
   decryption. Lose it and accounts silently drop to direct/rejected. Back it up
   before anything else.
-- `POWER_JWT_SECRET` / `FALCON_JWT_SECRET` — change ⇒ all users logged out.
+- `POWER_JWT_SECRET` — HS256 portal-auth signing key; change ⇒ all users logged
+  out. (`FALCON_JWT_SECRET` was removed — no code path reads it; see SECRETS_MAP.md.)
 
 **Phase-0 status.** Authored, unverified. Placeholders are created EMPTY; the
 operator sets values out-of-band (`aws secretsmanager put-secret-value ...`).

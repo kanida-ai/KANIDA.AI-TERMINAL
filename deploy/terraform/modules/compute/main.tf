@@ -5,12 +5,15 @@
 # desired_count. Kept swappable — replace THIS module with an EC2/ASG module and
 # nothing in vpc/rds/redis/secrets/egress changes.
 #
-# PHASE-0 HONESTY: this task definition has NO database volume. The app's A2
-# preflight (main.py) REFUSES to boot without a readable prod DB. In the cloud
-# that DB is either (a) an EFS-mounted SQLite file, or (b) RDS Postgres after the
-# data migration — BOTH are LATER phases. So a Fargate task launched from this
-# module as-is will crash-loop on the A2 gate BY DESIGN until DB wiring is added.
-# The local docker-compose is where the boot/A2 test actually passes in Phase 0.
+# PHASE-2 UPDATE (EFS wired): this task definition now mounts a PERSISTENT EFS
+# volume at /data/db (matching FALCON_DB_PATH/POWER_DB_PATH in the Dockerfile),
+# so the app's A2 preflight (main.py) can find the prod SQLite DB and boot. The
+# volume is an EFS access point POSIX-squashed to uid/gid 10001 (the Dockerfile
+# appuser) — see modules/efs/README.md. The EFS must be SEEDED with the prod DB
+# ONCE before first boot (deploy/PHASE2_3_RUNBOOK.md), else A2 still (correctly)
+# refuses to start against an empty volume. RDS Postgres (modules/rds) remains
+# the eventual end-state; EFS-SQLite is the single-writer bridge, so desired_count
+# MUST stay 1.
 # ============================================================================
 
 resource "aws_ecs_cluster" "this" {
@@ -44,6 +47,12 @@ resource "aws_ecs_task_definition" "app" {
       portMappings = [
         { containerPort = var.container_port, protocol = "tcp" }
       ]
+      # Mount the persistent EFS volume where the app expects the SQLite DB.
+      # containerPath MUST equal the FALCON_DB_PATH/POWER_DB_PATH directory
+      # (/data/db) from the Dockerfile so the A2 preflight finds the DB file.
+      mountPoints = [
+        { sourceVolume = "db", containerPath = "/data/db", readOnly = false }
+      ]
       # Non-secret env. DB paths shown for when a DB volume is wired (EFS mount
       # or, post-migration, replaced by DATABASE_URL from secrets). DATABASE_URL
       # is intentionally NOT set here in Phase 0 (app stays SQLite-shaped).
@@ -68,6 +77,25 @@ resource "aws_ecs_task_definition" "app" {
       }
     }
   ])
+
+  # ── Persistent DB volume (EFS) ─────────────────────────────────────────────
+  # Mounted at /data/db by the container mountPoint above. transit_encryption is
+  # ENABLED (Fargate platform 1.4.0+ tunnels NFS over TLS on 2049 — the EFS SG
+  # still gates 2049 to the app tier). authorization_config pins the POSIX-
+  # squashed access point; iam = "DISABLED" because access is already scoped by
+  # the access point + the 2049-from-app-SG-only rule, so NO extra task-role IAM
+  # is required (keeps modules/iam untouched).
+  volume {
+    name = "db"
+    efs_volume_configuration {
+      file_system_id     = var.efs_file_system_id
+      transit_encryption = "ENABLED"
+      authorization_config {
+        access_point_id = var.efs_access_point_id
+        iam             = "DISABLED"
+      }
+    }
+  }
 }
 
 data "aws_region" "current" {}

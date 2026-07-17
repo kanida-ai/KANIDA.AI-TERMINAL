@@ -122,7 +122,14 @@ COPY scripts/ /app/scripts/
 # readable (A2 needs R_OK) AND writable (SQLite writes -wal/-shm siblings). On
 # Docker Desktop bind mounts this is transparent; on Linux/ECS ensure the volume
 # is owned by (or group-shared with) UID 10001. See PHASE0_README validation notes.
-RUN useradd --system --uid 10001 --create-home appuser \
+# We pin BOTH uid and gid to 10001 (explicit groupadd) so the identity is
+# DETERMINISTIC and matches the EFS access point's posix_user (modules/efs sets
+# uid/gid = 10001). Without the explicit group, useradd's gid is distro-dependent
+# and could drift. On ECS the EFS access point squashes all I/O to 10001:10001
+# regardless, but pinning the container identity keeps the two provably in sync
+# and makes local docker-compose bind-mounts behave too.
+RUN groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid 10001 --create-home appuser \
     && mkdir -p /data/db \
     && chown -R appuser:appuser /app /ms-playwright /data
 USER appuser

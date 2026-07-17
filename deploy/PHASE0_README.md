@@ -146,10 +146,11 @@ prerequisites below are done.
 - Model A egress posture (each user trades their own broker app) — the EIP-per-
   user module suits both Model A and per-account isolation; the regulatory choice
   is the operator's (`AUTOTRADE_SCALABLE_ARCHITECTURE.md` §8).
-- `FALCON_JWT_SECRET` is in the migration brief but **not** in the current
-  `config/.env`; placeholdered as SECRET pending a code check.
+- `FALCON_JWT_SECRET` was in the migration brief but **no code path reads it**
+  (auth reads `POWER_JWT_SECRET`) — now REMOVED from `managed_secret_keys`
+  (Phase 2). See SECRETS_MAP.md.
 - Fargate task ships **without** a DB volume in Phase 0 → it will not pass A2 in
-  cloud until DB wiring lands. This is intentional and documented, not an
-  oversight.
+  cloud until DB wiring lands. **RESOLVED in Phase 2:** `modules/efs` mounts a
+  persistent EFS volume at `/data/db`; see `deploy/PHASE2_3_RUNBOOK.md`.
 - Instance/engine/AMI versions are best-effort; re-check ap-south-1 availability
   at apply time.

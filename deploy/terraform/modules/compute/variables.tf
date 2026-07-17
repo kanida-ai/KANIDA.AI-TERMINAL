@@ -22,6 +22,17 @@ variable "secret_arns_map" {
   type        = map(string)
 }
 
+# ── Persistent DB volume (from modules/efs) ──────────────────────────────────
+variable "efs_file_system_id" {
+  description = "EFS filesystem id backing the /data/db mount (module.efs.file_system_id)."
+  type        = string
+}
+
+variable "efs_access_point_id" {
+  description = "EFS access point id the volume mounts (POSIX-squashed to the container uid/gid; module.efs.access_point_id)."
+  type        = string
+}
+
 variable "acm_certificate_arn" {
   description = "ACM cert ARN for the HTTPS listener. Null = no listener created (plan still succeeds)."
   type        = string

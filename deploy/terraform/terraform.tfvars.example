@@ -36,6 +36,12 @@ app_desired_count = 1        # keep 1 until the in-process scheduler is external
 app_task_cpu      = 1024
 app_task_memory   = 4096
 
+# ── EFS (persistent SQLite volume for the single Fargate task) ───────────────
+# Defaults are safe. uid/gid MUST match the deploy/Dockerfile appuser (10001).
+efs_posix_uid       = 10001
+efs_posix_gid       = 10001
+efs_throughput_mode = "bursting"   # "elastic" if the DB workload ever throttles
+
 # ── Egress: one entry per user's broker account needing a static IP ──────────
 # Adding a user is EXACTLY this: append one stable handle. Terraform creates an
 # EIP + tinyproxy box for it; the output egress_ips_by_user gives the IP to

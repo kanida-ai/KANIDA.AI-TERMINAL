@@ -29,6 +29,41 @@ output "artifacts_bucket" {
   value = module.s3.bucket_name
 }
 
+# ── EFS (persistent DB volume) ───────────────────────────────────────────────
+output "efs_file_system_id" {
+  description = "EFS filesystem id (fs-...) backing /data/db. Seed the prod DB onto it once before first boot (see PHASE2_3_RUNBOOK.md)."
+  value       = module.efs.file_system_id
+}
+
+output "efs_access_point_id" {
+  description = "EFS access point id (fsap-...) the Fargate task mounts (POSIX-squashed to uid/gid 10001)."
+  value       = module.efs.access_point_id
+}
+
+# ── Seeder helpers (copy-paste inputs for the one-time DB seed run-task) ──────
+# The DB-seed step (PHASE2_3_RUNBOOK.md) launches a one-off ECS task in the
+# private subnets with the app SG. Exposing these as outputs saves the operator
+# from hunting subnet/SG IDs in the console.
+output "private_subnet_ids" {
+  description = "Private subnet IDs — pass to the one-time DB-seed `aws ecs run-task` networkConfiguration."
+  value       = module.vpc.private_subnet_ids
+}
+
+output "app_security_group_id" {
+  description = "App SG id — pass to the one-time DB-seed run-task networkConfiguration (it can reach EFS on 2049)."
+  value       = module.security.app_sg_id
+}
+
+output "ecs_cluster_name" {
+  description = "ECS cluster name — target for the one-time DB-seed run-task."
+  value       = module.compute.cluster_name
+}
+
+output "app_task_definition_family" {
+  description = "App task-def family — reused (with a command override) by the one-time DB-seed run-task."
+  value       = module.compute.task_definition_family
+}
+
 output "secret_arns" {
   description = "Map of secret KEY NAME -> Secrets Manager ARN (values set out-of-band)."
   value       = module.secrets.secret_arns

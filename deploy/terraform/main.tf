@@ -115,6 +115,27 @@ module "iam" {
   artifacts_bucket_arn = module.s3.bucket_arn
 }
 
+# ── EFS: persistent SQLite volume for the single Fargate task ───────────────
+# WHY: Fargate has NO persistent local disk, so the prod SQLite DB needs a
+# network volume that survives task restarts — otherwise the app's A2 preflight
+# (main.py) fail-loud crash-loops on a missing DB. This module is the fix for the
+# gap documented in modules/compute/README.md item 1. Its access point is
+# POSIX-squashed to uid/gid 10001 (the deploy/Dockerfile appuser). See
+# modules/efs/README.md. Bridge to the eventual RDS Postgres (modules/rds);
+# desired_count MUST stay 1 while on EFS-SQLite (single writer).
+module "efs" {
+  source = "./modules/efs"
+
+  name               = "${var.name_prefix}-${var.environment}"
+  vpc_id             = module.vpc.vpc_id
+  private_subnet_ids = module.vpc.private_subnet_ids
+  app_sg_id          = module.security.app_sg_id
+  kms_key_arn        = module.secrets.kms_key_arn
+  posix_uid          = var.efs_posix_uid
+  posix_gid          = var.efs_posix_gid
+  throughput_mode    = var.efs_throughput_mode
+}
+
 # ── Compute: ECS Fargate service behind an ALB ──────────────────────────────
 # WHY Fargate: no EC2 hosts to patch, per-task IAM, native Secrets Manager
 # injection, trivial rollback. Kept swappable — see modules/compute/README.md.
@@ -137,6 +158,11 @@ module "compute" {
   execution_role_arn  = module.iam.execution_role_arn
   task_role_arn       = module.iam.task_role_arn
   secret_arns_map     = module.secrets.secret_arns  # name -> ARN, injected as env
+
+  # Persistent DB volume — mounted at /data/db (matches FALCON_DB_PATH). Without
+  # this the A2 preflight fail-loud crash-loops (see modules/efs/README.md).
+  efs_file_system_id  = module.efs.file_system_id
+  efs_access_point_id = module.efs.access_point_id
 }
 
 # ── Per-user static egress IPs (the SEBI one-IP-per-account solution) ───────

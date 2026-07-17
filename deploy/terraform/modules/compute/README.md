@@ -26,10 +26,13 @@ compute-agnostic. Swapping to EC2 = replace this one module; its inputs
 
 ## Phase-0 honesty / open items (flagged)
 
-1. **No DB volume → A2 will fail here by design.** The task definition mounts no
-   database. `main.py`'s A2 preflight refuses to boot without a readable prod DB.
-   Cloud DB wiring — EFS-mounted SQLite **or** RDS Postgres after migration — is a
-   LATER phase. The Phase-0 A2 boot test passes in **docker-compose**, not here.
+1. **DB volume — WIRED (Phase 2).** The task definition now mounts a persistent
+   EFS volume at `/data/db` (`modules/efs`, access point POSIX-squashed to uid/gid
+   10001), matching `FALCON_DB_PATH`/`POWER_DB_PATH`. `main.py`'s A2 preflight can
+   now find the prod SQLite DB and boot — PROVIDED the EFS was **seeded** with the
+   prod DB once first (`deploy/PHASE2_3_RUNBOOK.md`); against an empty EFS, A2
+   still (correctly) refuses to boot. RDS Postgres (`modules/rds`) remains the
+   end-state; EFS-SQLite is the single-writer bridge.
 2. **`desired_count` must stay 1** until the in-process 16:05 IST scheduler + the
    boot-time `resume_active_sessions` / ladder-resume threads (main.py lifespan)
    are externalized. Two tasks = two schedulers = double-fires. This is the
