@@ -25,7 +25,9 @@ AUDIT-READY GUARANTEES (enforced by every function here):
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
@@ -36,6 +38,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import numpy as np
 
 from .feature_cols import FEATURE_COLS, in_drawdown_bounce
+
+log = logging.getLogger("kanida.power_user.persona_engine_core")
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -58,12 +62,97 @@ FEATURE_IDX = {c: i for i, c in enumerate(FEATURE_COLS)}
 # DATA LOADERS — pure functions, take a sqlite connection
 # ════════════════════════════════════════════════════════════════════════
 
-def load_full_patterns(rnd_db_path: str) -> List[Dict[str, Any]]:
-    """Load 1,384 patterns (after drawdown_bounce filter) from RND DB.
+# ── Sim pattern-set source (R&D-DB-split, Leg 2) — DEFAULT-OFF ────────────
+# The sim needs the UNFILTERED promoted-pattern catalog (~1826 R&D rows). PROD's
+# published tables are mining-window-filtered by publish_patterns.py (~834 rows),
+# so the sim cannot repoint at PROD. Cloud-migration §4.2: the single replica
+# won't carry the ~38 GB R&D DB, so this read must be able to use a small
+# published artifact (scripts/publish_full_patterns.py → table
+# `falcon_sim_patterns`).
+#
+#   env FALCON_SIM_PATTERNS_ARTIFACT = path to the artifact DB.
+#
+# UNSET (default) → reads R&D exactly as today (byte-identical). SET + usable →
+# reads the artifact, which materialises the identical JOIN rows in the identical
+# order (a `seq` column preserves R&D's natural row order, because the downstream
+# float accumulation in compute_year_signals is order-sensitive). SET but
+# missing/malformed → WARN and FALL BACK to R&D (safe: R&D is the source of
+# truth; we never silently simulate on wrong data). The Python post-processing
+# below is shared by both paths, so parity is exact by construction.
+_SIM_PATTERNS_ARTIFACT_ENV = "FALCON_SIM_PATTERNS_ARTIFACT"
+_SIM_PATTERNS_TABLE = "falcon_sim_patterns"
 
-    Same query used by every sim script. Returns list of dicts with
+
+def _patterns_from_rows(
+    rows: List[Tuple[Any, Any, Any]],
+) -> List[Dict[str, Any]]:
+    """Shared transform: (mined_year, rule_json, avg_oos_year_lift_pp) rows →
+    the persona pattern dicts, applying the drawdown_bounce Python filter.
+
+    Used identically for the R&D read and the artifact read so the two paths
+    can only differ in the raw rows they feed in (and those are equal by
+    construction of the publisher)."""
+    out: List[Dict[str, Any]] = []
+    for my, rj, lift in rows:
+        rule = [(f, op, float(th)) for f, op, th in json.loads(rj)]
+        if in_drawdown_bounce(rule):
+            continue
+        out.append({"mined_year": int(my), "rule": rule, "lift": float(lift)})
+    return out
+
+
+def _read_sim_patterns_artifact(
+    path: str,
+) -> Optional[List[Tuple[Any, Any, Any]]]:
+    """Return the raw (mined_year, rule_json, avg_oos_year_lift_pp) rows from the
+    published artifact, ordered by the stored `seq` (which preserves R&D's
+    natural JOIN order). Returns None on missing/malformed artifact so the
+    caller can fall back to R&D. Never raises."""
+    try:
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        con = sqlite3.connect(
+            f"file:{Path(path).as_posix()}?mode=ro", uri=True, timeout=30.0
+        )
+        try:
+            names = {
+                r[0] for r in con.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if _SIM_PATTERNS_TABLE not in names:
+                raise ValueError(f"artifact missing table {_SIM_PATTERNS_TABLE!r}")
+            return con.execute(
+                f"SELECT mined_year, rule_json, avg_oos_year_lift_pp "
+                f"FROM {_SIM_PATTERNS_TABLE} ORDER BY seq"
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception as e:  # noqa: BLE001 — any failure ⇒ safe R&D fallback
+        log.warning(
+            "%s set to %r but unusable (%r) — falling back to R&D DB for the sim "
+            "pattern set (behaviour unchanged, cloud-migration goal NOT met until "
+            "fixed)", _SIM_PATTERNS_ARTIFACT_ENV, path, e,
+        )
+        return None
+
+
+def load_full_patterns(rnd_db_path: str) -> List[Dict[str, Any]]:
+    """Load the unfiltered promoted-pattern catalog (~1,384 after the
+    drawdown_bounce filter) for the persona / co-trade simulators.
+
+    Prefers the published `falcon_sim_patterns` artifact when
+    FALCON_SIM_PATTERNS_ARTIFACT is set + usable; otherwise reads the R&D DB
+    exactly as before (default, byte-identical). Returns list of dicts with
     {mined_year, rule, lift}.
     """
+    art_path = (os.environ.get(_SIM_PATTERNS_ARTIFACT_ENV) or "").strip()
+    if art_path:
+        rows = _read_sim_patterns_artifact(art_path)
+        if rows is not None:
+            return _patterns_from_rows(rows)
+        # else: warning already logged; fall through to the R&D read below.
+
     con = sqlite3.connect(rnd_db_path, timeout=120.0)
     try:
         rows = con.execute("""
@@ -74,13 +163,7 @@ def load_full_patterns(rnd_db_path: str) -> List[Dict[str, Any]]:
         """).fetchall()
     finally:
         con.close()
-    out = []
-    for my, rj, lift in rows:
-        rule = [(f, op, float(th)) for f, op, th in json.loads(rj)]
-        if in_drawdown_bounce(rule):
-            continue
-        out.append({"mined_year": int(my), "rule": rule, "lift": float(lift)})
-    return out
+    return _patterns_from_rows(rows)
 
 
 def load_panel(prod_db_path: str, start: str, end: str):

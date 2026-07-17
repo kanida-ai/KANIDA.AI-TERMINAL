@@ -8,6 +8,15 @@ backend/.env
 # data/db/*.db   ← temporarily included for Railway deployment (baked into image)
 outputs/snapshots/*.db
 
+# Published artifacts (R&D-DB-split) — BUILD OUTPUT, multi-MB, regenerable from
+# the publishers in scripts/. Never commit the .db files (680 GiB git-bloat
+# incident makes stray DB blobs dangerous). The tiny *.manifest.json IS tracked
+# as a record of the expected schema / row-count / checksum.
+data/artifacts/*.db
+data/artifacts/*.db-wal
+data/artifacts/*.db-shm
+data/artifacts/*.building
+
 # Python
 __pycache__/
 *.pyc

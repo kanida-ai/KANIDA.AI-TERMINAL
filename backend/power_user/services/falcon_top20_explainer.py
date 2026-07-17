@@ -24,8 +24,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import sqlite3
 import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -194,6 +196,124 @@ _FEATURE_COLS_NUMERIC: set[str] = {
 }
 
 log = logging.getLogger("kanida.power_user.falcon_top20")
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Serve-time evidence artifact (R&D-DB-split, Leg 1) — DEFAULT-OFF
+# ════════════════════════════════════════════════════════════════════════
+# Cloud-migration §4.2: the single cloud replica will NOT carry the ~38 GB R&D
+# DB, so the two serve-time reads of `falcon_outcomes` (the evidence lookup at
+# _build_bucket2 and the all-time baseline at _stock_lifetime_baseline) must be
+# able to read a small published artifact instead.
+#
+#   env FALCON_OUTCOMES_ARTIFACT = path to data/artifacts/falcon_serve_evidence.db
+#       (built by scripts/publish_outcomes_evidence.py).
+#
+# UNSET (default) → both reads go to the R&D connection exactly as today; this
+# module is byte-identical to before this change. SET + usable → the two reads
+# hit the artifact tables `falcon_outcomes_evidence` and `falcon_outcome_baseline`.
+# SET but missing/malformed → we log a WARNING and FALL BACK to the R&D
+# connection (safe: R&D is the source of truth; we never silently serve wrong
+# data). In the cloud the R&D connection itself will be absent, so a broken
+# artifact there fails loudly at the router's connect(), not here.
+_OUTCOMES_ARTIFACT_ENV = "FALCON_OUTCOMES_ARTIFACT"
+_ARTIFACT_EVIDENCE_TABLE = "falcon_outcomes_evidence"
+_ARTIFACT_BASELINE_TABLE = "falcon_outcome_baseline"
+
+_artifact_lock = threading.Lock()
+# {"path": <resolved path or None>, "con": <sqlite3.Connection|None>, "ok": <bool|None>}
+_artifact_state: Dict[str, Any] = {"path": None, "con": None, "ok": None}
+
+
+def _outcomes_artifact_path() -> Optional[str]:
+    p = (os.environ.get(_OUTCOMES_ARTIFACT_ENV) or "").strip()
+    return p or None
+
+
+def _get_outcomes_artifact_con() -> Optional[sqlite3.Connection]:
+    """Cached read-only connection to the evidence artifact.
+
+    Returns None when the flag is unset OR the artifact is missing/malformed
+    (caller then uses the R&D connection). Never raises. The connection is
+    process-cached and shared across request threads; all reads through it are
+    serialised by ``_artifact_lock`` (the artifact is tiny + read-only, so this
+    is cheap and requests are already 10-min cache-gated upstream).
+    """
+    path = _outcomes_artifact_path()
+    if not path:
+        return None
+    with _artifact_lock:
+        st = _artifact_state
+        if st["path"] == path and st["ok"] is not None:
+            return st["con"] if st["ok"] else None
+        # (Re)initialise for a new/changed path.
+        st["path"] = path
+        con = None
+        ok = False
+        try:
+            if not os.path.exists(path):
+                raise FileNotFoundError(path)
+            con = sqlite3.connect(
+                f"file:{Path(path).as_posix()}?mode=ro", uri=True,
+                timeout=10.0, check_same_thread=False,
+            )
+            con.row_factory = sqlite3.Row
+            names = {
+                r[0] for r in con.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            missing = {_ARTIFACT_EVIDENCE_TABLE, _ARTIFACT_BASELINE_TABLE} - names
+            if missing:
+                raise ValueError(f"artifact missing tables: {sorted(missing)}")
+            ok = True
+        except Exception as e:  # noqa: BLE001 — any failure ⇒ safe R&D fallback
+            log.warning(
+                "%s set to %r but unusable (%r) — falling back to R&D DB for "
+                "serve-time evidence (behaviour unchanged, cloud-migration goal "
+                "NOT met until fixed)", _OUTCOMES_ARTIFACT_ENV, path, e,
+            )
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+            con = None
+        st["con"] = con
+        st["ok"] = ok
+        return con if ok else None
+
+
+def _evidence_lookup(
+    rnd_con: sqlite3.Connection, symbol: str, dates: List[str],
+) -> List[Any]:
+    """The `_build_bucket2` outcome lookup (explainer.py evidence read).
+
+    Returns rows of (trade_date, ret_20d, hit_10pc_20d, mae_20d, mfe_20d) for
+    ``symbol`` over ``dates``. Reads the published artifact when the flag is set
+    + usable; otherwise the R&D connection exactly as today. The two SQLs are
+    identical except for the table name, and the artifact ships every row R&D
+    has at trade_date >= _BUCKET2_LOOKBACK_START (the only dates queried here),
+    so results are exactly equal.
+    """
+    if not dates:
+        return []
+    placeholders = ",".join("?" * len(dates))
+    art = _get_outcomes_artifact_con()
+    if art is not None:
+        with _artifact_lock:
+            return art.execute(
+                f"SELECT trade_date, ret_20d, hit_10pc_20d, mae_20d, mfe_20d "
+                f"FROM {_ARTIFACT_EVIDENCE_TABLE} "
+                f"WHERE symbol = ? AND trade_date IN ({placeholders})",
+                [symbol, *dates],
+            ).fetchall()
+    return rnd_con.execute(
+        f"SELECT trade_date, ret_20d, hit_10pc_20d, mae_20d, mfe_20d "
+        f"FROM falcon_outcomes "
+        f"WHERE symbol = ? AND trade_date IN ({placeholders})",
+        [symbol, *dates],
+    ).fetchall()
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1141,13 +1261,7 @@ def _build_bucket2(
         return _bucket2_baseline_only(baseline, n_historical_fires=0)
 
     all_fire_dates = sorted(all_fire_dates_set)
-    placeholders = ",".join("?" * len(all_fire_dates))
-    out_rows = rnd_con.execute(
-        f"SELECT trade_date, ret_20d, hit_10pc_20d, mae_20d, mfe_20d "
-        f"FROM falcon_outcomes "
-        f"WHERE symbol = ? AND trade_date IN ({placeholders})",
-        [symbol, *all_fire_dates],
-    ).fetchall()
+    out_rows = _evidence_lookup(rnd_con, symbol, all_fire_dates)
     outcomes_by_date: Dict[str, Dict[str, Any]] = {
         r["trade_date"]: dict(r) for r in out_rows
     }
@@ -1260,7 +1374,27 @@ def _bucket2_baseline_only(baseline: float, n_historical_fires: int) -> Dict[str
 
 
 def _stock_lifetime_baseline(rnd_con: sqlite3.Connection, symbol: str) -> float:
-    """% of all-time falcon_outcomes rows for this symbol that hit_10pc_20d."""
+    """% of all-time falcon_outcomes rows for this symbol that hit_10pc_20d.
+
+    When the evidence artifact is active this reads the PRECOMPUTED all-time
+    per-symbol `lifetime_hit_pct` (the publisher computes it over full R&D
+    history — recomputing AVG() over only the shipped 2021+ evidence rows would
+    silently shrink the denominator; that is the parity trap). A symbol absent
+    from the baseline table yields 0.0, exactly matching the R&D path's
+    all-NULL/no-rows case. Otherwise reads R&D exactly as today.
+    """
+    art = _get_outcomes_artifact_con()
+    if art is not None:
+        try:
+            with _artifact_lock:
+                r = art.execute(
+                    f"SELECT lifetime_hit_pct FROM {_ARTIFACT_BASELINE_TABLE} "
+                    f"WHERE symbol = ?",
+                    (symbol,),
+                ).fetchone()
+            return float(r[0]) if r and r[0] is not None else 0.0
+        except Exception:
+            return 0.0
     try:
         r = rnd_con.execute(
             "SELECT AVG(hit_10pc_20d) * 100 FROM falcon_outcomes WHERE symbol = ? AND hit_10pc_20d IS NOT NULL",

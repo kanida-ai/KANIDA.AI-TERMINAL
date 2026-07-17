@@ -1,0 +1,17 @@
+{
+  "artifact_kind": "falcon_serve_evidence",
+  "artifact_version": "20260718010131",
+  "built_at_ist": "2026-07-18 01:01:31",
+  "source_db": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\universe_engine\\data\\db\\kanida_universe.db",
+  "source_commit": "9f8e5f529363",
+  "cutoff_trade_date": "2021-01-01",
+  "evidence_rows": "495572",
+  "baseline_symbols": "499",
+  "rnd_rows_all_time": "827379",
+  "evidence_date_min": "2021-01-01",
+  "evidence_date_max": "2026-03-04",
+  "checksum_sha256_32": "f4dfb09c5a18729c84d7584ad70a6141",
+  "schema_note": "Serves falcon_top20_explainer._build_bucket2 (:1145) and _stock_lifetime_baseline (:1266). Baseline is precomputed ALL-TIME; do not recompute it from this table.",
+  "artifact_path": "C:\\Users\\SPS\\Desktop\\_kanida_rndsplit\\data\\artifacts\\falcon_serve_evidence.db",
+  "artifact_size_mb": 53.8
+}

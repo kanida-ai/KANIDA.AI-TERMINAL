@@ -1,0 +1,16 @@
+{
+  "artifact_kind": "falcon_sim_patterns",
+  "artifact_version": "20260718010103",
+  "built_at_ist": "2026-07-18 01:01:03",
+  "source_db": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\universe_engine\\data\\db\\kanida_universe.db",
+  "source_commit": "9f8e5f529363",
+  "classification_filter": "universal,regime_dependent",
+  "mining_window_filter": "NONE (unfiltered \u2014 this is the point)",
+  "row_count": "1826",
+  "cutoff_mined_year": "2025",
+  "mined_year_min": "2017",
+  "checksum_sha256_32": "c8e493d7ab919563fbb2af3e77d220df",
+  "schema_note": "Serves persona_engine_core.load_full_patterns. Rows are the RAW JOIN (drawdown_bounce filter applied in Python at load). ORDER BY seq reproduces R&D's natural row order exactly.",
+  "artifact_path": "C:\\Users\\SPS\\Desktop\\_kanida_rndsplit\\data\\artifacts\\falcon_sim_patterns.db",
+  "artifact_size_mb": 0.279
+}
