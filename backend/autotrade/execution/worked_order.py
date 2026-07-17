@@ -47,6 +47,7 @@ volume signal. Never touches falcon_position_state or any legacy table.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import sqlite3
@@ -55,6 +56,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+from ..mkt_sink import (PROFILE_TABLE, profile_artifact_db, resolve_sink_db,
+                        sink_enabled)
 
 log = logging.getLogger("kanida.autotrade.execution.worked_order")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -385,6 +389,18 @@ def load_intraday_profile(symbol: str, *, db_path: Optional[str] = None,
         cached = _PROFILE_CACHE.get(ck)
         if cached is not None:
             return cached if cached.valid else None
+        # LEG 3.a — sink switch ON (and no explicit db_path override): the deep
+        # 95.7M-row ohlc_1min history is NOT copied to the sink; read the tiny
+        # precomputed per-symbol 75-bucket volume-PROFILE artifact instead.
+        # FAIL-SAFE: a missing/empty/absent-symbol artifact → None (cached) → the
+        # caller falls back to v1 flat POV, EXACTLY as a thin ohlc_1min history
+        # does today. When the switch is OFF this branch is skipped entirely and
+        # the read below is byte-identical to today.
+        if db_path is None and sink_enabled():
+            prof = _load_profile_from_artifact(symbol, min_days=int(min_days))
+            _PROFILE_CACHE[ck] = prof if (prof is not None and prof.valid) \
+                else IntradayVolumeProfile(buckets=[], symbol=symbol)
+            return prof if (prof is not None and prof.valid) else None
         p = Path(db_path) if db_path else _DEFAULT_UNIVERSE_DB
         if not p.exists():
             return None
@@ -425,6 +441,41 @@ def load_intraday_profile(symbol: str, *, db_path: Optional[str] = None,
         return prof if prof.valid else None
     except Exception as e:  # pragma: no cover - defensive; profile is optional
         log.debug("load_intraday_profile(%s) failed: %s", symbol, e)
+        return None
+
+
+def _load_profile_from_artifact(symbol: str, *, min_days: int
+                                ) -> Optional[IntradayVolumeProfile]:
+    """Read the precomputed volume-profile artifact for `symbol` (LEG 3.a). Returns
+    the SAME IntradayVolumeProfile shape as the R&D `ohlc_1min` scan: the artifact
+    stores the RAW per-bucket volume SUMS + n_days, so reconstructing the dataclass
+    re-runs the identical normalization → byte-identical buckets (exact parity).
+    None (fail-safe) on a missing/empty artifact, an absent symbol, a THIN history
+    (< min_days), or ANY error — the caller then uses v1 flat POV. Read-only, never
+    raises."""
+    try:
+        art = profile_artifact_db()
+        if art is None or not art.exists():
+            return None
+        uri = f"file:{art.as_posix()}?mode=ro"
+        con = sqlite3.connect(uri, uri=True, timeout=5)
+        try:
+            con.execute("PRAGMA query_only=ON")
+            row = con.execute(
+                f"SELECT buckets_json, n_days FROM {PROFILE_TABLE} "
+                "WHERE symbol=?", (symbol,)).fetchone()
+        finally:
+            con.close()
+        if not row or not row[0]:
+            return None
+        n_days = int(row[1] or 0)
+        if n_days < int(min_days):
+            return None
+        buckets = [float(b) for b in json.loads(row[0])]
+        prof = IntradayVolumeProfile(buckets=buckets, symbol=symbol, n_days=n_days)
+        return prof if prof.valid else None
+    except Exception as e:  # pragma: no cover - defensive; artifact is optional
+        log.debug("_load_profile_from_artifact(%s) failed: %s", symbol, e)
         return None
 
 
@@ -873,7 +924,10 @@ def recent_interval_volume(symbol: str, *, db_path: Optional[str] = None,
     missing DB (the engine then relies on the TWAP floor). Read-only (mode=ro,
     query_only), never raises — a missing poller must never break the order path."""
     try:
-        p = Path(db_path) if db_path else _DEFAULT_UNIVERSE_DB
+        # LEG 3.a — an explicit db_path wins; else the sink switch resolves the
+        # target (unset → the R&D default = byte-identical to today). Fail-safe
+        # unchanged: a missing/empty sink → no rows → None → TWAP-floor pacing.
+        p = Path(db_path) if db_path else resolve_sink_db(_DEFAULT_UNIVERSE_DB)
         if not p.exists():
             return None
         uri = f"file:{p.as_posix()}?mode=ro"

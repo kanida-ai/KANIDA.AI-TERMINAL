@@ -11,8 +11,11 @@ sys.path.insert(0, str(ROOT / "universe_engine")); sys.path.insert(0, str(ROOT /
 sys.path.insert(0, str(ROOT / "scripts"))
 from engine.data_fetch import get_kite
 import mkt_poller as P
+from autotrade.mkt_sink import resolve_sink_db  # LEG 3.a single sink resolver
 
-DB = ROOT / "universe_engine" / "data" / "db" / "kanida_universe.db"
+# LEG 3.a — write target moves with the SAME env as the execution reads.
+# FALCON_MKT_SINK_DB unset (default) → the R&D universe DB, byte-identical to today.
+DB = resolve_sink_db(ROOT / "universe_engine" / "data" / "db" / "kanida_universe.db")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 SCHEMA = """

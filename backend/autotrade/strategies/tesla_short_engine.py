@@ -42,6 +42,7 @@ import numpy as np
 import pandas as pd
 
 from . import tesla_features as tf
+from ..mkt_sink import resolve_sink_db
 
 try:
     from pandas.errors import PerformanceWarning
@@ -100,8 +101,18 @@ class TeslaSignalResult:
 
 # ── DB access (read-only) ────────────────────────────────────────────────────
 
+def _resolve_db(db_path: Optional[Path] = None) -> Path:
+    """LEG 3.a — the effective poll DB. An explicit `db_path` (tests, or the
+    per-session `config.tesla_signal_db_path`) ALWAYS wins; else FALCON_MKT_SINK_DB
+    when set; else DEFAULT_DB_PATH (the R&D file) = byte-identical to today.
+    Session config beats the env because it arrives here as an explicit db_path."""
+    if db_path:
+        return Path(db_path)
+    return resolve_sink_db(DEFAULT_DB_PATH)
+
+
 def connect_db_readonly(db_path: Optional[Path] = None) -> sqlite3.Connection:
-    p = Path(db_path) if db_path else DEFAULT_DB_PATH
+    p = _resolve_db(db_path)
     uri = f"file:{p.as_posix()}?mode=ro"
     con = sqlite3.connect(uri, uri=True, timeout=90)
     con.execute("PRAGMA query_only=ON")
@@ -1364,7 +1375,7 @@ def compute_live_signals_fast(
     owns_con = con is None
     if owns_con:
         con = connect_db_readonly(db_path)
-    db_key = Path(db_path).as_posix() if db_path else DEFAULT_DB_PATH.as_posix()
+    db_key = _resolve_db(db_path).as_posix()
     try:
         days_all = available_trading_days(con)
         if not days_all:

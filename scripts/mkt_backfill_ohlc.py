@@ -15,8 +15,11 @@ ROOT = Path(r"C:\Users\SPS\Desktop\Kanida.ai Terminal Quant Intelligence Engine"
 sys.path.insert(0, str(ROOT / "universe_engine")); sys.path.insert(0, str(ROOT / "backend"))
 from engine.data_fetch import RateLimiter, get_kite, get_latest_access_token
 from mkt_poller import INDICES
+from autotrade.mkt_sink import resolve_sink_db  # LEG 3.a single sink resolver
 
-DB = ROOT / "universe_engine" / "data" / "db" / "kanida_universe.db"
+# LEG 3.a — write target moves with the SAME env as the execution reads.
+# FALCON_MKT_SINK_DB unset (default) → the R&D universe DB, byte-identical to today.
+DB = resolve_sink_db(ROOT / "universe_engine" / "data" / "db" / "kanida_universe.db")
 GLOBAL_START = "2018-01-01"
 IDXN = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
 
