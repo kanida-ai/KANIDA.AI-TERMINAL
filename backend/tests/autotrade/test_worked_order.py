@@ -568,6 +568,15 @@ def test_exit_single_position_routes_to_worked_only_for_worked_mode(clean_positi
                                                                     monkeypatch):
     """_exit_single_position paces (work_and_confirm_exit) for a worked-mode session
     but uses the UNCHANGED one-shot / iceberg path for any other mode.
+
+    REASON UPDATED 2026-07-16: this test originally used "STOP_STOCK" as an ARBITRARY
+    reason — it predates the pacing bypass and is about worked-vs-non-worked ROUTING,
+    not about that reason. STOP_STOCK is now a capital-protecting BYPASS reason (it is
+    the trail "STOP" relabelled for per-stock scope), so it no longer paces and would
+    make this test assert the opposite of its own intent. Switched to "TARGET_HIT" —
+    a reason that deliberately STILL paces — which preserves the original intent
+    exactly. (The bypass reasons get their own fire/no-fire tests below.)
+
     MUTATION REVERT: remove the `if execution_mode == 'worked'` branch in
     _exit_single_position_inner → the worked session takes the one-shot path →
     the sentinel is never called → `called['n'] == 1` FAILS."""
@@ -593,7 +602,7 @@ def test_exit_single_position_routes_to_worked_only_for_worked_mode(clean_positi
     sess.brokers = {prof: broker}
     pos = sess.registry.get_open_positions()[0]
     res = asyncio.run(_exit_single_position(
-        session_id=sess.session_id, position=pos, reason="STOP_STOCK",
+        session_id=sess.session_id, position=pos, reason="TARGET_HIT",
         brokers={prof: broker}, registry=sess.registry,
         gtt_manager=sess.gtt_manager, kite_product="MIS", exec_cfg=cfg))
     assert called["n"] == 1                          # routed to the worked exit
@@ -626,22 +635,43 @@ def _worked_children(sid):
     return [d for d in _child_details(sid) if "worked-child-" in d]
 
 
-def test_bypass_predicate_fires_only_for_stop_and_kill_switch():
-    """The pure predicate: EXACTLY {STOP, KILL_SWITCH} bypass. Everything else —
-    notably the deadline-bound square-offs and the trail exits — still paces.
+def test_bypass_predicate_fires_for_urgent_and_deadline_bound_exits_only():
+    """The pure predicate encodes THE PRINCIPLE: pacing is for ENTRIES; every URGENT
+    (capital-protecting) or DEADLINE-BOUND exit fires as market. Everything with time
+    to spend still paces.
     MUTATION REVERT: widen the match to a prefix/substring test (r.startswith)
-    → "STOP_STOCK"/"TIME_STOP" start matching → the no-fire asserts FAIL."""
-    for r in ("STOP", "KILL_SWITCH", "stop", " kill_switch "):
+    → "TIME_STOP" starts matching "STOP" → the no-fire asserts FAIL."""
+    # FIRE — capital-protecting (urgent). STOP / STOP_STOCK / STOP_SEAT are ONE trail
+    # decision under three labels; all three must bypass or "stops don't pace" is a
+    # lie for 2 of 3.
+    for r in ("STOP", "STOP_STOCK", "STOP_SEAT", "KILL_SWITCH",
+              "stop_seat", " kill_switch "):
         assert wo.bypass_pacing_for_exit(r) is True, r
-    # NO-FIRE — each of these is a SEPARATE, un-approved operator decision.
-    # STOP_STOCK / STOP_SEAT are the SAME trail "STOP" relabelled for per-stock /
-    # per-seat scope: semantically loss stops, but OUT of the approved scope, so the
-    # exact-match discipline MUST keep them paced until the operator decides.
-    for r in ("MIS_SQUARE_OFF", "SQUARE_OFF", "MAX_HOLD_EXIT", "TRAIL_EXIT",
-              "STEP_LOCK_EXIT", "FLOOR_EXIT", "STOP_STOCK", "STOP_SEAT",
-              "TARGET_HIT", "TIME_STOP", "GTT", "OPERATOR", "EXIT_RETRY",
+    # FIRE — deadline-bound: pacing a hard deadline is guaranteed failure.
+    for r in ("MIS_SQUARE_OFF", "SQUARE_OFF"):
+        assert wo.bypass_pacing_for_exit(r) is True, r
+    # NO-FIRE — genuinely has time to spend, so impact control is worth having.
+    # This is the LINE we are deliberately drawing.
+    for r in ("TARGET_HIT", "MAX_HOLD_EXIT", "TRAIL_EXIT", "STEP_LOCK_EXIT",
+              "FLOOR_EXIT", "EXIT_RETRY", "TIME_STOP", "GTT", "OPERATOR",
               "", None):
         assert wo.bypass_pacing_for_exit(r) is False, r
+
+
+def test_stop_seat_is_in_the_exit_gate_vocabulary():
+    """STOP_SEAT (session.py's per-seat relabel of the trail "STOP") must be a
+    RECOGNISED gate reason. It was missing — it worked only because an unknown reason
+    fails OPEN, i.e. it was correct BY LUCK while logging a spurious warning on every
+    per-seat stop.
+    The fail-OPEN default is deliberately UNCHANGED: an exit must never be blocked by
+    vocabulary. This asserts the vocabulary is honest, not that it gates anything.
+    MUTATION REVERT: remove "STOP_SEAT" from exit_gate.VALID_REASONS → FAILS."""
+    from autotrade.exit_gate import VALID_REASONS
+    for r in ("STOP", "STOP_STOCK", "STOP_SEAT", "KILL_SWITCH", "MIS_SQUARE_OFF",
+              "SQUARE_OFF"):
+        assert r in VALID_REASONS, r
+    # The fail-open contract itself is untouched: an unknown reason still ALLOWS.
+    assert "A_TOTALLY_UNKNOWN_REASON" not in VALID_REASONS
 
 
 def test_stop_exit_under_worked_fires_one_market_exit_not_paced(clean_positions):
@@ -758,6 +788,152 @@ def test_stop_kill_across_many_positions_is_one_round_not_n_cadence(clean_positi
     assert out["n_exited_ok"] == 5
     # ONE market order per name — a single round, no cadence, no slicing.
     assert len(broker.exits) == 5
+    assert sorted(broker.exits) == sorted([(s, 1000) for s in syms])
+    assert _worked_children(sess.session_id) == []
+    for s in syms:
+        assert _row(sess.session_id, s)["status"] == "CLOSED"
+
+
+# ── EXPANDED SCOPE (operator-approved): every URGENT / DEADLINE-BOUND exit ─────
+
+
+@pytest.mark.parametrize("reason", ["STOP_STOCK", "STOP_SEAT", "MIS_SQUARE_OFF",
+                                    "SQUARE_OFF"])
+def test_newly_bypassed_reason_fires_one_market_exit_not_paced(clean_positions,
+                                                               reason):
+    """FIRE: each newly-approved reason bypasses the pacer under worked mode — ONE
+    market exit for the FULL qty, ZERO worked-child ledger rows.
+      STOP_STOCK / STOP_SEAT — the SAME trail "STOP" relabelled (capital-protecting).
+      MIS_SQUARE_OFF         — deadline-bound; paced it overruns the broker's ~15:20.
+      SQUARE_OFF             — deadline-bound; paced its window is 0s → zero orders.
+    MUTATION REVERT: drop any of these from PACING_BYPASS_EXIT_REASONS → that param
+    paces → len(broker.exits) > 1 and `_worked_children == []` FAIL."""
+    cfg = _worked_cfg(iceberg_freeze_qty_default=300)
+    sess = TradingSession.create(cfg, mode="live")
+    prof = _register(sess, "A", 1000)
+    broker = MockBroker(profile=sess.config.broker_profiles[0], dry_run=False,
+                        ltps={"A": 100.0}, net_positions={"A": 1000})
+    sess.brokers = {prof: broker}
+    pos = sess.registry.get_open_positions()[0]
+    res = asyncio.run(_exit_single_position(
+        session_id=sess.session_id, position=pos, reason=reason,
+        brokers={prof: broker}, registry=sess.registry,
+        gtt_manager=sess.gtt_manager, kite_product="MIS", exec_cfg=cfg))
+    assert res.get("worked") is not True              # NOT the paced path
+    assert len(broker.exits) == 1                     # ONE shot, no slicing
+    assert broker.exits[0] == ("A", 1000)             # the FULL clamped qty
+    assert _worked_children(sess.session_id) == []    # nothing was paced
+    assert _row(sess.session_id, "A")["status"] == "CLOSED"
+
+
+@pytest.mark.parametrize("reason", ["TARGET_HIT", "MAX_HOLD_EXIT"])
+def test_target_and_max_hold_STILL_pace_under_worked(clean_positions, reason):
+    """NO-FIRE / THE LINE WE ARE DRAWING: a TARGET_HIT / MAX_HOLD_EXIT is neither
+    urgent nor deadline-bound — the position is fine and there IS time to spend, so
+    impact control is genuinely worth having. These MUST still pace.
+    This is the explicit regression guard on the bypass NOT over-reaching.
+    MUTATION REVERT: add "TARGET_HIT"/"MAX_HOLD_EXIT" to PACING_BYPASS_EXIT_REASONS
+    → the paced sentinel is never called → `called["n"] == 1` FAILS."""
+    called = {"n": 0, "reason": None}
+
+    async def _stub(**kw):
+        called["n"] += 1
+        called["reason"] = kw.get("close_reason")
+        kw["registry"].mark_closed(kw["symbol"], kw["close_reason"],
+                                   exit_price=100.0,
+                                   broker_profile=kw.get("broker_profile"))
+        return {"status": "COMPLETE", "filled_qty": kw["total_qty"],
+                "symbol": kw["symbol"], "worked": True}
+
+    import autotrade.monitoring.exit_poller as _ep
+    _orig = _ep.work_and_confirm_exit
+    _ep.work_and_confirm_exit = _stub
+    try:
+        cfg = _worked_cfg(iceberg_freeze_qty_default=300)
+        sess = TradingSession.create(cfg, mode="live")
+        prof = _register(sess, "A", 1000)
+        broker = MockBroker(profile=sess.config.broker_profiles[0], dry_run=False,
+                            ltps={"A": 100.0}, net_positions={"A": 1000})
+        sess.brokers = {prof: broker}
+        pos = sess.registry.get_open_positions()[0]
+        res = asyncio.run(_exit_single_position(
+            session_id=sess.session_id, position=pos, reason=reason,
+            brokers={prof: broker}, registry=sess.registry,
+            gtt_manager=sess.gtt_manager, kite_product="MIS", exec_cfg=cfg))
+    finally:
+        _ep.work_and_confirm_exit = _orig
+    assert called["n"] == 1                 # STILL routed to the PACED worked exit
+    assert called["reason"] == reason
+    assert res.get("worked") is True
+
+
+def test_exit_retry_of_a_stop_STILL_PACES_known_gap(clean_positions):
+    """KNOWN GAP, PINNED (reported to the operator, deliberately NOT fixed here).
+
+    The EXIT_FAILED retry sweep (session.py) passes reason="EXIT_RETRY", which ERASES
+    the ORIGINAL reason — so the retry of a failed STOP is STILL PACED, at exactly the
+    moment we are already in trouble. The original is destroyed TWICE by the failure
+    path: registry.mark_exit_failed overwrites close_reason with "EXIT_FAILED:
+    {error}", and the gate release NULLs exit_initiated_by (which claim_exit_session
+    had set to the reason). A clean fix needs a persisted original-reason field
+    threaded through ~18 mark_exit_failed call sites whose only natural chokepoint
+    (registry.mark_exit_failed) is outside this change's scope.
+
+    This test documents the CURRENT (wrong) behaviour so the gap is visible and
+    cannot be forgotten. WHEN THE GAP IS FIXED THIS TEST SHOULD FAIL — that is
+    intended: flip it to assert the STOP is NOT paced."""
+    assert wo.bypass_pacing_for_exit("EXIT_RETRY") is False   # the gap, pinned
+    called = {"n": 0}
+
+    async def _stub(**kw):
+        called["n"] += 1
+        kw["registry"].mark_closed(kw["symbol"], kw["close_reason"],
+                                   exit_price=100.0,
+                                   broker_profile=kw.get("broker_profile"))
+        return {"status": "COMPLETE", "filled_qty": kw["total_qty"],
+                "symbol": kw["symbol"], "worked": True}
+
+    import autotrade.monitoring.exit_poller as _ep
+    _orig = _ep.work_and_confirm_exit
+    _ep.work_and_confirm_exit = _stub
+    try:
+        cfg = _worked_cfg(iceberg_freeze_qty_default=300)
+        sess = TradingSession.create(cfg, mode="live")
+        prof = _register(sess, "A", 1000)
+        broker = MockBroker(profile=sess.config.broker_profiles[0], dry_run=False,
+                            ltps={"A": 100.0}, net_positions={"A": 1000})
+        sess.brokers = {prof: broker}
+        pos = sess.registry.get_open_positions()[0]
+        asyncio.run(_exit_single_position(
+            session_id=sess.session_id, position=pos, reason="EXIT_RETRY",
+            brokers={prof: broker}, registry=sess.registry,
+            gtt_manager=sess.gtt_manager, kite_product="MIS", exec_cfg=cfg))
+    finally:
+        _ep.work_and_confirm_exit = _orig
+    assert called["n"] == 1        # PACED — the known gap (see docstring)
+
+
+def test_kill_switch_mis_square_off_across_basket_is_one_round(clean_positions):
+    """The MIS_SQUARE_OFF flatten through kill_switch.fire (the real square-off path)
+    is ONE market order per name — not N x the 20s cadence. Paced, this exit's
+    deadline computes to ~15:20:30 vs the broker's ~15:20 auto-square (a ~30s
+    overrun), which would end in a broker force-close at an arbitrary price.
+    MUTATION REVERT: drop MIS_SQUARE_OFF from PACING_BYPASS_EXIT_REASONS → each name
+    works into freeze-capped children → `len(broker.exits) == 4` FAILS."""
+    cfg = _worked_cfg(iceberg_freeze_qty_default=300, top_n_stocks=4)
+    sess = TradingSession.create(cfg, mode="live")
+    syms = ["Q1", "Q2", "Q3", "Q4"]
+    for s in syms:
+        prof = _register(sess, s, 1000)           # 1000 > freeze 300 -> would pace
+    broker = MockBroker(profile=sess.config.broker_profiles[0], dry_run=False,
+                        ltps={s: 100.0 for s in syms},
+                        net_positions={s: 1000 for s in syms})
+    sess.brokers = {prof: broker}
+    ks = KillSwitchExecutor(sess.session_id, cfg, {prof: broker}, sess.registry)
+    out = asyncio.run(ks.fire("MIS defensive square-off",
+                              close_reason="MIS_SQUARE_OFF"))
+    assert out["n_exited_ok"] == 4
+    assert len(broker.exits) == 4                 # ONE market order per name
     assert sorted(broker.exits) == sorted([(s, 1000) for s in syms])
     assert _worked_children(sess.session_id) == []
     for s in syms:
