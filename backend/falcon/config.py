@@ -20,22 +20,116 @@ DB_DIR        = DATA_DIR / "db"
 LEGACY_DB     = Path(os.environ.get("KANIDA_DB_PATH",        str(DB_DIR / "kanida_quant.db")))
 
 
+RND_DB_PATH   = ROOT / "universe_engine" / "data" / "db" / "kanida_universe.db"
+
+# Cloud-migration A2 (2026-07-16): the SILENT R&D fallback is REMOVED.
+#
+# Previously, if the production DB was absent this resolver silently returned
+# the ~35 GB universe_engine R&D DB — so the portal AND the live trading path
+# would boot happily on the WRONG database. In a container with a mis-mounted
+# volume that fails QUIETLY: the app serves, reading research data as if it
+# were production. The R&D file is also single-writer SQLite; live trading
+# silently sharing it is a contention + correctness hazard.
+#
+# The rule is narrow: the production/serving path must never IMPLICITLY fall
+# back to the research DB. Explicit opt-in remains fully supported:
+#   • FALCON_DB_PATH=<path>              — point anywhere, incl. the R&D DB
+#   • KANIDA_ALLOW_RND_DB_FALLBACK=true  — restore the legacy fallback (loud)
+# Offline research/backtest tooling that hardcodes the R&D path is untouched.
+def _rnd_fallback_allowed() -> bool:
+    return os.environ.get(
+        "KANIDA_ALLOW_RND_DB_FALLBACK", ""
+    ).strip().lower() in ("1", "true", "yes")
+
+
 def _resolve_falcon_db() -> Path:
-    """Look for Falcon DB at the canonical production path; fall back to the
-    universe_engine R&D path for local dev."""
+    """Resolve the Falcon production DB.
+
+    Explicit FALCON_DB_PATH wins. Otherwise the canonical production path is
+    returned UNCONDITIONALLY — existence is validated at startup by
+    verify_falcon_db(), which fails loud rather than substituting the R&D DB.
+    """
     env = os.environ.get("FALCON_DB_PATH")
     if env:
         return Path(env)
     canonical = DB_DIR / "kanida_universe.db"
     if canonical.exists():
         return canonical
-    rnd_path = ROOT / "universe_engine" / "data" / "db" / "kanida_universe.db"
-    if rnd_path.exists():
-        return rnd_path
-    return canonical    # default; entrypoint.sh seeds this in production
+    if _rnd_fallback_allowed() and RND_DB_PATH.exists():
+        # EXPLICIT opt-in only. Never reached in a default configuration.
+        return RND_DB_PATH
+    # No silent substitution. Return the canonical path so the error names the
+    # path the operator actually expects; verify_falcon_db() raises on it.
+    return canonical
 
 
 FALCON_DB     = _resolve_falcon_db()
+
+
+class ProductionDBMissingError(FileNotFoundError, RuntimeError):
+    """Raised at startup when the production DB is absent/unreadable.
+
+    Deliberately fatal: booting on the wrong database is worse than not
+    booting at all.
+
+    Subclasses FileNotFoundError for strict backward compatibility — the old
+    connect_falcon() raised FileNotFoundError, so any existing handler keeps
+    working unchanged.
+    """
+
+
+def _db_error_message(path, var: str) -> str:
+    # ASCII-ONLY, deliberately. start_backend.bat redirects stdout/stderr into
+    # logs\backend.log on a cp1252 console; box-drawing chars or bullets raise
+    # UnicodeEncodeError while printing, which would MASK this fatal error
+    # behind an encoding traceback. Verified: the em-dash/box version crashed.
+    rnd_note = ""
+    if RND_DB_PATH.exists():
+        rnd_note = (
+            f"\n  NOTE: the R&D database exists at\n    {RND_DB_PATH}\n"
+            "  It is NOT a substitute and will NOT be used automatically. It is a\n"
+            "  research warehouse (single-writer SQLite); serving live traffic or\n"
+            "  live trading from it is a correctness + contention hazard."
+        )
+    bar = "=" * 66
+    return (
+        "\n"
+        f"{bar}\n"
+        " FATAL: Kanida production database not found - refusing to start.\n"
+        f"{bar}\n"
+        f"  Expected at : {path}\n"
+        f"  Set via     : {var} (absolute path)\n"
+        "\n"
+        "  Likely causes:\n"
+        "    - Container volume not mounted / mounted at the wrong target\n"
+        f"    - {var} unset or pointing at a stale path\n"
+        "    - The DB file was moved, renamed, or not seeded into the image\n"
+        "\n"
+        "  This used to fall back SILENTLY to the R&D database, booting the\n"
+        "  portal and the LIVE TRADING path against the wrong data. That\n"
+        "  fallback is removed on purpose - fix the mount/path instead.\n"
+        "\n"
+        "  Escape hatch (only if this is a FALSE POSITIVE and you must boot):\n"
+        "    set KANIDA_SKIP_DB_PREFLIGHT=true"
+        f"{rnd_note}\n"
+        f"{bar}"
+    )
+
+
+def verify_falcon_db(path: Path | None = None) -> Path:
+    """Fail loud if the Falcon production DB is missing or unreadable.
+
+    Call at startup. Returns the verified path so callers can log it.
+    """
+    p = Path(path) if path is not None else FALCON_DB
+    if not p.exists():
+        raise ProductionDBMissingError(_db_error_message(p, "FALCON_DB_PATH"))
+    if not os.access(str(p), os.R_OK):
+        raise ProductionDBMissingError(
+            _db_error_message(p, "FALCON_DB_PATH")
+            + "\n  (File EXISTS but is not readable - check permissions/ownership.)"
+        )
+    return p
 
 # Tables
 T_SIGNALS_LIVE       = "falcon_signals_live"          # NEW — emitted picks per day
