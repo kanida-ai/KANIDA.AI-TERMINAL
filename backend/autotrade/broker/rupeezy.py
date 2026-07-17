@@ -48,6 +48,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote as _urlquote
 
 import socket as _socket
+import threading as _threading
 import urllib3.util.connection as _urllib3_conn
 
 from .base import BrokerClient, OrderResult
@@ -69,6 +70,39 @@ def _ipv4_only() -> int:
 _HTTP_TIMEOUT = 15
 _RETRY_MAX_ATTEMPTS = 3
 _RETRY_BASE_SLEEP_SEC = 0.4
+
+# ── CONNECTION / TLS POOLING (latency) ───────────────────────────────────────
+# _request() used a bare requests.request(), which builds a NEW connection per
+# call → every probe/order paid a fresh TCP + TLS handshake. That is why a Vortex
+# probe costs ~4.8s vs Kite's ~1.1s (kiteconnect keeps a pooled Session). A
+# module-level Session reuses the connection, cutting the handshake off EVERY
+# call — exits AND entries (entries measured 6.5-6.7s/pos on the same sessions).
+# Purely additive: same requests API, same headers/timeout/proxies/retry, same
+# scoped IPv4 pin (pooled sockets are CREATED inside the pin → they connect over
+# the allowlisted IPv4 and are then reused, so the live-verified egress is
+# preserved).
+#
+# Keyed by the PROXY config, never shared across different egress routes: today
+# _proxies() is process-global, but a per-ACCOUNT egress proxy is in flight on
+# another branch — keying by proxy means a connection opened for one account's
+# egress can NEVER be reused for another's. Auth is per-REQUEST (headers=...),
+# never set on the Session, so no token can leak across profiles.
+_SESSIONS: Dict[str, Any] = {}
+_SESSIONS_LOCK = _threading.Lock()
+
+
+def _http_session(proxies):
+    """Return the pooled requests.Session for this proxy config (created once).
+    urllib3's underlying PoolManager is thread-safe; the Session carries no
+    per-account state (no auth, no headers) — every call passes its own."""
+    import requests
+    key = repr(sorted((proxies or {}).items()))
+    with _SESSIONS_LOCK:
+        s = _SESSIONS.get(key)
+        if s is None:
+            s = requests.Session()
+            _SESSIONS[key] = s
+        return s
 
 # Order-margin (equity intraday/MTF leverage) probe — see get_margin_per_share.
 # The endpoint path is env-overridable (RUPEEZY_MARGIN_PATH) until the Vortex
@@ -230,10 +264,16 @@ class RupeezyBroker(BrokerClient):
                 _orig_gai = _urllib3_conn.allowed_gai_family
                 _urllib3_conn.allowed_gai_family = _ipv4_only
                 try:
-                    r = requests.request(
+                    # Pooled Session (connection/TLS reuse) instead of a bare
+                    # requests.request() that re-handshakes every call. The pin
+                    # still wraps the call, so any socket the pool OPENS here
+                    # connects over the allowlisted IPv4 and is then reused —
+                    # egress behaviour is unchanged (live-verified 2026-07-15).
+                    _prox = _proxies() or None
+                    r = _http_session(_prox).request(
                         method, url, headers=self._headers(), json=json_body,
                         params=params, timeout=_HTTP_TIMEOUT,
-                        proxies=_proxies() or None)
+                        proxies=_prox)
                 finally:
                     _urllib3_conn.allowed_gai_family = _orig_gai
                 if r.status_code >= 400 and _is_transient(r.status_code) \
@@ -878,12 +918,31 @@ class RupeezyBroker(BrokerClient):
             return None
         # No try/except around the fetch: a genuine transport/HTTP error MUST
         # propagate (that is the whole point of the fail-safe).
+        return self._net_qty_match(self._fetch_net_rows(), symbol,
+                                   instrument_type)
+
+    def _fetch_net_rows(self) -> List[dict]:
+        """ONE Vortex round trip → the raw net position rows. Deliberately has NO
+        try/except: a genuine transport/HTTP error MUST propagate (the BRIGADE
+        fail-safe). Extracted so the per-leg and batched probes share one fetch.
+        Deliberately NOT get_positions()/get_positions_net() — both swallow errors
+        to []/None, which the pre-exit guard would misread as 'proceed'."""
         r = self._request("GET", "/trading/portfolio/positions")
         r.raise_for_status()
         data = (r.json() or {}).get("data")
         if isinstance(data, dict):
             data = data.get("net") or data.get("positions") or []
-        for row in list(data or []):
+        return list(data or [])
+
+    def _net_qty_match(self, net_rows, symbol: str,
+                       instrument_type: str = "EQ") -> int:
+        """Pure matcher over already-fetched Vortex net rows. NO I/O. SINGLE
+        source of truth for the match semantics, shared by get_net_position_qty()
+        (per-leg) and net_qty_from_book() (batched) so the two can NEVER diverge.
+        NOTE (parity with today): Vortex rows are matched on the BARE symbol only
+        — `instrument_type` is accepted for signature parity and intentionally
+        unused, exactly as the per-leg probe has always behaved."""
+        for row in list(net_rows or []):
             if not isinstance(row, dict):
                 continue
             row_sym = (row.get("tradingsymbol") or row.get("trading_symbol")
@@ -902,6 +961,36 @@ class RupeezyBroker(BrokerClient):
             # 2026-07-15: MAPMYINDIA DELIVERY net quantity=0, buy=2, sell=2 → 0.
             return _held_from_row(row)
         return 0  # book retrieved, symbol absent → flat at the broker
+
+    def fetch_net_position_book(self):
+        """Batched pre-exit probe (see BrokerAdapter.fetch_net_position_book).
+
+        Paper / not-live → None (NO round trip). Live → the raw Vortex net rows
+        in ONE round trip. A genuine transport/HTTP error RAISES — deliberately
+        NOT swallowed to None like get_positions_net() does, because None is the
+        paper sentinel and a caller reading it as 'no book, proceed' would place
+        a BLIND exit (the 2026-07-10 BRIGADE double-cover class).
+
+        This is what turns an N-leg Vortex kill from N×~4.8s of serial probing
+        into ONE round trip; the per-leg probe remains the fallback."""
+        if not self._live_allowed():
+            return None
+        return self._fetch_net_rows()
+
+    def net_qty_from_book(self, book, symbol: str,
+                          instrument_type: str = "EQ"):
+        """Answer the pre-exit probe for `symbol` from an already-fetched book.
+        Identical semantics to get_net_position_qty() by construction (same
+        _net_qty_match). None → the book can't answer → the caller falls back to
+        the per-leg probe. Never raises (pure, defensive)."""
+        if book is None:
+            return None
+        try:
+            return self._net_qty_match(book, symbol, instrument_type)
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("rupeezy net_qty_from_book match failed for %s: %s — "
+                        "falling back to the per-leg probe", symbol, e)
+            return None
 
     def get_holdings(self) -> List[dict]:
         """Delivery holdings, NORMALISED to the Kite-shaped rows the reconciler

@@ -1049,6 +1049,62 @@ class ZerodhaBroker(BrokerClient):
             txn=getattr(order, "transaction_type", None),
             qty=getattr(order, "qty", None))
 
+    def _fetch_net_rows(self) -> list:
+        """ONE kite.positions() round trip → the raw `net` rows. Raises on any
+        Kite error (the caller decides; this NEVER swallows to None — None is the
+        paper sentinel). Extracted so the per-leg probe and the batched probe
+        share one fetch."""
+        pos = self.kite.positions() or {}
+        return list(pos.get("net") or [])
+
+    def _net_qty_match(self, net_rows, symbol: str,
+                       instrument_type: str = "EQ") -> int:
+        """Pure matcher: signed net qty for `symbol` within already-fetched `net`
+        rows. NO I/O. This is the SINGLE source of truth for the match semantics,
+        shared by get_net_position_qty() (per-leg) and net_qty_from_book()
+        (batched) so the two can NEVER diverge on a qty/clamp decision."""
+        trading_symbol, exchange = self._resolve_symbol(symbol)
+        if exchange == "NSE" and str(instrument_type).upper() in (
+                "FUT", "OPT", "CE", "PE"):
+            exchange = "NFO"
+        for row in list(net_rows or []):
+            if str(row.get("tradingsymbol")) != trading_symbol:
+                continue
+            # When we know the F&O segment, require it to match so a cash
+            # row can't shadow a contract of the same name.
+            rexch = str(row.get("exchange") or "").upper()
+            if exchange in ("NSE", "NFO") and rexch and rexch != exchange:
+                continue
+            return int(row.get("quantity") or 0)
+        return 0  # not in the net book → flat at the broker
+
+    def fetch_net_position_book(self):
+        """Batched pre-exit probe (see BrokerAdapter.fetch_net_position_book).
+
+        Paper / not-live → None (NO round trip). Live → the net rows in ONE
+        kite.positions() call. A genuine Kite error RAISES — deliberately NOT
+        swallowed to None like get_positions_net() does, because None is the
+        paper sentinel and a caller reading it as 'no book, proceed' would place
+        a BLIND exit (BRIGADE double-cover class)."""
+        if not self._live_allowed():
+            return None
+        return self._fetch_net_rows()
+
+    def net_qty_from_book(self, book, symbol: str,
+                          instrument_type: str = "EQ"):
+        """Answer the pre-exit probe for `symbol` from an already-fetched book.
+        Identical semantics to get_net_position_qty() by construction (same
+        _net_qty_match). None → the book can't answer → caller falls back to the
+        per-leg probe. Never raises (pure, defensive)."""
+        if book is None:
+            return None
+        try:
+            return self._net_qty_match(book, symbol, instrument_type)
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("net_qty_from_book match failed for %s: %s — falling "
+                        "back to the per-leg probe", symbol, e)
+            return None
+
     def get_net_position_qty(self, symbol: str,
                              instrument_type: str = "EQ"):
         """Signed net quantity Kite currently holds for `symbol` (via
@@ -1064,22 +1120,8 @@ class ZerodhaBroker(BrokerClient):
         if not self._live_allowed():
             return None
         try:
-            trading_symbol, exchange = self._resolve_symbol(symbol)
-            if exchange == "NSE" and str(instrument_type).upper() in (
-                    "FUT", "OPT", "CE", "PE"):
-                exchange = "NFO"
-            pos = self.kite.positions() or {}
-            net = pos.get("net") or []
-            for row in net:
-                if str(row.get("tradingsymbol")) != trading_symbol:
-                    continue
-                # When we know the F&O segment, require it to match so a cash
-                # row can't shadow a contract of the same name.
-                rexch = str(row.get("exchange") or "").upper()
-                if exchange in ("NSE", "NFO") and rexch and rexch != exchange:
-                    continue
-                return int(row.get("quantity") or 0)
-            return 0  # not in the net book → flat at the broker
+            net = self._fetch_net_rows()
+            return self._net_qty_match(net, symbol, instrument_type)
         except Exception as e:  # pragma: no cover - defensive
             # REAL-MONEY FAIL-SAFE (2026-07-10 BRIGADE double-cover). A genuine
             # broker error here (e.g. ConnectionResetError 10054 mid buy-to-cover)

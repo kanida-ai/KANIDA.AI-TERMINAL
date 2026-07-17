@@ -1337,8 +1337,17 @@ async def _exit_single_position_inner(
     # already-closed FUT. Returns None in paper / when the broker can't answer →
     # we then proceed with the normal exit (paper is byte-for-byte unchanged).
     probe_raised = False
+    # EXIT LATENCY: a BLOCKING broker round trip (~1.1s Kite / ~4.8s Vortex).
+    # _exit_single_position_inner is gathered CONCURRENTLY (see the exit sweeps),
+    # but an un-threaded blocking call inside a coroutine stalls the event loop —
+    # so those "concurrent" probes actually ran one after another, and ws_driver/
+    # tick were starved meanwhile. to_thread makes the overlap real. Semantics are
+    # IDENTICAL: to_thread re-raises the broker exception faithfully, so the
+    # fail-loud B1 guard below is untouched. (No batch hoist here: this is a
+    # SINGLE-position function — there is no loop to hoist out of.)
     try:
-        net_qty = broker.get_net_position_qty(position.get("symbol"), itype)
+        net_qty = await asyncio.to_thread(
+            broker.get_net_position_qty, position.get("symbol"), itype)
     except Exception as _net_e:
         # FAIL-SAFE (Fix B1, 2026-07-10 BRIGADE double-cover). The pre-exit position
         # read RAISED (broker connection/timeout — ConnectionResetError 10054 mid

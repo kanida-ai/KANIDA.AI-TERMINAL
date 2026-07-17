@@ -72,6 +72,14 @@ class _RequestsRecorder:
             return self._next
         return _FakeResp(200, {"data": {}})
 
+    def Session(self):
+        """_request() now goes through a POOLED requests.Session (connection/TLS
+        reuse — a bare requests.request() re-handshook on every call, which is why
+        a Vortex round trip cost ~4.5x a Kite one). The recorder stands in for the
+        `requests` MODULE, so it must model Session() too: it returns ITSELF, since
+        it already implements .request() with the same signature."""
+        return self
+
     def request(self, method, url, headers=None, json=None, params=None,
                 timeout=None, proxies=None):
         self.calls.append({"method": method, "url": url, "headers": headers,
@@ -94,7 +102,13 @@ def fake_requests(monkeypatch):
     rec = _RequestsRecorder()
     import sys
     monkeypatch.setitem(sys.modules, "requests", rec)
-    return rec
+    # The pooled-Session cache is MODULE-LEVEL (process-global by design, so the
+    # connection survives across calls). Clear it around every test or the FIRST
+    # test's recorder would stay cached and later tests would record into the
+    # wrong double. Cleared before AND after → no cross-test pollution.
+    rupeezy_mod._SESSIONS.clear()
+    yield rec
+    rupeezy_mod._SESSIONS.clear()
 
 
 def _run(coro):

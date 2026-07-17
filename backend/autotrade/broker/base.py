@@ -374,6 +374,54 @@ class BrokerClient(ABC):
         Only the live Zerodha adapter (and best-effort Rupeezy) return a list."""
         return None
 
+    # ── BATCHED PRE-EXIT PROBE (exit/kill latency: O(N) round trips → O(1)) ───
+    # get_net_position_qty() costs ONE broker round trip PER POSITION. Called in
+    # the serial pre-exit loop of kill_switch.fire it dominates exit latency
+    # (measured: ~14.4s of a 15.9s 3-leg Vortex kill sat BEFORE the first
+    # EXIT_PLACED). These two methods let a caller pay ONE round trip for the
+    # whole book and then answer every leg from it, in memory.
+    #
+    # SAFETY — why this is NOT just get_positions_net():
+    #   get_positions_net() SWALLOWS broker errors to None, and None is ALSO the
+    #   PAPER sentinel that callers read as "no book to reconcile, proceed with
+    #   the exit". Reusing it for the pre-exit guard would place a BLIND exit on
+    #   a broker error → the 2026-07-10 BRIGADE double-cover class (a blind
+    #   second buy-to-cover into a naked reverse). It must NEVER back this guard.
+    #
+    # fetch_net_position_book() therefore mirrors get_net_position_qty()'s
+    # fail-loud contract EXACTLY, and the two failure modes are made EXPLICIT
+    # (today the paper-vs-error distinction is implicit — that is where the
+    # danger lives):
+    #   * paper / not-live / no book available → None  (NO round trip; the caller
+    #     falls back to the per-leg probe, which itself returns None instantly →
+    #     paper is byte-for-byte unchanged, zero round trips)
+    #   * live + success                       → an OPAQUE, adapter-owned book
+    #   * live + ANY error                     → RAISE (never swallowed to None)
+    #
+    # The caller's contract: a raise/None from the BATCH must fall back to the
+    # per-leg probe loop — NEVER abort the legs (a fail-OPEN kill switch is worse
+    # than a slow one) and NEVER proceed unguarded.
+    def fetch_net_position_book(self):
+        """Fetch the broker's full net book in ONE round trip, for the batched
+        pre-exit guard. Returns an OPAQUE book (only ever passed back to this
+        SAME adapter's net_qty_from_book), or None when there is no book to
+        answer from. RAISES on a genuine live broker error — callers fall back to
+        the per-leg get_net_position_qty() probe, which fails loud per leg.
+
+        Default (paper / stub / no live creds): None → per-leg fallback."""
+        return None
+
+    def net_qty_from_book(self, book, symbol: str,
+                          instrument_type: str = "EQ") -> Optional[int]:
+        """Signed net qty for `symbol` read out of a `book` from THIS adapter's
+        fetch_net_position_book(). Pure / in-memory — performs NO I/O and must
+        never raise. Returns the SAME value get_net_position_qty(symbol,
+        instrument_type) would have returned for that book, or None when the book
+        cannot answer (→ the caller falls back to the per-leg probe).
+
+        Default (paper / stub): None → per-leg fallback."""
+        return None
+
     def get_holdings(self) -> Optional[List[dict]]:
         """Return the broker's DELIVERED demat holdings, as a list of raw broker
         holding rows, or None when the broker can't answer.

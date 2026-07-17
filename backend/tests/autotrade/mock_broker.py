@@ -23,6 +23,8 @@ class MockBroker(BrokerClient):
                  margins_available: bool = True,
                  net_positions: Optional[Dict[str, int]] = None,
                  net_probe_raise_symbols: Optional[set] = None,
+                 batch_probe: bool = False,
+                 batch_probe_raises: bool = False,
                  net_book: Optional[Any] = None,
                  holdings: Optional[Any] = None,
                  orders: Optional[Any] = None,
@@ -91,6 +93,18 @@ class MockBroker(BrokerClient):
         # The real ZerodhaBroker RE-RAISES on error; the caller's pre-exit guard must
         # then ABORT (no blind order). Default empty → existing tests unaffected.
         self._net_probe_raise_symbols = net_probe_raise_symbols or set()
+        # BATCHED pre-exit probe (exit/kill latency). Default OFF → this mock does
+        # NOT implement fetch_net_position_book (inherits the base None) → every
+        # existing test keeps taking the UNCHANGED per-leg probe path. Opt in with
+        # batch_probe=True to model a live adapter that answers the whole book in
+        # ONE round trip. batch_probe_raises=True models a LIVE broker error on the
+        # batch fetch (the anti-BRIGADE case: the caller MUST fall back to the
+        # per-leg probe, never place a blind exit). Counters let a test assert the
+        # actual number of broker round trips.
+        self._batch_probe = batch_probe
+        self._batch_probe_raises = batch_probe_raises
+        self.batch_book_fetches = 0     # fetch_net_position_book() round trips
+        self.per_leg_probes = 0         # get_net_position_qty() round trips
         # AUTHORITATIVE reconciler: the broker's FULL day-net book. Accepts either
         #   * a list of raw Kite-shaped net rows, or
         #   * a dict {symbol -> {quantity, buy_quantity, sell_quantity, sell_price,
@@ -225,6 +239,7 @@ class MockBroker(BrokerClient):
         return self._fut_margin_per_lot
 
     def get_net_position_qty(self, symbol: str, instrument_type: str = "EQ"):
+        self.per_leg_probes += 1
         # Fix B1: a configured symbol RAISES (models a live broker connection error
         # mid probe). The caller must ABORT the exit — never place a blind order.
         if symbol in self._net_probe_raise_symbols:
@@ -235,6 +250,28 @@ class MockBroker(BrokerClient):
         if self._net_positions is None:
             return None
         return self._net_positions.get(symbol)
+
+    def fetch_net_position_book(self):
+        """Batched pre-exit probe. Only implemented when batch_probe=True (else
+        the base None → per-leg fallback, i.e. every pre-existing test)."""
+        if not self._batch_probe:
+            return None
+        self.batch_book_fetches += 1
+        if self._batch_probe_raises:
+            # A LIVE broker error on the BATCH fetch. Mirrors the real adapters,
+            # which RAISE rather than swallow to None (None is the paper sentinel).
+            raise ConnectionResetError(
+                10054, "An existing connection was forcibly closed by the remote host")
+        if self._net_positions is None:
+            return None
+        return dict(self._net_positions)
+
+    def net_qty_from_book(self, book, symbol: str, instrument_type: str = "EQ"):
+        """Pure in-memory lookup — NO round trip (deliberately does not touch the
+        probe counters). Returns the same value get_net_position_qty would."""
+        if book is None:
+            return None
+        return book.get(symbol)
 
     def get_positions_net(self):
         # None (default) → the reconciler treats it as "broker unreachable / paper"
