@@ -64,6 +64,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+import time as _time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -71,6 +73,175 @@ from falcon.db import falcon_conn
 
 log = logging.getLogger("kanida.autotrade.position_reconciler")
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ALERT AUTO-TRIAGE — TIER 2: SUPPRESS AT THE DETECTOR
+# ═════════════════════════════════════════════════════════════════════════════
+# Tier 1 acks noise AFTER it becomes an alert. Tier 2 is THE REAL FIX: these
+# divergences should never become alerts at all, because they are not findings —
+# they are the reconciler racing our own in-flight exits.
+#
+# THE PROOF (2026-07-16 triage of 31 unacked alerts): alerts 21-24 each equalled
+# session 1aeb11b8's FIRST ICEBERG EXIT CHILD *exactly* — MAPMYINDIA 40, BIOCON
+# 2091, CHALET 31, ECLERX 52 — yet every one was blamed on session d9b218cf,
+# which never sold a single share. The reconciler saw the broker qty drop
+# (1aeb11b8's child had filled), computed a deficit, and attributed it to the
+# FIRST session in iteration order. Two bugs in one: (a) no awareness of an exit
+# in flight, (b) attribution by iteration order instead of by who is selling.
+#
+# All three gates below are behind FALCON_AUTOTRADE_AUTO_TRIAGE. With the flag
+# OFF every helper is bypassed before it reads a row → the reconciler is
+# byte-for-byte identical to today.
+
+def _triage_on() -> bool:
+    """The Tier-2 master gate (shared with Tier 1/3). Never raises."""
+    try:
+        from ..alerts import auto_triage_enabled
+        return auto_triage_enabled()
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, str(default)).strip()))
+    except (ValueError, AttributeError, TypeError):
+        return default
+
+
+def _inflight_max_age_sec() -> int:
+    """How long an EXIT_PLACED with no terminal event still counts as IN FLIGHT.
+    Default 300s: every observed entry-fill / iceberg race self-healed in <4 min,
+    so 5 minutes covers them all. Beyond this the order is NOT in flight — it is
+    STUCK, which is a real finding that must alert, not be suppressed."""
+    return _int_env("FALCON_AUTOTRADE_TRIAGE_INFLIGHT_MAX_SEC", 300)
+
+
+def _min_divergence_cycles() -> int:
+    """Consecutive reconcile cycles a divergence must PERSIST before it may
+    alert. Default 2 (~10s at the ~5s reconcile cadence) — this is the
+    quiet-period that kills the entry-fill and iceberg races while leaving a
+    genuinely persistent divergence fully alerting (a real one is still there on
+    cycle 2, and every cycle after)."""
+    return max(1, _int_env("FALCON_AUTOTRADE_TRIAGE_MIN_CYCLES", 2))
+
+
+# ── the quiet-period streak tracker ──────────────────────────────────────────
+# key -> (consecutive_count, last_seen_monotonic). Consecutiveness is enforced by
+# the GAP: a key not re-observed within _STREAK_GAP_SEC has broken its streak and
+# restarts at 1 (so we never need a global sweep, and a divergence that vanishes
+# and returns minutes later is correctly treated as NEW, not as persistent).
+_DIVERGENCE_STREAK: Dict[tuple, tuple] = {}
+_STREAK_LOCK = threading.Lock()
+_STREAK_GAP_SEC = 20.0
+
+
+def _bump_divergence_streak(key: tuple) -> int:
+    """Record one observation of a divergence and return its consecutive-cycle
+    count (1 on the first/restarted observation)."""
+    now = _time.monotonic()
+    with _STREAK_LOCK:
+        count, last = _DIVERGENCE_STREAK.get(key, (0, 0.0))
+        if now - last > _STREAK_GAP_SEC:
+            count = 0          # streak broken (or first ever) → restart
+        count += 1
+        _DIVERGENCE_STREAK[key] = (count, now)
+        return count
+
+
+def _clear_divergence_streak(key: tuple) -> None:
+    with _STREAK_LOCK:
+        _DIVERGENCE_STREAK.pop(key, None)
+
+
+def reset_divergence_streaks() -> None:
+    """Clear all streak state (tests + a session teardown). Never raises."""
+    with _STREAK_LOCK:
+        _DIVERGENCE_STREAK.clear()
+
+
+# Terminal states for an EXIT order-id: once one of these is on the ledger the
+# exit's lifecycle is RESOLVED, so it is no longer "in flight".
+_EXIT_TERMINAL_TYPES = (
+    "EXIT_FILLED", "EXIT_FAILED", "POSITION_CLOSED", "RECONCILE_CLOSE",
+    "REJECTED",
+)
+
+
+def _inflight_exits_for(bare_sym: str, product: str,
+                        prof_scope: Optional[List[str]],
+                        now: Optional[datetime] = None
+                        ) -> List[Dict[str, Any]]:
+    """IN-FLIGHT EXIT AWARENESS — every EXIT_PLACED on the durable ledger for
+    (bare_sym, product) that carries a REAL broker order-id and has NO terminal
+    event yet, within _inflight_max_age_sec().
+
+    This is the evidence that a deficit is OUR OWN exit working at the broker,
+    not an unattributed close: the broker has already reduced the qty, our
+    position row has not been closed yet, and the closing order-id is right there
+    on the ledger. Each returned row carries `session_id` — THE SELLING SESSION —
+    which is who the deficit belongs to, regardless of which session's reconcile
+    pass happened to notice it first.
+
+    Scoped to the reconciling session's broker profiles so another account's exit
+    can never explain this account's deficit. Never raises → [] on error (which
+    means NO suppression = the pre-triage alerting behaviour = fail-safe)."""
+    now = now or datetime.now(IST)
+    cutoff = (now - timedelta(seconds=_inflight_max_age_sec())).isoformat()
+    try:
+        with falcon_conn() as con:
+            rows = [dict(r) for r in con.execute(
+                f"""SELECT e.* FROM autotrade_order_events e
+                    WHERE e.event_type='EXIT_PLACED'
+                      AND e.broker_order_id IS NOT NULL
+                      AND e.broker_order_id<>''
+                      AND e.ts>=?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM autotrade_order_events t
+                          WHERE t.broker_order_id=e.broker_order_id
+                            AND COALESCE(t.broker_profile,'')
+                                =COALESCE(e.broker_profile,'')
+                            AND t.event_type IN
+                                ({','.join('?' * len(_EXIT_TERMINAL_TYPES))}))
+                    ORDER BY e.id ASC""",
+                (cutoff,) + _EXIT_TERMINAL_TYPES).fetchall()]
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("triage: in-flight exit scan failed (%s/%s): %s",
+                  bare_sym, product, e)
+        return []
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        if _bare_symbol(str(r.get("symbol") or "")) != bare_sym:
+            continue
+        # Product: match when the event STATES one (an event with no product is
+        # accepted — older rows — the symbol + profile scope still bounds it).
+        rp = r.get("product")
+        if rp not in (None, "") and _kite_product(rp) != product:
+            continue
+        if prof_scope is not None:
+            if str(r.get("broker_profile") or "") not in prof_scope:
+                continue
+        out.append(r)
+    return out
+
+
+def _inflight_exit_qty(inflight: List[Dict[str, Any]]) -> int:
+    """Total qty working in the in-flight exits (0 when a row states no qty —
+    conservative: an unknown qty explains nothing)."""
+    return sum(int(r.get("qty") or 0) for r in inflight)
+
+
+def _selling_sessions(inflight: List[Dict[str, Any]]) -> List[str]:
+    """The DISTINCT sessions that actually placed the in-flight exits — i.e. who
+    the deficit belongs to. THIS is the attribution fix: the deficit is named to
+    the SELLING session, never to whichever session's reconcile pass ran first."""
+    seen: List[str] = []
+    for r in inflight:
+        sid = str(r.get("session_id") or "")
+        if sid and sid not in seen:
+            seen.append(sid)
+    return seen
 
 
 def _reconcile_disabled() -> bool:
@@ -468,16 +639,68 @@ _CORP_ACTION_RATIOS = (2.0, 3.0, 5.0, 1.5, 2.5, 10.0)
 # Accept a ratio within ±2% (a clean split/bonus lands on the integer exactly for
 # a round lot; the tolerance only forgives fractional-share rounding).
 _CORP_ACTION_TOL = 0.02
+# ── TIER 2 — A RATIO IS NOT EVIDENCE (the ECLERX lesson) ─────────────────────
+# 2026-07-16: ECLERX raised a URGENT CORP_ACTION_SUSPECTED that was PURE
+# COINCIDENCE. broker 498 vs db 1465 → 1465/498 = 2.9417. Against R=3.0 the ±2%
+# tolerance is 0.06, and |2.9417 − 3.0| = 0.0583. It qualified as a "1:3 reverse
+# split" BY 0.0017. Meanwhile the real ₹8.3L event was raising no urgent alert at
+# all. ±2% is FAR too loose: it makes ~2% of the entire ratio line qualify around
+# each of six ratios, so ordinary partial-fill / multi-session arithmetic lands on
+# a "clean corporate action" by chance.
+#
+# A REAL split/bonus is EXACT. It multiplies the qty by a precise rational; the
+# only legitimate error is integer rounding on a fractional residue, which for any
+# realistic position size is « 0.2%. So the strict tolerance is ±0.2% — with it,
+# ECLERX's 0.0583 miss (needing ≤ 0.006 at R=3.0) is correctly REJECTED, while a
+# genuine 1465→4395 (×3 bonus, ratio exactly 3.0) still classifies.
+#
+# And tolerance is only the FIRST gate. Under the triage flag a corp action must
+# ALSO be (a) STABLE across ≥2 consecutive cycles (a real split does not appear
+# and vanish; a fill race does), and (b) free of any in-flight exit on the symbol
+# (an exit landing mid-scan moves the qty for a reason that is not a corp action).
+# The cross-check against a REAL corporate-action calendar is NOT implemented —
+# see _corp_action_calendar_confirms().
+_CORP_ACTION_TOL_STRICT = 0.002
 
 
-def _corp_action_ratio(broker_held: int, db_held: int) -> Optional[float]:
+def _corp_action_calendar_confirms(symbol: str,
+                                   ratio: float) -> Optional[bool]:
+    """Cross-check a suspected corporate action against a REAL corp-action
+    calendar for `symbol`.
+
+    ⚠️ NOT IMPLEMENTED — returns None ("unknown") always. There is no corporate-
+    action calendar table in this database today (verified: no split/bonus/
+    corp-action source exists in the autotrade or falcon schema), and inventing
+    one from price/qty data would reproduce exactly the ratio-guessing this gate
+    exists to stop.
+
+    The contract is deliberate and fail-SAFE:
+      * True  → confirmed by the calendar (would allow the CORP_ACTION alert).
+      * False → the calendar says there is NO corp action → the divergence is
+                something else and must alert as UNATTRIBUTED_CLOSE instead.
+      * None  → UNKNOWN. The caller does NOT treat unknown as confirmation; the
+                ratio alone can still classify, but only after passing the strict
+                tolerance + stability + no-in-flight-exit gates.
+    OPERATOR ACTION: to complete this gate, wire an NSE corporate-actions feed
+    into a table and implement this function. Until then a corp-action
+    classification remains a SUSPICION (its alert kind already says SUSPECTED and
+    it has never mutated a position)."""
+    return None
+
+
+def _corp_action_ratio(broker_held: int, db_held: int,
+                       tol: Optional[float] = None) -> Optional[float]:
     """Return the CLEAN corporate-action multiplier R such that broker ≈ db × R
     (a split/bonus grew the broker qty) — or its reciprocal for a reverse split —
     else None. Conservative: only a ratio within tolerance of a known
     _CORP_ACTION_RATIOS entry qualifies; anything else stays None (generic alert).
 
     Both sides must be > 0 (a 0 on either side is a real close/orphan, not a
-    ratio). Never raises."""
+    ratio). Never raises.
+
+    `tol` overrides the tolerance. Default None = the legacy ±2% (so every
+    pre-triage caller is byte-for-byte unchanged); the triage path passes
+    _CORP_ACTION_TOL_STRICT (±0.2%), which rejects the ECLERX coincidence."""
     try:
         b = int(broker_held)
         d = int(db_held)
@@ -485,11 +708,12 @@ def _corp_action_ratio(broker_held: int, db_held: int) -> Optional[float]:
         return None
     if b <= 0 or d <= 0 or b == d:
         return None
+    _tol = _CORP_ACTION_TOL if tol is None else float(tol)
     # Growth (split/bonus): broker larger. Shrink (reverse split): broker smaller.
     hi, lo = (b, d) if b > d else (d, b)
     raw = hi / lo
     for R in _CORP_ACTION_RATIOS:
-        if abs(raw - R) <= _CORP_ACTION_TOL * R:
+        if abs(raw - R) <= _tol * R:
             # Report the SIGNED multiplier vs db: >1 broker grew, <1 broker shrank.
             return round(R if b > d else (1.0 / R), 4)
     return None
@@ -990,6 +1214,51 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                     "product": product, "exit_price": ev["exit_price"],
                     "exit_order_id": ev["exit_order_id"],
                     "close_reason": ev["close_reason"]})
+            # ── TIER 2 GATE — IN-FLIGHT EXIT AWARENESS (default-OFF) ─────────
+            # BEFORE declaring a deficit, ask the durable ledger: is one of OUR
+            # exits working at the broker RIGHT NOW? An EXIT_PLACED with a real
+            # broker order-id and no terminal event means the broker has already
+            # reduced the qty while our row is not closed yet — the "deficit" IS
+            # that exit, mid-flight. It is not an unattributed close.
+            #
+            # THE ATTRIBUTION FIX: the deficit belongs to the SELLING session
+            # (the session_id on the EXIT_PLACED event), NOT to whichever
+            # session's reconcile pass noticed it first. Alerts 21-24 were blamed
+            # on d9b218cf — a session that never sold — because the old code took
+            # the first session in iteration order. Here we name the real seller,
+            # and if its in-flight qty covers the deficit we emit NOTHING at all
+            # (no alert, and critically NO partial-external-close mutation
+            # against this session's lot, which would have mis-booked another
+            # session's sell onto us).
+            if deficit > 0 and _triage_on():
+                _inflight = _inflight_exits_for(bare_sym, product, prof_scope)
+                if _inflight:
+                    _if_qty = _inflight_exit_qty(_inflight)
+                    _sellers = _selling_sessions(_inflight)
+                    if _if_qty >= deficit:
+                        _clear_divergence_streak(
+                            (bare_sym, product, grp_acct, "DEFICIT"))
+                        log.info(
+                            "reconcile %s/%s(%s): deficit=%d fully explained by "
+                            "%d in-flight exit qty placed by session(s) %s — "
+                            "SUPPRESSED (not an unattributed close; the exit is "
+                            "mid-flight and will close its own row by order-id)",
+                            session.session_id, bare_sym, product, deficit,
+                            _if_qty, ",".join(_sellers) or "?")
+                        actions.append({
+                            "action": "DEFICIT_INFLIGHT_EXIT_SUPPRESSED",
+                            "symbol": bare_sym, "product": product,
+                            "deficit": int(deficit),
+                            "inflight_qty": int(_if_qty),
+                            "selling_sessions": _sellers})
+                        continue
+                    log.info(
+                        "reconcile %s/%s(%s): deficit=%d only PARTLY explained by "
+                        "%d in-flight exit qty (sellers %s) — continuing to the "
+                        "normal path for the unexplained remainder",
+                        session.session_id, bare_sym, product, deficit, _if_qty,
+                        ",".join(_sellers) or "?")
+
             if deficit > 0:
                 # ── FULLY FLAT AT THE BROKER (held == 0) → close UNCONDITIONALLY ──
                 # The position is OBJECTIVELY gone: the trader (or RMS) squared it
@@ -1162,7 +1431,58 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
                 # ALERT, never blind-close (which session's lot closed is ambiguous).
                 # GUARD G3: a CLEAN corp-action ratio (reverse split shrank the qty)
                 # RECLASSIFIES as CORP_ACTION_SUSPECTED instead of the generic alert.
-                ratio = _corp_action_ratio(broker_held, db_held_all)
+                # ── TIER 2 GATE — TRANSIENT QUIET-PERIOD (default-OFF) ────────
+                # An unexplained deficit must PERSIST for ≥_min_divergence_cycles
+                # consecutive reconcile cycles (~10s) before it may alert. Every
+                # entry-fill / iceberg race self-heals in well under that; a REAL
+                # deficit is still there on cycle 2 and every cycle after, so this
+                # costs a genuine finding ~5 seconds and costs the noise
+                # everything. NOTE this gates ONLY the ALERT — the mutating
+                # branches above (order-id closes, fully-flat closes) already ran
+                # on positive evidence and are untouched.
+                _dkey = (bare_sym, product, grp_acct, "DEFICIT")
+                if _triage_on():
+                    _streak = _bump_divergence_streak(_dkey)
+                    _need = _min_divergence_cycles()
+                    if _streak < _need:
+                        log.info(
+                            "reconcile %s/%s(%s): unexplained deficit=%d seen on "
+                            "cycle %d/%d — QUIET PERIOD, not alerting yet",
+                            session.session_id, bare_sym, product, deficit,
+                            _streak, _need)
+                        actions.append({
+                            "action": "DEFICIT_QUIET_PERIOD",
+                            "symbol": bare_sym, "product": product,
+                            "deficit": int(deficit), "cycles": int(_streak),
+                            "cycles_required": int(_need)})
+                        continue
+                # ── TIER 2 GATE — CORP ACTION: A RATIO IS NOT EVIDENCE ────────
+                # Under the flag the ratio must clear the STRICT (±0.2%)
+                # tolerance, and the divergence must be STABLE (the quiet-period
+                # streak above already proved that) and free of any in-flight
+                # exit. Flag OFF → the legacy ±2% call, byte-for-byte unchanged.
+                if _triage_on():
+                    ratio = _corp_action_ratio(broker_held, db_held_all,
+                                               tol=_CORP_ACTION_TOL_STRICT)
+                    if ratio is not None and _inflight_exits_for(
+                            bare_sym, product, prof_scope):
+                        log.info(
+                            "reconcile %s/%s: corp-action ratio=%s REJECTED — an "
+                            "exit is in flight on this symbol; qty moved for a "
+                            "reason that is not a corporate action",
+                            session.session_id, bare_sym, ratio)
+                        ratio = None
+                    if ratio is not None:
+                        _cal = _corp_action_calendar_confirms(bare_sym, ratio)
+                        if _cal is False:
+                            log.info(
+                                "reconcile %s/%s: corp-action ratio=%s REJECTED "
+                                "— the corp-action calendar has no action for "
+                                "this symbol", session.session_id, bare_sym,
+                                ratio)
+                            ratio = None
+                else:
+                    ratio = _corp_action_ratio(broker_held, db_held_all)
                 if ratio is not None:
                     detail = (f"broker_held={broker_held} vs db_held_all="
                               f"{db_held_all}; clean corp-action ratio={ratio} "
@@ -1203,7 +1523,39 @@ def reconcile_broker_positions(session) -> List[Dict[str, Any]]:
         # rare coincidence that still flags — acceptable, info-level, non-mutating.
         # An ARBITRARY surplus (our 100 + a manual 37 = 137, ratio 1.37) is fully
         # invisible.
-        ratio = _corp_action_ratio(broker_held, db_held_all)
+        # ── TIER 2 GATES on the SURPLUS side (default-OFF) ────────────────────
+        # Identical reasoning to the deficit side: strict tolerance, stability
+        # across ≥2 consecutive cycles, and no in-flight exit on the symbol. A
+        # surplus that is a genuine bonus/split is permanent — it will still be
+        # there next cycle. Flag OFF → the single legacy ±2% call, unchanged.
+        if _triage_on():
+            ratio = _corp_action_ratio(broker_held, db_held_all,
+                                       tol=_CORP_ACTION_TOL_STRICT)
+            if ratio is not None and _inflight_exits_for(
+                    bare_sym, product, prof_scope):
+                log.info("reconcile %s/%s: surplus corp-action ratio=%s REJECTED "
+                         "— an exit is in flight on this symbol",
+                         session.session_id, bare_sym, ratio)
+                ratio = None
+            if ratio is not None and _corp_action_calendar_confirms(
+                    bare_sym, ratio) is False:
+                ratio = None
+            if ratio is not None:
+                _skey = (bare_sym, product, grp_acct, "SURPLUS")
+                _streak = _bump_divergence_streak(_skey)
+                _need = _min_divergence_cycles()
+                if _streak < _need:
+                    log.info(
+                        "reconcile %s/%s: surplus corp-action ratio=%s seen on "
+                        "cycle %d/%d — QUIET PERIOD, not alerting yet",
+                        session.session_id, bare_sym, ratio, _streak, _need)
+                    actions.append({
+                        "action": "SURPLUS_QUIET_PERIOD", "symbol": bare_sym,
+                        "product": product, "ratio": ratio,
+                        "cycles": int(_streak), "cycles_required": int(_need)})
+                    continue
+        else:
+            ratio = _corp_action_ratio(broker_held, db_held_all)
         if ratio is not None:
             detail = (f"broker_held={broker_held} vs db_held_all={db_held_all}; "
                       f"clean corp-action ratio={ratio} — split/bonus SUSPECTED, "

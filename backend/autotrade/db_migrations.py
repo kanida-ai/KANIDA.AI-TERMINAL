@@ -386,6 +386,30 @@ def run_migrations() -> dict:
                     "ADD COLUMN config_version INTEGER NOT NULL DEFAULT 0")
                 added_cols.append("ladder_config_version")
 
+        # ── 2h-bis. ALERT AUTO-TRIAGE — audit columns on autotrade_alerts ─────
+        # ack_reason: the AUDIT REASON recorded whenever an alert is acknowledged.
+        #   For an operator ack it stays NULL (unchanged); for an AUTO-ack the
+        #   evidence-gated triage rule writes WHY it was resolved (e.g.
+        #   "superseded by certification: rupeezy is_certified=True, 0 live orders
+        #   placed"). An auto-ack NEVER deletes a row — the row + its reason are
+        #   the permanent audit trail.
+        # auto_resolved: 0/1 — 1 marks a row acked by the AUTOMATED triage layer
+        #   rather than a human, so an operator can always tell the two apart (and
+        #   filter/undo). DEFAULT 0 → every existing row reads exactly as before.
+        # Additive + idempotent + inert while FALCON_AUTOTRADE_AUTO_TRIAGE is off
+        # (nothing writes these columns unless the flag is on).
+        if _table_exists(con, "autotrade_alerts"):
+            have = set(_existing_columns(con, "autotrade_alerts"))
+            if "ack_reason" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_alerts ADD COLUMN ack_reason TEXT")
+                added_cols.append("ack_reason")
+            if "auto_resolved" not in have:
+                con.execute(
+                    "ALTER TABLE autotrade_alerts "
+                    "ADD COLUMN auto_resolved INTEGER NOT NULL DEFAULT 0")
+                added_cols.append("auto_resolved")
+
         # ── 2i. RMS (SPRINT CLUSTER 4, CAP 3) — MIS broker-side protective SL-M ─
         # slm_order_id: the broker order-id of the Falcon-owned DAY SL-M (stop-
         # market) protective order placed on an MIS leg (which gets NO GTT). It is
