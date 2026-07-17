@@ -19,13 +19,16 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time as _time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from .. import alerts
 
 log = logging.getLogger("kanida.autotrade.alert_monitor")
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 # ── the money-losing DIVERGENCE kinds the reconciler emits (ITEM 2b) ──────────
@@ -355,3 +358,449 @@ def detect_naked_positions(session) -> List[Dict[str, Any]]:
                           "product": product, "broker_qty": int(qty),
                           "alert_id": aid})
     return naked
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ALERT AUTO-TRIAGE (default-OFF behind FALCON_AUTOTRADE_AUTO_TRIAGE)
+# ═════════════════════════════════════════════════════════════════════════════
+# THE DESIGN LESSON, encoded (from triaging all 31 unacked alerts of 2026-07-16):
+#
+#   The "URGENT" alerts were NOISE and the QUIET ones were the real ₹8.3L event.
+#   ECLERX CORP_ACTION_SUSPECTED was flagged URGENT but was pure coincidence
+#   (1465/498 = 2.9417 vs a 3.0 tolerance of 0.06 → it matched a "1:3 reverse
+#   split" by 0.0017). Meanwhile the QUIET UNATTRIBUTED_CLOSE deficits were the
+#   paper-contaminates-live bug that left 706 real MAPMYINDIA shares unsold.
+#
+# THEREFORE: auto-ack keys ONLY on PROVEN-TRANSIENT EVIDENCE — never on an
+# alert's KIND and never on its SEVERITY. Every rule below names the specific
+# artefact (a registry certification, a later healthy reconcile timestamp, a
+# ledger event) that PROVES the condition the alert reported is gone. No
+# evidence → no ack, forever, no matter how noisy the alert is.
+#
+# THE THREE TIERS
+#   Tier 1 — auto_resolve(): evidence-gated ack. Writes acknowledged=1 + an
+#            ack_reason audit string + auto_resolved=1. NEVER deletes a row.
+#   Tier 2 — suppression AT THE DETECTOR (position_reconciler.py) so a provably
+#            transient divergence never becomes an alert at all. The real fix.
+#   Tier 3 — ALWAYS page, NEVER auto-ack (_NEVER_AUTO_ACK below) + the
+#            RECONCILED_FLAT-without-an-exit-order detector.
+#
+# HARD RULE: nothing here may EVER auto-ack a condition that could indicate an
+# untracked / naked position. That is enforced structurally three times over:
+# (1) only _AUTO_ACKABLE_KINDS are ever selected as candidates, (2) every
+# candidate is re-checked against _NEVER_AUTO_ACK before the ack, and (3) a
+# session with ANY unacked Tier-3 alert is quarantined — none of its alerts are
+# acked while a real-money incident is open on it.
+# NON-MUTATING: this layer NEVER closes/opens a position and NEVER places an
+# order. It only flips ack flags and raises pages.
+
+# Tier 3 — the kinds a machine must NEVER resolve. Each one means real money is
+# (or may be) exposed: a stranded leg, an incomplete kill, an unmanaged broker
+# position, a manual conflict, or a close we cannot tie to one of our orders.
+_NEVER_AUTO_ACK = frozenset({
+    "EXIT_FAILED", "KILLING_INCOMPLETE", "NAKED_POSITION", "MANUAL_CONFLICT",
+    "UNATTRIBUTED_CLOSE", "ORPHAN_AT_BROKER", "DOUBLE_FILL",
+    "RECONCILED_FLAT_NO_EXIT_ORDER", "DAILY_LOSS_BREAKER",
+})
+
+# Tier 1 — the ONLY kinds any rule may ever ack. An alert kind absent from this
+# set can never be auto-acked, whatever evidence exists.
+_AUTO_ACKABLE_KINDS = ("UNCERTIFIED_BROKER_BLOCKED", "RECONCILE_STALE")
+
+
+def _triage_lookback_sec() -> int:
+    """How far back the triage scans for candidate alerts (s). Default 7 days —
+    the historical UNCERTIFIED_BROKER_BLOCKED backlog is exactly this shape."""
+    return _int_env("FALCON_AUTOTRADE_TRIAGE_LOOKBACK_SEC", 604800)
+
+
+def _triage_min_age_sec() -> int:
+    """Minimum age (s) before an alert may be auto-acked. A condition that fired
+    SECONDS ago has not proven itself transient yet — settle first, ack later."""
+    return _int_env("FALCON_AUTOTRADE_TRIAGE_MIN_AGE_SEC", 300)
+
+
+def _flat_detector_lookback_sec() -> int:
+    """How far back the Tier-3 RECONCILED_FLAT detector scans closed rows (s).
+    Default 24h — the detector is for REAL-TIME catching of today's closes."""
+    return _int_env("FALCON_AUTOTRADE_TRIAGE_FLAT_LOOKBACK_SEC", 86400)
+
+
+def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO IST timestamp from a row; None when absent/unparseable.
+    Naive timestamps are assumed IST (that is what every writer here emits)."""
+    if not ts:
+        return None
+    try:
+        d = datetime.fromisoformat(str(ts))
+    except (ValueError, TypeError):
+        return None
+    return d.replace(tzinfo=IST) if d.tzinfo is None else d
+
+
+def _live_session_ids() -> set:
+    """session_ids whose autotrade_sessions.mode is 'live'. A PAPER session is
+    invisible to every triage rule: paper legitimately has no broker order-ids
+    (synthetic fills), so a paper row would otherwise trip the Tier-3 detector on
+    every single close. Never raises → empty set (= no pages) on error."""
+    try:
+        from falcon.db import falcon_conn  # noqa: WPS433
+        with falcon_conn() as con:
+            rows = con.execute(
+                "SELECT session_id FROM autotrade_sessions "
+                "WHERE LOWER(COALESCE(mode,''))='live'").fetchall()
+        return {str(dict(r)["session_id"]) for r in rows}
+    except Exception as e:  # noqa: BLE001
+        log.debug("triage: live-session scan failed: %s", e)
+        return set()
+
+
+def _sessions_with_open_incident() -> set:
+    """QUARANTINE (safety guard 3): session_ids carrying ANY unacked Tier-3
+    alert. While a real-money incident is open on a session we do not touch ANY
+    of its alerts — a "transient" RECONCILE_STALE next to a live EXIT_FAILED is
+    context a human needs, not noise to sweep away. Fail-SAFE: on any error
+    return a sentinel that quarantines nothing is WRONG, so we cannot fail open
+    here — an error propagates to the caller which skips the ack entirely."""
+    from falcon.db import falcon_conn  # noqa: WPS433
+    kinds = tuple(sorted(_NEVER_AUTO_ACK))
+    with falcon_conn() as con:
+        rows = con.execute(
+            f"""SELECT DISTINCT session_id FROM autotrade_alerts
+                WHERE acknowledged=0 AND session_id IS NOT NULL
+                  AND kind IN ({','.join('?' * len(kinds))})""",
+            kinds).fetchall()
+    return {str(dict(r)["session_id"]) for r in rows}
+
+
+# ── Tier 1 rule (a): UNCERTIFIED_BROKER_BLOCKED superseded by certification ───
+_BLOCKED_BROKER_RE = re.compile(
+    r"UNCERTIFIED_BROKER_BLOCKED:\s*(\S+)\s+is not certified", re.IGNORECASE)
+
+
+def _parse_blocked_broker(detail: Optional[str]) -> Optional[str]:
+    """The broker name out of an UNCERTIFIED_BROKER_BLOCKED detail string, or
+    None. BROKER-AGNOSTIC: the name is READ from the alert and fed straight to
+    the registry — there is no broker literal anywhere in this module."""
+    m = _BLOCKED_BROKER_RE.search(str(detail or ""))
+    return m.group(1).strip() if m else None
+
+
+def _session_live_order_count(session_id: str) -> int:
+    """How many REAL broker orders a session has on the durable ledger — i.e.
+    ledger events carrying a non-NULL broker_order_id (a paper order has none).
+    Raises on a DB error so the caller fails CLOSED (no ack)."""
+    from falcon.db import falcon_conn  # noqa: WPS433
+    with falcon_conn() as con:
+        r = con.execute(
+            "SELECT COUNT(*) AS n FROM autotrade_order_events "
+            "WHERE session_id=? AND broker_order_id IS NOT NULL "
+            "AND broker_order_id<>''", (session_id,)).fetchone()
+    return int(dict(r)["n"]) if r else 0
+
+
+def _resolve_uncertified_broker_blocked(alert: Dict[str, Any]) -> Optional[str]:
+    """EVIDENCE GATE — ack an UNCERTIFIED_BROKER_BLOCKED only when:
+
+      (1) the broker named IN THE ALERT is_certified() == True RIGHT NOW — the
+          exact condition the alert reported is provably gone (the operator
+          certified the adapter since); AND
+      (2) that session placed 0 LIVE orders — no ledger event with a real broker
+          order-id. The block REFUSED the order, so a session that nonetheless
+          has live orders is entangled with real execution → a human looks.
+
+    Returns the audit reason on a pass, else None (no ack).
+
+    ⚠️ ASSUMPTION / KNOWN LIMITATION (flagged): broker/base.py raises this alert
+    with session_id=None (it pages from the adapter, which has no session
+    handle), so for TODAY's alerts gate (2) is VACUOUS and gate (1) carries the
+    full weight. That is acceptable ONLY because an UNCERTIFIED_BROKER_BLOCKED
+    means the order was REFUSED — it can never leave a naked position (the
+    opposite: nothing was placed). A blocked EXIT would surface separately and
+    independently as EXIT_FAILED, which is Tier 3 and never acked. If base.py
+    later threads a session_id through, gate (2) starts biting with no change
+    here. broker/base.py is outside this task's surface, so it was NOT changed."""
+    broker = _parse_blocked_broker(alert.get("detail"))
+    if not broker:
+        return None                     # can't name the broker → can't prove it
+    try:
+        from ..broker.registry import is_certified
+        certified = bool(is_certified(broker))
+    except Exception as e:  # noqa: BLE001 — fail CLOSED (no ack)
+        log.debug("triage: is_certified(%s) raised: %s", broker, e)
+        return None
+    if not certified:
+        return None                     # STILL uncertified → the alert is LIVE
+    sid = alert.get("session_id")
+    n_live = 0
+    if sid:
+        try:
+            n_live = _session_live_order_count(str(sid))
+        except Exception as e:  # noqa: BLE001 — fail CLOSED (no ack)
+            log.debug("triage: live-order count failed for %s: %s", sid, e)
+            return None
+        if n_live != 0:
+            return None                 # real orders exist → leave it to a human
+    return (f"superseded by certification: broker '{broker}' is_certified=True "
+            f"now (the blocking condition no longer holds) and the alert's "
+            f"session placed {n_live} live orders"
+            f"{'' if sid else ' (no session_id on this alert — adapter-level page)'}"
+            f" — historical, auto-resolved")
+
+
+# ── Tier 1 rule (b): RECONCILE_STALE self-healed ─────────────────────────────
+def _exit_activity_between(session_id: str, start: datetime,
+                           end: datetime) -> int:
+    """Count EXIT-lifecycle ledger events for a session in [start, end].
+
+    This is the "did an exit happen during the blind window?" evidence. If ANY
+    exit was placed/filled/failed/closed while we were reconcile-blind, the stale
+    alert is NOT benign — we may have exited against an unvalidated basket — so it
+    must NOT be acked. Raises on a DB error so the caller fails CLOSED."""
+    from falcon.db import falcon_conn  # noqa: WPS433
+    from ..order_ledger import (EV_EXIT_PLACED, EV_EXIT_FILLED, EV_EXIT_PARTIAL,
+                                EV_EXIT_FAILED, EV_POSITION_CLOSED,
+                                EV_RECONCILE_CLOSE)
+    kinds = (EV_EXIT_PLACED, EV_EXIT_FILLED, EV_EXIT_PARTIAL, EV_EXIT_FAILED,
+             EV_POSITION_CLOSED, EV_RECONCILE_CLOSE)
+    with falcon_conn() as con:
+        r = con.execute(
+            f"""SELECT COUNT(*) AS n FROM autotrade_order_events
+                WHERE session_id=? AND ts>=? AND ts<=?
+                  AND event_type IN ({','.join('?' * len(kinds))})""",
+            (session_id, start.isoformat(), end.isoformat()) + kinds).fetchone()
+    return int(dict(r)["n"]) if r else 0
+
+
+def _resolve_reconcile_stale(alert: Dict[str, Any]) -> Optional[str]:
+    """EVIDENCE GATE — ack a RECONCILE_STALE only when:
+
+      (1) a LATER HEALTHY reconcile exists for that session: basket_gen's
+          last-successful-reconcile timestamp is strictly AFTER the alert's ts.
+          That is positive proof the broker book became reachable again — the
+          blind window CLOSED. (No healthy reconcile recorded → no ack. This is
+          also why a backend restart, which clears basket_gen's in-memory map,
+          fails CLOSED: an unknown history is never treated as healed.)
+      (2) NO exit occurred during the blind window [alert_ts − stale_bound,
+          healed_ts]. If we exited real money while blind, the alert is a REAL
+          finding about an unvalidated exit, not a blip → a human reads it.
+
+    Returns the audit reason on a pass, else None."""
+    sid = alert.get("session_id")
+    if not sid:
+        return None
+    a_ts = _parse_iso(alert.get("ts"))
+    if a_ts is None:
+        return None
+    try:
+        from . import basket_gen as _bg
+        healed_iso = _bg.last_successful_reconcile_ts(str(sid))
+    except Exception as e:  # noqa: BLE001 — fail CLOSED
+        log.debug("triage: reconcile-ts lookup failed for %s: %s", sid, e)
+        return None
+    healed = _parse_iso(healed_iso)
+    if healed is None or healed <= a_ts:
+        return None                     # no LATER healthy reconcile → still blind
+    # The blind window: from one stale-bound BEFORE the page (when the book went
+    # dark) through the healthy reconcile that closed it.
+    win_start = a_ts - timedelta(seconds=_reconcile_stale_bound_sec())
+    try:
+        n_exits = _exit_activity_between(str(sid), win_start, healed)
+    except Exception as e:  # noqa: BLE001 — fail CLOSED
+        log.debug("triage: exit-activity scan failed for %s: %s", sid, e)
+        return None
+    if n_exits > 0:
+        return None                     # we EXITED while blind → never auto-ack
+    healed_after = (healed - a_ts).total_seconds()
+    return (f"self-healed after {int(healed_after)}s: a healthy broker reconcile "
+            f"landed at {healed.isoformat()} (after the page at {a_ts.isoformat()}) "
+            f"and 0 exit events occurred during the blind window "
+            f"[{win_start.isoformat()} .. {healed.isoformat()}] — transient")
+
+
+_TIER1_RULES = {
+    "UNCERTIFIED_BROKER_BLOCKED": _resolve_uncertified_broker_blocked,
+    "RECONCILE_STALE": _resolve_reconcile_stale,
+}
+
+
+def auto_resolve(now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """TIER 1 — evidence-gated auto-resolution of PROVEN-TRANSIENT alerts.
+
+    For every UNACKED alert of an _AUTO_ACKABLE_KINDS kind, run its rule. A rule
+    returns an AUDIT REASON only when it can PROVE the reported condition is gone;
+    None otherwise. On a reason we write acknowledged=1 + ack_reason +
+    auto_resolved=1 — the row is NEVER deleted, so the alert and the exact
+    evidence that resolved it stay auditable forever.
+
+    Returns [{alert_id, kind, session_id, symbol, reason}] for each acked alert.
+    Default-OFF; never raises."""
+    if not alerts.auto_triage_enabled():
+        return []
+    now = now or datetime.now(IST)
+    try:
+        candidates = alerts.unacked_alerts(
+            kinds=list(_AUTO_ACKABLE_KINDS),
+            lookback_sec=_triage_lookback_sec(), now=now)
+    except Exception as e:  # noqa: BLE001
+        log.debug("triage: candidate scan failed: %s", e)
+        return []
+    if not candidates:
+        return []
+    # SAFETY GUARD 3 — quarantine every session with an OPEN Tier-3 incident.
+    # Any error here means we cannot PROVE a session is incident-free → we ack
+    # nothing this pass (fail closed).
+    try:
+        quarantined = _sessions_with_open_incident()
+    except Exception as e:  # noqa: BLE001
+        log.warning("triage: incident quarantine scan failed — acking nothing "
+                    "this pass: %s", e)
+        return []
+    min_age = _triage_min_age_sec()
+    resolved: List[Dict[str, Any]] = []
+    for a in candidates:
+        kind = str(a.get("kind") or "")
+        # SAFETY GUARD 2 — re-check the never-ack list on the candidate itself.
+        if kind in _NEVER_AUTO_ACK or kind not in _TIER1_RULES:
+            continue
+        sid = a.get("session_id")
+        if sid and str(sid) in quarantined:
+            log.info("triage: alert %s (%s) NOT acked — session %s has an open "
+                     "Tier-3 incident", a.get("id"), kind, sid)
+            continue
+        a_ts = _parse_iso(a.get("ts"))
+        if a_ts is None or (now - a_ts).total_seconds() < min_age:
+            continue                    # too fresh to have proven itself transient
+        try:
+            reason = _TIER1_RULES[kind](a)
+        except Exception as e:  # noqa: BLE001 — a rule error is a NO-ACK
+            log.warning("triage: rule %s raised for alert %s (no ack): %s",
+                        kind, a.get("id"), e)
+            continue
+        if not reason:
+            continue
+        aid = a.get("id")
+        if aid is None:
+            continue
+        if alerts.acknowledge(int(aid), reason=f"AUTO_TRIAGE: {reason}",
+                              auto_resolved=True):
+            log.info("triage: AUTO-RESOLVED alert %s (%s, session=%s): %s",
+                     aid, kind, sid, reason)
+            resolved.append({"alert_id": int(aid), "kind": kind,
+                             "session_id": sid, "symbol": a.get("symbol"),
+                             "reason": reason})
+    return resolved
+
+
+# ── Tier 3 — the ₹8.3L detector ──────────────────────────────────────────────
+def detect_reconciled_flat_without_exit_order(
+        now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """TIER 3, HIGHEST VALUE — page on a *_RECONCILED_FLAT close that carries NO
+    exit_order_id, on a LIVE session.
+
+    THIS IS THE 2026-07-15 ₹8.3L MAPMYINDIA SHAPE, EXACTLY. A paper session's
+    843 OPEN qty leaked into the LIVE broker-net computation, so our_held
+    computed to 0 → "broker net qty is 0 … marking CLOSED, placing NO order" →
+    position id 246 booked close_reason='STOP_RECONCILED_FLAT' with
+    exit_order_id=NULL. 706 real shares (~₹8.33L notional) were never sold, and
+    NOTHING paged, because the row looked cleanly CLOSED.
+
+    THE INVARIANT: on a LIVE session, a position marked CLOSED with a
+    *_RECONCILED_FLAT reason claims "the broker is already flat, so we placed no
+    exit order". If that claim is WRONG, the shares are still held and nobody
+    owns them — an untracked position, with NO order-id to prove otherwise. There
+    is no evidence that can make this benign, so it ALWAYS pages and is in
+    _NEVER_AUTO_ACK. A human must confirm the broker is genuinely flat.
+
+    LIVE ONLY: a paper close has no broker order-id by construction, so paper
+    would fire on every close — paper rows are excluded via session mode.
+    Deduped per (session, symbol). Read-only: mutates NOTHING, places NO order."""
+    if not alerts.auto_triage_enabled():
+        return []
+    now = now or datetime.now(IST)
+    cutoff = (now - timedelta(seconds=_flat_detector_lookback_sec())).isoformat()
+    try:
+        from falcon.db import falcon_conn  # noqa: WPS433
+        with falcon_conn() as con:
+            rows = [dict(r) for r in con.execute(
+                """SELECT id, session_id, symbol, qty, avg_price, product,
+                          close_reason, closed_at, exit_order_id
+                   FROM autotrade_positions
+                   WHERE status='CLOSED'
+                     AND close_reason LIKE '%RECONCILED_FLAT%'
+                     AND COALESCE(exit_order_id,'')=''
+                     AND COALESCE(closed_at,'')>=?
+                   ORDER BY id ASC""", (cutoff,)).fetchall()]
+    except Exception as e:  # noqa: BLE001 — a detector must never crash a tick
+        log.debug("triage: RECONCILED_FLAT scan failed: %s", e)
+        return []
+    if not rows:
+        return []
+    live = _live_session_ids()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        sid = str(r.get("session_id") or "")
+        if sid not in live:
+            continue                    # paper / unknown session → never pages
+        sym = r.get("symbol")
+        qty = int(r.get("qty") or 0)
+        px = float(r.get("avg_price") or 0.0)
+        notional = qty * px
+        detail = (
+            f"RECONCILED_FLAT_NO_EXIT_ORDER: LIVE position {sym} "
+            f"(session {sid}, id={r.get('id')}) was booked CLOSED with "
+            f"close_reason='{r.get('close_reason')}' and NO exit_order_id — we "
+            f"placed NO exit order and have NO order-id proving the broker is "
+            f"flat. If the broker still holds it, {qty} shares "
+            f"(~Rs{notional:,.0f} notional) are UNSOLD and UNTRACKED. VERIFY THE "
+            f"BROKER BOOK NOW. (This is the 2026-07-15 MAPMYINDIA ~Rs8.3L shape.)")
+        aid = alerts.send_urgent_deduped(
+            kind="RECONCILED_FLAT_NO_EXIT_ORDER", session_id=sid, symbol=sym,
+            detail=detail)
+        out.append({"action": "RECONCILED_FLAT_NO_EXIT_ORDER", "symbol": sym,
+                    "session_id": sid, "position_id": r.get("id"), "qty": qty,
+                    "notional": notional, "close_reason": r.get("close_reason"),
+                    "alert_id": aid})
+    return out
+
+
+# Per-process throttle — auto_triage() is called from the ~5s tick path via
+# alerts.maybe_escalate(); the scans are pure DB reads but need not run per tick.
+_TRIAGE_THROTTLE_SEC = 30.0
+_TRIAGE_LAST_MONO = 0.0
+_TRIAGE_LOCK = threading.Lock()
+
+
+def auto_triage(now: Optional[datetime] = None,
+                force: bool = False) -> Dict[str, Any]:
+    """The single throttled entry point for the whole triage layer, called from
+    alerts.maybe_escalate() (the one already-wired per-tick alert hook) BEFORE
+    the escalation scan, so a provably-transient alert is resolved rather than
+    re-paged.
+
+    Order matters: Tier 3 detection runs FIRST, so an incident it raises is
+    already visible to Tier 1's quarantine guard in the SAME pass — a session
+    that just got a Tier-3 page cannot have any alert acked out from under it.
+
+    Default-OFF; throttled; never raises. `force=True` bypasses the throttle
+    (tests + a deliberate operator-triggered pass)."""
+    if not alerts.auto_triage_enabled():
+        return {"enabled": False, "paged": [], "auto_resolved": []}
+    global _TRIAGE_LAST_MONO
+    if not force:
+        with _TRIAGE_LOCK:
+            if _time.monotonic() - _TRIAGE_LAST_MONO < _TRIAGE_THROTTLE_SEC:
+                return {"enabled": True, "throttled": True, "paged": [],
+                        "auto_resolved": []}
+            _TRIAGE_LAST_MONO = _time.monotonic()
+    paged: List[Dict[str, Any]] = []
+    resolved: List[Dict[str, Any]] = []
+    try:
+        paged = detect_reconciled_flat_without_exit_order(now=now)
+    except Exception as e:  # noqa: BLE001
+        log.warning("triage: RECONCILED_FLAT detector raised (ignored): %s", e)
+    try:
+        resolved = auto_resolve(now=now)
+    except Exception as e:  # noqa: BLE001
+        log.warning("triage: auto_resolve raised (ignored): %s", e)
+    return {"enabled": True, "paged": paged, "auto_resolved": resolved}

@@ -98,6 +98,25 @@ def _dedup_window_sec() -> int:
     return _int_env("FALCON_AUTOTRADE_ALERT_DEDUP_SEC", 900)
 
 
+# ── ALERT AUTO-TRIAGE master flag (DEFAULT OFF) ───────────────────────────────
+def auto_triage_enabled() -> bool:
+    """The ONE master gate for the whole ALERT AUTO-TRIAGE layer (Tier 1 evidence-
+    gated auto-resolve, Tier 2 detector-level suppression, Tier 3 the
+    RECONCILED_FLAT-without-exit-order detector).
+
+    DEFAULT OFF. While this is off EVERY triage code path early-returns before it
+    can read a row, write an ack, suppress a detector, or raise a page — i.e. the
+    system is byte-for-byte identical to the pre-triage behaviour. The operator
+    opts in with FALCON_AUTOTRADE_AUTO_TRIAGE=true.
+
+    NOTE FOR THE OPERATOR: the Tier-3 RECONCILED_FLAT+exit_order_id-IS-NULL
+    detector (the one that would have caught the 2026-07-15 ₹8.3L MAPMYINDIA
+    event in real time) is behind this SAME flag, because flag-OFF must be
+    byte-identical. Turning the flag on is what arms it."""
+    return os.environ.get("FALCON_AUTOTRADE_AUTO_TRIAGE", "off").strip().lower() \
+        in ("on", "1", "true", "yes")
+
+
 def _now_ist_iso() -> str:
     return datetime.now(IST).isoformat()
 
@@ -221,19 +240,67 @@ def send_urgent_deduped(*, kind: str, session_id: Optional[str],
                        incident_id=incident_id)
 
 
-def acknowledge(alert_id: int) -> bool:
-    """Mark an alert acknowledged. Returns True when a row was updated."""
+def acknowledge(alert_id: int, reason: Optional[str] = None, *,
+                auto_resolved: bool = False) -> bool:
+    """Mark an alert acknowledged. Returns True when a row was updated.
+
+    NEVER deletes — an acknowledged alert stays in autotrade_alerts forever; ack
+    only flips a flag. Backward-compatible: acknowledge(id) with no reason behaves
+    exactly as before (ack_reason stays NULL, auto_resolved stays 0) — the operator
+    ack path is untouched.
+
+    `reason` records the AUDIT REASON (mandatory in practice for the AUTO path:
+    every auto-ack states the EVIDENCE that resolved it). `auto_resolved=True`
+    marks the row as machine-acked so an operator can always tell an automated
+    resolution from their own, and audit / reverse it.
+
+    Tolerates a pre-migration table (no ack_reason/auto_resolved columns): falls
+    back to the plain flag-only UPDATE so an ack can never fail on schema drift."""
     try:
         from falcon.db import falcon_conn  # noqa: WPS433
         with falcon_conn() as con:
-            cur = con.execute(
-                "UPDATE autotrade_alerts SET acknowledged=1 WHERE id=?",
-                (alert_id,))
+            try:
+                cur = con.execute(
+                    "UPDATE autotrade_alerts SET acknowledged=1, ack_reason=?, "
+                    "auto_resolved=? WHERE id=?",
+                    ((reason or "")[:1000] or None, 1 if auto_resolved else 0,
+                     alert_id))
+            except Exception:  # noqa: BLE001 — pre-migration schema fallback
+                cur = con.execute(
+                    "UPDATE autotrade_alerts SET acknowledged=1 WHERE id=?",
+                    (alert_id,))
             con.commit()
             return cur.rowcount > 0
     except Exception as e:  # noqa: BLE001
         log.warning("alerts: ack failed for %s: %s", alert_id, e)
         return False
+
+
+def unacked_alerts(kinds: Optional[List[str]] = None,
+                   lookback_sec: Optional[int] = None,
+                   now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Every UNACKED alert (optionally restricted to `kinds`, optionally only
+    those raised within `lookback_sec`), oldest first.
+
+    Read-only helper for the auto-triage layer. Never raises → [] on error."""
+    sql = "SELECT * FROM autotrade_alerts WHERE acknowledged=0"
+    params: List[Any] = []
+    if kinds:
+        sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+        params.extend(kinds)
+    if lookback_sec is not None and lookback_sec > 0:
+        cutoff = ((now or datetime.now(IST))
+                  - timedelta(seconds=lookback_sec)).isoformat()
+        sql += " AND ts>=?"
+        params.append(cutoff)
+    sql += " ORDER BY id ASC"
+    try:
+        from falcon.db import falcon_conn  # noqa: WPS433
+        with falcon_conn() as con:
+            return [dict(r) for r in con.execute(sql, tuple(params)).fetchall()]
+    except Exception as e:  # noqa: BLE001
+        log.debug("alerts: unacked_alerts scan failed: %s", e)
+        return []
 
 
 def escalate_stale_alerts(threshold_sec: Optional[int] = None,
@@ -290,12 +357,32 @@ _ESC_LOCK = threading.Lock()
 def maybe_escalate(threshold_sec: Optional[int] = None,
                    now: Optional[datetime] = None) -> List[int]:
     """Throttled wrapper around escalate_stale_alerts() for the tick path — at
-    most once per _ESCALATE_THROTTLE_SEC. Never raises."""
+    most once per _ESCALATE_THROTTLE_SEC. Never raises.
+
+    ALERT AUTO-TRIAGE (default-OFF) hooks in HERE, immediately BEFORE the
+    escalation scan, for two reasons:
+      1. This is the one already-wired per-tick alert entry point (the tick calls
+         alerts.maybe_escalate() every cycle), so the triage layer needs NO change
+         to session.py.
+      2. ORDERING IS THE POINT: an alert that auto-triage can PROVE transient
+         (self-healed, superseded) must be resolved BEFORE the escalator re-pages
+         it. Running triage first is what stops noise from escalating.
+    Fully guarded + flag-gated: with FALCON_AUTOTRADE_AUTO_TRIAGE off this is a
+    single env read and maybe_escalate() is byte-for-byte unchanged."""
     global _LAST_ESCALATE_MONO
     with _ESC_LOCK:
         if _time.monotonic() - _LAST_ESCALATE_MONO < _ESCALATE_THROTTLE_SEC:
             return []
         _LAST_ESCALATE_MONO = _time.monotonic()
+    if auto_triage_enabled():
+        try:
+            # Lazy import: alert_monitor imports THIS module at module level, so a
+            # top-level import here would be circular. Nothing is imported at all
+            # while the flag is off.
+            from .monitoring import alert_monitor as _am  # noqa: WPS433
+            _am.auto_triage(now=now)
+        except Exception as e:  # noqa: BLE001 — triage must never crash a tick
+            log.warning("alerts: auto_triage raised (%s) — ignored", e)
     try:
         return escalate_stale_alerts(threshold_sec=threshold_sec, now=now)
     except Exception as e:  # noqa: BLE001 — never crash a tick
