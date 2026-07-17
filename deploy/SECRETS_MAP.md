@@ -22,7 +22,7 @@ def's `secrets=[valueFrom]`). No app code change is required for this.
 |---|---|---|---|
 | `FALCON_VAULT_KEY` | SECRET | Secrets Manager + KMS | **CRITICAL.** Fernet key that decrypts broker creds (`api_secret_enc`, `access_token_enc`) AND per-user egress proxy URLs (`egress_proxy_url_enc`). **Lose/rotate it wrong and every account silently fails-open to DIRECT/rejected egress** (see `backend/autotrade/broker/egress.py`, `autotrade/vault.py`). **Back up FIRST; migrate FIRST.** Rotate via Fernet MultiFernet (old+new) grace window. |
 | `POWER_JWT_SECRET` | SECRET | Secrets Manager | HS256 signing key for portal auth (`power_user/config.py`). Change ⇒ all users logged out. |
-| `FALCON_JWT_SECRET` | SECRET | Secrets Manager | Named in the migration brief as a gate. **NOT present in the current `config/.env`** — verify whether any code path reads it before provisioning; created as an empty placeholder for safety. |
+| `POWER_JWT_SECRET` | SECRET | Secrets Manager | Named in the migration brief as a gate. **NOT present in the current `config/.env`** — verify whether any code path reads it before provisioning; created as an empty placeholder for safety. |
 | `POWER_ADMIN_SECRET` | SECRET | Secrets Manager | Admin login code (with `POWER_ADMIN_EMAIL`). Backend needs it at startup for admin auth. |
 | `ADMIN_SECRET` | SECRET | Secrets Manager | Legacy operator admin gate; `POWER_ADMIN_SECRET` falls back to it (`power_user/config.py`). |
 | `FALCON_OPERATOR_TOKEN` | SECRET | Secrets Manager | Gates `/api/autotrade/*` operator routes. |
