@@ -50,7 +50,7 @@ import json
 import logging
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -62,7 +62,6 @@ from .config import TradingSessionConfig
 from .session import TradingSession, now_ist
 
 log = logging.getLogger("kanida.autotrade.ladder")
-
 
 def _ladder_open_time() -> time:
     """Daily market-open / activation clock (IST). Shared with ladder_scheduler
@@ -192,6 +191,11 @@ class LadderCampaign:
     # template version bumped on each edit.
     child_config_json: Optional[str] = None
     config_version: int = 0
+    # Transient (never persisted): set True by _spawn_child the instant an entry
+    # can reach a broker, so daily_tick's error path knows it must NOT release
+    # the day's claim (releasing after orders may have gone out would allow a
+    # second basket on a retry).
+    _entry_attempted: bool = field(default=False, repr=False, compare=False)
 
     # ── Factory / persistence ─────────────────────────────────────────────────
     @classmethod
@@ -414,6 +418,48 @@ class LadderCampaign:
         for k, v in fields.items():
             if k != "updated_at":
                 setattr(self, k, v)
+
+    def _claim_day(self, today: date) -> bool:
+        """ATOMICALLY claim `today` as this ladder's tick day.
+
+        Returns True iff THIS caller won the claim and must therefore run the
+        day's basket decision; False if the day was already claimed (by a
+        concurrent tick, an earlier beat, or the boot resume).
+
+        ⚠️ REAL MONEY — DO NOT REFACTOR INTO A READ-THEN-WRITE. The conditional
+        WHERE + rowcount check is what makes two concurrent daily_ticks for the
+        same ladder+day open EXACTLY ONE basket. SQLite serialises the write
+        transaction, so exactly one of N racing UPDATEs matches the predicate
+        and reports rowcount==1; the rest see 0. A read-then-write (the pre-fix
+        shape) lets every racer read "not claimed" and spawn.
+        """
+        iso = today.isoformat()
+        with falcon_conn() as con:
+            cur = con.execute(
+                "UPDATE autotrade_ladders SET last_tick_date=?, updated_at=? "
+                "WHERE ladder_id=? "
+                "  AND (last_tick_date IS NULL OR last_tick_date<>?)",
+                (iso, _now_iso(), self.ladder_id, iso))
+            won = cur.rowcount == 1
+            con.commit()
+        if won:
+            self.last_tick_date = iso
+        return won
+
+    def _release_day(self, prev_tick_date: Optional[str]) -> None:
+        """Undo a claim taken by _claim_day when the tick errored BEFORE any
+        entry was attempted, so the next beat can retry today. Never raises."""
+        try:
+            with falcon_conn() as con:
+                con.execute(
+                    "UPDATE autotrade_ladders SET last_tick_date=?, updated_at=? "
+                    "WHERE ladder_id=?",
+                    (prev_tick_date, _now_iso(), self.ladder_id))
+                con.commit()
+            self.last_tick_date = prev_tick_date
+        except Exception as e:  # pragma: no cover - defensive
+            log.exception("ladder %s: releasing the day claim failed: %s",
+                          self.ladder_id, e)
 
     # ── Child bookkeeping (margin-basis capital accounting) ───────────────────
     def _child_rows(self, statuses: Optional[List[str]] = None
@@ -785,24 +831,41 @@ class LadderCampaign:
                 out["reason"] = (f"before the daily open ({_ladder_open_time()}) "
                                  "— no basket opened yet today")
                 return out
-            # Idempotency: at most one basket per ladder per day.
-            if self.last_tick_date == today.isoformat():
+            # ── IDEMPOTENCY: at most one basket per ladder per day ────────────
+            # ATOMIC CLAIM (real money). This single conditional UPDATE is the
+            # ONLY thing standing between two CONCURRENT daily_ticks and a
+            # DUPLICATE LIVE BASKET (duplicate real orders). It MUST stay a
+            # conditional-UPDATE + rowcount check — never a read-then-write.
+            # The loser of the race sees rowcount==0 and opens nothing.
+            prev_tick_date = self.last_tick_date
+            if not self._claim_day(today):
                 out["reason"] = "already opened today"
                 return out
+            self._entry_attempted = False
+            try:
+                free = self.free_capital()
+                if free + 1e-6 < float(self.per_basket_capital):
+                    # Fully deployed (or no free slice). The claim stands so we
+                    # don't re-evaluate every scheduler beat, but DON'T open.
+                    # (Same end state as the pre-atomic stamp-on-no-slice.)
+                    out["reason"] = (f"no free slice (free={free:.2f} < "
+                                     f"per_basket={self.per_basket_capital:.2f})")
+                    out["free_capital"] = free
+                    return out
 
-            free = self.free_capital()
-            if free + 1e-6 < float(self.per_basket_capital):
-                # Fully deployed (or no free slice). Mark the day handled so we
-                # don't re-evaluate every scheduler beat, but DON'T open.
-                self._update(last_tick_date=today.isoformat())
-                out["reason"] = (f"no free slice (free={free:.2f} < "
-                                 f"per_basket={self.per_basket_capital:.2f})")
-                out["free_capital"] = free
-                return out
-
-            # Open ONE positional child sized to per_basket_capital.
-            res = self._spawn_child(today)
-            self._update(last_tick_date=today.isoformat())
+                # Open ONE positional child sized to per_basket_capital.
+                res = self._spawn_child(today)
+            except Exception:
+                # We got here WITHOUT attempting any entry (every order-egress
+                # path inside _spawn_child is exception-wrapped and sets
+                # _entry_attempted before it can place anything). Release the
+                # day's claim so the next scheduler beat retries — this preserves
+                # the pre-atomic behaviour where a pre-spawn error left
+                # last_tick_date unstamped. If an entry WAS attempted the claim
+                # STANDS (never re-open a day whose orders may have gone out).
+                if not self._entry_attempted:
+                    self._release_day(prev_tick_date)
+                raise
             out["opened"] = bool(res.get("opened"))
             out["reason"] = res.get("reason")
             out["session_id"] = res.get("session_id")
@@ -1000,6 +1063,9 @@ class LadderCampaign:
             con.commit()
 
         # Fire the entries NOW (through the session engine's trading-day gate).
+        # Past THIS line an order can reach a broker → the day's claim is locked
+        # in and must never be released (see daily_tick's error path).
+        self._entry_attempted = True
         try:
             res = asyncio.run(sess.start(when="now"))
         except Exception as e:
