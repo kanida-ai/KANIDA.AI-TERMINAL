@@ -127,6 +127,13 @@ VALID_REASONS = {
     "TRAIL_EXIT", "FLOOR_EXIT", "STOP", "SQUARE_OFF", "STEP_LOCK_EXIT",
     # Per-stock software stop (Fix 3: individual stock exits before the GTT fires).
     "STOP_STOCK",
+    # Per-SEAT trail stop (session.py relabels the trail engine's "STOP" to
+    # "STOP_SEAT" in per-seat scope, exactly as it relabels "STOP_STOCK" for
+    # per-stock scope). It was ALWAYS allowed — unknown reasons fail OPEN by design
+    # (an exit must never be blocked by vocabulary) — so this only stops the spurious
+    # "unrecognised reason" warning on every per-seat stop and makes the vocabulary
+    # honest. The fail-OPEN default below is deliberately UNCHANGED.
+    "STOP_SEAT",
     # MIS defensive square-off — the ~15:12 flatten ahead of the broker's ~15:20
     # auto-square (square_off_scheduler, the tick backstop, and the tesla safety
     # net all fire close_reason="MIS_SQUARE_OFF"). It was always ALLOWED (unknown
