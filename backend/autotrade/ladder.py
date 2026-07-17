@@ -824,8 +824,11 @@ class LadderCampaign:
         * MAGNIFIER: strategy=intraday_magnifier, EQ + MIS (5×), long, the
           validated magnifier trail (arm6/floor2/give5/stop3, capital basis),
           Falcon Top-15 high-tier, split entry (50% @09:15 + 50% @09:16), squared
-          off same day (square_off_enabled=True). The overrides whitelist still
-          applies (risk/exit knobs only).
+          off same day (square_off_enabled=True), and NO per-position broker stop
+          or target (per_position_gtt_enabled=False) — the basket trail + the
+          square-off ARE the whole risk model. The overrides whitelist still
+          applies (risk/exit knobs only); per_position_gtt_enabled is NOT in that
+          whitelist, so an operator edit cannot re-arm the per-position stop.
         * BTST: strategy=btst_oscillator, EQ + CNC (1×, no leverage), long, the
           SAME Top-15 high-tier selection + 50/50 split entry as the Magnifier but
           positional (square_off_enabled=False), 2-session hold, NO profit trail
@@ -851,6 +854,46 @@ class LadderCampaign:
                 # arm/floor/give are the validated set); the step-lock ladder tuned
                 # for the standard intraday basket does not apply.
                 trail_step_lock_enabled=False,
+                # NO PER-POSITION STOP AND NO PER-POSITION TARGET (2026-07-17).
+                # The Magnifier spec defines exactly ONE risk model: the BASKET
+                # trail on the CAPITAL basis (arm6/floor2/give5/stop3 above) plus
+                # the 15:29 square-off. A per-position stop/target is UNMODELLED —
+                # it was never backtested and it is not this strategy's risk.
+                #
+                # WHY THIS FLAG IS THE RIGHT DISABLE: per_position_gtt_enabled is
+                # the single gate on the ONLY code path that places EITHER broker
+                # instrument. GTTManager.place_for_position is the sole caller of
+                # both place_gtt_oco and _place_protective_slm, and it is reachable
+                # ONLY via backfill_missing(), which is gated by this flag at every
+                # call site (session.py x4, recovery.py) AND internally
+                # (gtt_manager.backfill_missing early-returns []). False → the path
+                # never runs → NO SL-M and NO GTT are placed at all. This SKIPS
+                # placement rather than widening a level: a stop that "never fires"
+                # is still a stop that CAN fire on a limit-down day.
+                #
+                # WHAT IT COST: the generic per_position_* defaults (8%/20%) are
+                # fractions of the position's CAPITAL and are correct at 1x CNC,
+                # where 8% of capital == 8% of price. GTTManager converts them to a
+                # PRICE trigger via session leverage L (price_pct = capital_pct/L),
+                # so at the Magnifier's ~5x MIS an 8% capital stop becomes a ~1.6%
+                # PRICE stop — a hair-trigger INSIDE a mid-cap's normal intraday
+                # noise band. On 2026-07-17 that fired AEGISLOG at 1301.79 (entry
+                # 1325.84) for -Rs56,050; the stock closed at 1345.00 (+Rs43,417 had
+                # it held) = -Rs99,467 on ONE position. The BASKET stop (-3% of
+                # capital, the level actually backtested) would NOT have fired.
+                # The backtest held; the unmodelled execution stop sold.
+                #
+                # SCOPE: this line is inside the MAGNIFIER branch ONLY.
+                # intraday_basket / btst_oscillator / positional children and every
+                # direct (non-ladder) session keep per_position_gtt_enabled=True and
+                # the 8%/20% defaults — correct at their 1x products.
+                #
+                # NOTE (future): the operator wants a FAR disaster GTT (DOWNSIDE
+                # ONLY) for black-swan cover. Our only method is place_gtt_oco,
+                # which is two-leg and always carries an upside-capping target — so
+                # that needs a downside-only mechanism, not this flag. Re-enabling
+                # here without that would restore the upside cap. Separate task.
+                per_position_gtt_enabled=False,
             )
             for f, v in (overrides or {}).items():
                 setattr(cfg, f, v)
