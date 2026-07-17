@@ -1503,7 +1503,19 @@ async def _exit_single_position_inner(
     # oversell. Runs under the SAME single exit-flight + exit_gate claim. Default-
     # off: any other execution_mode falls through to the unchanged iceberg / one-
     # shot path below (byte-for-byte). Paper fills each child immediately.
-    if getattr(exec_cfg, "execution_mode", "market") == "worked":
+    # PACING BYPASS (2026-07-16): a STOP / KILL_SWITCH exit is CAPITAL-PROTECTING —
+    # pacing it inverts worked mode's purpose (a live STOP took 213s across 11 paced
+    # children while the market moved against the book). Those reasons fall through
+    # to the unchanged one-shot market exit below. Every other reason still paces,
+    # byte-for-byte. See worked_order.bypass_pacing_for_exit for the exact scope.
+    from autotrade.execution.worked_order import bypass_pacing_for_exit
+    _worked_mode = getattr(exec_cfg, "execution_mode", "market") == "worked"
+    _bypass_pacing = _worked_mode and bypass_pacing_for_exit(reason)
+    if _bypass_pacing:
+        log.warning("exit %s/%s: reason=%s — BYPASSING worked pacing, firing ONE "
+                    "market exit of %d (capital-protecting exit)",
+                    session_id, symbol, reason, int(qty))
+    if _worked_mode and not _bypass_pacing:
         from autotrade.monitoring.exit_poller import work_and_confirm_exit
         _vf = None
         if not (getattr(broker, "dry_run", False)):

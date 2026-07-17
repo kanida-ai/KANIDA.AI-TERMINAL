@@ -490,6 +490,73 @@ def resolve_deadline_ts(cfg, *, tighten_exit: bool = False,
     return min(base, now + max(120.0, (base - now) / 2.0))
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PACING BYPASS — capital-protecting exits are NEVER paced
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# WHY (2026-07-16, real money): LIVE session 1aeb11b8 took 213 SECONDS to exit a
+# STOP under execution_mode=="worked" — 11 paced child slices at the 20s
+# worked_interval_sec cadence (ledger: "STOP:worked-child-0 .. -10"). Worked mode
+# exists to minimise MARKET IMPACT when BUILDING a large position: trading slowly
+# is the whole point, and time is an acceptable cost. On a capital-protecting EXIT
+# that reasoning INVERTS — the position is losing money the entire time the stop
+# trickles out, so pacing converts an impact saving into a strictly larger loss.
+# A stop-loss is the one exit that must not be paced.
+#
+# SCOPE (operator decision, deliberately NARROW — do not widen without sign-off):
+#   * STOP        — the BASKET trail engine's downside hard stop (trail_engine emits
+#                   reason="STOP" → kill_switch.fire(close_reason="STOP")). This is
+#                   the exact tag of the 213s incident.
+#   * KILL_SWITCH — the portfolio kill switch. VERIFIED: this one tag ALSO covers the
+#                   MANUAL/OPERATOR kill, LADDER_KILL and the
+#                   PORTFOLIO_DAILY_LOSS_BREAKER — every one of them reaches the exit
+#                   path via TradingSession.kill() → KillSwitchExecutor.fire() WITHOUT
+#                   a close_reason argument, so they all take fire()'s DEFAULT
+#                   close_reason="KILL_SWITCH". Their distinct wording ("MANUAL
+#                   LADDER_KILL ...", "LOSS_LIMIT ...") rides on `trigger_reason`,
+#                   which is NOT what the pacing decision sees. So "OPERATOR" /
+#                   "LADDER_KILL" / "LOSS_LIMIT" never appear here as a close_reason.
+#
+# EXPLICITLY NOT BYPASSED — each is a SEPARATE, un-approved operator decision:
+#   MIS_SQUARE_OFF, SQUARE_OFF, MAX_HOLD_EXIT, TRAIL_EXIT, STEP_LOCK_EXIT,
+#   FLOOR_EXIT, STOP_STOCK, STOP_SEAT, TARGET_HIT, EXIT_RETRY.
+#   REPORTED GAPS (deliberately left paced — they need an operator call):
+#     - STOP_STOCK (session.py) and STOP_SEAT (session.py) are the SAME trail-engine
+#       "STOP" decision merely RELABELLED for per-stock / per-seat scope. They are
+#       semantically identical loss stops and are the strongest candidates to bypass
+#       next. STOP_STOCK is per_stock_stop_enabled=False by default; STOP_SEAT is the
+#       per-seat (Tesla) trail and is NOT in exit_gate.VALID_REASONS at all.
+#     - MIS_SQUARE_OFF is DEADLINE-BOUND: its paced deadline
+#       (resolve_deadline_ts(tighten_exit=True) = now + half the runway to
+#       square_off_time 15:29) computes to ~15:20:30 when it fires at 15:12 — i.e.
+#       ~30s BEYOND the broker's own ~15:20 intraday auto-square. A paced
+#       MIS_SQUARE_OFF can therefore hand the book to the broker to force-close.
+#     - EXIT_RETRY ERASES the original reason, so the retry of a FAILED "STOP" is
+#       paced. ('GTT' is only a reconciler mark_closed tag — it never reaches here.)
+#
+# ENTRIES ARE NEVER CONSULTED HERE — the worked ENTRY engine (incl. v2 VWAP) is
+# untouched and still paces. This predicate is only ever called on the exit path.
+PACING_BYPASS_EXIT_REASONS = frozenset({"STOP", "KILL_SWITCH"})
+
+
+def bypass_pacing_for_exit(close_reason: Optional[str]) -> bool:
+    """True when this EXIT reason must fire as ONE immediate market exit instead of
+    being worked/paced into child slices. PURE (no I/O, no clock).
+
+    Matches the close_reason tag EXACTLY (case/space-normalised) against
+    PACING_BYPASS_EXIT_REASONS — the tags at both decision points are plain
+    vocabulary tokens (see exit_gate.VALID_REASONS), never free text. A prefix/
+    substring match is deliberately NOT used: it would make "STOP" swallow
+    "STOP_STOCK" and "TIME_STOP", silently widening the approved scope.
+
+    An unknown/None reason returns False → PACED, i.e. today's behaviour. This
+    fails toward the UNCHANGED path, so a vocabulary drift can never turn a paced
+    exit into an unreviewed market blast."""
+    if not close_reason:
+        return False
+    return str(close_reason).strip().upper() in PACING_BYPASS_EXIT_REASONS
+
+
 def remaining_from_fills(target_qty: int, already_filled: int) -> int:
     """RESTART-DURABLE remaining = target - already_filled, never negative. On
     resume `already_filled` is read from the reconciled position row (entry: the

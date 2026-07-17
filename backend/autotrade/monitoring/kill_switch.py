@@ -439,7 +439,22 @@ class KillSwitchExecutor:
             # Runs under the ONE exit_gate claim taken above. Reuses the sliced_jobs
             # pipeline (same COMPLETE / EXIT_FAILED result shape). Default-off:
             # every other execution_mode falls through to iceberg / one-shot below.
-            if getattr(self.config, "execution_mode", "market") == "worked":
+            # PACING BYPASS (2026-07-16): STOP / KILL_SWITCH are CAPITAL-PROTECTING
+            # exits — pacing them inverts worked mode's purpose. This is the site the
+            # live 213s STOP actually took (the trail engine's STOP arrives here as
+            # close_reason="STOP" via fire()). Bypassed reasons fall through to the
+            # unchanged iceberg / one-shot market path below (iceberg_enabled=False by
+            # default → ONE market exit). Every other reason still paces, byte-for-
+            # byte. Exact scope: worked_order.bypass_pacing_for_exit.
+            from ..execution.worked_order import bypass_pacing_for_exit
+            _worked_mode = getattr(self.config, "execution_mode",
+                                   "market") == "worked"
+            _bypass_pacing = _worked_mode and bypass_pacing_for_exit(close_reason)
+            if _bypass_pacing:
+                log.critical("kill %s/%s: close_reason=%s — BYPASSING worked pacing, "
+                             "firing ONE market exit of %d (capital-protecting exit)",
+                             self.session_id, symbol, close_reason, int(qty))
+            if _worked_mode and not _bypass_pacing:
                 from .exit_poller import work_and_confirm_exit
                 _wvf = None
                 if not getattr(broker, "dry_run", False):

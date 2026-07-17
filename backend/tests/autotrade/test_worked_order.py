@@ -23,6 +23,7 @@ from autotrade.broker.base import Pick
 from autotrade.execution import worked_order as wo
 from autotrade.execution.orders import place_order_with_retry, Order
 from autotrade.monitoring.exit_poller import work_and_confirm_exit
+from autotrade.monitoring.kill_switch import KillSwitchExecutor
 from autotrade.session import TradingSession, set_fake_now, _exit_single_position
 from tests.autotrade.conftest import seed_signals
 from tests.autotrade.mock_broker import MockBroker
@@ -598,3 +599,166 @@ def test_exit_single_position_routes_to_worked_only_for_worked_mode(clean_positi
     assert called["n"] == 1                          # routed to the worked exit
     assert called["total"] == 1000                   # the clamped our_held qty
     assert res.get("worked") is True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PACING BYPASS — a capital-protecting exit (STOP / KILL_SWITCH) is NEVER paced
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# REAL INCIDENT (2026-07-16): LIVE session 1aeb11b8 took 213 SECONDS to exit a STOP
+# under execution_mode=="worked" — 11 paced children at the 20s cadence (ledger tag
+# "STOP:worked-child-0 .. -10") while the market moved against the book. Worked mode
+# minimises impact on a large ENTRY; on a stop it merely prolongs the loss.
+
+
+def _child_details(sid):
+    """Every order-ledger `detail` for a session. The worked pacer writes
+    "{close_reason}:worked-child-{idx}" per child (exit_poller), so an EMPTY
+    worked-child list is POSITIVE EVIDENCE that nothing was paced."""
+    with falcon_conn() as con:
+        rows = con.execute(
+            "SELECT detail FROM autotrade_order_events WHERE session_id=?",
+            (sid,)).fetchall()
+    return [r[0] for r in rows if r[0]]
+
+
+def _worked_children(sid):
+    return [d for d in _child_details(sid) if "worked-child-" in d]
+
+
+def test_bypass_predicate_fires_only_for_stop_and_kill_switch():
+    """The pure predicate: EXACTLY {STOP, KILL_SWITCH} bypass. Everything else —
+    notably the deadline-bound square-offs and the trail exits — still paces.
+    MUTATION REVERT: widen the match to a prefix/substring test (r.startswith)
+    → "STOP_STOCK"/"TIME_STOP" start matching → the no-fire asserts FAIL."""
+    for r in ("STOP", "KILL_SWITCH", "stop", " kill_switch "):
+        assert wo.bypass_pacing_for_exit(r) is True, r
+    # NO-FIRE — each of these is a SEPARATE, un-approved operator decision.
+    # STOP_STOCK / STOP_SEAT are the SAME trail "STOP" relabelled for per-stock /
+    # per-seat scope: semantically loss stops, but OUT of the approved scope, so the
+    # exact-match discipline MUST keep them paced until the operator decides.
+    for r in ("MIS_SQUARE_OFF", "SQUARE_OFF", "MAX_HOLD_EXIT", "TRAIL_EXIT",
+              "STEP_LOCK_EXIT", "FLOOR_EXIT", "STOP_STOCK", "STOP_SEAT",
+              "TARGET_HIT", "TIME_STOP", "GTT", "OPERATOR", "EXIT_RETRY",
+              "", None):
+        assert wo.bypass_pacing_for_exit(r) is False, r
+
+
+def test_stop_exit_under_worked_fires_one_market_exit_not_paced(clean_positions):
+    """FIRE: a STOP under execution_mode=="worked" bypasses the pacer — ONE market
+    exit for the FULL qty, and NO worked-child rows in the ledger.
+    MUTATION REVERT: drop `and not _bypass_pacing` from the worked branch in
+    _exit_single_position_inner → the STOP paces again → len(broker.exits) > 1 and
+    the `_worked_children == []` assert FAILS (the 213s incident shape)."""
+    cfg = _worked_cfg(iceberg_freeze_qty_default=300)
+    sess = TradingSession.create(cfg, mode="live")
+    prof = _register(sess, "A", 1000)
+    broker = MockBroker(profile=sess.config.broker_profiles[0], dry_run=False,
+                        ltps={"A": 100.0}, net_positions={"A": 1000})
+    sess.brokers = {prof: broker}
+    pos = sess.registry.get_open_positions()[0]
+    res = asyncio.run(_exit_single_position(
+        session_id=sess.session_id, position=pos, reason="STOP",
+        brokers={prof: broker}, registry=sess.registry,
+        gtt_manager=sess.gtt_manager, kite_product="MIS", exec_cfg=cfg))
+    assert res.get("worked") is not True              # NOT the paced path
+    assert len(broker.exits) == 1                     # ONE shot, no slicing
+    assert broker.exits[0] == ("A", 1000)             # the FULL clamped qty
+    assert _worked_children(sess.session_id) == []    # nothing was paced
+    assert _row(sess.session_id, "A")["status"] == "CLOSED"
+
+
+def test_kill_switch_exit_under_worked_is_not_paced(clean_positions):
+    """FIRE: the portfolio kill switch under worked mode bypasses the pacer.
+    close_reason="KILL_SWITCH" is the tag the MANUAL kill, LADDER_KILL and the
+    PORTFOLIO_DAILY_LOSS_BREAKER all reach the exit path with (fire()'s default),
+    so this covers every kill flavour.
+    MUTATION REVERT: drop `and not _bypass_pacing` from the worked branch in
+    kill_switch.fire → the kill paces → `_worked_children == []` FAILS."""
+    cfg = _worked_cfg(iceberg_freeze_qty_default=300, kill_switch_enabled=True,
+                      kill_switch_pct=0.01)
+    sess = TradingSession.create(cfg, mode="live")
+    prof = _register(sess, "K", 1000)
+    broker = MockBroker(profile=sess.config.broker_profiles[0], dry_run=False,
+                        ltps={"K": 100.0}, net_positions={"K": 1000})
+    sess.brokers = {prof: broker}
+    ks = KillSwitchExecutor(sess.session_id, cfg, {prof: broker}, sess.registry)
+    out = asyncio.run(ks.fire("LOSS_LIMIT gross_return=-0.0200",
+                              gross_return=-0.02))
+    assert out["n_exited_ok"] == 1
+    assert len(broker.exits) == 1                     # ONE market shot per name
+    assert broker.exits[0] == ("K", 1000)
+    assert _worked_children(sess.session_id) == []    # nothing was paced
+    assert _row(sess.session_id, "K")["status"] == "CLOSED"
+
+
+def test_worked_entry_still_paces_under_worked_mode(clean_positions):
+    """NO-FIRE / REGRESSION GUARD: the bypass is EXIT-ONLY. A worked ENTRY still
+    paces into POV/freeze-capped children — the validated worked v2 build engine is
+    untouched (impact control on a BUILD is the whole point of worked mode).
+    MUTATION REVERT: apply bypass_pacing_for_exit anywhere on the entry path →
+    the build becomes one shot → `n_children >= 4` FAILS."""
+    cfg = _worked_cfg(iceberg_freeze_qty_default=300)
+    sess = TradingSession.create(cfg, mode="live")
+    prof = sess.config.broker_profiles[0]
+    broker = MockBroker(profile=prof, dry_run=False, ltps={"AAA": 100.0})
+    clock = FakeClock(1000.0)
+    res = asyncio.run(sess._work_entry_leg(
+        broker, prof, "AAA", 1000, 100.0,
+        now_fn=clock.now, sleep_fn=clock.sleep,
+        volume_fn=lambda s: 100000,
+        deadline_ts=1000.0 + 100 * 20))
+    assert res["status"] == "PLACED"
+    assert res["qty"] == 1000 and res["shortfall"] == 0
+    assert res["n_children"] >= 4                     # STILL PACED (unregressed)
+    assert clock.t > 1000.0                           # pacing time actually spent
+
+
+def test_non_worked_session_stop_exit_is_byte_identical(clean_positions):
+    """NO-FIRE: a DEFAULT (non-worked) session is untouched by the bypass — a STOP
+    still takes the same one-shot market path it always did. The bypass only ever
+    changes behaviour INSIDE execution_mode=="worked"."""
+    cfg = _worked_cfg(execution_mode="market")
+    sess = TradingSession.create(cfg, mode="live")
+    prof = _register(sess, "M", 500)
+    broker = MockBroker(profile=sess.config.broker_profiles[0], dry_run=False,
+                        ltps={"M": 100.0}, net_positions={"M": 500})
+    sess.brokers = {prof: broker}
+    pos = sess.registry.get_open_positions()[0]
+    res = asyncio.run(_exit_single_position(
+        session_id=sess.session_id, position=pos, reason="STOP",
+        brokers={prof: broker}, registry=sess.registry,
+        gtt_manager=sess.gtt_manager, kite_product="MIS", exec_cfg=cfg))
+    assert res.get("worked") is not True
+    assert broker.exits == [("M", 500)]
+    assert _worked_children(sess.session_id) == []
+    assert _row(sess.session_id, "M")["status"] == "CLOSED"
+
+
+def test_stop_kill_across_many_positions_is_one_round_not_n_cadence(clean_positions):
+    """THE 213s SHAPE, pinned: N positions under worked+STOP flatten in ONE round of
+    market orders (one per name) — NOT N × the 20s pacing cadence. The live incident
+    was 11 children × ~20.5s = 213s for a SINGLE name; this asserts the whole basket
+    now costs exactly one order each and ZERO paced children.
+    MUTATION REVERT: restore pacing on the kill path → each name works into multiple
+    freeze-capped children → `len(broker.exits) == 5` FAILS (becomes ~20)."""
+    cfg = _worked_cfg(iceberg_freeze_qty_default=300, kill_switch_enabled=True,
+                      kill_switch_pct=0.01, top_n_stocks=5)
+    sess = TradingSession.create(cfg, mode="live")
+    syms = ["S1", "S2", "S3", "S4", "S5"]
+    for s in syms:
+        prof = _register(sess, s, 1000)           # 1000 > freeze 300 → would pace
+    broker = MockBroker(profile=sess.config.broker_profiles[0], dry_run=False,
+                        ltps={s: 100.0 for s in syms},
+                        net_positions={s: 1000 for s in syms})
+    sess.brokers = {prof: broker}
+    ks = KillSwitchExecutor(sess.session_id, cfg, {prof: broker}, sess.registry)
+    out = asyncio.run(ks.fire("LOSS_LIMIT gross_return=-0.0200",
+                              gross_return=-0.02, close_reason="STOP"))
+    assert out["n_exited_ok"] == 5
+    # ONE market order per name — a single round, no cadence, no slicing.
+    assert len(broker.exits) == 5
+    assert sorted(broker.exits) == sorted([(s, 1000) for s in syms])
+    assert _worked_children(sess.session_id) == []
+    for s in syms:
+        assert _row(sess.session_id, s)["status"] == "CLOSED"
