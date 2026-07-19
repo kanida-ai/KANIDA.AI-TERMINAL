@@ -122,9 +122,17 @@ def _now_ist_iso() -> str:
 
 
 def _incident_id(kind: str, session_id: Optional[str],
-                 symbol: Optional[str]) -> str:
-    """Stable dedup key for an incident: (kind, session, symbol)."""
-    return f"{kind}|{session_id or ''}|{symbol or ''}"
+                 symbol: Optional[str], extra: Optional[str] = None) -> str:
+    """Stable dedup key for an incident: (kind, session, symbol[, extra]).
+
+    `extra` (default None → byte-for-byte the old 3-part key) lets a caller add a
+    stable discriminator so ONE logical suspicion pages once. It is used for
+    CORP_ACTION_SUSPECTED to fold the detected split/bonus RATIO into the key, so a
+    persistent 2× divergence collapses to a single incident instead of re-paging
+    every reconcile cycle, while a genuinely NEW action at a DIFFERENT ratio is a
+    distinct incident that still surfaces."""
+    base = f"{kind}|{session_id or ''}|{symbol or ''}"
+    return f"{base}|{extra}" if extra else base
 
 
 # ── Persistence (best-effort; never raises into the trading path) ─────────────
@@ -223,18 +231,53 @@ def _recent_incident_exists(incident_id: str, window_sec: int,
         return False
 
 
+def _unacked_incident_exists(incident_id: str) -> bool:
+    """True when an UNACKED alert with this incident_id already exists (any age).
+
+    Fail-CLOSED-to-page (returns False on error) — a DB glitch must never silence a
+    genuine page. Used only by callers that pass suppress_if_unacked=True (currently
+    the CORP_ACTION_SUSPECTED wire): while the operator has an open, un-acked
+    suspicion for the SAME (symbol, ratio), re-detecting it every ~5s reconcile must
+    not open a fresh page — it is the same, still-open incident. Acking it (the
+    'clear') re-arms a future page."""
+    if not incident_id:
+        return False
+    try:
+        from falcon.db import falcon_conn  # noqa: WPS433
+        with falcon_conn() as con:
+            row = con.execute(
+                "SELECT 1 FROM autotrade_alerts WHERE incident_id=? "
+                "AND acknowledged=0 LIMIT 1", (incident_id,)).fetchone()
+            return bool(row)
+    except Exception as e:  # noqa: BLE001
+        log.debug("alerts: unacked-incident check failed (%s): %s", incident_id, e)
+        return False
+
+
 def send_urgent_deduped(*, kind: str, session_id: Optional[str],
                         symbol: Optional[str], detail: str,
                         window_sec: Optional[int] = None,
-                        now: Optional[datetime] = None) -> Optional[int]:
-    """Page ONCE per (kind, session, symbol) within the dedup window. Returns the
-    new alert id, or None when suppressed as a duplicate (already paged in-window).
-    This is the primitive every money-losing wire uses so one incident doesn't
-    page on every tick."""
-    incident_id = _incident_id(kind, session_id, symbol)
+                        now: Optional[datetime] = None,
+                        dedup_extra: Optional[str] = None,
+                        suppress_if_unacked: bool = False) -> Optional[int]:
+    """Page ONCE per (kind, session, symbol[, dedup_extra]) within the dedup window.
+    Returns the new alert id, or None when suppressed as a duplicate (already paged
+    in-window). This is the primitive every money-losing wire uses so one incident
+    doesn't page on every tick.
+
+    `dedup_extra` (default None → the classic 3-part key, unchanged) adds a stable
+    discriminator to the incident key. `suppress_if_unacked` (default False →
+    unchanged) additionally suppresses while an UN-ACKED alert with the same
+    incident already exists — i.e. page once and stay quiet until the operator
+    acknowledges (clears) it, then re-arm. Both default OFF, so every existing
+    caller is byte-for-byte identical."""
+    incident_id = _incident_id(kind, session_id, symbol, dedup_extra)
     win = _dedup_window_sec() if window_sec is None else window_sec
     if _recent_incident_exists(incident_id, win, now=now):
         log.debug("alerts: deduped %s (already paged in window)", incident_id)
+        return None
+    if suppress_if_unacked and _unacked_incident_exists(incident_id):
+        log.debug("alerts: deduped %s (open unacked incident)", incident_id)
         return None
     return send_urgent(detail, kind=kind, session_id=session_id, symbol=symbol,
                        incident_id=incident_id)

@@ -58,6 +58,19 @@ def _mark_stale_bound_ms() -> int:
     return _int_env("FALCON_AUTOTRADE_MARK_STALE_MS", 60000)
 
 
+def _corp_action_dedup_sec() -> int:
+    """Dedup window (s) for CORP_ACTION_SUSPECTED pages. A suspected split/bonus is
+    a PERSISTENT divergence that the reconciler re-detects every ~5s reconcile — the
+    default 900s window re-paged it ~4×/hour/symbol around the clock (the 306-alert
+    storm on 2026-07-13..18: 5 CNC symbols all reading broker_held ≈ 2× db_held).
+    A day-length default collapses that to at most one page per (symbol, ratio) per
+    day (the operator-facing daily reminder that a real, unresolved divergence still
+    stands), on top of the suppress-while-unacked gate. Configurable; 0 falls back
+    to the standard window."""
+    v = _int_env("FALCON_AUTOTRADE_CORP_ACTION_DEDUP_SEC", 86400)
+    return v
+
+
 # ── ITEM 2 — the five money-losing wires ──────────────────────────────────────
 def page_exit_failed(session_id: str, exit_failed_positions: List[Dict[str, Any]],
                      killing_incomplete: bool, is_live: bool) -> List[int]:
@@ -97,10 +110,27 @@ def page_recon_divergences(session_id: str,
         if kind not in _DIVERGENCE_ACTIONS:
             continue
         sym = action.get("symbol")
-        aid = alerts.send_urgent_deduped(
-            kind=kind, session_id=session_id, symbol=sym,
-            detail=(f"{kind}: broker/DB divergence on {sym} "
-                    f"(product={action.get('product')}) — {action}"))
+        detail = (f"{kind}: broker/DB divergence on {sym} "
+                  f"(product={action.get('product')}) — {action}")
+        if kind == "CORP_ACTION_SUSPECTED":
+            # A suspected corp-action is a PERSISTENT surplus/deficit the reconciler
+            # re-emits every reconcile cycle — NOT a fresh event each tick. Fold the
+            # detected RATIO into the dedup key and page it ONCE per (symbol, ratio):
+            # suppressed while an unacked one is open (page-once-until-cleared) AND
+            # rate-limited to the day window (a re-arm reminder if still unresolved).
+            # A genuinely new action at a DIFFERENT ratio is a distinct incident and
+            # still surfaces. This is intentionally independent of the auto-triage
+            # flag (which is OFF in prod). UNATTRIBUTED_CLOSE / ORPHAN_AT_BROKER keep
+            # their existing per-tick-window paging, unchanged.
+            ratio = action.get("ratio")
+            aid = alerts.send_urgent_deduped(
+                kind=kind, session_id=session_id, symbol=sym, detail=detail,
+                dedup_extra=(f"r{ratio}" if ratio is not None else None),
+                window_sec=_corp_action_dedup_sec(),
+                suppress_if_unacked=True)
+        else:
+            aid = alerts.send_urgent_deduped(
+                kind=kind, session_id=session_id, symbol=sym, detail=detail)
         if aid is not None:
             fired.append(aid)
     return fired
