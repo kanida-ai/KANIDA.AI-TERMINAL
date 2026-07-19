@@ -6,7 +6,7 @@ variable "kms_key_arn" { type = string }
 
 variable "engine_version" {
   type    = string
-  default = "15.7"
+  default = "15.18"
 }
 variable "instance_class" { type = string }
 variable "allocated_storage" { type = number }

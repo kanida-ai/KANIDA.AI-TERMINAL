@@ -50,6 +50,28 @@ requests>=2.31.0
 # ── Scheduling ─────────────────────────────────────────────
 apscheduler>=3.10.4
 
+# ── Auth / crypto / web-push (image-completeness fix, 2026-07-18) ──────────
+# Imported by the RUNNING backend but were absent from this file, so the cloud
+# container image built without them and crashed at boot on `import jwt`
+# (power_user/services/auth.py:38). Confirmed present in the laptop's working
+# env via a static import audit vs this file. Pinned to known-good floors.
+PyJWT>=2.10.1              # portal JWT signing/verify (power_user/services/auth.py)
+cryptography>=42.0.0       # Fernet vault (FALCON_VAULT_KEY broker-cred decrypt) + pywebpush
+pywebpush>=2.3.0           # VAPID web push (power_user/services/web_push.py)
+google-auth>=2.30.0        # Google API auth paths
+protobuf>=4.25.0           # google-auth transitive / proto payloads
+openpyxl>=3.1.0            # xlsx report generation
+yfinance>=0.2.50           # supplementary market data
+email-validator>=2.0.0     # pydantic EmailStr (power_user/routers/invites_router.py waitlist)
+
+# ── AWS SDK (on-demand per-user egress-IP provisioning, 2026-07-17) ─────────
+# Used ONLY by backend/autotrade/broker/egress_provisioner.py to allocate a
+# dedicated Elastic IP + tinyproxy box per user's broker account (SEBI one-IP
+# rule). Imported LAZILY there, so its absence never blocks boot — but the cloud
+# container needs it for the provisioning endpoints to work. Absent from the
+# laptop image today; pinned to a recent floor.
+boto3>=1.34.0             # EC2/EIP provisioning (autotrade egress_provisioner)
+
 # ── Dev / Testing ──────────────────────────────────────────
 pytest>=8.2.0
 httpx>=0.27.0               # for FastAPI test client

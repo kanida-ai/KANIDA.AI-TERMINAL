@@ -80,7 +80,7 @@ resource "aws_security_group" "efs" {
 # fails `plan`. The LIST LENGTH is known (from var.private_subnet_cidrs), so
 # count keeps `plan` clean.
 resource "aws_efs_mount_target" "this" {
-  count           = length(var.private_subnet_ids)
+  count           = var.subnet_count
   file_system_id  = aws_efs_file_system.this.id
   subnet_id       = var.private_subnet_ids[count.index]
   security_groups = [aws_security_group.efs.id]

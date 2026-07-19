@@ -28,9 +28,10 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import os
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Header, HTTPException
@@ -39,6 +40,8 @@ from pydantic import BaseModel
 from ..db import falcon_conn
 
 router = APIRouter()
+
+log = logging.getLogger("kanida.falcon.publish")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -263,4 +266,81 @@ def publish_intelligence(
             for t in bundle.tables.keys()
         },
         "audit_run_id": audit_run_id,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# KTS (2026-07-17): Kite (Zerodha) daily access-token SYNC — laptop → cloud.
+#
+# The Zerodha access token is minted ONLY on the laptop (Playwright login runs
+# there, see scripts/auth_worker.py). A cloud-hosted copy of this backend has no
+# way to mint it, yet needs it to place LIVE orders. This endpoint is the cloud
+# INGEST: the laptop POSTs the token it already minted and the cloud persists it
+# through kite_auth's own save path, so get_access_token() serves it unchanged.
+#
+# SECURITY: reuses the SAME self-contained, constant-time, fail-CLOSED auth as
+# /falcon/publish/intelligence (X-Publish-Secret == env FALCON_PUBLISH_SECRET).
+# REAL-MONEY-ADJACENT: the token authorizes live orders. The token VALUE is
+# NEVER logged or echoed — only its length, the date, and set_by.
+#
+# ADDITIVE: this only adds a route. It does NOT change get_access_token()'s
+# priority logic, the minting worker, or any execution path. The persist uses
+# kite_auth._save_token_to_db (no schema/insert duplication), which upserts
+# today's row keyed on date.today() — exactly the row get_access_token() reads.
+# ══════════════════════════════════════════════════════════════════════════════
+class KiteTokenPush(BaseModel):
+    access_token: str
+    # Optional IST YYYY-MM-DD; advisory/echoed only. The authoritative storage
+    # key is the server's date.today() (what get_access_token reads), so the
+    # write and the read stay internally consistent on the cloud box.
+    token_date: str | None = None
+    set_by: str = "cloud-sync"
+
+
+@router.post("/falcon/publish/kite-token")
+def publish_kite_token(
+    payload: KiteTokenPush,
+    x_publish_secret: str | None = Header(default=None, alias="X-Publish-Secret"),
+):
+    """Ingest the daily Kite access token minted on the laptop and persist it so
+    the cloud's get_access_token() returns it. See the KTS block above.
+
+    Body: { access_token: str, token_date?: str (IST YYYY-MM-DD), set_by?: str }
+    Returns: { ok: true, token_date: <stored>, requested_token_date: <echo>,
+               stored: true }
+    """
+    # ── 1. Auth (self-contained, constant-time, fail-closed) — same as above ──
+    _require_secret(x_publish_secret)
+
+    # ── 2. Validate — reject empty/whitespace token (never store a blank) ─────
+    token = (payload.access_token or "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "EMPTY_TOKEN",
+                    "message": "access_token is empty or whitespace."},
+        )
+
+    set_by = (payload.set_by or "cloud-sync").strip() or "cloud-sync"
+    requested_date = (payload.token_date or "").strip() or datetime.now(IST).date().isoformat()
+
+    # ── 3. Persist via kite_auth's OWN save path (no schema/insert dup) ───────
+    # _save_token_to_db upserts today's row (DELETE today + INSERT) keyed on
+    # date.today() — the exact row get_access_token() serves. Lazy import mirrors
+    # every other falcon→services call site (services/ on sys.path at runtime)
+    # and keeps this module importable in isolation for tests.
+    from services.kite_auth import _save_token_to_db
+
+    _save_token_to_db(token, set_by=set_by)
+    stored_date = date.today().isoformat()  # authoritative key get_access_token reads
+
+    # NEVER log the token value — only its length + the metadata.
+    log.info("kite-token ingest: stored for %s (requested=%s, set_by=%s, token_len=%d)",
+             stored_date, requested_date, set_by, len(token))
+
+    return {
+        "ok": True,
+        "token_date": stored_date,
+        "requested_token_date": requested_date,
+        "stored": True,
     }

@@ -58,9 +58,34 @@ resource "aws_ecs_task_definition" "app" {
       # is intentionally NOT set here in Phase 0 (app stays SQLite-shaped).
       environment = [
         { name = "PORT", value = tostring(var.container_port) },
+        # Pin the container clock to IST so naive date/time (e.g. kite token_date
+        # via date.today(), any naive datetime.now()) matches the laptop and the
+        # app's IST-centric logic. The scheduler already uses datetime.now(IST)
+        # explicitly, so this only removes latent UTC-vs-IST date edges.
+        { name = "TZ", value = "Asia/Kolkata" },
         { name = "FALCON_DB_PATH", value = "/data/db/kanida_universe.db" },
         { name = "POWER_DB_PATH", value = "/data/db/kanida_universe.db" },
         { name = "KANIDA_DB_PATH", value = "/data/db/kanida_quant.db" },
+        # R&D-DB split: serve-time reads use the published artifacts on EFS so
+        # the container never reaches for the 38GB universe_engine R&D DB (absent
+        # in cloud). Seeded alongside the serving DB at /data/db (Step 8).
+        { name = "FALCON_OUTCOMES_ARTIFACT", value = "/data/db/falcon_serve_evidence.db" },
+        { name = "FALCON_SIM_PATTERNS_ARTIFACT", value = "/data/db/falcon_sim_patterns.db" },
+        # Paper-safe by construction. Live trading requires FALCON_AUTOTRADE_ENABLED
+        # == "true"; set explicitly to "false" so the cloud box can NEVER place a
+        # real order during bring-up/parity, independent of any default drift.
+        { name = "FALCON_AUTOTRADE_ENABLED", value = "false" },
+        { name = "FALCON_AUTOTRADE_EXECUTION_MODE", value = "paper" },
+        # WS4 on-demand per-user egress-IP provisioning (egress_provisioner.py via
+        # boto3). Region + the public subnet / egress-proxy SG / AMI / instance type
+        # a provisioned proxy box uses. Empty AMI/SG = provisioning endpoints return
+        # a clean config error (they never auto-run), so this is safe to ship even
+        # before the values are finalized.
+        { name = "AWS_DEFAULT_REGION", value = data.aws_region.current.name },
+        { name = "KANIDA_EGRESS_SUBNET_ID", value = var.public_subnet_ids[0] },
+        { name = "KANIDA_EGRESS_SG_ID", value = var.egress_proxy_sg_id },
+        { name = "KANIDA_EGRESS_AMI_ID", value = var.egress_ami_id },
+        { name = "KANIDA_EGRESS_INSTANCE_TYPE", value = var.egress_instance_type },
       ]
       # Secrets injected from Secrets Manager (name -> valueFrom ARN). Values
       # never appear in the task def, image, or Terraform state.

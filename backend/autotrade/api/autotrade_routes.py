@@ -1354,6 +1354,97 @@ def egress_pool_status(caller: Caller = Depends(resolve_caller)):
     return egress.pool_status()
 
 
+# ── ON-DEMAND egress provisioning (boto3: allocate an EIP + tinyproxy box per
+#    account at RUNTIME, then store the mapping via the existing egress layer).
+#    ADMIN-ONLY: creating billable AWS infra is an operator action. These are
+#    ADDITIVE to the pool-based /egress endpoints above (which are untouched):
+#    /egress/provision (POST create, GET status, DELETE deprovision). Config comes
+#    from env (KANIDA_EGRESS_SUBNET_ID / _SG_ID / _AMI_ID / _INSTANCE_TYPE,
+#    AWS_DEFAULT_REGION). Missing config / boto3 → a clean 400/409/502, never a 500
+#    stack trace, and the credential-bearing proxy URL is NEVER surfaced. ────────
+
+@router.post("/autotrade/broker-account/{broker_account_id}/egress/provision")
+def broker_account_egress_provision(broker_account_id: str,
+                                    user_id: Optional[str] = None,
+                                    caller: Caller = Depends(resolve_caller)):
+    """Provision a DEDICATED static egress IP for this account on demand: allocate
+    an Elastic IP + launch a tinyproxy box, wait until running, associate the EIP,
+    and store the (encrypted) proxy mapping. Returns {public_ip, provisioned:true}
+    — the single IP the user registers with their broker (SEBI one-IP rule).
+
+    ADMIN-ONLY (it creates billable AWS infrastructure). Fail-safe: a partial
+    failure is cleaned up before erroring; the AWS EIP quota → 409; missing
+    config/boto3 → 400. The proxy credentials are never returned or logged."""
+    if not _caller(caller).is_admin:
+        raise HTTPException(403, "admin only — provisioning creates AWS infra")
+    scope = _assert_user_scope(user_id, caller)
+    from .. import vault
+    from ..broker import egress_provisioner as prov
+    if vault.get_account_public(broker_account_id, user_id=scope) is None:
+        raise HTTPException(404, "broker account not found")
+    try:
+        cfg = prov.load_config_from_env()
+        result = prov.provision_user_egress(
+            broker_account_id, region=cfg.region, subnet_id=cfg.subnet_id,
+            sg_id=cfg.sg_id, ami_id=cfg.ami_id, instance_type=cfg.instance_type,
+            key_name=cfg.key_name, proxy_port=cfg.proxy_port)
+        return {"broker_account_id": broker_account_id,
+                "public_ip": result["public_ip"], "provisioned": True,
+                "instructions": (
+                    f"Register {result['public_ip']} as the Allowed IP on your "
+                    f"broker app AND on your broker profile (SEBI static-IP "
+                    f"requirement). Orders for this account egress from this IP only.")}
+    except prov.EgressQuotaExceeded as e:
+        raise HTTPException(409, str(e))
+    except prov.EgressConfigError as e:
+        raise HTTPException(400, str(e))
+    except prov.EgressProvisioningError as e:
+        raise HTTPException(502, str(e))
+    except vault.VaultDisabledError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/autotrade/broker-account/{broker_account_id}/egress/provision")
+def broker_account_egress_provision_status(broker_account_id: str,
+                                           user_id: Optional[str] = None,
+                                           caller: Caller = Depends(resolve_caller)):
+    """Live AWS status of this account's dedicated egress box.
+    Returns {provisioned, public_ip, instance_state}. Non-admin scoped to own id."""
+    scope = _assert_user_scope(user_id, caller)
+    from .. import vault
+    from ..broker import egress_provisioner as prov
+    if vault.get_account_public(broker_account_id, user_id=scope) is None:
+        raise HTTPException(404, "broker account not found")
+    try:
+        return prov.get_user_egress_status(broker_account_id)
+    except prov.EgressConfigError as e:
+        raise HTTPException(400, str(e))
+    except prov.EgressProvisioningError as e:
+        raise HTTPException(502, str(e))
+
+
+@router.delete("/autotrade/broker-account/{broker_account_id}/egress/provision")
+def broker_account_egress_deprovision(broker_account_id: str,
+                                      user_id: Optional[str] = None,
+                                      caller: Caller = Depends(resolve_caller)):
+    """Tear down this account's dedicated egress box: terminate the instance,
+    release the Elastic IP, and clear the mapping (revert to DIRECT, no restart).
+    IDEMPOTENT. ADMIN-ONLY (it destroys billable AWS infra)."""
+    if not _caller(caller).is_admin:
+        raise HTTPException(403, "admin only — deprovisioning destroys AWS infra")
+    scope = _assert_user_scope(user_id, caller)
+    from .. import vault
+    from ..broker import egress_provisioner as prov
+    if vault.get_account_public(broker_account_id, user_id=scope) is None:
+        raise HTTPException(404, "broker account not found")
+    try:
+        return prov.deprovision_user_egress(broker_account_id)
+    except prov.EgressConfigError as e:
+        raise HTTPException(400, str(e))
+    except prov.EgressProvisioningError as e:
+        raise HTTPException(502, str(e))
+
+
 @router.get("/autotrade/brokers/supported")
 def brokers_supported(caller: Caller = Depends(resolve_caller)):
     """List brokers the platform can connect (for the onboarding dropdown) with

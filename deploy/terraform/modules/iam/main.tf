@@ -79,6 +79,48 @@ data "aws_iam_policy_document" "task" {
       "${var.artifacts_bucket_arn}/*",
     ]
   }
+
+  # ── ON-DEMAND per-user egress provisioning (autotrade egress_provisioner.py) ─
+  # The app allocates a dedicated Elastic IP + a tinyproxy EC2 per user's broker
+  # account at runtime (SEBI one-IP-per-account rule), then tears it down. AWS
+  # does not support resource-level scoping on Allocate/Associate/Disassociate/
+  # Release Address or the Describe*/CreateTags read/tag calls, so those are
+  # resource "*". The mutating instance calls (RunInstances/TerminateInstances)
+  # ARE scoped by the `kanida:egress-user` tag so the app can only ever churn its
+  # OWN egress boxes, never other EC2 in the account.
+  statement {
+    sid = "EgressEipAndDescribe"
+    actions = [
+      "ec2:AllocateAddress",
+      "ec2:ReleaseAddress",
+      "ec2:AssociateAddress",
+      "ec2:DisassociateAddress",
+      "ec2:DescribeAddresses",
+      "ec2:DescribeInstances",
+      "ec2:DescribeSubnets",
+      "ec2:DescribeSecurityGroups",
+      "ec2:CreateTags",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "EgressRunInstances"
+    actions   = ["ec2:RunInstances"]
+    resources = ["*"]
+  }
+
+  # Terminate ONLY instances tagged as this app's egress boxes.
+  statement {
+    sid       = "EgressTerminateTaggedOnly"
+    actions   = ["ec2:TerminateInstances"]
+    resources = ["*"]
+    condition {
+      test     = "StringLike"
+      variable = "ec2:ResourceTag/kanida:egress-user"
+      values   = ["*"]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "task" {

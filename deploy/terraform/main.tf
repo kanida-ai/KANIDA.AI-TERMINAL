@@ -129,6 +129,7 @@ module "efs" {
   name               = "${var.name_prefix}-${var.environment}"
   vpc_id             = module.vpc.vpc_id
   private_subnet_ids = module.vpc.private_subnet_ids
+  subnet_count       = length(var.private_subnet_cidrs)
   app_sg_id          = module.security.app_sg_id
   kms_key_arn        = module.secrets.kms_key_arn
   posix_uid          = var.efs_posix_uid
@@ -159,10 +160,38 @@ module "compute" {
   task_role_arn       = module.iam.task_role_arn
   secret_arns_map     = module.secrets.secret_arns  # name -> ARN, injected as env
 
+  # TLS: once var.api_domain is set + the cert validated (acm.tf), this brings up
+  # the ALB :443 HTTPS listener. Null (no api_domain) keeps the pre-HTTPS state.
+  acm_certificate_arn = var.api_domain == "" ? null : aws_acm_certificate_validation.api[0].certificate_arn
+
   # Persistent DB volume — mounted at /data/db (matches FALCON_DB_PATH). Without
   # this the A2 preflight fail-loud crash-loops (see modules/efs/README.md).
   efs_file_system_id  = module.efs.file_system_id
   efs_access_point_id = module.efs.access_point_id
+
+  # WS4 on-demand per-user egress-IP provisioning config (injected as KANIDA_EGRESS_*
+  # task env for backend/autotrade/broker/egress_provisioner.py). Proxy boxes launch
+  # in a PUBLIC subnet (need an EIP), use the egress-proxy SG, an AL2023 arm64 AMI,
+  # on a Graviton t4g.nano.
+  egress_proxy_sg_id   = module.security.egress_proxy_sg_id
+  egress_ami_id        = data.aws_ami.al2023_arm.id
+  egress_instance_type = "t4g.nano"
+}
+
+# AL2023 arm64 AMI for on-demand egress proxy boxes (matches t4g.nano). Same
+# filter the egress module uses; resolved at root so it can feed the compute
+# task env (KANIDA_EGRESS_AMI_ID) without instantiating the egress module.
+data "aws_ami" "al2023_arm" {
+  most_recent = true
+  owners      = ["amazon"]
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-arm64"]
+  }
+  filter {
+    name   = "architecture"
+    values = ["arm64"]
+  }
 }
 
 # ── Per-user static egress IPs (the SEBI one-IP-per-account solution) ───────

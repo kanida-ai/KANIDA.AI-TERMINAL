@@ -149,6 +149,10 @@ variable "managed_secret_keys" {
     "BROKER_PROXY_MAP",
     "BROKER_EGRESS_POOL",
     "RUPEEZY_LIVE_CERTIFIED",
+    # WS2 data-freshness: HMAC gate for the laptop→cloud publish endpoint
+    # (/api/falcon/publish/intelligence, checked in falcon/routers/publish_router.py
+    # as X-Publish-Secret == FALCON_PUBLISH_SECRET). Same value set on the laptop.
+    "FALCON_PUBLISH_SECRET",
   ]
 }
 

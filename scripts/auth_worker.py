@@ -84,6 +84,38 @@ def _in_active_window(now: datetime) -> bool:
     return _WINDOW_START <= hm <= _WINDOW_END
 
 
+def _best_effort_push_token_to_cloud() -> None:
+    """KTS (2026-07-17): after a healthy Kite token exists in the local DB, ship
+    it to the cloud-hosted backend copy so its get_access_token() serves it too.
+
+    BEST-EFFORT + fully guarded — it must NEVER break local minting:
+      * Only runs when FALCON_PUBLISH_URL is set. Laptops without cloud config
+        are completely unaffected (no-op).
+      * Runs the push as a SEPARATE short-lived process (scripts/push_kite_token
+        .py) with a hard timeout, so a crash/hang there cannot touch this worker.
+      * Every exception is swallowed and logged non-fatally.
+    Called on BOTH the fresh-mint-success and the skip-gate-healthy paths, so a
+    transient cloud outage self-heals on the next 30-min run (the cloud upsert is
+    idempotent). The token VALUE is never logged (the child prints only length).
+    """
+    if not os.environ.get("FALCON_PUBLISH_URL"):
+        return
+    try:
+        import subprocess
+        script = os.path.join(_HERE, "push_kite_token.py")
+        proc = subprocess.run(
+            [sys.executable, script],
+            capture_output=True, text=True, timeout=60,
+        )
+        log.info("auth_worker: cloud token push rc=%s", proc.returncode)
+        if proc.stdout:
+            log.info("auth_worker: push stdout:\n%s", proc.stdout.strip())
+        if proc.returncode != 0 and proc.stderr:
+            log.warning("auth_worker: push stderr:\n%s", proc.stderr.strip())
+    except Exception as e:  # noqa: BLE001 - best-effort, never fatal
+        log.warning("auth_worker: cloud token push failed (non-fatal): %s", e)
+
+
 def main() -> int:
     log.info("auth_worker START (pid=%s, fresh process)", os.getpid())
 
@@ -150,6 +182,9 @@ def main() -> int:
             log_attempt(POWER_DB_PATH, 0, "scheduled", skip)
         except Exception:
             pass
+        # KTS: token is healthy → (re)push to the cloud copy so a transient
+        # earlier push failure self-heals. No-op unless FALCON_PUBLISH_URL is set.
+        _best_effort_push_token_to_cloud()
         return 0
 
     if already and not live_ok:
@@ -185,6 +220,9 @@ def main() -> int:
     # 6. Exit code reflects outcome (Task Scheduler shows last result).
     if result.status == "success":
         log.info("auth_worker: SUCCESS — token written (preview=%s)", result.token_preview)
+        # KTS: freshly minted token → push to the cloud copy right after minting.
+        # No-op unless FALCON_PUBLISH_URL is set; never fatal.
+        _best_effort_push_token_to_cloud()
         return 0
     log.warning("auth_worker: FAILED — %s", result.error_code)
     return 1

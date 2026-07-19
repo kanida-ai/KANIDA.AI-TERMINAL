@@ -38,3 +38,22 @@ variable "acm_certificate_arn" {
   type        = string
   default     = null
 }
+
+# ── WS4 on-demand per-user egress-IP provisioning (KANIDA_EGRESS_* task env) ──
+variable "egress_proxy_sg_id" {
+  description = "Security group id for on-demand per-user egress proxy boxes (module.security.egress_proxy_sg_id). Injected as KANIDA_EGRESS_SG_ID."
+  type        = string
+  default     = ""
+}
+
+variable "egress_ami_id" {
+  description = "AMI id for on-demand egress proxy instances (AL2023, arch matching egress_instance_type). Injected as KANIDA_EGRESS_AMI_ID."
+  type        = string
+  default     = ""
+}
+
+variable "egress_instance_type" {
+  description = "Instance type for on-demand egress proxy boxes (default Graviton t4g.nano, matches an arm64 AMI). Injected as KANIDA_EGRESS_INSTANCE_TYPE."
+  type        = string
+  default     = "t4g.nano"
+}

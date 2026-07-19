@@ -12,6 +12,11 @@ variable "private_subnet_ids" {
   type        = list(string)
 }
 
+variable "subnet_count" {
+  description = "Number of private subnets / mount targets. STATIC (passed as length(var.private_subnet_cidrs) from the root) so aws_efs_mount_target's `count` is knowable at plan AND import time — before the subnets exist in state. Fixes 'Invalid count argument' on import into empty state."
+  type        = number
+}
+
 variable "app_sg_id" {
   description = "The Fargate app security group; the ONLY source allowed to reach EFS on 2049."
   type        = string

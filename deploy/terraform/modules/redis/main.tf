@@ -30,5 +30,13 @@ resource "aws_elasticache_replication_group" "this" {
   at_rest_encryption_enabled = true
   transit_encryption_enabled = true
 
+  # No auth_token is set (TLS-only, no Redis AUTH). The provider still defaults
+  # auth_token_update_strategy to "ROTATE", which reads as a change after import
+  # and makes ElastiCache reject a ModifyReplicationGroup with "Invalid AUTH
+  # token" (there is no token to rotate). Ignore it — there is no auth to manage.
+  lifecycle {
+    ignore_changes = [auth_token_update_strategy]
+  }
+
   tags = { Name = "${var.name}-redis" }
 }
