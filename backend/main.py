@@ -602,6 +602,7 @@ from falcon.trade.routers.trade_router import router as falcon_trade_router
 from autotrade.api.autotrade_routes import router as autotrade_router  # AutoTrade portfolio + kill switch (operator-token gated)
 from autotrade.api.pnl_routes import router as autotrade_pnl_router  # AutoTrade Performance dashboard P&L (power_jwt-gated, read-only, /api/power/autotrade/pnl/*)
 from autotrade.api.config_edit_routes import router as autotrade_config_edit_router  # AutoTrade LIVE CONFIG EDIT (power_jwt-gated) — PATCH /api/power/autotrade/{session|ladder}/{id}/config
+from autotrade.api.health_routes import router as sysagents_health_router  # System-Engineering Agent Hierarchy Phase 1 — GET /api/health/system (operator-token gated, read-only) — ships DISABLED (SYSAGENTS_ENABLED default-off)
 # P1PUB (2026-06-14): laptop → cloud "publish intelligence" ingest. Self-auth
 # (X-Publish-Secret), atomic full-replace. See CLOUD_ARCHITECTURE.md §6.
 from falcon.routers.publish_router     import router as falcon_publish_router
@@ -669,6 +670,7 @@ app.include_router(power_cotrade_router,         tags=["Power-User"])    # Co-Tr
 app.include_router(autotrade_router,             prefix="/api", tags=["AutoTrade"])    # AutoTrade: multi-broker portfolio sessions + kill switch (/api/autotrade/*) — ships DISABLED
 app.include_router(autotrade_pnl_router,          tags=["Power-User"])    # AutoTrade Performance dashboard P&L (power_jwt-gated, read-only) — /api/power/autotrade/pnl/*
 app.include_router(autotrade_config_edit_router,  tags=["Power-User"])    # AutoTrade LIVE CONFIG EDIT (power_jwt-gated) — PATCH /api/power/autotrade/{session|ladder}/{id}/config
+app.include_router(sysagents_health_router,      prefix="/api", tags=["SysAgents"])    # System-Engineering Agent Hierarchy Phase 1 — GET /api/health/system (operator-token gated, read-only) — DISABLED unless SYSAGENTS_ENABLED=true
 
 # Power User schema init — idempotent, creates tables on first boot.
 # Uses POWER_DB_PATH resolver — same DB as the engine read-only tables
@@ -774,6 +776,19 @@ try:
         log.info("Falcon KiteTicker not connected (auth not ready); will poll-only.")
 except Exception as _e:
     log.warning("Falcon KiteTicker not started: %s", _e)
+
+# System-Engineering Agent Hierarchy Phase 1 (platform HEALTH monitors) — the
+# run-loop is DEFAULT-OFF: start() is a hard no-op unless SYSAGENTS_ENABLED=true
+# AND the kill-switch is off. On a normal (flag-off) boot no thread starts and the
+# whole layer is inert. Observation-only: it never touches a trade/order/position.
+try:
+    from autotrade.sysagents import runner as _sysagents_runner
+    if _sysagents_runner.start():
+        log.info("SysAgents health run-loop started (SYSAGENTS_ENABLED=true).")
+    else:
+        log.info("SysAgents health layer disabled (default-off); run-loop not started.")
+except Exception as _e:  # pragma: no cover - never block boot
+    log.warning("SysAgents health layer not started (non-fatal): %s", _e)
 
 
 @app.get("/")
