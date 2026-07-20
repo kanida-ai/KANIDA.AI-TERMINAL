@@ -4655,6 +4655,62 @@ class TradingSession:
             picks, self.config.magnifier_high_tier)
         return kept
 
+    async def _gather_place_legs(
+            self, specs: List[tuple], *, register_mode: str = "replace"
+            ) -> List[Dict[str, Any]]:
+        """Place a list of leg specs CONCURRENTLY, mirroring the standard
+        `_fire_entries` gather path (2026-07-20 magnifier/btst entry-latency fix).
+
+        `specs` is a list of
+        `(broker, prof, pick, amount, allocator, cache, qty, quote)` tuples. Each
+        `_place_one` runs under the SAME bounded `_ENTRY_CONCURRENCY` semaphore as
+        the standard entry path (respecting the ~10/s Kite/Rupeezy order rate
+        limit), with per-leg failure ISOLATED (a crash returns a FAILED dict, never
+        aborts a sibling — so a concurrent gather where SOME legs fail still yields
+        the correct per-symbol results and n_filled). Results are returned in SPEC
+        order (asyncio.gather preserves input order), though all downstream logic is
+        symbol/count-based and order-independent.
+
+        Before placing, the account's WORKING-order book is pre-fetched ONCE per
+        distinct broker client (live only) and threaded into every leg via
+        `pending_book=`, so the F5 fungible-account double-fill probe costs ZERO
+        extra broker round-trips per leg — EXACTLY the per-fire hand-off the
+        standard path uses (session.py ~2540). A fetch error → None → the leg
+        fetches its own book (byte-for-byte the pre-hand-off behaviour); the F5
+        anti-double-fill verdict is unchanged. Paper (dry_run) skips the fetch.
+        `register_mode` is passed straight through ("replace" for a leg-1 open,
+        "add" to blend a leg-2 fill into the existing position)."""
+        if not specs:
+            return []
+        # PERF: ONE pending-order fetch per distinct broker client (never pooled
+        # across accounts — a session's profiles can resolve to different accounts).
+        _books: Dict[int, Optional[List[Dict[str, Any]]]] = {}
+        if not self.dry_run:
+            _uniq: Dict[int, Any] = {}
+            for _spec in specs:
+                _uniq.setdefault(id(_spec[0]), _spec[0])
+            _keys = list(_uniq.keys())
+            _fetched = await asyncio.gather(
+                *[_uniq[k].get_pending_orders() for k in _keys],
+                return_exceptions=True)
+            for _k, _res in zip(_keys, _fetched):
+                _books[_k] = _res if isinstance(_res, list) else None
+        sem = asyncio.Semaphore(_ENTRY_CONCURRENCY)
+
+        async def _guarded(broker, prof, pick, amount, allocator, cache, qty, quote):
+            async with sem:
+                try:
+                    return await self._place_one(
+                        broker, prof, pick, amount, allocator, prefetch=cache,
+                        forced_qty=qty, quote=quote, register_mode=register_mode,
+                        pending_book=_books.get(id(broker)))
+                except Exception as e:  # belt-and-braces per-leg isolation
+                    log.error("entry leg crashed for %s: %s", pick.symbol, e)
+                    return {"symbol": pick.symbol, "status": "FAILED",
+                            "error": str(e)}
+
+        return list(await asyncio.gather(*[_guarded(*s) for s in specs]))
+
     async def _fire_magnifier_initial(self) -> Dict[str, Any]:
         """MAGNIFIER split-entry PHASE 1 (the 09:15 half-leg).
 
@@ -4677,7 +4733,7 @@ class TradingSession:
         routed = router.route_picks(picks, self.config.broker_profiles)
         frac = float(self.config.magnifier_split_fraction)
         _fire_t0 = time.monotonic()
-        placed: List[Dict[str, Any]] = []
+        leg1_specs: List[tuple] = []
         leg2_plan: List[Dict[str, Any]] = []
         for prof in self.config.broker_profiles:
             if not prof.enabled:
@@ -4701,6 +4757,9 @@ class TradingSession:
             plan = allocator.plan_quantities(
                 [p.symbol for p in fund_picks], broker, cache=cache)
             plan_qtys = plan["quantities"]
+            # Collect the leg-1 specs (placed CONCURRENTLY below) and build the
+            # per-name leg-2 plan. Per-pick sizing (leg1 = target*frac, leg2 =
+            # target-leg1) is UNCHANGED — only the placement is fanned out.
             for pick in fund_picks:
                 target = int(plan_qtys.get(pick.symbol) or 0)
                 if target <= 0:
@@ -4709,14 +4768,16 @@ class TradingSession:
                 leg2 = target - leg1
                 amount = amounts.get(pick.symbol, 0.0)
                 if leg1 > 0:
-                    r = await self._place_one(
-                        broker, prof, pick, amount, allocator, prefetch=cache,
-                        forced_qty=leg1, quote=quote_cache.get(pick.symbol))
-                    placed.append(r)
+                    leg1_specs.append((broker, prof, pick, amount, allocator,
+                                       cache, leg1, quote_cache.get(pick.symbol)))
                 if leg2 > 0:
                     leg2_plan.append({
                         "profile_id": prof.profile_id, "symbol": pick.symbol,
                         "qty": int(leg2), "amount": amount})
+        # CONCURRENT leg-1 placement (was a sequential await-loop → ~N× broker
+        # round-trips; ~50s live for ~9 names on 2026-07-20). Now ~1× via
+        # asyncio.gather under the shared entry-rate semaphore.
+        placed: List[Dict[str, Any]] = await self._gather_place_legs(leg1_specs)
         entry_latency_ms = int((time.monotonic() - _fire_t0) * 1000)
         try:
             self._record_latency(entry_latency_ms=entry_latency_ms)
@@ -4816,7 +4877,7 @@ class TradingSession:
         by_prof: Dict[str, List[Dict[str, Any]]] = {}
         for item in plan:
             by_prof.setdefault(item["profile_id"], []).append(item)
-        placed: List[Dict[str, Any]] = []
+        leg2_specs: List[tuple] = []
         for pid, items in by_prof.items():
             prof = prof_by_id.get(pid)
             if prof is None or not getattr(prof, "enabled", True):
@@ -4839,17 +4900,15 @@ class TradingSession:
             for it in items:
                 pick = Pick(symbol=it["symbol"], rank=0, score=0.0, sector=None,
                             close_at_signal=None, n_fires=None, avg_lift=None)
-                try:
-                    r = await self._place_one(
-                        broker, prof, pick, float(it.get("amount") or 0.0),
-                        allocator, prefetch=cache, forced_qty=int(it["qty"]),
-                        quote=quote_cache.get(it["symbol"]), register_mode="add")
-                except Exception as e:  # per-leg isolation
-                    log.error("magnifier second leg crashed for %s: %s",
-                              it["symbol"], e)
-                    r = {"symbol": it["symbol"], "status": "FAILED",
-                         "error": str(e)}
-                placed.append(r)
+                leg2_specs.append((broker, prof, pick,
+                                   float(it.get("amount") or 0.0), allocator,
+                                   cache, int(it["qty"]),
+                                   quote_cache.get(it["symbol"])))
+        # CONCURRENT leg-2 placement (was a sequential await-loop). register_mode
+        # "add" blends each remaining-half fill INTO the existing position for the
+        # blended cost — the per-pick averaging is unchanged.
+        placed: List[Dict[str, Any]] = await self._gather_place_legs(
+            leg2_specs, register_mode="add")
         n_filled = sum(1 for p in placed
                        if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE",
                                                "DRY_RUN"))
@@ -4952,7 +5011,7 @@ class TradingSession:
         routed = router.route_picks(picks, self.config.broker_profiles)
         frac = float(self.config.magnifier_split_fraction)
         _fire_t0 = time.monotonic()
-        placed: List[Dict[str, Any]] = []
+        leg1_specs: List[tuple] = []
         leg2_plan: List[Dict[str, Any]] = []
         for prof in self.config.broker_profiles:
             if not prof.enabled:
@@ -4976,6 +5035,9 @@ class TradingSession:
             plan = allocator.plan_quantities(
                 [p.symbol for p in fund_picks], broker, cache=cache)
             plan_qtys = plan["quantities"]
+            # Collect the leg-1 specs (placed CONCURRENTLY below) and build the
+            # per-name leg-2 plan. Per-pick sizing (leg1 = target*frac, leg2 =
+            # target-leg1) is UNCHANGED — only the placement is fanned out.
             for pick in fund_picks:
                 target = int(plan_qtys.get(pick.symbol) or 0)
                 if target <= 0:
@@ -4984,14 +5046,16 @@ class TradingSession:
                 leg2 = target - leg1
                 amount = amounts.get(pick.symbol, 0.0)
                 if leg1 > 0:
-                    r = await self._place_one(
-                        broker, prof, pick, amount, allocator, prefetch=cache,
-                        forced_qty=leg1, quote=quote_cache.get(pick.symbol))
-                    placed.append(r)
+                    leg1_specs.append((broker, prof, pick, amount, allocator,
+                                       cache, leg1, quote_cache.get(pick.symbol)))
                 if leg2 > 0:
                     leg2_plan.append({
                         "profile_id": prof.profile_id, "symbol": pick.symbol,
                         "qty": int(leg2), "amount": amount})
+        # CONCURRENT leg-1 placement (was a sequential await-loop → ~N× broker
+        # round-trips; ~61s live for ~9 names on Rupeezy 2026-07-20). Now ~1× via
+        # asyncio.gather under the shared entry-rate semaphore.
+        placed: List[Dict[str, Any]] = await self._gather_place_legs(leg1_specs)
         entry_latency_ms = int((time.monotonic() - _fire_t0) * 1000)
         try:
             self._record_latency(entry_latency_ms=entry_latency_ms)
@@ -5083,7 +5147,7 @@ class TradingSession:
         by_prof: Dict[str, List[Dict[str, Any]]] = {}
         for item in plan:
             by_prof.setdefault(item["profile_id"], []).append(item)
-        placed: List[Dict[str, Any]] = []
+        leg2_specs: List[tuple] = []
         for pid, items in by_prof.items():
             prof = prof_by_id.get(pid)
             if prof is None or not getattr(prof, "enabled", True):
@@ -5106,17 +5170,15 @@ class TradingSession:
             for it in items:
                 pick = Pick(symbol=it["symbol"], rank=0, score=0.0, sector=None,
                             close_at_signal=None, n_fires=None, avg_lift=None)
-                try:
-                    r = await self._place_one(
-                        broker, prof, pick, float(it.get("amount") or 0.0),
-                        allocator, prefetch=cache, forced_qty=int(it["qty"]),
-                        quote=quote_cache.get(it["symbol"]), register_mode="add")
-                except Exception as e:  # per-leg isolation
-                    log.error("btst second leg crashed for %s: %s",
-                              it["symbol"], e)
-                    r = {"symbol": it["symbol"], "status": "FAILED",
-                         "error": str(e)}
-                placed.append(r)
+                leg2_specs.append((broker, prof, pick,
+                                   float(it.get("amount") or 0.0), allocator,
+                                   cache, int(it["qty"]),
+                                   quote_cache.get(it["symbol"])))
+        # CONCURRENT leg-2 placement (was a sequential await-loop). register_mode
+        # "add" blends each remaining-half fill INTO the existing position for the
+        # blended cost — the per-pick averaging is unchanged.
+        placed: List[Dict[str, Any]] = await self._gather_place_legs(
+            leg2_specs, register_mode="add")
         n_filled = sum(1 for p in placed
                        if p.get("status") in ("PLACED", "PARTIAL", "COMPLETE",
                                                "DRY_RUN"))
