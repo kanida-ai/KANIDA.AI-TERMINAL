@@ -344,3 +344,129 @@ def publish_kite_token(
         "requested_token_date": requested_date,
         "stored": True,
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RTS (2026-07-19): Rupeezy (Vortex) daily access-token SYNC — laptop → cloud.
+#
+# The EXACT parallel of the Kite token-sync above, with ONE structural difference:
+# the Rupeezy token is NOT a global daily row — it lives PER broker_account,
+# VAULT-ENCRYPTED. The headless Vortex bot (services/vortex_auto_auth.py) mints it
+# on the laptop and stores it on the ACTIVE rupeezy broker_account via
+# autotrade.vault.store_access_token(). A cloud copy of this backend cannot mint
+# (no Playwright / no login creds there), so this endpoint is the cloud INGEST:
+# the laptop POSTs {broker_account_id, access_token} and the cloud persists it
+# through the SAME vault store path, so the RupeezyBroker adapter's
+# self.profile.access_token resolves it unchanged.
+#
+# SECURITY: reuses the SAME self-contained, constant-time, fail-CLOSED auth as
+# every other publish route (X-Publish-Secret == env FALCON_PUBLISH_SECRET).
+# REAL-MONEY-ADJACENT: the token authorises live orders. The token VALUE is NEVER
+# logged or echoed — only its length, the account id, and the token_date.
+#
+# ADDITIVE: this ONLY adds a route. It does NOT change the adapter's request
+# logic, the mint bot, or any execution path. The persist uses
+# vault.store_access_token (no schema/insert duplication), which encrypts + writes
+# access_token_enc + stamps status=ACTIVE + token_date on THAT account — exactly
+# the row get_decrypted_creds() reads. Idempotent: a re-POST replaces the stored
+# token for that account.
+# ══════════════════════════════════════════════════════════════════════════════
+class RupeezyTokenPush(BaseModel):
+    broker_account_id: str
+    access_token: str
+    # Optional IST YYYY-MM-DD the token was minted; defaults to today IST on the
+    # server. Stamped onto the account so _derive_status()'s date rule agrees.
+    token_date: str | None = None
+    # Advisory; the vault store always stamps ACTIVE (a freshly-minted token IS
+    # active). Accepted for contract parity / forward-compat; not a downgrade path.
+    status: str = "ACTIVE"
+
+
+@router.post("/falcon/publish/rupeezy-token")
+def publish_rupeezy_token(
+    payload: RupeezyTokenPush,
+    x_publish_secret: str | None = Header(default=None, alias="X-Publish-Secret"),
+):
+    """Ingest the daily Rupeezy (Vortex) access token minted on the laptop and
+    persist it — VAULT-ENCRYPTED — on the given broker_account, so the cloud's
+    RupeezyBroker adapter serves it. See the RTS block above.
+
+    Body: { broker_account_id: str, access_token: str, token_date?: str (IST
+            YYYY-MM-DD), status?: str }
+    Returns: { ok: true, broker_account_id, token_date, stored: true }
+    """
+    # ── 1. Auth (self-contained, constant-time, fail-closed) — same as above ──
+    _require_secret(x_publish_secret)
+
+    # ── 2. Validate — reject empty ids/tokens (never store a blank) ───────────
+    bid = (payload.broker_account_id or "").strip()
+    if not bid:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "EMPTY_ACCOUNT_ID",
+                    "message": "broker_account_id is required."},
+        )
+    token = (payload.access_token or "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "EMPTY_TOKEN",
+                    "message": "access_token is empty or whitespace."},
+        )
+
+    token_date = (payload.token_date or "").strip() or datetime.now(IST).date().isoformat()
+
+    # ── 3. Resolve the account + assert it is a RUPEEZY account ───────────────
+    # Lazy import mirrors the kite path (autotrade/ on sys.path at runtime; keeps
+    # this module importable in isolation). NEVER cross-store: a token for the
+    # wrong broker on the wrong account is a real-money mis-route.
+    from autotrade import vault
+
+    acct = vault.get_account_public(bid)  # public dict, NO secrets; None if absent
+    if acct is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ACCOUNT_NOT_FOUND",
+                    "message": f"No broker account {bid!r} exists on this server."},
+        )
+    if str(acct.get("broker") or "").lower() != "rupeezy":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "NOT_A_RUPEEZY_ACCOUNT",
+                    "message": f"Account {bid!r} is broker "
+                               f"{acct.get('broker')!r}, not rupeezy — refusing to "
+                               "store a Rupeezy token on it."},
+        )
+
+    # ── 4. Persist via the vault's OWN store path (the SAME fn the mint bot uses:
+    # vortex_auto_auth._exchange_and_store → vault.store_access_token). Encrypts
+    # access_token_enc, stamps status=ACTIVE + token_date on THIS account. ───────
+    try:
+        stored = vault.store_access_token(bid, token, token_date=token_date)
+    except vault.VaultDisabledError:
+        # Real-money-adjacent: with no vault key we CANNOT encrypt the token.
+        # Fail closed (503) — never store a live-order token in plaintext.
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "VAULT_DISABLED",
+                    "message": "FALCON_VAULT_KEY is not set on the server — "
+                               "cannot store an encrypted Rupeezy token."},
+        )
+    if stored is None:
+        # Race: the account vanished between the check and the write.
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ACCOUNT_NOT_FOUND",
+                    "message": f"Broker account {bid!r} not found at write time."},
+        )
+
+    # NEVER log the token value — only its length + the metadata.
+    log.info("rupeezy-token ingest: stored for account=%s (token_date=%s, "
+             "token_len=%d)", bid, token_date, len(token))
+
+    return {
+        "ok": True,
+        "broker_account_id": bid,
+        "token_date": token_date,
+        "stored": True,
+    }
