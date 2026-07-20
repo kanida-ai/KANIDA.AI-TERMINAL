@@ -877,8 +877,18 @@ async def cancel_and_retry_exit(
         # (No batch hoist here: cancel_and_retry_exit is a SINGLE-leg call site —
         # there is no loop to hoist out of. One leg = one round trip already.)
         try:
+            # HOLDINGS-AWARE for CNC/delivery (2026-07-20 leaked-BTST fix): a
+            # settled overnight lot has left the DAY net book (it lives in HOLDINGS
+            # now), so get_net_position_qty alone reads 0 and would false-flat this
+            # retry (place NO order → the leg leaks). held_qty_for_exit adds
+            # holdings for delivery legs and IS get_net_position_qty (day-net only)
+            # for MIS/NRML/MTF/F&O (byte-for-byte). The delivery decision uses the
+            # order product (`product` when the caller states it, else kite_product
+            # — the kill/retry callers pass kite_product, not product). Equally
+            # FAIL-LOUD (raises on a live broker error → the B1 abort below).
             net_qty = await asyncio.to_thread(
-                broker.get_net_position_qty, symbol, instrument_type)
+                broker.held_qty_for_exit, symbol, instrument_type,
+                (product or kite_product), direction)
         except Exception as _net_e:
             log.error(
                 "cancel_and_retry_exit %s/%s: pre-place net probe RAISED: %s — "

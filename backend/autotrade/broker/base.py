@@ -438,6 +438,114 @@ class BrokerClient(ABC):
         (paper / stub / no live creds) → None."""
         return None
 
+    # ── HOLDINGS-AWARE PRE-EXIT HELD READ (settled-CNC exit fix, 2026-07-20) ──
+    @staticmethod
+    def is_delivery_product(product: Optional[str],
+                            instrument_type: str = "EQ",
+                            direction: str = "long") -> bool:
+        """True when (product, instrument_type, direction) is a LONG DELIVERY/CNC
+        leg that can settle into the holdings book — so the pre-exit flat guard
+        MUST be holdings-aware. MIS / NRML / MTF / F&O → False (day net-positions
+        only; they never settle to holdings). EQ product is normalised to CNC.
+
+        DIRECTION: a SHORT is never a delivery HOLDING (you cannot hold shares you
+        are short) — its exposure is the day-net |quantity|, and broker_held_qty()
+        floors a negative CNC net to 0. So a short ALWAYS takes the day-net path
+        regardless of product, preserving the short-cover clamp.
+
+        Broker-AGNOSTIC: the delivery rule lives in this ONE place and is shared by
+        held_qty_for_exit() AND the exit callers (session / kill switch / retry), so
+        no adapter and no caller can drift the definition. It mirrors the position
+        reconciler, which combines holdings ONLY for a (long) product=='CNC'."""
+        if str(direction or "long").lower() == "short":
+            return False
+        itype = str(instrument_type or "EQ").upper()
+        prod = str(product or "CNC").upper()
+        if prod == "EQ":
+            prod = "CNC"
+        return prod == "CNC" and itype not in ("FUT", "OPT", "CE", "PE")
+
+    def held_qty_for_exit(self, symbol: str, instrument_type: str = "EQ",
+                          product: Optional[str] = "CNC",
+                          direction: str = "long") -> Optional[int]:
+        """HOLDINGS-AWARE broker-held qty for the PRE-EXIT flat decision, or None.
+
+        THE REAL-MONEY BUG THIS CLOSES (2026-07-20, leaked BTST): the pre-exit
+        reconcile guard read ONLY the broker's DAY net-positions book
+        (get_net_position_qty). After T+1 settlement an overnight CNC/delivery lot
+        LEAVES the day-positions book and lives in the HOLDINGS book, so day-net
+        reads 0 for a still-held settled name → our_held==0 → the guard booked the
+        position CLOSED (…_RECONCILED_FLAT) and placed NO sell. Five real BTST
+        names stayed live at the broker. This method makes the guard consult
+        holdings for delivery legs so a settled overnight hold reads its true qty.
+
+        THE BROKER-AGNOSTIC INVARIANT (why a new adapter cannot reintroduce this
+        bug): this is implemented ONCE, HERE, and consumes only the two STANDARD
+        reads every adapter already provides — get_net_position_qty()/
+        get_holdings() — plus broker_held_qty(). So ANY adapter (Zerodha, Rupeezy,
+        and every future broker) gets correct settled-CNC exit behaviour FOR FREE
+        the moment it implements those two reads; there is no per-broker exit path
+        to get wrong (no `if broker == "…"` anywhere).
+
+        CONTRACT:
+          * CNC / delivery: |day net| + Σ holdings(quantity + t1_quantity) for the
+            symbol, combined via THIS adapter's own book semantics
+            (broker_held_qty / CNC_HOLDINGS_INCLUDE_SAME_DAY_BUYS) — the SAME
+            holdings+positions contract the position reconciler uses.
+          * MIS / NRML / MTF / F&O: day net-positions ONLY (never consult holdings
+            — MIS never settles, and a short's negative net would be mis-mapped).
+            BYTE-FOR-BYTE the pre-fix get_net_position_qty behaviour.
+          * None ONLY for paper / not-live (get_net_position_qty None) → the CALLER
+            proceeds with its NORMAL exit path, BYTE-FOR-BYTE unchanged (paper is a
+            DRY_RUN order anyway).
+          * RAISES on a genuine LIVE broker error on the day-net read — inherited
+            from get_net_position_qty(), which fail-LOUDly re-raises (never swallows
+            to None) — so the caller's B1 pre-exit guard ABORTS the exit (no blind
+            order, the 2026-07-10 BRIGADE class). A FULL broker outage therefore
+            RAISES here (on the net read) before holdings is ever consulted.
+
+        HOLDINGS UNAVAILABLE (get_holdings None — a narrow PARTIAL failure where the
+        net read succeeded but holdings did not) is treated as an EMPTY holdings
+        book (holdings_qty 0), so a genuinely-flat CNC (day-net 0) still reconciles
+        flat EXACTLY as before this fix — the established pre-exit-guard contract and
+        every existing exit/reconcile test are preserved byte-for-byte. RESIDUAL
+        (flagged): a settled overnight lot whose holdings read transiently fails
+        could still false-flat; mitigated because a real broker outage RAISES on the
+        net read first, and the real 2026-07-20 incident had holdings AVAILABLE. An
+        adapter whose get_holdings() returns [] (not None) on error (e.g. Rupeezy
+        today) shares this residual — hardening it to None/raise-on-error is an
+        adapter follow-up (operator sign-off).
+
+        Every downstream failure mode is still bounded by the caller's oversell
+        clamp + query-before-place + positive-evidence reconcile + phantom-close
+        guard."""
+        if not self.is_delivery_product(product, instrument_type, direction):
+            # Intraday / margin / F&O / any SHORT never settle to holdings → day-net
+            # ONLY (a short's exposure is |net|, resolved by our_held_at_broker).
+            return self.get_net_position_qty(symbol, instrument_type)
+        # CNC delivery. get_net_position_qty is FAIL-LOUD (raises on a live broker
+        # error → the caller's B1 guard aborts; returns None only for paper/not-live).
+        day_net = self.get_net_position_qty(symbol, instrument_type)
+        if day_net is None:
+            return None  # paper / not-live → caller's normal exit path, unchanged.
+        holdings = self.get_holdings()
+        bare = symbol.split(":", 1)[0] if (symbol and ":" in symbol) else symbol
+        holdings_qty = 0
+        for h in (holdings or []):
+            if not isinstance(h, dict):
+                continue
+            try:
+                hsym = str(h.get("tradingsymbol") or "")
+                hbare = hsym.split(":", 1)[0] if ":" in hsym else hsym
+                if hbare != bare:
+                    continue
+                holdings_qty += int((h.get("quantity") or 0)
+                                    + (h.get("t1_quantity") or 0))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                continue
+        return int(self.broker_held_qty(
+            product="CNC", holdings_qty=holdings_qty, net_qty=int(day_net)))
+
     def get_orders(self) -> Optional[List[dict]]:
         """Return the broker's FULL day orderbook in ONE call, as a list of raw
         broker order rows, or None when the broker can't answer.

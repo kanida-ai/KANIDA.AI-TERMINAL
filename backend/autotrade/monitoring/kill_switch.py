@@ -195,7 +195,20 @@ class KillSwitchExecutor:
             # serving ws_driver/tick during the blocking broker call.
             return await asyncio.to_thread(_b.fetch_net_position_book)
 
+        async def _fetch_holdings(_b):
+            # HOLDINGS-AWARE batch (2026-07-20 leaked-BTST fix): fetch each broker's
+            # holdings ONCE so a settled CNC leg's held qty is combined in-memory —
+            # keeping the kill O(1) in round trips (never O(N) per-leg get_holdings).
+            # Best-effort: get_holdings swallows errors to None per contract → None
+            # is treated as an EMPTY holdings book below (a genuinely-flat CNC still
+            # reconciles flat; the anti-BRIGADE guard is the net-read raise, not this).
+            try:
+                return await asyncio.to_thread(_b.get_holdings)
+            except Exception:  # pragma: no cover - get_holdings is best-effort
+                return None
+
         _probe_books: Dict[int, Any] = {}
+        _probe_holdings: Dict[int, Any] = {}
         if _probe_brokers:
             _bids = list(_probe_brokers.keys())
             _fetched = await asyncio.gather(
@@ -213,6 +226,37 @@ class KillSwitchExecutor:
                     continue
                 if _res is not None:
                     _probe_books[_i] = _res
+            # Holdings batch (best-effort, additive; a failure/None → treated as an
+            # empty book, i.e. day-net-only for that broker's CNC legs = the pre-fix
+            # behaviour). Never blocks the flatten.
+            _held_fetched = await asyncio.gather(
+                *[_fetch_holdings(_probe_brokers[_i]) for _i in _bids],
+                return_exceptions=True)
+            for _i, _hres in zip(_bids, _held_fetched):
+                if not isinstance(_hres, BaseException) and _hres is not None:
+                    _probe_holdings[_i] = _hres
+
+        def _batched_holdings_qty(_bid: int, sym: str) -> int:
+            """Σ holdings(quantity + t1_quantity) for `sym` from the pre-fetched
+            per-broker holdings book (the SAME contract as BrokerClient.
+            held_qty_for_exit + the reconciler). 0 when unavailable → day-net-only."""
+            hl = _probe_holdings.get(_bid)
+            if not hl:
+                return 0
+            _bare = sym.split(":", 1)[0] if (sym and ":" in sym) else sym
+            total = 0
+            for h in hl:
+                if not isinstance(h, dict):
+                    continue
+                try:
+                    hs = str(h.get("tradingsymbol") or "")
+                    hb = hs.split(":", 1)[0] if ":" in hs else hs
+                    if hb == _bare:
+                        total += int((h.get("quantity") or 0)
+                                     + (h.get("t1_quantity") or 0))
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    continue
+            return total
         for pos in positions:
             symbol = pos["symbol"]
             prof_id = pos.get("broker_profile")
@@ -248,15 +292,38 @@ class KillSwitchExecutor:
             # fall through to the UNCHANGED per-leg probe below.
             net_qty = None
             _batched = False
+            # HOLDINGS-AWARE for CNC/delivery (2026-07-20 leaked-BTST fix): a
+            # settled overnight CNC lot has LEFT the day net-positions book (it
+            # lives in HOLDINGS now), so the day-net alone reads 0 for it and would
+            # false-flat + leak a real BTST hold (MAX_HOLD_EXIT flattens through
+            # THIS path). For a LONG delivery leg we combine the batched day-net
+            # with the batched holdings IN-MEMORY (via the adapter's broker_held_qty
+            # semantics) so the kill stays O(1) in round trips. Intraday / margin /
+            # F&O / any SHORT (never settle to holdings) keep the raw batched day-net
+            # fast path, byte-for-byte.
+            _is_delivery_leg = broker.is_delivery_product(
+                pos.get("product"), itype, direction)
             _book = _probe_books.get(id(broker))
             if _book is not None:
                 _bq = broker.net_qty_from_book(_book, symbol, itype)
                 if _bq is not None:
-                    net_qty = _bq
+                    if _is_delivery_leg:
+                        _hq = _batched_holdings_qty(id(broker), symbol)
+                        net_qty = int(broker.broker_held_qty(
+                            product="CNC", holdings_qty=_hq, net_qty=int(_bq)))
+                    else:
+                        net_qty = _bq
                     _batched = True
             if not _batched:
                 try:
-                    net_qty = broker.get_net_position_qty(symbol, itype)
+                    # held_qty_for_exit is holdings-aware for a LONG CNC/delivery leg
+                    # and IS get_net_position_qty (day-net only) for everything else
+                    # (short / MIS / NRML / MTF / F&O) — so a non-delivery leg that
+                    # missed the batch is byte-for-byte unchanged. Equally FAIL-LOUD
+                    # (raises on a live broker error → the B1 abort below); paper /
+                    # unknown → None (unchanged).
+                    net_qty = broker.held_qty_for_exit(
+                        symbol, itype, pos.get("product"), direction)
                 except Exception as _net_e:
                     # FAIL-SAFE (Fix B1, 2026-07-10 BRIGADE double-cover). The pre-exit
                     # position read RAISED (broker connection/timeout — e.g.

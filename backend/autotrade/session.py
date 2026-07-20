@@ -1346,8 +1346,16 @@ async def _exit_single_position_inner(
     # fail-loud B1 guard below is untouched. (No batch hoist here: this is a
     # SINGLE-position function — there is no loop to hoist out of.)
     try:
+        # HOLDINGS-AWARE for CNC/delivery (2026-07-20 leaked-BTST fix): a settled
+        # overnight lot has left the DAY net-positions book and lives in HOLDINGS,
+        # so get_net_position_qty alone reads 0 and would false-flat + leak a real
+        # BTST hold. held_qty_for_exit adds holdings for delivery legs; for MIS/
+        # NRML/MTF/F&O it IS get_net_position_qty (day-net only, byte-for-byte). It
+        # is equally FAIL-LOUD (raises on a live broker error → the B1 abort below),
+        # and returns None for paper / unknown → the normal exit runs unchanged.
         net_qty = await asyncio.to_thread(
-            broker.get_net_position_qty, position.get("symbol"), itype)
+            broker.held_qty_for_exit, position.get("symbol"), itype,
+            position.get("product"), direction)
     except Exception as _net_e:
         # FAIL-SAFE (Fix B1, 2026-07-10 BRIGADE double-cover). The pre-exit position
         # read RAISED (broker connection/timeout — ConnectionResetError 10054 mid
