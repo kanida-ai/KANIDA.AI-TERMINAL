@@ -39,6 +39,36 @@ variable "acm_certificate_arn" {
   default     = null
 }
 
+# ── AutoTrade live-execution gate (THE cutover switch) ──────────────────────
+# Default paper-safe: the cloud can NEVER place a real order until these flip.
+# Flip to true / "marketable_limit" ONLY at the ownership handoff (after the
+# laptop gate is OFF), then apply. Rollback = flip back + apply.
+variable "autotrade_enabled" {
+  description = "FALCON_AUTOTRADE_ENABLED. false = paper-safe. Set true only at cutover handoff (laptop must be false first — single trade owner)."
+  type        = bool
+  default     = false
+}
+variable "autotrade_execution_mode" {
+  description = "FALCON_AUTOTRADE_EXECUTION_MODE. 'paper' until cutover; 'marketable_limit' at handoff (matches the laptop's live mode)."
+  type        = string
+  default     = "paper"
+}
+
+# ── System Engineering Agent Hierarchy (sysagents) — observe-only health layer ─
+# Default OFF. Arm AFTER the 1-share proof: sysagents_enabled=true with paging
+# 'off' during settling, then paging 'on' after one clean session. Never touches
+# trades (read-only health monitors); SYSAGENTS_KILL_SWITCH hard-stops the layer.
+variable "sysagents_enabled" {
+  description = "SYSAGENTS_ENABLED. Default off. Arm after the 1-share proof (observe-only; never touches trades)."
+  type        = bool
+  default     = false
+}
+variable "sysagents_paging" {
+  description = "SYSAGENTS_PAGING. 'off' during the cutover-settling window; 'on' after one clean live session."
+  type        = string
+  default     = "off"
+}
+
 # ── WS4 on-demand per-user egress-IP provisioning (KANIDA_EGRESS_* task env) ──
 variable "egress_proxy_sg_id" {
   description = "Security group id for on-demand per-user egress proxy boxes (module.security.egress_proxy_sg_id). Injected as KANIDA_EGRESS_SG_ID."

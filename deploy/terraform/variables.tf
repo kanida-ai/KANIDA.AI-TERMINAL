@@ -54,9 +54,12 @@ variable "alb_ingress_cidrs" {
 
 # ── RDS ──────────────────────────────────────────────────────────────────────
 variable "rds_instance_class" {
+  # DOWNSIZED 2026-07-18: RDS is UNUSED (app runs on EFS-SQLite; the Postgres
+  # cutover is future). db.t4g.micro single-AZ ≈ $19/mo vs db.t4g.medium Multi-AZ
+  # ≈ $110/mo. Restore db.t4g.medium (+ rds_multi_az=true) at the Postgres cutover.
   description = "RDS instance class."
   type        = string
-  default     = "db.t4g.medium"
+  default     = "db.t4g.micro"
 }
 
 variable "rds_allocated_storage" {
@@ -68,7 +71,7 @@ variable "rds_allocated_storage" {
 variable "rds_multi_az" {
   description = "Multi-AZ standby (removes the single-DB SPOF). Keep true in prod."
   type        = bool
-  default     = true
+  default     = false # DOWNSIZED 2026-07-18 — unused RDS; re-enable at Postgres cutover.
 }
 
 variable "rds_backup_retention_days" {
@@ -192,4 +195,29 @@ variable "egress_ssh_key_name" {
   description = "EC2 key pair name for the egress proxy boxes (for break-glass SSH). Optional."
   type        = string
   default     = null
+}
+
+# ── AutoTrade live-execution gate (THE cutover switch) ──────────────────────
+# Default paper-safe. At the ownership handoff (laptop gate OFF first):
+#   terraform apply -var autotrade_enabled=true -var autotrade_execution_mode=marketable_limit
+# Rollback = re-apply with autotrade_enabled=false.
+variable "autotrade_enabled" {
+  type        = bool
+  default     = false
+}
+variable "autotrade_execution_mode" {
+  type        = string
+  default     = "paper"
+}
+
+# ── Health layer (sysagents) — arm AFTER the 1-share proof ───────────────────
+#   terraform apply -var sysagents_enabled=true            (paging stays 'off' to settle)
+#   terraform apply -var sysagents_enabled=true -var sysagents_paging=on   (after a clean session)
+variable "sysagents_enabled" {
+  type        = bool
+  default     = false
+}
+variable "sysagents_paging" {
+  type        = string
+  default     = "off"
 }

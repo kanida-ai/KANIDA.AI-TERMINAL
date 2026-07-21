@@ -72,10 +72,17 @@ resource "aws_ecs_task_definition" "app" {
         { name = "FALCON_OUTCOMES_ARTIFACT", value = "/data/db/falcon_serve_evidence.db" },
         { name = "FALCON_SIM_PATTERNS_ARTIFACT", value = "/data/db/falcon_sim_patterns.db" },
         # Paper-safe by construction. Live trading requires FALCON_AUTOTRADE_ENABLED
-        # == "true"; set explicitly to "false" so the cloud box can NEVER place a
-        # real order during bring-up/parity, independent of any default drift.
-        { name = "FALCON_AUTOTRADE_ENABLED", value = "false" },
-        { name = "FALCON_AUTOTRADE_EXECUTION_MODE", value = "paper" },
+        # == "true". Defaults (var defaults) are false/"paper" so the cloud box can
+        # NEVER place a real order during bring-up/parity. Flip both at the cutover
+        # handoff via `-var autotrade_enabled=true -var autotrade_execution_mode=marketable_limit`
+        # (ONLY after the laptop gate is false — single trade owner).
+        { name = "FALCON_AUTOTRADE_ENABLED", value = tostring(var.autotrade_enabled) },
+        { name = "FALCON_AUTOTRADE_EXECUTION_MODE", value = var.autotrade_execution_mode },
+        # System Engineering Agent Hierarchy (observe-only health layer). Default
+        # OFF; arm AFTER the 1-share proof via `-var sysagents_enabled=true`.
+        # Read-only — never touches trades. SYSAGENTS_KILL_SWITCH hard-stops it.
+        { name = "SYSAGENTS_ENABLED", value = tostring(var.sysagents_enabled) },
+        { name = "SYSAGENTS_PAGING", value = var.sysagents_paging },
         # Rupeezy/Vortex instrument master (symbol→numeric token; needed to PLACE a
         # Rupeezy order). Shipped to EFS alongside the DB seed at /data/db so it
         # refreshes without an image rebuild. Absent until shipped → Rupeezy orders

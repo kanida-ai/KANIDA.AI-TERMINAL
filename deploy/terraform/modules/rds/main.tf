@@ -37,6 +37,11 @@ resource "aws_db_instance" "this" {
   engine         = "postgres"
   engine_version = var.engine_version
   instance_class = var.instance_class
+  # Apply class / Multi-AZ changes NOW rather than the weekly maintenance window.
+  # RDS is unused (EFS-SQLite serves today), so the brief reboot is harmless and the
+  # 2026-07-18 downsize saves cost immediately. Set back to false once RDS is in
+  # production use to avoid unplanned downtime on future changes.
+  apply_immediately = true
 
   allocated_storage     = var.allocated_storage
   max_allocated_storage = var.allocated_storage * 4   # storage autoscaling headroom

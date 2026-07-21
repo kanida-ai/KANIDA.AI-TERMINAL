@@ -176,6 +176,14 @@ module "compute" {
   egress_proxy_sg_id   = module.security.egress_proxy_sg_id
   egress_ami_id        = data.aws_ami.al2023_arm.id
   egress_instance_type = "t4g.nano"
+
+  # AutoTrade live-execution gate (THE cutover switch) — default paper-safe.
+  # Flip at handoff: -var autotrade_enabled=true -var autotrade_execution_mode=marketable_limit
+  autotrade_enabled        = var.autotrade_enabled
+  autotrade_execution_mode = var.autotrade_execution_mode
+  # Health layer (observe-only) — arm AFTER the 1-share proof: -var sysagents_enabled=true
+  sysagents_enabled = var.sysagents_enabled
+  sysagents_paging  = var.sysagents_paging
 }
 
 # AL2023 arm64 AMI for on-demand egress proxy boxes (matches t4g.nano). Same
