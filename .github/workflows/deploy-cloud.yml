@@ -1,0 +1,118 @@
+# ============================================================================
+# Kanida.AI — Cloud deploy pipeline  (build image → roll ECS)
+#
+# WHAT IT DOES: packages the app source, hands it to your existing CodeBuild
+# project (which builds the heavy chromium/playwright/scientific image on a
+# managed disk and pushes kanida-backend:phase2 to ECR), then forces the ECS
+# service to pull the new image. One `git push` → live in ~10-12 min.
+#
+# WHY CodeBuild and not "build here": the image is far larger than a GitHub
+# runner's ~14 GB disk (same reason CloudShell couldn't build it). CodeBuild
+# has the disk + the proven buildspec already configured.
+#
+# ── SAFETY: this workflow is DORMANT until explicitly armed ──────────────────
+#   1. Trigger is `workflow_dispatch` ONLY — it CANNOT fire on a push. (The
+#      auto-deploy-on-push trigger is present but commented out below; uncomment
+#      it only after the cutover is proven green — see deploy/CICD_SETUP.md.)
+#   2. It needs an AWS role (secrets.AWS_DEPLOY_ROLE_ARN) that does not exist
+#      yet, so even a manual run is inert until arming creates it.
+# See deploy/CICD_SETUP.md for the 3 arming steps.
+# ============================================================================
+name: deploy-cloud
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DEPLOY to confirm a LIVE cloud deploy'
+        required: true
+        default: ''
+  # ─── ARM AFTER CUTOVER: uncomment to auto-deploy on every push to main ───
+  # push:
+  #   branches: [ main ]
+  #   paths-ignore:
+  #     - '**.md'
+  #     - 'docs/**'
+
+# OIDC: GitHub mints a short-lived token, AWS trusts it → assume the deploy
+# role. No long-lived AWS access keys are ever stored in GitHub.
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-cloud       # never run two deploys at once
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPO:   kanida-backend
+  IMAGE_TAG:  phase2
+  CLUSTER:    kanida-prod-cluster
+  SERVICE:    kanida-prod-svc
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm gate (manual runs must type DEPLOY)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm != 'DEPLOY'
+        run: |
+          echo "::error::Refusing to deploy — type DEPLOY in the confirm box to proceed."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC — no stored keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package source for CodeBuild
+        run: |
+          set -euo pipefail
+          # Mirror the manual build zip: APP SOURCE ONLY.
+          # Hard-exclude .git (repo is huge), all DBs/data, and every secret file.
+          zip -rq /tmp/src.zip . \
+            -x '.git/*' \
+               'data/*' '**/*.db' '**/*.db-wal' '**/*.db-shm' '**/*.sqlite*' \
+               'config/.env' 'config/.env.*' '**/.env' '**/.env.*' \
+               '**/__pycache__/*' '**/*.pyc' \
+               'scratchpad/*' 'arena/*' \
+               'node_modules/*' '**/node_modules/*' '.next/*' '**/.next/*' \
+               '*.zip' '*.tar.gz'
+          KEY="ci/src-${GITHUB_SHA}.zip"
+          aws s3 cp /tmp/src.zip "s3://${{ secrets.CODEBUILD_SRC_BUCKET }}/${KEY}"
+          echo "SRC_KEY=${KEY}" >> "$GITHUB_ENV"
+          echo "Uploaded s3://${{ secrets.CODEBUILD_SRC_BUCKET }}/${KEY}"
+
+      - name: Build image on CodeBuild (managed disk)
+        run: |
+          set -euo pipefail
+          BID=$(aws codebuild start-build \
+            --project-name "${{ secrets.CODEBUILD_PROJECT }}" \
+            --source-type-override S3 \
+            --source-location-override "${{ secrets.CODEBUILD_SRC_BUCKET }}/${SRC_KEY}" \
+            --query 'build.id' --output text)
+          echo "CodeBuild started: $BID"
+          echo "Logs: https://${AWS_REGION}.console.aws.amazon.com/codesuite/codebuild/projects"
+          # Poll to completion (build takes ~8-10 min).
+          while true; do
+            S=$(aws codebuild batch-get-builds --ids "$BID" --query 'builds[0].buildStatus' --output text)
+            echo "  codebuild status: $S"
+            case "$S" in
+              SUCCEEDED) echo "Image built + pushed to ECR:${IMAGE_TAG}"; break ;;
+              IN_PROGRESS) sleep 20 ;;
+              *) echo "::error::CodeBuild ended $S"; exit 1 ;;
+            esac
+          done
+
+      - name: Roll ECS to the new image
+        run: |
+          set -euo pipefail
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" \
+            --force-new-deployment --query 'service.deployments[0].status' --output text
+          echo "Waiting for the service to stabilize on the new image..."
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          echo "✅ Deploy complete — $SERVICE is running the new image."
