@@ -116,6 +116,11 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 COPY backend/ /app/backend/
 COPY scripts/ /app/scripts/
+# Entrypoint: runs the SQLite DBs on LOCAL disk (not EFS) for laptop-SSD speed,
+# with a periodic + on-SIGTERM sync back to EFS for persistence. See the script
+# header for the full rationale (EFS/NFS latency + lock contention was the
+# live-load crash-loop root cause).
+COPY deploy/entrypoint.sh /app/entrypoint.sh
 
 # --- Non-root runtime user ---------------------------------------------------
 # Trading backend should not run as root. The mounted /data volume must be
@@ -130,8 +135,8 @@ COPY scripts/ /app/scripts/
 # and makes local docker-compose bind-mounts behave too.
 RUN groupadd --system --gid 10001 appuser \
     && useradd --system --uid 10001 --gid 10001 --create-home appuser \
-    && mkdir -p /data/db \
-    && chown -R appuser:appuser /app /ms-playwright /data
+    && mkdir -p /data/db /localdb \
+    && chown -R appuser:appuser /app /ms-playwright /data /localdb
 USER appuser
 
 # --- Healthcheck -------------------------------------------------------------
@@ -147,4 +152,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
 # local tunnel fronts it; in a container the orchestrator/ALB is the front door).
 WORKDIR /app/backend
 EXPOSE 8001
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8001}"]
+# Launch via the entrypoint: copies DBs EFS->local, repoints the app at local
+# disk (fast), starts uvicorn, syncs local->EFS periodically + on SIGTERM.
+# Runs from WORKDIR /app/backend so `uvicorn main:app` still imports main.py.
+CMD ["sh", "/app/entrypoint.sh"]
