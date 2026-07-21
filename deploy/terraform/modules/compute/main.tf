@@ -76,6 +76,11 @@ resource "aws_ecs_task_definition" "app" {
         # real order during bring-up/parity, independent of any default drift.
         { name = "FALCON_AUTOTRADE_ENABLED", value = "false" },
         { name = "FALCON_AUTOTRADE_EXECUTION_MODE", value = "paper" },
+        # Rupeezy/Vortex instrument master (symbol→numeric token; needed to PLACE a
+        # Rupeezy order). Shipped to EFS alongside the DB seed at /data/db so it
+        # refreshes without an image rebuild. Absent until shipped → Rupeezy orders
+        # fail loud ("instrument master not configured"); harmless while gates are OFF.
+        { name = "RUPEEZY_INSTRUMENT_MASTER", value = "/data/db/rupeezy_instruments.json" },
         # WS4 on-demand per-user egress-IP provisioning (egress_provisioner.py via
         # boto3). Region + the public subnet / egress-proxy SG / AMI / instance type
         # a provisioned proxy box uses. Empty AMI/SG = provisioning endpoints return
@@ -197,6 +202,20 @@ resource "aws_ecs_service" "app" {
   task_definition = aws_ecs_task_definition.app.arn
   desired_count   = var.desired_count   # keep 1 until the in-process scheduler is externalized
   launch_type     = "FARGATE"
+
+  # ── STOP-THEN-START deploy (single-writer SQLite on shared EFS) ────────────
+  # The app writes SQLite files on the shared EFS volume at /data/db, and SQLite
+  # is single-writer. The DEFAULT rolling deploy (max 200% / min 100%) starts the
+  # NEW task BEFORE draining the old one, so for ~1-2 min TWO tasks write the same
+  # DB over NFS → "database disk image is malformed" (hit live 2026-07-21 during a
+  # force-new-deployment; required a stop + re-seed to recover). Forcing
+  # max=100% / min=0% makes ECS STOP the old task before starting the new one, so
+  # there is NEVER more than one writer. Cost: ~1-2 min of downtime per deploy —
+  # acceptable and correct until the DB moves to RDS Postgres (multi-writer safe),
+  # at which point revert to a rolling deploy. This also makes the CI/CD pipeline's
+  # force-new-deployment corruption-safe. See deploy/CICD_SETUP.md.
+  deployment_maximum_percent         = 100
+  deployment_minimum_healthy_percent = 0
 
   network_configuration {
     subnets          = var.private_subnet_ids

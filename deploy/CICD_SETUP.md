@@ -56,6 +56,15 @@ if it's currently `NO_SOURCE`, we set it to `S3`. I'll check this in Step A.)*
 
 ---
 
+## Deploy safety: single-writer DB
+The service runs **stop-then-start** (`deployment_maximum_percent=100`,
+`deployment_minimum_healthy_percent=0` — in `modules/compute`). This is
+**required**: the app writes SQLite on shared EFS, and a rolling deploy would run
+two writers for ~1-2 min → `database disk image is malformed` (hit live
+2026-07-21). So the pipeline's `force-new-deployment` is corruption-safe, at the
+cost of ~1-2 min downtime per deploy. Revert to rolling only after the DB moves to
+RDS Postgres. **Never** raise `maximum_percent` above 100 while on EFS-SQLite.
+
 ## Guardrails baked in
 - **Dormant by default** — manual trigger only; the confirm box must read `DEPLOY`.
 - **`concurrency`** — never two deploys at once.
