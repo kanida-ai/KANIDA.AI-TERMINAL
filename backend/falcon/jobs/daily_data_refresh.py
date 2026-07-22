@@ -41,6 +41,16 @@ def run() -> dict:
 
         from ..config import FALCON_DB
         s = fetch_eq_daily(FALCON_DB, symbols, start, end, n_workers=24, rps=5)
+        # Surface a SAMPLE of fetch/auth errors so a systematic failure
+        # (IP / historical-data permission / rate-limit) is diagnosable from the
+        # logs instead of just a count. (cloud #-pipeline bring-up)
+        _errs = [d.get("error") for d in (s.get("details") or {}).values()
+                 if d.get("status") in ("fetch_error", "auth_error") and d.get("error")]
+        if _errs:
+            from collections import Counter
+            for _msg, _cnt in Counter(_errs).most_common(3):
+                print(f"[daily_data_refresh] fetch error x{_cnt}: {str(_msg)[:400]}", flush=True)
+        s.pop("details", None)  # keep the returned/audited summary compact
         state["rows"]  = s.get("rows_total", 0)
         state["notes"] = f"fetched {s.get('rows_total', 0)} new bars across {len(symbols)} symbols, {start} -> {end}"
         return {"status": "success", **s}
