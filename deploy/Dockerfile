@@ -121,6 +121,9 @@ COPY scripts/ /app/scripts/
 # header for the full rationale (EFS/NFS latency + lock contention was the
 # live-load crash-loop root cause).
 COPY deploy/entrypoint.sh /app/entrypoint.sh
+# Belt-and-suspenders: strip any CR so a Windows/autocrlf line-ending can never
+# reach dash (a stray \r makes `set`/commands fail with "Illegal option").
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod 0755 /app/entrypoint.sh
 
 # --- Non-root runtime user ---------------------------------------------------
 # Trading backend should not run as root. The mounted /data volume must be
