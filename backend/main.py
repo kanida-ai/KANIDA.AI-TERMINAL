@@ -435,9 +435,30 @@ async def lifespan(app: FastAPI):
     # anymore. It remains importable (admin status reads, the manual
     # /admin/auth/refresh-now path still works for on-demand refresh), but the
     # recurring 30-min loop is owned by the Scheduled Task.
-    log.info("Zerodha auto-auth scheduler NOT started in-process — owned by "
-              "standalone Scheduled Task 'KanidaZerodhaAuth' (Fix 1, 2026-06-02). "
-              "Backend reads token from DB only.")
+    # CLOUD self-minting (FALCON_INPROCESS_AUTH=true): start the in-process auth
+    # scheduler so the CLOUD mints its own Zerodha token (Playwright login + TOTP,
+    # creds from Secrets) — no laptop. The "aged process loses Playwright" root
+    # cause above was SLEEP-specific (a Fargate task never sleeps), so it does not
+    # apply here. IMPORTANT: only ONE minter per Kite account (a fresh
+    # generate_session invalidates the prior token) — so when this is on, the
+    # laptop's KanidaZerodhaAuth task MUST be disabled. The laptop leaves this
+    # flag unset and keeps its standalone task.
+    if os.environ.get("FALCON_INPROCESS_AUTH", "").strip().lower() in ("1", "true", "yes"):
+        try:
+            from services.auth_scheduler import start as _inproc_auth_start
+            if _inproc_auth_start():
+                log.info("Zerodha auto-auth scheduler STARTED in-process "
+                         "(FALCON_INPROCESS_AUTH) — cloud self-mints its token.")
+            else:
+                log.warning("in-process auth scheduler start() returned False "
+                            "(already running or disabled).")
+        except Exception as e:  # never let auth wiring crash boot
+            log.exception("in-process auth scheduler failed to start: %s", e)
+    else:
+        log.info("Zerodha auto-auth scheduler NOT started in-process — owned by "
+                  "standalone Scheduled Task 'KanidaZerodhaAuth' (Fix 1, 2026-06-02). "
+                  "Backend reads token from DB only. (set FALCON_INPROCESS_AUTH=true "
+                  "for cloud self-minting.)")
 
     # Sprint 5c-2: Featured replay pre-warmer. 6h daemon that keeps the 3
     # landing-page replay cache rows hot — kills the 2.26s cold-load that

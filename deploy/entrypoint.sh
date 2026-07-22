@@ -33,6 +33,10 @@ export RUPEEZY_INSTRUMENT_MASTER="$LOCAL_DIR/rupeezy_instruments.json"
 # signals + taxonomy, so point the "R&D" read path (Top-10/Top-50 explainer,
 # persona sim, admin market-data) at the local serving DB. (#3 serve-time dep.)
 export POWER_RND_DB_PATH="$LOCAL_DIR/kanida_universe.db"
+# Cloud mints its OWN Zerodha token in-process (Playwright + TOTP, creds from
+# Secrets) — no laptop. The laptop's KanidaZerodhaAuth task must be DISABLED when
+# this is on (one minter per Kite account).
+export FALCON_INPROCESS_AUTH="true"
 echo "entrypoint: app DB paths -> $LOCAL_DIR (sync back every ${SYNC_SECS}s)"
 
 sync_back() {
