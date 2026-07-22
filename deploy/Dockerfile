@@ -124,6 +124,13 @@ COPY deploy/entrypoint.sh /app/entrypoint.sh
 # Belt-and-suspenders: strip any CR so a Windows/autocrlf line-ending can never
 # reach dash (a stray \r makes `set`/commands fail with "Illegal option").
 RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod 0755 /app/entrypoint.sh
+# ── Falcon engine CODE (921 KB, NOT the 41 GB data warehouse) ────────────────
+# The daily pipeline jobs do `sys.path.insert(0, ROOT/"universe_engine")` (ROOT
+# resolves to /app in the container) then `from engine.*`. Copying just the code
+# lets the CLOUD run daily_data_refresh / daily_features / signal generation
+# itself — no laptop. The jobs read/write the serving DB (already on /localdb)
+# and fetch OHLC via the Kite token; they do NOT need the data/ warehouse.
+COPY universe_engine/engine/ /app/universe_engine/engine/
 
 # --- Non-root runtime user ---------------------------------------------------
 # Trading backend should not run as root. The mounted /data volume must be
