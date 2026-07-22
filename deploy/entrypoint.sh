@@ -29,6 +29,10 @@ export KANIDA_DB_PATH="$LOCAL_DIR/kanida_quant.db"
 export FALCON_OUTCOMES_ARTIFACT="$LOCAL_DIR/falcon_serve_evidence.db"
 export FALCON_SIM_PATTERNS_ARTIFACT="$LOCAL_DIR/falcon_sim_patterns.db"
 export RUPEEZY_INSTRUMENT_MASTER="$LOCAL_DIR/rupeezy_instruments.json"
+# R&D DB is absent in the cloud; the serving DB carries ohlc_daily + features +
+# signals + taxonomy, so point the "R&D" read path (Top-10/Top-50 explainer,
+# persona sim, admin market-data) at the local serving DB. (#3 serve-time dep.)
+export POWER_RND_DB_PATH="$LOCAL_DIR/kanida_universe.db"
 echo "entrypoint: app DB paths -> $LOCAL_DIR (sync back every ${SYNC_SECS}s)"
 
 sync_back() {

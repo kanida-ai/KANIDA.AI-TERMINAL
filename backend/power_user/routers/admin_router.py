@@ -515,7 +515,10 @@ def jobs_scheduled(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
 
 # ── Market-data live capture (mkt_ cluster) — Start/Stop control ───────
 from pathlib import Path as _Path
-_UNIV_DB = _Path(__file__).resolve().parents[3] / "universe_engine" / "data" / "db" / "kanida_universe.db"
+# Env-overridable (POWER_RND_DB_PATH). In the cloud the R&D DB is absent, so this
+# resolves to the local serving DB (which carries the mkt_/universe tables) —
+# without it, _mkt_conn() crashed on a non-existent path. (#3 serve-time dep.)
+from ..config import POWER_RND_DB_PATH as _UNIV_DB
 
 
 def _mkt_conn():

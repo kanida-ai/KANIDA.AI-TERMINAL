@@ -61,15 +61,21 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # by config.POWER_DB_PATH so we stay consistent with the rest of the backend.
 
 def _resolve_rnd_db_path() -> str:
-    """RND DB lives under universe_engine/data/db/. Has 14 GB of mining history."""
+    """RND DB path. Prefer POWER_RND_DB_PATH (env-overridable): in the cloud the
+    universe_engine R&D DB is absent, so this resolves to the local serving DB
+    (carries pattern catalog + OHLC + features). Falls back to the R&D path
+    (laptop) then a dev-adjacent copy. (#3 serve-time dep.)"""
+    envp = getattr(config, "POWER_RND_DB_PATH", None)
+    if envp and Path(envp).exists():
+        return str(envp)
     p = Path(config.POWER_DB_PATH).parent.parent.parent / "universe_engine" / "data" / "db" / "kanida_universe.db"
-    if not p.exists():
-        # Fallback (development): some installs have RND alongside PROD
-        alt = Path(config.POWER_DB_PATH).parent / "kanida_universe_rnd.db"
-        if alt.exists():
-            return str(alt)
-        raise FileNotFoundError(f"RND DB not found at {p}")
-    return str(p)
+    if p.exists():
+        return str(p)
+    # Fallback (development): some installs have RND alongside PROD
+    alt = Path(config.POWER_DB_PATH).parent / "kanida_universe_rnd.db"
+    if alt.exists():
+        return str(alt)
+    raise FileNotFoundError(f"RND DB not found (POWER_RND_DB_PATH={envp}, tried {p})")
 
 
 def _resolve_intraday_db_path() -> str:
