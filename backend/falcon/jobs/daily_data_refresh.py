@@ -5,8 +5,39 @@ that's already in DB. Multi-worker, rate-limited 5 rps.
 """
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
+
+# Daily bars are only FINAL after the 15:30 IST close. Fetch nothing past the
+# last COMPLETED session — otherwise Kite returns today's still-forming intraday
+# candle and it poisons the day's features + signals. Small settle margin.
+_MARKET_CLOSE_SETTLE_IST = (15, 40)   # (hh, mm) IST after which today's daily bar is final
+_REFETCH_LOOKBACK_DAYS   = 4          # re-fetch a trailing window so a FINAL bar
+                                      # overwrites any PARTIAL bar (fetcher = OR REPLACE)
+
+try:
+    from zoneinfo import ZoneInfo
+    _IST = ZoneInfo("Asia/Kolkata")
+except Exception:  # pragma: no cover
+    _IST = None
+
+
+def _now_ist() -> datetime:
+    # Container clock is UTC; compute IST explicitly (never rely on TZ env).
+    if _IST is not None:
+        return datetime.now(_IST)
+    return datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+
+def _last_completed_session_iso() -> str:
+    """ISO date of the last session whose daily bar is FINAL: today iff we are
+    past the 15:40 IST settle, else the previous calendar day. Weekends/holidays
+    are not modelled here — a weekend date simply yields no bars from Kite
+    (harmless empty fetch), matching the pre-existing behaviour."""
+    n = _now_ist()
+    if (n.hour, n.minute) >= _MARKET_CLOSE_SETTLE_IST:
+        return n.date().isoformat()
+    return (n.date() - timedelta(days=1)).isoformat()
 
 # Ensure the offline universe_engine module is importable for fetcher reuse.
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -32,11 +63,15 @@ def run() -> dict:
             state["notes"] = "no existing data — full backfill required, skipping daily delta"
             return {"status": "skipped", "reason": "no existing data"}
 
-        # Fetch from latest+1 to today
-        start = (date.fromisoformat(latest) + timedelta(days=1)).isoformat()
-        end   = date.today().isoformat()
+        # Window: end = last COMPLETED session (never today's forming bar);
+        # start = a short trailing window back from MAX(trade_date) so a FINAL
+        # bar OVERWRITES any PARTIAL bar a mid-session run may have written
+        # (fetcher uses INSERT OR REPLACE). This is what makes the pipeline
+        # self-heal instead of freezing a bad intraday candle.
+        end   = _last_completed_session_iso()
+        start = (date.fromisoformat(latest) - timedelta(days=_REFETCH_LOOKBACK_DAYS)).isoformat()
         if start > end:
-            state["notes"] = f"already up to date through {latest}"
+            state["notes"] = f"no completed session past {latest} yet (pre-close) — nothing to fetch"
             return {"status": "noop", "latest": latest}
 
         from ..config import FALCON_DB
@@ -52,7 +87,7 @@ def run() -> dict:
                 print(f"[daily_data_refresh] fetch error x{_cnt}: {str(_msg)[:400]}", flush=True)
         s.pop("details", None)  # keep the returned/audited summary compact
         state["rows"]  = s.get("rows_total", 0)
-        state["notes"] = f"fetched {s.get('rows_total', 0)} new bars across {len(symbols)} symbols, {start} -> {end}"
+        state["notes"] = f"refreshed {s.get('rows_total', 0)} bars across {len(symbols)} symbols, {start} -> {end} (trailing re-fetch, final-bar overwrite)"
         return {"status": "success", **s}
 
 
