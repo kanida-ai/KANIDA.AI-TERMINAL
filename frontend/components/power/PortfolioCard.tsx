@@ -23,9 +23,16 @@ const fmtPct = (n: number | null | undefined, opts: { sign?: boolean } = {}) => 
 type Props = {
   summary:       PortfolioSummary
   sparklinePoints?: Array<{ trade_date: string; total_equity: number }>
+  /**
+   * Base route the card links to. Default = the legacy /power/portfolios listing.
+   * The AI-native shell passes /power/co-trading so the card opens the in-shell
+   * persona detail (co-trading/[slug]) without leaving the shell. Backward-
+   * compatible: the legacy listing omits it and keeps its original target.
+   */
+  hrefBase?:     string
 }
 
-export function PortfolioCard({ summary: p, sparklinePoints }: Props) {
+export function PortfolioCard({ summary: p, sparklinePoints, hrefBase = '/power/portfolios' }: Props) {
   const live    = p.live
   const ret     = live?.reinvest.total_return_pct ?? null
   const retCls  = ret == null
@@ -42,7 +49,7 @@ export function PortfolioCard({ summary: p, sparklinePoints }: Props) {
 
   return (
     <Link
-      href={`/power/portfolios/${p.slug}`}
+      href={`${hrefBase}/${p.slug}`}
       className="block bg-neutral-900 border border-neutral-800 rounded-lg p-4 md:p-5
                   hover:bg-neutral-850 hover:border-mint-500/40 transition-all duration-200
                   group space-y-3"

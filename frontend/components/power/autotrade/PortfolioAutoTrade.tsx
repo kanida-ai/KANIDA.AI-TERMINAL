@@ -1,0 +1,6198 @@
+'use client'
+
+/**
+ * PortfolioAutoTrade — OPERATOR-ONLY console for the LIVE multi-broker Portfolio
+ * AutoTrade backend (/api/autotrade/*, operator-token gated, reached via the
+ * same-origin Falcon proxy through lib/autotrade-api.ts).
+ *
+ * HARD HONESTY (real money is involved):
+ *   • The backend SHIPS DISABLED. Sessions default to PAPER mode (no real
+ *     orders); the kill switch defaults OFF; and real LIVE orders ADDITIONALLY
+ *     require the server env flag FALCON_AUTOTRADE_ENABLED — so even a LIVE
+ *     session stays inert until that flag is on, server-side.
+ *   • This UI NEVER implies trading is on. PAPER is presented as the green/safe
+ *     default; LIVE is red, gated behind a typed confirm + a standing warning.
+ *   • All numbers come from the backend. We render "—" / honest empty + error
+ *     states; we fabricate no fills, no P&L, no positions.
+ *
+ * Flow: Config form → Create → Start (per-symbol placed/skipped) → live Status
+ * card (gross return, kill-switch state, open positions) with poll → KILL
+ * (red, typed-confirm). Plus read-only saved-configs + brokers lists.
+ *
+ * Reuses the cotrade-kit F2 palette + icon set so it reads as one product family
+ * with Co-Trading / the existing AutoTrade console.
+ */
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  C, ICON, Gear, MECHANISM_CSS, fmtCapital, fmtPct, pctTone, fmtINR, signedINR,
+} from '@/components/power/shared/cotrade-kit'
+import { SessionConfigEditor, type EditableValues, type LockedContext } from '@/components/power/autotrade/SessionConfigEditor'
+import { SignalTierBadge } from '@/components/power/PickCard'
+import {
+  AutoTradeAPI,
+  type Mode, type StartWhen, type SizingMode, type OrderProduct, type KillDirection,
+  type InstrumentType, type TradeDirection,
+  type OnMissedWindow,
+  type Strategy, type SessionConfig, type CreateResponse, type StartResponse,
+  type StatusResponse, type SavedConfig, type Broker, type SessionSummary,
+  type OpenPosition, type PreviewResponse, type PreviewPosition, type KillPreview, type SkippedPick,
+  type ConcentrationLimits,
+  type MarginFallbackWarning, type SessionHealth, type BreakerState, type AlertItem,
+  type BrokerAccount, type SessionScope,
+  type UniverseFilter, type PickItem, type PicksResponse,
+  type LadderProduct, type LadderEndMode, type LadderKillMode, type LadderStatusName,
+  type LadderStatus, type LadderSummary,
+  type MagnifierCreateBody, type MagnifierPreset,
+  MAGNIFIER_STRATEGY_ID,
+} from '@/lib/autotrade-api'
+
+// ── Safe defaults — paper + kill switch OFF, per the ships-disabled contract ──
+const DEFAULT_CONFIG: SessionConfig = {
+  strategy: 'portfolio_kill_switch',
+  total_allocated_capital: 500_000,
+  top_n_stocks: 5,
+  sizing_mode: 'equal',
+  max_pct_per_position: 25,
+  order_product: 'CNC',
+  // Instrument / direction — default to the existing equity long behaviour.
+  instrument_type: 'EQ',
+  direction: 'long',
+  kill_switch_enabled: false,
+  kill_switch_pct: 5,
+  kill_switch_direction: 'loss',
+  // Asymmetric kill switch — blank (undefined) = fall back to kill_switch_pct
+  // (symmetric, today's behaviour). Captured as PERCENTS; sent ÷100.
+  kill_switch_target_pct: undefined,
+  kill_switch_stop_pct: undefined,
+  entry_time: '09:15',
+  // MIS defensive square-off — backend default; only sent for MIS sessions.
+  mis_square_off_time: '15:12:00',
+  // Leftover-capital redistribution — on by default (backend default true).
+  redistribute_unused_capital: true,
+  // Execution-date / trading-day rule — empty entry_date = backend resolves to
+  // the next valid trading session; expire = drop a missed/non-trading-day fire.
+  entry_date: '',
+  on_missed_window: 'expire',
+  entry_grace_seconds: 120,
+  // ── HARDENING SPRINT protection knobs — ALL default to the backend default
+  // (= today's behaviour). mis_protective_slm_enabled defaults true (a broker-side
+  // stop for MIS); the rest are OFF/empty (undefined) until the operator sets them.
+  mis_protective_slm_enabled: true,
+  iceberg_enabled: false,
+}
+
+// ── Intraday-basket VALIDATED PRESET ──────────────────────────────────────────
+// The precoded defaults for the Falcon Intraday Basket strategy. Operator can
+// still edit every field; this just seeds the form when they pick the strategy.
+// Percent fields are kept as PERCENTS in state (sent ÷100); times are "HH:MM:SS".
+const INTRADAY_PRESET: Partial<SessionConfig> = {
+  top_n_stocks: 5,
+  entry_time: '09:15:00',
+  order_product: 'MIS',
+  // Validated basket-only config (2026-07-04, 530-day backtest + MAE/MFE + param
+  // grid): arm 2.5% / floor 1% / giveback 1.5% / stop 3%. Wide giveback rides the
+  // +2-3% runner days; -3% basket hard stop; per-stock stop is OFF server-side.
+  arm_pct: 2.5,
+  floor_pct: 1.0,
+  trail_giveback_pct: 1.5,
+  stop_pct: 3.0,
+  square_off_time: '15:29:00',
+  // Hold mode — default INTRADAY (force square-off). Positional = false.
+  square_off_enabled: true,
+  max_hold_sessions: 0,   // intraday has no multi-session cap
+  // Trailing STEP-LOCK — DEFAULT = Portfolio-level (basket), enabled, validated
+  // ladder + large-day tier. These match the backend defaults, so seeding them
+  // leaves today's behaviour byte-identical for anyone who ignores the section.
+  step_lock_scope: 'basket',
+  trail_step_lock_enabled: true,
+  trail_step_lock_ladder: [[3, 2], [5, 3.5], [8, 6], [12, 9.5], [16, 13]],
+  trail_large_peak_pct: 20,
+  trail_large_giveback_rel: 17.5,
+  // Per-stock hard stop (UI PERCENT; only used in Individual-stock mode). 3% of the
+  // capital deployed on a name → exit it alone. 0 = off. Wired ÷100.
+  per_stock_stop_pct: 3,
+}
+
+// ── Hold-mode TRAIL presets (params only — product/entry/capital untouched) ────
+// Switching the Hold toggle re-seeds the validated trail params for that mode:
+//   INTRADAY  — arm 2.5 / floor 1 / giveback 1.5 / stop 3, square-off ON, no cap.
+//   POSITIONAL — the Falcon Positional strategy (2026-07-04 doc, 519-day NET sim):
+//     arm 3 / floor 1 / giveback 4 (wide, for multi-day swings) / stop 6 (wide,
+//     for overnight gaps), carry overnight (square-off OFF), 3-session max-hold.
+const INTRADAY_TRAIL: Partial<SessionConfig> = {
+  arm_pct: 2.5, floor_pct: 1.0, trail_giveback_pct: 1.5, stop_pct: 3.0,
+  square_off_enabled: true, max_hold_sessions: 0,
+}
+const POSITIONAL_TRAIL: Partial<SessionConfig> = {
+  arm_pct: 3.0, floor_pct: 1.0, trail_giveback_pct: 4.0, stop_pct: 6.0,
+  square_off_enabled: false, max_hold_sessions: 3,
+}
+
+// ── PROFIT STEP-LOCK defaults (intraday_basket) — UI PERCENTS ─────────────────
+// The validated ratcheting floor: at each [peak%, lock%] rung, once profit reaches
+// the peak, lock in at least the lock%. Matches the backend's DEFAULT_STEP_LOCK_
+// LADDER ([[0.03,0.02],…] fractions) expressed as percents; toWireConfig sends ÷100.
+const STEP_LOCK_LADDER_DEFAULT: number[][] = [[3, 2], [5, 3.5], [8, 6], [12, 9.5], [16, 13]]
+const STEP_LOCK_LARGE_PEAK_DEFAULT = 20      // percent (wire 0.20)
+const STEP_LOCK_LARGE_GIVEBACK_DEFAULT = 17.5 // percent (wire 0.175)
+
+// Client-side validation for the intraday_basket trailing knobs (mirrors the
+// backend config.validate() rules so a bad ladder is caught before the POST):
+// give-back/stop in (0, 50]%, ladder rungs 0 < lock < peak < 100 and both columns
+// strictly ascending, large-day peak in (0, 50]%, large give-back in (0, 100)%.
+// Returns a human error string, or null when the config is valid.
+function validateIntradayStepLock(c: SessionConfig): string | null {
+  // tesla_short REUSES the same intraday trail/step-lock EXIT knobs, so validate
+  // them for it too (per-seat step-lock ladder + per-seat stop).
+  if (c.strategy !== 'intraday_basket' && c.strategy !== 'tesla_short') return null
+  const gb = Number(c.trail_giveback_pct)
+  const st = Number(c.stop_pct)
+  if (!(gb > 0 && gb <= 50)) return 'Trail giveback must be between 0 and 50%.'
+  if (!(st > 0 && st <= 50)) return 'Stop loss must be between 0 and 50%.'
+  if (c.trail_step_lock_enabled !== false) {
+    const ladder = c.trail_step_lock_ladder ?? []
+    if (ladder.length === 0) return 'Add at least one step-lock rung, or turn step-locking off.'
+    let prevPeak = -Infinity
+    let prevLock = -Infinity
+    for (let i = 0; i < ladder.length; i++) {
+      const peak = Number(ladder[i]?.[0])
+      const lock = Number(ladder[i]?.[1])
+      if (!Number.isFinite(peak) || !Number.isFinite(lock)) return `Step-lock rung ${i + 1}: enter both peak and lock %.`
+      if (!(lock > 0 && lock < peak && peak < 100)) return `Step-lock rung ${i + 1}: need 0 < lock (${lock}) < peak (${peak}) < 100.`
+      if (peak <= prevPeak) return `Step-lock rung ${i + 1}: peak % must increase down the ladder.`
+      if (lock <= prevLock) return `Step-lock rung ${i + 1}: lock % must increase down the ladder.`
+      prevPeak = peak
+      prevLock = lock
+    }
+  }
+  const lp = Number(c.trail_large_peak_pct)
+  const lr = Number(c.trail_large_giveback_rel)
+  if (!(lp > 0 && lp <= 50)) return 'Large-day peak must be between 0 and 50%.'
+  if (!(lr > 0 && lr < 100)) return 'Large-day give-back must be between 0 and 100%.'
+  // Per-stock hard stop (Individual-stock mode) — 0 = off, otherwise ≤ 50%.
+  if (c.step_lock_scope === 'stock') {
+    const ps = Number(c.per_stock_stop_pct)
+    if (!Number.isFinite(ps) || ps < 0 || ps > 50) return 'Per-stock stop-loss must be between 0 and 50% (0 = off).'
+  }
+  return null
+}
+
+// UI-level strategy choices for the create form's dropdown. The first two map
+// 1:1 to a backend Strategy enum. 'auto_ladder' is a UI CONSTRUCT ONLY — it is
+// NOT a backend strategy: selecting it builds a Falcon Positional Auto-Ladder
+// (a monthly campaign) whose children are positional intraday_basket sessions,
+// created via the LADDER API (ladderCreate → ladderStart), never session/create.
+type UiStrategy = Strategy | 'auto_ladder' | 'magnifier'
+
+// Each UI option carries a stable `backendId` (the strategy_id the admin
+// visibility system keys on — the create-form selector shows an option ONLY when
+// its backendId is in the caller-appropriate list the backend returns) and an
+// optional `experimental` flag (new/experimental strategies default OFF for power
+// users, so if the visibility endpoint isn't reporting yet we fail safe by hiding
+// them from non-admins). The Falcon Intraday Magnifier is a SEPARATE strategy — a
+// monthly rolling MIS 5× campaign — not folded into Dynamic (Trailing) or BTST.
+type StrategyOption = { id: UiStrategy; label: string; backendId: string; experimental?: boolean }
+
+// Protection mode = the exit engine. 'Fixed' is the flat ±% kill switch;
+// 'Dynamic (Trailing)' is the arm-and-trail intraday basket; 'Auto-Ladder' is
+// the set-once monthly campaign (positional baskets rolled daily by the backend);
+// 'Magnifier' is the Top-15 high-tier MIS 5× intraday split-entry campaign.
+const STRATEGY_OPTIONS: StrategyOption[] = [
+  { id: 'portfolio_kill_switch', label: 'Fixed — flat ±% basket exit (kill switch)',                   backendId: 'portfolio_kill_switch' },
+  { id: 'intraday_basket',       label: 'Dynamic (Trailing) — arm, lock a floor & trail, square-off',  backendId: 'intraday_basket' },
+  { id: 'auto_ladder',           label: 'Falcon Positional — Auto-Ladder (monthly campaign)',          backendId: 'auto_ladder' },
+  { id: 'tesla_short',           label: 'Falcon Tesla (order-flow short) — intraday MIS seat rotation', backendId: 'tesla_short' },
+  { id: 'magnifier',             label: 'Falcon Intraday Magnifier — Top-15 high-tier · MIS 5×',        backendId: MAGNIFIER_STRATEGY_ID, experimental: true },
+]
+
+// The Falcon BTST Oscillator campaign is a PRESET inside Auto-Ladder, but its
+// visibility is toggled on its OWN strategy_id (so an admin can hide it from power
+// users until enabled). experimental = default OFF for non-admins on a cold list.
+const BTST_STRATEGY_ID = 'falcon_btst_oscillator'
+
+// ── Falcon Intraday Magnifier PRESET (validated, read-only) ───────────────────
+// The operator only sizes it with a single "cash per day" input; every knob below
+// is fixed. MIS 5×, Falcon Top-15 high-tier (~9 names/day). Split entry: 50% @
+// 09:15 open + 50% @ 09:16 (blended cost); the stop/trail arms ONLY at 09:16 on
+// the blended cost (no stop on the 09:15 leg — the opening-whipsaw guard). Trail:
+// arm 6 / floor 2 / giveback 5 / stop 3 (capital basis). Square-off 15:29. Monthly
+// rolling campaign. These values are sent verbatim in the create body for the
+// backend to verify/echo — the UI never lets the operator edit them.
+const MAGNIFIER_LEVERAGE = 5
+const MAGNIFIER_NAMES_PER_DAY = 9    // ~9 high-tier names/day out of Top-15
+const MAGNIFIER_PRESET: MagnifierPreset = {
+  top_n: 15,
+  tier_filter: 'high',
+  leverage: MAGNIFIER_LEVERAGE,
+  order_product: 'MIS',
+  split_entry: [
+    { fraction: 0.5, time: '09:15:00' },
+    { fraction: 0.5, time: '09:16:00' },
+  ],
+  stop_arm_time: '09:16:00',
+  arm_pct: 6,
+  floor_pct: 2,
+  trail_giveback_pct: 5,
+  stop_pct: 3,
+  trail_basis: 'capital',
+  square_off_time: '15:29:00',
+}
+
+// ── Falcon TESLA (tesla_short) PRESET ─────────────────────────────────────────
+// The order-flow-native intraday SHORT capital-ROTATION engine. The backend FORCES
+// direction='short' / instrument_type='EQ' / order_product='MIS' (rejects anything
+// else), so the preset locks those. It REUSES the intraday trail EXIT knobs (per-
+// SEAT step-lock + per-seat stop) and REQUIRES square_off_enabled (MIS is intraday).
+// The seat model knobs (n_seats + grade/cooldown/window) are Tesla-only and default
+// to the backend defaults. Percent fields stay PERCENTS in state (sent ÷100).
+const TESLA_PRESET: Partial<SessionConfig> = {
+  order_product: 'MIS',
+  instrument_type: 'EQ',
+  direction: 'short',
+  entry_time: '09:15:00',
+  square_off_time: '15:15:00',
+  square_off_enabled: true,      // MIS is intraday — mandatory forced square-off
+  max_hold_sessions: 0,
+  // Reused intraday trail EXIT knobs — per-SEAT step-lock. Sensible short-side
+  // defaults (percents; wired ÷100). arm/floor/giveback/stop are the per-seat trail.
+  arm_pct: 1.0,
+  floor_pct: 0.5,
+  trail_giveback_pct: 0.75,
+  stop_pct: 1.5,
+  // Per-seat step-lock ratchet ON, scope = per-stock (each seat trails on its own).
+  step_lock_scope: 'stock',
+  trail_step_lock_enabled: true,
+  trail_step_lock_ladder: [[1, 0.5], [2, 1.25], [3, 2]],
+  trail_large_peak_pct: 20,
+  trail_large_giveback_rel: 17.5,
+  per_stock_stop_pct: 1.5,       // per-seat capital-basis hard stop
+  // Seat model (Tesla-only) — backend defaults.
+  n_seats: 3,
+  tesla_min_grade: 'A++',
+  tesla_cooldown_minutes: 30,
+  tesla_personality_window_days: 5,
+}
+
+// Tesla min-grade choices (segmented). 'A++' = A++ and A+++; 'A+++' = strongest only.
+const TESLA_GRADE_OPTIONS: { id: 'A++' | 'A+++'; label: string }[] = [
+  { id: 'A++',  label: 'A++ +' },
+  { id: 'A+++', label: 'A+++ only' },
+]
+
+// Auto-Ladder PRESET — which validated positional campaign to build. 'positional'
+// = the existing default (Falcon Top-5 held ~3 sessions; the wire body is
+// UNCHANGED, no child_config). 'btst' = Falcon BTST Oscillator: the daily Top-15
+// HIGH-TIER basket (~9 names) bought via a 50/50 SPLIT entry (50% @09:15 + 50%
+// @09:16, blended cost), held EXACTLY 2 sessions, sold Day-2 15:29, CNC (1× cash),
+// no trail (inert at 1×), −6% disaster stop on the blend. BTST forces
+// order_product=CNC and sends campaign_type:'btst' on create — the backend bakes in
+// the whole preset. Additive: the default positional path is byte-identical.
+type LadderPreset = 'positional' | 'btst'
+const LADDER_PRESET_OPTIONS: { id: LadderPreset; label: string; hint: string }[] = [
+  { id: 'positional', label: 'Positional (3-session)', hint: 'Falcon Top-5 held ~3 sessions — the default monthly positional campaign.' },
+  { id: 'btst',       label: 'Falcon BTST Oscillator', hint: 'Top-15 → high-tier subset (count varies daily) · 50/50 split entry @09:15+09:16 · CNC, hold 2 sessions, sell Day-2 15:29 · no trail · −6% stop.' },
+]
+
+// Campaign Duration options (Auto-Ladder only). Maps to LadderEndMode on the wire.
+const LADDER_DURATION_OPTIONS: { id: LadderEndMode; label: string; hint: string }[] = [
+  { id: 'month_end', label: 'This month (auto)', hint: 'Runs to the end of this month, then stops' },
+  { id: 'manual',    label: 'Until I stop',      hint: 'Runs every trading day until you stop it' },
+]
+
+// Kill modes for a running campaign (the confirm modal REQUIRES one — no default).
+const LADDER_KILL_OPTIONS: { id: LadderKillMode; label: string; line: string }[] = [
+  { id: 'flatten_now',        label: 'Flatten everything now',                    line: 'Exit every open basket immediately and stop the campaign.' },
+  { id: 'stop_new_let_finish', label: 'Stop opening new — let open baskets finish', line: 'Open no new baskets; let the already-open ones finish their normal exits.' },
+]
+
+// A SCHEDULED session that lost its in-memory timer (backend restart) reports
+// scheduler_armed === false. Everything else is "armed enough to wait".
+const isScheduled = (s?: string | null) => (s ?? '').toUpperCase() === 'SCHEDULED'
+
+// Live countdown helper — turns seconds into "2h 14m 03s" / "14m 03s" / "43s".
+function fmtCountdown(totalSec: number): string {
+  const s = Math.max(0, Math.floor(totalSec))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  const pad = (n: number) => String(n).padStart(2, '0')
+  if (h > 0) return `${h}h ${pad(m)}m ${pad(sec)}s`
+  if (m > 0) return `${m}m ${pad(sec)}s`
+  return `${sec}s`
+}
+
+// mm:ss countdown for the square-off timer (intraday_basket). Negative/absent → '—'.
+function fmtMMSS(totalSec: number | null | undefined): string {
+  if (totalSec == null || !Number.isFinite(totalSec)) return '—'
+  const s = Math.max(0, Math.floor(totalSec))
+  const m = Math.floor(s / 60)
+  const sec = s % 60
+  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+}
+
+// A latency in ms → a compact, human string: <1000 stays "368 ms"; ≥1000 becomes
+// "2.7 s" (one decimal, trailing .0 trimmed). null/non-finite → "—" (not measured).
+function fmtMs(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return '—'
+  const v = Math.max(0, ms)
+  if (v < 1000) return `${Math.round(v)} ms`
+  return `${(v / 1000).toFixed(1).replace(/\.0$/, '')} s`
+}
+
+// Liveness tone for the last-tick age (the monitoring heartbeat): green if the
+// feed is sub-second-ish (<1500ms), amber while it lags (1500–5000ms), red/stale
+// when older or not measured. Returns the tone color + an honest label.
+function tickLiveness(ms: number | null | undefined): { color: string; label: string; fresh: boolean } {
+  if (ms == null || !Number.isFinite(ms)) return { color: C.faint, label: 'no data', fresh: false }
+  if (ms < 1500) return { color: C.mint, label: 'monitoring sub-second', fresh: true }
+  if (ms <= 5000) return { color: C.amber, label: 'feed lagging', fresh: false }
+  return { color: C.red, label: 'stale', fresh: false }
+}
+
+// A backend FRACTION → a trimmed, signed percent string ("+2.3%", "-1.55%").
+// Returns '—' for absent/non-finite values so nothing is fabricated.
+function fracPct(frac: number | null | undefined, signed = true, dp = 2): string {
+  if (frac == null || !Number.isFinite(frac)) return '—'
+  const v = frac * 100
+  const trimmed = v.toFixed(dp).replace(/\.?0+$/, '')
+  const sign = signed && v >= 0 ? '+' : ''
+  return `${sign}${trimmed}%`
+}
+
+// Sliders glyph for the "Edit config" controls (cotrade-kit ICON has no gear).
+const EditGlyph = (n: number) => (
+  <svg width={n} height={n} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+    <path d="M4 8h9M17 8h3M4 16h3M11 16h9" strokeLinecap="round" />
+    <circle cx="15" cy="8" r="2.2" /><circle cx="9" cy="16" r="2.2" />
+  </svg>
+)
+
+// ── LIVE config-edit derivations (status → the editor's pre-filled values) ────
+// A backend FRACTION → a PERCENT for the editor input (e.g. 0.025 → 2.5). Absent/
+// non-finite → '' (a blank input the operator can fill). Never fabricates a value.
+const fracToPct = (frac: unknown): number | '' => {
+  const n = Number(frac)
+  return Number.isFinite(n) ? Number((n * 100).toFixed(4).replace(/\.?0+$/, '')) : ''
+}
+const numOrBlank = (v: unknown): number | '' => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : ''
+}
+const strOrEmpty = (v: unknown): string => (typeof v === 'string' ? v : '')
+
+// Pre-fill the editor from a RUNNING session's status. Trail knobs live in
+// status.trail (FRACTIONS); per-position + MIS + product fields are read
+// defensively (the status endpoint EXPOSES the whitelist fields — any still
+// absent degrade to a blank input, never a crash).
+function sessionEditable(s: StatusResponse): EditableValues {
+  const t = s.trail ?? {}
+  const any = s as Record<string, unknown>
+  return {
+    arm_pct: fracToPct(t.arm_pct),
+    floor_pct: fracToPct(t.floor_pct),
+    trail_giveback_pct: fracToPct(t.trail_giveback_pct),
+    stop_pct: fracToPct(t.stop_pct),
+    per_position_stop_pct: fracToPct(any.per_position_stop_pct),
+    per_position_target_pct: fracToPct(any.per_position_target_pct),
+    square_off_time: strOrEmpty(t.square_off_time ?? s.square_off_time),
+    mis_square_off_time: strOrEmpty(any.mis_square_off_time),
+    max_hold_sessions: numOrBlank(t.max_hold_sessions),
+  }
+}
+function sessionLocked(s: StatusResponse): LockedContext {
+  const any = s as Record<string, unknown>
+  const topN = any.top_n_stocks
+  return {
+    allocatedCapital: typeof s.total_allocated_capital === 'number' ? s.total_allocated_capital : undefined,
+    product: strOrEmpty(any.order_product) || undefined,
+    picks: Number.isFinite(Number(topN)) ? `Falcon Top ${Number(topN)}` : undefined,
+    entryTime: strOrEmpty(any.entry_time) || undefined,
+  }
+}
+// Pre-fill from a RUNNING campaign's LadderStatus. Trail knobs are read
+// defensively (the ladder status is being extended to expose them); capital +
+// end-date come straight from the status.
+function ladderEditable(l: LadderStatus): EditableValues {
+  const any = l as Record<string, unknown>
+  const cfg = (any.config ?? {}) as Record<string, unknown>
+  const pick = (k: string) => any[k] ?? cfg[k]
+  return {
+    arm_pct: fracToPct(pick('arm_pct')),
+    floor_pct: fracToPct(pick('floor_pct')),
+    trail_giveback_pct: fracToPct(pick('trail_giveback_pct')),
+    stop_pct: fracToPct(pick('stop_pct')),
+    per_position_stop_pct: fracToPct(pick('per_position_stop_pct')),
+    per_position_target_pct: fracToPct(pick('per_position_target_pct')),
+    square_off_time: strOrEmpty(pick('square_off_time')),
+    max_hold_sessions: numOrBlank(pick('max_hold_sessions')),
+    per_basket_capital: numOrBlank(l.per_basket_capital),
+    total_capital: numOrBlank(l.total_capital),
+    end_date: strOrEmpty(l.end_date),
+  }
+}
+function ladderLocked(l: LadderSummary, st?: LadderStatus): LockedContext {
+  // Basket label depends on the campaign variant: BTST/Magnifier run the Top-15
+  // high-tier basket; the default positional campaign runs Falcon Top-5.
+  const ct = String((st as Record<string, unknown> | undefined)?.campaign_type
+    ?? (l as Record<string, unknown>).campaign_type ?? 'positional')
+  const picks = (ct === 'btst' || ct === 'magnifier')
+    ? 'Falcon Top-15 → high-tier'
+    : 'Falcon Top 5'
+  return {
+    allocatedCapital: st?.total_capital ?? l.total_capital,
+    product: (st?.order_product ?? l.order_product) || undefined,
+    picks,
+    entryTime: '09:15:00',
+  }
+}
+
+// ── Universe filter options — identical to the signals page Top20Filters ─────
+const UNIVERSE_OPTIONS: Array<{ key: UniverseFilter; label: string }> = [
+  { key: 'all500',   label: 'All 500'   },
+  { key: 'nifty50',  label: 'Nifty 50'  },
+  { key: 'nifty100', label: 'Nifty 100' },
+  { key: 'nifty200', label: 'Nifty 200' },
+  { key: 'fno',      label: 'F&O'       },
+]
+
+// Best-first ordering for the custom-selection tier-filter chips. Values match
+// the SignalTier enum (backend signal_tier.py) that drives SignalTierBadge — the
+// distinct set is derived dynamically from the loaded picks, this only sorts it.
+// Unknown/new tiers fall to the end (then alphabetical) so the UI never breaks.
+const SIGNAL_TIER_ORDER = [
+  'PREMIUM-Pullback', 'PREMIUM-Compression', 'ENTERPRISE-Dryup',
+  'GOLD', 'GOLD-baseline', 'STANDARD', 'STANDARD-weak', 'AVOID',
+]
+
+const TOP_N_OPTIONS = [3, 5, 7, 10, 20, 50]
+const SIZING_OPTIONS: { id: SizingMode; label: string; hint: string }[] = [
+  { id: 'equal',   label: 'Equal',   hint: 'Split capital evenly across picks' },
+  { id: 'pct_cap', label: '% cap',   hint: 'Cap each position at a max % of capital' },
+  { id: 'manual',  label: 'Manual',  hint: 'Per-symbol amounts (advanced)' },
+]
+// NRML is an F&O / currency / commodity CARRY product — the broker REJECTS it on
+// NSE cash equity, and the backend now rejects it at session creation. So it is
+// NOT offered for equity sessions. (Futures sessions will send NRML themselves,
+// server-side, via the FUT order builder — the user never picks it here.)
+const PRODUCT_OPTIONS: OrderProduct[] = ['CNC', 'MIS', 'MTF']
+// Instrument: Equity (the existing cash path) | Futures (current-month, NRML set
+// server-side). CE/PE are NOT offered — futures-only this pass.
+const INSTRUMENT_OPTIONS: { id: InstrumentType; label: string }[] = [
+  { id: 'EQ',  label: 'Equity'   },
+  { id: 'FUT', label: 'Futures'  },
+]
+// Direction for a FUT session: Buy (long) | Sell / Short. 'short' is FUT-only
+// (backend rejects it on equity). Equity always runs long.
+const DIRECTION_OPTIONS: { id: TradeDirection; label: string }[] = [
+  { id: 'long',  label: 'Buy'          },
+  { id: 'short', label: 'Sell (Short)' },
+]
+// Direction for an EQUITY session: Long | Short. Short is EQUITY + MIS-only
+// (intraday, auto-covered before close); the backend rejects short on CNC/MTF,
+// so this control only appears when order_product === 'MIS'. Default Long.
+const EQ_DIRECTION_OPTIONS: { id: TradeDirection; label: string }[] = [
+  { id: 'long',  label: 'Long'  },
+  { id: 'short', label: 'Short' },
+]
+// D · Hold mode for the Dynamic (Trailing) basket. Intraday forces a square-off
+// at square_off_time; Positional carries the floor + hard stop across days.
+const HOLD_OPTIONS: { id: 'intraday' | 'positional'; label: string }[] = [
+  { id: 'intraday',   label: 'Intraday'   },
+  { id: 'positional', label: 'Positional' },
+]
+const KILL_DIR_OPTIONS: { id: KillDirection; label: string }[] = [
+  { id: 'loss',   label: 'Loss only' },
+  { id: 'profit', label: 'Profit only' },
+  { id: 'both',   label: 'Both' },
+]
+const CAPITAL_PRESETS = [100_000, 500_000, 1_000_000, 3_000_000]
+const ON_MISSED_OPTIONS: { id: OnMissedWindow; label: string }[] = [
+  { id: 'expire',                label: 'Expire' },
+  { id: 'carry_next_trading_day', label: 'Carry to next trading day' },
+]
+
+// The three non-placed terminal/blocked statuses from the trading-day rule. A
+// session in one of these did NOT place — render it muted/amber, never the green
+// RUNNING look.
+const NON_PLACED_STATUSES = ['REJECTED_NON_TRADING_DAY', 'EXPIRED_MISSED_WINDOW', 'DEFERRED_MARKET_CLOSED']
+const isNonPlaced = (s?: string | null) => NON_PLACED_STATUSES.includes((s ?? '').toUpperCase())
+
+// Parse a backend 400 detail that names the suggested next trading day, e.g.
+// "2026-06-28 is not a trading day. Next trading day: 2026-06-29" → "2026-06-29".
+// Returns null when no YYYY-MM-DD follows a "next trading day" cue.
+function parseSuggestedTradingDay(detail: string | null | undefined): string | null {
+  if (!detail) return null
+  const m = detail.match(/next\s+trading\s+day[^0-9]*(\d{4}-\d{2}-\d{2})/i)
+  return m ? m[1] : null
+}
+
+// True when an error detail looks like the "not a trading day" rejection (so we
+// show the friendly one-click apply rather than a raw error toast).
+function isNonTradingDayError(detail: string | null | undefined): boolean {
+  if (!detail) return false
+  return /not\s+a\s+trading\s+day/i.test(detail) || parseSuggestedTradingDay(detail) != null
+}
+
+// Friendly label for a non-placed status (the three trading-day-rule outcomes).
+function nonPlacedLabel(status: string): string {
+  switch (status.toUpperCase()) {
+    case 'REJECTED_NON_TRADING_DAY': return 'Rejected — not a trading day'
+    case 'EXPIRED_MISSED_WINDOW':    return 'Expired — entry window missed'
+    case 'DEFERRED_MARKET_CLOSED':   return 'Deferred — market closed'
+    default:                         return status
+  }
+}
+
+// Tomorrow's date (IST) as "YYYY-MM-DD" — the min for the campaign Schedule date
+// picker (a campaign can only be scheduled for a FUTURE trading day; the backend
+// validates the actual trading-day rule and 400s a weekend/holiday).
+// Earliest date a campaign may be scheduled for: TODAY if the 09:15 IST open
+// hasn't passed yet (so a pre-market "schedule for today" is allowed), else
+// tomorrow. The backend still validates the trading-day + before-open rule.
+function earliestScheduleDateIST(): string {
+  const istMs = Date.now() + (5 * 60 + 30) * 60_000  // UTC epoch → IST wall-clock
+  const ist = new Date(istMs)
+  const beforeOpen =
+    ist.getUTCHours() < 9 || (ist.getUTCHours() === 9 && ist.getUTCMinutes() < 15)
+  const base = beforeOpen ? istMs : istMs + 24 * 60 * 60_000
+  return new Date(base).toISOString().slice(0, 10)
+}
+
+// 'list' is the HOME phase: your saved sessions (newest first). 'config' is the
+// explicit New-Session form. 'created'/'running' are the live session views,
+// reached either by creating one OR by RESUMING an existing one from the list.
+type Phase = 'list' | 'config' | 'created' | 'running'
+
+// ── Small shared field primitives ────────────────────────────────────────────
+function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label className="text-[11px] font-semibold uppercase tracking-[0.05em]" style={{ color: C.muted }}>
+        {label}
+      </label>
+      {children}
+      {hint && <span className="text-[10.5px] leading-snug" style={{ color: C.faint }}>{hint}</span>}
+    </div>
+  )
+}
+
+function Segmented<T extends string | number>({
+  options, value, onChange,
+}: {
+  options: { id: T; label: string }[]; value: T; onChange: (v: T) => void
+}) {
+  return (
+    <div className="inline-flex rounded-xl border p-0.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+      {options.map((o) => {
+        const active = o.id === value
+        return (
+          <button
+            key={String(o.id)}
+            type="button"
+            onClick={() => onChange(o.id)}
+            className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors"
+            style={{
+              color: active ? '#06130c' : C.ink2,
+              background: active ? C.mint : 'transparent',
+            }}
+          >
+            {o.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+const inputStyle: React.CSSProperties = {
+  background: 'rgba(255,255,255,0.03)',
+  border: `1px solid ${C.line2}`,
+  color: C.ink,
+}
+
+export function PortfolioAutoTrade({
+  userId,
+  jwt,
+  onSessionChange,
+  isAdmin = true,
+  view,
+  onStarted,
+  onNewCampaign,
+  onNeedBroker,
+}: {
+  userId?: number | string
+  // Bearer power_jwt — required for the LIVE "Edit config" PATCH endpoints
+  // (/api/power/autotrade/…/config). When absent, the Edit-config controls are
+  // hidden (the operator/broker mounts that don't pass a jwt keep every other
+  // behaviour unchanged). Never used for the operator-token /api/autotrade/* path.
+  jwt?: string
+  // Called whenever the user focuses a session (resume or create).
+  // Passes the session_id up so sibling tabs (Journal) can use it.
+  onSessionChange?: (sessionId: string) => void
+  // isAdmin (DEFAULT true — the operator mount is unchanged). When false (a power
+  // user), the broker-account selector NEVER offers the global/operator account
+  // (the backend isolation guard refuses it), defaults to their single connected
+  // account when they have exactly one, and a LIVE start REQUIRES a selected
+  // ACTIVE account (paper may proceed without one). Everything else is identical.
+  isAdmin?: boolean
+  // view (DEFAULT undefined — the operator/admin mount is 100% UNCHANGED, combined
+  // list + inline create). When the 4-tab power-user shell splits this component in
+  // two:
+  //   'create'   — mount straight into the config form (phase='config'); the
+  //                sessions/campaigns list is NEVER shown. A successful start/schedule
+  //                calls onStarted() so the shell jumps to the Live tab. Picking LIVE
+  //                without a connected broker routes to onNeedBroker().
+  //   'dashboard' — mount into the list only (phase='list'); the inline config form
+  //                is NEVER shown. The "New session" button calls onNewCampaign()
+  //                (shell → Start tab) instead of opening the inline form.
+  view?: 'create' | 'dashboard'
+  // Called after a session/campaign is successfully created AND started/scheduled
+  // (view='create' only). The shell uses it to jump to the Live tab.
+  onStarted?: () => void
+  // Called by the list's "New session" button (view='dashboard' only). The shell
+  // uses it to jump to the Start tab.
+  onNewCampaign?: () => void
+  // Called when a power user picks LIVE with no connected/active broker account
+  // (view='create' only). The shell uses it to jump to the Broker tab.
+  onNeedBroker?: () => void
+}) {
+  const [config, setConfig] = useState<SessionConfig>(DEFAULT_CONFIG)
+  const [mode, setMode] = useState<Mode>('paper')
+
+  // ── Per-account session selection (Phase-2 multi-tenant) ──────────────────────
+  // The user's connected broker accounts (for the optional "Broker account"
+  // selector on the create form). '' = the global/operator session (default,
+  // unchanged). Only ACTIVE accounts may run a LIVE session; an EXPIRED account
+  // is offered but blocks live Start until re-connected. Loaded only when a user
+  // context exists; on failure we silently fall back to the global session.
+  const [accounts, setAccounts] = useState<BrokerAccount[]>([])
+  const [brokerAccountId, setBrokerAccountId] = useState<string>('')
+
+  // view='create' mounts straight into the config form; every other mount (admin
+  // combined view, or view='dashboard') starts on the sessions list. Admin
+  // (view=undefined) is unchanged: 'list'.
+  const [phase, setPhase] = useState<Phase>(view === 'create' ? 'config' : 'list')
+  const [session, setSession] = useState<CreateResponse | null>(null)
+  const [startResult, setStartResult] = useState<StartResponse | null>(null)
+  const [status, setStatus] = useState<StatusResponse | null>(null)
+
+  // Your Sessions list (newest first) — the HOME view. Resumes survive reload.
+  const [sessions, setSessions] = useState<SessionSummary[] | null>(null)
+  const [sessionsLoading, setSessionsLoading] = useState(false)
+  const [sessionsErr, setSessionsErr] = useState<string | null>(null)
+
+  // Multi-select delete (paper/test housekeeping). `selected` holds the chosen
+  // session_ids; `deleting` gates the bulk action; `deleteErr` is honest.
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [deleting, setDeleting] = useState(false)
+  const [deleteErr, setDeleteErr] = useState<string | null>(null)
+
+  const [busy, setBusy] = useState<null | 'create' | 'start' | 'status' | 'kill'>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  // ── LIVE "Edit config" (hot-reload risk/exit knobs) ──────────────────────────
+  // configEditor names WHICH live item the editor is open for (a running session
+  // OR a running campaign). configToast is the transient success line shown after
+  // a successful Apply. Both require a Bearer power_jwt (the PATCH endpoints are
+  // /api/power/autotrade/…/config); when jwt is absent the controls never render.
+  const [configEditor, setConfigEditor] = useState<{ kind: 'session' | 'campaign'; id: string } | null>(null)
+  const [configToast, setConfigToast] = useState<string | null>(null)
+  // Auto-dismiss the success toast after a few seconds (calm, non-blocking).
+  useEffect(() => {
+    if (!configToast) return
+    const t = setTimeout(() => setConfigToast(null), 6000)
+    return () => clearTimeout(t)
+  }, [configToast])
+
+  // When Create returns a "not a trading day" 400, we parse the suggested next
+  // trading day from the detail and offer a one-click "Use {date}" apply instead
+  // of a raw error. { detail } is the friendly message; { suggested } the date.
+  const [createSuggest, setCreateSuggest] = useState<{ detail: string; suggested: string | null } | null>(null)
+
+  // ── P&L preview (the "Potential outcome" card on the CONFIG form) ─────────────
+  // An ESTIMATE from POST /api/autotrade/preview — creates no session, places
+  // nothing. Debounced on the config fields that move the bases / kill outcome.
+  const [preview, setPreview] = useState<PreviewResponse | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewErr, setPreviewErr] = useState<string | null>(null)
+
+  // ── Universe filter + manual stock picker ─────────────────────────────────
+  // universeFilter: which index the picks come from (default all500 = current
+  // behaviour). Sent in SessionConfig as universe_filter; the backend falls
+  // back silently when the field is absent (graceful degradation).
+  const [universeFilter, setUniverseFilter] = useState<UniverseFilter>('all500')
+
+  // picks: the ranked list for the manual picker (from GET /session/picks).
+  // null = not yet loaded or unavailable; [] = loaded but empty.
+  const [picks, setPicks] = useState<PickItem[] | null>(null)
+  const [picksLoading, setPicksLoading] = useState(false)
+  const [picksErr, setPicksErr] = useState<string | null>(null)
+
+  // checkedSymbols: which symbols the user has checked. null = use default top-N
+  // (the picker hasn't been interacted with or failed to load). We seed it from
+  // the picks list once loaded (top_n items pre-checked, rest unchecked), but
+  // the user can override freely.
+  const [checkedSymbols, setCheckedSymbols] = useState<Set<string> | null>(null)
+
+  // tierFilter: VIEW-ONLY multi-select filter over the loaded picks by signal_tier.
+  // Empty set = "All" (no filter). Purely client-side; hides rows but never changes
+  // their checkbox state. Select-all/Deselect-all act on the visible (filtered) set.
+  const [tierFilter, setTierFilter] = useState<Set<string>>(new Set())
+
+  // Live-mode typed confirmation + kill typed confirmation
+  const [liveConfirm, setLiveConfirm] = useState('')
+  const [killArmed, setKillArmed] = useState(false)
+  const [killConfirm, setKillConfirm] = useState('')
+
+  // Poll toggle
+  const [poll, setPoll] = useState(true)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Live countdown for a SCHEDULED session. Seeded from status.seconds_remaining
+  // on every poll, then ticked down locally each second so the display is smooth
+  // between the (slower) status polls. Re-sync on each fresh status keeps it
+  // honest — the backend remains the source of truth.
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // UI-level strategy for the create form (see UiStrategy). 'auto_ladder' drives
+  // the campaign create path; the other two map 1:1 to config.strategy.
+  const [uiStrategy, setUiStrategy] = useState<UiStrategy>('portfolio_kill_switch')
+  const isLadder = uiStrategy === 'auto_ladder'
+  // Falcon Intraday Magnifier — a SEPARATE strategy (its own monthly rolling MIS 5×
+  // campaign). Like auto_ladder it's a UI construct that drives a dedicated create
+  // call; under the hood config.strategy is set to 'intraday_basket' so shared
+  // machinery doesn't choke, but the whole standard config region is hidden and a
+  // read-only validated preset is shown instead.
+  const isMagnifier = uiStrategy === 'magnifier'
+  // Falcon Tesla (order-flow short) — a real backend strategy (unlike auto_ladder).
+  // isTesla drives the read-only EQ/MIS/short controls + the seat-model knobs;
+  // trailStrategy = the two strategies that share the intraday trail EXIT card.
+  const isTesla = config.strategy === 'tesla_short'
+  const trailStrategy = config.strategy === 'intraday_basket' || isTesla
+
+  // ── Admin-controlled strategy visibility ────────────────────────────────────
+  // The backend returns the caller-appropriate strategy list (admin → all; power
+  // user → enabled only). null = not-yet-loaded / endpoint absent → fail safe:
+  // admins see every option, power users see all non-experimental ones. Once the
+  // list loads, the selector shows ONLY options whose backendId is present.
+  const [visibleStrategyIds, setVisibleStrategyIds] = useState<Set<string> | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    AutoTradeAPI.strategies()
+      .then((res) => {
+        if (cancelled) return
+        const ids = (res.strategies ?? []).map((s) => s.strategy_id).filter(Boolean)
+        setVisibleStrategyIds(new Set(ids))
+      })
+      .catch(() => { if (!cancelled) setVisibleStrategyIds(null) })
+    return () => { cancelled = true }
+  }, [])
+  const strategyVisible = (o: StrategyOption): boolean =>
+    visibleStrategyIds == null ? (isAdmin || !o.experimental) : visibleStrategyIds.has(o.backendId)
+  const visibleStrategyOptions = STRATEGY_OPTIONS.filter(strategyVisible)
+  // The BTST Oscillator campaign preset gates on its OWN strategy_id.
+  const btstAllowed = visibleStrategyIds == null ? isAdmin : visibleStrategyIds.has(BTST_STRATEGY_ID)
+  const visibleLadderPresets = LADDER_PRESET_OPTIONS.filter((o) => o.id !== 'btst' || btstAllowed)
+
+  // Campaign Duration (Auto-Ladder only) → LadderEndMode on the wire.
+  const [ladderEndMode, setLadderEndMode] = useState<LadderEndMode>('month_end')
+
+  // Auto-Ladder PRESET (Auto-Ladder only). 'positional' = default (unchanged wire
+  // body). 'btst' = Falcon BTST → forces CNC + sends child_config on create.
+  const [ladderPreset, setLadderPreset] = useState<LadderPreset>('positional')
+  const isBtst = isLadder && ladderPreset === 'btst'
+  // Choosing BTST forces the campaign product to CNC (positional carries overnight;
+  // MIS is rejected server-side and MTF isn't wanted for BTST). Selecting positional
+  // leaves the product untouched (CNC/MTF still the trader's choice).
+  const pickLadderPreset = (id: LadderPreset) => {
+    setLadderPreset(id)
+    if (id === 'btst') set('order_product', 'CNC')
+  }
+
+  // ── Running campaigns (Auto-Ladder) — shown ATOP the sessions list ───────────
+  // ladders = the user's campaigns; ladderStatuses = the live per-campaign poll
+  // keyed by ladder_id (~5s). Both degrade to "—" on missing fields, never crash.
+  const [ladders, setLadders] = useState<LadderSummary[] | null>(null)
+  const [ladderStatuses, setLadderStatuses] = useState<Record<string, LadderStatus>>({})
+  const [ladderBusy, setLadderBusy] = useState<Record<string, 'pause' | 'resume' | 'kill'>>({})
+  const [ladderErr, setLadderErr] = useState<string | null>(null)
+  // Confirmation banner shown after a campaign is created + started (parity with
+  // the session "scheduled" confirmation — otherwise the user gets no feedback).
+  const [ladderNotice, setLadderNotice] = useState<string | null>(null)
+  // Kill modal — mode is REQUIRED (starts unset so the trader must choose).
+  const [killLadderId, setKillLadderId] = useState<string | null>(null)
+  const [ladderKillMode, setLadderKillMode] = useState<LadderKillMode | null>(null)
+  const ladderPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // ── Auto-Ladder create→start two-step (mirrors the session created-phase) ────
+  // createdLadder holds the just-created CREATED (draft) campaign, awaiting a
+  // Start-now / Schedule choice. It is rendered by the campaign CREATED phase
+  // (phase==='created' && createdLadder && !session), parallel to the session
+  // created-phase (phase==='created' && session).
+  const [createdLadder, setCreatedLadder] = useState<{ ladder_id: string; mode: Mode; product: LadderProduct | 'MIS' } | null>(null)
+  // campaignDate — the picked future start day for Schedule (YYYY-MM-DD; '' = none).
+  const [campaignDate, setCampaignDate] = useState<string>('')
+  // busy flag for the campaign Start/Schedule action (parallel to `busy`).
+  const [campaignBusy, setCampaignBusy] = useState<null | 'now' | 'scheduled'>(null)
+  const [campaignErr, setCampaignErr] = useState<string | null>(null)
+  // A non-trading-day 400 on Schedule → the backend's suggested_date, offered as a
+  // one-click apply (mirrors the session createSuggest pattern).
+  const [campaignSuggest, setCampaignSuggest] = useState<string | null>(null)
+  // Duplicate-campaign soft guard: holds the product:capital:mode signature the
+  // user was just warned about, so a second "Create campaign" click proceeds.
+  const [dupConfirm, setDupConfirm] = useState<string | null>(null)
+  // Step-lock "Advanced" disclosure (ladder editor + large-day tier). The MODE
+  // selector + enable toggle stay visible; only the ladder/large-day are folded.
+  const [stepLockAdv, setStepLockAdv] = useState(false)
+
+  // ── HARDENING SPRINT — break-glass + observability (list/console surface) ─────
+  // Global-kill: a two-click armed confirm (never a one-tap flatten). globalKillResult
+  // holds the last sweep's count for a brief confirmation line.
+  const [globalKillArmed, setGlobalKillArmed] = useState(false)
+  const [globalKilling, setGlobalKilling] = useState(false)
+  const [globalKillResult, setGlobalKillResult] = useState<string | null>(null)
+  // Health strip (per active session) + the per-user breaker; polled ~20s on list.
+  const [health, setHealth] = useState<SessionHealth[] | null>(null)
+  const [breaker, setBreaker] = useState<BreakerState | null>(null)
+  // Alerts feed (unacked-first) + ack-in-flight set; polled ~20s on list.
+  const [alerts, setAlerts] = useState<AlertItem[] | null>(null)
+  const [alertsOpen, setAlertsOpen] = useState(false)
+  const [ackingIds, setAckingIds] = useState<Set<number>>(new Set())
+
+  const set = <K extends keyof SessionConfig>(k: K, v: SessionConfig[K]) =>
+    setConfig((c) => ({ ...c, [k]: v }))
+
+  // Switch instrument. Selecting Equity resets direction to 'long' (equity short
+  // is re-selectable only via the EQ+MIS Long/Short control below). Selecting
+  // Futures keeps the current direction (defaults to 'long').
+  const onInstrumentChange = (next: InstrumentType) =>
+    setConfig((c) => ({
+      ...c,
+      instrument_type: next,
+      direction: next === 'EQ' ? 'long' : (c.direction ?? 'long'),
+    }))
+
+  // Switch the equity order product. Short is EQUITY + MIS-only, so moving the
+  // product away from MIS (to CNC/MTF) snaps direction back to 'long' — the
+  // backend rejects short outside MIS, so the UI must never leave it selected.
+  const onProductChange = (next: OrderProduct) =>
+    setConfig((c) => ({
+      ...c,
+      order_product: next,
+      direction: next === 'MIS' ? (c.direction ?? 'long') : 'long',
+    }))
+
+  // The selected account object (if any) + the scope to send on create/preview/list.
+  // scope is omitted entirely when no user context exists (default global session).
+  const selectedAccount = accounts.find((a) => a.broker_account_id === brokerAccountId) ?? null
+  const accountExpired = (selectedAccount?.status ?? '').toUpperCase() === 'EXPIRED'
+  const scope: SessionScope | undefined =
+    userId != null
+      ? { user_id: userId, ...(brokerAccountId ? { broker_account_id: brokerAccountId } : {}) }
+      : undefined
+
+  // Load the user's broker accounts (for the selector). Best-effort: a missing
+  // endpoint / disabled vault leaves the selector showing only "Global account".
+  useEffect(() => {
+    if (userId == null) return
+    let cancelled = false
+    AutoTradeAPI.brokerAccounts(userId)
+      .then((res) => { if (!cancelled) setAccounts(res.accounts ?? []) })
+      .catch(() => { if (!cancelled) setAccounts([]) })
+    return () => { cancelled = true }
+  }, [userId])
+
+  // Power-user (isAdmin === false): the global/operator account is NOT an option
+  // (the backend isolation guard refuses it). Default-select their connected
+  // account when they have exactly one so the selector is never on the empty
+  // global default. Only runs while no account is chosen yet.
+  useEffect(() => {
+    if (isAdmin) return
+    if (brokerAccountId) return
+    if (accounts.length === 1) setBrokerAccountId(accounts[0].broker_account_id)
+  }, [isAdmin, accounts, brokerAccountId])
+
+  // Switch strategy (UI level). For intraday_basket, SEED the validated preset.
+  // For auto_ladder (UI construct), map to a POSITIONAL intraday_basket under the
+  // hood — CNC product, the positional trail preset (arm3/floor1/give4/stop6),
+  // carry-overnight (square_off_enabled:false) + 3-session hold — so the reused
+  // preview/wire path produces a correct one-basket estimate. For
+  // portfolio_kill_switch, restore the safe kill-switch defaults (byte-for-byte).
+  const onStrategyChange = (next: UiStrategy) => {
+    setUiStrategy(next)
+    if (next === 'auto_ladder') {
+      setConfig((c) => ({
+        ...c,
+        strategy: 'intraday_basket',
+        ...POSITIONAL_TRAIL,                 // arm3/floor1/give4/stop6, off, hold 3
+        order_product: c.order_product === 'MTF' ? 'MTF' : 'CNC', // CNC|MTF only
+        instrument_type: 'EQ',
+        direction: 'long',
+        entry_time: INTRADAY_PRESET.entry_time ?? '09:15:00',
+        kill_switch_enabled: false,
+      }))
+      return
+    }
+    if (next === 'tesla_short') {
+      // Falcon Tesla — seed the seat/rotation preset + FORCE short/EQ/MIS (the
+      // backend rejects anything else). square_off_enabled stays true (MIS intraday).
+      setConfig((c) => ({ ...c, ...TESLA_PRESET, strategy: 'tesla_short', kill_switch_enabled: false }))
+      return
+    }
+    if (next === 'magnifier') {
+      // Falcon Intraday Magnifier (a SEPARATE strategy) — a fixed, validated MIS 5×
+      // monthly campaign. Under the hood we mark strategy 'intraday_basket' so the
+      // shared machinery is happy; the whole standard config region is hidden and a
+      // read-only preset card is shown. The create call is dedicated (magnifierCreate),
+      // NOT toWireConfig — so these values are just for a coherent internal state.
+      setConfig((c) => ({
+        ...c,
+        strategy: 'intraday_basket',
+        order_product: 'MIS',
+        instrument_type: 'EQ',
+        direction: 'long',
+        top_n_stocks: MAGNIFIER_PRESET.top_n,
+        entry_time: MAGNIFIER_PRESET.split_entry[0]?.time ?? '09:15:00',
+        arm_pct: MAGNIFIER_PRESET.arm_pct,
+        floor_pct: MAGNIFIER_PRESET.floor_pct,
+        trail_giveback_pct: MAGNIFIER_PRESET.trail_giveback_pct,
+        stop_pct: MAGNIFIER_PRESET.stop_pct,
+        square_off_time: MAGNIFIER_PRESET.square_off_time,
+        square_off_enabled: true,
+        kill_switch_enabled: false,
+      }))
+      return
+    }
+    setConfig((c) => {
+      if (next === 'intraday_basket') {
+        return { ...c, ...INTRADAY_PRESET, strategy: next }
+      }
+      return {
+        ...c,
+        strategy: next,
+        order_product: DEFAULT_CONFIG.order_product,
+        entry_time: DEFAULT_CONFIG.entry_time,
+        kill_switch_enabled: DEFAULT_CONFIG.kill_switch_enabled,
+        kill_switch_pct: DEFAULT_CONFIG.kill_switch_pct,
+        kill_switch_direction: DEFAULT_CONFIG.kill_switch_direction,
+        kill_switch_target_pct: DEFAULT_CONFIG.kill_switch_target_pct,
+        kill_switch_stop_pct: DEFAULT_CONFIG.kill_switch_stop_pct,
+      }
+    })
+  }
+
+  // If the visibility list loads and the currently-selected strategy is no longer
+  // permitted for this caller (e.g. a power user had a now-hidden strategy), snap
+  // back to the always-on default so a hidden strategy can't be created. Likewise
+  // fall back off the BTST Oscillator preset when it isn't allowed.
+  useEffect(() => {
+    if (visibleStrategyIds == null) return
+    const cur = STRATEGY_OPTIONS.find((o) => o.id === uiStrategy)
+    if (cur && !visibleStrategyIds.has(cur.backendId)) onStrategyChange('portfolio_kill_switch')
+    if (ladderPreset === 'btst' && !btstAllowed) setLadderPreset('positional')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleStrategyIds])
+
+  // Switch Hold mode (Intraday ↔ Positional). Re-seeds that mode's validated
+  // trail preset (arm/floor/giveback/stop + square-off + max-hold) — product,
+  // capital and entry are untouched. The operator can still edit every field.
+  const onHoldChange = (hold: 'intraday' | 'positional') => {
+    setConfig((c) => ({ ...c, ...(hold === 'positional' ? POSITIONAL_TRAIL : INTRADAY_TRAIL) }))
+  }
+
+  // Switch Execution mode (intraday_basket / portfolio_kill_switch only; Tesla
+  // forces its own path). 'Standard' CLEARS execution_mode + every worked knob so
+  // the wire payload is byte-identical to today. 'Worked' seeds the paced-engine
+  // defaults (participation as a PERCENT in state, interval sec, deadline =
+  // session square-off) so the shown values match exactly what is sent; the freeze
+  // qty is intentionally left for the operator to set per the amber note.
+  const onExecutionModeChange = (worked: boolean) => {
+    setConfig((c) => worked
+      ? {
+          ...c,
+          execution_mode: 'worked',
+          worked_participation_pct: c.worked_participation_pct ?? 10, // PERCENT → wire 0.10
+          worked_interval_sec: c.worked_interval_sec ?? 20,
+          worked_deadline: c.worked_deadline ?? (c.square_off_time || '15:15:00'),
+        }
+      : {
+          ...c,
+          execution_mode: undefined,
+          worked_participation_pct: undefined,
+          worked_interval_sec: undefined,
+          worked_deadline: undefined,
+          iceberg_freeze_qty_default: undefined,
+        })
+  }
+
+  // ── Step-lock ladder editing (intraday_basket) — rungs held as PERCENTS ──────
+  // Falls back to the validated default ladder when state is empty so the editor
+  // always renders at least the seeded rungs.
+  const ladderRows = (): number[][] => config.trail_step_lock_ladder ?? STEP_LOCK_LADDER_DEFAULT
+  const setLadder = (rows: number[][]) => set('trail_step_lock_ladder', rows)
+  const updateRung = (i: number, col: 0 | 1, v: number) =>
+    setLadder(ladderRows().map((r, idx) => (idx === i ? (col === 0 ? [v, r[1]] : [r[0], v]) : r)))
+  const addRung = () => {
+    const rows = ladderRows()
+    const last = rows[rows.length - 1] ?? [0, 0]
+    setLadder([...rows, [Number(last[0]) + 2, Number(last[1]) + 2]])
+  }
+  const removeRung = (i: number) => setLadder(ladderRows().filter((_, idx) => idx !== i))
+
+  // Build the wire payload for a config: percents → fractions, exactly at the
+  // send boundary (state stays in percents so the inputs read naturally). Both
+  // create + preview use this so there is one conversion site per strategy.
+  // Also carries universe_filter + symbol_whitelist through (passed as extra args
+  // at the call site so the effect dependency arrays can declare them cleanly).
+  const toWireConfig = useCallback((
+    c: SessionConfig,
+    opts?: { universeFilter?: string; symbolWhitelist?: string[] },
+  ): SessionConfig => {
+    // Execution-date / trading-day rule: an empty entry_date means "let the
+    // backend resolve the next valid trading session" — send it as omitted (the
+    // empty string would be an invalid date), and pass through the rest.
+    const entry_date = c.entry_date && c.entry_date.trim() ? c.entry_date.trim() : undefined
+    const exec = {
+      entry_date,
+      on_missed_window: c.on_missed_window ?? 'expire',
+      entry_grace_seconds: Number.isFinite(Number(c.entry_grace_seconds))
+        ? Number(c.entry_grace_seconds) : 120,
+    }
+    // universe_filter: only send when not the default (all500 = current behaviour).
+    // symbol_whitelist: only send when the user has made a non-default selection.
+    const universeExtra: Partial<SessionConfig> = {}
+    if (opts?.universeFilter && opts.universeFilter !== 'all500') {
+      universeExtra.universe_filter = opts.universeFilter
+    }
+    if (opts?.symbolWhitelist && opts.symbolWhitelist.length > 0) {
+      universeExtra.symbol_whitelist = opts.symbolWhitelist
+    }
+    // C · leftover-capital redistribution — always sent (default true). A boolean
+    // is cheap and unambiguous; the backend defaults to true when absent anyway.
+    const capitalExtra: Partial<SessionConfig> = {
+      redistribute_unused_capital: c.redistribute_unused_capital !== false,
+    }
+    // A · MIS defensive square-off — only meaningful for MIS equity sessions; send
+    // it only then so non-MIS sessions carry no spurious field.
+    const misExtra: Partial<SessionConfig> = {}
+    if (c.order_product === 'MIS' && c.mis_square_off_time) {
+      misExtra.mis_square_off_time = c.mis_square_off_time
+    }
+    // Direction safety net: 'short' is valid ONLY for FUT or EQUITY-on-MIS. The
+    // controls already prevent selecting it elsewhere, but normalise here so the
+    // wire can never carry an invalid short (the backend would 400 it). Sent as
+    // `direction` verbatim (default 'long').
+    // The right operand only runs when instrument_type !== 'FUT' (i.e. EQ), so a
+    // bare MIS check there means EQUITY-on-MIS.
+    const shortOk = c.instrument_type === 'FUT' || c.order_product === 'MIS'
+    const dirExtra: Partial<SessionConfig> = {
+      direction: c.direction === 'short' && shortOk ? 'short' : 'long',
+    }
+    // ── HARDENING SPRINT risk/protection knobs — send ONLY what the operator set,
+    // so an untouched form is byte-identical to today. The two "_pct" fields are
+    // PERCENT in state → FRACTION on the wire (÷100); the ₹/int fields verbatim.
+    // A value is "set" only when it is a finite positive number.
+    const posNum = (v: unknown): number | null => {
+      const n = Number(v)
+      return Number.isFinite(n) && n > 0 ? n : null
+    }
+    const riskExtra: Partial<SessionConfig> = {}
+    {
+      const mdlp = posNum(c.max_daily_loss_pct)
+      if (mdlp != null) riskExtra.max_daily_loss_pct = mdlp / 100
+      const mdla = posNum(c.max_daily_loss_amount)
+      if (mdla != null) riskExtra.max_daily_loss_amount = mdla
+      // MIS protective SL-M — only meaningful for MIS; send the bool only then
+      // (true = default). Non-MIS sessions carry no spurious field.
+      if (c.order_product === 'MIS') {
+        riskExtra.mis_protective_slm_enabled = c.mis_protective_slm_enabled !== false
+      }
+      // Iceberg — only when enabled AND a slice source is set (the backend rejects
+      // iceberg_enabled with no slice source). slice_qty preferred; else slice_value.
+      const sliceQty = posNum(c.iceberg_slice_qty)
+      const sliceVal = posNum(c.iceberg_slice_value)
+      if (c.iceberg_enabled && (sliceQty != null || sliceVal != null)) {
+        riskExtra.iceberg_enabled = true
+        if (sliceQty != null) riskExtra.iceberg_slice_qty = Math.max(1, Math.floor(sliceQty))
+        else if (sliceVal != null) riskExtra.iceberg_slice_value = sliceVal
+      }
+      // Concentration / fat-finger caps — each inert unless set.
+      const mpn = posNum(c.max_pct_per_name)
+      if (mpn != null) riskExtra.max_pct_per_name = Math.min(1, mpn / 100)
+      const mno = posNum(c.fatfinger_max_notional_per_order)
+      if (mno != null) riskExtra.fatfinger_max_notional_per_order = mno
+      const mq = posNum(c.fatfinger_max_qty_per_order)
+      if (mq != null) riskExtra.fatfinger_max_qty_per_order = Math.max(1, Math.floor(mq))
+    }
+    // ── WORKED (paced) EXECUTION — only for intraday_basket / portfolio_kill_switch
+    // (Tesla forces its own path, so this is NOT spread into the tesla branch).
+    // When Standard is selected execution_mode is absent → workedExtra is EMPTY →
+    // the wire is byte-identical to today. When 'worked': send execution_mode plus
+    // only the knobs the operator set. worked_participation_pct is a PERCENT in
+    // state → FRACTION on the wire (÷100); interval/freeze are ints (verbatim);
+    // deadline is an "HH:MM[:SS]" IST string, omitted → backend uses square-off.
+    const workedExtra: Partial<SessionConfig> = {}
+    if (c.execution_mode === 'worked') {
+      workedExtra.execution_mode = 'worked'
+      const part = posNum(c.worked_participation_pct)
+      if (part != null) workedExtra.worked_participation_pct = part / 100
+      const iv = posNum(c.worked_interval_sec)
+      if (iv != null) workedExtra.worked_interval_sec = Math.max(1, Math.floor(iv))
+      const dl = typeof c.worked_deadline === 'string' ? c.worked_deadline.trim() : ''
+      if (dl) workedExtra.worked_deadline = dl
+      const fz = posNum(c.iceberg_freeze_qty_default)
+      if (fz != null) workedExtra.iceberg_freeze_qty_default = Math.max(1, Math.floor(fz))
+    }
+    if (c.strategy === 'tesla_short') {
+      // Falcon Tesla — order-flow-native intraday SHORT seat rotation. FORCE
+      // short/EQ/MIS (the backend 400s anything else) + emit the seat knobs and
+      // the REUSED intraday trail EXIT knobs (per-seat step-lock + per-seat stop).
+      return {
+        ...c,
+        ...exec,
+        ...universeExtra,
+        ...capitalExtra,
+        ...misExtra,
+        ...riskExtra,
+        strategy: 'tesla_short',
+        // Forced instrument/direction/product (read-only in the UI; asserted here).
+        instrument_type: 'EQ',
+        order_product: 'MIS',
+        direction: 'short',
+        square_off_enabled: true,          // MIS is intraday — mandatory square-off
+        // Reused intraday trail EXIT knobs — PERCENT → FRACTION (÷100), per seat.
+        arm_pct: (Number(c.arm_pct) || 0) / 100,
+        floor_pct: (Number(c.floor_pct) || 0) / 100,
+        trail_giveback_pct: (Number(c.trail_giveback_pct) || 0) / 100,
+        stop_pct: (Number(c.stop_pct) || 0) / 100,
+        step_lock_scope: c.step_lock_scope === 'basket' ? 'basket' : 'stock',
+        trail_step_lock_enabled: c.trail_step_lock_enabled !== false,
+        trail_step_lock_ladder: (c.trail_step_lock_ladder ?? STEP_LOCK_LADDER_DEFAULT)
+          .map((r) => [(Number(r[0]) || 0) / 100, (Number(r[1]) || 0) / 100]),
+        trail_large_peak_pct: (Number(c.trail_large_peak_pct) || STEP_LOCK_LARGE_PEAK_DEFAULT) / 100,
+        trail_large_giveback_rel: (Number(c.trail_large_giveback_rel) || STEP_LOCK_LARGE_GIVEBACK_DEFAULT) / 100,
+        per_stock_stop_pct: Math.max(0, Number(c.per_stock_stop_pct) || 0) / 100,
+        // Seat-model knobs (Tesla-only) — ints/enum, sent verbatim.
+        n_seats: Math.max(1, Math.floor(Number(c.n_seats) || 3)),
+        tesla_min_grade: c.tesla_min_grade === 'A+++' ? 'A+++' : 'A++',
+        tesla_cooldown_minutes: Math.max(0, Math.floor(Number(c.tesla_cooldown_minutes) || 0)),
+        tesla_personality_window_days: Math.max(1, Math.floor(Number(c.tesla_personality_window_days) || 1)),
+        tesla_did_layer_enabled: !!c.tesla_did_layer_enabled,
+        kill_switch_enabled: false,
+      }
+    }
+    if (c.strategy === 'intraday_basket') {
+      return {
+        ...c,
+        ...exec,
+        ...universeExtra,
+        ...capitalExtra,
+        ...misExtra,
+        ...dirExtra,
+        ...riskExtra,
+        ...workedExtra,
+        arm_pct: (Number(c.arm_pct) || 0) / 100,
+        floor_pct: (Number(c.floor_pct) || 0) / 100,
+        trail_giveback_pct: (Number(c.trail_giveback_pct) || 0) / 100,
+        stop_pct: (Number(c.stop_pct) || 0) / 100,
+        // D · Hold mode — INTRADAY (true, default) forces a square-off; POSITIONAL
+        // (false) carries the floor + hard stop across days. MIS cannot be
+        // positional (backend rejects it), so force INTRADAY for MIS.
+        square_off_enabled: c.order_product === 'MIS' ? true : (c.square_off_enabled !== false),
+        // D · positional max-hold cap — sent only for a positional (carry-overnight)
+        // session; MIS + intraday never carry a cap. Int, 0 = no cap.
+        max_hold_sessions: (c.order_product !== 'MIS' && c.square_off_enabled === false)
+          ? Math.max(0, Math.floor(Number(c.max_hold_sessions) || 0)) : 0,
+        // PROFIT STEP-LOCK — scope + enable pass through; ladder + large-day pcts
+        // convert PERCENT → FRACTION (backend wants fractions, 0 < lock < peak < 1).
+        // Untouched large-day fields fall back to the validated defaults (never 0,
+        // which the backend rejects).
+        step_lock_scope: c.step_lock_scope === 'stock' ? 'stock' : 'basket',
+        trail_step_lock_enabled: c.trail_step_lock_enabled !== false,
+        trail_step_lock_ladder: (c.trail_step_lock_ladder ?? STEP_LOCK_LADDER_DEFAULT)
+          .map((r) => [(Number(r[0]) || 0) / 100, (Number(r[1]) || 0) / 100]),
+        trail_large_peak_pct: (Number(c.trail_large_peak_pct) || STEP_LOCK_LARGE_PEAK_DEFAULT) / 100,
+        trail_large_giveback_rel: (Number(c.trail_large_giveback_rel) || STEP_LOCK_LARGE_GIVEBACK_DEFAULT) / 100,
+        // Per-stock CAPITAL-basis hard stop — PERCENT → FRACTION. 0 = off (kept, not
+        // coerced to a default). Backend applies it only in 'stock' scope.
+        per_stock_stop_pct: Math.max(0, Number(c.per_stock_stop_pct) || 0) / 100,
+        // intraday_basket exits via the trail, not the flat kill switch
+        kill_switch_enabled: false,
+      }
+    }
+    // B · asymmetric kill switch — send the per-side thresholds as FRACTIONS ONLY
+    // when the operator set them (a positive number); leave them omitted otherwise
+    // so the backend falls back to the single symmetric kill_switch_pct.
+    const killExtra: Partial<SessionConfig> = {}
+    const tgt = Number(c.kill_switch_target_pct)
+    const stp = Number(c.kill_switch_stop_pct)
+    if (c.kill_switch_target_pct != null && Number.isFinite(tgt) && tgt > 0) {
+      killExtra.kill_switch_target_pct = tgt / 100
+    }
+    if (c.kill_switch_stop_pct != null && Number.isFinite(stp) && stp > 0) {
+      killExtra.kill_switch_stop_pct = stp / 100
+    }
+    return {
+      ...c,
+      ...exec,
+      ...universeExtra,
+      ...capitalExtra,
+      ...misExtra,
+      ...dirExtra,
+      ...riskExtra,
+      ...killExtra,
+      ...workedExtra,
+      kill_switch_pct: (Number(c.kill_switch_pct) || 0) / 100,
+    }
+  }, [])
+
+  // ── Load picks when the config form is open (universe or top_n changes) ──────
+  // If the endpoint errors (backend not yet deployed), gracefully degrade: show
+  // an inline note and leave checkedSymbols null so create still works normally.
+  useEffect(() => {
+    if (phase !== 'config') {
+      setPicks(null); setPicksErr(null); setPicksLoading(false); setCheckedSymbols(null); setTierFilter(new Set())
+      return
+    }
+    let cancelled = false
+    setPicksLoading(true)
+    setPicksErr(null)
+    const t = setTimeout(async () => {
+      try {
+        const res: PicksResponse = await AutoTradeAPI.sessionPicks(universeFilter, config.top_n_stocks)
+        if (cancelled) return
+        setPicks(res.picks ?? [])
+        setPicksErr(null)
+        // Seed the checked set: top_n items pre-checked by rank, rest unchecked.
+        const defaultChecked = new Set(
+          (res.picks ?? [])
+            .filter((p) => p.rank <= config.top_n_stocks)
+            .map((p) => p.symbol),
+        )
+        setCheckedSymbols(defaultChecked)
+        // Fresh picks → drop any stale tier filter (tiers may differ per universe).
+        setTierFilter(new Set())
+      } catch {
+        if (cancelled) return
+        setPicks(null)
+        setPicksErr('Universe preview unavailable — top N picks will be used.')
+        setCheckedSymbols(null)
+      } finally {
+        if (!cancelled) setPicksLoading(false)
+      }
+    }, 300)
+    return () => { cancelled = true; clearTimeout(t) }
+  }, [phase, universeFilter, config.top_n_stocks])
+
+  // When the user clicks a different Top N, re-sync checked state to the new N
+  // (top N pre-checked, rest unchecked). Called in addition to set('top_n_stocks').
+  const onTopNChange = useCallback((n: number) => {
+    set('top_n_stocks', n)
+    if (picks) {
+      const newChecked = new Set(
+        picks.filter((p) => p.rank <= n).map((p) => p.symbol),
+      )
+      setCheckedSymbols(newChecked)
+    }
+  }, [picks])
+
+  // Compute the symbol_whitelist to send: undefined if the selection equals the
+  // default top-N (no override needed); string[] otherwise (the checked set).
+  const symbolWhitelist: string[] | undefined = (() => {
+    if (!checkedSymbols || !picks) return undefined
+    const defaultSet = new Set(
+      picks.filter((p) => p.rank <= config.top_n_stocks).map((p) => p.symbol),
+    )
+    const isDefault =
+      checkedSymbols.size === defaultSet.size &&
+      [...checkedSymbols].every((s) => defaultSet.has(s))
+    if (isDefault) return undefined
+    return [...checkedSymbols]
+  })()
+
+  // ── Custom-selection tier filter + select-all (view-only) ──────────────────
+  // distinctTiers: the signal_tier values actually present in the loaded picks,
+  // best-first, for the filter chips. Derived from the data so it stays correct
+  // if the tier taxonomy changes. visiblePicks: the filtered view the list
+  // renders + the Select-all / Deselect-all controls operate on.
+  const distinctTiers: string[] = (() => {
+    if (!picks) return []
+    const seen = new Set<string>()
+    for (const p of picks) if (p.signal_tier) seen.add(p.signal_tier)
+    return [...seen].sort((a, b) => {
+      const ia = SIGNAL_TIER_ORDER.indexOf(a); const ib = SIGNAL_TIER_ORDER.indexOf(b)
+      return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib) || a.localeCompare(b)
+    })
+  })()
+  const visiblePicks: PickItem[] = picks
+    ? picks.filter((p) => tierFilter.size === 0 || (p.signal_tier != null && tierFilter.has(p.signal_tier)))
+    : []
+  const visibleSymbols = visiblePicks.map((p) => p.symbol)
+  const visibleCheckedCount = checkedSymbols
+    ? visibleSymbols.reduce((n, s) => n + (checkedSymbols.has(s) ? 1 : 0), 0)
+    : 0
+  const allVisibleChecked = visibleSymbols.length > 0 && visibleCheckedCount === visibleSymbols.length
+  // Select-all / Deselect-all operate on the CURRENTLY-VISIBLE (filtered) set only;
+  // rows hidden by the tier filter keep their checkbox state untouched.
+  const selectAllVisible = () => setCheckedSymbols((prev) => {
+    const next = new Set(prev ?? []); visibleSymbols.forEach((s) => next.add(s)); return next
+  })
+  const deselectAllVisible = () => setCheckedSymbols((prev) => {
+    const next = new Set(prev ?? []); visibleSymbols.forEach((s) => next.delete(s)); return next
+  })
+
+  const liveReady = mode === 'paper' || liveConfirm.trim().toUpperCase() === 'LIVE'
+
+  // ── Power-user LIVE requires their OWN active broker account ───────────────────
+  // A power user (isAdmin === false) may NEVER be silently pointed at the operator
+  // global account, and a LIVE start needs a selected ACTIVE account (paper may
+  // proceed without one). accountActive = a chosen, non-EXPIRED connected account.
+  // liveAccountReady gates the LIVE Create/Start; for an operator (isAdmin) it is
+  // always true (the global account is a valid live target), preserving behaviour.
+  const accountActive = selectedAccount != null && !accountExpired
+  const liveAccountReady = isAdmin || mode === 'paper' || accountActive
+  // Combined LIVE readiness for the create/start buttons: the typed-LIVE confirm
+  // AND (for a power user) a selected active account.
+  const canGoLive = liveReady && liveAccountReady
+
+  // Auto-Ladder splits the total campaign capital across overlapping sleeves. The
+  // sizing preview must reflect what ONE day's basket buys, so we preview on the
+  // per-sleeve slice = total ÷ max_hold_sessions. Positional holds 3 (÷3); Falcon
+  // BTST holds exactly 2 (÷2) — matching the backend total_capital / hold-sessions.
+  const perBasketCapital = isLadder
+    ? Math.max(0, Math.floor((config.total_allocated_capital || 0) / (isBtst ? 2 : 3)))
+    : config.total_allocated_capital
+
+  // ── Debounced P&L preview (CONFIG form, kill switch enabled) ──────────────────
+  // Re-estimate the invested basis + kill outcome whenever a config field that
+  // moves them changes. Debounced 450ms so typing in the capital/threshold inputs
+  // doesn't spam the backend. UNITS: state holds kill_switch_pct as a PERCENT
+  // ("1" reads naturally); the backend speaks FRACTIONS, so we send /100 here —
+  // the SAME convention as createSession (no double-conversion; state untouched).
+  // intraday_basket ALWAYS previews (for the strategy-summary line: invested
+  // basis + leverage); portfolio_kill_switch previews only when the kill switch
+  // is on (the "Potential outcome" card). Both convert percents→fractions via
+  // toWireConfig at the send boundary.
+  const intraday = config.strategy === 'intraday_basket'
+  useEffect(() => {
+    // Magnifier AND BTST are fixed validated campaigns whose basket is the Top-15
+    // high-tier SUBSET (resolved at fire time) — the generic preview can't represent
+    // it (it would size the wrong top-N-by-rank names), so skip the estimate for both.
+    if (phase !== 'config' || isMagnifier || isBtst || (!intraday && !config.kill_switch_enabled)) {
+      setPreview(null); setPreviewErr(null); setPreviewLoading(false)
+      return
+    }
+    let cancelled = false
+    setPreviewLoading(true)
+    const t = setTimeout(async () => {
+      try {
+        // Auto-Ladder previews the PER-BASKET slice (total ÷ 3) so the trader
+        // sees exactly what one day's basket buys; other strategies preview the
+        // full capital, unchanged.
+        const previewConfig = isLadder
+          ? { ...config, total_allocated_capital: perBasketCapital }
+          : config
+        const res = await AutoTradeAPI.preview(
+          toWireConfig(previewConfig, { universeFilter, symbolWhitelist }),
+          scope,
+        )
+        if (!cancelled) { setPreview(res); setPreviewErr(null) }
+      } catch (e) {
+        // Keep the LAST-GOOD preview visible on a transient error (don't blank the
+        // sizing table) — just surface the error. Only a strategy switch (above)
+        // clears it. This fixes the "table sometimes disappears" flicker.
+        if (!cancelled) setPreviewErr(e instanceof Error ? e.message : 'Could not estimate the outcome.')
+      } finally {
+        if (!cancelled) setPreviewLoading(false)
+      }
+    }, 450)
+    return () => { cancelled = true; clearTimeout(t) }
+  }, [
+    phase,
+    intraday,
+    config.strategy,
+    config.kill_switch_enabled,
+    config.total_allocated_capital,
+    config.top_n_stocks,
+    config.sizing_mode,
+    config.order_product,
+    config.instrument_type,
+    config.direction,
+    config.kill_switch_pct,
+    config.kill_switch_direction,
+    config.kill_switch_target_pct,
+    config.kill_switch_stop_pct,
+    config.max_pct_per_position,
+    config.arm_pct,
+    config.floor_pct,
+    config.trail_giveback_pct,
+    config.stop_pct,
+    config.square_off_time,
+    config.square_off_enabled,
+    config.redistribute_unused_capital,
+    config.mis_square_off_time,
+    universeFilter,
+    symbolWhitelist,
+    userId,
+    brokerAccountId,
+    toWireConfig,
+    isLadder,
+    isMagnifier,
+    isBtst,
+    perBasketCapital,
+  ])
+
+  // ── Your Sessions (list + resume) ────────────────────────────────────────────
+  const loadSessions = useCallback(async () => {
+    setSessionsLoading(true); setSessionsErr(null)
+    try {
+      const res = await AutoTradeAPI.listSessions(userId != null ? { user_id: userId } : undefined)
+      // Newest first — sort by created_at desc when present, else keep order.
+      const list = (res.sessions ?? []).slice().sort((a, b) => {
+        const ta = a.created_at ? Date.parse(a.created_at) : 0
+        const tb = b.created_at ? Date.parse(b.created_at) : 0
+        return tb - ta
+      })
+      setSessions(list)
+    } catch (e) {
+      setSessionsErr(e instanceof Error ? e.message : 'Could not load your sessions.')
+    } finally {
+      setSessionsLoading(false)
+    }
+  }, [userId])
+
+  // Fetch the list once on mount so a reload RESTORES your sessions (the
+  // "session disappears" fix) instead of dumping you on a blank form.
+  useEffect(() => { loadSessions() }, [loadSessions])
+
+  // ── Running campaigns (Auto-Ladder) — a summary card ATOP the sessions list ──
+  // Load the user's campaigns; best-effort (a missing endpoint leaves the section
+  // absent, never blocking the sessions list). Only fetched with a user context.
+  const loadLadders = useCallback(async () => {
+    if (userId == null) { setLadders([]); return }
+    setLadderErr(null)
+    try {
+      const res = await AutoTradeAPI.ladders(userId)
+      const list = (res.ladders ?? []).slice().sort((a, b) => {
+        const ta = a.created_at ? Date.parse(a.created_at) : 0
+        const tb = b.created_at ? Date.parse(b.created_at) : 0
+        return tb - ta
+      })
+      setLadders(list)
+    } catch (e) {
+      // Calm degrade — surface a retry note; never crash the sessions list.
+      setLadders([])
+      setLadderErr(e instanceof Error ? e.message : 'Could not load your campaigns.')
+    }
+  }, [userId])
+
+  useEffect(() => { loadLadders() }, [loadLadders])
+
+  // ── HARDENING SPRINT — observability loaders (health + alerts) ────────────────
+  // Both are best-effort: a missing endpoint / error leaves the strip/feed absent
+  // (never blocks the sessions list). Scoped server-side by the caller identity.
+  const loadHealth = useCallback(async () => {
+    try {
+      const res = await AutoTradeAPI.health()
+      setHealth(res.sessions ?? [])
+      setBreaker(res.breaker ?? null)
+    } catch {
+      // Calm degrade — keep the last-good strip; never surface a hard error here.
+    }
+  }, [])
+
+  const loadAlerts = useCallback(async () => {
+    try {
+      const res = await AutoTradeAPI.alerts({ limit: 50 })
+      setAlerts(res.alerts ?? [])
+    } catch {
+      // Calm degrade — keep last-good; the feed is informational.
+    }
+  }, [])
+
+  // Poll health + alerts (~20s) ONLY while the list/console is shown, so a create
+  // or live view doesn't add background traffic. Cleared on unmount/phase change.
+  useEffect(() => {
+    if (phase !== 'list') return
+    loadHealth(); loadAlerts()
+    const t = setInterval(() => { loadHealth(); loadAlerts() }, 20_000)
+    return () => clearInterval(t)
+  }, [phase, loadHealth, loadAlerts])
+
+  // Acknowledge one alert — optimistic: mark acking, then reload the feed.
+  const onAckAlert = useCallback(async (id: number) => {
+    setAckingIds((s) => new Set(s).add(id))
+    try {
+      await AutoTradeAPI.ackAlert(id)
+      await loadAlerts()
+    } catch {
+      // best-effort — leave the alert unacked; the next poll re-syncs truth.
+    } finally {
+      setAckingIds((s) => { const n = new Set(s); n.delete(id); return n })
+    }
+  }, [loadAlerts])
+
+  // Break-glass GLOBAL KILL — flatten EVERY live session for this user in one
+  // sweep. Two-click armed confirm (never a one-tap flatten). Scoped to the user
+  // when a user context exists; the backend also scopes a non-admin to their book.
+  const onGlobalKill = useCallback(async () => {
+    setGlobalKilling(true); setGlobalKillResult(null); setError(null)
+    try {
+      const res = await AutoTradeAPI.globalKill(userId != null ? { user_id: userId } : undefined)
+      setGlobalKillArmed(false)
+      const n = res.n_killed ?? res.killed?.length ?? 0
+      setGlobalKillResult(
+        res.skipped
+          ? `Global kill already in progress — ${res.skipped}.`
+          : `Global kill fired — flattened ${n} session${n === 1 ? '' : 's'}.`,
+      )
+      await Promise.all([loadSessions(), loadHealth(), loadAlerts()])
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Global kill failed.')
+    } finally {
+      setGlobalKilling(false)
+    }
+  }, [userId, loadSessions, loadHealth, loadAlerts])
+
+  // The LIVE campaigns we render atop the list: RUNNING / PAUSED and now also
+  // SCHEDULED (armed for a future start_date). CREATED drafts are deliberately
+  // excluded — a draft lives only in the transient created-phase card until the
+  // trader Starts or Schedules it.
+  const liveLadders = (ladders ?? []).filter((l) => {
+    const s = (l.status ?? '').toUpperCase()
+    return s === 'RUNNING' || s === 'PAUSED' || s === 'SCHEDULED'
+  })
+  // Finished campaigns (COMPLETED / ENDED) — terminal history. Shown compactly so
+  // the trader can permanently DELETE them (they no longer open baskets).
+  const finishedLadders = (ladders ?? []).filter((l) => {
+    const s = (l.status ?? '').toUpperCase()
+    return s === 'COMPLETED' || s === 'ENDED'
+  })
+  const liveLadderIds = liveLadders.map((l) => l.ladder_id).join(',')
+
+  // Poll each live campaign's status (~5s). Keeps last-good numbers on a transient
+  // error (calm retry, mirroring the sessions list). Depends on the id set only.
+  useEffect(() => {
+    if (ladderPollRef.current) { clearInterval(ladderPollRef.current); ladderPollRef.current = null }
+    const ids = liveLadderIds ? liveLadderIds.split(',').filter(Boolean) : []
+    if (ids.length === 0) return
+    let cancelled = false
+    const tick = async () => {
+      await Promise.all(ids.map(async (id) => {
+        try {
+          const res = await AutoTradeAPI.ladderStatus(id)
+          if (!cancelled) setLadderStatuses((prev) => ({ ...prev, [id]: res }))
+        } catch { /* keep last-good; next tick retries */ }
+      }))
+    }
+    tick()
+    ladderPollRef.current = setInterval(tick, 5_000)
+    return () => { cancelled = true; if (ladderPollRef.current) clearInterval(ladderPollRef.current) }
+  }, [liveLadderIds])
+
+  // ── Campaign controls (pause / resume / kill) ────────────────────────────────
+  const onLadderPause = useCallback(async (id: string) => {
+    setLadderErr(null); setLadderBusy((b) => ({ ...b, [id]: 'pause' }))
+    try {
+      await AutoTradeAPI.ladderPause(id)
+      const res = await AutoTradeAPI.ladderStatus(id)
+      setLadderStatuses((prev) => ({ ...prev, [id]: res }))
+      loadLadders()
+    } catch (e) {
+      setLadderErr(e instanceof Error ? e.message : 'Could not pause the campaign.')
+    } finally {
+      setLadderBusy((b) => { const n = { ...b }; delete n[id]; return n })
+    }
+  }, [loadLadders])
+
+  const onLadderResume = useCallback(async (id: string) => {
+    setLadderErr(null); setLadderBusy((b) => ({ ...b, [id]: 'resume' }))
+    try {
+      await AutoTradeAPI.ladderResume(id)
+      const res = await AutoTradeAPI.ladderStatus(id)
+      setLadderStatuses((prev) => ({ ...prev, [id]: res }))
+      loadLadders()
+    } catch (e) {
+      setLadderErr(e instanceof Error ? e.message : 'Could not resume the campaign.')
+    } finally {
+      setLadderBusy((b) => { const n = { ...b }; delete n[id]; return n })
+    }
+  }, [loadLadders])
+
+  const onLadderKill = useCallback(async (modeArg?: LadderKillMode) => {
+    // modeArg lets a SCHEDULED-campaign cancel skip the wind-down question and
+    // pass a mode directly (nothing is open, so flatten_now just marks it done).
+    const mode = modeArg ?? ladderKillMode
+    if (!killLadderId || !mode) return
+    const id = killLadderId
+    setLadderErr(null); setLadderBusy((b) => ({ ...b, [id]: 'kill' }))
+    try {
+      await AutoTradeAPI.ladderKill(id, mode)
+      setKillLadderId(null); setLadderKillMode(null)
+      const res = await AutoTradeAPI.ladderStatus(id).catch(() => null)
+      if (res) setLadderStatuses((prev) => ({ ...prev, [id]: res }))
+      loadLadders()
+    } catch (e) {
+      setLadderErr(e instanceof Error ? e.message : 'Could not stop the campaign.')
+    } finally {
+      setLadderBusy((b) => { const n = { ...b }; delete n[id]; return n })
+    }
+  }, [killLadderId, ladderKillMode, loadLadders])
+
+  // Permanently delete a FINISHED campaign (COMPLETED/ENDED) — removes the row.
+  const onLadderDelete = useCallback(async (id: string) => {
+    setLadderErr(null); setLadderBusy((b) => ({ ...b, [id]: 'kill' }))
+    try {
+      await AutoTradeAPI.ladderDelete(id)
+      loadLadders()
+    } catch (e) {
+      setLadderErr(e instanceof Error ? e.message : 'Could not delete the campaign.')
+    } finally {
+      setLadderBusy((b) => { const n = { ...b }; delete n[id]; return n })
+    }
+  }, [loadLadders])
+
+  // ── Multi-select delete (paper/test housekeeping) ────────────────────────────
+  const toggleSelect = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }, [])
+
+  const allIds = (sessions ?? []).map((s) => s.session_id).filter(Boolean) as string[]
+  const allSelected = allIds.length > 0 && allIds.every((id) => selected.has(id))
+  const toggleSelectAll = useCallback(() => {
+    setSelected((prev) => (allIds.length > 0 && allIds.every((id) => prev.has(id)))
+      ? new Set()
+      : new Set(allIds))
+  }, [allIds])
+
+  const onDeleteSelected = useCallback(async () => {
+    const ids = Array.from(selected)
+    if (!ids.length) return
+    if (!window.confirm(
+      `Delete ${ids.length} session${ids.length > 1 ? 's' : ''}? This removes the ` +
+      `session record${ids.length > 1 ? 's' : ''} (paper/test housekeeping) and cannot be undone.`,
+    )) return
+    setDeleting(true); setDeleteErr(null)
+    try {
+      await AutoTradeAPI.deleteSessions(ids)
+      setSelected(new Set())
+      await loadSessions()
+    } catch (e) {
+      setDeleteErr(e instanceof Error ? e.message : 'Could not delete the selected sessions.')
+    } finally {
+      setDeleting(false)
+    }
+  }, [selected, loadSessions])
+
+  // Resume an existing session: jump straight to its live view + pull status.
+  // RESUME FIX: fetch status IMMEDIATELY using the row's id (not relying on the
+  // poll interval, which would leave the view on a blank "No open positions"
+  // for up to 12s while positions/LTP/gross are unknown). The poll effect still
+  // takes over afterwards; this just makes the first paint correct at once.
+  const onResume = useCallback(async (s: SessionSummary) => {
+    setError(null)
+    setSession({ session_id: s.session_id, status: s.status ?? 'unknown', mode: s.mode ?? 'paper' })
+    onSessionChange?.(s.session_id)
+    setStartResult(null)
+    setStatus(null)
+    setLiveConfirm(''); setKillArmed(false); setKillConfirm('')
+    // Seed the countdown from the list row if this is a SCHEDULED session, so
+    // the waiting view is correct the instant you resume (the poll re-syncs it).
+    setCountdown(isScheduled(s.status) && typeof s.seconds_remaining === 'number' ? s.seconds_remaining : null)
+    setPhase('running')
+    setPoll(true)
+    // Immediate, non-poll-dependent status pull so positions + LTP + gross show
+    // right away. Errors here are non-fatal — the poll will retry.
+    setBusy('status')
+    try {
+      const res = await AutoTradeAPI.sessionStatus(s.session_id)
+      setStatus(res)
+      if (isScheduled(res.status) && typeof res.seconds_remaining === 'number') {
+        setCountdown(res.seconds_remaining)
+      } else if (!isScheduled(res.status)) {
+        setCountdown(null)
+      }
+    } catch {
+      /* poll will retry; keep the loading state honest */
+    } finally {
+      setBusy(null)
+    }
+  }, [onSessionChange])
+
+  // ── Actions ────────────────────────────────────────────────────────────────
+  // Auto-Ladder — STEP 1: create the campaign only (ladderCreate → CREATED draft;
+  // spawns nothing). This MIRRORS the session two-step: create here, then the
+  // campaign CREATED phase offers Start-now / Schedule. The created draft is held
+  // in `createdLadder` and rendered by phase==='created' && createdLadder.
+  const onCreateCampaign = useCallback(async () => {
+    setError(null); setCampaignErr(null); setCampaignSuggest(null)
+    // Falcon BTST forces CNC (positional carries overnight; MIS is rejected and
+    // MTF isn't wanted). Positional preset keeps the trader's CNC/MTF choice.
+    const product: LadderProduct = ladderPreset === 'btst'
+      ? 'CNC'
+      : (config.order_product === 'MTF' ? 'MTF' : 'CNC')
+    const cap = config.total_allocated_capital || 0
+    // DUPLICATE GUARD: don't silently create an identical active campaign. Warn
+    // once (the button re-arms); a second click creates it anyway for the rare
+    // case a duplicate is genuinely intended.
+    const sig = `${product}:${cap}:${mode}`
+    const isDup = (ladders ?? []).some((l) => {
+      const s = (l.status ?? '').toUpperCase()
+      return (s === 'RUNNING' || s === 'PAUSED' || s === 'SCHEDULED')
+        && l.order_product === product
+        && Number(l.total_capital) === Number(cap)
+        && (l.mode ?? 'paper') === mode
+    })
+    if (isDup && dupConfirm !== sig) {
+      setDupConfirm(sig)
+      setError(`You already have an active ${product} ${fmtINR(cap)} campaign. Click “Create campaign” again to create another anyway.`)
+      return
+    }
+    setDupConfirm(null); setBusy('create')
+    try {
+      const created = await AutoTradeAPI.ladderCreate({
+        total_capital: cap,
+        order_product: product,
+        mode,
+        end_date_mode: ladderEndMode,
+        kill_mode: 'flatten_now',
+        // Falcon BTST Oscillator: send campaign_type:'btst' so the backend builds
+        // the REDEFINED strategy — Top-15 high-tier basket, 50/50 split entry,
+        // 2-session CNC hold, no trail, −6% disaster stop, sleeve = capital ÷ 2.
+        // The preset bakes in every knob (top_n, split, max_hold, arm-off, stop),
+        // so NO child_config is needed. Omitted for the default positional
+        // campaign, whose wire body stays byte-identical.
+        ...(ladderPreset === 'btst' ? { campaign_type: 'btst' as const } : {}),
+        // PARITY FIX: scope the campaign to this user exactly like createSession,
+        // so it lands with the same user_id and appears in the ?user_id-scoped
+        // Sessions list (a SCHEDULED campaign was being dropped by WHERE user_id=?).
+        ...(userId != null ? { user_id: userId } : {}),
+        ...(brokerAccountId ? { broker_account_id: brokerAccountId } : {}),
+      })
+      // Hold the draft, clear the picked date, and move to the campaign CREATED
+      // phase (Start-now / Schedule). Nothing has been placed or armed yet.
+      setCreatedLadder({ ladder_id: created.ladder_id, mode, product })
+      setCampaignDate('')
+      setSession(null)   // ensure the SESSION created-phase doesn't also render
+      setPhase('created')
+      loadLadders()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not create the campaign.')
+    } finally {
+      setBusy(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, config.total_allocated_capital, config.order_product, ladderEndMode, ladderPreset, loadLadders, ladders, dupConfirm, userId, brokerAccountId])
+
+  // Falcon Intraday Magnifier — STEP 1: create the campaign (thin, isolated). The
+  // ONLY operator input is `cash_per_day` (stored in config.total_allocated_capital
+  // so the shared capital input can drive it); the validated preset is sent verbatim.
+  // Returns a ladder_id → the SAME campaign CREATED phase (Start now / Schedule)
+  // reused via createdLadder + onCampaignStart. NOTHING about the positional/BTST/
+  // dynamic paths changes when Magnifier isn't selected — this is a separate call.
+  const onCreateMagnifier = useCallback(async () => {
+    setError(null); setCampaignErr(null); setCampaignSuggest(null)
+    const cashPerDay = config.total_allocated_capital || 0
+    if (cashPerDay <= 0) { setError('Enter the cash per day first.'); return }
+    setDupConfirm(null); setBusy('create')
+    try {
+      const body: MagnifierCreateBody = {
+        total_capital: cashPerDay,
+        campaign_type: 'magnifier',
+        end_date_mode: ladderEndMode,
+        mode,
+        ...(userId != null ? { user_id: userId } : {}),
+        ...(brokerAccountId ? { broker_account_id: brokerAccountId } : {}),
+      }
+      const created = await AutoTradeAPI.magnifierCreate(body)
+      setCreatedLadder({ ladder_id: created.ladder_id, mode, product: 'MIS' })
+      setCampaignDate('')
+      setSession(null)
+      setPhase('created')
+      loadLadders()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not create the Magnifier campaign.')
+    } finally {
+      setBusy(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, config.total_allocated_capital, ladderEndMode, loadLadders, userId, brokerAccountId])
+
+  // Auto-Ladder — STEP 2: start the held draft. `when==='now'` → ladderStart(id)
+  // → RUNNING (first basket next trading morning). `when==='scheduled'` →
+  // ladderStart(id, startDate) → SCHEDULED (auto-activates on that date). A
+  // non-trading-day 400 surfaces the backend's suggested_date as a one-click apply.
+  const onCampaignStart = useCallback(async (when: StartWhen) => {
+    if (!createdLadder) return
+    if (when === 'scheduled' && !campaignDate) {
+      setCampaignErr('Pick a start date first.')
+      return
+    }
+    setCampaignErr(null); setCampaignSuggest(null); setCampaignBusy(when)
+    try {
+      if (when === 'now') {
+        await AutoTradeAPI.ladderStart(createdLadder.ladder_id)
+        setLadderNotice(
+          'Campaign started ✓ — it opens its first Falcon basket at 09:15 on the '
+          + 'next trading day, then automatically ladders a new basket every trading day. '
+          + "It's shown below and runs on its own until it ends or you stop it.")
+      } else {
+        await AutoTradeAPI.ladderStart(createdLadder.ladder_id, campaignDate)
+        setLadderNotice(
+          `Campaign scheduled ✓ — it arms for ${campaignDate} and opens its first `
+          + 'Falcon basket at 09:15 that morning, then ladders a new basket every '
+          + "trading day. It's shown below until it activates.")
+      }
+      setCreatedLadder(null)
+      setCampaignDate('')
+      backToList()
+      loadLadders()
+      // Shell (view='create'): campaign started/scheduled — hand off to the Live tab.
+      onStarted?.()
+    } catch (e) {
+      // A weekend/holiday start → HTTP 400 whose detail is an object carrying a
+      // suggested_date. The shared call<>() helper attached it to the Error.
+      const suggested = (e as { suggested_date?: string })?.suggested_date
+      if (suggested) setCampaignSuggest(suggested)
+      setCampaignErr(e instanceof Error ? e.message : 'Could not start the campaign.')
+    } finally {
+      setCampaignBusy(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createdLadder, campaignDate, loadLadders, onStarted])
+
+  // Discard a draft campaign — PERMANENTLY delete it (it was never started), not
+  // just navigate away leaving an orphan CREATED row in the backend.
+  const onDiscardCampaign = useCallback(async () => {
+    const id = createdLadder?.ladder_id
+    if (id) await AutoTradeAPI.ladderDelete(id).catch(() => { /* best-effort */ })
+    backToList()
+    loadLadders()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createdLadder, loadLadders])
+
+  const onCreate = useCallback(async () => {
+    // Power-user LIVE guard: a live session must run on THEIR OWN active account —
+    // never the operator global default (the backend isolation guard refuses it).
+    if (!isAdmin && mode === 'live' && !accountActive) {
+      // Shell (view='create'): no connected/active account — send them to the
+      // Broker tab to connect one, rather than dead-ending on an inline error.
+      if (view === 'create' && onNeedBroker) {
+        setError('Connect your broker first — live needs your own active account. Taking you there…')
+        onNeedBroker()
+        return
+      }
+      setError('Select your connected broker account — live needs your own active account. (Paper is fine without one.)')
+      return
+    }
+    setError(null); setCreateSuggest(null)
+    // Client-validate the intraday_basket trailing knobs (ladder ascending, ranges
+    // sane) so a bad step-lock config is caught before the POST, not by a 400.
+    const slErr = validateIntradayStepLock(config)
+    if (slErr) { setError(slErr); return }
+    setBusy('create')
+    try {
+      // UNITS: the backend uses FRACTIONS for percentages (0.01 = 1%). The form
+      // captures every pct as a PERCENT so it reads naturally; toWireConfig
+      // converts to fractions ONLY at the send boundary (per strategy). State
+      // stays in percent (inputs keep showing "1"); no double-conversion.
+      const res = await AutoTradeAPI.createSession(
+        mode,
+        toWireConfig(config, { universeFilter, symbolWhitelist }),
+        scope,
+      )
+      setSession(res)
+      setPhase('created')
+      setStartResult(null)
+      setStatus(null)
+      // Notify sibling tabs (Journal) of the newly active session.
+      onSessionChange?.(res.session_id)
+      // Keep the list fresh so the new session shows the moment you return.
+      loadSessions()
+    } catch (e) {
+      // Execution-date rule: a 400 whose detail says the chosen entry_date isn't
+      // a trading day carries the suggested next trading day. Don't dump a raw
+      // error — parse it, show a friendly inline message + a one-click apply.
+      const detail = e instanceof Error ? e.message : 'Failed to create session'
+      if (isNonTradingDayError(detail)) {
+        setCreateSuggest({ detail, suggested: parseSuggestedTradingDay(detail) })
+      } else {
+        setError(detail)
+      }
+    } finally {
+      setBusy(null)
+    }
+  }, [mode, config, loadSessions, toWireConfig, userId, brokerAccountId, onSessionChange, universeFilter, symbolWhitelist, isAdmin, accountActive, view, onNeedBroker])
+
+  const onStart = useCallback(async (when: StartWhen) => {
+    if (!session) return
+    // Live placement is blocked on an EXPIRED account — its daily token has
+    // lapsed, so a real order would fail. Prompt to re-connect first. Paper is
+    // fine (no real order); the global/operator session is unaffected.
+    if (session.mode === 'live' && accountExpired) {
+      setError(
+        `This broker account is EXPIRED — re-connect it first (Broker accounts → ` +
+        `Re-connect) before starting a LIVE session on it.`,
+      )
+      return
+    }
+    setError(null); setBusy('start')
+    try {
+      const res = await AutoTradeAPI.startSession(session.session_id, when)
+      setStartResult(res)
+      // A scheduled start places nothing yet — seed the countdown from the
+      // backend's seconds_remaining so the waiting state is immediate.
+      if (isScheduled(res.status) && typeof res.seconds_remaining === 'number') {
+        setCountdown(res.seconds_remaining)
+      }
+      setPhase('running')
+      setPoll(true)
+      // Shell (view='create'): the session is started/scheduled — hand off to the
+      // Live tab. Passing the id keeps the shell's active-session focus in sync.
+      onStarted?.()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to start session')
+    } finally {
+      setBusy(null)
+    }
+  }, [session, accountExpired, onStarted])
+
+  const refreshStatus = useCallback(async (silent = false) => {
+    if (!session) return
+    if (!silent) { setError(null); setBusy('status') }
+    try {
+      const res = await AutoTradeAPI.sessionStatus(session.session_id)
+      setStatus(res)
+      // Re-sync the countdown from the backend on every poll while SCHEDULED;
+      // clear it once the session has flipped to RUNNING/CLOSED.
+      if (isScheduled(res.status) && typeof res.seconds_remaining === 'number') {
+        setCountdown(res.seconds_remaining)
+      } else if (!isScheduled(res.status)) {
+        setCountdown(null)
+      }
+    } catch (e) {
+      if (!silent) setError(e instanceof Error ? e.message : 'Failed to load status')
+    } finally {
+      if (!silent) setBusy(null)
+    }
+  }, [session])
+
+  const onKill = useCallback(async () => {
+    if (!session) return
+    setError(null); setBusy('kill')
+    try {
+      const res = await AutoTradeAPI.killSession(session.session_id)
+      setKillArmed(false); setKillConfirm('')
+      await refreshStatus(true)
+      if (res?.trigger_reason) setError(`Kill complete — ${res.trigger_reason}`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to kill session')
+    } finally {
+      setBusy(null)
+    }
+  }, [session, refreshStatus])
+
+  // ── Poll status while running ────────────────────────────────────────────────
+  // While SCHEDULED, poll FASTER (6s) so the auto-flip to RUNNING (and the
+  // placement that comes with it) shows promptly; otherwise 12s is plenty.
+  const scheduledNow = isScheduled(status?.status)
+  // A non-placed terminal/blocked status from the trading-day rule (rejected /
+  // expired / deferred). When true the normal RUNNING + KILL views are hidden in
+  // favour of a muted/amber explanation card — it never placed.
+  const nonPlacedNow = isNonPlaced(status?.status)
+  useEffect(() => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+    if (phase === 'running' && poll && session) {
+      refreshStatus(true)
+      pollRef.current = setInterval(() => refreshStatus(true), scheduledNow ? 6_000 : 12_000)
+    }
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+  }, [phase, poll, session, refreshStatus, scheduledNow])
+
+  // ── Local 1s ticker for the SCHEDULED countdown ──────────────────────────────
+  // Runs only while a countdown is active; floors at 0 (the next poll then
+  // confirms the flip to RUNNING). Independent of the auto-refresh toggle.
+  useEffect(() => {
+    if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null }
+    if (phase === 'running' && scheduledNow && countdown !== null) {
+      tickRef.current = setInterval(() => {
+        setCountdown((c) => (c === null ? null : Math.max(0, c - 1)))
+      }, 1_000)
+    }
+    return () => { if (tickRef.current) clearInterval(tickRef.current) }
+  }, [phase, scheduledNow, countdown !== null])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Open the explicit New-Session form (resets the in-flight session).
+  const openNewSession = () => {
+    setPhase('config'); setSession(null); setStartResult(null); setStatus(null)
+    setConfig(DEFAULT_CONFIG); setMode('paper'); setCountdown(null)
+    setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
+    setCreateSuggest(null)
+    // Clear any in-flight campaign draft (Auto-Ladder two-step).
+    setCreatedLadder(null); setCampaignDate(''); setCampaignErr(null); setCampaignSuggest(null); setDupConfirm(null)
+    // Reset the strategy dropdown + campaign duration + preset to defaults.
+    setUiStrategy('portfolio_kill_switch'); setLadderEndMode('month_end'); setLadderPreset('positional')
+    // Reset universe filter + picker
+    setUniverseFilter('all500'); setPicks(null); setPicksErr(null); setCheckedSymbols(null); setTierFilter(new Set())
+  }
+
+  // "New session" click router. In the split shell's DASHBOARD view the inline
+  // config form is never shown here — hand off to the Start tab via onNewCampaign.
+  // Admin (view=undefined) and the create view open the inline form as before.
+  const onNewSessionClick = () => {
+    if (view === 'dashboard' && onNewCampaign) { onNewCampaign(); return }
+    openNewSession()
+  }
+
+  // Return to the Your-Sessions list and refresh it (so a just-created/started
+  // session is visible — the disappearing-session fix).
+  //
+  // Shell (view='create'): this component never renders the list — going "back"
+  // resets to a fresh config form (openNewSession) instead of a phase='list' that
+  // would render nothing. Admin + dashboard views return to the list as before.
+  const backToList = () => {
+    if (view === 'create') { openNewSession(); return }
+    setPhase('list'); setSession(null); setStartResult(null); setStatus(null)
+    setCountdown(null)
+    setLiveConfirm(''); setKillArmed(false); setKillConfirm(''); setError(null)
+    setCreateSuggest(null)
+    // Clear any in-flight campaign draft (Auto-Ladder two-step).
+    setCreatedLadder(null); setCampaignDate(''); setCampaignErr(null); setCampaignSuggest(null); setDupConfirm(null)
+    loadSessions()
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  return (
+    <div className="flex flex-col gap-4">
+      <style>{MECHANISM_CSS}</style>
+      {/* Scoped live-indicator pulse (mint), namespaced to avoid token clashes. */}
+      <style>{`@keyframes at-live-pulse{0%,100%{opacity:1}50%{opacity:.35}}.live-dot{animation:at-live-pulse 1.6s ease-in-out infinite}@media (prefers-reduced-motion: reduce){.live-dot{animation:none}}`}</style>
+
+      {/* ── Ships-disabled honesty banner (always on) ────────────────────────── */}
+      <div
+        className="flex items-start gap-2.5 rounded-2xl border px-4 py-3"
+        style={{ borderColor: 'rgba(230,180,80,0.32)', background: 'rgba(230,180,80,0.06)' }}
+      >
+        <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.shield(16)}</span>
+        <div className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+          <b style={{ color: C.amber }}>Ships disabled.</b>{' '}
+          Sessions default to <b>PAPER</b> mode (no real orders). The kill switch is{' '}
+          <b>OFF</b> unless you enable it. Real LIVE orders ADDITIONALLY require the
+          server flag <code style={{ color: C.ink }}>FALCON_AUTOTRADE_ENABLED</code> — until
+          that is set on the backend, a LIVE session stays inert and places nothing.
+        </div>
+      </div>
+
+      {/* ── LIST PHASE (HOME) — Your Sessions, newest first ──────────────────── */}
+      {phase === 'list' && (
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span style={{ color: C.mint }}>{ICON.bolt(16)}</span>
+            <span className="text-[14px] font-semibold" style={{ color: C.ink }}>Your sessions</span>
+            <div className="ml-auto flex items-center gap-2">
+              {/* Delete-selected — appears only when something is checked. These
+                  are paper/test session records; deletion is record cleanup. */}
+              {selected.size > 0 && (
+                <button type="button" disabled={deleting} onClick={onDeleteSelected}
+                  className="flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-40"
+                  style={{ color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}>
+                  {ICON.close(12)} {deleting ? 'Deleting…' : `Delete selected (${selected.size})`}
+                </button>
+              )}
+              {/* BREAK-GLASS · Global kill — flatten ALL my live sessions. Two-click
+                  armed confirm (never a one-tap flatten). */}
+              {!globalKillArmed ? (
+                <button type="button" onClick={() => { setGlobalKillArmed(true); setGlobalKillResult(null) }}
+                  className="flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                  style={{ color: C.red, background: 'rgba(232,115,107,0.10)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.45)' }}
+                  title="Break-glass: immediately flatten every live session you own">
+                  {ICON.shield(12)} Global kill
+                </button>
+              ) : (
+                <span className="flex items-center gap-1.5">
+                  <span className="text-[11px]" style={{ color: C.red }}>Flatten ALL live sessions?</span>
+                  <button type="button" disabled={globalKilling} onClick={onGlobalKill}
+                    className="text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-40"
+                    style={{ color: '#1a0908', background: C.red }}>
+                    {globalKilling ? 'Flattening…' : 'Confirm'}
+                  </button>
+                  <button type="button" disabled={globalKilling} onClick={() => setGlobalKillArmed(false)}
+                    className="text-[11.5px] px-2.5 py-1.5 rounded-lg" style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+                    Cancel
+                  </button>
+                </span>
+              )}
+              <button type="button" disabled={sessionsLoading} onClick={loadSessions}
+                className="text-[11.5px] px-2.5 py-1.5 rounded-lg transition-colors disabled:opacity-40"
+                style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+                {sessionsLoading ? 'Refreshing…' : 'Refresh'}
+              </button>
+              <button type="button" onClick={onNewSessionClick}
+                className="flex items-center gap-1.5 text-[12px] font-semibold px-3.5 py-1.5 rounded-lg transition-opacity"
+                style={{ color: '#06130c', background: C.mint }}>
+                {ICON.bolt(13)} New session
+              </button>
+            </div>
+          </div>
+
+          {/* Global-kill result confirmation (count flattened). */}
+          {globalKillResult && (
+            <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[12px] leading-snug"
+              style={{ borderColor: 'rgba(232,115,107,0.35)', background: 'rgba(232,115,107,0.05)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.shield(14)}</span>
+              <span className="flex-1">{globalKillResult}</span>
+              <button type="button" onClick={() => setGlobalKillResult(null)} className="shrink-0" style={{ color: C.faint }}>
+                {ICON.close(13)}
+              </button>
+            </div>
+          )}
+
+          {/* ── HARDENING SPRINT — health strip + alerts feed (observability). Both
+              degrade to nothing when the backend has no data. ─────────────────── */}
+          <HealthStrip sessions={health} breaker={breaker} />
+          <AlertsFeed
+            alerts={alerts}
+            open={alertsOpen}
+            onToggle={() => setAlertsOpen((o) => !o)}
+            onAck={onAckAlert}
+            ackingIds={ackingIds}
+          />
+
+          {/* Campaign-created confirmation (parity with the session scheduled note). */}
+          {ladderNotice && (
+            <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[12px] leading-snug"
+              style={{ borderColor: 'rgba(63,227,164,0.4)', background: 'rgba(63,227,164,0.07)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.mint }}>{ICON.check(14)}</span>
+              <span className="flex-1">{ladderNotice}</span>
+              <button type="button" onClick={() => setLadderNotice(null)} className="shrink-0" style={{ color: C.faint }}>
+                {ICON.close(13)}
+              </button>
+            </div>
+          )}
+
+          {/* ── Running Auto-Ladder campaigns — summary cards ATOP the list ─────
+              One card per running/paused campaign, from the ~5s ladderStatus
+              poll. The campaign's child baskets appear below as ordinary session
+              rows tagged with a "Campaign" chip. */}
+          {ladderErr && (ladders?.length ?? 0) === 0 && (
+            <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
+              style={{ borderColor: 'rgba(230,180,80,0.35)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+              <span>{ladderErr}{' '}
+                <button type="button" onClick={loadLadders} className="underline" style={{ color: C.mint }}>Retry</button>
+              </span>
+            </div>
+          )}
+          {liveLadders.length > 0 && (
+            <div className="flex items-baseline gap-2 px-1">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.06em]" style={{ color: C.muted }}>Monthly campaigns</span>
+              <span className="text-[10.5px]" style={{ color: C.faint }}>set once · auto-ladders a basket every trading day</span>
+            </div>
+          )}
+          {liveLadders.map((l) => (
+            <LadderCampaignCard
+              key={l.ladder_id}
+              summary={l}
+              status={ladderStatuses[l.ladder_id]}
+              busy={ladderBusy[l.ladder_id]}
+              onPause={() => onLadderPause(l.ladder_id)}
+              onResume={() => onLadderResume(l.ladder_id)}
+              onKill={() => { setLadderKillMode(null); setKillLadderId(l.ladder_id) }}
+              onEdit={jwt ? () => setConfigEditor({ kind: 'campaign', id: l.ladder_id }) : undefined}
+            />
+          ))}
+
+          {finishedLadders.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.06em] px-1" style={{ color: C.muted }}>Finished campaigns</span>
+              {finishedLadders.map((l) => (
+                <div key={l.ladder_id} className="flex items-center gap-2 rounded-xl border px-3 py-2"
+                  style={{ borderColor: C.line, background: 'rgba(255,255,255,0.012)' }}>
+                  <span style={{ color: C.faint }}>{ICON.loop(13)}</span>
+                  <span className="text-[11.5px]" style={{ color: C.ink2 }}>Monthly campaign</span>
+                  <span className="text-[9px] font-mono rounded-full px-1.5 py-0.5"
+                    style={{ color: C.muted, background: 'rgba(255,255,255,0.05)' }}>#{String(l.ladder_id).slice(0, 6)}</span>
+                  <span className="text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+                    style={{ color: C.faint, background: 'rgba(133,153,144,0.13)', boxShadow: 'inset 0 0 0 1px rgba(133,153,144,0.4)' }}>
+                    {(l.status ?? '').toUpperCase()}
+                  </span>
+                  <button type="button" disabled={ladderBusy[l.ladder_id] != null}
+                    onClick={() => onLadderDelete(l.ladder_id)}
+                    className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11.5px] font-semibold transition-opacity disabled:opacity-40"
+                    style={{ color: C.red, background: 'rgba(232,115,107,0.10)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.35)' }}>
+                    {ICON.close(12)} {ladderBusy[l.ladder_id] === 'kill' ? 'Deleting…' : 'Delete'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {(liveLadders.length > 0 || finishedLadders.length > 0) && (
+            <div className="flex items-baseline gap-2 px-1 pt-1">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.06em]" style={{ color: C.muted }}>Individual sessions</span>
+              <span className="text-[10.5px]" style={{ color: C.faint }}>one-off sessions + each campaign’s daily baskets</span>
+            </div>
+          )}
+          <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+            {sessionsLoading && sessions === null ? (
+              <p className="text-[12px]" style={{ color: C.muted }}>Loading your sessions…</p>
+            ) : sessionsErr ? (
+              <div className="flex items-start gap-2 text-[12px] leading-snug" style={{ color: C.ink2 }}>
+                <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+                <span>{sessionsErr} <button type="button" onClick={loadSessions} className="underline" style={{ color: C.mint }}>Retry</button></span>
+              </div>
+            ) : !sessions?.length ? (
+              <div className="flex flex-col items-start gap-3">
+                <p className="text-[12.5px]" style={{ color: C.muted }}>
+                  No sessions yet. Create one to begin — it stays here after you create or
+                  reload, so you can resume its live view anytime.
+                </p>
+                <button type="button" onClick={openNewSession}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl text-[12.5px] font-semibold"
+                  style={{ color: '#06130c', background: C.mint }}>
+                  {ICON.bolt(14)} Create your first session
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Honest delete error (record cleanup failed) */}
+                {deleteErr && (
+                  <div className="mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px] leading-snug"
+                    style={{ borderColor: 'rgba(232,115,107,0.35)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
+                    <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(13)}</span>
+                    <span>{deleteErr}</span>
+                    <button type="button" onClick={() => setDeleteErr(null)} className="ml-auto shrink-0" style={{ color: C.faint }}>
+                      {ICON.close(12)}
+                    </button>
+                  </div>
+                )}
+
+                {/* Select-all + housekeeping note */}
+                <div className="mb-2 flex items-center gap-2.5 px-1">
+                  <label className="flex items-center gap-2 text-[11px] cursor-pointer select-none" style={{ color: C.muted }}>
+                    <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
+                    Select all
+                  </label>
+                  <span className="text-[10.5px]" style={{ color: C.faint }}>
+                    Checkboxes select paper/test session records for deletion — they don&apos;t open the session.
+                  </span>
+                </div>
+
+                <ul className="flex flex-col gap-2">
+                {sessions.map((s, i) => {
+                  // Backend gross_return is a FRACTION (-0.0136 = -1.36%); ×100 to display.
+                  const ret = typeof s.gross_return === 'number' ? s.gross_return * 100 : null
+                  const sched = isScheduled(s.status)
+                  const running = (s.status ?? '').toUpperCase() === 'RUNNING'
+                  const nOpen = typeof s.n_open_positions === 'number' ? s.n_open_positions : null
+                  const checked = selected.has(s.session_id)
+                  // A child basket of an Auto-Ladder campaign carries ladder_id —
+                  // tag it with a "Campaign" chip so it's clearly part of a ladder.
+                  const isCampaignChild = s.ladder_id != null && s.ladder_id !== ''
+                  // Tesla runs as a seat-rotation short: RUNNING with 0 open seats is
+                  // NORMAL ("armed, waiting for signals"), not an empty/error state.
+                  // (Needs the backend to echo `strategy` on /sessions — degrades to
+                  // the standard row until then.)
+                  const isTeslaRow = s.strategy === 'tesla_short'
+                  const teslaArmed = isTeslaRow && running && (nOpen === 0)
+                  return (
+                    <li key={s.session_id ?? i}>
+                      <div
+                        className="w-full flex items-center gap-3 rounded-xl border px-3.5 py-3 transition-colors"
+                        style={{
+                          borderColor: checked ? 'rgba(232,115,107,0.45)' : (sched ? 'rgba(63,227,164,0.32)' : C.line2),
+                          background: checked ? 'rgba(232,115,107,0.05)' : 'rgba(255,255,255,0.015)',
+                        }}>
+                        {/* Selection checkbox — not part of the resume click target */}
+                        <label className="shrink-0 flex items-center cursor-pointer" onClick={(e) => e.stopPropagation()}>
+                          <input type="checkbox" checked={checked}
+                            onChange={() => s.session_id && toggleSelect(s.session_id)} />
+                        </label>
+
+                        {/* Resume target — the rest of the row opens the live view */}
+                        <button type="button" onClick={() => onResume(s)}
+                          className="min-w-0 flex-1 flex items-center gap-3 text-left">
+                          <span className="shrink-0" style={{ color: C.mint }}>{sched ? ICON.clock(15) : ICON.bolt(15)}</span>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              {sched ? <SchedPill /> : running ? <RunningPill /> : (
+                                <span className="text-[12.5px] font-semibold truncate" style={{ color: C.ink }}>
+                                  {s.status ?? 'session'}
+                                </span>
+                              )}
+                              {s.mode && <ModePill mode={s.mode} />}
+                              {isCampaignChild && <CampaignChip />}
+                              {isTeslaRow && (
+                                <span className="text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+                                  style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+                                  Tesla
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10.5px] mt-0.5 font-mono truncate" style={{ color: C.faint }}>
+                              {sched && s.fires_at
+                                ? <span style={{ color: C.mint }}>fires {s.fires_at}{typeof s.seconds_remaining === 'number' ? ` · in ${fmtCountdown(s.seconds_remaining)}` : ''}</span>
+                                : <>{s.session_id}{s.created_at ? ` · ${s.created_at}` : ''}</>}
+                            </div>
+                          </div>
+
+                          {/* Positions — a RUNNING session holds positions; never
+                              look empty. Show the count if the list gives one,
+                              else an honest "open" / "—" with the live dot. */}
+                          {!sched && (
+                            <div className="shrink-0 text-right">
+                              <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>
+                                {teslaArmed ? 'Seats' : 'Positions'}
+                              </div>
+                              <div className="text-[13px] font-semibold flex items-center justify-end gap-1.5" style={{ color: nOpen ? C.ink : C.ink2 }}>
+                                {running && <span className="inline-block w-1.5 h-1.5 rounded-full live-dot" style={{ background: C.mint }} />}
+                                {teslaArmed
+                                  ? <span className="text-[11px]" style={{ color: C.mint }}>armed</span>
+                                  : (nOpen != null ? nOpen : (running ? 'open' : '—'))}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="shrink-0 text-right">
+                            <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>{sched ? 'Status' : 'Return'}</div>
+                            <div className="text-[13px] font-semibold" style={{ color: sched ? C.mint : (ret == null ? C.faint : pctTone(ret)) }}>
+                              {sched ? 'Scheduled' : (ret == null ? '—' : fmtPct(ret))}
+                            </div>
+                          </div>
+                          <div className="shrink-0 text-right hidden sm:block">
+                            <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Capital</div>
+                            <div className="text-[13px] font-semibold" style={{ color: C.ink2 }}>
+                              {typeof s.total_allocated_capital === 'number' ? fmtCapital(s.total_allocated_capital) : '—'}
+                            </div>
+                          </div>
+                          <span className="shrink-0" style={{ color: C.faint }}>{ICON.chevronR(14)}</span>
+                        </button>
+                      </div>
+                    </li>
+                  )
+                })}
+                </ul>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── CONFIG PHASE — explicit New Session form ─────────────────────────── */}
+      {phase === 'config' && (
+        <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+          {/* In the split shell's create view the tab bar is the nav — there is no
+              in-component list to go back to, so this button is hidden there. */}
+          {view !== 'create' && (
+            <button type="button" onClick={backToList}
+              className="mb-4 inline-flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-lg transition-colors"
+              style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+              ← Your sessions
+            </button>
+          )}
+
+          {/* Strategy selector — picks the exit engine. Intraday basket seeds its
+              validated preset; Auto-Ladder builds a monthly positional campaign
+              (the same form, restricted to the campaign deltas); the kill switch
+              is the default flat ±% exit. */}
+          <div className="mb-5">
+            <Field
+              label="Strategy"
+              hint={isMagnifier
+                ? 'Falcon Top-15 high-tier, MIS 5× intraday. Split entry (50% @ 09:15 + 50% @ 09:16, blended cost); stop/trail arms only at 09:16. Set it once — a monthly rolling campaign. A validated preset — you only choose the cash per day.'
+                : isLadder
+                ? 'Set it once — Falcon opens, manages and rolls a positional basket every trading day for the whole campaign. You never manage a basket.'
+                : isTesla
+                ? 'Order-flow-native intraday SHORT seat rotation — fills up to N seats from live A++/A+++ signals and back-fills a freed seat instantly. Equity · MIS · Short (fixed).'
+                : config.strategy === 'intraday_basket'
+                ? 'Arms a trailing exit once the basket profits, locks a floor, trails a giveback %, hard-stops, and squares off at a set time.'
+                : 'A single flat ±% basket exit on the invested return (the kill switch).'}
+            >
+              <select
+                value={uiStrategy}
+                onChange={(e) => onStrategyChange(e.target.value as UiStrategy)}
+                className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
+                style={inputStyle}
+              >
+                {visibleStrategyOptions.map((o) => (
+                  <option key={o.id} value={o.id} style={{ background: '#0b1410', color: C.ink }}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+
+            {/* Auto-Ladder intro strip — "set once, runs the month" (trader terms). */}
+            {isLadder && (
+              <div className="mt-3 flex items-start gap-2.5 rounded-xl border px-3.5 py-3"
+                style={{ borderColor: 'rgba(63,227,164,0.22)', background: 'linear-gradient(180deg, rgba(63,227,164,0.06), rgba(255,255,255,0.015))' }}>
+                <span className="shrink-0 mt-0.5" style={{ color: C.mint }}>{ICON.loop(16)}</span>
+                <div className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+                  <b style={{ color: C.ink }}>Monthly campaign.</b>{' '}
+                  Falcon splits your capital across {isBtst ? '2 overlapping sleeves' : '~3 baskets'} and opens a new one every trading day
+                  at <b style={{ color: C.ink }}>09:15 IST</b> — each basket is held positional (a fixed
+                  {isBtst ? ' 2-session' : ' 3-session'} hold), and you never manage one.
+                </div>
+              </div>
+            )}
+
+            {/* Auto-Ladder PRESET toggle — Positional (default) vs Falcon BTST.
+                BTST forces CNC + sends child_config on create; positional is the
+                unchanged default path. */}
+            {isLadder && (
+              <div className="mt-3">
+                <Field label="Campaign preset" hint={LADDER_PRESET_OPTIONS.find((o) => o.id === ladderPreset)?.hint}>
+                  <div className="inline-flex rounded-xl border p-0.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                    {visibleLadderPresets.map((o) => {
+                      const active = o.id === ladderPreset
+                      return (
+                        <button key={o.id} type="button" onClick={() => pickLadderPreset(o.id)}
+                          className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors"
+                          style={{ color: active ? '#06130c' : C.ink2, background: active ? C.mint : 'transparent' }}>
+                          {o.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </Field>
+              </div>
+            )}
+
+            {/* Falcon BTST read-only summary — exactly what the operator is arming.
+                Capital is the OPERATOR'S input; sleeve = capital ÷ 2 (2 overlapping
+                sleeves = full pool). Per-name isn't shown because the high-tier count
+                varies day to day. Never hardcoded. */}
+            {isBtst && (() => {
+              const cap = config.total_allocated_capital || 0
+              const sleeve = cap > 0 ? cap / 2 : 0
+              return (
+                <div className="mt-3 rounded-xl border px-3.5 py-3"
+                  style={{ borderColor: 'rgba(63,227,164,0.22)', background: 'linear-gradient(180deg, rgba(63,227,164,0.06), rgba(255,255,255,0.015))' }}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span style={{ color: C.mint }}>{ICON.check(15)}</span>
+                    <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Falcon BTST Oscillator — what you&apos;re arming</span>
+                  </div>
+                  <ul className="text-[11.5px] leading-relaxed space-y-1" style={{ color: C.ink2 }}>
+                    <li>· Buy the daily <b style={{ color: C.ink }}>Top-15 → high-tier</b> subset (the high-tier names within that morning&apos;s Falcon Top-15 — count varies) via a <b style={{ color: C.ink }}>50/50 split</b> entry (<b style={{ color: C.ink }}>09:15 + 09:16</b>), hold <b style={{ color: C.ink }}>exactly 2 sessions</b>, sell <b style={{ color: C.ink }}>Day-2 at 15:29</b>.</li>
+                    <li>· <b style={{ color: C.ink }}>CNC</b> — 1× cash, no leverage · <b style={{ color: C.ink }}>no trail</b> (inert at 1×) · <b style={{ color: C.ink }}>−6% disaster stop</b> on the blended cost.</li>
+                    <li>· Rolling <b style={{ color: C.ink }}>monthly</b> campaign — auto-spawns one basket per trading day, continuous until cancelled.</li>
+                    <li>· Sleeve = capital ÷ 2 = <b style={{ color: C.ink }}>{cap > 0 ? fmtINR(sleeve) : '—'}</b> per day (2 overlapping sleeves = full capital), spread equally across that day&apos;s high-tier basket.</li>
+                  </ul>
+                </div>
+              )
+            })()}
+
+            {/* Falcon Tesla intro strip — order-flow short seat rotation. Factual,
+                calm, paper-first note (the engine is thin-validated). */}
+            {isTesla && (
+              <div className="mt-3 flex items-start gap-2.5 rounded-xl border px-3.5 py-3"
+                style={{ borderColor: 'rgba(63,227,164,0.22)', background: 'linear-gradient(180deg, rgba(63,227,164,0.06), rgba(255,255,255,0.015))' }}>
+                <span className="shrink-0 mt-0.5" style={{ color: C.mint }}>{ICON.loop(16)}</span>
+                <div className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+                  <b style={{ color: C.ink }}>Order-flow short rotation.</b>{' '}
+                  Falcon fills up to <b style={{ color: C.ink }}>N seats</b> with intraday shorts drawn from live
+                  A++/A+++ order-flow signals — equal seat = capital ÷ seats — and back-fills a freed seat the
+                  moment one exits. A running Tesla session with <b style={{ color: C.ink }}>0 positions is normal</b>
+                  {' '}(&quot;armed, waiting for signals&quot;). Trades <b style={{ color: C.ink }}>Equity · MIS · Short only</b>.
+                  {' '}Thin-validated — <b style={{ color: C.ink }}>run in Paper first</b>.
+                </div>
+              </div>
+            )}
+
+            {/* Falcon Intraday Magnifier — read-only VALIDATED preset. Everything
+                here is fixed; the operator only picks the cash per day below.
+                Notional (cash × 5) and ~per-name (÷ ~9) are computed LIVE from the
+                operator's own cash-per-day input — never hardcoded. */}
+            {isMagnifier && (() => {
+              const cash = config.total_allocated_capital || 0
+              const notional = cash > 0 ? cash * MAGNIFIER_LEVERAGE : 0
+              const perName = notional > 0 ? notional / MAGNIFIER_NAMES_PER_DAY : 0
+              return (
+                <div className="mt-3 rounded-xl border px-3.5 py-3"
+                  style={{ borderColor: 'rgba(63,227,164,0.22)', background: 'linear-gradient(180deg, rgba(63,227,164,0.06), rgba(255,255,255,0.015))' }}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span style={{ color: C.mint }}>{ICON.check(15)}</span>
+                    <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Falcon Intraday Magnifier — validated preset</span>
+                    <span className="ml-auto text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+                      style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.42)' }}>fixed</span>
+                  </div>
+                  <ul className="text-[11.5px] leading-relaxed space-y-1" style={{ color: C.ink2 }}>
+                    <li>· Falcon <b style={{ color: C.ink }}>Top-15 high-tier</b> basket (~<b style={{ color: C.ink }}>9 names</b>/day) · <b style={{ color: C.ink }}>MIS 5×</b> intraday.</li>
+                    <li>· <b style={{ color: C.ink }}>Split entry</b> — 50% @ <b style={{ color: C.ink }}>09:15</b> open + 50% @ <b style={{ color: C.ink }}>09:16</b> (blended cost).</li>
+                    <li>· Stop/trail <b style={{ color: C.ink }}>arms only at 09:16</b> on the blended cost — <b style={{ color: C.ink }}>no stop on the 09:15 leg</b> (opening-whipsaw guard).</li>
+                    <li>· Trail: <b style={{ color: C.ink }}>arm 6%</b> · <b style={{ color: C.ink }}>floor 2%</b> · <b style={{ color: C.ink }}>giveback 5%</b> · <b style={{ color: C.red }}>stop 3%</b> (capital basis) · <b style={{ color: C.ink }}>square-off 15:29</b>.</li>
+                    <li>· Rolling <b style={{ color: C.ink }}>monthly</b> campaign — auto-spawns one basket per trading day until cancelled.</li>
+                    <li>· Cash/day <b style={{ color: C.ink }}>{cash > 0 ? fmtINR(cash) : '—'}</b> → 5× notional <b style={{ color: C.ink }}>{cash > 0 ? fmtINR(notional) : '—'}</b> · ~per-name <b style={{ color: C.ink }}>{cash > 0 ? fmtINR(perName) : '—'}</b>.</li>
+                  </ul>
+                </div>
+              )
+            })()}
+          </div>
+
+          {/* Broker account selector — Phase-2 multi-tenant. Optional; only shown
+              when a user context exists. '' = the global/operator session
+              (default, unchanged). An ACTIVE account runs the session on that
+              account; an EXPIRED account is selectable but blocks a LIVE start
+              until re-connected (paper is fine). */}
+          {userId != null && (
+            <div className="mb-5">
+              <Field
+                label="Broker account"
+                hint={selectedAccount
+                  ? (accountExpired
+                      ? 'This account is EXPIRED — re-connect it (Broker accounts) before a LIVE start. Paper is fine.'
+                      : 'This session will run on your selected connected account.')
+                  : (isAdmin
+                      ? 'Default — the global operator account. Pick a connected account to run this session on it.'
+                      : (accounts.length === 0
+                          ? 'Connect a broker account above to run a live session on your own account.'
+                          : 'Select your connected account — live needs your own account.'))}
+              >
+                <select
+                  value={brokerAccountId}
+                  onChange={(e) => setBrokerAccountId(e.target.value)}
+                  className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
+                  style={inputStyle}
+                >
+                  {/* Operator: the global/operator account is a valid default.
+                      Power user: the global account is NEVER offered (backend
+                      isolation refuses it) — only their own connected accounts.
+                      A power user with no account sees a disabled placeholder. */}
+                  {isAdmin ? (
+                    <option value="" style={{ background: '#0b1410', color: C.ink }}>
+                      Global account (operator default)
+                    </option>
+                  ) : (
+                    <option value="" disabled={accounts.length > 0} style={{ background: '#0b1410', color: C.ink }}>
+                      {accounts.length === 0 ? 'No connected account — connect one above' : 'Select your account…'}
+                    </option>
+                  )}
+                  {accounts.map((a) => {
+                    const st = (a.status ?? '').toUpperCase()
+                    return (
+                      <option key={a.broker_account_id} value={a.broker_account_id}
+                        style={{ background: '#0b1410', color: C.ink }}>
+                        {a.account_label || a.broker_account_id} · {a.broker}{st ? ` · ${st}` : ''}
+                      </option>
+                    )
+                  })}
+                </select>
+              </Field>
+              {selectedAccount && accountExpired && (
+                <div className="mt-2 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px] leading-snug"
+                  style={{ borderColor: 'rgba(232,115,107,0.35)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
+                  <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(13)}</span>
+                  <span>This account&apos;s token is <b style={{ color: C.red }}>expired</b>. Re-connect it in the <b>Broker accounts</b> tab before starting a LIVE session on it.</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Mode selector */}
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-5">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.05em]" style={{ color: C.muted }}>Mode</span>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => { setMode('paper'); setLiveConfirm('') }}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors"
+                style={{
+                  color: mode === 'paper' ? '#06130c' : C.mint,
+                  background: mode === 'paper' ? C.mint : 'rgba(63,227,164,0.10)',
+                  boxShadow: mode === 'paper' ? 'none' : 'inset 0 0 0 1px rgba(63,227,164,0.4)',
+                }}
+              >
+                {ICON.shield(14)} Paper — safe
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('live')}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors"
+                style={{
+                  color: mode === 'live' ? '#1a0908' : C.red,
+                  background: mode === 'live' ? C.red : 'rgba(232,115,107,0.10)',
+                  boxShadow: mode === 'live' ? 'none' : 'inset 0 0 0 1px rgba(232,115,107,0.4)',
+                }}
+              >
+                {ICON.bolt(14)} Live — real orders
+              </button>
+            </div>
+          </div>
+
+          {/* Live warning + typed confirm */}
+          {mode === 'live' && (
+            <div className="mb-5 rounded-xl border px-3.5 py-3" style={{ borderColor: 'rgba(232,115,107,0.4)', background: 'rgba(232,115,107,0.06)' }}>
+              <div className="flex items-start gap-2 text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+                <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(15)}</span>
+                <span>
+                  <b style={{ color: C.red }}>LIVE places REAL orders on a connected broker.</b>{' '}
+                  It still does nothing until the server flag{' '}
+                  <code style={{ color: C.ink }}>FALCON_AUTOTRADE_ENABLED</code> is set — but
+                  type <b>LIVE</b> below to confirm you intend a live session.
+                </span>
+              </div>
+              <input
+                value={liveConfirm}
+                onChange={(e) => setLiveConfirm(e.target.value)}
+                placeholder='Type "LIVE" to confirm'
+                className="mt-2.5 w-full rounded-lg px-3 py-2 text-[12.5px] outline-none"
+                style={{ ...inputStyle, borderColor: 'rgba(232,115,107,0.4)' }}
+              />
+            </div>
+          )}
+
+          {/* ── Magnifier config — the ONLY inputs: Cash per day + Duration. Every
+              other knob is the validated preset (shown read-only above). The whole
+              standard config region below is hidden for Magnifier. ─────────────── */}
+          {isMagnifier && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Field
+                label="Cash per day"
+                hint={(() => {
+                  const cash = config.total_allocated_capital || 0
+                  return cash > 0
+                    ? `MIS 5× → ${fmtINR(cash * MAGNIFIER_LEVERAGE)} notional/day · ~${fmtINR((cash * MAGNIFIER_LEVERAGE) / MAGNIFIER_NAMES_PER_DAY)} per name.`
+                    : 'Cash you commit each trading day. MIS 5× multiplies it into the day’s notional.'
+                })()}
+              >
+                <input
+                  type="number" min={0} step={10000}
+                  value={config.total_allocated_capital}
+                  onChange={(e) => set('total_allocated_capital', Number(e.target.value) || 0)}
+                  className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums"
+                  style={inputStyle}
+                />
+                <div className="flex flex-wrap gap-1.5 mt-1">
+                  {CAPITAL_PRESETS.map((p) => (
+                    <button key={p} type="button" onClick={() => set('total_allocated_capital', p)}
+                      className="px-2 py-1 rounded-md text-[10.5px] transition-colors"
+                      style={{ color: C.muted, border: `1px solid ${C.line}`, background: 'rgba(255,255,255,0.02)' }}>
+                      {fmtCapital(p)}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+
+              <Field label="Duration" hint={LADDER_DURATION_OPTIONS.find((o) => o.id === ladderEndMode)?.hint}>
+                <div className="inline-flex rounded-xl border p-0.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                  {LADDER_DURATION_OPTIONS.map((o) => {
+                    const active = o.id === ladderEndMode
+                    return (
+                      <button key={o.id} type="button" onClick={() => setLadderEndMode(o.id)}
+                        className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors"
+                        style={{ color: active ? '#06130c' : C.ink2, background: active ? C.mint : 'transparent' }}>
+                        {o.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </Field>
+            </div>
+          )}
+
+          {/* ── STANDARD config region (hidden for Magnifier, which is a fixed,
+              preset-only campaign). Positional/BTST/Dynamic/Tesla/Fixed paths are
+              byte-identical when Magnifier isn't selected. ────────────────────── */}
+          {!isMagnifier && (<>
+
+          {/* Config grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field
+              label={isLadder ? 'Total campaign capital' : 'Allocated capital'}
+              hint={isLadder
+                ? (isBtst
+                    ? `Falcon BTST Oscillator splits this across 2 overlapping sleeves. Each sleeve ≈ ${fmtINR(perBasketCapital)}`
+                    : `Falcon splits this across ~3 baskets. Each basket ≈ ${fmtINR(perBasketCapital)}`)
+                : 'Total capital this session may deploy.'}
+            >
+              <input
+                type="number" min={0} step={10000}
+                value={config.total_allocated_capital}
+                onChange={(e) => set('total_allocated_capital', Number(e.target.value) || 0)}
+                className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
+                style={inputStyle}
+              />
+              <div className="flex flex-wrap gap-1.5 mt-1">
+                {CAPITAL_PRESETS.map((p) => (
+                  <button key={p} type="button" onClick={() => set('total_allocated_capital', p)}
+                    className="px-2 py-1 rounded-md text-[10.5px] transition-colors"
+                    style={{ color: C.muted, border: `1px solid ${C.line}`, background: 'rgba(255,255,255,0.02)' }}>
+                    {fmtCapital(p)}
+                  </button>
+                ))}
+              </div>
+            </Field>
+
+            {isBtst ? (
+              // Falcon BTST Oscillator has a FIXED basket baked into the backend
+              // preset (today's Falcon Top-15 → high-tier filter → the high-tier
+              // subset, count varies daily); the generic Top-N selector doesn't apply
+              // and would contradict the strategy, so show a locked indicator.
+              <Field label="Basket" hint="Fixed by the Falcon BTST Oscillator strategy — resolved each morning, not adjustable.">
+                <div className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-[12.5px]"
+                  style={{ color: C.ink2, border: `1px solid ${C.line}`, background: 'rgba(255,255,255,0.02)' }}>
+                  <span style={{ color: C.mint }}>{ICON.check(14)}</span>
+                  <span>Falcon <b style={{ color: C.ink }}>Top-15 → high-tier</b> subset · set by preset</span>
+                </div>
+              </Field>
+            ) : (
+              <Field label="Top N stocks" hint="How many of today's picks to trade.">
+                <Segmented
+                  options={TOP_N_OPTIONS.map((n) => ({ id: n, label: String(n) }))}
+                  value={config.top_n_stocks}
+                  onChange={(v) => onTopNChange(v)}
+                />
+              </Field>
+            )}
+
+            <Field label="Sizing mode" hint={SIZING_OPTIONS.find((s) => s.id === config.sizing_mode)?.hint}>
+              <Segmented
+                options={SIZING_OPTIONS.map((s) => ({ id: s.id, label: s.label }))}
+                value={config.sizing_mode}
+                onChange={(v) => set('sizing_mode', v)}
+              />
+            </Field>
+
+            {/* Instrument — Equity (existing cash path) | Futures (current-month,
+                NRML set server-side). Hidden for Auto-Ladder (always Equity) and
+                for Tesla (forced Equity · MIS · Short — see the read-only note). */}
+            {!isLadder && !isTesla && (
+            <Field label="Instrument" hint="Equity trades cash; Futures trades the current-month contract (product set automatically).">
+              <Segmented
+                options={INSTRUMENT_OPTIONS.map((o) => ({ id: o.id, label: o.label }))}
+                value={config.instrument_type ?? 'EQ'}
+                onChange={(v) => onInstrumentChange(v)}
+              />
+            </Field>
+            )}
+
+            {/* Tesla — instrument/direction/product are FORCED by the backend
+                (Equity · MIS · Short). Render them read-only so the operator sees
+                the fixed shape but can't produce a rejected combination. */}
+            {isTesla && (
+            <Field label="Instrument" hint="Tesla is intraday MIS short by design — Falcon forces these; you can't change them.">
+              <div className="flex flex-wrap items-center gap-2">
+                {['Equity', 'MIS', 'Short'].map((t) => (
+                  <span key={t} className="text-[11px] font-mono uppercase tracking-[0.06em] rounded-lg px-2.5 py-1.5"
+                    style={{ color: C.mint, background: 'rgba(63,227,164,0.10)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+                    {t}
+                  </span>
+                ))}
+                <span className="text-[10px] uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+                  style={{ color: C.faint, border: `1px solid ${C.line}` }}>fixed</span>
+              </div>
+            </Field>
+            )}
+
+            {config.sizing_mode === 'pct_cap' ? (
+              <Field label="Max % per position" hint="Cap on any single position.">
+                <input
+                  type="number" min={1} max={100} step={1}
+                  value={config.max_pct_per_position ?? 25}
+                  onChange={(e) => set('max_pct_per_position', Number(e.target.value) || 0)}
+                  className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
+                  style={inputStyle}
+                />
+              </Field>
+            ) : (config.instrument_type ?? 'EQ') !== 'FUT' && !isTesla ? (
+              <Field label="Order product" hint={isBtst ? 'Falcon BTST Oscillator is CNC only (1× cash, no leverage — it carries overnight).' : isLadder ? 'Campaign product — Cash (CNC) or Margin (MTF).' : 'Broker product type for entries.'}>
+                <Segmented
+                  options={((isBtst ? (['CNC'] as OrderProduct[]) : isLadder ? (['CNC', 'MTF'] as OrderProduct[]) : PRODUCT_OPTIONS)).map((p) => ({ id: p, label: p }))}
+                  value={config.order_product === 'MIS' && isLadder ? 'CNC' : (isBtst ? 'CNC' : config.order_product)}
+                  onChange={(v) => onProductChange(v)}
+                />
+              </Field>
+            ) : null}
+
+            {/* Futures: hide the equity product row; instead pick Buy / Sell (Short)
+                and show the auto-product note. Product = NRML is set server-side.
+                Never shown for Auto-Ladder (equity-only). */}
+            {!isLadder && (config.instrument_type ?? 'EQ') === 'FUT' && (
+              <Field label="Direction" hint="Current-month futures · product set automatically (NRML).">
+                <Segmented
+                  options={DIRECTION_OPTIONS.map((d) => ({ id: d.id, label: d.label }))}
+                  value={config.direction ?? 'long'}
+                  onChange={(v) => set('direction', v)}
+                />
+                {(config.direction ?? 'long') === 'short' && (
+                  <div
+                    className="mt-2 flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-snug"
+                    style={{ color: C.amber, border: `1px solid ${C.amber}`, background: 'rgba(230,180,80,0.10)' }}
+                    role="note"
+                  >
+                    <span className="shrink-0 mt-0.5">{ICON.shield(13)}</span>
+                    <span>
+                      <b>Short futures</b> — margin + unbounded-loss risk; runs in paper until certified.
+                    </span>
+                  </div>
+                )}
+              </Field>
+            )}
+
+            {config.sizing_mode === 'pct_cap' && (config.instrument_type ?? 'EQ') !== 'FUT' && !isTesla && (
+              <Field label="Order product" hint="Broker product type for entries.">
+                <Segmented
+                  options={PRODUCT_OPTIONS.map((p) => ({ id: p, label: p }))}
+                  value={config.order_product}
+                  onChange={(v) => onProductChange(v)}
+                />
+              </Field>
+            )}
+
+            {/* Equity direction — Long | Short. ADDITIVE. Short is EQUITY + MIS-only
+                (intraday, auto-covered before close): the control appears ONLY when
+                instrument is Equity AND product is MIS. CNC/MTF, Futures and
+                Auto-Ladder are Long-only (the Futures Buy/Sell control is separate),
+                so Short is never offered there — the backend rejects it. Default
+                Long; onProductChange snaps back to Long when product leaves MIS. */}
+            {!isLadder && !isTesla
+              && (config.instrument_type ?? 'EQ') === 'EQ'
+              && config.order_product === 'MIS' && (
+              <Field label="Direction" hint="Long buys to open; Short (MIS only) sells to open and auto-covers before close.">
+                <Segmented
+                  options={EQ_DIRECTION_OPTIONS.map((d) => ({ id: d.id, label: d.label }))}
+                  value={config.direction ?? 'long'}
+                  onChange={(v) => set('direction', v)}
+                />
+                {(config.direction ?? 'long') === 'short' && (
+                  <div
+                    className="mt-2 flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-snug"
+                    style={{ color: C.ink2, border: `1px solid ${C.line}`, background: 'rgba(63,227,164,0.06)' }}
+                    role="note"
+                  >
+                    <span className="shrink-0 mt-0.5" style={{ color: C.mint }}>{ICON.info(13)}</span>
+                    <span>
+                      Short sells to open on MIS and is auto-covered before market close (intraday only).
+                    </span>
+                  </div>
+                )}
+              </Field>
+            )}
+
+            {/* Entry time / date / missed-window are managed by the campaign
+                engine for Auto-Ladder — hidden there; a Duration control takes
+                their place. Shown unchanged for the two session strategies. */}
+            {!isLadder && (
+            <Field label="Entry time (IST)" hint="When the session places entries.">
+              <input
+                type="time"
+                value={(config.entry_time ?? '').slice(0, 5)}
+                onChange={(e) => set('entry_time', e.target.value)}
+                className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
+                style={inputStyle}
+              />
+            </Field>
+            )}
+
+            {/* Execution date — optional. Empty = the backend resolves to the
+                next valid trading session. Clearing it is one tap (the chip). */}
+            {!isLadder && (
+            <Field label="Entry date (IST)" hint="Optional. Leave empty to fire on the next valid trading session.">
+              <div className="flex items-center gap-2">
+                <input
+                  type="date"
+                  value={config.entry_date ?? ''}
+                  onChange={(e) => { set('entry_date', e.target.value); setCreateSuggest(null) }}
+                  className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
+                  style={inputStyle}
+                />
+                {config.entry_date ? (
+                  <button type="button" onClick={() => { set('entry_date', ''); setCreateSuggest(null) }}
+                    className="shrink-0 text-[11px] px-2.5 py-2 rounded-lg transition-colors"
+                    style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+                    Clear
+                  </button>
+                ) : (
+                  <span className="shrink-0 text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-1"
+                    style={{ color: C.mint, background: 'rgba(63,227,164,0.10)' }}>auto</span>
+                )}
+              </div>
+            </Field>
+            )}
+
+            {/* On missed window — drop or roll forward. */}
+            {!isLadder && (
+            <Field
+              label="If the fire moment is missed"
+              hint="If the fire moment is missed or lands on a non-trading day: drop it, or roll to the next trading day."
+            >
+              <Segmented
+                options={ON_MISSED_OPTIONS}
+                value={config.on_missed_window ?? 'expire'}
+                onChange={(v) => set('on_missed_window', v)}
+              />
+            </Field>
+            )}
+
+            {/* Duration (Auto-Ladder only) — when the campaign ends. */}
+            {isLadder && (
+            <Field label="Duration" hint={LADDER_DURATION_OPTIONS.find((o) => o.id === ladderEndMode)?.hint}>
+              <div className="inline-flex rounded-xl border p-0.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                {LADDER_DURATION_OPTIONS.map((o) => {
+                  const active = o.id === ladderEndMode
+                  return (
+                    <button key={o.id} type="button" onClick={() => setLadderEndMode(o.id)}
+                      className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors"
+                      style={{ color: active ? '#06130c' : C.ink2, background: active ? C.mint : 'transparent' }}>
+                      {o.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </Field>
+            )}
+          </div>
+
+          {/* ── Universe filter + manual stock picker ───────────────────────────
+              Placed OUTSIDE the 2-col grid so it spans the full width.
+              Both controls are progressive-disclosure refinements above
+              the strategy section — the defaults (all500 + top-N) are
+              exactly current behaviour, so the form is backward-compatible. */}
+          {/* Universe filter + manual picker + live sizing preview. For SESSIONS and
+              the generic positional campaign. The Falcon BTST Oscillator has a FIXED
+              preset basket (all500 → Top-15 → high-tier SUBSET), and the generic
+              preview would size the WRONG names (top-N by rank, not the high-tier
+              subset), so the WHOLE refinements card is hidden for BTST — matching the
+              Magnifier, which also shows no live sizing preview. */}
+          {!isBtst && (
+          <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.015)' }}>
+            <div className="flex items-center gap-2 mb-3">
+              {ICON.trend(15) /* reuse trend icon = filter context */}
+              <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Universe</span>
+              <span className="text-[10.5px]" style={{ color: C.faint }}>
+                Which index to draw picks from · default All 500
+              </span>
+            </div>
+
+            {/* Universe filter chips — same style as signals page Top20Filters */}
+            <div className="flex items-center gap-2 flex-wrap">
+              {UNIVERSE_OPTIONS.map((opt) => {
+                const active = opt.key === universeFilter
+                return (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    onClick={() => setUniverseFilter(opt.key)}
+                    className="px-3 py-1.5 rounded-full text-xs font-semibold uppercase tracking-wide border transition-colors"
+                    style={active ? {
+                      color: C.mint,
+                      background: 'rgba(63,227,164,0.12)',
+                      borderColor: 'rgba(63,227,164,0.4)',
+                    } : {
+                      color: 'rgba(255,255,255,0.7)',
+                      background: 'rgba(255,255,255,0.04)',
+                      borderColor: C.line2,
+                    }}
+                    aria-pressed={active}
+                  >
+                    {opt.label}
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* ── Manual stock picker ─────────────────────────────────────────── */}
+            <div className="mt-4">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-[11.5px] font-semibold uppercase tracking-[0.05em]" style={{ color: C.muted }}>
+                  Pick stocks
+                </span>
+                {checkedSymbols && (
+                  <span className="text-[11px]" style={{ color: C.mint }}>
+                    {checkedSymbols.size} selected
+                    {symbolWhitelist
+                      ? <span style={{ color: C.amber }}> · custom override</span>
+                      : <span style={{ color: C.faint }}> · default top {config.top_n_stocks}</span>}
+                  </span>
+                )}
+              </div>
+
+              {/* ── Tier filter chips — VIEW-ONLY over the loaded picks. Same chip
+                  styling as the Universe row above. Multi-select: each tier toggles;
+                  "All" clears the filter. Only shown when ≥2 distinct tiers exist. */}
+              {!picksLoading && !picksErr && checkedSymbols && distinctTiers.length > 1 && (
+                <div className="flex items-center gap-1.5 flex-wrap mb-2">
+                  <span className="text-[10px] uppercase tracking-[0.06em] mr-0.5" style={{ color: C.faint }}>Tier</span>
+                  {(() => {
+                    const allActive = tierFilter.size === 0
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => setTierFilter(new Set())}
+                        className="px-2.5 py-1 rounded-full text-[10.5px] font-semibold uppercase tracking-wide border transition-colors"
+                        style={allActive ? {
+                          color: C.mint, background: 'rgba(63,227,164,0.12)', borderColor: 'rgba(63,227,164,0.4)',
+                        } : {
+                          color: 'rgba(255,255,255,0.7)', background: 'rgba(255,255,255,0.04)', borderColor: C.line2,
+                        }}
+                        aria-pressed={allActive}
+                      >
+                        All
+                      </button>
+                    )
+                  })()}
+                  {distinctTiers.map((tier) => {
+                    const active = tierFilter.has(tier)
+                    return (
+                      <button
+                        key={tier}
+                        type="button"
+                        onClick={() => setTierFilter((prev) => {
+                          const next = new Set(prev)
+                          if (next.has(tier)) next.delete(tier); else next.add(tier)
+                          return next
+                        })}
+                        className="px-2.5 py-1 rounded-full text-[10.5px] font-semibold uppercase tracking-wide border transition-colors"
+                        style={active ? {
+                          color: C.mint, background: 'rgba(63,227,164,0.12)', borderColor: 'rgba(63,227,164,0.4)',
+                        } : {
+                          color: 'rgba(255,255,255,0.7)', background: 'rgba(255,255,255,0.04)', borderColor: C.line2,
+                        }}
+                        aria-pressed={active}
+                      >
+                        {tier.replace('-', ' ')}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+
+              {/* ── Select all / Deselect all — operate on the VISIBLE (filtered)
+                  set only. Primary need = one-click Deselect all, then hand-pick. */}
+              {!picksLoading && !picksErr && picks && picks.length > 0 && checkedSymbols && (
+                <div className="flex items-center justify-between gap-2 mb-2 px-1">
+                  <span className="text-[10.5px] tabular-nums" style={{ color: C.faint }}>
+                    {visibleCheckedCount} of {visibleSymbols.length} shown selected
+                    {tierFilter.size > 0 && <span> · filtered</span>}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={selectAllVisible}
+                      disabled={visibleSymbols.length === 0 || allVisibleChecked}
+                      className="px-2 py-1 rounded-md text-[10.5px] font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={{ color: C.mint, background: 'rgba(63,227,164,0.08)', borderColor: 'rgba(63,227,164,0.3)' }}
+                    >
+                      Select all
+                    </button>
+                    <button
+                      type="button"
+                      onClick={deselectAllVisible}
+                      disabled={visibleCheckedCount === 0}
+                      className="px-2 py-1 rounded-md text-[10.5px] font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={{ color: C.ink2, background: 'rgba(255,255,255,0.04)', borderColor: C.line2 }}
+                    >
+                      Deselect all
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Loading skeleton */}
+              {picksLoading && (
+                <div className="flex flex-col gap-1.5">
+                  {[...Array(Math.min(config.top_n_stocks, 5))].map((_, i) => (
+                    <div key={i} className="h-8 rounded-lg animate-pulse" style={{ background: 'rgba(255,255,255,0.05)' }} />
+                  ))}
+                </div>
+              )}
+
+              {/* Graceful-degradation: endpoint not deployed yet */}
+              {!picksLoading && picksErr && (
+                <div className="flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px] leading-snug"
+                  style={{ borderColor: 'rgba(230,180,80,0.32)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+                  <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(13)}</span>
+                  <span>{picksErr}</span>
+                </div>
+              )}
+
+              {/* Picks list */}
+              {!picksLoading && !picksErr && picks && picks.length > 0 && checkedSymbols && (
+                <div
+                  className="flex flex-col gap-1 overflow-y-auto pr-1"
+                  style={{ maxHeight: visiblePicks.length > 12 ? 420 : undefined }}
+                >
+                  {visiblePicks.map((p) => {
+                    const checked = checkedSymbols.has(p.symbol)
+                    const isTopN = p.rank <= config.top_n_stocks
+                    return (
+                      <label
+                        key={p.symbol}
+                        className="flex items-center gap-3 rounded-lg px-3 py-2 cursor-pointer transition-colors"
+                        style={{
+                          background: checked ? 'rgba(63,227,164,0.07)' : 'rgba(255,255,255,0.02)',
+                          border: `1px solid ${checked ? 'rgba(63,227,164,0.28)' : C.line2}`,
+                        }}
+                      >
+                        {/* Rank badge */}
+                        <span
+                          className="shrink-0 w-5 h-5 rounded-md flex items-center justify-center text-[10px] font-bold tabular-nums"
+                          style={{
+                            background: isTopN ? 'rgba(63,227,164,0.18)' : 'rgba(255,255,255,0.06)',
+                            color: isTopN ? C.mint : C.faint,
+                          }}
+                        >
+                          {p.rank}
+                        </span>
+
+                        {/* Symbol + sector */}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>
+                              {p.symbol}
+                            </span>
+                            {/* Signal-time tier (GOLD / ENTERPRISE / PREMIUM / STANDARD /
+                                AVOID) — same classifier the Today/Signals panel uses. */}
+                            <SignalTierBadge tier={p.signal_tier} color={p.signal_tier_color}
+                                             reason={p.signal_tier_reason} />
+                            {p.sector && (
+                              <span
+                                className="text-[9.5px] uppercase tracking-[0.06em] rounded-full px-1.5 py-0.5"
+                                style={{ color: C.muted, background: 'rgba(255,255,255,0.06)', border: `1px solid ${C.line2}` }}
+                              >
+                                {p.sector}
+                              </span>
+                            )}
+                          </div>
+                          {/* Score in small type — secondary info */}
+                          <div className="text-[10px] tabular-nums mt-0.5" style={{ color: C.faint }}>
+                            score {p.score.toFixed ? p.score.toFixed(0) : p.score}
+                            {p.avg_lift != null && p.avg_lift !== 0
+                              ? ` · avg lift ${p.avg_lift > 0 ? '+' : ''}${typeof p.avg_lift === 'number' ? p.avg_lift.toFixed(1) : p.avg_lift}%`
+                              : ''}
+                          </div>
+                        </div>
+
+                        {/* Checkbox */}
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            setCheckedSymbols((prev) => {
+                              const next = new Set(prev ?? [])
+                              if (next.has(p.symbol)) next.delete(p.symbol)
+                              else next.add(p.symbol)
+                              return next
+                            })
+                          }}
+                          className="shrink-0 w-4 h-4 accent-mint cursor-pointer"
+                        />
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+
+              {/* No rows match the active tier filter (picks exist, filter hides all) */}
+              {!picksLoading && !picksErr && picks && picks.length > 0 && checkedSymbols && visiblePicks.length === 0 && (
+                <p className="text-[11.5px] px-1" style={{ color: C.muted }}>
+                  No picks match the selected tier{tierFilter.size > 1 ? 's' : ''}.{' '}
+                  <button type="button" onClick={() => setTierFilter(new Set())} className="underline" style={{ color: C.mint }}>
+                    Clear filter
+                  </button>
+                </p>
+              )}
+
+              {/* Empty picks list (universe + date with no signals yet) */}
+              {!picksLoading && !picksErr && picks && picks.length === 0 && (
+                <p className="text-[11.5px]" style={{ color: C.muted }}>
+                  No picks available for the selected universe and date.
+                  Top N picks will be used by the engine as usual.
+                </p>
+              )}
+
+              {/* Summary line when a custom override is active */}
+              {symbolWhitelist && (
+                <div className="mt-2 flex items-center gap-2 text-[11px]" style={{ color: C.ink2 }}>
+                  <span style={{ color: C.amber }}>{ICON.info(12)}</span>
+                  <span>
+                    Custom selection: <b style={{ color: C.ink }}>{symbolWhitelist.join(', ')}</b>{' '}
+                    will be sent as <code style={{ color: C.mint }}>symbol_whitelist</code>.
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (picks) {
+                          setCheckedSymbols(new Set(
+                            picks.filter((p) => p.rank <= config.top_n_stocks).map((p) => p.symbol),
+                          ))
+                        } else {
+                          setCheckedSymbols(null)
+                        }
+                      }}
+                      className="ml-2 underline"
+                      style={{ color: C.mint }}
+                    >
+                      Reset to top {config.top_n_stocks}
+                    </button>
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* ── C · Use leftover capital ── redistribute the capital freed by any
+                skipped pick (1 unit > its slice) across the remaining picks. On by
+                default; toggling off leaves that capital idle. */}
+            <div className="mt-4 flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5"
+              style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+              <div className="min-w-0">
+                <div className="text-[12px] font-semibold" style={{ color: C.ink }}>Use leftover capital</div>
+                <div className="text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>
+                  Redistribute capital freed by skipped picks across the remaining names.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => set('redistribute_unused_capital', !(config.redistribute_unused_capital !== false))}
+                className="relative shrink-0 w-11 h-6 rounded-full transition-colors"
+                style={{ background: config.redistribute_unused_capital !== false ? C.mint : 'rgba(255,255,255,0.12)' }}
+                aria-pressed={config.redistribute_unused_capital !== false}
+              >
+                <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all"
+                  style={{ left: config.redistribute_unused_capital !== false ? '22px' : '2px' }} />
+              </button>
+            </div>
+
+            {/* Skipped-picks banner — names dropped because 1 unit > their slice
+                budget (from the live preview estimate). Amber; honest. */}
+            <SkippedPicksBanner picks={preview?.skipped_picks} redistribute={config.redistribute_unused_capital !== false} />
+
+            {/* SIZING TRANSPARENCY — per-name qty/lots + margin/value for EVERY
+                product & instrument (CNC cash · MTF/MIS margin · FUT lots+margin). */}
+            <SizingBreakdown config={config} preview={preview} loading={previewLoading} err={previewErr} />
+          </div>
+          )}
+
+          {/* A · MIS defensive square-off note — for MIS sessions, the backend
+              force-squares at ~15:12 IST (before the broker's window). Read-only
+              note; applies to both strategies. */}
+          {config.order_product === 'MIS' && config.strategy !== 'intraday_basket' && (
+            <div className="mt-3 flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
+              style={{ borderColor: 'rgba(230,180,80,0.32)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+              <span>
+                <b>MIS session</b> — positions auto-square at ~<b>15:12 IST</b> (defensive),
+                ahead of the broker&apos;s own intraday square-off window.
+              </span>
+            </div>
+          )}
+
+          {/* Advanced — entry grace window (tucked away; backend default 120s). */}
+          <details className="mt-3 group">
+            <summary className="inline-flex items-center gap-1.5 text-[11.5px] cursor-pointer select-none list-none"
+              style={{ color: C.muted }}>
+              <span className="transition-transform group-open:rotate-90" style={{ color: C.faint }}>{ICON.chevronR(11)}</span>
+              Advanced
+            </summary>
+            <div className="mt-3 max-w-[280px]">
+              <Field label="Entry grace (seconds)" hint="How late after the fire moment the session may still fire before it's treated as missed.">
+                <input
+                  type="number" min={0} step={10}
+                  value={config.entry_grace_seconds ?? 120}
+                  onChange={(e) => set('entry_grace_seconds', Number(e.target.value) || 0)}
+                  className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
+                  style={inputStyle}
+                />
+              </Field>
+            </div>
+          </details>
+
+          {/* ── Execution mode — Standard (fire at signal) vs Worked (paced order
+              engine). Offered for the intraday_basket / portfolio_kill_switch
+              strategies only: Tesla forces its own path and the Auto-Ladder
+              campaign takes a fixed config. Standard sends NO execution_mode
+              (byte-identical to today); Worked reveals its pacing knobs. ─────── */}
+          {!isLadder && !isTesla && (
+            <div className="mt-3 rounded-xl border p-3.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="min-w-0">
+                  <div className="text-[12px] font-semibold" style={{ color: C.ink }}>Execution mode</div>
+                  <div className="text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>
+                    How entry orders reach the market. Standard fires at the signal; Worked paces large orders over the session.
+                  </div>
+                </div>
+                <Segmented
+                  options={[{ id: 'standard', label: 'Standard' }, { id: 'worked', label: 'Worked (paced)' }]}
+                  value={config.execution_mode === 'worked' ? 'worked' : 'standard'}
+                  onChange={(v) => onExecutionModeChange(v === 'worked')}
+                />
+              </div>
+
+              {config.execution_mode === 'worked' && (
+                <>
+                  <div className="mt-3.5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <Field label="Participation (%)" hint="Share of the recent-interval volume worked into the market per child order.">
+                      <input type="number" min={0.1} max={100} step={0.5}
+                        value={config.worked_participation_pct ?? ''}
+                        onChange={(e) => set('worked_participation_pct', e.target.value === '' ? undefined : Number(e.target.value))}
+                        placeholder="10"
+                        className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                    </Field>
+                    <Field label="Interval (sec)" hint="Seconds between paced child orders.">
+                      <input type="number" min={1} step={1}
+                        value={config.worked_interval_sec ?? ''}
+                        onChange={(e) => set('worked_interval_sec', e.target.value === '' ? undefined : Number(e.target.value))}
+                        placeholder="20"
+                        className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                    </Field>
+                    <Field label="Stop-working by" hint="IST time to stop pacing. Defaults to the session square-off.">
+                      <input type="text" inputMode="numeric"
+                        value={config.worked_deadline ?? ''}
+                        onChange={(e) => set('worked_deadline', e.target.value === '' ? undefined : e.target.value)}
+                        placeholder={config.square_off_time || '15:15:00'}
+                        className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                    </Field>
+                    <Field label="Freeze qty per order" hint="NSE per-order freeze quantity for the names you trade. Blank = engine default.">
+                      <input type="number" min={1} step={1}
+                        value={config.iceberg_freeze_qty_default ?? ''}
+                        onChange={(e) => set('iceberg_freeze_qty_default', e.target.value === '' ? undefined : Number(e.target.value))}
+                        placeholder="e.g. 900"
+                        className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                    </Field>
+                  </div>
+                  <div className="mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11px] leading-snug"
+                    style={{ borderColor: 'rgba(230,180,80,0.32)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+                    <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(13)}</span>
+                    <span>
+                      Worked mode <b>PACES large orders</b> over the session to limit market impact — expect{' '}
+                      <b>PARTIAL fills</b> on thin names, and fill prices that drift from the 9:15 signal.{' '}
+                      <b>PAPER-validate first.</b> Set the freeze qty for the names you trade.
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ── HARDENING SPRINT — Risk & protection (additive; every knob optional,
+              blank = the backend default = today's behaviour). Hidden for the
+              Auto-Ladder campaign, which takes a fixed validated config. ─────── */}
+          {!isLadder && (
+          <details className="mt-3 group">
+            <summary className="inline-flex items-center gap-1.5 text-[11.5px] cursor-pointer select-none list-none"
+              style={{ color: C.muted }}>
+              <span className="transition-transform group-open:rotate-90" style={{ color: C.faint }}>{ICON.chevronR(11)}</span>
+              Risk &amp; protection
+              <span className="text-[10px] font-mono" style={{ color: C.faint }}>optional</span>
+            </summary>
+            <div className="mt-3 flex flex-col gap-4">
+
+              {/* Daily-loss circuit breaker (RMS) — flatten ALL of your sessions when
+                  the combined loss crosses either threshold. Both blank = OFF. */}
+              <div className="rounded-xl border p-3.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                <div className="text-[12px] font-semibold" style={{ color: C.ink }}>Daily-loss circuit breaker</div>
+                <div className="text-[10.5px] leading-snug mt-0.5 mb-2.5" style={{ color: C.faint }}>
+                  Flatten all my sessions if combined loss crosses this. Leave both blank to keep it off.
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <Field label="Max daily loss (%)" hint="Of your fund. Blank = off.">
+                    <input type="number" min={0} max={50} step={0.5}
+                      value={config.max_daily_loss_pct ?? ''}
+                      onChange={(e) => set('max_daily_loss_pct', e.target.value === '' ? undefined : Number(e.target.value))}
+                      placeholder="off"
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                  </Field>
+                  <Field label="Max daily loss (₹)" hint="Absolute rupee cap. Blank = off.">
+                    <input type="number" min={0} step={1000}
+                      value={config.max_daily_loss_amount ?? ''}
+                      onChange={(e) => set('max_daily_loss_amount', e.target.value === '' ? undefined : Number(e.target.value))}
+                      placeholder="off"
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                  </Field>
+                </div>
+              </div>
+
+              {/* MIS protective SL-M — a broker-side stop so an MIS position is
+                  protected even if the monitor is down. Only relevant for MIS. */}
+              {config.order_product === 'MIS' && (
+                <div className="flex items-center justify-between gap-3 rounded-xl border px-3 py-2.5"
+                  style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-semibold" style={{ color: C.ink }}>MIS protective stop (SL-M)</div>
+                    <div className="text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>
+                      Places a broker-side stop so an MIS position is protected even if the monitor is down.
+                    </div>
+                  </div>
+                  <button type="button"
+                    onClick={() => set('mis_protective_slm_enabled', !(config.mis_protective_slm_enabled !== false))}
+                    className="relative shrink-0 w-11 h-6 rounded-full transition-colors"
+                    style={{ background: config.mis_protective_slm_enabled !== false ? C.mint : 'rgba(255,255,255,0.12)' }}
+                    aria-pressed={config.mis_protective_slm_enabled !== false}>
+                    <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all"
+                      style={{ left: config.mis_protective_slm_enabled !== false ? '22px' : '2px' }} />
+                  </button>
+                </div>
+              )}
+
+              {/* Iceberg — split a large order into slices (needed above the exchange
+                  freeze qty). Slice input shows only when enabled. */}
+              <div className="rounded-xl border px-3 py-2.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-semibold" style={{ color: C.ink }}>Iceberg (slice large orders)</div>
+                    <div className="text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>
+                      Split a large order into slices (needed above the exchange freeze quantity).
+                    </div>
+                  </div>
+                  <button type="button"
+                    onClick={() => set('iceberg_enabled', !config.iceberg_enabled)}
+                    className="relative shrink-0 w-11 h-6 rounded-full transition-colors"
+                    style={{ background: config.iceberg_enabled ? C.mint : 'rgba(255,255,255,0.12)' }}
+                    aria-pressed={!!config.iceberg_enabled}>
+                    <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all"
+                      style={{ left: config.iceberg_enabled ? '22px' : '2px' }} />
+                  </button>
+                </div>
+                {config.iceberg_enabled && (
+                  <div className="mt-3 max-w-[240px]">
+                    <Field label="Slice size (shares)" hint="Shares per slice. Enabling iceberg needs a slice size.">
+                      <input type="number" min={1} step={1}
+                        value={config.iceberg_slice_qty ?? ''}
+                        onChange={(e) => set('iceberg_slice_qty', e.target.value === '' ? undefined : Number(e.target.value))}
+                        placeholder="e.g. 900"
+                        className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                    </Field>
+                  </div>
+                )}
+              </div>
+
+              {/* Concentration / fat-finger caps — nested advanced. Each blank = off. */}
+              <details className="group/ff">
+                <summary className="inline-flex items-center gap-1.5 text-[11px] cursor-pointer select-none list-none"
+                  style={{ color: C.muted }}>
+                  <span className="transition-transform group-open/ff:rotate-90" style={{ color: C.faint }}>{ICON.chevronR(10)}</span>
+                  Concentration &amp; fat-finger caps
+                  <span className="text-[10px] font-mono" style={{ color: C.faint }}>per order · blank = off</span>
+                </summary>
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <Field label="Max % per name" hint="Cap any single name to this % of your fund.">
+                    <input type="number" min={0} max={100} step={1}
+                      value={config.max_pct_per_name ?? ''}
+                      onChange={(e) => set('max_pct_per_name', e.target.value === '' ? undefined : Number(e.target.value))}
+                      placeholder="off"
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                  </Field>
+                  <Field label="Max ₹ per order" hint="Absolute rupee notional cap for one order.">
+                    <input type="number" min={0} step={1000}
+                      value={config.fatfinger_max_notional_per_order ?? ''}
+                      onChange={(e) => set('fatfinger_max_notional_per_order', e.target.value === '' ? undefined : Number(e.target.value))}
+                      placeholder="off"
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                  </Field>
+                  <Field label="Max qty per order" hint="Absolute share/lot qty cap for one order.">
+                    <input type="number" min={0} step={1}
+                      value={config.fatfinger_max_qty_per_order ?? ''}
+                      onChange={(e) => set('fatfinger_max_qty_per_order', e.target.value === '' ? undefined : Number(e.target.value))}
+                      placeholder="off"
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                  </Field>
+                </div>
+              </details>
+            </div>
+          </details>
+          )}
+
+          {config.sizing_mode === 'manual' && (
+            <div className="mt-3 rounded-xl border px-3.5 py-2.5 text-[11px] leading-snug"
+              style={{ borderColor: C.line, background: 'rgba(255,255,255,0.015)', color: C.muted }}>
+              Manual per-symbol amounts are sent only when configured by the backend
+              preset (config/list). This UI creates the session with the chosen mode;
+              per-symbol manual amounts are not edited here yet.
+            </div>
+          )}
+
+          {/* ── Tesla seat model — n_seats + grade/cooldown/window (tesla_short) ── */}
+          {isTesla && (() => {
+            const seats = Math.max(1, Math.floor(Number(config.n_seats) || 1))
+            const cap = Number(config.total_allocated_capital) || 0
+            const perSeat = seats > 0 ? Math.floor(cap / seats) : 0
+            return (
+              <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.04)' }}>
+                <div className="flex items-center gap-2 mb-3">
+                  <span style={{ color: C.mint }}>{ICON.loop(15)}</span>
+                  <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Seat rotation (Tesla)</span>
+                  <span className="ml-auto text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+                    style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+                    Order-flow short
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <Field label="Seats (max concurrent shorts)"
+                    hint={`Equal seat = capital ÷ seats = ${fmtINR(perSeat)} per seat. A freed seat back-fills instantly on the next live signal.`}>
+                    <input type="number" min={1} step={1}
+                      value={config.n_seats ?? 3}
+                      onChange={(e) => set('n_seats', Math.max(1, Math.floor(Number(e.target.value) || 1)))}
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                  </Field>
+                  <Field label="Minimum signal grade" hint="A++ trades A++ and A+++; A+++ only takes the strongest signals (fewer, higher-conviction).">
+                    <Segmented
+                      options={TESLA_GRADE_OPTIONS.map((g) => ({ id: g.id, label: g.label }))}
+                      value={config.tesla_min_grade ?? 'A++'}
+                      onChange={(v) => set('tesla_min_grade', v)}
+                    />
+                  </Field>
+                  <Field label="Cooldown (minutes)" hint="Minimum spacing before the same name can be re-entered.">
+                    <input type="number" min={0} step={1}
+                      value={config.tesla_cooldown_minutes ?? 30}
+                      onChange={(e) => set('tesla_cooldown_minutes', Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                  </Field>
+                  <Field label="Personality window (days)" hint="Rolling completed trading days used to score how short-worthy an instrument is.">
+                    <input type="number" min={1} step={1}
+                      value={config.tesla_personality_window_days ?? 5}
+                      onChange={(e) => set('tesla_personality_window_days', Math.max(1, Math.floor(Number(e.target.value) || 1)))}
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                  </Field>
+                </div>
+
+                {/* v3 DiD exhaustion filter — opt-in stricter entry selection. */}
+                <label className="mt-3 flex items-start gap-2.5 rounded-lg border px-3 py-2.5 cursor-pointer"
+                  style={{ borderColor: config.tesla_did_layer_enabled ? 'rgba(63,227,164,0.4)' : C.line2,
+                           background: config.tesla_did_layer_enabled ? 'rgba(63,227,164,0.06)' : 'rgba(255,255,255,0.02)' }}>
+                  <input type="checkbox" checked={!!config.tesla_did_layer_enabled}
+                    onChange={(e) => set('tesla_did_layer_enabled', e.target.checked)}
+                    className="mt-0.5 shrink-0 w-4 h-4 accent-mint cursor-pointer" />
+                  <span className="min-w-0">
+                    <span className="text-[12px] font-semibold" style={{ color: C.ink }}>
+                      DiD exhaustion filter <span className="font-mono text-[10px]" style={{ color: C.mint }}>v3</span>
+                    </span>
+                    <span className="block text-[11px] leading-snug mt-0.5" style={{ color: C.muted }}>
+                      Only take shorts that are selling off <b>abnormally vs their sector</b> and are
+                      still an orderly continuation (not a panic spike). Stricter than the base gate —
+                      it trades <b>fewer, higher-quality</b> names, and can abstain entirely on a given day.
+                      Thin-validated; run in Paper.
+                    </span>
+                  </span>
+                </label>
+
+                <div className="mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11px] leading-snug"
+                  style={{ borderColor: 'rgba(230,180,80,0.32)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+                  <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(13)}</span>
+                  <span>
+                    <b>Thin-validated engine.</b> Tesla is intraday MIS short by design; downside is software-managed
+                    (kill-on-rise + mandatory square-off). Run it in <b>Paper</b> first. The per-seat trailing exit
+                    below governs each seat.
+                  </span>
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* ── intraday_basket / tesla: four trail %s + square-off + summary ── */}
+          {trailStrategy && (
+            <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.04)' }}>
+              <div className="flex items-center gap-2 mb-3">
+                <span style={{ color: C.mint }}>{ICON.trend(15)}</span>
+                <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>
+                  {isTesla ? 'Per-seat trailing exit (Tesla)' : isLadder ? 'Trailing exit (per basket)' : 'Trailing exit (intraday basket)'}
+                </span>
+                <span className="ml-auto text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+                  style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+                  {isBtst ? 'BTST Oscillator' : isLadder ? 'Positional preset' : 'Preset loaded'}
+                </span>
+              </div>
+              {isBtst ? (
+                <div className="mb-3 flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-snug"
+                  style={{ border: `1px solid ${C.line2}`, background: 'rgba(255,255,255,0.02)', color: C.muted }}>
+                  <span className="shrink-0 mt-px" style={{ color: C.mint }}>{ICON.info(12)}</span>
+                  <span>Falcon BTST Oscillator holds each basket <b style={{ color: C.ink2 }}>exactly 2 sessions</b> (buy 09:15 Day-1 → sell 15:29 Day-2). <b style={{ color: C.ink2 }}>NO trailing exit</b> — the arm is set unreachable so it never arms; the only guards are the <b style={{ color: C.ink2 }}>−6% hard stop</b> and the Day-2 time-exit. <b style={{ color: C.ink2 }}>Fixed for the campaign</b>.</span>
+                </div>
+              ) : isLadder ? (
+                <div className="mb-3 flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-snug"
+                  style={{ border: `1px solid ${C.line2}`, background: 'rgba(255,255,255,0.02)', color: C.muted }}>
+                  <span className="shrink-0 mt-px" style={{ color: C.mint }}>{ICON.info(12)}</span>
+                  <span>Each basket runs the <b style={{ color: C.ink2 }}>validated positional config</b> below — held positional with a fixed 3-session hold; the floor + hard stop carry across days. These values are <b style={{ color: C.ink2 }}>fixed for the campaign</b> (shown for reference).</span>
+                </div>
+              ) : null}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {isBtst ? (
+                  <>
+                    {/* BTST runs with NO trail — the arm is set unreachable so it
+                        never arms. Display OFF for arm/floor/giveback and the −6%
+                        hard stop; read-only, sends nothing new to the wire. */}
+                    <Field label="Arm / profit (%)" hint="No trail — BTST never arms (arm set unreachable).">
+                      <div className="w-full rounded-lg px-3 py-2 text-[13px] opacity-60" style={inputStyle}>OFF — no trail</div>
+                    </Field>
+                    <Field label="Lock floor (%)" hint="No trail — nothing to lock.">
+                      <div className="w-full rounded-lg px-3 py-2 text-[13px] opacity-60" style={inputStyle}>OFF — no trail</div>
+                    </Field>
+                    <Field label="Trail giveback (%)" hint="No trail — no giveback exit.">
+                      <div className="w-full rounded-lg px-3 py-2 text-[13px] opacity-60" style={inputStyle}>OFF — no trail</div>
+                    </Field>
+                    <Field label="Stop loss (%)" hint="BTST hard stop — the basket exits if it drops this much.">
+                      <div className="w-full rounded-lg px-3 py-2 text-[13px] opacity-60 tabular-nums" style={inputStyle}>{config.stop_pct ?? 6}%</div>
+                    </Field>
+                  </>
+                ) : (
+                  <>
+                <Field label="Arm / profit (%)" hint={isLadder ? 'Validated positional value (fixed).' : 'Arms trailing once the basket hits this on notional.'}>
+                  <input type="number" min={0} step={0.05} disabled={isLadder} readOnly={isLadder}
+                    value={config.arm_pct ?? ''}
+                    onChange={(e) => set('arm_pct', Number(e.target.value) || 0)}
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none disabled:opacity-60 disabled:cursor-not-allowed" style={inputStyle} />
+                </Field>
+                <Field label="Lock floor (%)" hint={isLadder ? 'Validated positional value (fixed).' : 'Locks in at least this profit once armed.'}>
+                  <input type="number" min={0} step={0.05} disabled={isLadder} readOnly={isLadder}
+                    value={config.floor_pct ?? ''}
+                    onChange={(e) => set('floor_pct', Number(e.target.value) || 0)}
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none disabled:opacity-60 disabled:cursor-not-allowed" style={inputStyle} />
+                </Field>
+                <Field label="Trail giveback (%)" hint={isLadder ? 'Validated positional value (fixed).' : 'Exits if the basket gives back this much from its peak.'}>
+                  <input type="number" min={0} step={0.05} disabled={isLadder} readOnly={isLadder}
+                    value={config.trail_giveback_pct ?? ''}
+                    onChange={(e) => set('trail_giveback_pct', Number(e.target.value) || 0)}
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none disabled:opacity-60 disabled:cursor-not-allowed" style={inputStyle} />
+                </Field>
+                <Field label="Stop loss (%)" hint={isLadder ? 'Validated positional value (fixed).' : 'Hard exit if the basket drops this much on notional.'}>
+                  <input type="number" min={0} step={0.05} disabled={isLadder} readOnly={isLadder}
+                    value={config.stop_pct ?? ''}
+                    onChange={(e) => set('stop_pct', Number(e.target.value) || 0)}
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none disabled:opacity-60 disabled:cursor-not-allowed" style={inputStyle} />
+                </Field>
+                  </>
+                )}
+
+                {/* ── D · Hold mode ── Intraday forces a square-off at the set time;
+                    Positional carries the floor + hard stop across days (no forced
+                    square-off). MIS MUST be intraday — the backend rejects positional
+                    for MIS, so it's forced + Positional is disabled with a tooltip.
+                    HIDDEN for Auto-Ladder: it is always positional with a fixed
+                    3-session hold (sent under the hood), so no toggle is surfaced. */}
+                {!isLadder && (() => {
+                  const isMis = config.order_product === 'MIS'
+                  // With MIS, always show Intraday selected (the wire also forces it).
+                  const holdValue: 'intraday' | 'positional' =
+                    isMis ? 'intraday' : (config.square_off_enabled === false ? 'positional' : 'intraday')
+                  return (
+                    <Field
+                      label="Hold"
+                      hint={holdValue === 'positional'
+                        ? 'Positional — the trailing floor + hard stop carry across days. No forced square-off.'
+                        : 'Intraday — the basket is force-squared-off at the square-off time.'}
+                    >
+                      <div className="inline-flex rounded-xl border p-0.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                        {HOLD_OPTIONS.map((o) => {
+                          const active = o.id === holdValue
+                          const disabled = isMis && o.id === 'positional'
+                          return (
+                            <button
+                              key={o.id}
+                              type="button"
+                              disabled={disabled}
+                              title={disabled ? 'MIS must square off intraday' : undefined}
+                              onClick={() => !disabled && onHoldChange(o.id)}
+                              className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors disabled:cursor-not-allowed"
+                              style={{
+                                color: active ? '#06130c' : (disabled ? C.faint : C.ink2),
+                                background: active ? C.mint : 'transparent',
+                                opacity: disabled ? 0.5 : 1,
+                              }}
+                            >
+                              {o.label}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </Field>
+                  )
+                })()}
+
+                {/* Square-off time / max-hold — HIDDEN for Auto-Ladder (fixed
+                    3-session positional hold under the hood). Shown for Intraday;
+                    max-hold for Positional in the two session strategies. */}
+                {isLadder ? null : (config.order_product === 'MIS' || config.square_off_enabled !== false) ? (
+                  <Field label="Square-off time (IST)" hint="Forces a flat basket at this time (HH:MM).">
+                    <input type="time"
+                      value={(config.square_off_time ?? '15:29:00').slice(0, 5)}
+                      onChange={(e) => set('square_off_time', `${e.target.value}:00`)}
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none" style={inputStyle} />
+                  </Field>
+                ) : (
+                  <Field label="Max hold (trading sessions)"
+                    hint={`Force-close the basket at ${(config.square_off_time ?? '15:29:00').slice(0, 5)} on the Nth trading session (entry day = 1; weekends & NSE holidays skipped). 0 = no cap. Falcon Positional uses 3.`}>
+                    <input type="number" min={0} step={1}
+                      value={config.max_hold_sessions ?? 3}
+                      onChange={(e) => set('max_hold_sessions', Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                      className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                    <div className="mt-1.5 flex items-start gap-2 rounded-lg px-2.5 py-1.5 text-[11px] leading-snug"
+                      style={{ border: `1px solid ${C.line2}`, background: 'rgba(255,255,255,0.02)', color: C.muted }}>
+                      <span className="shrink-0 mt-px" style={{ color: C.mint }}>{ICON.info(12)}</span>
+                      <span>Positional — the floor + hard stop carry <b style={{ color: C.ink2 }}>across days</b>; the basket force-closes on the max-hold session (or earlier on trail/stop).</span>
+                    </div>
+                  </Field>
+                )}
+              </div>
+
+              {/* MIS forces intraday — surface the rule when MIS is the product. */}
+              {config.order_product === 'MIS' && (
+                <div className="mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11px] leading-snug"
+                  style={{ borderColor: 'rgba(230,180,80,0.32)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+                  <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(13)}</span>
+                  <span>
+                    <b>MIS must square off intraday</b> — Positional is disabled, and MIS auto-squares
+                    at ~<b>15:12 IST</b> (defensive), ahead of the broker&apos;s own square-off window.
+                  </span>
+                </div>
+              )}
+
+              {/* The invested-basis / leverage / sizing summary is a BASKET view
+                  (previews the full deployment). Tesla fills seats live from
+                  signals, so a static preview isn't meaningful — suppress it. */}
+              {!isTesla && (
+                <IntradayStrategySummary
+                  config={config}
+                  preview={preview}
+                  loading={previewLoading}
+                  err={previewErr}
+                  isBtst={isBtst}
+                />
+              )}
+            </div>
+          )}
+
+          {/* ── Trailing strategy (profit STEP-LOCK) — ADDITIVE, intraday_basket
+              + Tesla (per-seat step-lock reuses the SAME knobs). NEW controls only:
+              portfolio- vs per-stock trailing + the ratcheting locked-floor ladder
+              + large-day tier. Give-back + the hard stop stay in the trail card
+              above (same backend fields — not duplicated). Hidden for Auto-Ladder. */}
+          {trailStrategy && !isLadder && (() => {
+            const scope = config.step_lock_scope ?? 'basket'
+            const lockOn = config.trail_step_lock_enabled !== false
+            const rows = config.trail_step_lock_ladder ?? STEP_LOCK_LADDER_DEFAULT
+            const cap = Number(config.total_allocated_capital) || 0
+            return (
+              <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.04)' }}>
+                <div className="flex items-center gap-2 mb-3">
+                  <span style={{ color: C.mint }}>{ICON.trend(15)}</span>
+                  <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Trailing strategy</span>
+                  <span className="ml-auto text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+                    style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+                    {scope === 'stock' ? 'Per-stock' : 'Portfolio'}
+                  </span>
+                </div>
+
+                {/* MODE selector — the primary control. Reuses the mint Segmented. */}
+                <Field label="Trailing mode" hint="What the profit trail follows — the whole basket, or each stock on its own.">
+                  <Segmented
+                    options={[{ id: 'basket', label: 'Portfolio-level' }, { id: 'stock', label: 'Individual-stock' }]}
+                    value={scope}
+                    onChange={(v) => set('step_lock_scope', v as 'basket' | 'stock')}
+                  />
+                </Field>
+                <div className="mt-2 grid grid-cols-1 gap-1 text-[11px] leading-snug" style={{ color: C.muted }}>
+                  <div><b style={{ color: scope === 'basket' ? C.mint : C.ink2 }}>Portfolio-level</b> — the whole basket&apos;s profit is trailed and exits together.</div>
+                  <div><b style={{ color: scope === 'stock' ? C.mint : C.ink2 }}>Individual-stock</b> — each stock trails and exits on its own.</div>
+                </div>
+
+                {/* PER-STOCK hard stop — only meaningful in Individual-stock mode.
+                    Portfolio-level uses the aggregate hard stop (Stop loss above). */}
+                {scope === 'stock' && (
+                  <div className="mt-4">
+                    <Field label="Per-stock stop-loss (% of capital)" hint="Exit an individual stock when it's down this % of the capital deployed on it. 0 = off.">
+                      <input type="number" min={0} step={0.5} value={config.per_stock_stop_pct ?? ''}
+                        onChange={(e) => set('per_stock_stop_pct', Number(e.target.value) || 0)}
+                        className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                    </Field>
+                  </div>
+                )}
+
+                {/* ENABLE step-locking — reuses the kill-switch toggle pattern. */}
+                <div className="mt-4 flex items-center justify-between rounded-lg border px-3 py-2.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                  <div className="pr-3">
+                    <div className="text-[12px] font-semibold" style={{ color: C.ink }}>Profit step-lock</div>
+                    <div className="text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>
+                      Ratchets a rising locked floor as profit climbs the ladder. Off = a single fixed floor + give-back.
+                    </div>
+                  </div>
+                  <button type="button" onClick={() => set('trail_step_lock_enabled', !lockOn)}
+                    className="relative w-11 h-6 rounded-full transition-colors shrink-0"
+                    style={{ background: lockOn ? C.mint : 'rgba(255,255,255,0.12)' }} aria-pressed={lockOn}>
+                    <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all" style={{ left: lockOn ? '22px' : '2px' }} />
+                  </button>
+                </div>
+
+                <div className="mt-2 flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-snug"
+                  style={{ border: `1px solid ${C.line2}`, background: 'rgba(255,255,255,0.02)', color: C.muted }}>
+                  <span className="shrink-0 mt-px" style={{ color: C.mint }}>{ICON.info(12)}</span>
+                  <span>Give-back and the basket hard stop are set in <b style={{ color: C.ink2 }}>Trail giveback</b> / <b style={{ color: C.ink2 }}>Stop loss</b> above.</span>
+                </div>
+
+                {/* ADVANCED — ladder editor + large-day tier (folded to keep the
+                    mode selector + give-back/stop visible). */}
+                {lockOn && (
+                  <>
+                    <button type="button" onClick={() => setStepLockAdv((v) => !v)}
+                      className="mt-3 inline-flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: C.mint }}>
+                      <span className="text-[10px]">{stepLockAdv ? '▾' : '▸'}</span> Advanced — step-lock ladder &amp; large-day tier
+                    </button>
+                    {stepLockAdv && (
+                      <div className="mt-3 rounded-lg border p-3" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.015)' }}>
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.05em] mb-1" style={{ color: C.muted }}>Step-lock ladder</div>
+                        <div className="text-[10.5px] leading-snug mb-2.5" style={{ color: C.faint }}>Once profit reaches a peak %, lock in at least the paired lock %. Both columns must rise down the ladder.</div>
+                        <div className="flex flex-col gap-2">
+                          {rows.map((r, i) => {
+                            const lockRs = cap > 0 ? ((Number(r[1]) || 0) / 100) * cap : 0
+                            return (
+                              <div key={i} className="flex items-center gap-2">
+                                <label className="text-[10px] w-8 shrink-0" style={{ color: C.faint }}>Peak</label>
+                                <div className="relative flex-1 min-w-0">
+                                  <input type="number" min={0} step={0.5} value={r[0] ?? ''}
+                                    onChange={(e) => updateRung(i, 0, Number(e.target.value) || 0)}
+                                    className="w-full rounded-lg pr-6 pl-2.5 py-1.5 text-[12px] outline-none tabular-nums" style={inputStyle} />
+                                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px]" style={{ color: C.faint }}>%</span>
+                                </div>
+                                <span className="text-[11px] shrink-0" style={{ color: C.faint }}>→ lock</span>
+                                <div className="relative flex-1 min-w-0">
+                                  <input type="number" min={0} step={0.5} value={r[1] ?? ''}
+                                    onChange={(e) => updateRung(i, 1, Number(e.target.value) || 0)}
+                                    className="w-full rounded-lg pr-6 pl-2.5 py-1.5 text-[12px] outline-none tabular-nums" style={inputStyle} />
+                                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px]" style={{ color: C.faint }}>%</span>
+                                </div>
+                                {cap > 0 && (
+                                  <span className="hidden sm:block text-[10px] tabular-nums w-20 text-right shrink-0" style={{ color: C.mint }}>{signedINR(lockRs)}</span>
+                                )}
+                                <button type="button" onClick={() => removeRung(i)} disabled={rows.length <= 1}
+                                  title={rows.length <= 1 ? 'Keep at least one rung' : 'Remove rung'}
+                                  className="shrink-0 grid place-items-center w-6 h-6 rounded-md text-[14px] leading-none disabled:opacity-30 disabled:cursor-not-allowed"
+                                  style={{ color: C.red, border: `1px solid ${C.line2}` }}>×</button>
+                              </div>
+                            )
+                          })}
+                        </div>
+                        <button type="button" onClick={addRung}
+                          className="mt-2.5 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-semibold"
+                          style={{ color: C.mint, border: '1px solid rgba(63,227,164,0.4)', background: 'rgba(63,227,164,0.08)' }}>+ Add rung</button>
+
+                        {/* Large-day tier — advanced/optional relative give-back. */}
+                        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <Field label="Large-day peak (%)" hint="Above this peak, give-back turns RELATIVE (a % of the peak) to ride big days.">
+                            <input type="number" min={0} step={0.5} value={config.trail_large_peak_pct ?? ''}
+                              onChange={(e) => set('trail_large_peak_pct', Number(e.target.value) || 0)}
+                              className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                          </Field>
+                          <Field label="Large-day give-back (%)" hint="Relative give-back from the peak once past the large-day peak (e.g. 17.5%).">
+                            <input type="number" min={0} step={0.5} value={config.trail_large_giveback_rel ?? ''}
+                              onChange={(e) => set('trail_large_giveback_rel', Number(e.target.value) || 0)}
+                              className="w-full rounded-lg px-3 py-2 text-[13px] outline-none tabular-nums" style={inputStyle} />
+                          </Field>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )
+          })()}
+
+          {/* Kill switch block — portfolio_kill_switch strategy only */}
+          {config.strategy === 'portfolio_kill_switch' && (
+          <div className="mt-5 rounded-xl border p-3.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.015)' }}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span style={{ color: config.kill_switch_enabled ? C.red : C.faint }}>{ICON.shield(15)}</span>
+                <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Kill switch</span>
+                <span className="text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+                  style={config.kill_switch_enabled
+                    ? { color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }
+                    : { color: C.faint, background: 'rgba(255,255,255,0.04)' }}>
+                  {config.kill_switch_enabled ? 'ON' : 'OFF (default)'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => set('kill_switch_enabled', !config.kill_switch_enabled)}
+                className="relative w-11 h-6 rounded-full transition-colors"
+                style={{ background: config.kill_switch_enabled ? C.red : 'rgba(255,255,255,0.12)' }}
+                aria-pressed={config.kill_switch_enabled}
+              >
+                <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all"
+                  style={{ left: config.kill_switch_enabled ? '22px' : '2px' }} />
+              </button>
+            </div>
+
+            {config.kill_switch_enabled && (
+              <>
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="Direction" hint="Which side(s) trigger the flat basket exit.">
+                  <Segmented
+                    options={KILL_DIR_OPTIONS}
+                    value={config.kill_switch_direction}
+                    onChange={(v) => set('kill_switch_direction', v)}
+                  />
+                </Field>
+                <Field label="Trigger at (%)" hint="Fallback threshold used for any side left blank below (on INVESTED return).">
+                  <input
+                    type="number" min={0} step={0.5}
+                    value={config.kill_switch_pct}
+                    onChange={(e) => set('kill_switch_pct', Number(e.target.value) || 0)}
+                    className="w-full rounded-lg px-3 py-2 text-[13px] outline-none"
+                    style={inputStyle}
+                  />
+                </Field>
+              </div>
+
+              {/* ── B · Asymmetric thresholds ── separate Target +% (profit side)
+                  and Stop −% (loss side). Blank → the single Trigger above is used
+                  for that side (symmetric, today's behaviour). Shown per direction. */}
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {(config.kill_switch_direction === 'profit' || config.kill_switch_direction === 'both') && (
+                  <Field label="Target +% (profit exit)" hint="Optional. Overrides the fallback on the profit side. Blank = use Trigger at (%).">
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[13px] font-semibold" style={{ color: C.mint }}>+</span>
+                      <input
+                        type="number" min={0} step={0.5}
+                        value={config.kill_switch_target_pct ?? ''}
+                        placeholder={`${config.kill_switch_pct}`}
+                        onChange={(e) => set('kill_switch_target_pct', e.target.value === '' ? undefined : (Number(e.target.value) || 0))}
+                        className="w-full rounded-lg pl-7 pr-3 py-2 text-[13px] outline-none"
+                        style={inputStyle}
+                      />
+                    </div>
+                  </Field>
+                )}
+                {(config.kill_switch_direction === 'loss' || config.kill_switch_direction === 'both') && (
+                  <Field label="Stop −% (loss exit)" hint="Optional. Overrides the fallback on the loss side. Blank = use Trigger at (%).">
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[13px] font-semibold" style={{ color: C.red }}>−</span>
+                      <input
+                        type="number" min={0} step={0.5}
+                        value={config.kill_switch_stop_pct ?? ''}
+                        placeholder={`${config.kill_switch_pct}`}
+                        onChange={(e) => set('kill_switch_stop_pct', e.target.value === '' ? undefined : (Number(e.target.value) || 0))}
+                        className="w-full rounded-lg pl-7 pr-3 py-2 text-[13px] outline-none"
+                        style={inputStyle}
+                      />
+                    </div>
+                  </Field>
+                )}
+              </div>
+              </>
+            )}
+
+            {/* ── Potential outcome (P&L preview) — only when the kill switch is on ── */}
+            {config.kill_switch_enabled && (
+              <PotentialOutcome
+                preview={preview}
+                loading={previewLoading}
+                err={previewErr}
+                direction={config.kill_switch_direction}
+                orderProduct={config.order_product}
+              />
+            )}
+          </div>
+          )}
+
+          {/* ── Non-trading-day suggestion (from a Create 400) ──────────────────
+              Friendly inline message + a one-click "Use {date}" that sets
+              entry_date and lets the operator retry — instead of a raw error. */}
+          {createSuggest && (
+            <div className="mt-5 rounded-xl border px-3.5 py-3"
+              style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
+              <div className="flex items-start gap-2 text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+                <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(15)}</span>
+                <span>
+                  <b style={{ color: C.amber }}>That date isn&apos;t a trading day.</b>{' '}
+                  {createSuggest.suggested
+                    ? <>The next trading day is <b style={{ color: C.ink }}>{createSuggest.suggested}</b>.</>
+                    : <>Pick a valid trading day, or clear the date to use the next valid session.</>}
+                </span>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2.5">
+                {createSuggest.suggested && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      set('entry_date', createSuggest.suggested as string)
+                      setCreateSuggest(null)
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[12px] font-semibold transition-opacity"
+                    style={{ color: '#06130c', background: C.mint }}
+                  >
+                    {ICON.check(13)} Use {createSuggest.suggested}
+                  </button>
+                )}
+                <button type="button"
+                  onClick={() => { set('entry_date', ''); setCreateSuggest(null) }}
+                  className="text-[11.5px] px-3 py-1.5 rounded-lg transition-colors"
+                  style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+                  Clear date (use next session)
+                </button>
+                <button type="button" onClick={() => setCreateSuggest(null)}
+                  className="text-[11.5px]" style={{ color: C.faint }}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
+          </>)}
+          {/* ── end STANDARD config region ─────────────────────────────────────── */}
+
+          {/* Primary CTA — "Create campaign" for Auto-Ladder + Magnifier (create →
+              a CREATED draft; the campaign CREATED phase then offers Start-now /
+              Schedule, mirroring the session flow). "Create session" otherwise. */}
+          <div className="mt-5 flex items-center gap-3">
+            <button
+              type="button"
+              disabled={busy === 'create' || !canGoLive || ((isLadder || isMagnifier) && (config.total_allocated_capital || 0) <= 0)}
+              onClick={isMagnifier ? onCreateMagnifier : isLadder ? onCreateCampaign : onCreate}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-semibold transition-opacity disabled:opacity-40"
+              style={{ color: '#06130c', background: C.mint }}
+            >
+              {(isLadder || isMagnifier)
+                ? (busy === 'create' ? 'Creating…' : <>{ICON.loop(14)} Create campaign</>)
+                : (busy === 'create' ? 'Creating…' : <>Create {mode} session {ICON.arrow(13)}</>)}
+            </button>
+            <span className="text-[11px]" style={{ color: C.muted }}>
+              {mode === 'live' && !liveReady
+                ? 'Type LIVE above to enable.'
+                : mode === 'live' && !liveAccountReady
+                ? 'Select your connected broker account — live needs your own active account.'
+                : isMagnifier
+                ? `Creates the ${mode} Magnifier campaign as a draft — next you choose Start now or Schedule. No baskets open yet.`
+                : isLadder
+                ? `Creates the ${mode} campaign as a draft — next you choose Start now or Schedule for a future date. No baskets open yet.`
+                : `Creates a ${mode} session — no orders are placed yet.`}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* ── CAMPAIGN CREATED PHASE — confirm then Start now / Schedule ────────────
+          Mirrors the session created-phase, but for an Auto-Ladder draft: a
+          "Campaign created" card + Start now (RUNNING) / Schedule for a future
+          trading day (SCHEDULED, via an inline date picker). A non-trading-day
+          400 offers the backend's suggested_date as a one-click apply. */}
+      {phase === 'created' && createdLadder && !session && (
+        <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+          <div className="flex items-center gap-2 mb-1">
+            <span style={{ color: C.mint }}>{ICON.check(16)}</span>
+            <span className="text-[14px] font-semibold" style={{ color: C.ink }}>Campaign created</span>
+            <ModePill mode={createdLadder.mode} />
+            <span className="text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+              style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+              {createdLadder.product}
+            </span>
+          </div>
+          <div className="text-[11.5px] mb-4" style={{ color: C.muted }}>
+            ID <code style={{ color: C.ink2 }}>{createdLadder.ladder_id}</code> · status{' '}
+            <span style={{ color: C.ink2 }}>CREATED (draft)</span> · fires{' '}
+            <span style={{ color: C.ink2 }}>09:15 IST</span>
+            <span style={{ color: C.faint }}> · first basket next trading morning, then every trading day — nothing armed yet</span>
+          </div>
+
+          {/* Calm retry note (parity with the session error line). */}
+          {campaignErr && !campaignSuggest && (
+            <div className="mb-4 flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
+              style={{ borderColor: 'rgba(232,115,107,0.4)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(14)}</span>
+              <span>{campaignErr}</span>
+            </div>
+          )}
+
+          {/* Non-trading-day suggestion (Schedule 400) — one-click apply the
+              backend's suggested_date, mirroring the session createSuggest UI. */}
+          {campaignSuggest && (
+            <div className="mb-4 rounded-xl border px-3.5 py-3"
+              style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
+              <div className="flex items-start gap-2 text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+                <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(15)}</span>
+                <span>
+                  <b style={{ color: C.amber }}>That&apos;s not a trading day.</b>{' '}
+                  Use <b style={{ color: C.ink }}>{campaignSuggest}</b> instead?
+                </span>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2.5">
+                <button type="button"
+                  onClick={() => { setCampaignDate(campaignSuggest); setCampaignSuggest(null); setCampaignErr(null) }}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[12px] font-semibold transition-opacity"
+                  style={{ color: '#06130c', background: C.mint }}>
+                  {ICON.check(13)} Use {campaignSuggest}
+                </button>
+                <button type="button" onClick={() => { setCampaignSuggest(null); setCampaignErr(null) }}
+                  className="text-[11.5px]" style={{ color: C.faint }}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* TWO clear ways to begin — start now, or schedule for a future day. */}
+          <div className="flex flex-col sm:flex-row sm:items-stretch gap-3">
+            {/* Start now → RUNNING (first basket next trading morning). */}
+            <button
+              type="button"
+              disabled={campaignBusy != null}
+              onClick={() => onCampaignStart('now')}
+              className="flex-1 flex flex-col items-start gap-1 px-4 py-3 rounded-xl text-left transition-opacity disabled:opacity-40"
+              style={createdLadder.mode === 'live'
+                ? { color: '#1a0908', background: C.red }
+                : { color: '#06130c', background: C.mint }}
+            >
+              <span className="flex items-center gap-2 text-[13px] font-semibold">
+                {ICON.bolt(14)} {campaignBusy === 'now' ? 'Starting…' : 'Start now'}
+              </span>
+              <span className="text-[10.5px] leading-snug opacity-80">
+                First Falcon basket opens at 09:15 next trading morning.
+              </span>
+            </button>
+
+            {/* Schedule → SCHEDULED: pick a future trading day, then arm it. */}
+            <div className="flex-1 flex flex-col gap-2 px-4 py-3 rounded-xl"
+              style={{ background: 'rgba(63,227,164,0.10)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+              <span className="flex items-center gap-2 text-[13px] font-semibold" style={{ color: C.mint }}>
+                {ICON.clock(14)} Schedule for a date
+              </span>
+              <input
+                type="date"
+                min={earliestScheduleDateIST()}
+                value={campaignDate}
+                onChange={(e) => { setCampaignDate(e.target.value); setCampaignSuggest(null); setCampaignErr(null) }}
+                className="w-full rounded-lg px-2.5 py-1.5 text-[12px] tabular-nums outline-none"
+                style={{ color: C.ink, background: 'rgba(0,0,0,0.25)', border: `1px solid ${C.line2}`, colorScheme: 'dark' }}
+              />
+              <button
+                type="button"
+                disabled={campaignBusy != null || !campaignDate}
+                onClick={() => onCampaignStart('scheduled')}
+                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[12px] font-semibold transition-opacity disabled:opacity-40"
+                style={{ color: '#06130c', background: C.mint }}
+              >
+                {ICON.clock(13)} {campaignBusy === 'scheduled'
+                  ? 'Scheduling…'
+                  : campaignDate ? `Schedule for ${campaignDate} · 09:15` : 'Pick a date'}
+              </button>
+              <span className="text-[10.5px] leading-snug" style={{ color: C.muted }}>
+                Arms it to open its first basket at 09:15 IST that day — nothing is placed until then.
+              </span>
+            </div>
+          </div>
+
+          <div className="mt-3 flex items-center gap-3">
+            <button type="button" onClick={onDiscardCampaign}
+              className="text-[12px] px-3 py-2 rounded-lg transition-colors"
+              style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+              Discard
+            </button>
+            <p className="text-[11px] leading-snug" style={{ color: C.faint }}>
+              {createdLadder.mode === 'paper'
+                ? 'Paper simulates the daily baskets — no broker orders are sent.'
+                : 'Live attempts real broker orders, but only if the server flag FALCON_AUTOTRADE_ENABLED is set; otherwise it reports skipped.'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── CREATED PHASE — confirm then Start ───────────────────────────────── */}
+      {phase === 'created' && session && (
+        <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+          <div className="flex items-center gap-2 mb-1">
+            <span style={{ color: C.mint }}>{ICON.check(16)}</span>
+            <span className="text-[14px] font-semibold" style={{ color: C.ink }}>Session created</span>
+            <ModePill mode={session.mode} />
+          </div>
+          <div className="text-[11.5px] mb-4" style={{ color: C.muted }}>
+            ID <code style={{ color: C.ink2 }}>{session.session_id}</code> · status{' '}
+            <span style={{ color: C.ink2 }}>{session.status}</span> · entry{' '}
+            <span style={{ color: C.ink2 }}>
+              {config.entry_date ? `${config.entry_date} ` : ''}{(config.entry_time ?? '').slice(0, 5)} IST
+            </span>
+            {!config.entry_date && <span style={{ color: C.faint }}> · next valid session</span>}
+          </div>
+
+          {/* Skipped-picks banner (create response) — names dropped at sizing. */}
+          <div className="mb-4">
+            <SkippedPicksBanner picks={session.skipped_picks} redistribute={config.redistribute_unused_capital !== false} />
+          </div>
+
+          {/* TWO clear ways to begin — fire now, or arm for the entry time. */}
+          <div className="flex flex-col sm:flex-row sm:items-stretch gap-3">
+            {/* Start now → places immediately (RUNNING). */}
+            <button
+              type="button"
+              disabled={busy === 'start'}
+              onClick={() => onStart('now')}
+              className="flex-1 flex flex-col items-start gap-1 px-4 py-3 rounded-xl text-left transition-opacity disabled:opacity-40"
+              style={session.mode === 'live'
+                ? { color: '#1a0908', background: C.red }
+                : { color: '#06130c', background: C.mint }}
+            >
+              <span className="flex items-center gap-2 text-[13px] font-semibold">
+                {ICON.bolt(14)} {busy === 'start' ? 'Starting…' : 'Start now'}
+              </span>
+              <span className="text-[10.5px] leading-snug opacity-80">
+                Places {session.mode === 'paper' ? 'simulated' : 'real'} entries immediately.
+              </span>
+            </button>
+
+            {/* Schedule → arms the session to auto-fire at entry_time (SCHEDULED). */}
+            <button
+              type="button"
+              disabled={busy === 'start'}
+              onClick={() => onStart('scheduled')}
+              className="flex-1 flex flex-col items-start gap-1 px-4 py-3 rounded-xl text-left transition-colors disabled:opacity-40"
+              style={{ color: C.mint, background: 'rgba(63,227,164,0.10)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}
+            >
+              <span className="flex items-center gap-2 text-[13px] font-semibold">
+                {ICON.clock(14)} {busy === 'start' ? 'Scheduling…' : `Schedule for ${config.entry_time}`}
+              </span>
+              <span className="text-[10.5px] leading-snug" style={{ color: C.muted }}>
+                Arms it to auto-fire at {config.entry_time} IST — nothing is placed until then.
+              </span>
+            </button>
+          </div>
+
+          <div className="mt-3 flex items-center gap-3">
+            <button type="button" onClick={backToList}
+              className="text-[12px] px-3 py-2 rounded-lg transition-colors"
+              style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+              Discard
+            </button>
+            <p className="text-[11px] leading-snug" style={{ color: C.faint }}>
+              {session.mode === 'paper'
+                ? 'Paper simulates placement — no broker orders are sent.'
+                : 'Live attempts real broker orders, but only if the server flag FALCON_AUTOTRADE_ENABLED is set; otherwise it reports skipped.'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── RUNNING PHASE — start result + live status + kill ─────────────────── */}
+      {phase === 'running' && session && (
+        <div className="flex flex-col gap-4">
+          {/* SCHEDULED — armed, waiting to fire. Places nothing until entry time. */}
+          {scheduledNow && (
+            <div className="rounded-2xl border p-4 sm:p-5"
+              style={{ borderColor: 'rgba(63,227,164,0.32)', background: 'rgba(63,227,164,0.05)' }}>
+              <div className="flex items-center gap-2 mb-3">
+                <span style={{ color: C.mint }}>{ICON.clock(17)}</span>
+                <span className="text-[14px] font-semibold" style={{ color: C.ink }}>Scheduled — waiting to fire</span>
+                {status && <ModePill mode={status.mode} />}
+              </div>
+
+              {/* Armed: show fire time + live countdown. Not armed: honest note. */}
+              {status?.scheduler_armed === false ? (
+                <div className="rounded-xl border px-3.5 py-3 mb-4"
+                  style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
+                  <div className="flex items-start gap-2 text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+                    <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(15)}</span>
+                    <span>
+                      <b style={{ color: C.amber }}>Not armed.</b>{' '}
+                      The backend restarted and lost this session&apos;s in-memory timer, so it
+                      will NOT auto-fire. Re-schedule it to arm the timer again.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy === 'start'}
+                    onClick={() => onStart('scheduled')}
+                    className="mt-3 inline-flex items-center gap-2 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+                    style={{ color: '#06130c', background: C.mint }}
+                  >
+                    {ICON.clock(13)} {busy === 'start' ? 'Re-scheduling…' : 'Re-schedule'}
+                  </button>
+                </div>
+              ) : (
+                <>
+                <div className="flex flex-wrap items-end gap-x-8 gap-y-3 mb-3">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Fires at (IST)</div>
+                    {/* Prefer the backend's RESOLVED fire datetime (the exact moment
+                        it will fire after resolving entry_date+time → next valid
+                        session), not just the bare time. */}
+                    <div className="text-[15px] font-semibold mt-0.5" style={{ color: C.ink }}>
+                      {status?.resolved_fire_datetime ?? status?.fires_at ?? `${config.entry_time}`}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>In</div>
+                    <div className="text-[20px] font-semibold mt-0.5 tabular-nums" style={{ color: C.mint }}>
+                      {countdown !== null
+                        ? (countdown <= 0 ? 'firing…' : fmtCountdown(countdown))
+                        : (typeof status?.seconds_remaining === 'number' ? fmtCountdown(status.seconds_remaining) : '—')}
+                    </div>
+                  </div>
+                </div>
+                {/* "Fires {…} · trading day ✓/✗ · market open/closed" */}
+                {status && <ResolvedFireLine status={status} />}
+                </>
+              )}
+
+              <p className="text-[11px] leading-snug mb-3" style={{ color: C.faint }}>
+                Nothing is placed yet. At the entry time the session auto-flips to RUNNING
+                and places its entries — this view updates automatically.
+              </p>
+
+              {/* Cancel a SCHEDULED session — kill cancels it (places nothing). */}
+              <button
+                type="button"
+                disabled={busy === 'kill'}
+                onClick={onKill}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors disabled:opacity-40"
+                style={{ color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}
+              >
+                {ICON.close(13)} {busy === 'kill' ? 'Cancelling…' : 'Cancel schedule'}
+              </button>
+            </div>
+          )}
+
+          {/* NON-PLACED — rejected / expired / deferred by the trading-day rule.
+              Muted/amber so it's obvious the session did NOT place. */}
+          {nonPlacedNow && status && <NonPlacedCard status={status} onKill={onKill} busyKill={busy === 'kill'} />}
+
+          {/* RMS pre-trade REFUSAL — the start was refused for insufficient
+              margin/capital; nothing was placed. Clear, non-generic. */}
+          {!scheduledNow && !nonPlacedNow && startResult?.risk_refused && (
+            <div className="rounded-2xl border p-4 sm:p-5"
+              style={{ borderColor: 'rgba(232,115,107,0.4)', background: 'rgba(232,115,107,0.06)' }}>
+              <div className="flex items-center gap-2 mb-2">
+                <span style={{ color: C.red }}>{ICON.shield(15)}</span>
+                <span className="text-[13.5px] font-semibold" style={{ color: C.red }}>Refused — not enough margin / capital</span>
+              </div>
+              <p className="text-[12px] leading-snug mb-2" style={{ color: C.ink2 }}>
+                {startResult.reason || 'The pre-trade risk check refused this start; nothing was placed.'}
+              </p>
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px]" style={{ color: C.faint }}>
+                {typeof startResult.available_margin === 'number' && (
+                  <span>Available margin <b style={{ color: C.ink2 }}>{fmtINR(startResult.available_margin)}</b></span>
+                )}
+                {typeof startResult.committed_other === 'number' && (
+                  <span>Committed (other sessions) <b style={{ color: C.ink2 }}>{fmtINR(startResult.committed_other)}</b></span>
+                )}
+                {typeof startResult.planned_deployed === 'number' && (
+                  <span>This session would deploy <b style={{ color: C.ink2 }}>{fmtINR(startResult.planned_deployed)}</b></span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Amber margin-fallback — one or more legs were cash-sized because the
+              margin was unavailable (fewer shares than the leverage allows). Calm,
+              informational; never an error. */}
+          {!scheduledNow && !nonPlacedNow && (startResult?.margin_fallback_warnings?.length ?? 0) > 0 && (
+            <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
+              style={{ borderColor: 'rgba(230,180,80,0.35)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+              <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+              <span>
+                Sized on cash (margin unavailable) for{' '}
+                <b style={{ color: C.ink }}>
+                  {(startResult!.margin_fallback_warnings ?? [])
+                    .map((w: MarginFallbackWarning) => w.symbol).filter(Boolean).join(', ') || 'some names'}
+                </b>
+                {' '}— fewer shares than the leverage would allow.
+              </span>
+            </div>
+          )}
+
+          {/* Placement result */}
+          {!scheduledNow && !nonPlacedNow && startResult && !startResult.risk_refused && (
+            <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+              <div className="flex items-center gap-2 mb-3">
+                <span style={{ color: C.mint }}>{ICON.bolt(15)}</span>
+                <span className="text-[13.5px] font-semibold" style={{ color: C.ink }}>Placement result</span>
+                <ModePill mode={startResult.mode} />
+                <span className="ml-auto text-[11.5px]" style={{ color: C.muted }}>
+                  {startResult.n_placed} placed · {startResult.orders?.length ?? 0} total
+                </span>
+              </div>
+              {startResult.orders?.length ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[12px]">
+                    <thead>
+                      <tr style={{ color: C.faint }}>
+                        <th className="text-left font-medium pb-2">Symbol</th>
+                        <th className="text-left font-medium pb-2">Status</th>
+                        <th className="text-left font-medium pb-2">Reason</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {startResult.orders.map((o, i) => {
+                        const placed = /placed|complete|success|open/i.test(o.status)
+                        return (
+                          <tr key={`${o.symbol}-${i}`} style={{ borderTop: `1px solid ${C.line}` }}>
+                            <td className="py-1.5 font-medium" style={{ color: C.ink }}>{o.symbol}</td>
+                            <td className="py-1.5">
+                              <span style={{ color: placed ? C.mint : C.amber }}>{o.status}</span>
+                            </td>
+                            <td className="py-1.5" style={{ color: C.muted }}>{o.reason ?? '—'}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-[12px]" style={{ color: C.muted }}>No orders reported.</p>
+              )}
+            </div>
+          )}
+
+          {/* Live status — the normal RUNNING view (hidden while SCHEDULED or
+              when a trading-day-rule status means it never placed). */}
+          {!scheduledNow && !nonPlacedNow && (
+          <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+            <div className="flex items-center gap-2 mb-4">
+              <Gear size={18} dir={1} />
+              <span className="text-[13.5px] font-semibold" style={{ color: C.ink }}>Live status</span>
+              {status && <ModePill mode={status.mode} />}
+              {status?.strategy && <StrategyPill strategy={status.strategy} />}
+              <div className="ml-auto flex items-center gap-2">
+                {/* Edit config — hot-reload the risk/exit knobs of this RUNNING
+                    trailing/positional session (needs a power_jwt; the flat
+                    kill-switch strategy exits differently and isn't edited here). */}
+                {jwt && status?.strategy === 'intraday_basket'
+                  && (status.status ?? '').toUpperCase() === 'RUNNING' && session && (
+                  <button type="button" onClick={() => setConfigEditor({ kind: 'session', id: session.session_id })}
+                    className="flex items-center gap-1.5 text-[11.5px] px-2.5 py-1 rounded-lg transition-colors"
+                    style={{ color: C.mint, border: `1px solid rgba(63,227,164,0.3)` }}>
+                    {EditGlyph(13)} Edit config
+                  </button>
+                )}
+                <label className="flex items-center gap-1.5 text-[11px] cursor-pointer" style={{ color: C.muted }}>
+                  <input type="checkbox" checked={poll} onChange={(e) => setPoll(e.target.checked)} />
+                  Auto-refresh
+                </label>
+                <button type="button" disabled={busy === 'status'} onClick={() => refreshStatus(false)}
+                  className="text-[11.5px] px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40"
+                  style={{ color: C.mint, border: `1px solid rgba(63,227,164,0.3)` }}>
+                  {busy === 'status' ? 'Refreshing…' : 'Refresh'}
+                </button>
+              </div>
+            </div>
+
+            {!status ? (
+              <p className="text-[12px]" style={{ color: C.muted }}>Loading status…</p>
+            ) : (
+              <>
+                {/* DUAL RETURN — both returns, clearly labelled. All backend
+                    figures are FRACTIONS → ×100. The kill switch triggers on the
+                    INVESTED return (gross_return), so that one is the kill basis. */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+                  <Stat label="Status" value={status.status} />
+                  <Stat
+                    label="Return (invested)"
+                    value={fmtPct(status.gross_return * 100)}
+                    valueColor={pctTone(status.gross_return)}
+                    sub="kill basis"
+                  />
+                  <Stat
+                    label="Return (on fund)"
+                    value={typeof status.gross_return_fund === 'number' ? fmtPct(status.gross_return_fund * 100) : '—'}
+                    valueColor={typeof status.gross_return_fund === 'number' ? pctTone(status.gross_return_fund) : undefined}
+                    sub="÷ your fund"
+                  />
+                  <Stat label="Open positions" value={String(status.n_open_positions)} />
+                </div>
+
+                {/* The two ₹ bases behind the returns, so "invested" vs "fund" is
+                    unambiguous (MTF = leveraged invested value, CNC = cash). */}
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-1 mb-3 text-[11px]" style={{ color: C.faint }}>
+                  <span>
+                    Invested basis{' '}
+                    <b style={{ color: C.ink2 }}>{typeof status.invested_basis === 'number' ? fmtINR(status.invested_basis) : '—'}</b>
+                    {' '}· the kill basis
+                  </span>
+                  <span>
+                    Fund{' '}
+                    <b style={{ color: C.ink2 }}>{fmtCapital(status.total_allocated_capital)}</b>
+                  </span>
+                </div>
+
+                {/* NET P&L — the REAL number after estimated charges, shown beside
+                    the gross so the user isn't fooled by pre-cost P&L. Display only;
+                    the kill/trail decision basis stays the gross invested return. */}
+                {typeof status.net_pnl === 'number' && (
+                  <div className="mb-3 flex flex-wrap items-center gap-x-5 gap-y-1 rounded-xl border px-3.5 py-2.5 text-[11.5px]"
+                    style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+                    <span style={{ color: C.faint }}>
+                      Gross P&amp;L{' '}
+                      <b style={{ color: typeof status.gross_pnl === 'number' ? pctTone(status.gross_pnl) : C.ink2 }}>
+                        {typeof status.gross_pnl === 'number' ? signedINR(status.gross_pnl) : '—'}
+                      </b>
+                    </span>
+                    <span style={{ color: C.faint }}>
+                      Est. charges{' '}
+                      <b style={{ color: C.ink2 }}>
+                        {typeof status.estimated_charges === 'number' ? fmtINR(status.estimated_charges) : '—'}
+                      </b>
+                    </span>
+                    <span style={{ color: C.ink2 }}>
+                      <span className="uppercase tracking-[0.05em] text-[10px]" style={{ color: C.faint }}>Net</span>{' '}
+                      <b className="text-[13px] tabular-nums" style={{ color: pctTone(status.net_pnl) }}>
+                        {signedINR(status.net_pnl)}
+                      </b>
+                      {typeof status.net_return === 'number' && (
+                        <span style={{ color: C.faint }}>{' '}({fmtPct(status.net_return * 100)})</span>
+                      )}
+                    </span>
+                  </div>
+                )}
+
+                {/* Skipped-picks banner — names dropped at sizing (live). */}
+                <div className="mb-3">
+                  <SkippedPicksBanner picks={status.skipped_picks} redistribute />
+                </div>
+
+                {/* Resolved fire moment + trading-day / market state. Shown when
+                    the backend reports it (degrades to nothing when absent). */}
+                <ResolvedFireLine status={status} className="mb-3" />
+
+                {/* SPEED strip — deploy/exit latency + the live data-freshness
+                    heartbeat. Works for BOTH strategies; sits above the
+                    strategy-specific panels and doesn't disturb them. */}
+                <SpeedStrip status={status} />
+
+                {/* intraday_basket → the live TRAIL STATUS PANEL. */}
+                {status.strategy === 'intraday_basket' && (
+                  <div className="mb-4">
+                    <TrailStatusPanel status={status} />
+                  </div>
+                )}
+
+                {/* tesla_short → the seat-rotation panel: "armed, waiting for
+                    signals" when 0 seats are filled (NORMAL), plus any seat exits /
+                    back-fills the status reports. */}
+                {status.strategy === 'tesla_short' && (
+                  <div className="mb-4">
+                    <TeslaSeatPanel status={status} />
+                  </div>
+                )}
+
+                {/* portfolio_kill_switch → the kill-switch readout + live preview
+                    (unchanged). Hidden for intraday_basket + tesla, which trail. */}
+                {status.strategy !== 'intraday_basket' && status.strategy !== 'tesla_short' && (
+                  <>
+                {/* Kill-switch state readout — threshold is a backend FRACTION (0.01 = 1%). */}
+                <div className="flex items-center gap-2 mb-3 text-[11.5px]" style={{ color: C.muted }}>
+                  <span style={{ color: status.kill_switch_enabled ? C.red : C.faint }}>{ICON.shield(14)}</span>
+                  Kill switch{' '}
+                  <b style={{ color: status.kill_switch_enabled ? C.red : C.faint }}>
+                    {status.kill_switch_enabled ? 'ARMED' : 'OFF'}
+                  </b>
+                  {status.kill_switch_enabled && (
+                    <span>· triggers at ±{(status.kill_switch_pct * 100).toFixed(2).replace(/\.?0+$/, '')}% {status.kill_switch_direction} on the <b style={{ color: C.ink2 }}>invested</b> return</span>
+                  )}
+                </div>
+
+                {/* LIVE, exact kill-switch outcome for the running session (same
+                    shape as the config preview) — surfaced when the backend sends it. */}
+                {status.kill_switch_enabled && status.kill_preview && (status.kill_preview.target || status.kill_preview.stop) && (
+                  <div className="mb-4">
+                    <KillPreviewCard kill={status.kill_preview} direction={status.kill_switch_direction} live />
+                  </div>
+                )}
+                  </>
+                )}
+
+                {/* Open positions table — Kite-style: absolute P&L (₹) + Chg % per row */}
+                {status.open_positions?.length ? (
+                  <>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-[12px]">
+                      <thead>
+                        <tr style={{ color: C.faint }}>
+                          <th className="text-left font-medium pb-2">Symbol</th>
+                          <th className="text-right font-medium pb-2">Qty</th>
+                          <th className="text-right font-medium pb-2">Avg</th>
+                          <th className="text-right font-medium pb-2">LTP</th>
+                          <th className="text-right font-medium pb-2">P&amp;L (₹)</th>
+                          <th className="text-right font-medium pb-2">Chg</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {status.open_positions.map((p, i) => {
+                          // Backend sends `ltp` + `avg_price`; per-position Chg %
+                          // is derived from them (no return_pct field exists). The
+                          // absolute P&L (₹) is the backend's own `unrealised_pnl`.
+                          const ret = (typeof p.ltp === 'number' && typeof p.avg_price === 'number' && p.avg_price > 0)
+                            ? ((p.ltp - p.avg_price) / p.avg_price) * 100
+                            : null
+                          const pnl = typeof p.unrealised_pnl === 'number' ? p.unrealised_pnl : null
+                          return (
+                            <tr key={`${p.symbol ?? i}`} style={{ borderTop: `1px solid ${C.line}` }}>
+                              <td className="py-1.5 font-medium" style={{ color: C.ink }}>{p.symbol ?? '—'}</td>
+                              <td className="py-1.5 text-right" style={{ color: C.ink2 }}>{p.qty ?? '—'}</td>
+                              <td className="py-1.5 text-right" style={{ color: C.ink2 }}>{p.avg_price ?? '—'}</td>
+                              <td className="py-1.5 text-right" style={{ color: C.ink2 }}>{p.ltp ?? '—'}</td>
+                              <td className="py-1.5 text-right font-medium tabular-nums" style={{ color: pnl == null ? C.faint : pctTone(pnl) }}>
+                                {pnl == null ? '—' : signedINR(pnl)}
+                              </td>
+                              <td className="py-1.5 text-right" style={{ color: ret == null ? C.faint : pctTone(ret) }}>
+                                {ret == null ? '—' : fmtPct(ret)}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <PortfolioSummary positions={status.open_positions} />
+                  </>
+                ) : (
+                  <p className="text-[12px]" style={{ color: C.muted }}>No open positions.</p>
+                )}
+              </>
+            )}
+          </div>
+          )}
+
+          {/* KILL block — hidden while SCHEDULED (use "Cancel schedule" above) and
+              when a trading-day-rule status means there's nothing to kill. */}
+          {!scheduledNow && !nonPlacedNow && (
+          <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: 'rgba(232,115,107,0.32)', background: 'rgba(232,115,107,0.04)' }}>
+            <div className="flex items-center gap-2 mb-2">
+              <span style={{ color: C.red }}>{ICON.bolt(15)}</span>
+              <span className="text-[13.5px] font-semibold" style={{ color: C.red }}>Kill session</span>
+            </div>
+            <p className="text-[11.5px] leading-snug mb-3" style={{ color: C.ink2 }}>
+              Immediately exits all open positions and stops this session.
+              {' '}This is irreversible for the session.
+            </p>
+            {!killArmed ? (
+              <button type="button" onClick={() => setKillArmed(true)}
+                className="px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors"
+                style={{ color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}>
+                Kill session…
+              </button>
+            ) : (
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2.5">
+                <input
+                  value={killConfirm}
+                  onChange={(e) => setKillConfirm(e.target.value)}
+                  placeholder='Type "KILL" to confirm'
+                  className="rounded-lg px-3 py-2 text-[12.5px] outline-none sm:w-56"
+                  style={{ ...inputStyle, borderColor: 'rgba(232,115,107,0.4)' }}
+                />
+                <button
+                  type="button"
+                  disabled={busy === 'kill' || killConfirm.trim().toUpperCase() !== 'KILL'}
+                  onClick={onKill}
+                  className="px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+                  style={{ color: '#1a0908', background: C.red }}
+                >
+                  {busy === 'kill' ? 'Killing…' : 'Confirm kill'}
+                </button>
+                <button type="button" onClick={() => { setKillArmed(false); setKillConfirm('') }}
+                  className="text-[12px] px-3 py-2 rounded-lg" style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
+          )}
+
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={backToList}
+              className="self-start text-[12px] px-3 py-2 rounded-lg transition-colors"
+              style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+              ← Your sessions
+            </button>
+            <button type="button" onClick={onNewSessionClick}
+              className="self-start text-[12px] px-3 py-2 rounded-lg transition-colors"
+              style={{ color: C.mint, border: `1px solid rgba(63,227,164,0.3)` }}>
+              New session
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Error toast ──────────────────────────────────────────────────────── */}
+      {error && (
+        <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
+          style={{ borderColor: 'rgba(232,115,107,0.35)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
+          <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(14)}</span>
+          <span>{error}</span>
+          <button type="button" onClick={() => setError(null)} className="ml-auto shrink-0" style={{ color: C.faint }}>
+            {ICON.close(13)}
+          </button>
+        </div>
+      )}
+
+      {/* ── LIVE config-edit success toast ───────────────────────────────────── */}
+      {configToast && (
+        <div className="fixed left-1/2 -translate-x-1/2 bottom-6 z-[60] flex items-center gap-2 rounded-xl border px-4 py-2.5 shadow-lg"
+          style={{ borderColor: 'rgba(63,227,164,0.4)', background: C.panel, color: C.ink }}>
+          <span style={{ color: C.mint }}>{ICON.check(15)}</span>
+          <span className="text-[12px] font-medium">{configToast}</span>
+          <button type="button" onClick={() => setConfigToast(null)} className="ml-1 shrink-0" style={{ color: C.faint }}>
+            {ICON.close(13)}
+          </button>
+        </div>
+      )}
+
+      {/* ── LIVE config-edit modal — session OR campaign ─────────────────────── */}
+      {configEditor && jwt && (() => {
+        if (configEditor.kind === 'session') {
+          // Use the live status already loaded for the running session.
+          if (!status || configEditor.id !== session?.session_id) return null
+          const any = status as Record<string, unknown>
+          const positional = Number(status.trail?.max_hold_sessions ?? 0) > 0 || any.square_off_enabled === false
+          const isMis = strOrEmpty(any.order_product).toUpperCase() === 'MIS'
+          return (
+            <SessionConfigEditor
+              kind="session"
+              id={configEditor.id}
+              jwt={jwt}
+              initial={sessionEditable(status)}
+              initialConfigVersion={typeof status.config_version === 'number' ? status.config_version : undefined}
+              reloadConfig={async () => {
+                // Re-fetch the CURRENT session config + version after a concurrency
+                // conflict so the operator re-applies against fresh server truth.
+                const fresh = await AutoTradeAPI.sessionStatus(configEditor.id)
+                refreshStatus(false)
+                return {
+                  values: sessionEditable(fresh),
+                  configVersion: typeof fresh.config_version === 'number' ? fresh.config_version : undefined,
+                }
+              }}
+              locked={sessionLocked(status)}
+              isTrailing={status.strategy === 'intraday_basket'}
+              isPositional={positional}
+              isMis={isMis}
+              onClose={() => setConfigEditor(null)}
+              onApplied={(msg) => { setConfigToast(msg); refreshStatus(false) }}
+            />
+          )
+        }
+        // Campaign
+        const summary = (ladders ?? []).find((l) => l.ladder_id === configEditor.id)
+        if (!summary) return null
+        const st = ladderStatuses[configEditor.id]
+        return (
+          <SessionConfigEditor
+            kind="campaign"
+            id={configEditor.id}
+            jwt={jwt}
+            initial={st ? ladderEditable(st) : {}}
+            initialConfigVersion={typeof st?.config_version === 'number' ? st.config_version : undefined}
+            reloadConfig={async () => {
+              // Re-fetch the CURRENT campaign config + version after a concurrency
+              // conflict; also refresh the parent's cached live view.
+              const fresh = await AutoTradeAPI.ladderStatus(configEditor.id)
+              setLadderStatuses((prev) => ({ ...prev, [configEditor.id]: fresh }))
+              return {
+                values: ladderEditable(fresh),
+                configVersion: typeof fresh.config_version === 'number' ? fresh.config_version : undefined,
+              }
+            }}
+            locked={ladderLocked(summary, st)}
+            isTrailing
+            isPositional
+            isMis={false}
+            onClose={() => setConfigEditor(null)}
+            onApplied={(msg) => {
+              setConfigToast(msg)
+              // Refresh this campaign's live view + the list.
+              AutoTradeAPI.ladderStatus(configEditor.id)
+                .then((r) => setLadderStatuses((prev) => ({ ...prev, [configEditor.id]: r })))
+                .catch(() => {})
+              loadLadders()
+            }}
+          />
+        )
+      })()}
+
+      {/* ── Campaign action error (pause/resume/kill) — calm, dismissible ─────── */}
+      {ladderErr && (ladders?.length ?? 0) > 0 && (
+        <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
+          style={{ borderColor: 'rgba(232,115,107,0.35)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
+          <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(14)}</span>
+          <span>{ladderErr}</span>
+          <button type="button" onClick={() => setLadderErr(null)} className="ml-auto shrink-0" style={{ color: C.faint }}>
+            {ICON.close(13)}
+          </button>
+        </div>
+      )}
+
+      {/* ── Campaign KILL modal — mode is REQUIRED (no silent default) ───────── */}
+      {killLadderId && (() => {
+        // SCHEDULED / CREATED campaigns have NOTHING deployed yet, so the
+        // flatten-now vs let-open-baskets-finish choice is meaningless — show a
+        // plain confirm instead. RUNNING / PAUSED keep the wind-down modes.
+        const _kl = (ladders ?? []).find((l) => l.ladder_id === killLadderId)
+        const _st = (_kl?.status ?? '').toUpperCase()
+        const killScheduled = _st === 'SCHEDULED' || _st === 'CREATED'
+        return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4"
+          style={{ background: 'rgba(0,0,0,0.6)' }}
+          onClick={() => (ladderBusy[killLadderId] == null) && setKillLadderId(null)}>
+          <div className="w-full max-w-md rounded-2xl border p-5"
+            style={{ borderColor: 'rgba(232,115,107,0.4)', background: C.panel }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-2 mb-2">
+              <span style={{ color: C.red }}>{ICON.shield(16)}</span>
+              <span className="text-[14px] font-semibold" style={{ color: C.ink }}>
+                {killScheduled ? 'Cancel scheduled campaign' : 'Stop the campaign'}
+              </span>
+              <button type="button" onClick={() => setKillLadderId(null)} className="ml-auto shrink-0" style={{ color: C.faint }}>
+                {ICON.close(14)}
+              </button>
+            </div>
+
+            {killScheduled ? (
+              <>
+                <p className="text-[11.5px] leading-snug mb-4" style={{ color: C.muted }}>
+                  This campaign hasn’t opened anything yet — cancelling just removes it.
+                  There are no open baskets to exit.
+                </p>
+                <div className="flex items-center gap-2.5">
+                  <button type="button"
+                    disabled={ladderBusy[killLadderId] != null}
+                    onClick={() => onLadderKill('flatten_now')}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+                    style={{ color: '#fff', background: C.red }}>
+                    {ladderBusy[killLadderId] === 'kill' ? 'Cancelling…' : 'Cancel campaign'}
+                  </button>
+                  <button type="button" disabled={ladderBusy[killLadderId] != null} onClick={() => setKillLadderId(null)}
+                    className="px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors disabled:opacity-40"
+                    style={{ color: C.ink2, border: `1px solid ${C.line2}` }}>
+                    Keep it
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-[11.5px] leading-snug mb-3" style={{ color: C.muted }}>
+                  Choose how to wind the campaign down — this is required.
+                </p>
+                <div className="flex flex-col gap-2">
+                  {LADDER_KILL_OPTIONS.map((o) => {
+                    const active = ladderKillMode === o.id
+                    return (
+                      <button key={o.id} type="button" onClick={() => setLadderKillMode(o.id)}
+                        className="flex items-start gap-2.5 rounded-xl border px-3.5 py-3 text-left transition-colors"
+                        style={{
+                          borderColor: active ? 'rgba(232,115,107,0.55)' : C.line2,
+                          background: active ? 'rgba(232,115,107,0.07)' : 'rgba(255,255,255,0.015)',
+                        }}>
+                        <span className="shrink-0 mt-0.5 grid place-items-center w-4 h-4 rounded-full"
+                          style={{ boxShadow: `inset 0 0 0 1.5px ${active ? C.red : C.line2}` }}>
+                          {active && <span className="w-2 h-2 rounded-full" style={{ background: C.red }} />}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-[12.5px] font-semibold" style={{ color: active ? C.ink : C.ink2 }}>{o.label}</span>
+                          <span className="block text-[10.5px] leading-snug mt-0.5" style={{ color: C.faint }}>{o.line}</span>
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+                <div className="flex items-center gap-2.5 mt-4">
+                  <button type="button"
+                    disabled={ladderBusy[killLadderId] != null || ladderKillMode == null}
+                    onClick={() => onLadderKill()}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+                    style={{ color: '#fff', background: C.red }}>
+                    {ladderBusy[killLadderId] === 'kill' ? 'Stopping…' : 'Confirm stop'}
+                  </button>
+                  <button type="button" disabled={ladderBusy[killLadderId] != null} onClick={() => setKillLadderId(null)}
+                    className="px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors disabled:opacity-40"
+                    style={{ color: C.ink2, border: `1px solid ${C.line2}` }}>
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+        )
+      })()}
+
+      {/* ── Broker allowlist (egress IP self-service) ────────────────────────── */}
+      <EgressIpCard />
+
+      {/* ── Read-only saved configs + brokers ────────────────────────────────── */}
+      <ReferenceLists />
+    </div>
+  )
+}
+
+// ── Campaign chip — tags a session row that is a child basket of a running
+// Auto-Ladder campaign. Trader-term "Campaign"; never surfaces internal words.
+function CampaignChip() {
+  return (
+    <span className="inline-flex items-center gap-1 text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+      style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+      {ICON.loop(9)} Campaign
+    </span>
+  )
+}
+
+// ── Ladder campaign summary card — reuses the AutoLadderPanel card/controls
+// rendering, rendered ATOP the sessions list. Every number comes from the live
+// ladderStatus poll (falls back to the list summary), missing → "—". Controls:
+// Pause / Resume + Stop (opens the required-mode kill modal). Trader terms only.
+function LadderCampaignCard({
+  summary, status, busy, onPause, onResume, onKill, onEdit,
+}: {
+  summary: LadderSummary
+  status?: LadderStatus
+  busy?: 'pause' | 'resume' | 'kill'
+  onPause: () => void
+  onResume: () => void
+  onKill: () => void
+  // Present only when a power_jwt exists AND the campaign is live-editable
+  // (RUNNING/PAUSED). Opens the shared config editor; undefined → no button.
+  onEdit?: () => void
+}) {
+  const st: LadderStatusName | undefined = status?.status ?? summary.status
+  const upper = (s?: string | null) => (s ?? '').toUpperCase()
+  const running = upper(st) === 'RUNNING'
+  const paused = upper(st) === 'PAUSED'
+  // SCHEDULED = armed for a future start_date; nothing deployed yet. Its card
+  // shows "starts {start_date}" and offers Cancel (kill) but no Pause.
+  const scheduled = upper(st) === 'SCHEDULED'
+  // ₹ or "—"
+  const rs = (v?: number) => (typeof v === 'number' && Number.isFinite(v) ? fmtINR(v) : '—')
+  const signed = (v?: number) => (typeof v === 'number' && Number.isFinite(v) ? signedINR(v) : '—')
+  const num = (v?: number) => (typeof v === 'number' && Number.isFinite(v) ? String(v) : '—')
+  const product = status?.order_product ?? summary.order_product
+  const totalCapital = status?.total_capital ?? summary.total_capital
+  const perBasket = status?.per_basket_capital
+  const endDate = status?.end_date ?? summary.end_date
+  const startDate = status?.start_date ?? summary.start_date
+  // Live countdown to the campaign's first-basket time (09:15 IST on start_date) —
+  // parity with the single-session scheduled countdown. Ticks every 1s while
+  // SCHEDULED; computed client-side from start_date (no backend seconds needed).
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    if (!scheduled || !startDate) return
+    const id = setInterval(() => setNowMs(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [scheduled, startDate])
+  const fireMs = scheduled && startDate ? Date.parse(`${startDate}T09:15:00+05:30`) : NaN
+  const remainMs = Number.isFinite(fireMs) ? Math.max(0, fireMs - nowMs) : null
+  const fmtCountdown = (ms: number) => {
+    const s = Math.floor(ms / 1000)
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600)
+    const m = Math.floor((s % 3600) / 60), sec = s % 60
+    return d > 0 ? `${d}d ${h}h ${m}m` : `${h}h ${m}m ${sec}s`
+  }
+
+  return (
+    <div className="rounded-2xl border overflow-hidden"
+      style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'linear-gradient(180deg, rgba(63,227,164,0.05), rgba(255,255,255,0.012))' }}>
+      {/* Header */}
+      <div className="flex items-center gap-2 flex-wrap px-4 pt-3.5 pb-2">
+        <span style={{ color: C.mint }}>{ICON.loop(15)}</span>
+        <span className="text-[13.5px] font-semibold" style={{ color: C.ink }}>Monthly campaign</span>
+        {/* Short id so multiple campaigns are distinguishable at a glance. */}
+        <span className="text-[9px] font-mono rounded-full px-1.5 py-0.5"
+          style={{ color: C.muted, background: 'rgba(255,255,255,0.05)' }}>
+          #{String(summary.ladder_id).slice(0, 6)}
+        </span>
+        <LadderStatusPill status={st} />
+        <ModePill mode={(summary.mode ?? 'paper') as Mode} />
+        {product && (
+          <span className="text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+            style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+            {product}
+          </span>
+        )}
+        {(startDate || endDate) && (
+          <span className="ml-auto text-[10.5px]" style={{ color: scheduled ? C.amber : C.muted }}>
+            {scheduled
+              ? (startDate ? `starts ${startDate}` : 'scheduled')
+              : (startDate ? `started ${startDate}` : 'running')}
+            {endDate ? ` · runs to ${endDate}` : ''}
+          </span>
+        )}
+      </div>
+
+      {/* Live countdown to the first-basket time — parity with the single-session
+          scheduled view. Client-computed from start_date @ 09:15 IST. */}
+      {scheduled && remainMs != null && (
+        <div className="mx-4 mb-2 flex items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5"
+          style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
+          <div className="flex items-center gap-2 text-[11.5px]" style={{ color: C.ink2 }}>
+            <span style={{ color: C.amber }}>{ICON.clock(14)}</span>
+            <span>Fires <b style={{ color: C.ink }}>{startDate} 09:15</b> IST — its first Falcon basket</span>
+          </div>
+          <span className="text-[15px] font-semibold tabular-nums shrink-0" style={{ color: C.mint }}>
+            {remainMs === 0 ? 'starting…' : fmtCountdown(remainMs)}
+          </span>
+        </div>
+      )}
+
+      {/* Verbatim downturn alert — calm amber, informational (NOT an error). */}
+      {status?.alert?.active && (
+        <div className="mx-4 mb-2 flex items-start gap-2.5 rounded-xl border px-3.5 py-2.5"
+          style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
+          <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+          <div className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+            <div>{status.alert.message}</div>
+            {typeof status.alert.trailing_5d_avg_return === 'number' && (
+              <div className="text-[10.5px] mt-1" style={{ color: C.faint }}>
+                Trailing 5-day average return:{' '}
+                <b style={{ color: pctTone(status.alert.trailing_5d_avg_return) }}>
+                  {fracPct(status.alert.trailing_5d_avg_return)}
+                </b>
+                {typeof status.alert.n_days_in_window === 'number' ? ` · over ${status.alert.n_days_in_window} days` : ''}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Capital row */}
+      <div className="grid grid-cols-3 gap-3 px-4 pb-2">
+        <MiniStat label="Deployed" value={rs(status?.capital_deployed)} />
+        <MiniStat label="Free" value={rs(status?.capital_free)} />
+        <MiniStat label="Total" value={rs(totalCapital)} sub={typeof perBasket === 'number' ? `per basket ${fmtINR(perBasket)}` : undefined} />
+      </div>
+
+      {/* Activity + P&L row */}
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 px-4 pb-3">
+        <MiniStat label="Active baskets" value={num(status?.n_active_baskets)} />
+        <MiniStat label="Open positions" value={num(status?.n_open_positions)} />
+        <MiniStat label="Daily P&L" value={signed(status?.today_pnl)} valueColor={typeof status?.today_pnl === 'number' ? pctTone(status.today_pnl) : C.faint} />
+        <MiniStat label="Realized" value={signed(status?.realized_pnl)} valueColor={typeof status?.realized_pnl === 'number' ? pctTone(status.realized_pnl) : C.faint} />
+        <MiniStat label="Unrealized" value={signed(status?.unrealized_pnl)} valueColor={typeof status?.unrealized_pnl === 'number' ? pctTone(status.unrealized_pnl) : C.faint} />
+      </div>
+
+      {/* Controls */}
+      <div className="flex items-center gap-2.5 flex-wrap px-4 pb-3.5">
+        {/* Pause/Resume only make sense once the campaign is live. A SCHEDULED
+            campaign has nothing to pause — it only offers Cancel. */}
+        {!scheduled && (paused ? (
+          <button type="button" disabled={busy != null} onClick={onResume}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+            style={{ color: '#06130c', background: C.mint }}>
+            {ICON.bolt(14)} {busy === 'resume' ? 'Resuming…' : 'Resume'}
+          </button>
+        ) : (
+          <button type="button" disabled={busy != null} onClick={onPause}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+            style={{ color: C.ink2, border: `1px solid ${C.line2}` }}>
+            {ICON.clock(14)} {busy === 'pause' ? 'Pausing…' : 'Pause'}
+          </button>
+        ))}
+        {/* Edit config — hot-reload the campaign's risk/exit knobs + future-spawn
+            capital. Only for a live campaign (RUNNING/PAUSED) with a power_jwt. */}
+        {onEdit && (running || paused) && (
+          <button type="button" disabled={busy != null} onClick={onEdit}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors disabled:opacity-40"
+            style={{ color: C.mint, border: `1px solid rgba(63,227,164,0.35)` }}>
+            {EditGlyph(14)} Edit config
+          </button>
+        )}
+        {(running || paused || scheduled) && (
+          <button type="button" disabled={busy != null} onClick={onKill}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-opacity disabled:opacity-40"
+            style={{ color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}>
+            {ICON.close(13)} {scheduled ? 'Cancel campaign' : 'Stop campaign'}
+          </button>
+        )}
+        <span className="ml-auto text-[10.5px]" style={{ color: C.faint }}>
+          {scheduled
+            ? 'It activates on its start date — its baskets will appear below then.'
+            : (status?.n_active_baskets ?? summary.n_active_baskets ?? 0) === 0
+              ? 'Waiting for the next trading day — it opens its first Falcon basket at 09:15.'
+              : 'Its baskets appear below, tagged “Campaign”.'}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// Small labelled stat used inside the campaign card.
+function MiniStat({ label, value, valueColor, sub }: { label: string; value: string; valueColor?: string; sub?: string }) {
+  return (
+    <div className="rounded-xl border px-3 py-2" style={{ borderColor: C.line, background: 'rgba(255,255,255,0.015)' }}>
+      <div className="text-[9.5px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>{label}</div>
+      <div className="text-[14px] font-semibold mt-0.5 tabular-nums" style={{ color: valueColor ?? C.ink }}>{value}</div>
+      {sub && <div className="text-[9px] mt-0.5" style={{ color: C.faint }}>{sub}</div>}
+    </div>
+  )
+}
+
+// Campaign status pill (running pulses mint; paused amber; done/other muted).
+function LadderStatusPill({ status }: { status?: LadderStatusName }) {
+  const s = (status ?? '').toUpperCase()
+  const running = s === 'RUNNING'
+  const paused = s === 'PAUSED'
+  // SCHEDULED (armed, not yet live) reads amber like Paused — a calm "waiting"
+  // state, not the live-green look.
+  const scheduled = s === 'SCHEDULED'
+  const done = s === 'COMPLETED' || s === 'ENDED'
+  const amberTone = paused || scheduled
+  const tone = running ? C.mint : amberTone ? C.amber : done ? C.mint : C.muted
+  const bg = running || done ? 'rgba(63,227,164,0.12)' : amberTone ? 'rgba(230,180,80,0.12)' : 'rgba(133,153,144,0.13)'
+  const ring = running || done ? 'rgba(63,227,164,0.4)' : amberTone ? 'rgba(230,180,80,0.4)' : 'rgba(133,153,144,0.4)'
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+      style={{ color: tone, background: bg, boxShadow: `inset 0 0 0 1px ${ring}` }}>
+      {running && <span className="inline-block w-1.5 h-1.5 rounded-full live-dot" style={{ background: C.mint }} />}
+      {s || 'campaign'}
+    </span>
+  )
+}
+
+// ── Mode pill ────────────────────────────────────────────────────────────────
+function ModePill({ mode }: { mode: Mode }) {
+  const live = mode === 'live'
+  return (
+    <span className="text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+      style={live
+        ? { color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }
+        : { color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+      {mode}
+    </span>
+  )
+}
+
+// Strategy pill — names the exit engine in the live header. Mint for both; the
+// label disambiguates (kill-switch vs intraday trailing basket).
+function StrategyPill({ strategy }: { strategy: Strategy }) {
+  const label = strategy === 'tesla_short' ? 'Tesla · Short'
+    : strategy === 'intraday_basket' ? 'Intraday Basket' : 'Kill Switch'
+  return (
+    <span className="text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+      style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+      {label}
+    </span>
+  )
+}
+
+// ── Tesla seat-rotation panel (tesla_short live status) ──────────────────────
+// Renders the seat state for a RUNNING Falcon Tesla session. 0 filled seats is
+// NORMAL ("armed, waiting for signals") — never an empty/error look. seat_exits /
+// backfilled are OPTIONAL (the backend surfaces them on the per-tick result; they
+// may be absent on a plain status poll) — shown only when present.
+function TeslaSeatPanel({ status }: { status: StatusResponse }) {
+  const running = (status.status ?? '').toUpperCase() === 'RUNNING'
+  const filled = typeof status.n_open_positions === 'number' ? status.n_open_positions : null
+  const armedWaiting = running && filled === 0
+  const exits = Array.isArray(status.seat_exits) ? status.seat_exits : []
+  const fills = Array.isArray(status.backfilled) ? status.backfilled : []
+  const lastFill = fills.length ? fills[fills.length - 1] : null
+  return (
+    <div className="rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.04)' }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span style={{ color: C.mint }}>{ICON.loop(15)}</span>
+        <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Seat rotation</span>
+        <span className="ml-auto text-[10px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+          style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+          {armedWaiting ? 'Armed' : 'Rotating'}
+        </span>
+      </div>
+      <p className="text-[11.5px] leading-snug mb-2" style={{ color: C.muted }}>
+        {armedWaiting
+          ? 'Armed — waiting for live A++/A+++ signals. Seats fill in as they fire; a freed seat back-fills instantly.'
+          : <>Seats filled: <b style={{ color: C.ink }}>{filled ?? '—'}</b>. A freed seat back-fills on the next live signal.</>}
+      </p>
+      {status.mark_stale_abstain && (
+        <p className="text-[11px] leading-snug mb-2" style={{ color: C.amber }}>
+          Abstaining this tick — the price mark is stale (won&apos;t enter or profit-exit on stale data; the hard stop stays armed).
+        </p>
+      )}
+      {(exits.length > 0 || lastFill) && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]" style={{ color: C.faint }}>
+          {lastFill && (
+            <span>
+              Last back-fill{' '}
+              <b style={{ color: C.ink2 }}>{lastFill.symbol ?? '—'}</b>
+              {lastFill.grade ? <span> · {lastFill.grade}</span> : null}
+            </span>
+          )}
+          {exits.length > 0 && (
+            <span>
+              Recent exits{' '}
+              <b style={{ color: C.ink2 }}>{exits.map((e) => e.symbol).filter(Boolean).join(', ') || exits.length}</b>
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Skipped-picks banner (C · leftover capital) ──────────────────────────────
+// Renders an amber banner when the backend skipped one or more picks because a
+// single unit of the name costs more than its per-slice budget (e.g. a high-
+// priced stock like PAGEIND). Names the symbols; notes whether their freed
+// capital is being redistributed. Renders nothing when there are no skips.
+function SkippedPicksBanner({ picks, redistribute }: { picks?: SkippedPick[]; redistribute?: boolean }) {
+  if (!picks || picks.length === 0) return null
+  const syms = picks.map((p) => p.symbol).filter(Boolean) as string[]
+  const n = picks.length
+  return (
+    <div className="flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-snug"
+      style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)', color: C.ink2 }}>
+      <span className="shrink-0 mt-0.5" style={{ color: C.amber }}>{ICON.info(14)}</span>
+      <span>
+        <b style={{ color: C.amber }}>{n} pick{n > 1 ? 's' : ''} skipped</b>
+        {' '}— priced above their per-slice budget
+        {syms.length ? <>: <b style={{ color: C.ink }}>{syms.join(', ')}</b></> : null}.
+        {' '}
+        {redistribute
+          ? 'Their capital is redistributed across the remaining picks.'
+          : 'Their capital is left idle (Use leftover capital is off).'}
+      </span>
+    </div>
+  )
+}
+
+// ── Resolved fire line (execution-date / trading-day rule) ───────────────────
+// "Fires {resolved_fire_datetime IST} · trading day ✓/✗ · market open/closed".
+// Renders only what the backend actually returned — every absent field becomes
+// an honest "—"; if nothing relevant is present it renders nothing at all.
+function ResolvedFireLine({ status, className = '' }: { status: StatusResponse; className?: string }) {
+  const fire = status.resolved_fire_datetime ?? status.resolved_fire_date
+  const hasTradingDay = typeof status.is_trading_day === 'boolean'
+  const hasMarket = typeof status.market_open_now === 'boolean'
+  // Nothing to show → render nothing (don't fabricate a line).
+  if (!fire && !hasTradingDay && !hasMarket) return null
+
+  const tradingColor = hasTradingDay ? (status.is_trading_day ? C.mint : C.amber) : C.faint
+  const marketColor = hasMarket ? (status.market_open_now ? C.mint : C.muted) : C.faint
+
+  return (
+    <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] ${className}`} style={{ color: C.muted }}>
+      <span style={{ color: C.faint }}>{ICON.clock(13)}</span>
+      <span>
+        Fires{' '}
+        <b style={{ color: C.ink }}>{fire ?? '—'}</b>
+        {fire && <span style={{ color: C.faint }}> IST</span>}
+      </span>
+      <span style={{ color: C.faint }}>·</span>
+      <span>
+        trading day{' '}
+        <b style={{ color: tradingColor }}>
+          {hasTradingDay ? (status.is_trading_day ? '✓' : '✗') : '—'}
+        </b>
+      </span>
+      <span style={{ color: C.faint }}>·</span>
+      <span>
+        market{' '}
+        <b style={{ color: marketColor }}>
+          {hasMarket ? (status.market_open_now ? 'open' : 'closed') : '—'}
+        </b>
+      </span>
+    </div>
+  )
+}
+
+// ── Non-placed card (trading-day rule) ───────────────────────────────────────
+// Surfaces REJECTED_NON_TRADING_DAY / EXPIRED_MISSED_WINDOW / DEFERRED_MARKET_CLOSED
+// distinctly: a MUTED/AMBER treatment (never the green RUNNING look) so it's
+// obvious the session did NOT place. Shows the friendly status label, the
+// backend's deferred_reason (verbatim when present), the resolved-fire line, and
+// the echoed entry_date / on_missed_window. DEFERRED keeps a Cancel action.
+function NonPlacedCard({ status, onKill, busyKill }: { status: StatusResponse; onKill: () => void; busyKill: boolean }) {
+  const raw = (status.status ?? '').toUpperCase()
+  const deferred = raw === 'DEFERRED_MARKET_CLOSED'
+  // Default reasons when the backend doesn't supply deferred_reason.
+  const fallbackReason =
+    raw === 'REJECTED_NON_TRADING_DAY' ? 'The chosen entry date is not a trading day, so the session was rejected.'
+    : raw === 'EXPIRED_MISSED_WINDOW'  ? 'The entry window was missed (past the grace period) and on-missed was set to expire — nothing was placed.'
+    : raw === 'DEFERRED_MARKET_CLOSED' ? 'The fire moment landed while the market was closed — the session is deferred and placed nothing.'
+    : 'This session did not place.'
+  const reason = status.deferred_reason ?? fallbackReason
+
+  return (
+    <div className="rounded-2xl border p-4 sm:p-5"
+      style={{ borderColor: 'rgba(230,180,80,0.4)', background: 'rgba(230,180,80,0.06)' }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span style={{ color: C.amber }}>{ICON.info(17)}</span>
+        <span className="text-[14px] font-semibold" style={{ color: C.amber }}>{nonPlacedLabel(raw)}</span>
+        {status.mode && <ModePill mode={status.mode} />}
+        <span className="ml-auto text-[9px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+          style={{ color: C.amber, background: 'rgba(230,180,80,0.14)', boxShadow: 'inset 0 0 0 1px rgba(230,180,80,0.4)' }}>
+          did not place
+        </span>
+      </div>
+
+      <p className="text-[11.5px] leading-snug mb-3" style={{ color: C.ink2 }}>{reason}</p>
+
+      {/* Resolved fire moment + trading-day / market state (degrades to "—"). */}
+      <ResolvedFireLine status={status} className="mb-3" />
+
+      {/* The echoed config that drove the outcome. */}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px] mb-1" style={{ color: C.faint }}>
+        <span>entry date <b style={{ color: C.ink2 }}>{status.entry_date || '—'}</b></span>
+        <span>on missed <b style={{ color: C.ink2 }}>{status.on_missed_window ?? '—'}</b></span>
+        <span>status <b style={{ color: C.amber }}>{raw}</b></span>
+      </div>
+
+      {/* A DEFERRED session is still alive (awaiting the next open) — let the
+          operator cancel it. Rejected/expired are terminal — nothing to cancel. */}
+      {deferred && (
+        <button
+          type="button"
+          disabled={busyKill}
+          onClick={onKill}
+          className="mt-3 inline-flex items-center gap-2 px-4 py-2 rounded-xl text-[12.5px] font-semibold transition-colors disabled:opacity-40"
+          style={{ color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}
+        >
+          {ICON.close(13)} {busyKill ? 'Cancelling…' : 'Cancel session'}
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ── Speed / latency strip (BOTH strategies) ──────────────────────────────────
+// A compact readout of the three backend latency ints (ms, may be null):
+//   • Entry — fire start → all legs settled (deploy speed); neutral.
+//   • Exit  — flatten trigger → all flat (exit speed); shown ONLY once a flatten
+//             has happened (exit_latency_ms present), so it doesn't imply a
+//             flatten that hasn't occurred. Neutral.
+//   • Data  — age of the newest tick used; the monitoring heartbeat. Coloured as
+//             a liveness signal (green sub-second, amber lagging, red/stale/—).
+// Every value degrades to "—" when not measured; nothing is fabricated.
+function SpeedStrip({ status }: { status: StatusResponse }) {
+  const entry = status.entry_latency_ms
+  const exit = status.exit_latency_ms
+  const tickAge = status.last_tick_age_ms
+  const live = tickLiveness(tickAge)
+  const showExit = exit != null && Number.isFinite(exit)
+
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-xl border px-3.5 py-2.5"
+      style={{ borderColor: C.line, background: 'rgba(255,255,255,0.015)' }}>
+      <span className="text-[10px] font-semibold uppercase tracking-[0.06em]" style={{ color: C.faint }}>Speed</span>
+
+      {/* Entry deploy speed — neutral */}
+      <span className="text-[11.5px]" style={{ color: C.muted }}>
+        Entry <b className="tabular-nums" style={{ color: C.ink2 }}>{fmtMs(entry)}</b>
+      </span>
+
+      {/* Exit speed — only once a flatten has actually been measured */}
+      {showExit && (
+        <span className="text-[11.5px]" style={{ color: C.muted }}>
+          Exit <b className="tabular-nums" style={{ color: C.ink2 }}>{fmtMs(exit)}</b>
+        </span>
+      )}
+
+      {/* Data freshness — the live heartbeat, coloured by liveness */}
+      <span className="inline-flex items-center gap-1.5 text-[11.5px]" style={{ color: C.muted }}>
+        <span
+          className={`inline-block w-1.5 h-1.5 rounded-full${live.fresh ? ' live-dot' : ''}`}
+          style={{ background: live.color }}
+        />
+        Data <b className="tabular-nums" style={{ color: live.color }}>{fmtMs(tickAge)}</b>
+      </span>
+
+      {/* Honest liveness label (last tick age) */}
+      <span className="text-[10px] font-mono uppercase tracking-[0.05em]" style={{ color: live.color }}>
+        {live.label}
+      </span>
+    </div>
+  )
+}
+
+// ── Live trail status (intraday_basket) ──────────────────────────────────────
+// Reads the nested `trail{...}` (falling back to the flat mirror fields), all
+// FRACTIONS (×100 to display). Shows armed state, peak, current notional return,
+// the live exit-trigger level, the four configured numbers, and a square-off
+// countdown. On a CLOSED session it shows the exit reason + the dual final
+// returns. Every field degrades to "—" when absent — nothing is fabricated.
+function TrailStatusPanel({ status }: { status: StatusResponse }) {
+  const t = status.trail ?? {}
+  // Prefer nested trail fields; fall back to the flat status mirrors.
+  const armed = t.armed ?? status.trail_armed
+  const peak = t.peak ?? status.trail_peak
+  const current = t.current_gross_return ?? status.gross_return
+  const trigger = t.trigger ?? status.trail_trigger
+  const armPct = t.arm_pct
+  const floorPct = t.floor_pct
+  const trailPct = t.trail_giveback_pct
+  const stopPct = t.stop_pct
+  const sqTime = t.square_off_time ?? status.square_off_time ?? '—'
+  const sqSecs = t.seconds_to_square_off ?? status.seconds_to_square_off
+  const closed = (status.status ?? '').toUpperCase() === 'CLOSED'
+
+  // Plain-English trail line, built only from fields the backend actually sent.
+  const armedLine = armed
+    ? `Armed at ${fracPct(armPct)} · peak ${fracPct(peak)} · exits if it gives back to ${fracPct(trigger)}`
+    : `Not armed yet — arms once the basket reaches ${fracPct(armPct)} on notional.`
+
+  return (
+    <div className="rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.05)' }}>
+      <div className="flex items-center gap-2 mb-3">
+        <span style={{ color: C.mint }}>{ICON.trend(15)}</span>
+        <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Trailing exit</span>
+        <span className="text-[9px] font-mono uppercase tracking-[0.06em] rounded-full px-2 py-0.5"
+          style={armed
+            ? { color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }
+            : { color: C.faint, background: 'rgba(255,255,255,0.04)' }}>
+          {armed == null ? 'TRAIL —' : armed ? 'ARMED' : 'NOT ARMED'}
+        </span>
+        <span className="ml-auto text-[11px]" style={{ color: C.faint }}>
+          square-off <b style={{ color: C.ink2 }}>{sqTime !== '—' ? sqTime.slice(0, 5) : '—'}</b>
+          {' '}· in <b style={{ color: C.mint }}>{fmtMMSS(sqSecs)}</b>
+        </span>
+      </div>
+
+      {/* Closed → exit reason + dual final returns. Else the live trail metrics. */}
+      {closed ? (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3">
+          <Stat label="Exit reason" value={status.exit_reason ?? '—'} valueColor={C.ink} />
+          <Stat
+            label="Final (notional)"
+            value={fracPct(status.notional_return)}
+            valueColor={pctTone(status.notional_return)}
+          />
+          <Stat
+            label="Final (own funds)"
+            value={fracPct(status.own_funds_return)}
+            valueColor={pctTone(status.own_funds_return)}
+          />
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+            <Stat label="Current (notional)" value={fracPct(current)} valueColor={pctTone(current)} sub="trail basis" />
+            <Stat label="Peak" value={fracPct(peak)} valueColor={pctTone(peak)} />
+            <Stat label="Exit trigger" value={fracPct(trigger)} valueColor={C.ink} sub="exits here" />
+            <Stat label="Square-off in" value={fmtMMSS(sqSecs)} valueColor={C.mint} />
+          </div>
+          <p className="text-[11.5px] leading-snug mb-3" style={{ color: C.muted }}>{armedLine}</p>
+        </>
+      )}
+
+      {/* The four configured numbers (×100), always shown for legibility. */}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px]" style={{ color: C.faint }}>
+        <span>arm <b style={{ color: C.mint }}>{fracPct(armPct, false)}</b></span>
+        <span>floor <b style={{ color: C.mint }}>{fracPct(floorPct, false)}</b></span>
+        <span>trail <b style={{ color: C.ink2 }}>{fracPct(trailPct, false)}</b></span>
+        <span>stop <b style={{ color: C.red }}>{fracPct(stopPct, false)}</b></span>
+      </div>
+    </div>
+  )
+}
+
+// RUNNING status pill — mint with a pulsing live dot so a running session that
+// holds positions never reads as empty/"no orders" in the list.
+function RunningPill() {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+      style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+      <span className="inline-block w-1.5 h-1.5 rounded-full live-dot" style={{ background: C.mint }} />
+      Running
+    </span>
+  )
+}
+
+// SCHEDULED status pill — mint, distinct from RUNNING/CLOSED in the list.
+function SchedPill() {
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] font-mono uppercase tracking-[0.07em] rounded-full px-2 py-0.5"
+      style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }}>
+      {ICON.clock(10)} Scheduled
+    </span>
+  )
+}
+
+// ── Kite-style portfolio footer ──────────────────────────────────────────────
+// Invested = Σ(qty×avg_price); Current value = Σ(qty×ltp); Total P&L =
+// Σ(unrealised_pnl) shown as ₹ AND % (Total P&L ÷ Invested ×100). Each cell is
+// HONEST: a field is summed only when every contributing position supplies it;
+// if any required field is missing the cell shows "—" (never a partial/fabricated
+// total). Total P&L prefers the backend's own unrealised_pnl sum.
+function PortfolioSummary({ positions }: { positions: OpenPosition[] }) {
+  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+
+  let invested = 0; let investedOk = positions.length > 0
+  let current = 0; let currentOk = positions.length > 0
+  let pnl = 0; let pnlOk = positions.length > 0
+
+  for (const p of positions) {
+    const qty = num(p.qty); const avg = num(p.avg_price); const ltp = num(p.ltp); const up = num(p.unrealised_pnl)
+    if (qty != null && avg != null) invested += qty * avg; else investedOk = false
+    if (qty != null && ltp != null) current += qty * ltp; else currentOk = false
+    if (up != null) pnl += up; else pnlOk = false
+  }
+
+  const investedVal = investedOk ? invested : null
+  const currentVal = currentOk ? current : null
+  const pnlVal = pnlOk ? pnl : null
+  const pnlPct = pnlVal != null && investedVal != null && investedVal > 0 ? (pnlVal / investedVal) * 100 : null
+
+  return (
+    <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-3 rounded-xl border px-3.5 py-3"
+      style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+      <SumCell label="Invested" value={investedVal == null ? '—' : fmtINR(investedVal)} />
+      <SumCell label="Current value" value={currentVal == null ? '—' : fmtINR(currentVal)} />
+      <SumCell
+        label="Total P&L"
+        value={pnlVal == null ? '—' : signedINR(pnlVal)}
+        sub={pnlPct == null ? undefined : fmtPct(pnlPct, 2)}
+        valueColor={pnlVal == null ? C.faint : pctTone(pnlVal)}
+      />
+    </div>
+  )
+}
+
+function SumCell({ label, value, sub, valueColor }: { label: string; value: string; sub?: string; valueColor?: string }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>{label}</div>
+      <div className="text-[15px] font-semibold mt-0.5 tabular-nums" style={{ color: valueColor ?? C.ink }}>
+        {value}{sub && <span className="text-[12px] font-medium ml-1.5" style={{ color: valueColor ?? C.muted }}>({sub})</span>}
+      </div>
+    </div>
+  )
+}
+
+function Stat({ label, value, valueColor, sub }: { label: string; value: string; valueColor?: string; sub?: string }) {
+  return (
+    <div className="rounded-xl border px-3 py-2.5" style={{ borderColor: C.line, background: 'rgba(255,255,255,0.015)' }}>
+      <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>{label}</div>
+      <div className="text-[15px] font-semibold mt-0.5" style={{ color: valueColor ?? C.ink }}>{value}</div>
+      {sub && <div className="text-[9.5px] mt-0.5" style={{ color: C.faint }}>{sub}</div>}
+    </div>
+  )
+}
+
+// ── P&L preview card (CONFIG form) ───────────────────────────────────────────
+// Renders the "Potential outcome" estimate from POST /api/autotrade/preview.
+// Honest "—" / loading / error states; nothing is fabricated. UNITS: every pct
+// from the backend is a FRACTION (×100 to display); ₹ via fmtINR/signedINR.
+function PotentialOutcome({
+  preview, loading, err, direction, orderProduct,
+}: { preview: PreviewResponse | null; loading: boolean; err: string | null; direction: KillDirection; orderProduct: OrderProduct }) {
+  return (
+    <div className="mt-4 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.04)' }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span style={{ color: C.mint }}>{ICON.info(14)}</span>
+        <span className="text-[12px] font-semibold" style={{ color: C.ink }}>Potential outcome</span>
+        <span className="ml-auto text-[10px]" style={{ color: C.faint }}>estimate — places nothing</span>
+      </div>
+
+      {loading && !preview ? (
+        <p className="text-[11.5px]" style={{ color: C.muted }}>Estimating…</p>
+      ) : err ? (
+        <p className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+          <span style={{ color: C.amber }}>Couldn&apos;t estimate the outcome</span>{' '}
+          <span style={{ color: C.faint }}>({err}) — the preview endpoint may not be reporting yet. Showing &ldquo;—&rdquo;.</span>
+        </p>
+      ) : preview ? (
+        <>
+          <KillPreviewCard kill={preview.kill_preview} direction={direction} />
+          <p className="text-[10.5px] leading-snug mt-2.5" style={{ color: C.faint }}>
+            on <b style={{ color: C.ink2 }}>{fmtINR(preview.invested_basis)}</b> invested
+            {' '}· ~{(preview.leverage ?? 1).toFixed(preview.leverage % 1 === 0 ? 0 : 2)}× ({orderProduct})
+            {' '}· fund <b style={{ color: C.ink2 }}>{fmtCapital(preview.total_allocated_capital)}</b>
+          </p>
+        </>
+      ) : (
+        <p className="text-[11.5px]" style={{ color: C.faint }}>—</p>
+      )}
+    </div>
+  )
+}
+
+// ── Intraday-basket strategy summary (CONFIG form) ───────────────────────────
+// A single legible line describing the configured trail, on the ESTIMATED bases
+// from POST /api/autotrade/preview (invested_basis + leverage). The pct fields
+// come from the config in PERCENTS (display as-is). Honest "—"/loading/error.
+// Sizing transparency — per-name breakdown for ANY product/instrument, showing the
+// FUNDING split so it's clear how much is YOUR money vs the broker's:
+//   Your margin  = capital you put up      (Σ = your money in)
+//   Broker funds = leverage the broker adds (deployed − your margin; 0 for cash)
+//   Deployed     = total position value    (your margin + broker funds)
+// Reads preview.positions (qty/ref_price/margin/invested_value + lots/lot_size/
+// margin_per_lot for FUT). ALWAYS renders a state — loading / error / empty /
+// table — so the panel never silently disappears.
+type SizeCol = { label: string; get: (p: PreviewPosition) => string | number; strong?: boolean; tone?: string; total?: 'margin' | 'broker' | 'deployed' }
+function SizingBreakdown({ config, preview, loading, err }:
+    { config: SessionConfig; preview: PreviewResponse | null; loading?: boolean; err?: string | null }) {
+  const isFut = config.instrument_type === 'FUT'
+  const product = String(config.order_product ?? 'CNC')
+  const title = isFut ? 'Futures sizing — margin & buying power'
+    : `${product} sizing — margin & buying power`
+
+  // One shell so EVERY state (loading / error / empty / table) shows the header —
+  // the panel is never a mysterious blank.
+  const wrap = (inner: ReactNode) => (
+    <div className="mt-3 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.05)' }}>
+      <div className="flex items-center gap-2 mb-2.5">
+        <span style={{ color: C.mint }}>{ICON.info(14)}</span>
+        <span className="text-[12px] font-semibold" style={{ color: C.ink }}>{title}</span>
+        <span className="ml-auto text-[10px]" style={{ color: C.faint }}>estimate — places nothing</span>
+      </div>
+      {inner}
+    </div>
+  )
+
+  const rows = (preview?.positions ?? []).filter((p) => p.status !== 'SKIPPED' && (p.qty ?? 0) > 0)
+  if (!preview || rows.length === 0) {
+    if (loading) return wrap(<p className="text-[11.5px]" style={{ color: C.muted }}>Estimating sizing…</p>)
+    if (err) return wrap(
+      <p className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+        <span style={{ color: C.amber }}>Couldn&apos;t estimate sizing</span>{' '}
+        <span style={{ color: C.faint }}>({err}). It will refresh on your next change.</span>
+      </p>)
+    if (preview) return wrap(<p className="text-[11.5px]" style={{ color: C.faint }}>No sizable positions for this capital / universe.</p>)
+    return wrap(<p className="text-[11.5px]" style={{ color: C.muted }}>Estimating sizing…</p>)
+  }
+
+  const inr = (v: number | undefined) => fmtINR(v ?? 0)
+  const lev = preview.leverage ?? 1
+  const myFund = preview.total_allocated_capital
+  const totalMargin = preview.total_margin ?? rows.reduce((s, p) => s + (p.margin ?? 0), 0)
+  const totalDeployed = preview.invested_basis
+  const totalBroker = Math.max(0, totalDeployed - totalMargin)
+  const deployedOf = (p: PreviewPosition) => ((isFut ? (p.notional ?? p.invested_value) : p.invested_value) ?? 0)
+  const brokerOf = (p: PreviewPosition) => Math.max(0, deployedOf(p) - (p.margin ?? 0))
+  const totalFor = (t?: string) =>
+    t === 'margin' ? fmtINR(totalMargin)
+    : t === 'broker' ? (totalBroker > 1 ? fmtINR(totalBroker) : '—')
+    : t === 'deployed' ? fmtINR(totalDeployed) : ''
+
+  // Funding columns shown for EVERY product, so switching MIS↔MTF↔CNC makes the
+  // difference obvious (Broker funds lights up only when the product leverages).
+  const fundingCols: SizeCol[] = [
+    { label: 'Your margin', get: (p) => inr(p.margin), strong: true, tone: C.mint, total: 'margin' },
+    { label: 'Broker funds', get: (p) => { const b = brokerOf(p); return b > 1 ? inr(b) : '—' }, tone: C.amber, total: 'broker' },
+    { label: 'Deployed', get: (p) => inr(deployedOf(p)), tone: C.ink2, total: 'deployed' },
+  ]
+  const cols: SizeCol[] = isFut
+    ? [{ label: 'Lots', get: (p) => p.lots ?? 0, tone: C.mint }, { label: 'Lot size', get: (p) => p.lot_size ?? 0 },
+       { label: 'Qty', get: (p) => p.qty ?? 0 }, { label: 'Margin/lot', get: (p) => inr(p.margin_per_lot) }, ...fundingCols]
+    : [{ label: 'Qty', get: (p) => p.qty ?? 0 }, { label: 'Price', get: (p) => inr(p.ref_price) }, ...fundingCols]
+  const cell = 'text-right tabular-nums py-1.5 px-2'
+
+  return wrap(
+    <>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11.5px]" style={{ borderCollapse: 'collapse' }}>
+          <thead>
+            <tr style={{ color: C.faint }}>
+              <th className="text-left font-medium py-1 px-2">Name</th>
+              {cols.map((c) => <th key={c.label} className="text-right font-medium py-1 px-2">{c.label}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((p) => (
+              <tr key={p.symbol} style={{ borderTop: `1px solid ${C.line2}` }}>
+                <td className="text-left py-1.5 px-2 font-semibold" style={{ color: C.ink }}>
+                  <span>{p.symbol}</span>
+                  {/* Iceberg intent — this leg will SPLIT into N slices. Surfaced so
+                      the operator sees the order shape before Start. */}
+                  {p.iceberg && (p.n_slices ?? 0) > 1 && (
+                    <span className="ml-1.5 inline-flex items-center gap-1 text-[9px] font-mono rounded-full px-1.5 py-0.5 align-middle"
+                      style={{ color: C.mint, background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.35)' }}
+                      title={`Will split into ${p.n_slices} slices of ${p.slice_qty}`}>
+                      {p.n_slices}× {p.slice_qty}
+                    </span>
+                  )}
+                </td>
+                {cols.map((c) => (
+                  <td key={c.label} className={cell + (c.strong ? ' font-semibold' : '')}
+                      style={{ color: c.tone ?? C.ink2 }}>{c.get(p)}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr style={{ borderTop: `1px solid ${C.line}` }}>
+              <td className="text-left py-1.5 px-2 font-semibold" style={{ color: C.ink }}>Total</td>
+              {cols.map((c) => (
+                <td key={c.label} className={cell + (c.total ? ' font-semibold' : '')}
+                    style={{ color: c.total === 'margin' ? C.mint : c.total === 'broker' ? C.amber : c.total === 'deployed' ? C.ink : 'transparent' }}>
+                  {totalFor(c.total)}
+                </td>
+              ))}
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <p className="text-[10.5px] leading-snug mt-2" style={{ color: C.faint }}>
+        {totalBroker > 1 ? (
+          <>You put in <b style={{ color: C.mint }}>{fmtINR(totalMargin)}</b>, the broker funds{' '}
+            <b style={{ color: C.amber }}>{fmtINR(totalBroker)}</b> → <b style={{ color: C.ink2 }}>{fmtINR(totalDeployed)}</b> deployed
+            {' '}(~{lev.toFixed(lev % 1 === 0 ? 0 : 2)}× buying power). Your fund: <b style={{ color: C.ink2 }}>{fmtCapital(myFund)}</b>.</>
+        ) : (
+          <>You put in <b style={{ color: C.mint }}>{fmtINR(totalMargin)}</b> → <b style={{ color: C.ink2 }}>{fmtINR(totalDeployed)}</b> deployed
+            {' '}(<b style={{ color: C.ink2 }}>no broker margin, 1×</b>). Your fund: <b style={{ color: C.ink2 }}>{fmtCapital(myFund)}</b>.</>
+        )}
+      </p>
+      {/* Risk-basis label + the ₹ concentration / fat-finger thresholds the backend
+          echoes, so the leverage math is explicit. Shows only what is set. */}
+      <ConcentrationNote riskBasis={preview.risk_basis} limits={preview.concentration_limits} />
+    </>
+  )
+}
+
+// The explicit risk_basis label + any ₹ concentration/fat-finger caps from the
+// preview/status. Renders nothing when there is nothing to say (no basis, no caps).
+function ConcentrationNote({ riskBasis, limits }:
+    { riskBasis?: string; limits?: ConcentrationLimits | null }) {
+  const perName = limits?.max_per_name_rs
+  const perOrderRs = limits?.max_notional_per_order_rs
+  const perOrderQty = limits?.max_qty_per_order
+  const hasCap = (typeof perName === 'number' && perName > 0)
+    || (typeof perOrderRs === 'number' && perOrderRs > 0)
+    || (typeof perOrderQty === 'number' && perOrderQty > 0)
+  if (!riskBasis && !hasCap) return null
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10.5px]" style={{ color: C.faint }}>
+      {riskBasis && (
+        <span>Risk basis <b style={{ color: C.ink2 }}>{riskBasis}</b></span>
+      )}
+      {typeof perName === 'number' && perName > 0 && (
+        <span>Max/name <b style={{ color: C.ink2 }}>{fmtINR(perName)}</b></span>
+      )}
+      {typeof perOrderRs === 'number' && perOrderRs > 0 && (
+        <span>Max/order <b style={{ color: C.ink2 }}>{fmtINR(perOrderRs)}</b></span>
+      )}
+      {typeof perOrderQty === 'number' && perOrderQty > 0 && (
+        <span>Max qty/order <b style={{ color: C.ink2 }}>{perOrderQty}</b></span>
+      )}
+    </div>
+  )
+}
+
+// ── HARDENING SPRINT — per-session HEALTH strip (GET /autotrade/health) ────────
+// A compact console-level indicator: reconcile age (amber >120s, red >300s),
+// oldest mark age (amber >60s, red >120s), an exit-failed badge + open count, and
+// the per-user breaker banner. Degrades to nothing when there is no active session
+// and the breaker isn't breached.
+function fmtAge(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return '—'
+  const s = Math.max(0, Math.floor(seconds))
+  if (s < 90) return `${s}s`
+  const m = Math.floor(s / 60)
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h`
+}
+function HealthStrip({ sessions, breaker }:
+    { sessions: SessionHealth[] | null; breaker: BreakerState | null }) {
+  const rows = sessions ?? []
+  const breached = breaker?.breached === true
+  if (rows.length === 0 && !breached) return null
+  return (
+    <div className="rounded-2xl border p-3.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.015)' }}>
+      <div className="flex items-center gap-2 mb-2.5">
+        <span style={{ color: C.mint }}>{ICON.shield(14)}</span>
+        <span className="text-[12px] font-semibold" style={{ color: C.ink }}>Monitoring health</span>
+        <span className="ml-auto text-[10px]" style={{ color: C.faint }}>live · every 20s</span>
+      </div>
+
+      {/* Per-user daily-loss breaker — only when breached (calm red banner). */}
+      {breached && (
+        <div className="mb-2.5 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px] leading-snug"
+          style={{ borderColor: 'rgba(232,115,107,0.4)', background: 'rgba(232,115,107,0.06)', color: C.ink2 }}>
+          <span className="shrink-0 mt-0.5" style={{ color: C.red }}>{ICON.info(13)}</span>
+          <span>
+            <b style={{ color: C.red }}>Daily-loss breaker breached.</b>{' '}
+            {breaker?.reason || 'Combined loss crossed your configured limit.'}
+            {typeof breaker?.aggregate_pnl === 'number' && (
+              <> Combined P&amp;L <b style={{ color: C.ink2 }}>{signedINR(breaker.aggregate_pnl)}</b></>
+            )}
+            {typeof breaker?.limit_rs === 'number' && breaker.limit_rs != null && (
+              <> · limit <b style={{ color: C.ink2 }}>{fmtINR(breaker.limit_rs)}</b></>
+            )}
+          </span>
+        </div>
+      )}
+
+      {rows.length === 0 ? (
+        <p className="text-[11px]" style={{ color: C.faint }}>No active sessions.</p>
+      ) : (
+        <ul className="flex flex-col gap-1.5">
+          {rows.map((h) => {
+            const rec = h.last_reconcile_age_seconds
+            const recTone = rec == null ? C.faint : rec > 300 ? C.red : rec > 120 ? C.amber : C.mint
+            const markMs = h.oldest_mark_age_ms
+            const markS = markMs == null ? null : markMs / 1000
+            const markTone = markMs == null ? C.faint : markMs > 120_000 ? C.red : markMs > 60_000 ? C.amber : C.mint
+            return (
+              <li key={h.session_id}
+                className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-3 py-2 text-[11px]"
+                style={{ borderColor: h.has_exit_failed ? 'rgba(232,115,107,0.4)' : C.line, background: 'rgba(255,255,255,0.015)' }}>
+                <span className="font-mono truncate" style={{ color: C.ink2, maxWidth: 160 }}>{h.session_id}</span>
+                {h.status && (
+                  <span className="text-[9px] font-mono uppercase tracking-[0.06em] rounded-full px-1.5 py-0.5"
+                    style={{ color: C.muted, background: 'rgba(255,255,255,0.05)' }}>{h.status}</span>
+                )}
+                {h.has_exit_failed && (
+                  <span className="text-[9px] font-mono uppercase tracking-[0.06em] rounded-full px-1.5 py-0.5"
+                    style={{ color: C.red, background: 'rgba(232,115,107,0.12)', boxShadow: 'inset 0 0 0 1px rgba(232,115,107,0.4)' }}>
+                    exit-failed
+                  </span>
+                )}
+                <span className="ml-auto flex items-center gap-3" style={{ color: C.faint }}>
+                  <span>open <b style={{ color: C.ink2 }}>{typeof h.n_open === 'number' ? h.n_open : '—'}</b></span>
+                  <span title="Time since the last successful reconcile">
+                    reconcile <b style={{ color: recTone }}>{fmtAge(rec)}</b>
+                    {h.reconcile_healthy === false && <span style={{ color: C.amber }}> ⚠</span>}
+                  </span>
+                  <span title="Age of the oldest position mark (data freshness)">
+                    mark <b style={{ color: markTone }}>{fmtAge(markS)}</b>
+                  </span>
+                </span>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+// ── HARDENING SPRINT — ALERTS feed (GET /autotrade/alerts + POST …/ack) ───────
+// A compact drawer: unacked-first, severity-toned, with an Ack button. Surfaces
+// naked-position / failed-exit / divergence / daily-loss pages so the operator
+// SEES them. Renders nothing until the feed has loaded (alerts !== null).
+function alertSeverityTone(sev?: string): string {
+  const s = (sev ?? '').toLowerCase()
+  if (s.includes('crit') || s.includes('error') || s.includes('fatal') || s.includes('high')) return C.red
+  if (s.includes('warn') || s.includes('med')) return C.amber
+  return C.muted
+}
+function AlertsFeed({ alerts, open, onToggle, onAck, ackingIds }: {
+  alerts: AlertItem[] | null
+  open: boolean
+  onToggle: () => void
+  onAck: (id: number) => void
+  ackingIds: Set<number>
+}) {
+  if (alerts === null) return null
+  const isAcked = (a: AlertItem) => a.acknowledged === true || a.acknowledged === 1
+  const nUnacked = alerts.filter((a) => !isAcked(a)).length
+  // Unacked first, then most recent.
+  const ordered = alerts.slice().sort((a, b) => {
+    const au = isAcked(a) ? 1 : 0, bu = isAcked(b) ? 1 : 0
+    if (au !== bu) return au - bu
+    const ta = a.ts ? Date.parse(a.ts) : 0, tb = b.ts ? Date.parse(b.ts) : 0
+    return tb - ta
+  })
+  return (
+    <div className="rounded-2xl border" style={{ borderColor: nUnacked > 0 ? 'rgba(230,180,80,0.4)' : C.line2, background: 'rgba(255,255,255,0.015)' }}>
+      <button type="button" onClick={onToggle}
+        className="w-full flex items-center gap-2 px-3.5 py-2.5 text-left">
+        <span style={{ color: nUnacked > 0 ? C.amber : C.faint }}>{ICON.info(14)}</span>
+        <span className="text-[12px] font-semibold" style={{ color: C.ink }}>Alerts</span>
+        {nUnacked > 0 ? (
+          <span className="text-[9px] font-mono uppercase tracking-[0.06em] rounded-full px-1.5 py-0.5"
+            style={{ color: C.amber, background: 'rgba(230,180,80,0.14)', boxShadow: 'inset 0 0 0 1px rgba(230,180,80,0.4)' }}>
+            {nUnacked} unacked
+          </span>
+        ) : (
+          <span className="text-[10px]" style={{ color: C.faint }}>{alerts.length === 0 ? 'none' : 'all acknowledged'}</span>
+        )}
+        <span className="ml-auto text-[10px]" style={{ color: C.faint }}>live · every 20s</span>
+        <span className="transition-transform" style={{ color: C.faint, transform: open ? 'rotate(90deg)' : 'none' }}>{ICON.chevronR(12)}</span>
+      </button>
+      {open && (
+        <div className="px-3.5 pb-3">
+          {ordered.length === 0 ? (
+            <p className="text-[11px] py-1" style={{ color: C.faint }}>No alerts.</p>
+          ) : (
+            <ul className="flex flex-col gap-1.5">
+              {ordered.map((a) => {
+                const acked = isAcked(a)
+                const tone = alertSeverityTone(a.severity)
+                const acking = ackingIds.has(a.id)
+                return (
+                  <li key={a.id}
+                    className="flex items-start gap-2.5 rounded-lg border px-3 py-2 text-[11px] leading-snug"
+                    style={{ borderColor: acked ? C.line : 'rgba(230,180,80,0.3)', background: acked ? 'transparent' : 'rgba(255,255,255,0.02)', opacity: acked ? 0.7 : 1 }}>
+                    <span className="shrink-0 mt-1 inline-block w-1.5 h-1.5 rounded-full" style={{ background: tone }} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        {a.kind && <b style={{ color: C.ink }}>{a.kind}</b>}
+                        {a.symbol && <span className="font-mono" style={{ color: C.ink2 }}>{a.symbol}</span>}
+                        {a.severity && (
+                          <span className="text-[9px] font-mono uppercase tracking-[0.06em]" style={{ color: tone }}>{a.severity}</span>
+                        )}
+                        {a.escalated ? (
+                          <span className="text-[9px] font-mono uppercase tracking-[0.06em] rounded-full px-1.5 py-0.5"
+                            style={{ color: C.red, background: 'rgba(232,115,107,0.12)' }}>escalated</span>
+                        ) : null}
+                      </div>
+                      {a.detail && <div className="mt-0.5" style={{ color: C.ink2 }}>{a.detail}</div>}
+                      {a.ts && <div className="mt-0.5 font-mono text-[9.5px]" style={{ color: C.faint }}>{a.ts}</div>}
+                    </div>
+                    {!acked && (
+                      <button type="button" disabled={acking} onClick={() => onAck(a.id)}
+                        className="shrink-0 text-[10.5px] font-semibold px-2.5 py-1 rounded-lg transition-opacity disabled:opacity-40"
+                        style={{ color: C.mint, border: `1px solid rgba(63,227,164,0.35)` }}>
+                        {acking ? 'Acking…' : 'Ack'}
+                      </button>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function IntradayStrategySummary({
+  config, preview, loading, err, isBtst = false,
+}: { config: SessionConfig; preview: PreviewResponse | null; loading: boolean; err: string | null; isBtst?: boolean }) {
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+  const arm = num(config.arm_pct); const floor = num(config.floor_pct)
+  const trail = num(config.trail_giveback_pct); const stop = num(config.stop_pct)
+  const sq = (config.square_off_time ?? '').slice(0, 5) || '—'
+  const entry = (config.entry_time ?? '').slice(0, 5) || '—'
+  const trim = (v: number | null) => (v == null ? '—' : String(v))
+  // Falcon BTST sleeve = total capital ÷ 2 (2 overlapping sleeves = full capital);
+  // matches the top BTST summary card + the backend total_capital / hold-sessions.
+  const btstStop = stop == null ? 6 : stop
+  const btstSleeve = Math.max(0, Math.floor((config.total_allocated_capital || 0) / 2))
+
+  return (
+    <div className="mt-4 rounded-xl border p-3.5" style={{ borderColor: 'rgba(63,227,164,0.28)', background: 'rgba(63,227,164,0.05)' }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span style={{ color: C.mint }}>{ICON.info(14)}</span>
+        <span className="text-[12px] font-semibold" style={{ color: C.ink }}>Strategy summary</span>
+        <span className="ml-auto text-[10px]" style={{ color: C.faint }}>estimate — places nothing</span>
+      </div>
+      {isBtst ? (
+        <>
+          <p className="text-[12px] leading-relaxed" style={{ color: C.ink2 }}>
+            Enter <b style={{ color: C.ink }}>09:15</b>
+            {' → '}<b style={{ color: C.ink }}>no trail</b>
+            {' → '}stop <b style={{ color: C.red }}>−{btstStop}%</b>
+            {' → '}sell <b style={{ color: C.ink }}>Day-2 15:29</b>
+            {' · '}<b style={{ color: C.ink }}>2-session</b> hold
+            {' · '}<b style={{ color: C.ink }}>CNC</b>
+          </p>
+          <p className="text-[10.5px] leading-snug mt-2" style={{ color: C.faint }}>
+            per-basket fund = capital ÷ 2 = <b style={{ color: C.ink2 }}>{config.total_allocated_capital ? fmtCapital(btstSleeve) : '—'}</b>
+            {' '}· CNC 1× cash, no leverage.
+          </p>
+        </>
+      ) : (
+      <>
+      <p className="text-[12px] leading-relaxed" style={{ color: C.ink2 }}>
+        Enter <b style={{ color: C.ink }}>{entry}</b>
+        {' → '}arm <b style={{ color: C.mint }}>+{trim(arm)}%</b>
+        {' → '}trail <b style={{ color: C.ink }}>{trim(trail)}%</b> giveback
+        {' '}(floor <b style={{ color: C.mint }}>+{trim(floor)}%</b>)
+        {' → '}stop <b style={{ color: C.red }}>−{trim(stop)}%</b>
+        {' → '}square-off <b style={{ color: C.ink }}>{sq}</b>
+      </p>
+      <p className="text-[10.5px] leading-snug mt-2" style={{ color: C.faint }}>
+        {loading && !preview ? (
+          'Estimating notional…'
+        ) : err ? (
+          <><span style={{ color: C.amber }}>Couldn&apos;t estimate the notional</span>{' '}({err}) — showing &ldquo;—&rdquo;.</>
+        ) : preview ? (
+          <>on <b style={{ color: C.ink2 }}>{fmtINR(preview.invested_basis)}</b> notional
+            {' '}· ~{(preview.leverage ?? 1).toFixed(preview.leverage % 1 === 0 ? 0 : 2)}× ({config.order_product})
+            {' '}· fund <b style={{ color: C.ink2 }}>{fmtCapital(preview.total_allocated_capital)}</b></>
+        ) : '—'}
+      </p>
+      </>
+      )}
+    </div>
+  )
+}
+
+// The two-sided kill outcome (target / stop). Shared by the CONFIG preview and
+// the LIVE running status. Each side: ₹ on the INVESTED basis + (% on your fund).
+// UNITS: pct/fund_pct are FRACTIONS (×100); basis_value_rs is ₹.
+function KillPreviewCard({ kill, direction, live }: { kill: KillPreview; direction: KillDirection; live?: boolean }) {
+  const showTarget = (direction === 'profit' || direction === 'both') && kill.target
+  const showStop = (direction === 'loss' || direction === 'both') && kill.stop
+  if (!showTarget && !showStop) {
+    return <p className="text-[11.5px]" style={{ color: C.faint }}>—</p>
+  }
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+      {kill.target && (direction === 'profit' || direction === 'both') && (
+        <OutcomeSide
+          label={`At +${(kill.target.pct * 100).toFixed(2).replace(/\.?0+$/, '')}% target`}
+          rs={kill.target.basis_value_rs}
+          fundPct={kill.target.fund_pct}
+          positive
+          live={live}
+        />
+      )}
+      {kill.stop && (direction === 'loss' || direction === 'both') && (
+        <OutcomeSide
+          label={`At −${(kill.stop.pct * 100).toFixed(2).replace(/\.?0+$/, '')}% stop`}
+          rs={kill.stop.basis_value_rs}
+          fundPct={kill.stop.fund_pct}
+          positive={false}
+          live={live}
+        />
+      )}
+    </div>
+  )
+}
+
+function OutcomeSide({
+  label, rs, fundPct, positive, live,
+}: { label: string; rs: number; fundPct: number; positive: boolean; live?: boolean }) {
+  // basis_value_rs is reported as a magnitude on the invested basis; sign it by
+  // side (target = +, stop = −) so the ₹ + % read consistently. fund_pct is a
+  // FRACTION (×100). Never fabricate — caller only renders sides the backend gave.
+  const signedRs = positive ? Math.abs(rs) : -Math.abs(rs)
+  const signedFund = positive ? Math.abs(fundPct) : -Math.abs(fundPct)
+  const tone = positive ? C.mint : C.red
+  return (
+    <div className="rounded-lg border px-3 py-2.5" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+      <div className="text-[10px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>
+        {label}{live && <span className="ml-1.5" style={{ color: C.mint }}>· live</span>}
+      </div>
+      <div className="text-[15px] font-semibold mt-0.5 tabular-nums" style={{ color: tone }}>
+        {Number.isFinite(rs) ? signedINR(signedRs) : '—'}
+      </div>
+      <div className="text-[10.5px] mt-0.5" style={{ color: tone }}>
+        {Number.isFinite(fundPct) ? `${fmtPct(signedFund * 100, 2)} on your fund` : '—'}
+      </div>
+    </div>
+  )
+}
+
+// ── Broker allowlist IP self-service ─────────────────────────────────────────
+// Shows the backend's outbound IP so the operator can add it to the broker's
+// Allowed-IPs list (developers.kite.trade) — otherwise live orders error. Loads
+// on mount; graceful if the endpoint isn't live yet (shows "—", no fabrication).
+function EgressIpCard() {
+  const [ip, setIp] = useState<string | null>(null)
+  const [asOf, setAsOf] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true); setErr(null)
+    try {
+      const res = await AutoTradeAPI.egressIp()
+      setIp(typeof res.ip === 'string' && res.ip ? res.ip : null)
+      setAsOf(typeof res.as_of === 'string' ? res.as_of : null)
+    } catch (e) {
+      setIp(null)
+      setErr(e instanceof Error ? e.message : 'unavailable')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const onCopy = useCallback(async () => {
+    if (!ip) return
+    try {
+      await navigator.clipboard.writeText(ip)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    } catch { /* clipboard blocked — the IP is shown for manual copy */ }
+  }, [ip])
+
+  return (
+    <div className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: C.line2, background: C.card }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span style={{ color: C.mint }}>{ICON.shield(15)}</span>
+        <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Broker allowlist IP</span>
+        {asOf && <span className="ml-auto text-[10px]" style={{ color: C.faint }}>as of {asOf}</span>}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2.5 mb-2">
+        <code className="text-[14px] font-mono rounded-lg px-3 py-1.5"
+          style={{ color: ip ? C.ink : C.faint, background: 'rgba(255,255,255,0.03)', border: `1px solid ${C.line2}` }}>
+          {loading ? 'Loading…' : (ip ?? '—')}
+        </code>
+        {ip && (
+          <button type="button" onClick={onCopy}
+            className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-colors"
+            style={{ color: C.mint, border: `1px solid rgba(63,227,164,0.3)` }}>
+            {copied ? ICON.check(13) : ICON.book(13)} {copied ? 'Copied' : 'Copy'}
+          </button>
+        )}
+        {!loading && !ip && (
+          <button type="button" onClick={load}
+            className="text-[11.5px] px-2.5 py-1.5 rounded-lg transition-colors"
+            style={{ color: C.muted, border: `1px solid ${C.line}` }}>
+            Retry
+          </button>
+        )}
+      </div>
+
+      <p className="text-[11px] leading-snug" style={{ color: C.muted }}>
+        Add this to your broker&apos;s Allowed IPs (developers.kite.trade) so live orders don&apos;t error.
+        {!loading && !ip && <span style={{ color: C.faint }}>{' '}The egress-IP endpoint isn&apos;t reporting yet{err ? ` (${err})` : ''} — showing &ldquo;—&rdquo;.</span>}
+      </p>
+    </div>
+  )
+}
+
+// ── Read-only saved configs + brokers (load on demand) ───────────────────────
+function ReferenceLists() {
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [configs, setConfigs] = useState<SavedConfig[] | null>(null)
+  const [brokers, setBrokers] = useState<Broker[] | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true); setErr(null)
+    const [c, b] = await Promise.allSettled([AutoTradeAPI.configList(), AutoTradeAPI.brokerList()])
+    if (c.status === 'fulfilled') setConfigs(c.value.configs ?? [])
+    if (b.status === 'fulfilled') setBrokers(b.value.brokers ?? [])
+    if (c.status === 'rejected' && b.status === 'rejected') {
+      setErr('Could not load presets or brokers.')
+    }
+    setLoading(false)
+  }, [])
+
+  const toggle = () => {
+    const next = !open
+    setOpen(next)
+    if (next && configs === null && brokers === null && !loading) load()
+  }
+
+  return (
+    <div className="rounded-2xl border" style={{ borderColor: C.line2, background: C.card2 }}>
+      <button type="button" onClick={toggle}
+        className="w-full flex items-center gap-2 px-4 py-3 text-left">
+        <span style={{ color: C.muted }}>{ICON.book(15)}</span>
+        <span className="text-[12.5px] font-semibold" style={{ color: C.ink }}>Saved presets &amp; brokers</span>
+        <span className="ml-auto" style={{ color: C.faint }}>{open ? ICON.chevron(15) : ICON.chevronR(13)}</span>
+      </button>
+
+      {open && (
+        <div className="px-4 pb-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.05em] mb-2" style={{ color: C.faint }}>Presets (config/list)</div>
+            {loading ? <Empty text="Loading…" />
+              : err ? <Empty text={err} />
+              : !configs?.length ? <Empty text="No saved presets." />
+              : <ul className="flex flex-col gap-1.5">
+                  {configs.map((c, i) => (
+                    <li key={c.id ?? i} className="rounded-lg border px-3 py-2 text-[12px]"
+                      style={{ borderColor: C.line, background: 'rgba(255,255,255,0.015)', color: C.ink2 }}>
+                      {c.name ?? `Preset ${i + 1}`}
+                    </li>
+                  ))}
+                </ul>}
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.05em] mb-2" style={{ color: C.faint }}>Brokers (broker/list)</div>
+            {loading ? <Empty text="Loading…" />
+              : !brokers?.length ? <Empty text="No brokers connected." />
+              : <ul className="flex flex-col gap-1.5">
+                  {brokers.map((b, i) => (
+                    <li key={b.id ?? i} className="rounded-lg border px-3 py-2 text-[12px] flex items-center gap-2"
+                      style={{ borderColor: C.line, background: 'rgba(255,255,255,0.015)', color: C.ink2 }}>
+                      <span style={{ color: C.mint }}>{ICON.link(13)}</span>
+                      {b.label ?? b.name ?? b.broker ?? `Broker ${i + 1}`}
+                      {b.status && <span className="ml-auto text-[10px]" style={{ color: C.faint }}>{b.status}</span>}
+                    </li>
+                  ))}
+                </ul>}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Empty({ text }: { text: string }) {
+  return <p className="text-[11.5px]" style={{ color: C.faint }}>{text}</p>
+}

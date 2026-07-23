@@ -1,7 +1,12 @@
 // KANIDA.AI Terminal — Falcon API client
 // All Falcon endpoints live under /api/falcon/* on the FastAPI backend.
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
+// Route the operator console through the same-origin Falcon proxy
+// (app/api/falcon-proxy) so the operator token is injected server-side and
+// never reaches the browser. The proxy forwards to NEXT_PUBLIC_API_URL with the
+// X-Operator-Token header. The /falcon console is interactive (client-side), so
+// a relative same-origin base is correct.
+const API = '/api/falcon-proxy'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

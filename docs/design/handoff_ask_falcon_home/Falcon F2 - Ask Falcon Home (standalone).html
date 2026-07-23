@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Falcon — Ask Falcon Home (F2)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;450;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: #0a100e; overflow: hidden; }
+  #root { height: 100vh; }
+
+  /* ---- Falcon brand tokens (design system) ---- */
+  .fal {
+    --canvas: #0a100e; --panel: #0c1310; --card: #111b16; --card-2: #0f1814;
+    --mint: #3FE3A4; --mint-hi: #5AECB5; --mint-dim: rgba(63,227,164,0.10);
+    --ink: #e9f2ec; --ink-2: #c2d0c9; --muted: #859990; --faint: #5b6c64;
+    --line: rgba(255,255,255,0.065); --line-2: rgba(255,255,255,0.10);
+    --amber: #E6B450; --teal: #4BCBE0; --tier-green: #3FE3A4; --slate: #8595a0; --red: #E8736B;
+    /* Standalone fills the viewport (the canvas prototype used a fixed 1280×860 frame). */
+    width: 100vw; height: 100vh; background: var(--canvas); color: var(--ink); display: flex; overflow: hidden;
+    font-family: "Geist", system-ui, -apple-system, sans-serif; font-size: 15px; line-height: 1.5;
+    letter-spacing: -0.01em; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  }
+  .mono { font-family: "Geist Mono", ui-monospace, monospace; font-feature-settings: "tnum" 1; letter-spacing: 0; }
+
+  /* ---- Tier badge (shared component styling) ---- */
+  .tier { font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em; padding: 3px 8px; border-radius: 6px; text-transform: uppercase; white-space: nowrap; display: inline-block; }
+  .tier.gold { color: var(--amber); background: rgba(230,180,80,0.11); }
+  .tier.goldplus { color: var(--amber); background: rgba(230,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(230,180,80,0.3); }
+  .tier.premium { color: var(--teal); background: rgba(75,203,224,0.11); }
+  .tier.enterprise { color: var(--tier-green); background: rgba(63,227,164,0.12); }
+  .tier.entcand { color: var(--tier-green); background: rgba(63,227,164,0.07); box-shadow: inset 0 0 0 1px rgba(63,227,164,0.22); }
+  .tier.standard { color: var(--slate); background: rgba(133,149,160,0.13); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<!-- Tier badge component (the only shared dependency F2 reads from window) -->
+<script type="text/babel">
+  const TIER_LABEL = { gold:"Gold", goldplus:"Gold+", premium:"Premium", enterprise:"Enterprise", entcand:"Ent. Candidate", standard:"Standard" };
+  function Tier({ t }) { return <span className={"tier "+t}>{TIER_LABEL[t]}</span>; }
+  Object.assign(window, { Tier, TIER_LABEL });
+</script>
+
+<!-- The F2 screen -->
+<script type="text/babel" src="falcon-f2.jsx"></script>
+
+<!-- Mount -->
+<script type="text/babel">
+  const ScreenF2 = window.ScreenF2;
+  ReactDOM.createRoot(document.getElementById("root")).render(<ScreenF2 />);
+</script>
+</body>
+</html>

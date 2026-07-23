@@ -77,3 +77,15 @@ universe_engine/**/*.pkl
 universe_engine/**/*.npy
 universe_engine/**/*.npz
 universe_engine/**/__pycache__/
+# === Repo-bloat guard (added 2026-06-18 after a Codex `git add` runaway   ===
+# === wrote 680 GiB of DB versions into .git and filled the disk).         ===
+# SQLite sidecar files — never version
+*.db-wal
+*.db-shm
+*.db-journal
+# Multi-GB research databases — reconstructable from the pipeline; never commit
+data/db/kanida_universe.db
+data/db/_backups/
+data/falcon.db
+universe_engine/**/*.db
+universe_engine/data/db/

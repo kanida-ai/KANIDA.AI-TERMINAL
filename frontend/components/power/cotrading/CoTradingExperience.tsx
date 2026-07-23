@@ -1,0 +1,1493 @@
+'use client'
+
+/**
+ * CoTradingExperience — the Kanida.AI Co-Trading flow, redesigned (2026-06-21)
+ * into a SIMPLE, VISUAL, decision-oriented 2-STAGE flow.
+ *
+ * The product must read in a few seconds: "Choose style → Add capital →
+ * Falcon manages the plan → See performance." Only TWO user actions, then
+ * Falcon does everything automatically.
+ *
+ *   STAGE 1 — SETUP (one calm centered screen):
+ *     • Choose trading style (visual cards; only Falcon Top 10 Swing live).
+ *     • Enter virtual capital (input + ₹1L/₹5L/₹10L chips).
+ *     • Choose start: "Start Today" (live) OR a historical date (replay).
+ *     • One big "Start Co-Trading" button.
+ *     • ONE secondary link "How Falcon manages your money" → RulesSlideOver
+ *       (the ONLY place rules live). No risk profile, no allocation config,
+ *       no rules tables on this screen. Falcon decides everything.
+ *
+ *   STAGE 2 — RESULT (the hero; visual, minimal numbers):
+ *     • A compact summary strip (Starting · Current/Ending · P&L · Return% ·
+ *       Open · Cash · Max Drawdown — honest "pending" where live data isn't
+ *       served).
+ *     • LIVE ("Start Today"): "Falcon selected your Top 10" — a clean visual
+ *       portfolio of cards (symbol · tier · capital · entry · stop · STATUS
+ *       pill). Status is HONEST: pre-open shows "Queued for 9:15" / "Waiting";
+ *       live Hold/Trailing/Exit + P&L are a Backend need (never fabricated).
+ *       One-line Falcon caption — not a rules table.
+ *     • REPLAY (historical date): a HERO performance result from the REAL
+ *       persona endpoint (avg/positive years/win rate + an EQUITY CURVE built
+ *       from the real monthly end_equity series) — honest about year grain.
+ *     • "Inspect deeper ▾" — ONE expandable (collapsed) revealing the
+ *       year-by-year table (real), month drill (real), and the rulebook link.
+ *     • "← Change plan" returns to Stage 1; AutoTrade bridge CTA at the end.
+ *
+ * DATA WIRING (2026-06-22) — the RESULT stage is driven by the now-LIVE
+ *   POST /api/power/cotrade/simulate. It returns a SIMULATION on EOD data
+ *   (modelled entries/exits, NOT real fills) plus an `honesty` string we surface.
+ *     • SummaryStrip ← summary { starting/current_value/total_pnl/return_pct/
+ *       max_dd/n_open/n_closed/cash/win_rate }.
+ *     • ReplayHero equity curve ← the REAL `equity` series (EquityChart).
+ *     • Positions list ← the REAL `positions` (entry/qty/capital/SL/status/pnl).
+ *     • Falcon ACTIONS feed ← `actions` (entry/exit/trail/skip + reason),
+ *       folded into "Inspect deeper" to keep the result calm.
+ *
+ * HARD HONESTY RULES (money is involved):
+ *   • The portfolio is a SIMULATION on EOD data — the `honesty` caption says so.
+ *   • NO fabricated P&L, current value, return %, drawdown, or live fills — every
+ *     number comes from /cotrade/simulate. Loading → calm state; failure → honest
+ *     "couldn't simulate" (never fabricated).
+ *   • The persona "Proven track record" (year-by-year) stays the REAL persona
+ *     backtest endpoint — separate historical confidence, NOT the user's sim.
+ *   • positions[].tier may be null → no badge (never fabricated).
+ *   • Only "Falcon Top 10 Swing" is LIVE.
+ */
+import { useEffect, useMemo, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { PowerAPI } from '@/lib/power-api'
+import type {
+  PersonaBacktestResponse, QuoteResponse,
+  CotradeSimulateResponse, CotradePosition, CotradeAction,
+  PortfolioSummary,
+} from '@/lib/power-api'
+import { PortfolioCard } from '@/components/power/PortfolioCard'
+import { CompassLogo } from '@/components/power/CompassLogo'
+import { EquityChart } from '@/components/power/EquitySparkline'
+import type { Top20Pick, Top20Response } from '@/lib/falcon-top20-types'
+import { PlanSwitcher, AllPlansAggregate, ALL_PLANS, type Plan } from '@/components/power/shared/PlanSwitcher'
+import {
+  C, ICON, TIER_STYLE, BAND_COLORKEY, tierBand, MechanismStrip,
+  fmtINR, signedINR, fmtNum, fmtCapital, pctTone, fmtPct, istTodayISO,
+} from '@/components/power/shared/cotrade-kit'
+
+// ── Top-10 persona slug — backtest performance source of truth ───────────────
+//   backend/power_user/services/persona_simulator.py PERSONA_CONFIGS
+//   ("falcon-top-10") → PowerAPI.persona() → GET /api/power/personas/{slug}.
+const TOP10_PERSONA_SLUG = 'falcon-top-10'
+
+// ── REAL summary fields returned by simulate_persona() (typed locally —
+//    PersonaBacktestResponse.summary is Record<string, unknown> on the client). ─
+type PersonaSummary = {
+  avg_yearly_return_pct?:    number
+  median_yearly_return_pct?: number
+  best_year_pct?:            number
+  worst_year_pct?:           number
+  positive_years?:           number
+  total_years?:              number
+  avg_max_drawdown_pct?:     number
+  worst_drawdown_pct?:       number
+  avg_win_rate_pct?:         number
+  total_pnl_rs?:             number
+  total_trades?:             number
+}
+type PersonaYearly = {
+  year: number; return_pct: number; max_dd_pct: number; win_rate_pct: number
+  n_closed: number; n_open_at_year_end: number
+}
+type PersonaMonthly = { year: number; month: string; end_equity: number; return_pct: number }
+
+// ── Trading styles — only Swing is LIVE (rest Launch-Pending) ────────────────
+type StyleId = 'swing' | 'btst' | 'intraday' | 'weekly' | 'longterm'
+type Style = { id: StyleId; name: string; hold: string; holdDays: number; live: boolean; icon: keyof typeof ICON; blurb: string }
+const STYLES: Style[] = [
+  { id: 'swing',    name: 'Falcon Top 10 Swing', hold: '~7 trading days', holdDays: 7,  live: true,  icon: 'flame',  blurb: 'The live engine — 10 highest-conviction names, held about a week.' },
+  { id: 'btst',     name: 'BTST',                hold: '1–2 days',        holdDays: 2,  live: false, icon: 'clock',  blurb: 'Buy today, sell tomorrow.' },
+  { id: 'intraday', name: 'Intraday',           hold: 'Same day',        holdDays: 0,  live: false, icon: 'bolt',   blurb: 'Enter and exit within one session.' },
+  { id: 'weekly',   name: 'Weekly Swing',       hold: '1–4 weeks',       holdDays: 20, live: false, icon: 'trend',  blurb: 'Ride multi-week trends.' },
+  { id: 'longterm', name: 'Long-Term',          hold: '3+ months',       holdDays: 90, live: false, icon: 'shield', blurb: 'Position-build over months.' },
+]
+
+// ── FIXED allocation model. DOCUMENTED rule: ₹50,000 per pick at a ₹5,00,000
+//   base across the full Top 10, scaled proportionally to the user's capital.
+//   REAL math (₹ per trade × ratio, then qty = floor(perTrade / entry)). ───────
+const BASE_CAPITAL = 500_000           // ₹5 L base the fixed sizing is defined at
+const BASE_PER_TRADE = 50_000          // ₹50 k per pick at the ₹5 L base
+const TOP_N = 10                       // full Top 10 deployment
+const STANDARD_SL_PCT = -7             // locked Falcon Top 10 rule when a pick carries no SL
+
+const CAPITAL_PRESETS = [100_000, 500_000, 1_000_000]
+
+// ── STATIC documented Kanida.ai virtual trading rules (facts about HOW Falcon
+//    works — NOT performance numbers). Surfaced ONLY in the rules slide-over. ──
+type RuleItem = { icon: keyof typeof ICON; title: string; body: string }
+const VIRTUAL_RULES: RuleItem[] = [
+  { icon: 'clock',  title: 'Entry',          body: '9:15 IST at the open — the Top 10 ranked by engine score.' },
+  { icon: 'wallet', title: 'Trade size',     body: '₹50k per stock at a ₹5 L base; scales with your virtual capital.' },
+  { icon: 'trend',  title: 'Holding',        body: 'Maximum 7 trading days per position.' },
+  { icon: 'shield', title: 'Stop-loss',      body: '−7%; a gap-down exits at the actual open price.' },
+  { icon: 'flame',  title: 'Smart trailing', body: 'After a +12% close, SL = higher of entry or the 10-day low — never moves down.' },
+  { icon: 'bolt',   title: 'Capital',        body: 'Cash only — no leverage, integer shares, idle cash tracked.' },
+  { icon: 'info',   title: 'Position rules', body: 'Skip names already held; no duplicate positions.' },
+]
+
+// ── STATIC: the 7-step trading cycle (documented flow). ──────────────────────
+const TRADING_CYCLE: string[] = [
+  'Engine ranks the universe at EOD; Top 10 by score are selected.',
+  'Enter all 10 at 9:15 IST the next session — ₹50k each (at ₹5 L base).',
+  'A −7% stop-loss is placed on every position from entry.',
+  'Each position is held up to 7 trading days.',
+  'On a +12% close, smart trailing arms: SL rises to the higher of entry or the 10-day low.',
+  'Exit on stop, trailing stop, or the 7-day time limit (gap-downs exit at the actual price).',
+  'Freed cash returns to the book; already-held names are skipped on the next cycle.',
+]
+
+// ── Entry price resolution — only ever a REAL number off the pick; else null. ─
+function entryPriceOf(p: Top20Pick): number | null {
+  const fromAction = p.action?.entry_price_rs
+  if (typeof fromAction === 'number' && fromAction > 0) return fromAction
+  return null
+}
+
+// ── Allocation math (REAL): FIXED ₹/trade scaled, qty = floor(alloc/entry). ──
+//   `entrySource` says where `entry` came from so the UI can be honest:
+//   'signal' = the real signal payload price; 'quote' = a REAL last EOD close
+//   used only as a REFERENCE (NOT a live tick, NOT a fill); null = no price.
+type AllocRow = {
+  pick:        Top20Pick
+  entry:       number | null
+  entrySource: 'signal' | 'quote' | null
+  quoteAsOf:   string | null
+  qty:         number
+  capital:     number
+  slPrice:     number | null
+  slPct:       number
+}
+
+type Props = {
+  data:      Top20Response | null
+  firstName: string
+  /**
+   * MIGRATION (2026-06-23): the REAL co-trading personas + equity sparklines,
+   * fetched server-side (PowerAPI.portfolios + portfolioEquity). Rendered as a
+   * "Browse live AI co-traders" listing on the setup screen; each card opens the
+   * in-shell persona detail (/power/co-trading/[slug]). Optional — when absent
+   * (fetch failed) the section is simply omitted, never faked.
+   */
+  personas?:   PortfolioSummary[]
+  sparklines?: Record<string, Array<{ trade_date: string; total_equity: number }>>
+}
+
+type Stage = 'setup' | 'result'
+
+export function CoTradingExperience({ data: seed, firstName, personas, sparklines }: Props) {
+  const router = useRouter()
+
+  // ── Flow stage — the whole UX is two screens ───────────────────────────────
+  const [stage, setStage] = useState<Stage>('setup')
+
+  // ── Setup state ──────────────────────────────────────────────────────────
+  const [styleId, setStyleId] = useState<StyleId>('swing')
+  const [capital, setCapital] = useState<number>(500_000)
+  const today = useMemo(() => istTodayISO(), [])
+  const [mode, setMode] = useState<'today' | 'replay'>('today')   // start choice
+  const [startDate, setStartDate] = useState<string>(today)
+
+  // ── Live picks (REAL) — still used as a pre-sim allocation preview. ─────────
+  const [data, setData]       = useState<Top20Response | null>(seed)
+  const [loading, setLoading] = useState(false)
+  const [replayPending, setReplayPending] = useState(false)
+
+  // ── Co-Trading SIMULATION (REAL — POST /api/power/cotrade/simulate). This is
+  //   the source of truth for the RESULT stage: summary P&L, equity curve,
+  //   positions, and the Falcon actions feed. A SIMULATION on EOD data. ────────
+  const [sim, setSim]               = useState<CotradeSimulateResponse | null>(null)
+  const [simLoading, setSimLoading] = useState(false)
+  const [simErr, setSimErr]         = useState(false)
+
+  // ── Trading-rules slide-over (the ONE place all rules content lives) ────────
+  const [rulesOpen, setRulesOpen] = useState(false)
+
+  // ── REAL backtest performance (persona simulator). NEVER hardcoded. ────────
+  const [persona, setPersona]       = useState<PersonaBacktestResponse | null>(null)
+  const [personaErr, setPersonaErr] = useState(false)
+  const [personaLoading, setPersonaLoading] = useState(true)
+  useEffect(() => {
+    const ac = new AbortController()
+    setPersonaLoading(true); setPersonaErr(false)
+    PowerAPI.persona(TOP10_PERSONA_SLUG, ac.signal)
+      .then(p => { setPersona(p); setPersonaLoading(false) })
+      .catch(() => { setPersonaErr(true); setPersonaLoading(false) })
+    return () => ac.abort()
+  }, [])
+
+  const style = STYLES.find(s => s.id === styleId)!
+  const isReplay = mode === 'replay'
+  // Fixed per-trade ₹, scaled proportionally from the ₹5 L base to user capital.
+  const perTrade = Math.max(0, (capital / BASE_CAPITAL) * BASE_PER_TRADE)
+
+  // ── REAL EOD quotes (PowerAPI.quote — last close, NOT a live tick). Used ONLY
+  //   as an entry REFERENCE for picks whose signal payload has no entry price.
+  //   Fetched once we reach the LIVE result for the symbols actually missing one. ─
+  const [quotes, setQuotes] = useState<QuoteResponse>({})
+  const symbolsNeedingQuote = useMemo(() => {
+    if (!data || style.id !== 'swing' || isReplay || stage !== 'result') return []
+    return data.picks.slice(0, TOP_N).filter(p => entryPriceOf(p) == null).map(p => p.symbol)
+  }, [data, style.id, isReplay, stage])
+  useEffect(() => {
+    const missing = symbolsNeedingQuote.filter(s => !(s in quotes))
+    if (missing.length === 0) return
+    const ac = new AbortController()
+    PowerAPI.quote(missing, ac.signal)
+      .then(q => setQuotes(prev => ({ ...prev, ...q })))
+      .catch(() => { /* honest: leave entry "—" if the quote feed fails */ })
+    return () => ac.abort()
+  }, [symbolsNeedingQuote, quotes])
+
+  // ── Build the allocation rows (REAL picks + FIXED ₹/trade math) ────────────
+  const rows: AllocRow[] = useMemo(() => {
+    if (!data || style.id !== 'swing') return []
+    return data.picks.slice(0, TOP_N).map(p => {
+      const signalEntry = entryPriceOf(p)
+      // Fall back to the REAL last EOD close as a reference (never a fill/tick).
+      const q = quotes[p.symbol]
+      const refEntry = signalEntry == null && q && q.last_close > 0 ? q.last_close : null
+      const entry = signalEntry ?? refEntry
+      const entrySource: 'signal' | 'quote' | null =
+        signalEntry != null ? 'signal' : refEntry != null ? 'quote' : null
+      const quoteAsOf = entrySource === 'quote' ? (q?.as_of ?? null) : null
+      const qty = entry && entry > 0 && perTrade > 0 ? Math.floor(perTrade / entry) : 0
+      const cap = entry && entry > 0 ? qty * entry : 0
+      const slPctRaw = p.action?.stop_loss_pct
+      const slPct = typeof slPctRaw === 'number' && slPctRaw !== 0 ? slPctRaw : STANDARD_SL_PCT
+      const slPrice = entry ? +(entry * (1 + slPct / 100)).toFixed(2) : null
+      return { pick: p, entry, entrySource, quoteAsOf, qty, capital: cap, slPrice, slPct }
+    })
+  }, [data, style.id, perTrade, quotes])
+
+  const committed = rows.reduce((a, r) => a + r.capital, 0)
+  const cashLeft  = Math.max(0, capital - committed)
+  const anyEntryMissing = rows.some(r => r.entry == null)
+  const showReplayPending = isReplay && replayPending
+
+  const canStart = style.live && !loading && capital > 0
+
+  // ── Multi-style PLAN switcher (Task 2). Today exactly one live plan = the
+  //   active style + capital; the switcher is structural and scales to N plans.
+  //   "All plans" → aggregate view (combined capital/P&L/positions). P&L stays
+  //   honest "—/pending" until the live-tracking backend supplies it per plan. ─
+  const [planView, setPlanView] = useState<string>('current')   // 'current' | ALL_PLANS
+  const plans: Plan[] = useMemo(() => [{
+    id: 'current', styleId: style.id, styleName: style.name, capital,
+    pnl: null, open: rows.length, live: style.live,
+  }], [style.id, style.name, capital, rows.length, style.live])
+
+  // ── Start handler: run the REAL Co-Trading simulation (POST /cotrade/simulate)
+  //   for BOTH live-today and a historical replay window, then show the result.
+  //   The sim drives summary P&L / equity / positions / actions. We still keep
+  //   the client allocation preview (`rows`) as an honest pre-/fallback view. ──
+  async function handleStart() {
+    if (!canStart) return
+    setLoading(true); setSimLoading(true); setSimErr(false); setReplayPending(false)
+    if (!isReplay) setData(seed)
+    setStage('result')
+    try {
+      const res = await PowerAPI.cotradeSimulate({
+        style:      'falcon-top-10',
+        capital,
+        start_date: isReplay ? startDate : today,
+        ...(isReplay ? { end_date: today } : {}),
+      })
+      setSim(res)
+      // Honest replay-pending: the sim ran but produced no portfolio for the date.
+      if (isReplay && res.positions.length === 0 && res.equity.length === 0) {
+        setReplayPending(true)
+      }
+    } catch {
+      setSim(null)
+      setSimErr(true)
+    } finally {
+      setSimLoading(false)
+      setLoading(false)
+    }
+  }
+
+  // ── RENDER ─────────────────────────────────────────────────────────────────
+  return (
+    <div className="relative flex flex-col min-h-screen md:min-h-0 md:h-full md:overflow-hidden"
+         style={{ background: C.canvas, color: C.ink }}>
+      {stage === 'setup' ? (
+        <SetupStage
+          firstName={firstName}
+          styleId={styleId} setStyleId={setStyleId}
+          capital={capital} setCapital={setCapital}
+          mode={mode} setMode={(m) => { setMode(m); if (m === 'today') setStartDate(today) }}
+          startDate={startDate} setStartDate={setStartDate} today={today}
+          canStart={canStart} loading={loading}
+          onStart={handleStart} onOpenRules={() => setRulesOpen(true)}
+          onAutoTrade={() => router.push('/power/autotrade')}
+          plans={plans}
+          onAddStyle={(sid) => { const s = STYLES.find(x => x.id === sid); if (s?.live) setStyleId(s.id) }}
+          personas={personas}
+          sparklines={sparklines}
+        />
+      ) : (
+        <ResultStage
+          style={style} firstName={firstName}
+          capital={capital} committed={committed} cashLeft={cashLeft}
+          rows={rows} data={data} isReplay={isReplay} startDate={startDate}
+          today={today} perTrade={perTrade} anyEntryMissing={anyEntryMissing}
+          showReplayPending={showReplayPending}
+          sim={sim} simLoading={simLoading} simErr={simErr}
+          persona={persona} personaLoading={personaLoading} personaErr={personaErr}
+          onChangePlan={() => setStage('setup')}
+          onOpenRules={() => setRulesOpen(true)}
+          onAutoTrade={() => router.push('/power/autotrade')}
+          onAnalyze={(sym) => router.push(`/power/ask?symbol=${encodeURIComponent(sym)}`)}
+          plans={plans} planView={planView} setPlanView={setPlanView}
+          onAddStyle={(sid) => { const s = STYLES.find(x => x.id === sid); if (s?.live) { setStyleId(s.id); setPlanView('current') } }}
+        />
+      )}
+
+      {/* ── Trading-rules slide-over (in-flow faux-overlay, NOT position:fixed,
+          so the viewport-lock is preserved). The ONE place all rules live. ── */}
+      {rulesOpen && (
+        <RulesSlideOver perTrade={perTrade} capital={capital} onClose={() => setRulesOpen(false)} />
+      )}
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// STAGE 1 — SETUP. One calm, centered screen. Two choices + one button.
+// ════════════════════════════════════════════════════════════════════════════
+function SetupStage({
+  firstName, styleId, setStyleId, capital, setCapital, mode, setMode,
+  startDate, setStartDate, today, canStart, loading, onStart, onOpenRules, onAutoTrade,
+  plans, onAddStyle, personas, sparklines,
+}: {
+  firstName: string
+  styleId: StyleId; setStyleId: (s: StyleId) => void
+  capital: number; setCapital: (n: number) => void
+  mode: 'today' | 'replay'; setMode: (m: 'today' | 'replay') => void
+  startDate: string; setStartDate: (s: string) => void; today: string
+  canStart: boolean; loading: boolean
+  onStart: () => void; onOpenRules: () => void; onAutoTrade: () => void
+  plans: Plan[]; onAddStyle: (styleId: string) => void
+  personas?: PortfolioSummary[]
+  sparklines?: Record<string, Array<{ trade_date: string; total_equity: number }>>
+}) {
+  return (
+    <div className="flex-1 min-h-0 md:overflow-y-auto [scrollbar-width:thin]">
+      <div className="mx-auto w-full max-w-[1120px] px-5 md:px-8 py-5 md:py-6 flex flex-col gap-4 md:gap-5">
+
+        {/* multi-style plan switcher (structural today — one live plan) */}
+        {plans.length > 1 && (
+          <div className="flex justify-center">
+            <PlanSwitcher
+              plans={plans} activeId={plans.find(p => p.styleId === styleId)?.id ?? 'current'}
+              onSelect={(id) => { const p = plans.find(x => x.id === id); if (p) onAddStyle(p.styleId) }}
+              addable={STYLES.map(s => ({ id: s.id, name: s.name, live: s.live }))}
+              onAdd={onAddStyle} accent="mint"
+            />
+          </div>
+        )}
+
+        {/* heading */}
+        <div className="flex flex-col items-center text-center gap-1.5">
+          <CompassLogo size={28} />
+          <h1 className="text-[21px] md:text-[24px] font-semibold tracking-[-0.02em]" style={{ color: C.ink }}>
+            Co-Trade with Falcon, {firstName}
+          </h1>
+          <p className="text-[12.5px] md:text-[13px] leading-snug max-w-[560px]" style={{ color: C.muted }}>
+            Follow Falcon with <b style={{ color: C.ink }}>virtual capital</b>. Pick a style, add capital,
+            and Falcon handles entries, stops, trailing and exits automatically.
+          </p>
+        </div>
+
+        {/* "How Co-Trading works" — the running-machine mechanism strip (hook) */}
+        <MechanismStrip variant="cotrade" onBridge={onAutoTrade} />
+
+        {/* STEP 1 — choose your trading style (visual cards, full-width 5-up) */}
+        <Step n={1} title="Choose your trading style">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
+            {STYLES.map(s => {
+              const active = s.id === styleId
+              return (
+                <button
+                  key={s.id} type="button"
+                  onClick={() => { if (s.live) setStyleId(s.id) }}
+                  disabled={!s.live}
+                  className="relative text-left rounded-2xl border p-3 transition-colors disabled:cursor-not-allowed"
+                  style={{
+                    borderColor: active ? 'rgba(63,227,164,0.55)' : C.line2,
+                    background: active ? 'rgba(63,227,164,0.07)' : 'rgba(255,255,255,0.02)',
+                    opacity: s.live ? 1 : 0.6,
+                  }}
+                >
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <span className="grid place-items-center w-7 h-7 rounded-lg shrink-0"
+                          style={{ background: C.mintDim, color: C.mint }}>{ICON[s.icon](15)}</span>
+                    {s.live
+                      ? (active && <span className="ml-auto w-2 h-2 rounded-full shrink-0" style={{ background: C.mint, boxShadow: `0 0 8px ${C.mint}` }} />)
+                      : <span className="ml-auto text-[8.5px] font-mono uppercase tracking-[0.08em] shrink-0" style={{ color: C.faint }}>soon</span>}
+                  </div>
+                  <div className="text-[12.5px] font-semibold leading-tight" style={{ color: s.live ? C.ink : C.faint }}>{s.name}</div>
+                  <div className="text-[10px] mt-0.5" style={{ color: C.faint }}>{s.hold}</div>
+                </button>
+              )
+            })}
+          </div>
+          <p className="text-[10.5px] mt-2" style={{ color: C.faint }}>
+            Only <b style={{ color: C.muted }}>Falcon Top 10 Swing</b> is live today — the other engines are
+            Launch-Pending and we won&apos;t fake their picks.
+          </p>
+        </Step>
+
+        {/* STEPS 2 + 3 — short, placed SIDE-BY-SIDE to fill the width and cut
+            vertical emptiness. Stack on narrow widths. */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 items-start">
+
+        {/* STEP 2 — enter virtual capital */}
+        <Step n={2} title="Enter virtual capital">
+          <div className="flex items-center gap-2 rounded-xl px-3 py-2 border"
+               style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.03)' }}>
+            <span className="text-[16px] font-semibold" style={{ color: C.muted }}>₹</span>
+            <input
+              type="number" min={10_000} step={10_000} value={capital}
+              onChange={e => setCapital(Math.max(0, Number(e.target.value) || 0))}
+              className="w-full bg-transparent outline-none text-[17px] font-mono font-semibold tabular-nums"
+              style={{ color: C.ink }}
+            />
+            <span className="text-[11px] font-mono shrink-0" style={{ color: C.faint }}>{fmtCapital(capital)}</span>
+          </div>
+          <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+            {CAPITAL_PRESETS.map(v => (
+              <button key={v} type="button" onClick={() => setCapital(v)}
+                      className="text-[12px] rounded-full px-3 py-1 border transition-colors"
+                      style={capital === v
+                        ? { borderColor: 'rgba(63,227,164,0.5)', color: C.mint, background: 'rgba(63,227,164,0.08)' }
+                        : { borderColor: C.line2, color: C.muted }}>
+                {fmtCapital(v)}
+              </button>
+            ))}
+          </div>
+          <p className="text-[10.5px] mt-2" style={{ color: C.faint }}>
+            Pretend money — never a broker. Falcon sizes <b style={{ color: C.muted }}>{fmtINR(perTradeFor(capital))}</b> per pick
+            (₹50k at ₹5 L, scaled).
+          </p>
+        </Step>
+
+        {/* STEP 3 — choose start */}
+        <Step n={3} title="Choose when to start">
+          <div className="flex flex-col sm:flex-row gap-2.5">
+            <button type="button" onClick={() => setMode('today')}
+                    className="flex-1 text-left rounded-2xl border p-3 transition-colors"
+                    style={{
+                      borderColor: mode === 'today' ? 'rgba(63,227,164,0.55)' : C.line2,
+                      background: mode === 'today' ? 'rgba(63,227,164,0.07)' : 'rgba(255,255,255,0.02)',
+                    }}>
+              <div className="flex items-center gap-2">
+                <span className="grid place-items-center w-7 h-7 rounded-lg shrink-0" style={{ background: C.mintDim, color: C.mint }}>{ICON.bolt(15)}</span>
+                <span className="text-[13px] font-semibold" style={{ color: C.ink }}>Start Today</span>
+                {mode === 'today' && <span className="ml-auto w-2 h-2 rounded-full" style={{ background: C.mint, boxShadow: `0 0 8px ${C.mint}` }} />}
+              </div>
+              <p className="text-[10.5px] mt-1.5 leading-snug" style={{ color: C.faint }}>
+                Follow today&apos;s live Top 10 forward from here.
+              </p>
+            </button>
+
+            <button type="button" onClick={() => setMode('replay')}
+                    className="flex-1 text-left rounded-2xl border p-3 transition-colors"
+                    style={{
+                      borderColor: mode === 'replay' ? 'rgba(230,180,80,0.55)' : C.line2,
+                      background: mode === 'replay' ? 'rgba(230,180,80,0.07)' : 'rgba(255,255,255,0.02)',
+                    }}>
+              <div className="flex items-center gap-2">
+                <span className="grid place-items-center w-7 h-7 rounded-lg shrink-0"
+                      style={{ background: 'rgba(230,180,80,0.14)', color: C.amber }}>{ICON.clock(15)}</span>
+                <span className="text-[13px] font-semibold" style={{ color: C.ink }}>Replay a past date</span>
+                {mode === 'replay' && <span className="ml-auto w-2 h-2 rounded-full" style={{ background: C.amber, boxShadow: `0 0 8px ${C.amber}` }} />}
+              </div>
+              <p className="text-[10.5px] mt-1.5 leading-snug" style={{ color: C.faint }}>
+                See how Falcon would have performed — point-in-time only.
+              </p>
+              {mode === 'replay' && (
+                <input type="date" value={startDate} max={today}
+                       onClick={e => e.stopPropagation()}
+                       onChange={e => setStartDate(e.target.value || today)}
+                       className="mt-2 text-[12.5px] rounded-lg px-2.5 py-1.5 border font-mono w-full"
+                       style={{ borderColor: C.line2, background: 'rgba(0,0,0,0.25)', color: C.ink }} />
+              )}
+            </button>
+          </div>
+        </Step>
+
+        </div>{/* end Steps 2+3 row */}
+
+        {/* primary action + the ONE rules link — spans the width below */}
+        <div className="flex flex-col items-center gap-2.5 mt-0.5">
+          <button
+            type="button" onClick={onStart} disabled={!canStart}
+            className="w-full max-w-[420px] inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-[15px] font-semibold transition-colors disabled:opacity-50
+                       shadow-[0_12px_32px_-12px_rgba(63,227,164,0.7)]"
+            style={{ background: C.mint, color: '#06130c' }}>
+            {loading ? 'Building…' : 'Start Co-Trading'}{!loading && ICON.arrow(15)}
+          </button>
+          <button type="button" onClick={onOpenRules}
+                  className="inline-flex items-center gap-1.5 text-[12px]" style={{ color: C.muted }}>
+            <span style={{ color: C.mint }}>{ICON.book(13)}</span>
+            How Falcon manages your money
+          </button>
+          <p className="text-[10px] text-center max-w-[440px]" style={{ color: C.faint }}>
+            Virtual capital · not financial advice. No order is placed — this mirrors Falcon so you can
+            learn the strategy risk-free.
+          </p>
+        </div>
+
+        {/* MIGRATION (2026-06-23): browse the REAL co-trading personas. Each card
+            opens the in-shell persona detail (/power/co-trading/[slug]) — the
+            full Zerodha-style P&L / positions / trades / equity dashboard. */}
+        {personas && personas.length > 0 && (
+          <section className="mt-1.5 border-t pt-5" style={{ borderColor: C.line2 }}>
+            <div className="flex items-baseline justify-between gap-3 mb-3">
+              <h2 className="text-[14px] font-semibold" style={{ color: C.ink }}>
+                Browse live AI co-traders
+              </h2>
+              <span className="text-[10.5px]" style={{ color: C.faint }}>
+                live virtual portfolios · tap a card for full positions &amp; P&amp;L
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {personas.map(p => (
+                <PortfolioCard
+                  key={p.slug}
+                  summary={p}
+                  sparklinePoints={sparklines?.[p.slug]}
+                  hrefBase="/power/co-trading"
+                />
+              ))}
+            </div>
+          </section>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function Step({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
+  return (
+    <section>
+      <div className="flex items-center gap-2 mb-2.5">
+        <span className="grid place-items-center w-5 h-5 rounded-full text-[11px] font-mono font-semibold shrink-0"
+              style={{ background: C.mintDim, color: C.mint }}>{n}</span>
+        <h2 className="text-[14px] font-semibold" style={{ color: C.ink }}>{title}</h2>
+      </div>
+      {children}
+    </section>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// STAGE 2 — RESULT. The hero. Summary strip → portfolio/performance → expand.
+// ════════════════════════════════════════════════════════════════════════════
+function ResultStage({
+  style, capital, committed, cashLeft, rows, data, isReplay, startDate, today,
+  perTrade, anyEntryMissing, showReplayPending, sim, simLoading, simErr,
+  persona, personaLoading,
+  personaErr, onChangePlan, onOpenRules, onAutoTrade, onAnalyze,
+  plans, planView, setPlanView, onAddStyle,
+}: {
+  style: Style; firstName: string
+  capital: number; committed: number; cashLeft: number
+  rows: AllocRow[]; data: Top20Response | null; isReplay: boolean; startDate: string
+  today: string; perTrade: number; anyEntryMissing: boolean; showReplayPending: boolean
+  sim: CotradeSimulateResponse | null; simLoading: boolean; simErr: boolean
+  persona: PersonaBacktestResponse | null; personaLoading: boolean; personaErr: boolean
+  onChangePlan: () => void; onOpenRules: () => void; onAutoTrade: () => void
+  onAnalyze: (s: string) => void
+  plans: Plan[]; planView: string; setPlanView: (v: string) => void; onAddStyle: (styleId: string) => void
+}) {
+  const showAggregate = planView === ALL_PLANS
+  // ── REAL summary from the simulation (the source of truth for P&L). ─────────
+  const s = sim?.summary ?? null
+  const haveSim = !!sim && !simErr
+  // Tier badges: positions[].tier may be null → fall back to the live signal_tier
+  //   surface (Top20) where we can join by symbol; else show no badge (honest).
+  const tierBySymbol = useMemo(() => {
+    const m: Record<string, string | null> = {}
+    for (const p of data?.picks ?? []) m[p.symbol] = p.signal_tier ?? null
+    return m
+  }, [data])
+
+  return (
+    <div className="flex-1 min-h-0 flex flex-col md:overflow-hidden">
+      {/* FIXED header (shrink-0): title · change-plan · summary strip */}
+      <div className="shrink-0 px-5 md:px-7 pt-2.5 md:pt-3 pb-3 border-b" style={{ borderColor: C.line }}>
+        <div className="flex items-center gap-2.5 mb-2.5">
+          <button type="button" onClick={onChangePlan}
+                  className="grid place-items-center w-8 h-8 rounded-lg border shrink-0"
+                  style={{ borderColor: C.line2, color: C.muted }} title="Change plan">
+            {ICON.back(15)}
+          </button>
+          <CompassLogo size={22} />
+          <div className="min-w-0">
+            <div className="text-[18px] font-semibold tracking-[-0.02em] leading-tight" style={{ color: C.ink }}>Co-Trading</div>
+            <div className="text-[11.5px] truncate" style={{ color: C.faint }}>
+              {style.name} · {fmtCapital(capital)} · {isReplay ? `replay @ ${startDate}` : 'live today'}
+            </div>
+          </div>
+          <button type="button" onClick={onChangePlan}
+                  className="ml-auto shrink-0 text-[11.5px] rounded-lg px-2.5 py-1.5 border inline-flex items-center gap-1.5"
+                  style={{ borderColor: C.line2, color: C.muted }}>
+            {ICON.back(12)} Change plan
+          </button>
+        </div>
+
+        {/* multi-style plan switcher — compact; structural today (one live plan) */}
+        <div className="mb-2.5">
+          <PlanSwitcher
+            plans={plans} activeId={planView === ALL_PLANS ? ALL_PLANS : 'current'}
+            onSelect={setPlanView}
+            addable={STYLES.map(s => ({ id: s.id, name: s.name, live: s.live }))}
+            onAdd={onAddStyle} accent="mint"
+          />
+        </div>
+
+        {/* slim running-machine reminder (keeps the result uncluttered) */}
+        <div className="hidden sm:block mb-2"><MechanismStrip variant="cotrade" slim /></div>
+
+        <SummaryStrip
+          starting={s?.starting_rs ?? capital}
+          endValue={s ? s.current_value_rs : null}
+          pnl={s ? s.total_pnl_rs : null}
+          retPct={s ? s.return_pct : null}
+          open={s ? s.n_open : (haveSim ? null : rows.length)}
+          cash={s ? s.cash_rs : cashLeft}
+          ddPct={s ? s.max_dd_pct : null}
+          haveCash={!!s}
+          deployedPct={s
+            ? (s.starting_rs > 0 ? ((s.starting_rs - s.cash_rs) / s.starting_rs) * 100 : 0)
+            : (capital > 0 ? (committed / capital) * 100 : 0)}
+          showDeployBar={!isReplay}
+          openNote={isReplay ? 'open at period end' : (s ? 'open now' : `${(capital > 0 ? (committed / capital) * 100 : 0).toFixed(0)}% deployed`)}
+          pending={simLoading}
+        />
+      </div>
+
+      {/* SCROLLABLE body */}
+      <div className="flex-1 min-h-0 md:overflow-y-auto px-5 md:px-7 pt-4 pb-8 [scrollbar-width:thin]">
+        {showAggregate ? (
+          // ── ALL PLANS — aggregate across styles (one live plan today) ──
+          <div className="flex flex-col gap-5 max-w-[1000px] mx-auto">
+            <AllPlansAggregate plans={plans} accent="mint" />
+            <AutoTradeBridge onAutoTrade={onAutoTrade} />
+          </div>
+        ) : !style.live ? (
+          <StylePendingCard style={style} />
+        ) : simLoading ? (
+          // ── SIMULATING — calm loading state (never fabricate while waiting) ──
+          <SimLoadingCard isReplay={isReplay} startDate={startDate} />
+        ) : simErr ? (
+          // ── HONEST failure — never invent a portfolio ──
+          <SimErrorCard isReplay={isReplay} />
+        ) : showReplayPending ? (
+          <ReplayPendingCard startDate={startDate} />
+        ) : haveSim && sim ? (
+          // ── REAL SIMULATION RESULT — summary/equity/positions/actions ──
+          <div className="flex flex-col gap-5 max-w-[1000px] mx-auto">
+            <SimResult sim={sim} capital={capital} isReplay={isReplay} startDate={startDate}
+                       tierBySymbol={tierBySymbol} holdDays={style.holdDays} onAnalyze={onAnalyze} />
+            <InspectDeeper sim={sim} persona={persona} loading={personaLoading} err={personaErr} onOpenRules={onOpenRules} />
+            <AutoTradeBridge onAutoTrade={onAutoTrade} />
+          </div>
+        ) : !data || rows.length === 0 ? (
+          <NoPicksCard />
+        ) : (
+          // ── FALLBACK (sim unavailable): client allocation preview only ──
+          <div className="flex flex-col gap-5 max-w-[1000px] mx-auto">
+            <LivePortfolio
+              rows={rows} perTrade={perTrade} anyEntryMissing={anyEntryMissing}
+              signalDate={data.signal_date} entryDate={data.entry_date ?? data.next_trading_day}
+              holdDays={style.holdDays} onAnalyze={onAnalyze}
+            />
+            <InspectDeeper sim={null} persona={persona} loading={personaLoading} err={personaErr} onOpenRules={onOpenRules} />
+            <AutoTradeBridge onAutoTrade={onAutoTrade} />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SUMMARY STRIP — compact. REAL computed values; honest "—/pending" otherwise.
+// ════════════════════════════════════════════════════════════════════════════
+function SummaryStrip({
+  starting, endValue, pnl, retPct, open, cash, ddPct,
+  haveCash, deployedPct, showDeployBar, openNote, pending,
+}: {
+  starting: number; endValue: number | null; pnl: number | null; retPct: number | null
+  open: number | null; cash: number; ddPct: number | null
+  haveCash: boolean; deployedPct: number; showDeployBar: boolean
+  openNote: string; pending: boolean
+}) {
+  // While simulating, every live number reads "…" (calm, never fabricated).
+  const note = pending ? 'simulating…' : 'pending'
+  const dash = pending ? '…' : '—'
+  return (
+    <div>
+      <div className="grid grid-cols-4 lg:grid-cols-7 rounded-[10px] border overflow-hidden"
+           style={{ borderColor: C.line, background: 'rgba(255,255,255,0.02)' }}>
+        <Cell label="Starting" value={fmtINR(starting)} real />
+        <Cell label="Current value"
+              value={endValue == null ? dash : fmtINR(endValue)}
+              note={endValue == null ? note : undefined} real={endValue != null} />
+        <Cell label="Total P&L" value={pnl == null ? dash : signedINR(pnl)}
+              note={pnl == null ? note : undefined}
+              real={pnl != null} tone={pnl == null ? undefined : pctTone(pnl)} />
+        <Cell label="Return %" value={pnl == null && retPct == null ? dash : fmtPct(retPct)}
+              note={retPct == null ? note : undefined}
+              real={retPct != null} tone={retPct == null ? undefined : pctTone(retPct)} />
+        <Cell label="Open" value={open == null ? dash : String(open)}
+              note={open == null ? note : openNote} real={open != null} />
+        <Cell label="Cash" value={haveCash ? fmtINR(cash) : (pending ? dash : fmtINR(cash))}
+              real={haveCash} note={haveCash ? undefined : (pending ? note : undefined)} />
+        <Cell label="Max Drawdown" value={ddPct == null ? dash : fmtPct(ddPct)}
+              note={ddPct == null ? note : undefined}
+              real={ddPct != null} tone={ddPct == null ? undefined : C.red} />
+      </div>
+      {showDeployBar && (
+        <div className="mt-1.5 h-1 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.06)' }}>
+          <div className="h-full rounded-full" style={{ width: `${Math.min(100, deployedPct)}%`, background: C.mint }} />
+        </div>
+      )}
+    </div>
+  )
+}
+function Cell({
+  label, value, note, real = false, tone,
+}: { label: string; value: string; note?: string; real?: boolean; tone?: string }) {
+  return (
+    <div className="px-2.5 py-1.5 border-t border-l first:border-l-0 [&:nth-child(5)]:border-t-0 lg:border-t-0 lg:[&:nth-child(5)]:border-l"
+         style={{ background: real ? 'rgba(63,227,164,0.05)' : undefined, borderColor: C.line }}>
+      <div className="text-[8.5px] uppercase tracking-[0.04em] leading-tight truncate" style={{ color: C.faint }}>{label}</div>
+      <div className="text-[13px] font-mono font-semibold tabular-nums leading-tight mt-0.5"
+           style={{ color: tone ?? (real ? C.ink : C.faint) }}>{value}</div>
+      {note && <div className="text-[8px] leading-tight" style={{ color: real ? C.mint : C.faint }}>{note}</div>}
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SIM RESULT — the REAL Co-Trading simulation. Big numbers + equity curve from
+//   `summary`/`equity`; positions from `positions`. A SIMULATION on EOD data:
+//   the `honesty` string is surfaced as a caption. NO fabricated values.
+// ════════════════════════════════════════════════════════════════════════════
+function SimResult({
+  sim, capital, isReplay, startDate, tierBySymbol, holdDays, onAnalyze,
+}: {
+  sim: CotradeSimulateResponse
+  capital: number; isReplay: boolean; startDate: string
+  tierBySymbol: Record<string, string | null>
+  holdDays: number; onAnalyze: (s: string) => void
+}) {
+  const s = sim.summary
+  const points = sim.equity
+    .filter(p => typeof p.equity_rs === 'number' && p.equity_rs > 0)
+    .map(p => ({ trade_date: p.date, total_equity: p.equity_rs }))
+  // Day-1 of a LIVE follow has ~no P&L yet — say so honestly.
+  const dayOne = !isReplay && Math.abs(s.total_pnl_rs) < 1 && s.n_closed === 0
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* PERFORMANCE HERO — REAL summary + equity curve */}
+      <div className="rounded-2xl border overflow-hidden" style={{ borderColor: C.line2, background: C.panel }}>
+        <div className="px-4 py-3 border-b flex items-center gap-2 flex-wrap" style={{ borderColor: C.line }}>
+          <h3 className="text-[15px] font-semibold" style={{ color: C.ink }}>
+            {isReplay ? 'How your Co-Trading plan would have performed' : 'Your Co-Trading portfolio'}
+          </h3>
+          <span className="text-[10.5px] rounded-full px-2 py-0.5" style={{ color: C.mint, background: C.mintDim }}>
+            simulation · EOD
+          </span>
+          <span className="ml-auto text-[10.5px] font-mono" style={{ color: C.faint }}>
+            {isReplay ? `${sim.start_date} → ${sim.end_date ?? sim.as_of}` : `as of ${sim.as_of}`}
+          </span>
+        </div>
+
+        {/* big hero numbers: start → current value */}
+        <div className="px-4 pt-4 pb-2 flex items-end gap-3 flex-wrap">
+          <div>
+            <div className="text-[9.5px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>Starting</div>
+            <div className="text-[22px] font-mono font-semibold tabular-nums leading-none" style={{ color: C.muted }}>{fmtCapital(s.starting_rs)}</div>
+          </div>
+          <span className="text-[18px] pb-0.5" style={{ color: C.faint }}>→</span>
+          <div>
+            <div className="text-[9.5px] uppercase tracking-[0.05em]" style={{ color: C.faint }}>{isReplay ? 'Ending value' : 'Current value'}</div>
+            <div className="text-[30px] md:text-[34px] font-mono font-semibold tabular-nums leading-none tracking-[-0.02em]"
+                 style={{ color: pctTone(s.total_pnl_rs) }}>
+              {fmtCapital(s.current_value_rs)}
+            </div>
+          </div>
+          <div className="ml-auto text-right">
+            <div className="text-[20px] md:text-[24px] font-mono font-semibold tabular-nums leading-none" style={{ color: pctTone(s.return_pct) }}>
+              {fmtPct(s.return_pct)}
+            </div>
+            <div className="text-[12px] font-mono tabular-nums mt-0.5" style={{ color: pctTone(s.total_pnl_rs) }}>
+              {signedINR(s.total_pnl_rs)}
+            </div>
+          </div>
+        </div>
+
+        {/* the EQUITY CURVE (REAL `equity` series from the sim) */}
+        <div className="px-3 pb-1">
+          {points.length >= 2 ? (
+            <EquityChart points={points} capitalStart={s.starting_rs} className="w-full" />
+          ) : (
+            <div className="px-2 py-6 text-[11.5px]" style={{ color: C.faint }}>
+              {dayOne
+                ? 'Your equity curve starts building from today — there’s only one EOD point so far. Check back after the next trading day.'
+                : 'Not enough EOD points to chart the equity curve yet.'}
+            </div>
+          )}
+        </div>
+
+        {/* secondary scannable stats — all REAL */}
+        <div className="grid grid-cols-3 lg:grid-cols-5 border-t" style={{ borderColor: C.line }}>
+          <Stat label="Max drawdown" value={fmtPct(s.max_dd_pct)} tone={C.red} />
+          <Stat label="Win rate" value={s.n_trades > 0 ? `${s.win_rate_pct.toFixed(0)}%` : '—'} />
+          <Stat label="Trades" value={String(s.n_trades)} />
+          <Stat label="Open" value={String(s.n_open)} />
+          <Stat label="Closed" value={String(s.n_closed)} />
+        </div>
+
+        {/* HONESTY caption — surfaced verbatim from the endpoint */}
+        <div className="px-4 py-2 border-t text-[9.5px] flex items-start gap-1.5" style={{ borderColor: C.line, color: C.amber }}>
+          {ICON.info(11)}
+          <span style={{ color: C.faint }}>
+            {sim.honesty || 'Simulation on EOD data — modelled entries/exits, not real fills.'}
+            {dayOne && ' Day one — P&L is ~0 until prices move.'}
+          </span>
+        </div>
+      </div>
+
+      {/* POSITIONS — REAL `positions` from the sim */}
+      <SimPositions positions={sim.positions} isReplay={isReplay}
+                    tierBySymbol={tierBySymbol} holdDays={holdDays} onAnalyze={onAnalyze} />
+    </div>
+  )
+}
+
+// ── Positions list — REAL sim positions (entry/qty/capital/SL/status/pnl). ────
+function SimPositions({
+  positions, isReplay, tierBySymbol, holdDays, onAnalyze,
+}: {
+  positions: CotradePosition[]; isReplay: boolean
+  tierBySymbol: Record<string, string | null>; holdDays: number
+  onAnalyze: (s: string) => void
+}) {
+  if (positions.length === 0) {
+    return (
+      <div className="rounded-2xl border p-5 text-[12.5px] leading-relaxed" style={{ borderColor: C.line2, background: C.panel, color: C.ink2 }}>
+        The simulation produced no positions for this window. Nothing is shown rather than anything fabricated.
+      </div>
+    )
+  }
+  const open   = positions.filter(p => p.status === 'open')
+  const closed = positions.filter(p => p.status === 'closed')
+  return (
+    <div className="rounded-2xl border overflow-hidden" style={{ borderColor: C.line2, background: C.panel }}>
+      <div className="px-4 py-3 border-b flex items-center gap-2 flex-wrap" style={{ borderColor: C.line }}>
+        <h3 className="text-[15px] font-semibold" style={{ color: C.ink }}>
+          {isReplay ? 'Positions Falcon would have taken' : 'Falcon selected your portfolio'}
+        </h3>
+        <span className="text-[11px]" style={{ color: C.faint }}>
+          {open.length} open{closed.length ? ` · ${closed.length} closed` : ''} · hold ~{holdDays}d
+        </span>
+      </div>
+      <div className="p-3 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        {[...open, ...closed].map((p, i) => (
+          <SimPositionCard key={`${p.symbol}-${p.entry_date}-${i}`} p={p}
+                           tier={p.tier ?? tierBySymbol[p.symbol] ?? null} onAnalyze={onAnalyze} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SimPositionCard({ p, tier, onAnalyze }: { p: CotradePosition; tier: string | null; onAnalyze: (s: string) => void }) {
+  const band = tierBand(tier)
+  const ts = TIER_STYLE[BAND_COLORKEY[band ?? ''] ?? 'gray'] ?? TIER_STYLE.gray
+  const isOpen = p.status === 'open'
+  return (
+    <div className="rounded-xl border p-3" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-[14px] font-semibold truncate" style={{ color: C.ink }}>{p.symbol}</span>
+        {band && (
+          <span className="text-[8.5px] font-semibold uppercase tracking-[0.04em] rounded px-1.5 py-0.5 shrink-0"
+                style={{ color: ts.color, background: ts.bg, boxShadow: `inset 0 0 0 1px ${ts.ring}` }}>
+            {band}
+          </span>
+        )}
+        <span className="ml-auto shrink-0 text-[9px] font-semibold uppercase tracking-[0.05em] rounded-full px-2 py-0.5"
+              style={isOpen
+                ? { color: C.mint,  background: 'rgba(63,227,164,0.12)', boxShadow: 'inset 0 0 0 1px rgba(63,227,164,0.4)' }
+                : { color: C.muted, background: 'rgba(255,255,255,0.06)', boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.12)' }}>
+          {isOpen ? 'Open' : 'Closed'}
+        </span>
+      </div>
+      <div className="flex items-center justify-between mb-2.5">
+        <div className="text-[10.5px] truncate" style={{ color: C.faint }}>{p.sector ?? '—'}</div>
+        <div className="text-[12px] font-mono font-semibold tabular-nums" style={{ color: pctTone(p.pnl_rs) }}>
+          {signedINR(p.pnl_rs)} <span className="text-[10px]" style={{ color: pctTone(p.pnl_pct) }}>({fmtPct(p.pnl_pct)})</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-1.5">
+        <Mini label="Capital" value={p.capital_rs > 0 ? fmtINR(p.capital_rs) : '—'} sub={p.qty > 0 ? `${p.qty} sh` : undefined} />
+        <Mini label="Entry" value={`₹${fmtNum(p.entry_price)}`} sub={p.entry_date} />
+        <Mini
+          label={isOpen ? 'Stop' : 'Exit'}
+          value={isOpen
+            ? (p.sl_level ? `₹${fmtNum(p.sl_level)}` : '—')
+            : (p.exit_price ? `₹${fmtNum(p.exit_price)}` : '—')}
+          sub={isOpen ? `${p.hold_days}d held` : (p.exit_date ?? undefined)}
+          tone={isOpen ? C.red : undefined}
+        />
+      </div>
+
+      <button type="button" onClick={() => onAnalyze(p.symbol)}
+              className="mt-2.5 w-full text-[11px] rounded-lg px-2 py-1.5 border inline-flex items-center justify-center gap-1"
+              style={{ borderColor: C.line2, color: C.muted }}>
+        Why this pick {ICON.arrow(11)}
+      </button>
+    </div>
+  )
+}
+
+// ── Falcon ACTIONS feed — REAL `actions` (entry/exit/trail/skip + reason). ────
+function SimActionsFeed({ actions }: { actions: CotradeAction[] }) {
+  if (!actions.length) {
+    return <div className="py-3 text-[11.5px]" style={{ color: C.faint }}>No actions recorded for this window yet.</div>
+  }
+  const tone: Record<CotradeAction['type'], string> = {
+    entry: C.mint, exit: C.ink2, trail: C.amber, skip: C.faint,
+  }
+  return (
+    <div className="mt-2 flex flex-col rounded-xl border overflow-hidden" style={{ borderColor: C.line, background: 'rgba(255,255,255,0.02)' }}>
+      {actions.slice(0, 60).map((a, i) => (
+        <div key={i} className="grid grid-cols-[auto_56px_1fr] gap-2 items-baseline px-3 py-2"
+             style={i > 0 ? { borderTop: `1px solid ${C.line}` } : undefined}>
+          <span className="text-[9.5px] font-mono tabular-nums" style={{ color: C.faint }}>{a.date}</span>
+          <span className="text-[9px] font-semibold uppercase tracking-[0.05em]" style={{ color: tone[a.type] }}>{a.type}</span>
+          <span className="text-[11.5px] leading-snug" style={{ color: C.ink2 }}>
+            <b style={{ color: C.ink }}>{a.symbol}</b>
+            {a.price > 0 && <span className="font-mono" style={{ color: C.muted }}> · ₹{fmtNum(a.price)}</span>}
+            {a.reason && <span style={{ color: C.faint }}> — {a.reason}</span>}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ── Sim loading / error states — calm + honest, never fabricated ─────────────
+function SimLoadingCard({ isReplay, startDate }: { isReplay: boolean; startDate: string }) {
+  return (
+    <div className="rounded-2xl border p-6 max-w-[640px] mx-auto flex items-center gap-3" style={{ borderColor: C.line2, background: C.panel }}>
+      <span className="w-2.5 h-2.5 rounded-full animate-pulse shrink-0" style={{ background: C.mint, boxShadow: `0 0 10px ${C.mint}` }} />
+      <div>
+        <h3 className="text-[14px] font-semibold" style={{ color: C.ink }}>
+          {isReplay ? `Simulating from ${startDate}…` : 'Building your portfolio…'}
+        </h3>
+        <p className="text-[12px] mt-1 leading-snug" style={{ color: C.faint }}>
+          Running the Co-Trading simulation on EOD data — modelled entries and exits, no live fills.
+        </p>
+      </div>
+    </div>
+  )
+}
+function SimErrorCard({ isReplay }: { isReplay: boolean }) {
+  return (
+    <div className="rounded-2xl border p-6 max-w-[640px] mx-auto" style={{ borderColor: 'rgba(232,115,107,0.3)', background: 'rgba(232,115,107,0.05)' }}>
+      <h3 className="text-[15px] font-semibold mb-2" style={{ color: C.ink }}>Couldn&apos;t run the simulation</h3>
+      <p className="text-[13px] leading-[1.6]" style={{ color: C.ink2 }}>
+        The Co-Trading simulation engine didn&apos;t respond just now, so there&apos;s nothing to show —
+        we never invent a portfolio. Go back and try again{isReplay ? ' (or pick a different date)' : ''}.
+        It reads from <span className="font-mono" style={{ color: C.muted }}>POST /api/power/cotrade/simulate</span>.
+      </p>
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// LIVE PORTFOLIO — "Falcon selected your Top 10" — clean visual cards.
+//   Per stock: symbol · tier · capital · entry · stop · STATUS pill.
+//   Status is HONEST: pre-open = "Queued for 9:15" / "Waiting"; live tracking
+//   (Hold/Trailing/Exit/P&L) is a Backend need — NEVER fabricated.
+// ════════════════════════════════════════════════════════════════════════════
+function LivePortfolio({
+  rows, perTrade, anyEntryMissing, signalDate, entryDate, holdDays, onAnalyze,
+}: {
+  rows: AllocRow[]; perTrade: number; anyEntryMissing: boolean
+  signalDate: string | null; entryDate: string | null; holdDays: number
+  onAnalyze: (s: string) => void
+}) {
+  const anyQuoteRef = rows.some(r => r.entrySource === 'quote')
+  return (
+    <div className="rounded-2xl border overflow-hidden" style={{ borderColor: C.line2, background: C.panel }}>
+      <div className="px-4 py-3 border-b flex items-center gap-2 flex-wrap" style={{ borderColor: C.line }}>
+        <h3 className="text-[15px] font-semibold" style={{ color: C.ink }}>Falcon selected your Top 10</h3>
+        <span className="text-[11px]" style={{ color: C.faint }}>
+          {fmtINR(perTrade)}/pick · ranked @ {signalDate ?? 'today'} EOD
+        </span>
+      </div>
+
+      {/* one-line Falcon caption (NOT a rules table) */}
+      <div className="px-4 py-2 border-b flex items-center gap-2 text-[11.5px]"
+           style={{ borderColor: C.line, color: C.muted, background: 'rgba(63,227,164,0.04)' }}>
+        <span style={{ color: C.mint }}>{ICON.flame(13)}</span>
+        Falcon will: enter at 9:15 ({entryDate ?? 'next open'}) · −7% stop · trail after +12% · exit by day {holdDays}.
+      </div>
+
+      {anyQuoteRef && (
+        <div className="px-4 py-2 text-[11px] flex items-center gap-2 border-b"
+             style={{ borderColor: C.line, color: C.amber, background: 'rgba(230,180,80,0.06)' }}>
+          {ICON.info(13)}
+          <span style={{ color: C.ink2 }}>
+            Where the signal payload had no entry price, we size off the <b style={{ color: C.ink }}>last EOD close</b>{' '}
+            as a reference (marked &quot;ref&quot;) — not a live tick and not a real fill. The actual fill is the 9:15 open.
+          </span>
+        </div>
+      )}
+
+      {anyEntryMissing && (
+        <div className="px-4 py-2 text-[11px] flex items-center gap-2 border-b"
+             style={{ borderColor: C.line, color: C.amber, background: 'rgba(230,180,80,0.06)' }}>
+          {ICON.info(13)}
+          <span style={{ color: C.ink2 }}>
+            Some entry prices aren&apos;t available from the signal payload or the EOD quote feed yet — those cards
+            show &quot;—&quot;. A live quote feed (Backend need) fills them in.
+          </span>
+        </div>
+      )}
+
+      {/* visual portfolio grid */}
+      <div className="p-3 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        {rows.map(r => <PositionCard key={r.pick.symbol} r={r} holdDays={holdDays} onAnalyze={onAnalyze} />)}
+      </div>
+    </div>
+  )
+}
+
+function PositionCard({ r, holdDays, onAnalyze }: { r: AllocRow; holdDays: number; onAnalyze: (s: string) => void }) {
+  const p = r.pick
+  const band = tierBand(p.signal_tier)
+  const ts = TIER_STYLE[BAND_COLORKEY[band ?? ''] ?? 'gray'] ?? TIER_STYLE.gray
+  return (
+    <div className="rounded-xl border p-3" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span className="font-mono text-[10px] shrink-0" style={{ color: C.faint }}>#{p.rank}</span>
+        <span className="text-[14px] font-semibold truncate" style={{ color: C.ink }}>{p.symbol}</span>
+        {band && (
+          <span className="text-[8.5px] font-semibold uppercase tracking-[0.04em] rounded px-1.5 py-0.5 shrink-0"
+                title={p.signal_tier_reason ?? undefined}
+                style={{ color: ts.color, background: ts.bg, boxShadow: `inset 0 0 0 1px ${ts.ring}` }}>
+            {band}
+          </span>
+        )}
+        {/* HONEST status pill — pre-open, not a fabricated live state */}
+        <span className="ml-auto shrink-0 text-[9px] font-semibold uppercase tracking-[0.05em] rounded-full px-2 py-0.5"
+              style={{ color: C.amber, background: 'rgba(230,180,80,0.12)', boxShadow: 'inset 0 0 0 1px rgba(230,180,80,0.4)' }}>
+          {r.entry == null ? 'Waiting' : 'Queued · 9:15'}
+        </span>
+      </div>
+      <div className="text-[10.5px] truncate mb-2.5" style={{ color: C.faint }}>{p.sector}</div>
+
+      <div className="grid grid-cols-3 gap-1.5">
+        <Mini label="Capital" value={r.capital > 0 ? fmtINR(r.capital) : '—'} />
+        <Mini
+          label={r.entrySource === 'quote' ? 'Entry (ref)' : 'Entry'}
+          value={r.entry == null ? '—' : `₹${fmtNum(r.entry)}`}
+          sub={
+            r.entrySource === 'quote'
+              ? `ref: last close${r.quoteAsOf ? ` · ${r.quoteAsOf}` : ''}`
+              : r.qty > 0 ? `${r.qty} sh` : undefined
+          }
+          tone={r.entrySource === 'quote' ? C.amber : undefined}
+        />
+        <Mini label="Stop" value={r.slPrice == null ? '—' : `₹${fmtNum(r.slPrice)}`} sub={`${r.slPct}%`} tone={C.red} />
+      </div>
+
+      <button type="button" onClick={() => onAnalyze(p.symbol)}
+              className="mt-2.5 w-full text-[11px] rounded-lg px-2 py-1.5 border inline-flex items-center justify-center gap-1"
+              style={{ borderColor: C.line2, color: C.muted }}>
+        Why this pick {ICON.arrow(11)}
+      </button>
+    </div>
+  )
+}
+function Mini({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: string }) {
+  return (
+    <div className="rounded-lg px-2 py-1.5" style={{ background: 'rgba(0,0,0,0.2)' }}>
+      <div className="text-[8.5px] uppercase tracking-[0.04em]" style={{ color: C.faint }}>{label}</div>
+      <div className="text-[12px] font-mono font-semibold tabular-nums leading-tight mt-0.5" style={{ color: tone ?? C.ink }}>{value}</div>
+      {sub && <div className="text-[8.5px] leading-tight" style={{ color: C.faint }}>{sub}</div>}
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Stat — small scannable metric cell (used by the SimResult hero).
+// ════════════════════════════════════════════════════════════════════════════
+function Stat({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  return (
+    <div className="px-3 py-2.5 border-l first:border-l-0" style={{ borderColor: C.line }}>
+      <div className="text-[14px] md:text-[16px] font-mono font-semibold tabular-nums leading-none" style={{ color: tone ?? C.ink }}>{value}</div>
+      <div className="text-[9px] uppercase tracking-[0.04em] mt-1" style={{ color: C.faint }}>{label}</div>
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// INSPECT DEEPER — the SINGLE expandable (collapsed). Year-by-year (real) +
+//   month drill (real) + a link to the rulebook slide-over. Nothing dense until
+//   the user opens it.
+// ════════════════════════════════════════════════════════════════════════════
+function InspectDeeper({
+  sim, persona, loading, err, onOpenRules,
+}: { sim: CotradeSimulateResponse | null; persona: PersonaBacktestResponse | null; loading: boolean; err: boolean; onOpenRules: () => void }) {
+  return (
+    <details className="group rounded-2xl border overflow-hidden" style={{ borderColor: C.line2, background: C.panel }}>
+      <summary className="list-none cursor-pointer flex items-center gap-2 px-4 py-3 select-none">
+        <span className="text-[13px] font-semibold" style={{ color: C.ink }}>Inspect deeper</span>
+        <span className="text-[10.5px]" style={{ color: C.faint }}>
+          {sim ? 'Falcon actions · year-by-year · the rulebook' : 'year-by-year · months · the rulebook'}
+        </span>
+        <span className="ml-auto transition-transform group-open:rotate-180" style={{ color: C.faint }}>{ICON.chevron(16)}</span>
+      </summary>
+      <div className="px-4 pb-4 border-t" style={{ borderColor: C.line }}>
+        {/* Falcon ACTIONS feed — REAL `actions` from the sim (kept behind the
+            expand so the result stays calm). */}
+        {sim && (
+          <>
+            <div className="mt-3 text-[11px] uppercase tracking-[0.05em] mb-1 flex items-center gap-2" style={{ color: C.faint }}>
+              Falcon actions
+              <span className="text-[9px] normal-case tracking-normal" style={{ color: C.faint }}>entry · exit · trail · skip — simulated on EOD data</span>
+            </div>
+            <SimActionsFeed actions={sim.actions} />
+          </>
+        )}
+
+        {/* rulebook link */}
+        <button type="button" onClick={onOpenRules}
+                className="w-full mt-3 mb-1 flex items-center gap-2.5 rounded-xl px-3 py-2.5 border transition-colors text-left"
+                style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+          <span className="grid place-items-center w-7 h-7 rounded-lg shrink-0" style={{ background: C.mintDim, color: C.mint }}>{ICON.book(15)}</span>
+          <span className="min-w-0">
+            <span className="block text-[12.5px] font-semibold leading-tight" style={{ color: C.ink }}>How Falcon manages your money</span>
+            <span className="block text-[10.5px]" style={{ color: C.faint }}>Entry · sizing · stop · trailing · the full cycle.</span>
+          </span>
+          <span className="ml-auto shrink-0" style={{ color: C.faint }}>{ICON.arrow(13)}</span>
+        </button>
+
+        <div className="mt-3 text-[11px] uppercase tracking-[0.05em] mb-1" style={{ color: C.faint }}>Year-by-year</div>
+        <YearByYearTable persona={persona} loading={loading} err={err} />
+
+        <details className="group/r mt-3 border-t" style={{ borderColor: C.line }}>
+          <summary className="list-none cursor-pointer flex items-center gap-2 py-2.5 select-none">
+            <span className="text-[11.5px] font-semibold" style={{ color: C.muted }}>Risk &amp; how to read this</span>
+            <span className="ml-auto transition-transform group-open/r:rotate-180" style={{ color: C.faint }}>{ICON.chevron(14)}</span>
+          </summary>
+          <p className="text-[10.5px] leading-snug pb-2" style={{ color: C.faint }}>{RISK_DISCLOSURE}</p>
+        </details>
+      </div>
+    </details>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TRADING-RULES SLIDE-OVER — the ONE place all rules content lives. In-flow
+//   faux-overlay (absolute inset-0, NOT position:fixed) so the viewport-lock is
+//   untouched. 100% STATIC documented strategy facts — no performance numbers.
+// ════════════════════════════════════════════════════════════════════════════
+function RulesSlideOver({
+  perTrade, capital, onClose,
+}: { perTrade: number; capital: number; onClose: () => void }) {
+  return (
+    <div className="absolute inset-0 z-40 flex justify-end">
+      <button type="button" aria-label="Close trading rules" onClick={onClose}
+              className="absolute inset-0" style={{ background: 'rgba(0,0,0,0.55)' }} />
+      <div className="relative h-full w-full max-w-[520px] border-l flex flex-col shadow-[0_0_80px_-20px_rgba(0,0,0,0.8)]"
+           style={{ background: C.panel, borderColor: C.line2 }}>
+        <div className="shrink-0 flex items-center gap-2.5 px-5 py-3.5 border-b" style={{ borderColor: C.line }}>
+          <span className="grid place-items-center w-7 h-7 rounded-lg shrink-0" style={{ background: C.mintDim, color: C.mint }}>{ICON.book(15)}</span>
+          <div className="min-w-0">
+            <div className="text-[15px] font-semibold leading-tight" style={{ color: C.ink }}>How Falcon manages your money</div>
+            <div className="text-[11px]" style={{ color: C.faint }}>Exactly how Falcon Top 10 Swing works.</div>
+          </div>
+          <button type="button" onClick={onClose} className="ml-auto shrink-0 grid place-items-center w-8 h-8 rounded-lg border"
+                  style={{ borderColor: C.line2, color: C.muted }}>{ICON.close(15)}</button>
+        </div>
+
+        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 flex flex-col gap-5 [scrollbar-width:thin]">
+          <section>
+            <RulesSectionHead n={1} title="The rules" />
+            <div className="flex flex-col rounded-xl border overflow-hidden" style={{ borderColor: C.line2, background: 'rgba(255,255,255,0.02)' }}>
+              {VIRTUAL_RULES.map((r, i) => (
+                <div key={r.title} className="flex items-start gap-2.5 px-3 py-2.5" style={i > 0 ? { borderTop: `1px solid ${C.line}` } : undefined}>
+                  <span className="grid place-items-center w-6 h-6 rounded-md shrink-0 mt-px" style={{ background: C.mintDim, color: C.mint }}>{ICON[r.icon](12)}</span>
+                  <div className="min-w-0">
+                    <div className="text-[12.5px] font-semibold leading-tight" style={{ color: C.ink }}>{r.title}</div>
+                    <div className="text-[11.5px] leading-snug mt-0.5" style={{ color: C.ink2 }}>{r.body}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+          <section>
+            <RulesSectionHead n={2} title="Capital model — fixed allocation" />
+            <CapitalModel perTrade={perTrade} capital={capital} />
+          </section>
+          <section>
+            <RulesSectionHead n={3} title="What this trader does" />
+            <WhatThisTraderDoes />
+          </section>
+          <section>
+            <RulesSectionHead n={4} title="The trading cycle" />
+            <TradingCycle />
+          </section>
+        </div>
+
+        <div className="shrink-0 px-5 py-3 border-t" style={{ borderColor: C.line }}>
+          <button type="button" onClick={onClose} className="w-full rounded-xl px-4 py-2 text-[13px] font-semibold" style={{ background: C.mint, color: '#06130c' }}>
+            Got it
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+function RulesSectionHead({ n, title }: { n: number; title: string }) {
+  return (
+    <div className="flex items-baseline gap-2 mb-2">
+      <span className="grid place-items-center w-4 h-4 rounded-full text-[10px] font-mono font-semibold shrink-0" style={{ background: C.mintDim, color: C.mint }}>{n}</span>
+      <h4 className="text-[12.5px] font-semibold" style={{ color: C.ink }}>{title}</h4>
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// AUTOTRADE BRIDGE
+// ════════════════════════════════════════════════════════════════════════════
+function AutoTradeBridge({ onAutoTrade }: { onAutoTrade: () => void }) {
+  return (
+    <div className="rounded-2xl border p-4" style={{ borderColor: 'rgba(63,227,164,0.25)', background: 'rgba(63,227,164,0.05)' }}>
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className="grid place-items-center w-7 h-7 rounded-lg shrink-0" style={{ background: C.mintDim, color: C.mint }}>{ICON.bot(15)}</span>
+        <h3 className="text-[13.5px] font-semibold" style={{ color: C.ink }}>Ready to automate?</h3>
+      </div>
+      <p className="text-[12px] leading-[1.5] mb-3" style={{ color: C.ink2 }}>
+        Connect your broker to automate eligible Falcon trades. AutoTrade places and manages these
+        entries for you — once you&apos;ve seen the strategy work.
+      </p>
+      <button type="button" onClick={onAutoTrade}
+              className="w-full inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-[13px] font-semibold transition-colors"
+              style={{ background: C.mint, color: '#06130c' }}>
+        Connect a broker {ICON.arrow(13)}
+      </button>
+      <p className="text-[10px] mt-2 text-center" style={{ color: C.faint }}>AutoTrade is Launch-Pending.</p>
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PERSONA (REAL BACKTEST) HELPERS — narrow the typed summary/yearly/monthly.
+// ════════════════════════════════════════════════════════════════════════════
+function personaYearly(p: PersonaBacktestResponse | null): PersonaYearly[] {
+  return (p?.yearly ?? []) as unknown as PersonaYearly[]
+}
+function personaMonthly(p: PersonaBacktestResponse | null): PersonaMonthly[] {
+  return (p?.monthly ?? []) as unknown as PersonaMonthly[]
+}
+/** Winning months per year — DERIVED from the real monthly returns (count > 0). */
+function winningMonths(months: PersonaMonthly[], year: number): { wins: number; total: number } {
+  const ms = months.filter(m => m.year === year)
+  return { wins: ms.filter(m => m.return_pct > 0).length, total: ms.length }
+}
+
+// The operator-supplied RISK DISCLOSURE, shown VERBATIM as a static caveat.
+const RISK_DISCLOSURE =
+  'Risk disclosure: backtested on 2021–2026 data only. It has NOT been crash-tested ' +
+  'against 2008, 2015 or 2020 conditions. 2021 is a small 15-trade sample. Returns ' +
+  'include real intra-year drawdowns (e.g. −15.59% in 2025). Past simulated performance ' +
+  'is not a guarantee of future results. This is virtual capital, not financial advice.'
+
+// ════════════════════════════════════════════════════════════════════════════
+// YEAR-BY-YEAR TABLE — REAL `yearly`; click a year → REAL months.
+// ════════════════════════════════════════════════════════════════════════════
+function YearByYearTable({
+  persona, loading, err,
+}: { persona: PersonaBacktestResponse | null; loading: boolean; err: boolean }) {
+  const [openYear, setOpenYear] = useState<number | null>(null)
+  const yearly  = personaYearly(persona)
+  const monthly = personaMonthly(persona)
+
+  if (loading) return <div className="py-4 text-[12px]" style={{ color: C.faint }}>Loading the real backtest…</div>
+  if (err || !persona || yearly.length === 0)
+    return <div className="py-4 text-[12px]" style={{ color: C.ink2 }}>No year-by-year backtest available right now.</div>
+
+  return (
+    <div className="mt-2">
+      <div className="grid grid-cols-[0.7fr_1fr_1fr_1fr_0.8fr] gap-2 px-2 py-1.5 text-[10px] uppercase tracking-[0.04em]" style={{ color: C.faint }}>
+        <span>Year</span><span className="text-right">Return</span><span className="text-right">Max DD</span>
+        <span className="text-right">Win months</span><span className="text-right">Trades</span>
+      </div>
+      <div className="flex flex-col">
+        {yearly.map(y => {
+          const wm = winningMonths(monthly, y.year)
+          const isOpen = openYear === y.year
+          return (
+            <div key={y.year} className="border-t" style={{ borderColor: C.line }}>
+              <button type="button" onClick={() => setOpenYear(o => (o === y.year ? null : y.year))}
+                      className="w-full grid grid-cols-[0.7fr_1fr_1fr_1fr_0.8fr] gap-2 px-2 py-2 items-center text-left">
+                <span className="text-[12.5px] font-semibold flex items-center gap-1" style={{ color: C.ink }}>
+                  <span style={{ color: C.faint, transition: 'transform .15s', transform: isOpen ? 'rotate(90deg)' : undefined }}>{ICON.chevronR(11)}</span>
+                  {y.year}
+                </span>
+                <span className="text-right font-mono tabular-nums text-[12.5px]" style={{ color: pctTone(y.return_pct) }}>{fmtPct(y.return_pct)}</span>
+                <span className="text-right font-mono tabular-nums text-[12.5px]" style={{ color: C.red }}>{fmtPct(y.max_dd_pct)}</span>
+                <span className="text-right font-mono tabular-nums text-[12.5px]" style={{ color: C.ink2 }}>{wm.total ? `${wm.wins}/${wm.total}` : '—'}</span>
+                <span className="text-right font-mono tabular-nums text-[12.5px]" style={{ color: C.ink2 }}>{y.n_closed}</span>
+              </button>
+              {isOpen && (
+                <div className="px-2 pb-2.5">
+                  <div className="rounded-lg border overflow-hidden" style={{ borderColor: C.line, background: 'rgba(255,255,255,0.02)' }}>
+                    <div className="grid grid-cols-[1fr_1fr_1fr] gap-2 px-2.5 py-1.5 text-[9.5px] uppercase tracking-[0.04em] border-b" style={{ borderColor: C.line, color: C.faint }}>
+                      <span>Month</span><span className="text-right">Return</span><span className="text-right">End equity</span>
+                    </div>
+                    {monthly.filter(m => m.year === y.year).sort((a, b) => a.month.localeCompare(b.month)).map(m => (
+                      <div key={m.month} className="grid grid-cols-[1fr_1fr_1fr] gap-2 px-2.5 py-1.5 text-[11.5px] border-t" style={{ borderColor: C.line }}>
+                        <span className="font-mono" style={{ color: C.muted }}>{m.month}</span>
+                        <span className="text-right font-mono tabular-nums" style={{ color: pctTone(m.return_pct) }}>{fmtPct(m.return_pct)}</span>
+                        <span className="text-right font-mono tabular-nums" style={{ color: C.ink2 }}>{fmtINR(m.end_equity)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[9.5px] mt-1.5" style={{ color: C.faint }}>
+                    Per-position drawdown isn&apos;t in the monthly rows — month-level max DD is a Backend need.
+                  </p>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// CAPITAL MODEL / WHAT THIS TRADER DOES / TRADING CYCLE — STATIC (rules slide-over).
+// ════════════════════════════════════════════════════════════════════════════
+function CapitalModel({ perTrade, capital }: { perTrade: number; capital: number }) {
+  const lines = [
+    'Fixed ₹ per trade — every pick gets the same allocation, regardless of rank.',
+    'No intra-year compounding — profits do NOT raise the per-stock allocation mid-year.',
+    'Each yearly backtest starts fresh from a ₹5,00,000 book.',
+    'Your virtual capital scales that fixed allocation proportionally (₹50k per pick at ₹5 L).',
+  ]
+  return (
+    <div className="mt-3 flex flex-col gap-1.5">
+      {lines.map((l, i) => (
+        <div key={i} className="flex items-start gap-2 text-[12px] leading-snug" style={{ color: C.ink2 }}>
+          <span className="mt-[6px] w-[5px] h-[5px] rounded-full shrink-0" style={{ background: C.mint }} />
+          <span>{l}</span>
+        </div>
+      ))}
+      <div className="mt-2 rounded-lg border px-3 py-2 text-[11.5px]" style={{ borderColor: C.line, background: 'rgba(63,227,164,0.04)', color: C.muted }}>
+        At your <b style={{ color: C.ink }}>{fmtCapital(capital)}</b> capital that is{' '}
+        <b style={{ color: C.mint }}>{fmtINR(perTrade)}</b> per pick × up to 10 names ={' '}
+        <b style={{ color: C.ink }}>{fmtINR(perTrade * TOP_N)}</b> fully deployed.
+      </div>
+    </div>
+  )
+}
+function WhatThisTraderDoes() {
+  return (
+    <p className="mt-3 text-[12.5px] leading-[1.6]" style={{ color: C.ink2 }}>
+      This trader ranks every stock by <b style={{ color: C.ink }}>avg_lift</b> — the average edge a name shows per
+      pattern fire (sum_lift ÷ pattern fires) — and only takes names that clear at least{' '}
+      <b style={{ color: C.ink }}>10 confluent patterns</b>. It buys all ten at{' '}
+      <b style={{ color: C.ink }}>₹50k each</b>, puts a <b style={{ color: C.ink }}>−7% stop-loss</b> on every
+      position, lets winners run with a <b style={{ color: C.ink }}>+12% trailing stop</b>, and never holds past{' '}
+      <b style={{ color: C.ink }}>7 trading days</b>. Simple, disciplined, repeatable.
+    </p>
+  )
+}
+function TradingCycle() {
+  return (
+    <ol className="mt-3 flex flex-col gap-2 m-0 p-0 list-none">
+      {TRADING_CYCLE.map((step, i) => (
+        <li key={i} className="flex items-start gap-2.5">
+          <span className="grid place-items-center w-5 h-5 rounded-full text-[10px] font-mono font-semibold shrink-0 mt-px" style={{ background: C.mintDim, color: C.mint }}>{i + 1}</span>
+          <span className="text-[12px] leading-snug" style={{ color: C.ink2 }}>{step}</span>
+        </li>
+      ))}
+    </ol>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Empty / replay-pending / style-pending states
+// ════════════════════════════════════════════════════════════════════════════
+function StylePendingCard({ style }: { style: Style }) {
+  return (
+    <div className="rounded-2xl border p-6 max-w-[640px] mx-auto" style={{ borderColor: C.line2, background: C.panel }}>
+      <span className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.08em] rounded-md px-2 py-1 mb-3"
+            style={{ color: C.mint, background: C.mintDim, border: '1px solid rgba(63,227,164,0.3)' }}>
+        <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: C.mint }} />
+        Launch Pending
+      </span>
+      <h3 className="text-[16px] font-semibold mb-2" style={{ color: C.ink }}>{style.name}</h3>
+      <p className="text-[13px] leading-[1.6]" style={{ color: C.ink2 }}>
+        A {style.hold} engine for this style isn&apos;t live yet — we won&apos;t allocate virtual capital against
+        picks we haven&apos;t validated. Go back and choose <b style={{ color: C.ink }}>Falcon Top 10 Swing</b>.
+      </p>
+    </div>
+  )
+}
+function NoPicksCard() {
+  return (
+    <div className="rounded-2xl border p-6 max-w-[640px] mx-auto" style={{ borderColor: C.line2, background: C.panel }}>
+      <h3 className="text-[15px] font-semibold mb-2" style={{ color: C.ink }}>No live Top 10 to allocate</h3>
+      <p className="text-[13px] leading-[1.6]" style={{ color: C.ink2 }}>
+        We couldn&apos;t load today&apos;s Falcon Top 10 from the engine, so there&apos;s nothing to allocate yet.
+        This is a live-data view — try again after the next end-of-day cycle.
+      </p>
+    </div>
+  )
+}
+function ReplayPendingCard({ startDate }: { startDate: string }) {
+  return (
+    <div className="rounded-2xl border p-6 max-w-[640px] mx-auto" style={{ borderColor: 'rgba(230,180,80,0.3)', background: 'rgba(230,180,80,0.04)' }}>
+      <span className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.08em] rounded-md px-2 py-1 mb-3"
+            style={{ color: C.amber, background: 'rgba(230,180,80,0.12)' }}>
+        replay · backend pending
+      </span>
+      <h3 className="text-[15px] font-semibold mb-2" style={{ color: C.ink }}>Replay for {startDate} isn&apos;t available yet</h3>
+      <p className="text-[13px] leading-[1.6]" style={{ color: C.ink2 }}>
+        The engine doesn&apos;t have point-in-time Top 10 picks for that date through this view. A full
+        walk-forward replay — how Falcon would have managed your capital from that day, using only
+        information available then (no look-ahead) — needs the Co-Trading simulation backend.
+      </p>
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Local helper (formatters / icons now come from the shared cotrade-kit)
+// ════════════════════════════════════════════════════════════════════════════
+function perTradeFor(capital: number): number {
+  return Math.max(0, (capital / BASE_CAPITAL) * BASE_PER_TRADE)
+}

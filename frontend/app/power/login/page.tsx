@@ -41,9 +41,10 @@ export default function LoginPage() {
       const result = await loginWithInviteCode(cleanEmail, code.trim())
       await storeSessionJWT(result.jwt)
       // After-login destination: admins go to /power/admin (their landing),
-      // everyone else to /power/today. The router.push will hit the server
-      // and the layout will re-render with the new auth cookie.
-      const dest = result.user.role === 'admin' ? '/power/admin' : '/power/today'
+      // everyone else to /power/ask (the new AI-native shell home). The
+      // router.push will hit the server and the layout will re-render with the
+      // new auth cookie. (Legacy /power/today stays reachable from the shell.)
+      const dest = result.user.role === 'admin' ? '/power/admin' : '/power/ask'
       router.push(dest)
       router.refresh()
     } catch (e) {
@@ -61,7 +62,7 @@ export default function LoginPage() {
       <h1 className="text-2xl md:text-3xl font-bold mb-2">Sign in</h1>
       <p className="text-sm text-neutral-400 mb-6">
         Power User beta {'—'} invite only. Enter your email and the invite code your admin shared.
-        Returning users can leave the code field blank.
+        Your invite code is required every time you sign in. Admins sign in with the admin secret.
       </p>
 
       {expired && (
@@ -86,7 +87,7 @@ export default function LoginPage() {
           />
         </Field>
 
-        <Field label="Invite code" hint="kn-2026-xxxxxx (leave blank if you're a returning user)">
+        <Field label="Invite code" hint="kn-2026-xxxxxx — required every sign-in (admins: enter the admin secret)">
           <input
             type="text"
             inputMode="text"

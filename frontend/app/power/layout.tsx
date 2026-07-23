@@ -7,10 +7,22 @@
 import Link from 'next/link'
 import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
+import { headers } from 'next/headers'
 import { getCurrentUser } from '@/lib/power-auth'
 import { UserMenu } from '@/components/power/UserMenu'
 import { FalconNavLinks } from '@/components/power/FalconNavLinks'
 import { CompassLogo } from '@/components/power/CompassLogo'
+
+/**
+ * Routes that own their own chrome (the Falcon AI-native left-nav AppShell,
+ * route group app/power/(app)/*). For these we render `children` raw so the
+ * AppShell's full-screen left rail isn't double-wrapped by the public TopBar +
+ * max-w-7xl main below. Legacy /power/* routes are unaffected.
+ */
+const SHELL_PREFIXES = [
+  '/power/ask', '/power/signals', '/power/co-trading', '/power/autotrade',
+  '/power/performance', '/power/plans', '/power/account', '/power/learn',
+]
 
 export const metadata: Metadata = {
   title: 'KANIDA.AI — Engineered Edge for Indian Equities',
@@ -19,6 +31,13 @@ export const metadata: Metadata = {
 }
 
 export default async function PowerLayout({ children }: { children: ReactNode }) {
+  // The Falcon AI shell routes render their own chrome — pass through raw so the
+  // public TopBar/Footer don't double-wrap the left-nav AppShell.
+  const pathname = (await headers()).get('x-pathname') ?? ''
+  if (SHELL_PREFIXES.some(p => pathname === p || pathname.startsWith(p + '/'))) {
+    return <>{children}</>
+  }
+
   const user = await getCurrentUser()
   return (
     <div className="min-h-screen bg-black text-neutral-100">

@@ -3,6 +3,27 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  /* Falcon F2 "Ask Falcon" home tokens — defined HERE (in the compiling :root,
+     alongside --background) because a separate bare :root block after @theme
+     was being dropped by the bundler, leaving every var(--f2-*) undefined. */
+  --f2-canvas:  #0a100e;
+  --f2-panel:   #0c1310;
+  --f2-card:    #111b16;
+  --f2-card-2:  #0f1814;
+  --f2-mint:    #3fe3a4;
+  --f2-mint-hi: #5aecb5;
+  --f2-mint-dim: rgba(63, 227, 164, 0.10);
+  --f2-ink:    #e9f2ec;
+  --f2-ink-2:  #c2d0c9;
+  --f2-muted:  #859990;
+  --f2-faint:  #5b6c64;
+  --f2-line:   rgba(255, 255, 255, 0.065);
+  --f2-line-2: rgba(255, 255, 255, 0.10);
+  --f2-amber:  #e6b450;
+  --f2-teal:   #4bcbe0;
+  --f2-tier-green: #3fe3a4;
+  --f2-slate:  #8595a0;
+  --f2-red:    #e8736b;
 }
 
 @theme inline {
@@ -36,6 +57,33 @@
   --color-mint-300: #5aecb5;
   --color-mint-400: #3fe3a4;
   --color-mint-500: #2bd392;
+}
+
+/* ── Falcon F2 "Ask Falcon" home tokens (2026-06-20) ───────────────────────
+   The F2 master-detail design (docs/design/handoff_ask_falcon_home/) uses a
+   richer green-tinted palette than the generic neutral scale. These are LOCKED
+   to the handoff README "Design Tokens" table and consumed via arbitrary-value
+   Tailwind classes (e.g. bg-[var(--f2-panel)]) in components/power/ask/*.
+   They do NOT introduce a new accent — mint (#3FE3A4) remains the only accent. */
+:root {
+  --f2-canvas:  #0a100e;
+  --f2-panel:   #0c1310;
+  --f2-card:    #111b16;
+  --f2-card-2:  #0f1814;
+  --f2-mint:    #3fe3a4;
+  --f2-mint-hi: #5aecb5;
+  --f2-mint-dim: rgba(63, 227, 164, 0.10);
+  --f2-ink:    #e9f2ec;
+  --f2-ink-2:  #c2d0c9;
+  --f2-muted:  #859990;
+  --f2-faint:  #5b6c64;
+  --f2-line:   rgba(255, 255, 255, 0.065);
+  --f2-line-2: rgba(255, 255, 255, 0.10);
+  --f2-amber:  #e6b450;   /* GOLD tier */
+  --f2-teal:   #4bcbe0;   /* PREMIUM tier */
+  --f2-tier-green: #3fe3a4; /* ENTERPRISE tier */
+  --f2-slate:  #8595a0;   /* STANDARD tier */
+  --f2-red:    #e8736b;   /* losses / AVOID only */
 }
 
 @media (prefers-color-scheme: dark) {

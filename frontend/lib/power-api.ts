@@ -35,6 +35,29 @@ function apiBase(): string {
 export type Tier      = 'ELITE' | 'HIGH' | 'MID' | 'LOWER' | 'TAIL'
 export type TierColor = 'amber' | 'green' | 'yellow' | 'orange' | 'gray' | 'red'
 
+// One row of the deeper ranked list (GET /api/power/today/falcon-ranked).
+export type FalconRankedPick = {
+  rank: number
+  symbol: string
+  sector: string | null
+  score: number | null
+  n_fires: number | null
+  avg_lift: number | null
+  close_at_signal: number | null
+  signal_tier?: string | null
+  signal_tier_color?: TierColor | null
+  signal_tier_reason?: string | null
+  signal_day_ret_pct?: number | null
+  two_day_ret_pct?: number | null
+}
+export type FalconRankedResponse = {
+  signal_date: string | null
+  universe: string
+  sector: string | null
+  count: number
+  picks: FalconRankedPick[]
+}
+
 // v2: signal-time tier (distinct axis from the rank `tier`). Derived from
 // signal-day price + volume (see backend signal_tier.py).
 export type SignalTier =
@@ -249,7 +272,7 @@ export class PowerAPIError extends Error {
 // ──────────────────────────────────────────────────────────────────────────
 
 type FetchOpts = {
-  method?: 'GET' | 'POST' | 'DELETE'
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'
   body?:   unknown
   jwt?:    string | null
   signal?: AbortSignal
@@ -689,10 +712,321 @@ export type CancelSubscriptionResponse = {
 }
 
 
+// Ask-Falcon home — universe symbols, EOD quotes, single-stock analysis
+// (LIVE 2026-06-22). Verified shapes from the backend handoff.
+// ──────────────────────────────────────────────────────────────────────────
+
+/** One entry from GET /api/power/universe/symbols.
+ *  `name == symbol` today (no company-name field yet on the backend). */
+export type UniverseSymbol = {
+  symbol: string
+  name:   string
+  sector: string | null
+}
+
+export type UniverseSymbolsResponse = {
+  as_of:   string
+  count:   number
+  symbols: UniverseSymbol[]
+}
+
+/** One symbol's EOD quote from GET /api/power/quote?symbols=…
+ *  HONESTY: `last_close` is the LAST EOD CLOSE, never a live intraday tick. */
+export type Quote = {
+  last_close: number
+  prev_close: number
+  as_of:      string
+}
+
+/** GET /api/power/quote → keyed by symbol. Missing symbols are simply absent. */
+export type QuoteResponse = Record<string, Quote>
+
+/** GET /api/power/ask/analyze-stock?symbol=… — single-stock explainability.
+ *  All fields are server-authored prose / labels (no fabricated numbers). */
+export type AnalyzeStockResponse = {
+  symbol:                       string
+  name:                         string
+  sector:                       string | null
+  as_of:                        string
+  current_trend:                string
+  recent_price_movement:        string
+  recent_volume_behavior:       string
+  signal_day_movement:          string
+  sector_performance:           string
+  falcon_pattern_observations:  string
+  tier:                         string | null
+  tier_reason:                  string | null
+  entry_context:                string
+  risk_warnings:                string[]
+  explanation:                  string
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Co-Trading SIMULATION — POST /api/power/cotrade/simulate (LIVE 2026-06-22).
+// A SIMULATION on EOD data: modelled entries/exits, NOT real fills. The response
+// carries an honesty string the UI must surface. Verified shape from the backend
+// handoff. NOT the live auto-trade path — this is the user's virtual portfolio.
+// ──────────────────────────────────────────────────────────────────────────
+
+export type CotradeSimulateRequest = {
+  style:       string            // 'falcon-top-10'
+  capital:     number            // user's virtual book in ₹
+  start_date:  string            // 'YYYY-MM-DD' (live ≈ today)
+  end_date?:   string            // 'YYYY-MM-DD' (replay window end; omit for live)
+}
+
+export type CotradeSummary = {
+  starting_rs:      number
+  current_value_rs: number
+  total_pnl_rs:     number
+  return_pct:       number
+  max_dd_pct:       number
+  n_open:           number
+  n_closed:         number
+  cash_rs:          number
+  win_rate_pct:     number
+  n_trades:         number
+}
+
+export type CotradePosition = {
+  symbol:      string
+  sector:      string | null
+  tier:        string | null     // may be null → join to signal_tier surface if possible, else no badge
+  entry_date:  string
+  entry_price: number
+  qty:         number
+  capital_rs:  number
+  sl_level:    number
+  status:      'open' | 'closed'
+  exit_date?:  string | null
+  exit_price?: number | null
+  pnl_rs:      number
+  pnl_pct:     number
+  hold_days:   number
+  last_close:  number
+}
+
+export type CotradeEquityPoint = {
+  date:      string
+  equity_rs: number
+}
+
+export type CotradeAction = {
+  date:   string
+  type:   'entry' | 'exit' | 'trail' | 'skip'
+  symbol: string
+  price:  number
+  reason: string
+}
+
+export type CotradeSimulateResponse = {
+  style:        string
+  start_date:   string
+  end_date:     string | null
+  as_of:        string
+  honesty:      string           // surface this verbatim — it's a SIMULATION on EOD data
+  last_updated: string
+  summary:      CotradeSummary
+  positions:    CotradePosition[]
+  equity:       CotradeEquityPoint[]
+  actions:      CotradeAction[]
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// AutoTrade P&L (strategy-level performance) — CONTRACT
+//   GET /api/power/autotrade/pnl/summary?period=&from=&to=&mode=   (Bearer)
+//   GET /api/power/autotrade/pnl/export.csv?period=&from=&to=&mode= (Bearer)
+// net = gross − charges throughout. Empty period → strategies:[] + zeroed totals.
+// A strategy may span multiple segments/products; `segment`/`product` are the
+// primary display value, `segments`/`products` the full set for filtering.
+// ──────────────────────────────────────────────────────────────────────────
+
+export type PnlPeriod = 'yesterday' | '1w' | '2w' | 'mtd' | 'ytd' | 'custom'
+export type PnlMode   = 'live' | 'paper'
+export type PnlKind   = 'session' | 'campaign'
+
+export type PnlBestWorst = { pnl: number; label: string }
+
+export type PnlSession = {
+  id:         string
+  kind:       PnlKind
+  name:       string
+  date_label: string
+  net:        number
+  gross:      number
+  charges:    number
+  trades:     number
+  win_rate:   number
+  segment:    string
+  product:    string
+}
+
+export type PnlStrategy = {
+  id:       string
+  name:     string
+  segment:  string
+  segments: string[]
+  product:  string
+  products: string[]
+  net:      number
+  gross:    number
+  charges:  number
+  trades:   number
+  wins:     number
+  losses:   number
+  win_rate: number
+  avg:      number
+  best:     PnlBestWorst
+  worst:    PnlBestWorst
+  sessions: PnlSession[]
+}
+
+export type PnlTotals = {
+  net:      number
+  gross:    number
+  charges:  number
+  trades:   number
+  wins:     number
+  losses:   number
+  win_rate: number
+}
+
+export type AutotradePnlSummary = {
+  period:           PnlPeriod
+  from:             string | null
+  to:               string | null
+  as_of:            string
+  capital_deployed: number
+  totals:           PnlTotals
+  strategies:       PnlStrategy[]
+}
+
+type PnlQueryOpts = { from?: string | null; to?: string | null; mode?: PnlMode }
+
+/** Path (relative, no origin) for the auth'd CSV export. Kept as a helper so the
+ *  caller can log/inspect it; the actual download must go through
+ *  PowerAPI.autotradePnlExport() because the endpoint needs a Bearer header (a
+ *  plain <a href> cannot attach one). */
+export function autotradePnlExportUrl(period: PnlPeriod, opts: PnlQueryOpts = {}): string {
+  const qs = new URLSearchParams({ period })
+  if (opts.from) qs.set('from', opts.from)
+  if (opts.to)   qs.set('to', opts.to)
+  qs.set('mode', opts.mode ?? 'live')
+  return `/api/power/autotrade/pnl/export.csv?${qs.toString()}`
+}
+
+
+// ──────────────────────────────────────────────────────────────────────────
+// AutoTrade LIVE CONFIG EDIT — hot-reload the risk/exit knobs of a RUNNING
+// session or campaign without a restart (open positions untouched). CONTRACT:
+//   PATCH /api/power/autotrade/session/{session_id}/config?dry_run=true|false  (Bearer)
+//   PATCH /api/power/autotrade/ladder/{ladder_id}/config?dry_run=true|false    (Bearer)
+// Body is a SUBSET of the whitelist below. All pct fields are FRACTIONS on the
+// wire (send ÷100, display ×100) — the SAME convention as session create/preview
+// and the status trail readout. Times are "HH:MM:SS" IST; capital is ₹ int;
+// max_hold_sessions is an int (trading days); end_date is "YYYY-MM-DD".
+//   400 = non-whitelisted / out-of-range field · 409 = session/ladder not RUNNING
+//   404 = not owned by the caller.
+// ──────────────────────────────────────────────────────────────────────────
+
+export type AutotradeConfigPatch = {
+  // Trailing / exit knobs (both session + campaign children)
+  arm_pct?: number                   // FRACTION — start trailing at +arm of capital
+  floor_pct?: number                 // FRACTION — floor locked once armed
+  trail_giveback_pct?: number        // FRACTION — give-back from the peak
+  stop_pct?: number                  // FRACTION — basket hard stop
+  per_position_stop_pct?: number     // FRACTION — per-stock stop
+  per_position_target_pct?: number   // FRACTION — per-stock target
+  square_off_time?: string           // "HH:MM:SS" IST
+  mis_square_off_time?: string        // "HH:MM:SS" IST (MIS defensive square-off)
+  max_hold_sessions?: number         // int trading days (positional only; 0 = no cap)
+  // Campaign-only — "applies to future spawns"
+  per_basket_capital?: number        // ₹ per daily basket
+  total_capital?: number             // ₹ campaign total
+  end_date?: string                  // "YYYY-MM-DD"
+}
+
+// Result of a config PATCH (dry_run or apply). Optional-safe: any field may be
+// absent → the UI degrades gracefully. `warnings` (dry_run) is a plain-language
+// list the operator must confirm before a real apply. `children_updated` (ladder)
+// names the running child baskets that were hot-reloaded. `config_version` is the
+// server's post-apply version — callers MUST fold it back into their captured
+// version so a subsequent edit sends the fresh `expected_config_version`.
+export type AutotradeConfigResult = {
+  ok?: boolean
+  session_id?: string
+  ladder_id?: string
+  applied?: Record<string, unknown>
+  rejected?: unknown[]
+  effective_config?: Record<string, unknown>
+  children_updated?: string[]
+  warnings?: string[]
+  config_version?: number | string
+  [k: string]: unknown
+}
+
+// ── Optimistic-concurrency conflict (HTTP 409, code CONFIG_VERSION_CONFLICT) ──
+// The session/ladder config PATCH is version-checked: when the caller sends an
+// `expected_config_version` that no longer matches the server's CURRENT version
+// (another operator/tick edited it since the modal opened), the backend applies
+// NOTHING and returns 409 with this detail. `apiFetch` surfaces it as a
+// PowerAPIError whose `.detail` carries the two versions. Callers use
+// `isConfigVersionConflict()` to distinguish it from the OTHER 409 (NOT_RUNNING)
+// and from a generic error, then re-fetch + let the operator re-apply.
+export type ConfigVersionConflictDetail = {
+  code: 'CONFIG_VERSION_CONFLICT'
+  message?: string
+  expected_config_version?: number
+  current_config_version?: number
+  [k: string]: unknown
+}
+
+/** True when `e` is the optimistic-concurrency 409 (stale config version). Read
+ *  `e.detail.current_config_version` for the version to re-base on. */
+export function isConfigVersionConflict(
+  e: unknown,
+): e is PowerAPIError & { detail: ConfigVersionConflictDetail } {
+  return e instanceof PowerAPIError && e.status === 409 && e.code === 'CONFIG_VERSION_CONFLICT'
+}
+
+// Options carried by BOTH config-PATCH methods. `dryRun` runs the warnings-only
+// pass; `expectedConfigVersion` (when set) is folded into the request body as
+// `expected_config_version` so the backend can reject a stale edit with a 409.
+export type AutotradeConfigPatchOpts = {
+  dryRun?: boolean
+  expectedConfigVersion?: number
+}
+
 export const PowerAPI = {
   // ── Public (no JWT) ───────────────────────────────────────────────────
   todayPreview: (signal?: AbortSignal) =>
     apiFetch<TodayResponse>('/api/power/picks/today/preview', { signal }),
+
+  // ── Co-Trading SIMULATION (LIVE) ──────────────────────────────────────
+  /** Simulate a virtual Co-Trading portfolio on EOD data (modelled entries/
+   *  exits, NOT real fills). `start_date` ≈ today for a live follow; pass
+   *  `end_date` for a historical replay window. Surface `honesty` in the UI. */
+  cotradeSimulate: (req: CotradeSimulateRequest, signal?: AbortSignal) =>
+    apiFetch<CotradeSimulateResponse>('/api/power/cotrade/simulate',
+      { method: 'POST', body: req, signal }),
+
+  // ── Ask-Falcon home (LIVE) ────────────────────────────────────────────
+  /** Full tradable universe (~477). Fetch once; filter client-side. */
+  universeSymbols: (signal?: AbortSignal) =>
+    apiFetch<UniverseSymbolsResponse>('/api/power/universe/symbols', { signal }),
+
+  /** Last EOD close + prev close for up to 60 symbols. NOT a live tick. */
+  quote: (symbols: string[], signal?: AbortSignal) => {
+    const list = symbols.filter(Boolean).slice(0, 60).join(',')
+    return apiFetch<QuoteResponse>(
+      `/api/power/quote?symbols=${encodeURIComponent(list)}`, { signal })
+  },
+
+  /** Single-stock analysis. Throws PowerAPIError(404, 'NOT_COVERED') for
+   *  symbols Falcon does not cover. */
+  analyzeStock: (symbol: string, signal?: AbortSignal) =>
+    apiFetch<AnalyzeStockResponse>(
+      `/api/power/ask/analyze-stock?symbol=${encodeURIComponent(symbol)}`, { signal }),
 
   // Co-Trader portfolios (all public)
   portfolios: (signal?: AbortSignal) =>
@@ -817,12 +1151,124 @@ export const PowerAPI = {
       `/api/power/today/falcon-top-20?${qs.toString()}`, { signal })
   },
 
+  // Deeper RANKED list (rank + signal-time tier, no heavy explainability) —
+  // same LOCKED persona ranking as falcon-top-20, sliced to top_n. Fast (~ms).
+  // Backs the Signals "Today's Top 50" browse tail below the rich Top-10 cards.
+  falconRanked: (
+    universe: import('./falcon-top20-types').Top20Universe = 'all500',
+    sector?:   string | null,
+    topN: number = 50,
+    signal_date?: string | null,
+    signal?: AbortSignal,
+  ) => {
+    const qs = new URLSearchParams({ universe, top_n: String(topN) })
+    if (sector)      qs.set('sector', sector)
+    if (signal_date) qs.set('signal_date', signal_date)
+    return apiFetch<FalconRankedResponse>(
+      `/api/power/today/falcon-ranked?${qs.toString()}`, { signal })
+  },
+
+  // Full 3-bucket explainability for ONE ranked symbol (expand a tail row on
+  // demand). Returns the same Top20Response shape — the single pick is at its
+  // true rank, rendered by <Top20Card> exactly like a Top-10 card.
+  falconExplain: (
+    symbol: string,
+    universe: import('./falcon-top20-types').Top20Universe = 'all500',
+    signal_date?: string | null,
+    signal?: AbortSignal,
+  ) => {
+    const qs = new URLSearchParams({ symbol, universe })
+    if (signal_date) qs.set('signal_date', signal_date)
+    return apiFetch<import('./falcon-top20-types').Top20Response>(
+      `/api/power/today/falcon-explain?${qs.toString()}`, { signal })
+  },
+
   liveDecisions: (jwt: string, cycle: LiveCycle | 'latest' = 'latest', entry_date?: string) => {
     const qs = new URLSearchParams({ cycle })
     if (entry_date) qs.set('entry_date', entry_date)
     return apiFetch<LiveDecisionsResponse>(
       `/api/power/picks/live?${qs.toString()}`, { jwt })
   },
+
+  // ── AutoTrade P&L (strategy-level performance) ─────────────────────────
+  autotradePnlSummary: (
+    period: PnlPeriod,
+    opts:   PnlQueryOpts = {},
+    jwt?:   string | null,
+    signal?: AbortSignal,
+  ) => {
+    const qs = new URLSearchParams({ period })
+    if (opts.from) qs.set('from', opts.from)
+    if (opts.to)   qs.set('to', opts.to)
+    qs.set('mode', opts.mode ?? 'live')
+    return apiFetch<AutotradePnlSummary>(
+      `/api/power/autotrade/pnl/summary?${qs.toString()}`, { jwt: jwt ?? null, signal })
+  },
+
+  /** Auth'd CSV export → Blob. Fetches with the Bearer token (the endpoint is
+   *  not a plain href because it needs the Authorization header) and returns a
+   *  Blob the caller turns into a download. */
+  autotradePnlExport: async (
+    period: PnlPeriod,
+    opts:   PnlQueryOpts = {},
+    jwt?:   string | null,
+  ): Promise<Blob> => {
+    const r = await fetch(`${apiBase()}${autotradePnlExportUrl(period, opts)}`, {
+      headers: jwt ? { Authorization: `Bearer ${jwt}` } : {},
+      cache:   'no-store',
+    })
+    if (!r.ok) {
+      throw new PowerAPIError(r.status, `HTTP_${r.status}`, `Export failed: ${r.status}`)
+    }
+    return r.blob()
+  },
+
+  // ── AutoTrade LIVE CONFIG EDIT (hot-reload the risk/exit knobs) ────────
+  /** PATCH a RUNNING session's risk/exit knobs. Pass `{ dryRun: true }` first to
+   *  fetch `warnings` (e.g. a name that would exit next tick under the new stop);
+   *  on confirm call again with `{ dryRun: false }` to apply live (~5s, positions
+   *  untouched). Body is a SUBSET of AutotradeConfigPatch (pct fields ÷100).
+   *  Pass `expectedConfigVersion` (the version captured when the editor opened) so
+   *  a concurrent edit is caught: a mismatch → PowerAPIError 409 that
+   *  `isConfigVersionConflict()` recognises. */
+  autotradeUpdateSessionConfig: (
+    sessionId: string,
+    patch:     AutotradeConfigPatch,
+    opts:      AutotradeConfigPatchOpts = {},
+    jwt?:      string | null,
+  ) =>
+    apiFetch<AutotradeConfigResult>(
+      `/api/power/autotrade/session/${encodeURIComponent(sessionId)}/config?dry_run=${opts.dryRun ? 'true' : 'false'}`,
+      {
+        method: 'PATCH',
+        body: opts.expectedConfigVersion != null
+          ? { ...patch, expected_config_version: opts.expectedConfigVersion }
+          : patch,
+        jwt: jwt ?? null,
+      },
+    ),
+
+  /** PATCH a RUNNING campaign's knobs. Same dry_run→apply flow. Trailing/exit
+   *  knobs hot-reload every open child basket; capital/end-date apply to FUTURE
+   *  spawns. Response `children_updated` names the baskets that were reloaded.
+   *  `expectedConfigVersion` gives the same optimistic-concurrency guard as the
+   *  session PATCH (409 on a stale edit). */
+  autotradeUpdateLadderConfig: (
+    ladderId: string,
+    patch:    AutotradeConfigPatch,
+    opts:     AutotradeConfigPatchOpts = {},
+    jwt?:     string | null,
+  ) =>
+    apiFetch<AutotradeConfigResult>(
+      `/api/power/autotrade/ladder/${encodeURIComponent(ladderId)}/config?dry_run=${opts.dryRun ? 'true' : 'false'}`,
+      {
+        method: 'PATCH',
+        body: opts.expectedConfigVersion != null
+          ? { ...patch, expected_config_version: opts.expectedConfigVersion }
+          : patch,
+        jwt: jwt ?? null,
+      },
+    ),
 }
 
 // ──────────────────────────────────────────────────────────────────────────
