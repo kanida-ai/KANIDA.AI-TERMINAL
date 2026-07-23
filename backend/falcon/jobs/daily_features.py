@@ -44,6 +44,14 @@ UNDERFILL_THRESHOLD = 0.50
 # directly with explicit start/end dates — not via this catch-up cron.
 CATCHUP_WINDOW_DAYS = 60
 
+# Always FORCE-recompute the most recent N trade_dates, even when they already
+# have a full feature set. Row PRESENCE can't detect a bar whose VALUE was
+# corrected after features were first computed (e.g. a partial intraday bar later
+# overwritten by the final EOD bar — the daily_data_refresh trailing re-fetch).
+# extract_universe_features is idempotent (ON CONFLICT), so recompute is safe and
+# this makes bar corrections propagate features -> signals with no manual delete.
+RECOMPUTE_TRAILING_DAYS = 4
+
 
 def _refresh_weekly(con: sqlite3.Connection) -> int:
     """Rebuild ohlc_weekly for the latest week only."""
@@ -135,6 +143,18 @@ def _identify_gap_dates(con: sqlite3.Connection, n_active: int) -> Tuple[List[st
       ORDER BY trade_date
     """, (window_start, threshold_rows)).fetchall()
     partial = [(r[0], r[1]) for r in partial_rows]
+
+    # Force-recompute the most recent RECOMPUTE_TRAILING_DAYS trade_dates so a
+    # CORRECTED bar (partial -> final EOD overwrite) refreshes its features even
+    # though a full feature set already exists for that date. Folded into
+    # `missing` (the recompute set); extract_universe_features overwrites via
+    # ON CONFLICT, so re-doing an up-to-date date is a cheap no-op in effect.
+    force_rows = con.execute(
+        "SELECT DISTINCT trade_date FROM ohlc_daily WHERE trade_date >= ? "
+        "ORDER BY trade_date DESC LIMIT ?",
+        (window_start, RECOMPUTE_TRAILING_DAYS),
+    ).fetchall()
+    missing = sorted(set(missing) | {r[0] for r in force_rows})
 
     return missing, partial
 
