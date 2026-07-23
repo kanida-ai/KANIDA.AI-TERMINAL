@@ -59,3 +59,21 @@ archive/
 # Claude Code session state + agent worktrees (tooling, not source)
 .claude/
 .railway/
+
+# universe_engine: track the ENGINE CODE (engine/*.py, ~900KB) so the cloud CI
+# build can ship it, but NEVER the multi-GB data warehouse or any DB/dataset.
+# (See the Codex git-bloat incident — a stray data add wrote 680 GiB into .git.)
+# These rules make even an accidental `git add universe_engine/` safe.
+universe_engine/data/
+universe_engine/**/*.db
+universe_engine/**/*.db-wal
+universe_engine/**/*.db-shm
+universe_engine/**/*.sqlite
+universe_engine/**/*.sqlite3
+universe_engine/**/*.parquet
+universe_engine/**/*.feather
+universe_engine/**/*.csv
+universe_engine/**/*.pkl
+universe_engine/**/*.npy
+universe_engine/**/*.npz
+universe_engine/**/__pycache__/
