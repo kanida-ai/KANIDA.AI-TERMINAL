@@ -41,7 +41,7 @@ In GitHub → repo **Settings → Secrets and variables → Actions**, add these
 |------|-------|
 | `AWS_DEPLOY_ROLE_ARN` | the role ARN from Step A |
 | `CODEBUILD_PROJECT`   | your CodeBuild project name (`aws codebuild list-projects --region ap-south-1`) |
-| `CODEBUILD_SRC_BUCKET`| the S3 bucket the pipeline uploads source to (the artifacts bucket, `kanida-prod-artifacts-389642461326`) |
+| `CODEBUILD_SRC_BUCKET`| the CodeBuild project's SOURCE bucket, **`kanida-cb-src-389642461326`** (NOT the artifacts bucket — that one is KMS-locked and the CodeBuild role gets `kms:Decrypt` AccessDenied, confirmed 2026-07-22). This is the bucket whose `src.zip` the project already reads. |
 
 *(One-time: confirm the CodeBuild project's source type accepts an S3 override —
 if it's currently `NO_SOURCE`, we set it to `S3`. I'll check this in Step A.)*
