@@ -810,14 +810,29 @@ class RupeezyBroker(BrokerClient):
         if prod not in ("INTRADAY", "MTF"):
             return {}
         ltps = self.get_ltps_batch(list(symbols))
+        targets = [(s, float(ltps[s])) for s in symbols
+                   if ltps.get(s) and ltps[s] > 0]
         out: Dict[str, float] = {}
-        for s in symbols:
-            ltp = ltps.get(s)
-            if not ltp or ltp <= 0:
-                continue
-            m = self._margin_probe(s, prod, float(ltp))
-            if m and m > 0:
-                out[s] = float(m)
+        if not targets:
+            return out
+        # Vortex has no basket-margin endpoint, so each symbol needs its OWN
+        # order-margin probe. Run them CONCURRENTLY (the requests.Session is
+        # pooled/thread-safe and the per-(symbol,product) cache write is atomic)
+        # instead of one-at-a-time — a 15-name basket costs ~1 round-trip of
+        # wall-time, not 15. Probes are independent + fail-soft (None -> cash
+        # fallback), so a slow/failing symbol can't block or corrupt the rest.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=min(12, len(targets))) as ex:
+            futs = {ex.submit(self._margin_probe, s, prod, ltp): s
+                    for s, ltp in targets}
+            for f in as_completed(futs):
+                s = futs[f]
+                try:
+                    m = f.result()
+                except Exception:
+                    m = None
+                if m and m > 0:
+                    out[s] = float(m)
         return out
 
     # ── Portfolio (design §6) ─────────────────────────────────────────────────
