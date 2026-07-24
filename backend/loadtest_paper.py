@@ -38,7 +38,9 @@ _CLEANUP_TABLES = [
     ("autotrade_order_events", "session_id"),
     ("autotrade_alerts", "session_id"),
     ("autotrade_slippage", "session_id"),
-    ("portfolio_positions", "session_id"),
+    # NOTE: portfolio_positions is a CO-TRADING table (no session_id column) and
+    # is NOT written by the autotrade fire path — deliberately excluded so cleanup
+    # doesn't error on a missing column.
     ("falcon_position_state", "session_id"),
     ("autotrade_session_account_allocations", "session_id"),
     ("autotrade_sessions", "session_id"),
