@@ -34,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from falcon.db import falcon_conn
+from oltp_db import oltp_conn  # OLTP tables -> SQLite(off)/Postgres(KANIDA_PG_ENABLED); market blocks keep falcon_conn
 from .pricing import resolve_brokers_ltp, resolve_brokers_ltp_with_source
 
 log = logging.getLogger("kanida.autotrade.monitor")
@@ -110,7 +111,7 @@ class PortfolioMonitor:
         zero. Never recomputed from live positions — it must NOT shrink as
         positions close.
         """
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             row = con.execute(
                 "SELECT invested_basis FROM autotrade_sessions WHERE session_id=?",
                 (self.session_id,),
@@ -158,7 +159,7 @@ class PortfolioMonitor:
         else:
             ib = self.compute_invested_basis(positions)
         stored = ib if ib > 0 else self._total_allocated_capital
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             con.execute(
                 "UPDATE autotrade_sessions SET invested_basis=? WHERE session_id=?",
                 (stored, self.session_id),
@@ -188,7 +189,7 @@ class PortfolioMonitor:
         else:
             ib = self.compute_invested_basis(positions)
         stored = ib if ib > 0 else self._total_allocated_capital
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             con.execute(
                 "UPDATE autotrade_sessions SET invested_basis=? WHERE session_id=?",
                 (stored, self.session_id),
@@ -217,7 +218,7 @@ class PortfolioMonitor:
         positions = self._open_positions()
         val = self.compute_invested_basis(positions)
         stored = val if val > 0 else self._total_allocated_capital
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             con.execute(
                 "UPDATE autotrade_sessions SET entry_basket_notional=? "
                 "WHERE session_id=?",
@@ -231,7 +232,7 @@ class PortfolioMonitor:
         was never captured (a session created before this column, or before its
         entries fired). None → the caller falls back to the live Σ-over-OPEN
         (pre-Fix-A behaviour) so nothing regresses for legacy sessions."""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             row = con.execute(
                 "SELECT entry_basket_notional FROM autotrade_sessions "
                 "WHERE session_id=?",
@@ -251,7 +252,7 @@ class PortfolioMonitor:
         a mid-day trail continues correctly after a restart.
         """
         from .trail_engine import TrailState
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             row = con.execute(
                 "SELECT trail_armed, trail_peak FROM autotrade_sessions "
                 "WHERE session_id=?",
@@ -273,7 +274,7 @@ class PortfolioMonitor:
         peak would drop the exit trigger and over-give-back real profit. The trail
         engine only ever ratchets peak UP and arms 0→1 (never disarms), so MAX is
         behaviour-preserving for the single-writer path and race-safe for two."""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             con.execute(
                 "UPDATE autotrade_sessions "
                 "SET trail_armed = MAX(COALESCE(trail_armed,0), ?), "
@@ -288,7 +289,7 @@ class PortfolioMonitor:
         the trail engine (symbol/qty/avg_price/ltp/unrealised_pnl), the per-stock
         stop (gtt_id/broker_profile/instrument_type) AND the PER-STOCK step-lock
         (pos_trail_armed/pos_trail_peak — each position's own ratchet state)."""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             rows = con.execute(
                 """SELECT symbol, qty, avg_price, ltp, unrealised_pnl,
                           gtt_id, broker_profile, instrument_type, direction,
@@ -308,7 +309,7 @@ class PortfolioMonitor:
         R1 — MONOTONE RATCHET (per-stock): same as save_trail_state, pos_trail_peak
         is written as MAX(existing, new) so an out-of-order writer can't regress a
         position's ratchet high-water and over-give-back."""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             con.execute(
                 "UPDATE autotrade_positions "
                 "SET pos_trail_armed = MAX(COALESCE(pos_trail_armed,0), ?), "
@@ -327,7 +328,7 @@ class PortfolioMonitor:
         mark_exit_failed() releases it — preventing a new task from being spawned
         on every tick while a retry is already in flight.
         """
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             rows = con.execute(
                 """SELECT symbol, qty, avg_price, ltp,
                           gtt_id, broker_profile, instrument_type, direction
@@ -347,7 +348,7 @@ class PortfolioMonitor:
         engine sees a falsely healthy portfolio.
         Returns 0.0 when there are no closed positions or realised_pnl is NULL.
         """
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             row = con.execute(
                 "SELECT COALESCE(SUM(realised_pnl), 0.0) AS total "
                 "FROM autotrade_positions "
@@ -365,7 +366,7 @@ class PortfolioMonitor:
         still counts these shares in the denominator. refresh_ltps() marks these
         rows to market alongside OPEN so the figure is live. Returns 0.0 when there
         are no EXIT_FAILED rows (byte-identical to before for a normal book)."""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             row = con.execute(
                 "SELECT COALESCE(SUM(unrealised_pnl),0.0) AS total "
                 "FROM autotrade_positions "
@@ -422,7 +423,7 @@ class PortfolioMonitor:
         (pricing.resolve_brokers_ltp). Returns count updated.
         """
         updated = 0
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             # C3: mark EXIT_FAILED (still-held) legs to market too, so their live
             # uPnL feeding the gross-return numerator stays fresh (not the stale
             # mark from the tick their exit failed).
@@ -463,7 +464,7 @@ class PortfolioMonitor:
                     batched[(prof, s)] = float(v)
 
         now_iso = datetime.now(IST).isoformat()
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             for r in rows:
                 ltp = batched.get((r["broker_profile"], r["symbol"]))
                 # CLUSTER 5 ITEM 2 — track PROVENANCE. A batched hit is a LIVE
@@ -510,7 +511,7 @@ class PortfolioMonitor:
         # from the panel the moment any leg closed.
         gr = (total_u + self._total_realised()
               + self._total_exit_failed_unrealised()) / self._total_allocated_capital
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             con.execute(
                 """INSERT INTO autotrade_portfolio_snapshots
                    (session_id, snapped_at, gross_return, total_unrealised,

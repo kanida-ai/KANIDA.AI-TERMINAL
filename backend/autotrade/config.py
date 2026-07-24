@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from falcon.db import falcon_conn
+from oltp_db import oltp_conn  # OLTP tables -> SQLite(off)/Postgres(KANIDA_PG_ENABLED); market blocks keep falcon_conn
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -1522,7 +1523,7 @@ class TradingSessionConfig:
 
 def save_preset(name: str, cfg: TradingSessionConfig) -> int:
     cfg.validate()
-    with falcon_conn() as con:
+    with oltp_conn() as con:
         cur = con.execute(
             """INSERT INTO autotrade_config_presets (name, created_at, config_json)
                VALUES (?,?,?)
@@ -1534,7 +1535,7 @@ def save_preset(name: str, cfg: TradingSessionConfig) -> int:
 
 
 def list_presets() -> List[Dict[str, Any]]:
-    with falcon_conn() as con:
+    with oltp_conn() as con:
         rows = con.execute(
             "SELECT id, name, created_at, config_json FROM autotrade_config_presets "
             "ORDER BY name ASC"
@@ -1549,7 +1550,7 @@ def list_presets() -> List[Dict[str, Any]]:
 
 
 def get_preset(name: str) -> Optional[TradingSessionConfig]:
-    with falcon_conn() as con:
+    with oltp_conn() as con:
         row = con.execute(
             "SELECT config_json FROM autotrade_config_presets WHERE name=?", (name,)
         ).fetchone()

@@ -39,6 +39,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
 from falcon.db import falcon_conn
+from oltp_db import oltp_conn  # OLTP tables -> SQLite(off)/Postgres(KANIDA_PG_ENABLED); market blocks keep falcon_conn
 
 from .. import config as cfgmod
 from .. import risk_manager
@@ -201,7 +202,7 @@ def _assert_session_access(session_id: str, caller: Any) -> None:
                                     non-admin users)
     """
     caller = _caller(caller)
-    with falcon_conn() as con:
+    with oltp_conn() as con:
         row = con.execute(
             "SELECT user_id FROM autotrade_sessions WHERE session_id=?",
             (session_id,),
@@ -219,7 +220,7 @@ def _assert_ladder_access(ladder_id: str, caller: Any) -> None:
     """Ownership gate for a ladder campaign — same semantics as
     _assert_session_access (admin sees all; non-owner → 404, no existence leak)."""
     caller = _caller(caller)
-    with falcon_conn() as con:
+    with oltp_conn() as con:
         row = con.execute(
             "SELECT user_id FROM autotrade_ladders WHERE ladder_id=?",
             (ladder_id,),
@@ -440,7 +441,7 @@ def _delete_one_session(session_id: str) -> bool:
     except Exception:  # pragma: no cover - defensive
         pass
 
-    with falcon_conn() as con:
+    with oltp_conn() as con:
         row = con.execute(
             "SELECT status, mode FROM autotrade_sessions WHERE session_id=?",
             (session_id,),
@@ -803,7 +804,7 @@ def alerts_list(limit: int = 100, unacked_only: bool = False,
         sql += " AND a.acknowledged = 0"
     sql += " ORDER BY a.ts DESC LIMIT ?"
     params.append(limit)
-    with falcon_conn() as con:
+    with oltp_conn() as con:
         rows = con.execute(sql, tuple(params)).fetchall()
     return {"alerts": [dict(r) for r in rows]}
 
@@ -814,7 +815,7 @@ def alert_ack(alert_id: int, caller: Caller = Depends(resolve_caller)):
     session must belong to the caller (admin may ack any; a NULL-session alert is
     admin-only)."""
     caller = _caller(caller)
-    with falcon_conn() as con:
+    with oltp_conn() as con:
         row = con.execute(
             "SELECT session_id FROM autotrade_alerts WHERE id=?",
             (alert_id,)).fetchone()
@@ -853,7 +854,7 @@ def health(caller: Caller = Depends(resolve_caller)):
         args = list(_ACTIVE) + [caller.user_id]
     now = datetime.now(IST)
     out: List[Dict[str, Any]] = []
-    with falcon_conn() as con:
+    with oltp_conn() as con:
         sessions = con.execute(sql, tuple(args)).fetchall()
         for s in sessions:
             sid = s["session_id"]
@@ -1117,7 +1118,7 @@ def config_list():
 @router.post("/autotrade/broker/add")
 def broker_add(req: AddBrokerRequest):
     rr = req.rank_range
-    with falcon_conn() as con:
+    with oltp_conn() as con:
         con.execute(
             """INSERT INTO autotrade_broker_profiles
                (profile_id, broker_name, allocated_capital, symbols_json,
@@ -1144,7 +1145,7 @@ def broker_add(req: AddBrokerRequest):
 
 @router.get("/autotrade/broker/list")
 def broker_list():
-    with falcon_conn() as con:
+    with oltp_conn() as con:
         rows = con.execute(
             "SELECT * FROM autotrade_broker_profiles ORDER BY profile_id"
         ).fetchall()
