@@ -143,6 +143,14 @@ def start_for_session(session_id: str,
     started."""
     if not autostart_enabled():
         return False
+    # MULTI-CONTAINER (Stage 4b): only the lease OWNER monitors this session.
+    # Otherwise every task would tick every session — N× broker calls and N×
+    # racing exit attempts. No-op (always True) in single-container mode.
+    from ..session_ownership import try_own
+    if not try_own(session_id):
+        log.info("tick_driver: %s owned by another container — not starting",
+                 session_id)
+        return False
     env_interval = os.environ.get("FALCON_AUTOTRADE_TICK_INTERVAL")
     if env_interval:
         try:

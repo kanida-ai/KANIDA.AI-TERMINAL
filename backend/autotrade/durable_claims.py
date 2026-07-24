@@ -120,6 +120,39 @@ def claim(key: str, lease_sec: float, holder: str | None = None) -> bool:
             return cur.rowcount == 1
 
 
+def renew(key: str, lease_sec: float, holder: str) -> bool:
+    """Extend a lease we ALREADY hold. True iff we still held it.
+
+    claim() deliberately refuses a live lease (that is what stops a second
+    container taking over), so a holder needs this to keep its own lease alive.
+    Guarded on holder=? so one container can never extend another's lease.
+    Returns False if the lease was lost/taken over — the caller must then STOP
+    whatever it was doing for that key.
+    """
+    now = datetime.now(IST)
+    until_iso = (now + timedelta(seconds=lease_sec)).isoformat()
+    try:
+        if _pg_claims():
+            import pgdb
+            with pgdb.pg_conn() as c:
+                cur = c.cursor()
+                cur.execute(
+                    "UPDATE autotrade_claims SET leased_until=%s "
+                    "WHERE claim_key=%s AND holder=%s RETURNING claim_key",
+                    (until_iso, key, holder))
+                return cur.fetchone() is not None
+        with falcon_conn() as con:
+            _ensure(con)
+            cur = con.execute(
+                "UPDATE autotrade_claims SET leased_until=? "
+                "WHERE claim_key=? AND holder=?", (until_iso, key, holder))
+            con.commit()
+            return cur.rowcount == 1
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("durable_claims.renew(%s) failed: %s", key, e)
+        return False
+
+
 def release(key: str) -> None:
     """Release `key` (delete the row). Idempotent + best-effort (never raises into
     the exit hot path)."""

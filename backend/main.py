@@ -75,6 +75,27 @@ def _run_pipeline_sync():
         log.warning("Pipeline already running — skipping.")
         return
 
+    # Stage 4c — SINGLETON ACROSS CONTAINERS. _pipeline_lock is a threading.Lock,
+    # so it only serialises within ONE process. Every task runs its own 16:05 IST
+    # scheduler thread, so with desired_count>1 the EOD pipeline would run N times
+    # concurrently — N Kite fetches and N writers racing on the same tables. A
+    # dated claim (pipeline:<YYYY-MM-DD>) means exactly one container runs it.
+    # Lease > worst-case runtime so a slow run can't be double-started; a crashed
+    # holder's lease expires and tomorrow's key differs anyway.
+    # No-op in single-container mode (KANIDA_MULTI_CONTAINER unset).
+    try:
+        from autotrade.session_ownership import multi_container, OWNER_ID
+        if multi_container():
+            from autotrade import durable_claims
+            _pkey = f"pipeline:{datetime.now(IST).date().isoformat()}"
+            if not durable_claims.claim(_pkey, 4 * 3600, holder=OWNER_ID):
+                log.info("Pipeline: %s already claimed by another container — "
+                         "skipping (single run per day, cluster-wide).", _pkey)
+                _pipeline_lock.release()
+                return
+    except Exception as e:  # never let the guard block the pipeline
+        log.warning("Pipeline singleton guard failed (running anyway): %s", e)
+
     _pipeline_status["running"] = True
     _pipeline_status["last_run"] = datetime.now(IST).isoformat()
     log.info("Pipeline starting — %s", _pipeline_status["last_run"])
