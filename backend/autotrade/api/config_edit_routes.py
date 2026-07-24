@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
-from falcon.db import falcon_conn
+from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP module.
 
 from ..config import (
     TradingSessionConfig, _parse_clock_to_seconds, validate_step_lock_ladder)

@@ -35,7 +35,7 @@ def _persisted_exit_coid(session_id: str, symbol: str,
     so the exit tag is STABLE across restarts (query-before-place). Best-effort:
     any DB error → None (mint a fresh one)."""
     try:
-        from falcon.db import falcon_conn
+        from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP module.
         with falcon_conn() as con:
             if broker_profile is not None:
                 r = con.execute(

@@ -218,7 +218,7 @@ def _owned_evidence(prof_scope: List[str]) -> Dict[str, Any]:
     order_ids: set = set()
     closed_pairs: set = set()
     try:
-        from falcon.db import falcon_conn  # noqa: WPS433
+        from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP module.
         with falcon_conn() as con:
             rows = con.execute(
                 "SELECT symbol, product, status, client_order_id, entry_order_id, "
@@ -474,7 +474,7 @@ def _live_session_ids() -> set:
     (synthetic fills), so a paper row would otherwise trip the Tier-3 detector on
     every single close. Never raises → empty set (= no pages) on error."""
     try:
-        from falcon.db import falcon_conn  # noqa: WPS433
+        from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP module.
         with falcon_conn() as con:
             rows = con.execute(
                 "SELECT session_id FROM autotrade_sessions "
@@ -492,7 +492,7 @@ def _sessions_with_open_incident() -> set:
     context a human needs, not noise to sweep away. Fail-SAFE: on any error
     return a sentinel that quarantines nothing is WRONG, so we cannot fail open
     here — an error propagates to the caller which skips the ack entirely."""
-    from falcon.db import falcon_conn  # noqa: WPS433
+    from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP module.
     kinds = tuple(sorted(_NEVER_AUTO_ACK))
     with falcon_conn() as con:
         rows = con.execute(
@@ -520,7 +520,7 @@ def _session_live_order_count(session_id: str) -> int:
     """How many REAL broker orders a session has on the durable ledger — i.e.
     ledger events carrying a non-NULL broker_order_id (a paper order has none).
     Raises on a DB error so the caller fails CLOSED (no ack)."""
-    from falcon.db import falcon_conn  # noqa: WPS433
+    from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP module.
     with falcon_conn() as con:
         r = con.execute(
             "SELECT COUNT(*) AS n FROM autotrade_order_events "
@@ -587,7 +587,7 @@ def _exit_activity_between(session_id: str, start: datetime,
     exit was placed/filled/failed/closed while we were reconcile-blind, the stale
     alert is NOT benign — we may have exited against an unvalidated basket — so it
     must NOT be acked. Raises on a DB error so the caller fails CLOSED."""
-    from falcon.db import falcon_conn  # noqa: WPS433
+    from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP module.
     from ..order_ledger import (EV_EXIT_PLACED, EV_EXIT_FILLED, EV_EXIT_PARTIAL,
                                 EV_EXIT_FAILED, EV_POSITION_CLOSED,
                                 EV_RECONCILE_CLOSE)
@@ -750,7 +750,7 @@ def detect_reconciled_flat_without_exit_order(
     now = now or datetime.now(IST)
     cutoff = (now - timedelta(seconds=_flat_detector_lookback_sec())).isoformat()
     try:
-        from falcon.db import falcon_conn  # noqa: WPS433
+        from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP module.
         with falcon_conn() as con:
             rows = [dict(r) for r in con.execute(
                 """SELECT id, session_id, symbol, qty, avg_price, product,
