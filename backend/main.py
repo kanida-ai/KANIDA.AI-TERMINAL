@@ -460,6 +460,25 @@ async def lifespan(app: FastAPI):
                   "Backend reads token from DB only. (set FALCON_INPROCESS_AUTH=true "
                   "for cloud self-minting.)")
 
+    # Postgres (SQLite->PG migration, Stage 1). Probe-only: reports whether the
+    # OLTP domain can reach RDS. Routing does NOT change until KANIDA_PG_ENABLED
+    # is set AND the per-module cutover lands, so this is safe to ship dormant.
+    # Never raises — a DB probe must not be able to crash boot.
+    try:
+        import pgdb as _pgdb
+        _h = _pgdb.health()
+        if not _h.get("enabled"):
+            log.info("pgdb: DISABLED (SQLite only) — target=%s", _h.get("target"))
+        elif _h.get("ok"):
+            log.info("pgdb: OK -> %s db=%s public_tables=%s %s",
+                     _h.get("target"), _h.get("database"),
+                     _h.get("public_tables"), _h.get("version"))
+        else:
+            log.error("pgdb: ENABLED BUT UNREACHABLE -> %s :: %s",
+                      _h.get("target"), _h.get("error"))
+    except Exception as e:  # pragma: no cover - probe must never break boot
+        log.warning("pgdb: health probe failed to run: %s", e)
+
     # Sprint 5c-2: Featured replay pre-warmer. 6h daemon that keeps the 3
     # landing-page replay cache rows hot — kills the 2.26s cold-load that
     # an unlucky first visitor would otherwise pay.
