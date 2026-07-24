@@ -140,7 +140,7 @@ def _persist(*, ts: str, severity: str, kind: str, session_id: Optional[str],
              symbol: Optional[str], detail: str, incident_id: Optional[str],
              pushed: bool, push_result: str) -> Optional[int]:
     try:
-        from falcon.db import falcon_conn  # noqa: WPS433
+        from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP.
         with falcon_conn() as con:
             cur = con.execute(
                 """INSERT INTO autotrade_alerts
@@ -220,7 +220,7 @@ def _recent_incident_exists(incident_id: str, window_sec: int,
     now = now or datetime.now(IST)
     cutoff = (now - timedelta(seconds=window_sec)).isoformat()
     try:
-        from falcon.db import falcon_conn  # noqa: WPS433
+        from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP.
         with falcon_conn() as con:
             row = con.execute(
                 "SELECT 1 FROM autotrade_alerts WHERE incident_id=? AND ts>=? "
@@ -243,7 +243,7 @@ def _unacked_incident_exists(incident_id: str) -> bool:
     if not incident_id:
         return False
     try:
-        from falcon.db import falcon_conn  # noqa: WPS433
+        from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP.
         with falcon_conn() as con:
             row = con.execute(
                 "SELECT 1 FROM autotrade_alerts WHERE incident_id=? "
@@ -300,7 +300,7 @@ def acknowledge(alert_id: int, reason: Optional[str] = None, *,
     Tolerates a pre-migration table (no ack_reason/auto_resolved columns): falls
     back to the plain flag-only UPDATE so an ack can never fail on schema drift."""
     try:
-        from falcon.db import falcon_conn  # noqa: WPS433
+        from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP.
         with falcon_conn() as con:
             try:
                 cur = con.execute(
@@ -338,7 +338,7 @@ def unacked_alerts(kinds: Optional[List[str]] = None,
         params.append(cutoff)
     sql += " ORDER BY id ASC"
     try:
-        from falcon.db import falcon_conn  # noqa: WPS433
+        from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP.
         with falcon_conn() as con:
             return [dict(r) for r in con.execute(sql, tuple(params)).fetchall()]
     except Exception as e:  # noqa: BLE001
@@ -359,7 +359,7 @@ def escalate_stale_alerts(threshold_sec: Optional[int] = None,
     cutoff = (now - timedelta(seconds=thr)).isoformat()
     escalated: List[int] = []
     try:
-        from falcon.db import falcon_conn  # noqa: WPS433
+        from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP.
         with falcon_conn() as con:
             rows = con.execute(
                 "SELECT id, kind, session_id, symbol, detail, ts "
@@ -376,7 +376,7 @@ def escalate_stale_alerts(threshold_sec: Optional[int] = None,
             body=f"UNACKED >{thr}s: {r.get('detail') or ''}",
             kind=f"ESCALATED_{r['kind']}", severity="urgent")
         try:
-            from falcon.db import falcon_conn  # noqa: WPS433
+            from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP.
             with falcon_conn() as con:
                 con.execute(
                     "UPDATE autotrade_alerts SET escalated=1 WHERE id=?",

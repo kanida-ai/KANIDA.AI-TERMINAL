@@ -97,7 +97,7 @@ def get_account_proxy(broker_account_id: Optional[str],
         return None
     try:
         from .. import vault
-        from falcon.db import falcon_conn
+        from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP.
 
         p = provider or vault._DEFAULT_PROVIDER
         if not p.available():
@@ -145,7 +145,7 @@ def set_account_proxy(broker_account_id: str, proxy_url: str,
     blank or unparseable URL (a bad URL silently stored would break the user's
     orders at 09:15, not at configuration time)."""
     from .. import vault
-    from falcon.db import falcon_conn
+    from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP.
 
     p = provider or vault._DEFAULT_PROVIDER
     if not p.available():
@@ -183,7 +183,7 @@ def clear_account_proxy(broker_account_id: str,
     """Release an account's egress proxy (back to the pool). Returns True if a
     row was updated. Needs no vault key — clearing must always be possible."""
     from .. import vault
-    from falcon.db import falcon_conn
+    from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP.
 
     now = vault._now_ist_iso()
     with falcon_conn() as con:
@@ -284,7 +284,7 @@ def _assigned_urls(provider: Optional[Any] = None) -> List[str]:
     Availability is DERIVED from live rows — so deleting an account releases its
     IP automatically and a released IP can never be double-booked."""
     from .. import vault
-    from falcon.db import falcon_conn
+    from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP.
 
     p = provider or vault._DEFAULT_PROVIDER
     if not p.available():
