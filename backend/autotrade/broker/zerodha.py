@@ -24,6 +24,20 @@ from .base import BrokerClient, OrderResult
 
 log = logging.getLogger("kanida.autotrade.broker.zerodha")
 
+
+def _loadtest_stub_price() -> Optional[float]:
+    """Synthetic LTP for the paper LOAD TEST only. When KANIDA_LOADTEST_STUB_PRICE
+    is set, price fetches return it INSTEAD of calling Kite — so a 100-200 session
+    paper burst measures OUR concurrency (DB + threads), not Kite's single-key
+    quote throttle. Unset in production → returns None → real prices, no effect."""
+    v = os.environ.get("KANIDA_LOADTEST_STUB_PRICE")
+    if not v:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
 # ── Protective SL-M market-protection band (2026-07-15 rejection-16448 fix) ──────
 # A protective SL-M becomes a MARKET order on trigger; Kite REJECTS API market/SL-M
 # orders without an explicit `market_protection` %, AND internally converts the SL-M
@@ -323,6 +337,9 @@ class ZerodhaBroker(BrokerClient):
         return f"NSE:{symbol}"
 
     def get_ltp(self, symbol: str) -> Optional[float]:
+        _stub = _loadtest_stub_price()
+        if _stub is not None:
+            return _stub
         # 1. Fast WS tick cache (reuse existing ticker).
         try:
             from falcon.trade.services.kite_ticker import get_ltp as ws_ltp
@@ -350,6 +367,9 @@ class ZerodhaBroker(BrokerClient):
         out: dict = {}
         if not symbols:
             return out
+        _stub = _loadtest_stub_price()
+        if _stub is not None:
+            return {s: _stub for s in symbols}
         # Pass 1: WS tick cache.
         try:
             from falcon.trade.services.kite_ticker import get_ltp as ws_ltp
