@@ -121,6 +121,10 @@ COPY scripts/ /app/scripts/
 # header for the full rationale (EFS/NFS latency + lock contention was the
 # live-load crash-loop root cause).
 COPY deploy/entrypoint.sh /app/entrypoint.sh
+# SQLite->Postgres migration SQL (Stage 2/3). backend/pg_migrate.py resolves
+# these at /app/deploy/migrations and applies them INSIDE the container — RDS is
+# in a private subnet, so the migration can only run from here.
+COPY deploy/migrations/ /app/deploy/migrations/
 # Belt-and-suspenders: strip any CR so a Windows/autocrlf line-ending can never
 # reach dash (a stray \r makes `set`/commands fail with "Illegal option").
 RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod 0755 /app/entrypoint.sh
