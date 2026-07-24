@@ -467,14 +467,15 @@ async def lifespan(app: FastAPI):
     try:
         import pgdb as _pgdb
         _h = _pgdb.health()
-        if not _h.get("enabled"):
-            log.info("pgdb: DISABLED (SQLite only) — target=%s", _h.get("target"))
+        if not _h.get("enabled") and not _h.get("ok") and "detail" in _h:
+            log.info("pgdb: NOT CONFIGURED (SQLite only) — %s", _h.get("detail"))
         elif _h.get("ok"):
-            log.info("pgdb: OK -> %s db=%s public_tables=%s %s",
+            log.info("pgdb: REACHABLE -> %s db=%s public_tables=%s routing=%s %s",
                      _h.get("target"), _h.get("database"),
-                     _h.get("public_tables"), _h.get("version"))
+                     _h.get("public_tables"), _h.get("routing"),
+                     _h.get("version"))
         else:
-            log.error("pgdb: ENABLED BUT UNREACHABLE -> %s :: %s",
+            log.error("pgdb: CONFIGURED BUT UNREACHABLE -> %s :: %s",
                       _h.get("target"), _h.get("error"))
     except Exception as e:  # pragma: no cover - probe must never break boot
         log.warning("pgdb: health probe failed to run: %s", e)

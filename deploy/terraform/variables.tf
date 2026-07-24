@@ -156,6 +156,13 @@ variable "managed_secret_keys" {
     # (/api/falcon/publish/intelligence, checked in falcon/routers/publish_router.py
     # as X-Publish-Secret == FALCON_PUBLISH_SECRET). Same value set on the laptop.
     "FALCON_PUBLISH_SECRET",
+    # SQLite->Postgres migration (Stage 1). Full libpq URL for RDS
+    # (kanida-prod-pg, private subnet, reachable only from the app SG). Injecting
+    # it makes backend/pgdb.py PROBE reachability at boot; it does NOT route any
+    # traffic to PG — routing is a separate flag (KANIDA_PG_ENABLED) plus the
+    # per-module cutover. Created out-of-band, so `terraform import` it before
+    # the first apply (see deploy/CICD_SETUP.md / the migration notes).
+    "DATABASE_URL",
   ]
 }
 

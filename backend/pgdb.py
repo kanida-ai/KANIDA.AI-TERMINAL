@@ -149,12 +149,18 @@ def pg_conn() -> Iterator[Any]:
 def health() -> dict:
     """Connectivity probe used at boot + by the admin route.
 
+    Probes whenever a DSN is CONFIGURED, even while routing is still disabled —
+    that way wiring DATABASE_URL alone is enough to verify RDS reachability
+    (SG path, credentials, database exists) BEFORE any traffic is routed.
+    `routing` reports whether OLTP actually reads/writes PG yet.
+
     Never raises — returns a structured result so a failure is visible in logs
     and the admin panel instead of crashing the app.
     """
-    if not pg_enabled():
-        return {"enabled": False, "ok": False, "target": safe_target(),
-                "detail": "KANIDA_PG_ENABLED is not set"}
+    if not dsn():
+        return {"enabled": pg_enabled(), "routing": pg_enabled(), "ok": False,
+                "target": "(unconfigured)",
+                "detail": "no DATABASE_URL / PGHOST configured"}
     try:
         with pg_conn() as c:
             cur = c.cursor()
@@ -165,12 +171,14 @@ def health() -> dict:
                 "WHERE table_schema = 'public'"
             )
             ntables = cur.fetchone()[0]
-        return {"enabled": True, "ok": True, "target": safe_target(),
+        return {"enabled": True, "routing": pg_enabled(), "ok": True,
+                "target": safe_target(),
                 "database": db, "server_time": str(now),
                 "public_tables": ntables,
                 "version": (ver or "").split(",")[0]}
     except Exception as e:
-        return {"enabled": True, "ok": False, "target": safe_target(),
+        return {"enabled": True, "routing": pg_enabled(), "ok": False,
+                "target": safe_target(),
                 "error": f"{type(e).__name__}: {str(e)[:300]}"}
 
 
