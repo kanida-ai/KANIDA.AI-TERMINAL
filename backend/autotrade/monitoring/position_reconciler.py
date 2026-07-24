@@ -69,7 +69,7 @@ import time as _time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from falcon.db import falcon_conn
+from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP module.
 
 log = logging.getLogger("kanida.autotrade.position_reconciler")
 IST = timezone(timedelta(hours=5, minutes=30))

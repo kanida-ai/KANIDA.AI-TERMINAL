@@ -36,7 +36,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
-from falcon.db import falcon_conn
+from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP module.
 
 from .monitoring import tick_driver
 from .monitoring import entry_scheduler

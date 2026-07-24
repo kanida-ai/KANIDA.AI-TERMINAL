@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from falcon.db import falcon_conn
+from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP module.
 
 from ..base import MonitorAgent
 from ..signals import HealthSignal, Status, worse
