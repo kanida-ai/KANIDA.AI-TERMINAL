@@ -35,7 +35,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from falcon.db import falcon_conn
+from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP.
 
 log = logging.getLogger("kanida.autotrade.vault")
 

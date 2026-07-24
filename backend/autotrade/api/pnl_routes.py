@@ -22,7 +22,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from falcon.db import falcon_conn
+from oltp_db import oltp_conn as falcon_conn  # OLTP: SQLite(flag off)/Postgres(KANIDA_PG_ENABLED). pure-OLTP.
 
 from .autotrade_routes import Caller, _extract_jwt
 from . import pnl_summary as svc
