@@ -384,110 +384,6 @@ CREATE TABLE IF NOT EXISTS autotrade_broker_profiles (
     updated_at      TEXT
 );
 
--- ── portfolio_positions ─────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS portfolio_positions (
-    id                  BIGSERIAL PRIMARY KEY,
-    portfolio_id        BIGINT NOT NULL REFERENCES portfolio_definitions(id),
-    signal_date         TEXT NOT NULL,          -- date the engine emitted the rank
-    entry_date          TEXT NOT NULL,          -- next trading day
-    symbol              TEXT NOT NULL,
-    sector              TEXT,
-    rank_on_entry       BIGINT,                -- 1..14 etc, audit field
-    score_on_entry      DOUBLE PRECISION,
-    story_on_entry      TEXT,                   -- "Why I bought" — locked at entry
-    entry_price         DOUBLE PRECISION NOT NULL,
-    qty                 BIGINT NOT NULL,
-    capital_committed   DOUBLE PRECISION NOT NULL,          -- entry_price * qty
-    sl_level            DOUBLE PRECISION NOT NULL,          -- absolute price ₹
-    target_level        DOUBLE PRECISION,                   -- absolute price ₹ (NULL if trail-only)
-    trail_high_water    DOUBLE PRECISION,                   -- highest close since trail trigger; NULL until armed
-    trail_active        BIGINT NOT NULL DEFAULT 0 CHECK (trail_active IN (0,1)),
-    -- Exit fields, populated on close
-    exit_date           TEXT,
-    exit_price          DOUBLE PRECISION,
-    exit_reason         TEXT CHECK (exit_reason IN ('SL','TARGET','TIME','TRAIL','MANUAL')),
-    pnl_rs              DOUBLE PRECISION,
-    pnl_pct             DOUBLE PRECISION,
-    holding_days        BIGINT,
-    created_at          TEXT NOT NULL DEFAULT (TIMESTAMPTZ('now')),
-    -- Defensive: never open the same (portfolio, day, symbol) twice
-    UNIQUE(portfolio_id, signal_date, symbol)
-);
-CREATE INDEX IF NOT EXISTS ix_port_pos_open      ON portfolio_positions(portfolio_id, exit_date) WHERE exit_date IS NULL;
-CREATE INDEX IF NOT EXISTS ix_port_pos_entry     ON portfolio_positions(portfolio_id, entry_date DESC);
-CREATE INDEX IF NOT EXISTS ix_port_pos_exit      ON portfolio_positions(portfolio_id, exit_date DESC) WHERE exit_date IS NOT NULL;
-
--- ── portfolio_event_log ─────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS portfolio_event_log (
-    id           BIGSERIAL PRIMARY KEY,
-    portfolio_id BIGINT NOT NULL REFERENCES portfolio_definitions(id),
-    event_date   TEXT NOT NULL,
-    event_type   TEXT NOT NULL CHECK (event_type IN ('ENTER','EXIT_SL','EXIT_TARGET','EXIT_TIME','EXIT_TRAIL')),
-    symbol       TEXT NOT NULL,
-    price        DOUBLE PRECISION NOT NULL,
-    reason_text  TEXT NOT NULL,        -- trader-voice, public
-    position_id  BIGINT REFERENCES portfolio_positions(id),
-    created_at   TEXT NOT NULL DEFAULT (TIMESTAMPTZ('now'))
-);
-CREATE INDEX IF NOT EXISTS ix_port_event_recent ON portfolio_event_log(portfolio_id, event_date DESC, id DESC);
-CREATE INDEX IF NOT EXISTS ix_port_event_type   ON portfolio_event_log(portfolio_id, event_type, event_date DESC);
-
--- ── portfolio_equity_history ─────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS portfolio_equity_history (
-    id                     BIGSERIAL PRIMARY KEY,
-    portfolio_id           BIGINT NOT NULL REFERENCES portfolio_definitions(id),
-    trade_date             TEXT NOT NULL,
-    cash_balance           DOUBLE PRECISION NOT NULL,
-    deployed_capital       DOUBLE PRECISION NOT NULL,        -- sum of capital_committed for open positions
-    mtm_unrealized         DOUBLE PRECISION NOT NULL,        -- sum of (qty * close - capital_committed) for open positions
-    total_equity           DOUBLE PRECISION NOT NULL,        -- cash + deployed + mtm
-    daily_pnl_rs           DOUBLE PRECISION NOT NULL DEFAULT 0,
-    daily_pnl_pct          DOUBLE PRECISION NOT NULL DEFAULT 0,
-    cumulative_return_pct  DOUBLE PRECISION NOT NULL DEFAULT 0,   -- vs. virtual_capital_start
-    max_drawdown_pct       DOUBLE PRECISION NOT NULL DEFAULT 0,   -- worst dd-to-date
-    peak_equity            DOUBLE PRECISION NOT NULL DEFAULT 0,   -- running peak (for dd calc)
-    n_open_positions       BIGINT NOT NULL DEFAULT 0,
-    n_closed_today         BIGINT NOT NULL DEFAULT 0,
-    n_opened_today         BIGINT NOT NULL DEFAULT 0,
-    created_at             TEXT NOT NULL DEFAULT (TIMESTAMPTZ('now')),
-    UNIQUE(portfolio_id, trade_date)
-);
-CREATE INDEX IF NOT EXISTS ix_port_eq_recent ON portfolio_equity_history(portfolio_id, trade_date DESC);
-
--- ── portfolio_monthly_performance ─────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS portfolio_monthly_performance (
-    id              BIGSERIAL PRIMARY KEY,
-    portfolio_id    BIGINT NOT NULL REFERENCES portfolio_definitions(id),
-    year            BIGINT NOT NULL,
-    month           BIGINT NOT NULL CHECK (month BETWEEN 1 AND 12),
-    end_equity_rs   DOUBLE PRECISION NOT NULL,
-    return_pct      DOUBLE PRECISION NOT NULL,            -- vs prior-month equity (or vs ₹5 L for Jan)
-    is_partial      BIGINT NOT NULL DEFAULT 0 CHECK (is_partial IN (0,1)),
-    created_at      TEXT NOT NULL DEFAULT (TIMESTAMPTZ('now')),
-    UNIQUE(portfolio_id, year, month)
-);
-CREATE INDEX IF NOT EXISTS ix_port_monthly ON portfolio_monthly_performance(portfolio_id, year, month);
-
--- ── portfolio_yearly_performance ─────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS portfolio_yearly_performance (
-    id              BIGSERIAL PRIMARY KEY,
-    portfolio_id    BIGINT NOT NULL REFERENCES portfolio_definitions(id),
-    year            BIGINT NOT NULL,
-    start_cap_rs    DOUBLE PRECISION NOT NULL,            -- always ₹5 L per V3 yearly-reset model
-    end_equity_rs   DOUBLE PRECISION NOT NULL,
-    pnl_rs          DOUBLE PRECISION NOT NULL,
-    return_pct      DOUBLE PRECISION NOT NULL,
-    max_drawdown_pct DOUBLE PRECISION NOT NULL,
-    win_rate_pct    DOUBLE PRECISION NOT NULL,
-    n_closed_trades BIGINT NOT NULL,
-    winning_months  BIGINT,                  -- 0..12 (NULL if month data unavailable)
-    is_partial      BIGINT NOT NULL DEFAULT 0 CHECK (is_partial IN (0,1)),    -- 2026 = partial
-    mining_window   TEXT,                     -- e.g. "2020-2020" (debug field)
-    created_at      TEXT NOT NULL DEFAULT (TIMESTAMPTZ('now')),
-    UNIQUE(portfolio_id, year)
-);
-CREATE INDEX IF NOT EXISTS ix_port_yearly ON portfolio_yearly_performance(portfolio_id, year);
-
 -- ── portfolio_definitions ─────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS portfolio_definitions (
     id                    BIGSERIAL PRIMARY KEY,
@@ -523,31 +419,6 @@ CREATE TABLE IF NOT EXISTS falcon_trade_events (
 );
 CREATE INDEX IF NOT EXISTS idx_trade_events_symbol ON falcon_trade_events(symbol, detected_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trade_events_kind   ON falcon_trade_events(kind, detected_at DESC);
-
--- ── falcon_trade_orders ─────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS falcon_trade_orders (
-    id                BIGSERIAL PRIMARY KEY,
-    batch_id          TEXT NOT NULL,
-    symbol            TEXT NOT NULL,
-    side              TEXT NOT NULL,              -- BUY | SELL
-    role              TEXT NOT NULL,              -- ENTRY | STOP | SMOKE | EXIT
-    is_averaging      BIGINT DEFAULT 0,          -- 0 | 1
-    kite_order_id     TEXT,
-    qty               BIGINT NOT NULL,
-    price             DOUBLE PRECISION,
-    trigger_price     DOUBLE PRECISION,
-    product           TEXT NOT NULL,              -- MTF | CNC
-    order_type        TEXT NOT NULL,              -- MARKET | LIMIT | SL | SL-M
-    status            TEXT NOT NULL,              -- PENDING | PLACING | PLACED | REJECTED | CANCELLED | FAILED
-    placed_at         TEXT,
-    filled_at         TEXT,
-    error             TEXT,
-    idempotency_key   TEXT NOT NULL UNIQUE, filled_qty BIGINT DEFAULT 0, last_reconciled_at TEXT,
-    FOREIGN KEY (batch_id) REFERENCES falcon_trade_runs(batch_id)
-);
-CREATE INDEX IF NOT EXISTS idx_trade_orders_batch  ON falcon_trade_orders(batch_id);
-CREATE INDEX IF NOT EXISTS idx_trade_orders_symbol ON falcon_trade_orders(symbol);
-CREATE INDEX IF NOT EXISTS idx_trade_orders_role   ON falcon_trade_orders(role);
 
 -- ── falcon_trade_runs ─────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS falcon_trade_runs (
@@ -758,5 +629,134 @@ CREATE TABLE IF NOT EXISTS falcon_trail_config (
     hold_days_max      BIGINT NOT NULL,    -- e.g. 7
     updated_at         TEXT NOT NULL
 , trail_method TEXT NOT NULL DEFAULT 'percentage', trail_lookback BIGINT NOT NULL DEFAULT 10);
+
+-- ── portfolio_positions ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS portfolio_positions (
+    id                  BIGSERIAL PRIMARY KEY,
+    portfolio_id        BIGINT NOT NULL REFERENCES portfolio_definitions(id),
+    signal_date         TEXT NOT NULL,          -- date the engine emitted the rank
+    entry_date          TEXT NOT NULL,          -- next trading day
+    symbol              TEXT NOT NULL,
+    sector              TEXT,
+    rank_on_entry       BIGINT,                -- 1..14 etc, audit field
+    score_on_entry      DOUBLE PRECISION,
+    story_on_entry      TEXT,                   -- "Why I bought" — locked at entry
+    entry_price         DOUBLE PRECISION NOT NULL,
+    qty                 BIGINT NOT NULL,
+    capital_committed   DOUBLE PRECISION NOT NULL,          -- entry_price * qty
+    sl_level            DOUBLE PRECISION NOT NULL,          -- absolute price ₹
+    target_level        DOUBLE PRECISION,                   -- absolute price ₹ (NULL if trail-only)
+    trail_high_water    DOUBLE PRECISION,                   -- highest close since trail trigger; NULL until armed
+    trail_active        BIGINT NOT NULL DEFAULT 0 CHECK (trail_active IN (0,1)),
+    -- Exit fields, populated on close
+    exit_date           TEXT,
+    exit_price          DOUBLE PRECISION,
+    exit_reason         TEXT CHECK (exit_reason IN ('SL','TARGET','TIME','TRAIL','MANUAL')),
+    pnl_rs              DOUBLE PRECISION,
+    pnl_pct             DOUBLE PRECISION,
+    holding_days        BIGINT,
+    created_at          TEXT NOT NULL DEFAULT (TIMESTAMPTZ('now')),
+    -- Defensive: never open the same (portfolio, day, symbol) twice
+    UNIQUE(portfolio_id, signal_date, symbol)
+);
+CREATE INDEX IF NOT EXISTS ix_port_pos_open      ON portfolio_positions(portfolio_id, exit_date) WHERE exit_date IS NULL;
+CREATE INDEX IF NOT EXISTS ix_port_pos_entry     ON portfolio_positions(portfolio_id, entry_date DESC);
+CREATE INDEX IF NOT EXISTS ix_port_pos_exit      ON portfolio_positions(portfolio_id, exit_date DESC) WHERE exit_date IS NOT NULL;
+
+-- ── portfolio_event_log ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS portfolio_event_log (
+    id           BIGSERIAL PRIMARY KEY,
+    portfolio_id BIGINT NOT NULL REFERENCES portfolio_definitions(id),
+    event_date   TEXT NOT NULL,
+    event_type   TEXT NOT NULL CHECK (event_type IN ('ENTER','EXIT_SL','EXIT_TARGET','EXIT_TIME','EXIT_TRAIL')),
+    symbol       TEXT NOT NULL,
+    price        DOUBLE PRECISION NOT NULL,
+    reason_text  TEXT NOT NULL,        -- trader-voice, public
+    position_id  BIGINT REFERENCES portfolio_positions(id),
+    created_at   TEXT NOT NULL DEFAULT (TIMESTAMPTZ('now'))
+);
+CREATE INDEX IF NOT EXISTS ix_port_event_recent ON portfolio_event_log(portfolio_id, event_date DESC, id DESC);
+CREATE INDEX IF NOT EXISTS ix_port_event_type   ON portfolio_event_log(portfolio_id, event_type, event_date DESC);
+
+-- ── portfolio_equity_history ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS portfolio_equity_history (
+    id                     BIGSERIAL PRIMARY KEY,
+    portfolio_id           BIGINT NOT NULL REFERENCES portfolio_definitions(id),
+    trade_date             TEXT NOT NULL,
+    cash_balance           DOUBLE PRECISION NOT NULL,
+    deployed_capital       DOUBLE PRECISION NOT NULL,        -- sum of capital_committed for open positions
+    mtm_unrealized         DOUBLE PRECISION NOT NULL,        -- sum of (qty * close - capital_committed) for open positions
+    total_equity           DOUBLE PRECISION NOT NULL,        -- cash + deployed + mtm
+    daily_pnl_rs           DOUBLE PRECISION NOT NULL DEFAULT 0,
+    daily_pnl_pct          DOUBLE PRECISION NOT NULL DEFAULT 0,
+    cumulative_return_pct  DOUBLE PRECISION NOT NULL DEFAULT 0,   -- vs. virtual_capital_start
+    max_drawdown_pct       DOUBLE PRECISION NOT NULL DEFAULT 0,   -- worst dd-to-date
+    peak_equity            DOUBLE PRECISION NOT NULL DEFAULT 0,   -- running peak (for dd calc)
+    n_open_positions       BIGINT NOT NULL DEFAULT 0,
+    n_closed_today         BIGINT NOT NULL DEFAULT 0,
+    n_opened_today         BIGINT NOT NULL DEFAULT 0,
+    created_at             TEXT NOT NULL DEFAULT (TIMESTAMPTZ('now')),
+    UNIQUE(portfolio_id, trade_date)
+);
+CREATE INDEX IF NOT EXISTS ix_port_eq_recent ON portfolio_equity_history(portfolio_id, trade_date DESC);
+
+-- ── portfolio_monthly_performance ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS portfolio_monthly_performance (
+    id              BIGSERIAL PRIMARY KEY,
+    portfolio_id    BIGINT NOT NULL REFERENCES portfolio_definitions(id),
+    year            BIGINT NOT NULL,
+    month           BIGINT NOT NULL CHECK (month BETWEEN 1 AND 12),
+    end_equity_rs   DOUBLE PRECISION NOT NULL,
+    return_pct      DOUBLE PRECISION NOT NULL,            -- vs prior-month equity (or vs ₹5 L for Jan)
+    is_partial      BIGINT NOT NULL DEFAULT 0 CHECK (is_partial IN (0,1)),
+    created_at      TEXT NOT NULL DEFAULT (TIMESTAMPTZ('now')),
+    UNIQUE(portfolio_id, year, month)
+);
+CREATE INDEX IF NOT EXISTS ix_port_monthly ON portfolio_monthly_performance(portfolio_id, year, month);
+
+-- ── portfolio_yearly_performance ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS portfolio_yearly_performance (
+    id              BIGSERIAL PRIMARY KEY,
+    portfolio_id    BIGINT NOT NULL REFERENCES portfolio_definitions(id),
+    year            BIGINT NOT NULL,
+    start_cap_rs    DOUBLE PRECISION NOT NULL,            -- always ₹5 L per V3 yearly-reset model
+    end_equity_rs   DOUBLE PRECISION NOT NULL,
+    pnl_rs          DOUBLE PRECISION NOT NULL,
+    return_pct      DOUBLE PRECISION NOT NULL,
+    max_drawdown_pct DOUBLE PRECISION NOT NULL,
+    win_rate_pct    DOUBLE PRECISION NOT NULL,
+    n_closed_trades BIGINT NOT NULL,
+    winning_months  BIGINT,                  -- 0..12 (NULL if month data unavailable)
+    is_partial      BIGINT NOT NULL DEFAULT 0 CHECK (is_partial IN (0,1)),    -- 2026 = partial
+    mining_window   TEXT,                     -- e.g. "2020-2020" (debug field)
+    created_at      TEXT NOT NULL DEFAULT (TIMESTAMPTZ('now')),
+    UNIQUE(portfolio_id, year)
+);
+CREATE INDEX IF NOT EXISTS ix_port_yearly ON portfolio_yearly_performance(portfolio_id, year);
+
+-- ── falcon_trade_orders ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS falcon_trade_orders (
+    id                BIGSERIAL PRIMARY KEY,
+    batch_id          TEXT NOT NULL,
+    symbol            TEXT NOT NULL,
+    side              TEXT NOT NULL,              -- BUY | SELL
+    role              TEXT NOT NULL,              -- ENTRY | STOP | SMOKE | EXIT
+    is_averaging      BIGINT DEFAULT 0,          -- 0 | 1
+    kite_order_id     TEXT,
+    qty               BIGINT NOT NULL,
+    price             DOUBLE PRECISION,
+    trigger_price     DOUBLE PRECISION,
+    product           TEXT NOT NULL,              -- MTF | CNC
+    order_type        TEXT NOT NULL,              -- MARKET | LIMIT | SL | SL-M
+    status            TEXT NOT NULL,              -- PENDING | PLACING | PLACED | REJECTED | CANCELLED | FAILED
+    placed_at         TEXT,
+    filled_at         TEXT,
+    error             TEXT,
+    idempotency_key   TEXT NOT NULL UNIQUE, filled_qty BIGINT DEFAULT 0, last_reconciled_at TEXT,
+    FOREIGN KEY (batch_id) REFERENCES falcon_trade_runs(batch_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trade_orders_batch  ON falcon_trade_orders(batch_id);
+CREATE INDEX IF NOT EXISTS idx_trade_orders_symbol ON falcon_trade_orders(symbol);
+CREATE INDEX IF NOT EXISTS idx_trade_orders_role   ON falcon_trade_orders(role);
 
 -- (transaction owned by pg_migrate.apply_schema)

@@ -102,6 +102,39 @@ def translate(ddl: str) -> tuple[str, list[str]]:
     return s + ";", warns
 
 
+def dependency_order(ddls: dict) -> list:
+    """Order tables so a FOREIGN KEY's target is CREATEd before the referrer.
+
+    SQLite tolerates any creation order; Postgres does not — a REFERENCES to a
+    table that doesn't exist yet fails the whole migration (hit live:
+    portfolio_positions -> portfolio_definitions). Simple Kahn topological sort;
+    on a cycle we fall back to the declared order (PG would then need the FK
+    added post-hoc, which we'd see immediately as a loud failure).
+    """
+    names = set(ddls)
+    deps = {}
+    for t, ddl in ddls.items():
+        refs = set()
+        for m in re.finditer(r'REFERENCES\s+"?([A-Za-z_][A-Za-z0-9_]*)"?', ddl, re.I):
+            r = m.group(1)
+            if r in names and r != t:
+                refs.add(r)
+        deps[t] = refs
+
+    ordered, placed = [], set()
+    remaining = list(ddls)
+    while remaining:
+        progress = False
+        for t in list(remaining):
+            if deps[t] <= placed:
+                ordered.append(t); placed.add(t); remaining.remove(t); progress = True
+        if not progress:            # cycle — emit the rest as-is
+            ordered.extend(remaining)
+            print(f"  WARN: FK cycle among {remaining} — emitted in declared order")
+            break
+    return ordered
+
+
 def main() -> None:
     con = sqlite3.connect(f"file:{SRC}?mode=ro", uri=True)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
@@ -121,6 +154,8 @@ def main() -> None:
     found = 0
     missing = []
 
+    # Collect raw DDL first so we can order by FK dependency before emitting.
+    raw = {}
     for t in OLTP_TABLES:
         row = con.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (t,)
@@ -128,8 +163,11 @@ def main() -> None:
         if not row or not row[0]:
             missing.append(t)
             continue
+        raw[t] = row[0]
+
+    for t in dependency_order(raw):
         found += 1
-        sql, warns = translate(row[0])
+        sql, warns = translate(raw[t])
         lines.append(f"-- ── {t} ─────────────────────────────────────────────")
         lines.append(sql)
         for w in warns:
