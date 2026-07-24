@@ -381,6 +381,31 @@ def jobs_run(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
             "message": f"Not kicked off: {result.get('reason_skipped')}"}
 
 
+#  ── SQLite -> Postgres migration (Stages 1-3) ────────────────────────────────
+#  Runs in the RUNNING container on purpose: RDS is in a private subnet, and this
+#  process already has the serving SQLite DBs on /localdb plus the PG pool. A
+#  one-off ECS task would skip entrypoint.sh and have no /localdb to read from.
+
+@router.get("/db/pg-health")
+def db_pg_health(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
+    """Postgres reachability probe (never raises)."""
+    import pgdb
+    return pgdb.health()
+
+
+@router.post("/db/pg-migrate")
+def db_pg_migrate(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
+    """Run schema -> backfill -> fix_sequences -> verify.
+
+    SAFE + IDEMPOTENT: SQLite is opened read-only (live data never mutated),
+    every DDL is IF NOT EXISTS, and the backfill uses ON CONFLICT DO NOTHING, so
+    re-running tops up rather than duplicating. Changes NO routing — the app
+    keeps serving from SQLite until the per-module cutover.
+    """
+    import pg_migrate
+    return pg_migrate.run_all()
+
+
 @router.get("/jobs/scheduled")
 def jobs_scheduled(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
     """Roster of scheduled jobs known to this backend, in the order they run.
