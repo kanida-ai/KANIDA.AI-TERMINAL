@@ -406,6 +406,25 @@ def db_pg_migrate(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
     return pg_migrate.run_all()
 
 
+@router.post("/db/loadtest-paper-fire")
+def db_loadtest_paper_fire(
+    n: int = Query(100, ge=1, le=500),
+    capital: float = Query(1e7),
+    top_n: int = Query(10, ge=1, le=50),
+    product: str = Query("CNC"),
+    _admin: bool = Depends(require_admin),
+) -> Dict[str, Any]:
+    """Fire N PAPER sessions (default ₹1 Cr each) at once through the REAL order
+    path; measure fires/sec, latency, errors, positions written; then clean up.
+
+    Paper (dry_run → no real orders); prices stubbed so it measures OUR
+    concurrency, not Kite's single-key throttle. All data is owned by
+    'loadtest-*' users and deleted in a finally. Admin-gated.
+    """
+    import loadtest_paper
+    return loadtest_paper.run(n=n, capital=capital, top_n=top_n, product=product)
+
+
 @router.post("/db/concurrency-benchmark")
 def db_concurrency_benchmark(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
     """Measure concurrent-write throughput: SQLite (single-writer) vs Postgres.
