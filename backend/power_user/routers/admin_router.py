@@ -406,6 +406,18 @@ def db_pg_migrate(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
     return pg_migrate.run_all()
 
 
+@router.post("/db/concurrency-benchmark")
+def db_concurrency_benchmark(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
+    """Measure concurrent-write throughput: SQLite (single-writer) vs Postgres.
+
+    Uses scratch objects only (a temp SQLite file + a scratch PG table it drops)
+    — no real order/position/user data is touched. Answers 'how many users can
+    place orders simultaneously before the DB is the bottleneck' with numbers.
+    """
+    import pg_benchmark
+    return pg_benchmark.run()
+
+
 @router.get("/jobs/scheduled")
 def jobs_scheduled(_admin: bool = Depends(require_admin)) -> Dict[str, Any]:
     """Roster of scheduled jobs known to this backend, in the order they run.
