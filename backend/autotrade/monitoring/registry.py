@@ -16,7 +16,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from falcon.db import falcon_conn
+from oltp_db import oltp_conn  # OLTP domain: SQLite (flag off) or Postgres (KANIDA_PG_ENABLED). This module is pure-OLTP (no market tables).
 from .pricing import resolve_ltp
 from .. import order_ledger as _order_ledger
 
@@ -33,7 +33,7 @@ def session_mode(session_id: str) -> Optional[str]:
     orphan session_id (no autotrade_sessions row) behaves byte-for-byte as
     before. Never raises."""
     try:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             r = con.execute(
                 "SELECT mode FROM autotrade_sessions WHERE session_id=?",
                 (session_id,)).fetchone()
@@ -128,7 +128,7 @@ def sibling_open_qty(session_id: str, symbol: str,
     sql = ("SELECT COALESCE(SUM(p.qty),0) AS q FROM autotrade_positions p "
            "LEFT JOIN autotrade_sessions s ON s.session_id=p.session_id WHERE "
            + " AND ".join(clauses))
-    with falcon_conn() as con:
+    with oltp_conn() as con:
         r = con.execute(sql, params).fetchone()
     return int(r["q"] or 0) if r else 0
 
@@ -215,7 +215,7 @@ class PositionRegistry:
         """
         now = datetime.now(IST).isoformat()
         direction = "short" if str(direction).lower() == "short" else "long"
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             existing = con.execute(
                 """SELECT id FROM autotrade_positions
                    WHERE session_id=? AND symbol=?
@@ -286,7 +286,7 @@ class PositionRegistry:
         Returns {blended_qty, blended_avg} (the resulting row's qty + avg)."""
         now = datetime.now(IST).isoformat()
         direction = "short" if str(direction).lower() == "short" else "long"
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             row = con.execute(
                 """SELECT id, qty, avg_price FROM autotrade_positions
                    WHERE session_id=? AND symbol=?
@@ -308,7 +308,7 @@ class PositionRegistry:
         if new_qty <= 0:
             return {"blended_qty": old_qty, "blended_avg": old_avg}
         new_avg = ((old_qty * old_avg) + (int(add_qty) * float(add_price))) / new_qty
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             con.execute(
                 """UPDATE autotrade_positions
                    SET qty=?, avg_price=?, ltp=COALESCE(ltp, ?),
@@ -352,7 +352,7 @@ class PositionRegistry:
 
     # ── Reads ─────────────────────────────────────────────────────────────────
     def get_open_positions(self) -> List[Dict[str, Any]]:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             rows = con.execute(
                 """SELECT * FROM autotrade_positions
                    WHERE session_id=? AND status='OPEN' AND qty > 0""",
@@ -361,7 +361,7 @@ class PositionRegistry:
         return [dict(r) for r in rows]
 
     def get_all_positions(self) -> List[Dict[str, Any]]:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             rows = con.execute(
                 "SELECT * FROM autotrade_positions WHERE session_id=?",
                 (self.session_id,),
@@ -377,7 +377,7 @@ class PositionRegistry:
         (COALESCE keeps the first-minted id stable across retries). Best-effort;
         never raises into the exit path. Scoped by (session, symbol[, profile])."""
         try:
-            with falcon_conn() as con:
+            with oltp_conn() as con:
                 if broker_profile is not None:
                     con.execute(
                         """UPDATE autotrade_positions
@@ -404,7 +404,7 @@ class PositionRegistry:
                                  ) -> Optional[str]:
         """Read the persisted EXIT client_order_id for a position (or None)."""
         try:
-            with falcon_conn() as con:
+            with oltp_conn() as con:
                 if broker_profile is not None:
                     r = con.execute(
                         """SELECT exit_client_order_id FROM autotrade_positions
@@ -427,7 +427,7 @@ class PositionRegistry:
         exit_lock — for status() so a stranded, still-held leg is VISIBLE (C3).
         (monitor.get_exit_failed_positions returns only the retry-eligible
         exit_lock=0 subset; this is the full set for display.)"""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             rows = con.execute(
                 """SELECT * FROM autotrade_positions
                    WHERE session_id=? AND status='EXIT_FAILED' AND qty > 0""",
@@ -444,7 +444,7 @@ class PositionRegistry:
         close → existing avg_price) so we never persist a stale unrelated value.
         Scoped to (session_id, symbol[, broker_profile]).
         """
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             row = con.execute(
                 """SELECT id, avg_price FROM autotrade_positions
                    WHERE session_id=? AND symbol=?
@@ -500,7 +500,7 @@ class PositionRegistry:
         identical whenever a positive price is supplied OR ltp>0 (the only real
         paper/live flows); it ONLY changes the pathological 0/absent case."""
         now = datetime.now(IST).isoformat()
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             # FUTURES long/short: sign-aware realised P&L. 'long' CASE = +1 →
             # byte-identical to (exit-avg)*qty; 'short' = (avg-exit)*qty.
             if broker_profile is not None:
@@ -551,7 +551,7 @@ class PositionRegistry:
         (ltp-avg)*qty), short = (avg-ltp)*qty. avg_price is updated only when a
         non-None value is passed (COALESCE keeps the existing avg otherwise).
         Scoped to (session_id, symbol[, broker_profile])."""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             if broker_profile is not None:
                 con.execute(
                     """UPDATE autotrade_positions
@@ -591,7 +591,7 @@ class PositionRegistry:
         still recorded so the UI shows the intended floor/ceiling. Also mirrors
         the levels into sl_level / target_price for the existing UI fields.
         Scoped to (session_id, symbol[, broker_profile])."""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             if broker_profile is not None:
                 con.execute(
                     """UPDATE autotrade_positions
@@ -621,7 +621,7 @@ class PositionRegistry:
         order-id on an MIS position row. Scoped to (session_id, symbol[, profile]).
         Best-effort — never raises into the entry / exit path."""
         try:
-            with falcon_conn() as con:
+            with oltp_conn() as con:
                 if broker_profile is not None:
                     con.execute(
                         """UPDATE autotrade_positions SET slm_order_id=?
@@ -642,7 +642,7 @@ class PositionRegistry:
         """OPEN positions that have NO gtt_id yet — used to backfill the broker
         backup on session start and boot-resume (e.g. positions opened before
         this feature deployed)."""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             rows = con.execute(
                 """SELECT * FROM autotrade_positions
                    WHERE session_id=? AND status='OPEN' AND qty > 0
@@ -668,7 +668,7 @@ class PositionRegistry:
         broker_profile None keeps the old symbol-wide behaviour (byte-identical for
         the single-profile case that has always been the norm)."""
         now = datetime.now(IST).isoformat()
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             if broker_profile is not None:
                 con.execute(
                     """UPDATE autotrade_positions
@@ -726,7 +726,7 @@ class PositionRegistry:
         log.warning(
             "partial exit for %s/%s: filled=%d exit_price=%s",
             self.session_id, symbol, filled_qty, exit_price)
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             if broker_profile is not None:
                 row = con.execute(
                     """SELECT avg_price, qty, direction FROM autotrade_positions
