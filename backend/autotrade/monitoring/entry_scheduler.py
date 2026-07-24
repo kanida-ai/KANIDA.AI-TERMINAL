@@ -173,7 +173,18 @@ def start_for_session(session_id: str, target_ist: datetime,
     """Arm an entry scheduler for session_id that fires at target_ist (an
     IST-aware datetime). Idempotent — returns False if one is already armed for
     this session_id, True if a new scheduler was armed. `now_fn` (tests only)
-    injects a frozen clock for the sleep computation."""
+    injects a frozen clock for the sleep computation.
+
+    MULTI-CONTAINER (Stage 4b): only the container that OWNS this session's lease
+    arms the scheduler. Without this, every task would arm a scheduler for every
+    scheduled session and all of them would wake at 09:15 — the duplicate-order
+    claim would stop the extra fires, but only after N containers had raced. No-op
+    (always True) in single-container mode."""
+    from ..session_ownership import try_own
+    if not try_own(session_id):
+        log.info("entry_scheduler: %s owned by another container — not arming",
+                 session_id)
+        return False
     with _LOCK:
         existing = _SCHEDULERS.get(session_id)
         if existing is not None and existing.is_alive():
