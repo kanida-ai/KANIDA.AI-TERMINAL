@@ -48,6 +48,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from falcon.db import falcon_conn
+from oltp_db import oltp_conn  # OLTP fire-path tables (autotrade_positions/sessions) -> SQLite(off)/Postgres(KANIDA_PG_ENABLED); market blocks keep falcon_conn
 
 from .config import TradingSessionConfig
 from . import trading_calendar
@@ -992,7 +993,7 @@ def estimate_session_charges_rs(session_id: str, product: str) -> float:
     from .charges import estimate_charges
     total = 0.0
     try:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             rows = con.execute(
                 "SELECT qty, avg_price, ltp, exit_price, status, instrument_type "
                 "FROM autotrade_positions WHERE session_id=? "
@@ -1032,7 +1033,7 @@ def _falcon_owned_exit_ids_tags(session_id: str, symbol: str,
     tags: set = set()
     try:
         from autotrade.order_ledger import compact_tag
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             if broker_profile is not None:
                 rows = con.execute(
                     """SELECT entry_order_id, exit_order_id, gtt_id,
@@ -1733,7 +1734,7 @@ class TradingSession:
                     f"broker_account_id {broker_account_id} not found"
                     + (f" for user {user_id}" if user_id else ""))
         session_id = uuid.uuid4().hex
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             con.execute(
                 """INSERT INTO autotrade_sessions
                    (session_id, created_at, status, mode,
@@ -1752,7 +1753,7 @@ class TradingSession:
 
     @classmethod
     def load(cls, session_id: str) -> Optional["TradingSession"]:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             row = con.execute(
                 "SELECT mode, config_json, user_id, broker_account_id, "
                 "config_version "
@@ -1791,7 +1792,7 @@ class TradingSession:
         version is unchanged it is an O(1) no-op (no re-parse). Returns True iff a
         reload happened.
         """
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             row = con.execute(
                 "SELECT config_version, config_json "
                 "FROM autotrade_sessions WHERE session_id=?",
@@ -1856,7 +1857,7 @@ class TradingSession:
                FROM autotrade_sessions s
             """)
         scope_id = owner_user_id if owner_user_id is not None else user_id
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             if scope_id is not None:
                 rows = con.execute(
                     base + " WHERE s.user_id = ? ORDER BY s.created_at DESC "
@@ -4618,7 +4619,7 @@ class TradingSession:
         """True once BOTH split-entry legs are in (mag_entry_complete=1). Until
         then the tick/ws trail is DORMANT (the deferred-arm edge)."""
         try:
-            with falcon_conn() as con:
+            with oltp_conn() as con:
                 r = con.execute(
                     "SELECT mag_entry_complete FROM autotrade_sessions "
                     "WHERE session_id=?", (self.session_id,)).fetchone()
@@ -4627,14 +4628,14 @@ class TradingSession:
             return False
 
     def _set_magnifier_entry_complete(self, v: bool = True) -> None:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             con.execute(
                 "UPDATE autotrade_sessions SET mag_entry_complete=? "
                 "WHERE session_id=?", (1 if v else 0, self.session_id))
             con.commit()
 
     def _persist_mag_leg2_plan(self, plan: List[Dict[str, Any]]) -> None:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             con.execute(
                 "UPDATE autotrade_sessions SET mag_leg2_plan_json=? "
                 "WHERE session_id=?", (json.dumps(plan), self.session_id))
@@ -4642,7 +4643,7 @@ class TradingSession:
 
     def _load_mag_leg2_plan(self) -> List[Dict[str, Any]]:
         try:
-            with falcon_conn() as con:
+            with oltp_conn() as con:
                 r = con.execute(
                     "SELECT mag_leg2_plan_json FROM autotrade_sessions "
                     "WHERE session_id=?", (self.session_id,)).fetchone()
@@ -5328,7 +5329,7 @@ class TradingSession:
 
     # ── Status ─────────────────────────────────────────────────────────────────
     def status(self) -> Dict[str, Any]:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             row = con.execute(
                 "SELECT * FROM autotrade_sessions WHERE session_id=?",
                 (self.session_id,),
@@ -5538,7 +5539,7 @@ class TradingSession:
     def _last_exit_reason(self) -> Optional[str]:
         """The close_reason written to this session's positions on flatten
         (TRAIL_EXIT / FLOOR_EXIT / STOP / SQUARE_OFF / KILL_SWITCH), or None."""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             row = con.execute(
                 """SELECT close_reason FROM autotrade_positions
                    WHERE session_id=? AND close_reason IS NOT NULL
@@ -5548,7 +5549,7 @@ class TradingSession:
         if row and row["close_reason"]:
             return row["close_reason"]
         # Fall back to the session-level kill_reason (e.g. nothing was open).
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             row = con.execute(
                 "SELECT kill_reason FROM autotrade_sessions WHERE session_id=?",
                 (self.session_id,),
@@ -5560,7 +5561,7 @@ class TradingSession:
         set when entries fire (RUNNING transition). The DURABLE anchor for the
         multi-session max-hold cap — read fresh each call so the cap survives a
         restart. None until the session has fired."""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             row = con.execute(
                 "SELECT started_at FROM autotrade_sessions WHERE session_id=?",
                 (self.session_id,),
@@ -5575,7 +5576,7 @@ class TradingSession:
                         exit_latency_ms: Optional[int] = None) -> None:
         """Persist the speed-pass observability fields on the session row
         (idempotent COALESCE-style UPDATE; only the provided field is written)."""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             if entry_latency_ms is not None:
                 con.execute(
                     "UPDATE autotrade_sessions SET entry_latency_ms=? "
@@ -5588,7 +5589,7 @@ class TradingSession:
 
     def _current_status(self) -> Optional[str]:
         """The session's CURRENT persisted status (fresh read), or None."""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             r = con.execute(
                 "SELECT status FROM autotrade_sessions WHERE session_id=?",
                 (self.session_id,)).fetchone()
@@ -5599,7 +5600,7 @@ class TradingSession:
         yet flat. Used to decide when a KILLING_INCOMPLETE session may be promoted
         to CLOSED (C2). Counts a locked in-flight retry (exit_lock=1) too, so we
         never close while an exit is mid-flight."""
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             r = con.execute(
                 "SELECT COUNT(*) AS n FROM autotrade_positions "
                 "WHERE session_id=? AND status IN ('OPEN','EXIT_FAILED') "
@@ -5609,7 +5610,7 @@ class TradingSession:
     def _set_status(self, status: str, started_at: Optional[str] = None,
                     reason: Optional[str] = None,
                     closed_at: Optional[str] = None) -> None:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             con.execute(
                 "UPDATE autotrade_sessions SET status=?, "
                 "started_at=COALESCE(?, started_at), "
@@ -5623,7 +5624,7 @@ class TradingSession:
         restart resumes from the carried date. Idempotent rewrite of config_json.
         """
         self.config.entry_date = entry_date
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             con.execute(
                 "UPDATE autotrade_sessions SET config_json=? WHERE session_id=?",
                 (self.config.to_json(), self.session_id))
