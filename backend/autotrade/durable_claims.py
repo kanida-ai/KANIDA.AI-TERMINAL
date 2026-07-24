@@ -21,6 +21,7 @@ hot exit path.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -28,6 +29,25 @@ from falcon.db import falcon_conn
 
 log = logging.getLogger("kanida.autotrade.durable_claims")
 IST = timezone(timedelta(hours=5, minutes=30))
+
+# ── WHY POSTGRES MATTERS HERE (the desired_count>1 blocker) ──────────────────
+# falcon_conn() is SQLite at FALCON_DB_PATH, which in the cloud is
+# /localdb/kanida_universe.db — CONTAINER-LOCAL (entrypoint.sh copies EFS->local
+# per task). So this CAS is cross-PROCESS but NOT cross-CONTAINER: with two
+# tasks, each claims `entry:<session>` in its OWN file, BOTH win, and BOTH fire
+# the 9:15 entry -> DUPLICATE LIVE ORDERS. That is the single reason
+# desired_count must stay 1.
+#
+# Postgres is a genuinely shared authority, so the same CAS becomes correct
+# across containers. Gated by KANIDA_PG_CLAIMS (default OFF) so nothing changes
+# until it is deliberately enabled; it is INDEPENDENT of full OLTP routing
+# because it is the prerequisite for horizontal scale on its own.
+# autotrade_claims already exists in PG (migrated in Stage 3).
+
+
+def _pg_claims() -> bool:
+    return os.environ.get("KANIDA_PG_CLAIMS", "").strip().lower() in (
+        "1", "true", "yes", "on")
 
 # Lease lengths (seconds). A FIRE / ENTRY claim is effectively one-shot per session
 # (a session fires / places entries at most once), so it uses a LONG lease — a
@@ -60,6 +80,27 @@ def claim(key: str, lease_sec: float, holder: str | None = None) -> bool:
     now = datetime.now(IST)
     now_iso = now.isoformat()
     until_iso = (now + timedelta(seconds=lease_sec)).isoformat()
+
+    if _pg_claims():
+        # Single-statement CAS. The row is returned ONLY if we inserted (key was
+        # free) or the takeover WHERE matched (prior lease expired) — so exactly
+        # one racing container wins, across the whole cluster. Any failure
+        # propagates: silently falling back to the container-local SQLite claim
+        # would re-open the duplicate-fire window this exists to close.
+        import pgdb
+        with pgdb.pg_conn() as c:
+            cur = c.cursor()
+            cur.execute(
+                "INSERT INTO autotrade_claims(claim_key, holder, leased_until,"
+                " created_at) VALUES (%s,%s,%s,%s) "
+                "ON CONFLICT (claim_key) DO UPDATE SET holder=EXCLUDED.holder,"
+                " leased_until=EXCLUDED.leased_until,"
+                " created_at=EXCLUDED.created_at "
+                "WHERE autotrade_claims.leased_until < %s "
+                "RETURNING claim_key",
+                (key, holder, until_iso, now_iso, now_iso))
+            return cur.fetchone() is not None
+
     with falcon_conn() as con:
         _ensure(con)
         try:
@@ -83,6 +124,12 @@ def release(key: str) -> None:
     """Release `key` (delete the row). Idempotent + best-effort (never raises into
     the exit hot path)."""
     try:
+        if _pg_claims():
+            import pgdb
+            with pgdb.pg_conn() as c:
+                c.cursor().execute(
+                    "DELETE FROM autotrade_claims WHERE claim_key=%s", (key,))
+            return
         with falcon_conn() as con:
             _ensure(con)
             con.execute("DELETE FROM autotrade_claims WHERE claim_key=?", (key,))
@@ -94,6 +141,15 @@ def release(key: str) -> None:
 def is_claimed(key: str) -> bool:
     """True iff a LIVE (unexpired) claim exists for `key`."""
     now_iso = datetime.now(IST).isoformat()
+    if _pg_claims():
+        import pgdb
+        with pgdb.pg_conn() as c:
+            cur = c.cursor()
+            cur.execute(
+                "SELECT leased_until FROM autotrade_claims WHERE claim_key=%s",
+                (key,))
+            r = cur.fetchone()
+        return bool(r and str(r[0]) > now_iso)
     with falcon_conn() as con:
         _ensure(con)
         r = con.execute(
