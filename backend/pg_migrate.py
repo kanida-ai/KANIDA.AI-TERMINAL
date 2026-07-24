@@ -105,6 +105,83 @@ def apply_schema() -> Dict[str, Any]:
 
 # ── 2. backfill ──────────────────────────────────────────────────────────────
 
+def _fk_ordered(tables: List[str]) -> List[str]:
+    """Order tables so a FK's target loads before its referrer.
+
+    Only matters when FK enforcement could NOT be disabled (see backfill); with
+    session_replication_role=replica the order is irrelevant. Reads the real FK
+    graph out of Postgres, so it can't drift from the schema. Falls back to the
+    given order on any error or cycle — never blocks the migration.
+    """
+    try:
+        import pgdb
+        with pgdb.pg_conn() as c:
+            cur = c.cursor()
+            cur.execute("""
+                SELECT tc.table_name, ccu.table_name AS refs
+                  FROM information_schema.table_constraints tc
+                  JOIN information_schema.constraint_column_usage ccu
+                    ON tc.constraint_name = ccu.constraint_name
+                 WHERE tc.constraint_type = 'FOREIGN KEY'
+                   AND tc.table_schema = 'public'
+            """)
+            edges = cur.fetchall()
+    except Exception:
+        return list(tables)
+
+    want = set(tables)
+    deps = {t: set() for t in tables}
+    for child, parent in edges:
+        if child in want and parent in want and child != parent:
+            deps[child].add(parent)
+
+    ordered, placed, remaining = [], set(), list(tables)
+    while remaining:
+        progress = False
+        for t in list(remaining):
+            if deps[t] <= placed:
+                ordered.append(t); placed.add(t); remaining.remove(t); progress = True
+        if not progress:
+            ordered.extend(remaining)      # cycle — emit rest as-is
+            break
+    return ordered
+
+
+def check_orphans() -> Dict[str, Any]:
+    """Report rows whose FK target is missing (pre-existing SQLite data issues).
+
+    These are copied faithfully by the backfill (FK enforcement is off during
+    load) — this surfaces them so they can be cleaned deliberately instead of
+    being silently dropped or silently corrupting referential integrity.
+    """
+    import pgdb
+    found: Dict[str, Any] = {}
+    with pgdb.pg_conn() as c:
+        cur = c.cursor()
+        cur.execute("""
+            SELECT tc.table_name, kcu.column_name,
+                   ccu.table_name AS ref_table, ccu.column_name AS ref_col
+              FROM information_schema.table_constraints tc
+              JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+              JOIN information_schema.constraint_column_usage ccu
+                ON tc.constraint_name = ccu.constraint_name
+             WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'
+        """)
+        for tbl, col, rtbl, rcol in cur.fetchall():
+            try:
+                cur.execute(
+                    f'SELECT COUNT(*) FROM "{tbl}" c '
+                    f'WHERE c."{col}" IS NOT NULL AND NOT EXISTS '
+                    f'(SELECT 1 FROM "{rtbl}" p WHERE p."{rcol}" = c."{col}")')
+                n = cur.fetchone()[0]
+                if n:
+                    found[f"{tbl}.{col} -> {rtbl}.{rcol}"] = n
+            except Exception as e:
+                found[f"{tbl}.{col}"] = f"check failed: {str(e)[:120]}"
+    return {"orphan_groups": len(found), "details": found}
+
+
 def _pg_columns(cur, table: str) -> List[str]:
     cur.execute(
         "SELECT column_name FROM information_schema.columns "
@@ -115,20 +192,42 @@ def _pg_columns(cur, table: str) -> List[str]:
 
 
 def backfill(tables: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Copy rows SQLite -> PG. Idempotent (ON CONFLICT DO NOTHING)."""
+    """Copy rows SQLite -> PG. Idempotent (ON CONFLICT DO NOTHING).
+
+    TWO HARD-WON DETAILS (both hit live on the first real run):
+
+    1. ONE TRANSACTION PER TABLE. Originally the whole backfill shared a single
+       transaction, so the first failure aborted it and every later table died
+       with InFailedSqlTransaction — and the rollback discarded the 87k rows
+       that HAD copied. A fresh connection per table isolates failures.
+
+    2. FK ENFORCEMENT OFF DURING LOAD. SQLite never enforced foreign keys, so
+       the source legitimately contains orphans (e.g. portfolio_positions
+       .portfolio_id=481 with no portfolio_definitions row). Postgres rightly
+       rejects those. `SET session_replication_role = replica` is the standard
+       bulk-load escape hatch: it copies the data FAITHFULLY, orphans included,
+       instead of silently dropping rows. Orphans are reported by check_orphans()
+       so they can be cleaned deliberately rather than lost in a migration.
+       If the role lacks permission we fall back to enforced FKs (and the
+       dependency ordering below then matters).
+    """
     import pgdb
     from psycopg2.extras import execute_values
 
-    targets = tables or OLTP_TABLES
+    targets = tables or _fk_ordered(OLTP_TABLES)
     src = _sqlite_ro()
     src.row_factory = sqlite3.Row
     out: Dict[str, Any] = {}
     t0 = time.time()
 
-    with pgdb.pg_conn() as c:
-        cur = c.cursor()
-        for t in targets:
-            try:
+    for t in targets:
+        try:
+            with pgdb.pg_conn() as c:          # isolated txn per table
+                cur = c.cursor()
+                try:
+                    cur.execute("SET session_replication_role = replica")
+                except Exception:
+                    pass                        # not permitted -> FKs enforced
                 pg_cols = _pg_columns(cur, t)
                 if not pg_cols:
                     out[t] = {"skipped": "table absent in PG"}
@@ -164,9 +263,9 @@ def backfill(tables: Optional[List[str]] = None) -> Dict[str, Any]:
                 out[t] = {"copied": n, "columns": len(cols),
                           "dropped_columns": sorted(set(sq_cols) - set(cols))}
                 log.info("pg_migrate: %s -> %s rows", t, n)
-            except Exception as e:
-                out[t] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
-                log.exception("pg_migrate: backfill failed for %s", t)
+        except Exception as e:
+            out[t] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+            log.exception("pg_migrate: backfill failed for %s", t)
     src.close()
     return {"ok": True, "elapsed_sec": round(time.time() - t0, 1), "tables": out}
 
@@ -237,6 +336,7 @@ def run_all() -> Dict[str, Any]:
         return res
     res["backfill"] = backfill()
     res["sequences"] = fix_sequences()
+    res["orphans"] = check_orphans()
     res["verify"] = verify()
     return res
 
