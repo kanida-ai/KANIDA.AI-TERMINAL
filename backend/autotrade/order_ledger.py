@@ -38,7 +38,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from falcon.db import falcon_conn
+from oltp_db import oltp_conn  # OLTP domain: SQLite (flag off) or Postgres (KANIDA_PG_ENABLED). This module is pure-OLTP (no market tables).
 
 log = logging.getLogger("kanida.autotrade.order_ledger")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -217,7 +217,7 @@ def append_event(*, session_id: Optional[str], symbol: Optional[str],
     Returns True on a successful append/no-op, False on error. NEVER raises — a
     ledger write must never break the order path."""
     try:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             con.execute(
                 """INSERT OR IGNORE INTO autotrade_order_events
                    (ts, session_id, position_ref, symbol, product, broker_profile,
@@ -268,7 +268,7 @@ def get_events(session_id: str, symbol: Optional[str] = None
     """The ordered event trail for a session (optionally one symbol), oldest
     first. Used by tests + audit to reconstruct a position's lifecycle."""
     try:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             if symbol is not None:
                 rows = con.execute(
                     """SELECT * FROM autotrade_order_events
@@ -293,7 +293,7 @@ def find_intent_by_client_order_id(client_order_id: str
     accepted but never recorded as a position can be located here (then matched to
     the broker orderbook by recomputing compact_tag)."""
     try:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             r = con.execute(
                 """SELECT * FROM autotrade_order_events
                    WHERE client_order_id=? AND event_type=?
@@ -327,7 +327,7 @@ def entry_intents(session_id: str) -> List[Dict[str, Any]]:
     The recovery path uses this to find a broker-accepted entry with NO position
     row (a crash between broker-accept and the position insert). Never raises."""
     try:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             rows = con.execute(
                 """SELECT * FROM autotrade_order_events
                    WHERE session_id=? AND COALESCE(source,'')='entry'
@@ -375,7 +375,7 @@ def entry_intent_resolved(session_id: str, client_order_id: str) -> bool:
     REJECTED / POSITION_CLOSED / RECONCILE_CLOSE) — its lifecycle is resolved, so
     the orphan-adoption scan skips it (idempotent; never re-pages/re-registers)."""
     try:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             ph = ",".join("?" for _ in _ENTRY_TERMINAL_TYPES)
             r = con.execute(
                 f"""SELECT 1 FROM autotrade_order_events
@@ -411,7 +411,7 @@ def ledger_exit_evidence(session_id: str, symbol: str,
     pass the position's opened_at so a PRIOR lifecycle's close of the same
     (session, symbol) can never be mis-attributed to a later re-entry."""
     try:
-        with falcon_conn() as con:
+        with oltp_conn() as con:
             placeholders = ",".join("?" for _ in _EXIT_EVENT_TYPES)
             params: List[Any] = [session_id, symbol]
             sql = (f"""SELECT * FROM autotrade_order_events
