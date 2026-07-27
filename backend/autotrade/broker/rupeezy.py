@@ -201,22 +201,22 @@ def _is_transient(status_code: Optional[int]) -> bool:
 class RupeezyBroker(BrokerClient):
     broker_name = "rupeezy"
 
-    # BOOK SEMANTICS (see BrokerClient.broker_held_qty) — ⚠️ UNCERTIFIED, LEFT AT
-    # THE SAFE DEFAULT ON PURPOSE.
-    # SUSPECTED: Vortex's holdings `t1_quantity` already contains TODAY's CNC buys
-    # (unlike Kite, where they sit only in the net book), so the shared
-    # holdings + max(0, net) rule DOUBLE-COUNTS a same-day CNC buy → a ~2× broker
-    # SURPLUS → the 3 bogus CORP_ACTION_SUSPECTED alerts observed on Rupeezy CNC.
-    # If confirmed, flip this to True and held = holdings alone.
-    # NOT FLIPPED: get_holdings() below is still certified only against an
-    # ALL-ZERO live book, so the total_free / t1_quantity split is UNVERIFIED —
-    # this must be set from ONE live, NON-ZERO holdings response observed
-    # alongside the same day's positions() net for the same symbol. Guessing here
-    # would be a real-money reconciliation decision made on no evidence.
-    # FAIL-SAFE while False: the over-count reads as a broker SURPLUS, which the
-    # reconciler treats as INVISIBLE (never closes / never mutates a position) —
-    # the only cost is the spurious non-mutating CORP_ACTION_SUSPECTED alert.
-    CNC_HOLDINGS_INCLUDE_SAME_DAY_BUYS = False
+    # BOOK SEMANTICS (see BrokerClient.broker_held_qty).
+    # Vortex's holdings `t1_quantity` ALREADY contains TODAY's CNC buys (unlike
+    # Kite, where a same-day buy sits only in the net book). So the shared Kite
+    # rule `holdings + max(0, net)` DOUBLE-COUNTS a same-day CNC buy → a ~2× broker
+    # SURPLUS → the bogus CORP_ACTION_SUSPECTED alerts on Rupeezy CNC.
+    # CONFIRMED LIVE 2026-07-27: the operator's first live Rupeezy 5L CNC campaign
+    # produced a UNIFORM 2.0× broker_held/db_held across 9 same-day CNC names
+    # (DATAPATTNS, KARURVYSYA, M&MFIN, MANAPPURAM, GRAPHITE, SPLPETRO, TVSMOTOR,
+    # FLUOROCHEM, AEGISVOPAK). broker_held = net + holdings = 2×db ⟹ net == holdings
+    # == db ⟹ the same-day buy is present in BOTH the net book AND holdings.t1 —
+    # exactly the suspected double-count. Zerodha MIS (never enters holdings) did
+    # NOT trip, confirming the mechanism. So per the prior note ("if confirmed,
+    # flip to True"), flipped: held = max(0, holdings) alone.
+    # Still FAIL-SAFE if ever wrong: an under-count reads as a DEFICIT → an alert
+    # with no same-day sell evidence → never a close / never a mutation.
+    CNC_HOLDINGS_INCLUDE_SAME_DAY_BUYS = True
 
     def __init__(self, profile, dry_run: bool = True):
         super().__init__(profile, dry_run=dry_run)
