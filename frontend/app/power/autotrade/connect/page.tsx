@@ -88,37 +88,76 @@ export default function BrokerConnectPage() {
   useEffect(() => {
     if (ran.current) return   // StrictMode double-invoke guard
     ran.current = true
-
-    const sp = new URLSearchParams(
-      typeof window !== 'undefined' ? window.location.search : '',
-    )
-    const token = readToken(sp)
-    const status = sp.get('status') // broker-reported status, if any
-    const pending = readPending()
-    const id = pending.broker_account_id
-    const userId = pending.user_id
-
-    // Broker explicitly reported a non-success status (e.g. Zerodha ?status=error).
-    const brokerRejected = typeof status === 'string' && status && status.toLowerCase() !== 'success'
-
-    if (!token || !id) {
-      const reason = !token
-        ? 'We didn’t receive a login token from your broker.'
-        : 'We couldn’t find a pending broker connection on this device.'
-      setStage({ name: 'missing', reason, token })
-      notifyOpener({ ok: false, error: reason })
-      return
-    }
-
-    if (brokerRejected) {
-      const message = `Your broker reported: ${status}. Please try connecting again.`
-      setStage({ name: 'error', message, token })
-      notifyOpener({ ok: false, error: message, broker_account_id: id })
-      return
-    }
-
     let cancelled = false
+
     ;(async () => {
+      const sp = new URLSearchParams(
+        typeof window !== 'undefined' ? window.location.search : '',
+      )
+      const token = readToken(sp)
+      const status = sp.get('status') // broker-reported status, if any
+      // Broker explicitly reported a non-success status (e.g. Zerodha ?status=error).
+      const brokerRejected = typeof status === 'string' && status && status.toLowerCase() !== 'success'
+
+      if (!token) {
+        const reason = 'We didn’t receive a login token from your broker.'
+        setStage({ name: 'missing', reason, token: '' })
+        notifyOpener({ ok: false, error: reason })
+        return
+      }
+
+      // Resolve WHICH account this login is for, most-reliable source first:
+      //   1. localStorage (same-browser popup — the happy path), then
+      //   2. explicit URL params (bid/broker_account_id/uid/broker), then
+      //   3. a BACKEND lookup of the signed-in user's accounts.
+      // (3) is what removes the copy-paste in Incognito / a different device /
+      // a blocked popup — where localStorage is empty but the session cookie is
+      // still valid. We pick the single account that needs reconnecting (or the
+      // single account matching the broker hint); only a genuinely ambiguous
+      // case falls through to the manual paste box.
+      const pending = readPending()
+      let id: string = pending.broker_account_id || sp.get('bid') || sp.get('broker_account_id') || ''
+      let userId: number | string | undefined =
+        pending.user_id ?? (sp.get('uid') || undefined)
+      const brokerHint = (pending.broker || sp.get('broker') || '').toLowerCase()
+
+      if (!id) {
+        try {
+          const resp = await AutoTradeAPI.brokerAccounts(userId ?? '')
+          if (cancelled) return
+          const accts = (resp.accounts || []) as Array<{
+            broker_account_id: string; broker?: string; status?: string; user_id?: number | string
+          }>
+          const byBroker = brokerHint
+            ? accts.filter(a => (a.broker || '').toLowerCase() === brokerHint)
+            : accts
+          const NEEDS = ['EXPIRED', 'PENDING', 'ERROR', 'REVOKED']
+          const needs = byBroker.filter(a => NEEDS.includes((a.status || '').toUpperCase()))
+          const chosen = needs.length === 1 ? needs[0]
+            : byBroker.length === 1 ? byBroker[0]
+            : null
+          if (chosen) {
+            id = chosen.broker_account_id
+            if (userId == null) userId = chosen.user_id
+          }
+        } catch { /* fall through to the manual box below */ }
+      }
+      if (cancelled) return
+
+      if (!id) {
+        const reason = 'We couldn’t match this login to a broker connection. Paste the token below to finish.'
+        setStage({ name: 'missing', reason, token })
+        notifyOpener({ ok: false, error: reason })
+        return
+      }
+
+      if (brokerRejected) {
+        const message = `Your broker reported: ${status}. Please try connecting again.`
+        setStage({ name: 'error', message, token })
+        notifyOpener({ ok: false, error: message, broker_account_id: id })
+        return
+      }
+
       try {
         await AutoTradeAPI.refreshBrokerToken(id, token, userId)
         if (cancelled) return
