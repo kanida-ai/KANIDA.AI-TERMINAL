@@ -572,7 +572,7 @@ function GuidedSetup({
         }))
       } catch { /* storage blocked — manual paste fallback still works */ }
       try {
-        const res = await AutoTradeAPI.brokerLoginUrl(acct.broker_account_id, userId)
+        const res = await AutoTradeAPI.brokerLoginUrl(acct.broker_account_id, userId, acct.broker_account_id)
         if (res.login_url) window.open(res.login_url, '_blank', 'noopener,noreferrer,width=520,height=720')
         setPhase('awaiting_token')
         setNote('Sign in on the broker page — we’ll finish automatically. Or paste the request_token below if it doesn’t.')
@@ -821,7 +821,7 @@ function YourConnections({
   const onReconnect = useCallback(async (a: BrokerAccount) => {
     setRowErr(null); setRowBusy(a.broker_account_id); setRequestToken('')
     try {
-      const res = await AutoTradeAPI.brokerLoginUrl(a.broker_account_id, userId)
+      const res = await AutoTradeAPI.brokerLoginUrl(a.broker_account_id, userId, a.broker_account_id)
       if (res.login_url) window.open(res.login_url, '_blank', 'noopener,noreferrer,width=520,height=720')
       setConnectId(a.broker_account_id)
     } catch (e) {

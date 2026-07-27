@@ -115,8 +115,12 @@ export default function BrokerConnectPage() {
       // still valid. We pick the single account that needs reconnecting (or the
       // single account matching the broker hint); only a genuinely ambiguous
       // case falls through to the manual paste box.
+      // `state` is what BrokerAccountsPanel passes into the broker login and the
+      // broker echoes back — the reliable carrier (survives Incognito/other
+      // device). `bid`/`broker_account_id` are accepted as aliases.
       const pending = readPending()
-      let id: string = pending.broker_account_id || sp.get('bid') || sp.get('broker_account_id') || ''
+      let id: string = pending.broker_account_id
+        || sp.get('state') || sp.get('bid') || sp.get('broker_account_id') || ''
       let userId: number | string | undefined =
         pending.user_id ?? (sp.get('uid') || undefined)
       const brokerHint = (pending.broker || sp.get('broker') || '').toLowerCase()

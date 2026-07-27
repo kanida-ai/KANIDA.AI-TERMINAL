@@ -1267,8 +1267,11 @@ export const AutoTradeAPI = {
 
   // Get the broker login URL (Zerodha) so the user can authenticate in a popup
   // and obtain a request_token to paste back.
-  brokerLoginUrl: (id: string, userId: number | string) =>
-    call<LoginUrlResponse>(`/broker-account/${encodeURIComponent(id)}/login-url${q({ user_id: userId })}`),
+  // `state` is echoed back by the broker on the redirect (Vortex) so the
+  // /connect landing knows WHICH account to activate without localStorage —
+  // pass the broker_account_id so re-auth works in Incognito / another device.
+  brokerLoginUrl: (id: string, userId: number | string, state?: string) =>
+    call<LoginUrlResponse>(`/broker-account/${encodeURIComponent(id)}/login-url${q({ user_id: userId, state })}`),
 
   // Exchange the pasted request_token for a daily access token → account ACTIVE.
   refreshBrokerToken: (id: string, requestToken: string, userId?: number | string) =>
