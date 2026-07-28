@@ -1,0 +1,107 @@
+# ============================================================================
+# Kanida.AI — Nightly ISOLATED EOD pipeline
+#
+# WHY: the in-app 16:05 IST EOD pipeline runs daily_features' >=10-worker
+# ProcessPool, which writes falcon_features to the SAME SQLite file the live
+# autotrade monitors write — the concurrent writers corrupt it (2026-07-28
+# "database disk image is malformed" incident). The in-app pipeline is now
+# gated off in prod via env KANIDA_INPROCESS_EOD=false. This workflow replaces
+# it: it STOPS the app (no live writers), runs the EOD chain as an isolated
+# one-off task, then ALWAYS restarts the app.
+#
+# Downtime: ~15-25 min after market close (that is the accepted trade for a
+# corruption-free DB). Runs on the deploy OIDC role (AWS_DEPLOY_ROLE_ARN); that
+# role needs ecs:UpdateService/RunTask/StopTask/DescribeTasks/ListTasks/
+# DescribeServices + iam:PassRole for the task roles (see deploy/CICD_SETUP.md).
+# ============================================================================
+name: nightly-eod
+
+on:
+  schedule:
+    - cron: '40 10 * * 1-5'   # 10:40 UTC = 16:10 IST, Mon-Fri (after 15:40 settle)
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why running manually'
+        required: false
+        default: 'manual'
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: nightly-eod
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  CLUSTER: kanida-prod-cluster
+  SERVICE: kanida-prod-svc
+  SUBNETS: subnet-0d9bb03d5128f1f83,subnet-0ef882670447608e9
+  SG: sg-00a155bbb2c054ede
+  LOG_GROUP: /ecs/kanida-prod-app
+
+jobs:
+  isolated-eod:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Stop app (isolate the DB from live writers)
+        run: |
+          set -euo pipefail
+          TD=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+                 --query 'services[0].taskDefinition' --output text)
+          echo "TASKDEF=$TD" >> "$GITHUB_ENV"
+          echo "Stopping service (desired=0)…"
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" \
+            --desired-count 0 --query 'service.desiredCount' --output text
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          RUN=$(aws ecs list-tasks --cluster "$CLUSTER" --desired-status RUNNING \
+                  --query 'length(taskArns)' --output text)
+          echo "running tasks after stop: $RUN"
+          if [ "$RUN" != "0" ]; then echo "::error::app did not fully stop"; exit 1; fi
+
+      - name: Run isolated EOD one-off
+        run: |
+          set -euo pipefail
+          OV=$(cat <<JSON
+          {"containerOverrides":[{"name":"app","command":["python","/app/deploy/nightly_eod.py"]}]}
+          JSON
+          )
+          NET="awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SG}],assignPublicIp=DISABLED}"
+          TASK=$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$TASKDEF" \
+                   --launch-type FARGATE --network-configuration "$NET" \
+                   --overrides "$OV" --query 'tasks[0].taskArn' --output text)
+          echo "EOD task: $TASK"
+          echo "TASK=$TASK" >> "$GITHUB_ENV"
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK"
+          RC=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" \
+                 --query 'tasks[0].containers[0].exitCode' --output text)
+          echo "EOD container exit code: $RC"
+          echo "EOD_RC=$RC" >> "$GITHUB_ENV"
+
+      - name: Restart app (ALWAYS, even if EOD failed)
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "Restarting service (desired=1)…"
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" \
+            --desired-count 1 --query 'service.desiredCount' --output text
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          echo "app restarted."
+
+      - name: Report result
+        if: always()
+        run: |
+          echo "EOD exit code: ${EOD_RC:-<none>}  (0=fresh, 2=ran-but-stale/holiday, 1=fail)"
+          echo "Recent EOD log lines:"
+          aws logs tail "$LOG_GROUP" --since 30m --format short 2>/dev/null \
+            | grep -E 'nightly_eod|MAX signal_date|JOB |rebuild|ABORT|DONE' | tail -30 || true
+          if [ "${EOD_RC:-1}" = "1" ]; then echo "::error::EOD hard-failed — check logs"; exit 1; fi
+          if [ "${EOD_RC:-1}" = "2" ]; then echo "::warning::EOD ran but signals not fresh (holiday or partial)"; fi
