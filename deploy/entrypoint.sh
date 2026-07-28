@@ -37,6 +37,13 @@ export POWER_RND_DB_PATH="$LOCAL_DIR/kanida_universe.db"
 # Secrets) — no laptop. The laptop's KanidaZerodhaAuth task must be DISABLED when
 # this is on (one minter per Kite account).
 export FALCON_INPROCESS_AUTH="true"
+# EOD runs as an EXTERNAL isolated task (nightly-eod GitHub workflow), NOT
+# in-process: the in-app >=10-worker daily_features job writes falcon_features to
+# THIS same SQLite file while the live monitors write it too, and the concurrent
+# writers corrupt it (2026-07-28 malformed incident). main.py gates the in-app
+# pipeline + boot-catchup on this flag. Laptop does not run this entrypoint, so
+# local dev keeps the in-app pipeline (flag defaults "true" there).
+export KANIDA_INPROCESS_EOD="false"
 echo "entrypoint: app DB paths -> $LOCAL_DIR (sync back every ${SYNC_SECS}s)"
 
 sync_back() {
