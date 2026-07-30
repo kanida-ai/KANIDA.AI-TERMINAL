@@ -58,13 +58,27 @@ jobs:
           TD=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
                  --query 'services[0].taskDefinition' --output text)
           echo "TASKDEF=$TD" >> "$GITHUB_ENV"
-          echo "Stopping service (desired=0)…"
+          # HARDENED STOP: capture the OLD task ARNs, then wait for them to FULLY
+          # STOP (container exited) -- NOT just "off the RUNNING list". A draining
+          # container keeps its 300s local->EFS sync loop alive for minutes and will
+          # sync its STALE /localdb over the fresh EOD write, reverting signals to
+          # the previous day (2026-07-29 clobber incident). tasks-stopped waits for
+          # the real exit (~6 min for the 669MB final backup), killing that loop.
+          OLD=$(aws ecs list-tasks --cluster "$CLUSTER" --desired-status RUNNING --query 'taskArns[]' --output text)
+          echo "old tasks: ${OLD:-none}"
           aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" \
             --desired-count 0 --query 'service.desiredCount' --output text
-          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          for t in $OLD; do
+            aws ecs stop-task --cluster "$CLUSTER" --task "$t" --reason "nightly-eod isolate" --query 'task.lastStatus' --output text || true
+          done
+          for t in $OLD; do
+            echo "waiting tasks-stopped: $t"
+            aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$t"
+          done
+          sleep 10
           RUN=$(aws ecs list-tasks --cluster "$CLUSTER" --desired-status RUNNING \
                   --query 'length(taskArns)' --output text)
-          echo "running tasks after stop: $RUN"
+          echo "running tasks after hardened stop: $RUN"
           if [ "$RUN" != "0" ]; then echo "::error::app did not fully stop"; exit 1; fi
 
       - name: Run isolated EOD one-off
