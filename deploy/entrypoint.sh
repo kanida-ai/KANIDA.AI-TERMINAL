@@ -44,6 +44,17 @@ export FALCON_INPROCESS_AUTH="true"
 # pipeline + boot-catchup on this flag. Laptop does not run this entrypoint, so
 # local dev keeps the in-app pipeline (flag defaults "true" there).
 export KANIDA_INPROCESS_EOD="false"
+# PHASE 1 PG CUTOVER (2026-07-30): route the CONVERTED OLTP surface
+# (autotrade_*, broker_accounts, strategy_visibility, sysagent_*) to Postgres RDS
+# instead of the fragile SQLite<->EFS bridge. Market data + not-yet-converted OLTP
+# (power_user_*, falcon/trade/*, portfolio_*) still use SQLite (later phases).
+# Pool sized for desired_count=1 under db.t4g.micro (~112 conn ceiling); the
+# 8-parallel fire path needs >8. STAY at desired_count=1 (durable_claims is not on
+# PG yet: KANIDA_PG_CLAIMS off -> multi-container would duplicate orders).
+# Rollback = set this "false" + redeploy.
+export KANIDA_PG_ENABLED="true"
+export KANIDA_PG_POOL_MIN="2"
+export KANIDA_PG_POOL_MAX="32"
 echo "entrypoint: app DB paths -> $LOCAL_DIR (sync back every ${SYNC_SECS}s)"
 
 sync_back() {
