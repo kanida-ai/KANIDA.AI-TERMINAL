@@ -17,8 +17,8 @@
 name: nightly-eod
 
 on:
-  schedule:
-    - cron: '40 10 * * 1-5'   # 10:40 UTC = 16:10 IST, Mon-Fri (after 15:40 settle)
+  # schedule DISABLED 2026-08-13 for extended cost-pause (app is stopped); re-enable when going live. Manual runs still work via workflow_dispatch:
+    # - cron: '40 10 * * 1-5'   # 10:40 UTC = 16:10 IST, Mon-Fri (after 15:40 settle)
   workflow_dispatch:
     inputs:
       reason:
