@@ -75,3 +75,7 @@ boto3>=1.34.0             # EC2/EIP provisioning (autotrade egress_provisioner)
 # ── Dev / Testing ──────────────────────────────────────────
 pytest>=8.2.0
 httpx>=0.27.0               # for FastAPI test client
+
+# Agent Builder v0 — DuckDB reads OHLCV Parquet from S3 (httpfs/aws exts)
+duckdb>=0.10
+pyarrow>=14
