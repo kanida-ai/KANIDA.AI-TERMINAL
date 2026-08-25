@@ -46,11 +46,19 @@ Develop it **HERE** (falcon session: `cd` into this repo or use a git worktree o
 3. **cloud session** reviews + deploys: backend via CodeBuild+ECS roll, frontend via Vercel (push to main). Update the changelog here.
 
 ## TODO / backlog (to reach GTM-grade)
-- [ ] **UX cleanup** (falcon session) — current v0 UX is rough.
-- [ ] Replace `X-User-Id` stub with power-JWT auth.
+- [~] **UX cleanup** (falcon session) — v0.2 landed (grouped sections, carded condition builder, plain-English read-back, starter presets, cost breakdown, polished results + verdict + Worlds legend, responsive, offline state). More UX depth below (A).
+- [ ] Replace `X-User-Id` stub with power-JWT auth. *(cross-cut — cloud session owns the JWT dependency; falcon wires the client)*
 - [ ] Wire wallet to `power_user_users.token_balance` + Razorpay top-ups.
 - [ ] 1-min data tier (daily only for now).
-- [ ] (falcon session: append feature backlog here)
+
+### Feature roadmap toward GTM (falcon session) — mandate: "everything, lots more functionalities"
+Operator wants the full build-out, not one item. Proposed sequencing; operator's own feature brain-dump lands on top of this via the cloud session.
+**A. Composer depth** — save/load + version agents (per user); more indicators (ADX, OBV, Donchian, VWAP-dist, 52w hi/lo, sector RS, event/earnings flags); nested condition groups (AND-of-ORs); "signal persists N bars"; universe/segment filters (price/liquidity/index/sector); multi-leg entry/exit; long+short in one agent.
+**B. Evidence depth** — portfolio-level backtest (equity curve, CAGR, max DD, Sharpe/Calmar) not just per-trade expectancy; drawdown + monthly-returns heatmap; trade distribution + top/bottom trades; per-year table; NIFTY benchmark overlay; robustness (param-sensitivity sweep, OOS/era split, cost sensitivity); shareable evidence card.
+**C. Tokens/wallet/GTM** — power-JWT (with cloud); wallet→RDS + Razorpay + ledger UI; plan-linked monthly token grants; big-run (1-min) confirm modal; usage history/receipts.
+**D. Deploy-an-agent (bridge to the rest of KANIDA)** — "Promote to paper-trading" → live paper agent w/ Algorithm-1 identity + self-journal; user-agent leaderboard; "your agent signalled today" alerts; guarded, human-gated Co-Trading/AutoTrade handoff.
+**E. Data/engine** — 1-min tier live; refresh Parquet from the fixed engine; fundamentals/events source.
 
 ## Changelog
 - 2026-08-25 (cloud session): folded Agent Builder v0 into this repo + deployed; verified end-to-end (health, quote, 240k-trade backtest, wallet decrement). Applied cloud deltas 1-8 above. Created this coordination doc.
+- 2026-08-25 (falcon session): **UX cleanup v0.2** of `frontend/app/power/(app)/builder/page.tsx` — no backend/contract change. Added: grouped sections (Identity/Entry/Exit/Data) with hierarchy; carded, labelled condition builder (min-one-condition guard); live plain-English strategy sentence; 4 starter presets; clearer token-cost breakdown; polished results panel (honest verdict chip, Market-Worlds heat + legend + hover sample-size, loading/empty/offline states); responsive (useBreakpoint) two-col→one-col. Verified LOCALLY against real data (backend on :8011 SQLite fallback = kanida.db, 1561 stocks × 3817 bars; Next dev :3007 w/ NEXT_PUBLIC_PREVIEW_NO_AUTH=1): page compiles, catalog+quote+wallet-topup work through the rewrite, backtest returns valid card (RSI<30 → n=113,294, win 47.2%, +0.28%/trade, edge −0.17%, pf 1.11; charged 276, balance 5000→4724). Appended the GTM feature roadmap (A–E) above. Ready for cloud review on `feat/agent-builder`.
