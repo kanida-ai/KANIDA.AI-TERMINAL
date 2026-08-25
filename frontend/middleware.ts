@@ -31,7 +31,11 @@ const BASIC_REALM = 'Restricted'
 // site-wide Basic Auth dialog (otherwise prospects hit a browser auth prompt
 // before they can read the legal docs). It exposes no operator data — static
 // content only.
-const POWER_PORTAL_PATHS = ['/power', '/api/power', '/api/power-auth', '/legal']
+// '/api/builder' = Agent Builder v0 API — a power-portal surface, so it bypasses
+// the operator site-Basic-Auth like /api/power (else invited power users, who
+// don't have SITE_PASS, couldn't use it). NOTE: v0 uses an X-User-Id stub, so this
+// endpoint is currently unauthenticated — add power-JWT before public launch.
+const POWER_PORTAL_PATHS = ['/power', '/api/power', '/api/power-auth', '/api/builder', '/legal']
 
 function unauthorized(): NextResponse {
   return new NextResponse(null, {
