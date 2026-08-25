@@ -55,6 +55,11 @@ export KANIDA_INPROCESS_EOD="false"
 export KANIDA_PG_ENABLED="true"
 export KANIDA_PG_POOL_MIN="2"
 export KANIDA_PG_POOL_MAX="32"
+# Agent Builder (v0, 2026-08): reads OHLCV Parquet from the artifacts bucket (task
+# role already has s3:GetObject + kms:Decrypt); prepaid-wallet backtest at /api/builder/*.
+export AGENT_DATA_URI="s3://kanida-prod-artifacts-389642461326/kanida/daily/"
+export AGENT_NIFTY_SYMBOL="NIFTY 50"
+export AWS_REGION="ap-south-1"
 echo "entrypoint: app DB paths -> $LOCAL_DIR (sync back every ${SYNC_SECS}s)"
 
 sync_back() {

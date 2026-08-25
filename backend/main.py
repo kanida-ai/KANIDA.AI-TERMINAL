@@ -712,6 +712,17 @@ from power_user.routers.cotrade_router           import router as power_cotrade_
 
 app = FastAPI(title="KANIDA.AI Swing Trading Terminal", version="3.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# Agent Builder (v0, 2026-08): custom-strategy composer -> leak-free backtest on
+# Parquet/S3 market data + prepaid token wallet. 100% ADDITIVE (/api/builder/*).
+# Wrapped so a builder import/mount error can NEVER crash the live app boot.
+try:
+    from agent_builder.router import router as agent_builder_router
+    app.include_router(agent_builder_router, prefix="/api", tags=["Builder"])
+    log.info("Agent Builder mounted at /api/builder/*")
+except Exception as _ab_e:
+    log.warning("Agent Builder NOT mounted (non-fatal): %s", _ab_e)
+
 app.include_router(quant_router,     prefix="/api", tags=["Quant"])
 app.include_router(backtest_router,  prefix="/api", tags=["Backtest"])
 app.include_router(live_router,      prefix="/api", tags=["Live"])

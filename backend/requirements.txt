@@ -10,3 +10,5 @@ psycopg2-binary==2.9.10
 # 8+ times — see playwright_preflight.py docstring for the 2026-05-29
 # postmortem). Treat this pin as load-bearing.
 playwright==1.59.0
+duckdb>=0.10
+pyarrow>=14
