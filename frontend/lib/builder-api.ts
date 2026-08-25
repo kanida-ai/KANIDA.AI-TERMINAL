@@ -1,6 +1,6 @@
 // Agent Builder API client — mirrors lib/backtest-api.ts. Drop into frontend/lib/.
 // Talks to the agent_builder backend (/api/builder/*). Authed calls send the power-auth JWT.
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+const API = process.env.NEXT_PUBLIC_API_URL || ''
 
 export type IndicatorMeta = { name: string; defaults: Record<string, number>; label: string }
 export type Catalog = {

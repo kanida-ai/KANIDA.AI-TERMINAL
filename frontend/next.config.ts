@@ -37,6 +37,8 @@ const nextConfig: NextConfig = {
       { source: "/api/falcon/:path*",        destination: `${BACKEND_ORIGIN}/api/falcon/:path*` },
       // Legacy quant endpoints under /api/admin, /api/quant, etc.
       { source: "/api/admin/:path*",         destination: `${BACKEND_ORIGIN}/api/admin/:path*` },
+      // Agent Builder (v0) — same-origin proxy so the browser reaches the backend.
+      { source: "/api/builder/:path*",       destination: `${BACKEND_ORIGIN}/api/builder/:path*` },
     ];
   },
 };
