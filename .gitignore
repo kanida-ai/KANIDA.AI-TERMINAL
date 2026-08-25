@@ -89,3 +89,6 @@ data/db/_backups/
 data/falcon.db
 universe_engine/**/*.db
 universe_engine/data/db/
+
+# Agent Builder local runtime state (SQLite wallet) — never commit
+backend/agent_builder/*.db
