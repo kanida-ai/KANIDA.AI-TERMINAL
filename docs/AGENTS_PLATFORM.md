@@ -157,6 +157,15 @@ Per Shyam: stand the whole thing up, then add agents one by one.
 | `backend/agents/` runtime + registry + chart skeleton | **BUILT (this branch)** — mounts at `/api/agents/*`, chart-v1 registered |
 | DEV `.claude/` agents + commands + rules + skills | **BUILT (this branch)** |
 | Overall ~20-agent direction | **CONFIRMED by Shyam** (green light) |
+| **Chart Agent — multi-pattern library** (`backend/agents/chart/patterns/`, registry, guarded) | **BUILT (this branch)** — detectors self-register; a bad detector can't crash the agent/boot |
+| **Chart Agent — Horizontal-Trendline detector** (ported `_levels` clustering + live-stage `classify`, all `PARAMS` preserved; point-in-time) | **BUILT (this branch)** — flags TITAN 2022-08-30 breakout @ ~2565 |
+| **Chart Agent — pattern-forward evidence** (ported `pattern_evidence`: T+1..T+10 win/ETV/median/MFE/MAE + edge-vs-baseline) | **BUILT (this branch)** |
+| **Chart Agent — §9 decision gate stack** (G1 sample · G2 edge · G3 significance · G5 tail) | **BUILT (this branch)** — ⚠️ gates on **pattern-forward** ETV as an honest stand-in; TITAN verdict = WATCH (n=6 < 20) |
+| **Chart Agent — strategy-replay ETV (§8.2)** — the ETV the gates are *supposed* to read | **SPEC** — not built; every decision stamps `basis="pattern_forward"` + a SPEC note |
+| **Chart Agent — G4 nested-population coherence (§7.2/§7.3) & G6 strategy-recency** | **SPEC** — reported as `skipped` with reason, never silently passed |
+| **Chart Agent — retest depth-floor (§5.4)** | wired but **DISABLED by default** (`retest_depth_max=None`) so BUILT behaviour is byte-identical; enable via governance |
+| **Chart Agent — triangle / channel detectors** | **SPEC** — registered skeletons returning `[]` with v3 TODOs (make the multi-pattern seam real) |
+| **Chart Agent — data loader** (`data.py`: SQLite fallback to R&D `kanida.db`, env `AGENT_CHART_DB`) | **BUILT (this branch)**; cloud feeds/S3 wiring = **SPEC** |
 
 ---
 

@@ -35,6 +35,10 @@ class Manifest:
         "route": "autotrade", "mode": "paper", "live": "requires_broker_cert+operator_arm"})
     permissions: dict = field(default_factory=lambda: {
         "trade_execution": "gated", "source_code": False})
+    # Optional per-agent extension: agents that host multiple sub-detectors (e.g. the Chart
+    # Agent's pattern library) advertise them here. Additive + default-empty so every existing
+    # agent and app boot is unaffected.
+    patterns: list = field(default_factory=list)
     version: str = "v1"
 
     def to_dict(self) -> dict:
