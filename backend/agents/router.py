@@ -119,35 +119,62 @@ def _recent_occurrence(sym: str, date: Optional[str], lookback: int = 90):
 
 
 # --------------------------------------------------------------------------- chart endpoints
+def _setup_to_row(s: dict) -> dict:
+    """Normalise a screener setup (or a precomputed artifact row) to the endpoint's occurrence shape.
+    Accepts both the screener's ``symbol`` key and the legacy ``stock`` key."""
+    return {
+        "stock": s.get("symbol") or s.get("stock"),
+        "pattern": s.get("pattern"),
+        "stage": s.get("stage"),
+        "level": s.get("level"),
+        "distance_pct": s.get("distance_pct") if "distance_pct" in s else (s.get("context") or {}).get("distance_to_level_pct"),
+        "volume_x": s.get("volume_x") if "volume_x" in s else (s.get("context") or {}).get("volume_x"),
+        "direction": s.get("direction", "long"),
+        "touches": s.get("touches") if isinstance(s.get("touches"), int) else len(s.get("touches") or []),
+        "as_of_date": s.get("as_of_date") or (s.get("context") or {}).get("as_of_date"),
+    }
+
+
 @router.get("/agents/chart/scan")
 def chart_scan(date: Optional[str] = Query(None, description="as-of date YYYY-MM-DD (point-in-time)"),
-               limit: int = Query(40, ge=1, le=500)):
-    """Run ChartAgent.scan(as_of=date) over the default universe. Point-in-time: only data <= date.
-    Returns the live-stage occurrences (stock, pattern, stage, level, distance, volume_x)."""
+               limit: int = Query(40, ge=1, le=500),
+               full: bool = Query(False, description="return the entire screen (ignore limit)")):
+    """Full-universe live-stage screen for the as-of date. Point-in-time: only bars <= date.
+
+    Serves the POST-MARKET precomputed screen if present (target <1 s); else LIVE-computes across the
+    full universe via screener.scan_universe (slower, honestly flagged). Guarded — never 500-crashes.
+    Returns the setups (stock, pattern, stage, level, distance, volume_x, touches)."""
     try:
-        agent = _chart_agent()
         from .chart import data as cdata
+        from .chart import screener as scr
         if not cdata.db_available():
             return {"ok": False, "date": date, "occurrences": [], "count": 0,
                     "note": f"data source unavailable ({cdata.db_path()}); SPEC: cloud feeds wiring."}
-        occ = agent.scan(ctx={"as_of": date}) or []
-        rows = []
-        for o in occ:
-            ctx = o.get("context", {}) or {}
-            rows.append({
-                "stock": o.get("stock"),
-                "pattern": o.get("pattern"),
-                "stage": o.get("stage"),
-                "level": o.get("level"),
-                "distance_pct": ctx.get("distance_to_level_pct"),
-                "volume_x": ctx.get("volume_x"),
-                "direction": o.get("direction", "long"),
-                "touches": len(o.get("touches") or []),
-                "as_of_date": ctx.get("as_of_date"),
-            })
+
+        cached = scr.load_screen(date)
+        if cached is not None:
+            res = cached
+            served = "precompute"
+            serve_note = f"served precomputed screen (built_at {cached.get('built_at')})"
+        else:
+            res = scr.scan_universe_detailed(date)
+            served = "live"
+            serve_note = ("no precomputed screen for this date — LIVE-computed on the request path "
+                          "(slower; run build_screen post-market to serve <1s)")
+
+        setups = res.get("setups", [])
+        rows = [_setup_to_row(s) for s in setups]
         rows.sort(key=lambda r: {"BREAKOUT": 0, "RETEST": 1, "APPROACHING": 2, "FAILED": 3}.get(r["stage"], 9))
-        return {"ok": True, "date": date, "universe_size": len(cdata.DEFAULT_UNIVERSE),
-                "count": len(rows), "occurrences": rows[:limit]}
+        out_rows = rows if full else rows[:limit]
+        # coverage accounting is surfaced so the universe-vs-classified gap is labelled, not hidden
+        return {"ok": True, "date": date, "served": served, "note": serve_note,
+                "screen_note": res.get("note"), "trading_day": res.get("trading_day"),
+                "universe_size": res.get("universe_size"),
+                "scanned": res.get("scanned"),
+                "skipped_min_bars": res.get("skipped_min_bars"),
+                "skipped_stale": res.get("skipped_stale"),
+                "skipped_no_window": res.get("skipped_no_window"),
+                "count": len(rows), "occurrences": out_rows}
     except Exception as e:  # noqa: BLE001 — never 500-crash
         log.warning("chart_scan failed: %s", e)
         return {"ok": False, "date": date, "occurrences": [], "count": 0, "error": str(e)}

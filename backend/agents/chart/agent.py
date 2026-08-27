@@ -72,12 +72,20 @@ class ChartAgent(BaseAgent):
     def scan(self, ctx=None) -> list:
         """Run every registered detector point-in-time across the default universe. Returns a list
         of occurrence dicts. Fully guarded per symbol and per detector."""
-        universe = _ctx_get(ctx, "universe") or _ctx_get(ctx, "symbols") or data.DEFAULT_UNIVERSE
         as_of = _ctx_get(ctx, "as_of")
         out: list = []
         if not data.db_available():
             log.warning("chart scan: data source unavailable (%s) — returning [].", data.db_path())
             return out
+        # Default = the FULL active universe (not the 16-symbol starter). DEFAULT_UNIVERSE is only a
+        # fallback if enumerating the source fails. Callers can still pin an explicit universe/symbols.
+        universe = _ctx_get(ctx, "universe") or _ctx_get(ctx, "symbols")
+        if not universe:
+            try:
+                universe = list(data.all_symbols()) or data.DEFAULT_UNIVERSE
+            except Exception as e:  # noqa: BLE001 — never let enumeration crash the scan
+                log.warning("chart scan: universe enumeration failed (%s) — using starter set.", e)
+                universe = data.DEFAULT_UNIVERSE
         for sym in universe:
             try:
                 df = data.load_daily(sym)
