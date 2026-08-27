@@ -167,6 +167,8 @@ Per Shyam: stand the whole thing up, then add agents one by one.
 | **Chart Agent — retest depth-floor (§5.4)** | wired but **DISABLED by default** (`retest_depth_max=None`) so BUILT behaviour is byte-identical; enable via governance |
 | **Chart Agent — triangle / channel detectors** | **SPEC** — registered skeletons returning `[]` with v3 TODOs (make the multi-pattern seam real) |
 | **Chart Agent — data loader** (`data.py`: SQLite fallback to R&D `kanida.db`, env `AGENT_CHART_DB`) | **BUILT (this branch)**; cloud feeds/S3 wiring = **SPEC** |
+| **Chart Agent — read-only portal endpoints** (`agents/router.py`: `GET /api/agents/chart/scan` · `/decision` · `/storyline`, all guarded → honest JSON, point-in-time as-of `date`) | **BUILT (this branch)** — render REAL agent output; TITAN 2022-08-30 → scan finds BREAKOUT, decision honest WATCH (n=6). Smoke test added |
+| **Chart Agent — portal page** (`frontend/app/power/(app)/agents/page.tsx` + `lib/agents-api.ts` + nav `agents`) | **BUILT (this branch)** — Agent→Story→Evidence 3-col view (LEFT patterns LIVE/SOON · MIDDLE date+stock selector + honest storyline · RIGHT strategy-replay + pattern-forward + gates); matches terminal-ui theme; typechecks + `next build` green. Triangle/Channel + G4 labelled SPEC in-UI |
 
 ---
 

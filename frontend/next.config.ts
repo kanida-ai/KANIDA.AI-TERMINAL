@@ -39,6 +39,8 @@ const nextConfig: NextConfig = {
       { source: "/api/admin/:path*",         destination: `${BACKEND_ORIGIN}/api/admin/:path*` },
       // Agent Builder (v0) — same-origin proxy so the browser reaches the backend.
       { source: "/api/builder/:path*",       destination: `${BACKEND_ORIGIN}/api/builder/:path*` },
+      // Agent Platform (Chart Agent etc.) — read-only, same-origin proxy to the backend.
+      { source: "/api/agents/:path*",        destination: `${BACKEND_ORIGIN}/api/agents/:path*` },
     ];
   },
 };

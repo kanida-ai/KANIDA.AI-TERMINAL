@@ -193,11 +193,54 @@ def test_trade_emits_paper_intent():
     return "paper intent cites strategy + policy"
 
 
+# ---------------------------------------------------------------- read-only endpoint smoke tests
+def test_endpoints_return_valid_json():
+    """The 3 portal endpoints (scan/decision/storyline) each return well-formed, honest JSON for
+    date=2022-08-30 / symbol=TITAN on the R&D DB. Skips gracefully if the DB is absent (SPEC feeds).
+    They are guarded — a failure returns ok=False JSON, never a 500 crash."""
+    import json
+    from agents import router as R
+
+    if not data.db_available():
+        print("SKIP test_endpoints_return_valid_json — DB absent")
+        return "SKIP"
+
+    # scan — point-in-time as-of the date; TITAN breakout must be among the occurrences
+    s = R.chart_scan(date=TITAN_DATE, limit=40)
+    assert json.dumps(s, default=str)              # JSON-serialisable
+    assert s["ok"] is True and s["count"] >= 1, s
+    syms = {r["stock"] for r in s["occurrences"]}
+    assert "TITAN" in syms, syms
+    titan = next(r for r in s["occurrences"] if r["stock"] == "TITAN")
+    assert titan["stage"] == "BREAKOUT" and abs(titan["level"] - TITAN_LEVEL) / TITAN_LEVEL < 0.01
+
+    # decision — honest WATCH at current N; both families present; basis stamped
+    d = R.chart_decision(symbol="TITAN", date=TITAN_DATE)
+    assert json.dumps(d, default=str)
+    assert d["ok"] is True and d["decision"] == "WATCH" and "n=6" in d["reason"], (d["decision"], d["reason"])
+    assert d["basis"] == "strategy_replay"
+    assert d["strategy"] and d["strategy"]["n"] == 6
+    assert d["pattern_forward"] and "3" in d["pattern_forward"]["horizons"]
+
+    # storyline — ordered events ending in the WATCH decision
+    st = R.chart_storyline(symbol="TITAN", date=TITAN_DATE)
+    assert json.dumps(st, default=str)
+    assert st["ok"] is True and st["decision"] == "WATCH"
+    kinds = [e["kind"] for e in st["events"]]
+    assert kinds[0] == "level" and kinds[-1] == "decision" and "breakout" in kinds, kinds
+
+    # guard — an unknown symbol returns honest JSON (ok=False), never raises
+    bad = R.chart_decision(symbol="NOTREAL", date=TITAN_DATE)
+    assert bad["ok"] is False and bad.get("error"), bad
+    return f"scan={s['count']} decision={d['decision']} storyline_events={len(st['events'])}"
+
+
 if __name__ == "__main__":
     results = []
     for fn in (test_package_imports_and_registers, test_titan_breakout_detected,
                test_replay_exit_reasons, test_pattern_vs_strategy_separation,
-               test_trade_emits_paper_intent, test_decide_returns_valid_dict):
+               test_trade_emits_paper_intent, test_decide_returns_valid_dict,
+               test_endpoints_return_valid_json):
         try:
             r = fn()
             results.append((fn.__name__, "PASS", r))
