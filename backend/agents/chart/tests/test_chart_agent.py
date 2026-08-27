@@ -33,17 +33,24 @@ TITAN_DATE = "2022-08-30"
 TITAN_LEVEL = 2565.0
 
 
+SLOPED = ("ascending_triangle", "descending_triangle", "symmetrical_triangle",
+          "rising_wedge", "falling_wedge", "rectangle", "channel")
+
+
 def test_package_imports_and_registers():
     registry.load_builtin()
     agent = registry.get("chart-v1")
     assert agent is not None, "chart-v1 did not register"
     ids = {p.pattern_id for p in patterns.all_patterns()}
     assert "horizontal_trendline" in ids
-    assert "triangle" in ids and "channel" in ids
-    # manifest advertises the pattern library
+    assert "triangle" not in ids, "the generic triangle skeleton was retired (WAVE A)"
+    for pid in SLOPED:
+        assert pid in ids, f"{pid} not registered"
+    # manifest advertises the pattern library — all WAVE A patterns are now BUILT
     pats = {p["pattern_id"]: p["status"] for p in agent.manifest.patterns}
     assert pats.get("horizontal_trendline") == "built"
-    assert pats.get("triangle") == "spec" and pats.get("channel") == "spec"
+    for pid in SLOPED:
+        assert pats.get(pid) == "built", f"{pid} not advertised built"
 
 
 def test_titan_breakout_detected():

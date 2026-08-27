@@ -16,7 +16,12 @@ _PATTERNS: dict = {}
 # Pattern modules to load (each self-registers). Add new patterns here.
 _BUILTIN = (
     "agents.chart.patterns.horizontal_trendline",
-    "agents.chart.patterns.triangle",
+    "agents.chart.patterns.ascending_triangle",
+    "agents.chart.patterns.descending_triangle",
+    "agents.chart.patterns.symmetrical_triangle",
+    "agents.chart.patterns.rising_wedge",
+    "agents.chart.patterns.falling_wedge",
+    "agents.chart.patterns.rectangle",
     "agents.chart.patterns.channel",
 )
 

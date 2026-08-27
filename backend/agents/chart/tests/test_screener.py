@@ -57,9 +57,11 @@ def test_scan_universe_includes_titan_breakout():
     assert t["stage"] == "BREAKOUT", f"expected BREAKOUT, got {t['stage']}"
     assert abs(t["level"] - TITAN_LEVEL) / TITAN_LEVEL < 0.01, f"level {t['level']} !~= {TITAN_LEVEL}"
     assert t["pattern"] == "horizontal_trendline"
-    # triangle/channel are SPEC skeletons -> they contribute nothing (honest)
-    assert {s["pattern"] for s in setups} == {"horizontal_trendline"}, \
-        "only the BUILT pattern should produce setups today"
+    # WAVE A: sloped patterns are BUILT too; every setup must be one of the registered built ids
+    from agents.chart.patterns import registry as _pr
+    built_ids = {p.pattern_id for p in _pr.all_patterns()}
+    assert {s["pattern"] for s in setups} <= built_ids
+    assert "horizontal_trendline" in {s["pattern"] for s in setups}
     return f"{len(setups)} setups over {len(syms)} symbols; TITAN BREAKOUT @ {t['level']}"
 
 

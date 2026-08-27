@@ -53,6 +53,14 @@ class StrategyPolicy:
 
 DEFAULT_POLICY = StrategyPolicy()
 
+# Sloped-pattern policies (WAVE A). Same frozen knobs as S-horiz-v1, distinct governed ids; the SHORT
+# variant is replayed by the direction-aware short branch below. Level is a frozen scalar at the break,
+# so the constant-level structural invalidation is reused unchanged (no moving-line logic).
+TRENDLINE_VERSION = "S-trendline-v1"
+TRENDLINE_SHORT_VERSION = "S-trendline-short-v1"
+TRENDLINE_POLICY = StrategyPolicy(version=TRENDLINE_VERSION)
+TRENDLINE_SHORT_POLICY = StrategyPolicy(version=TRENDLINE_SHORT_VERSION)
+
 
 # --------------------------------------------------------------------- single-occurrence replay
 def _get(occ, key, default=None):
@@ -61,44 +69,93 @@ def _get(occ, key, default=None):
     return getattr(occ, key, default)
 
 
-def _replay_core(o, h, l, c, n, entry_idx: int, level: float, P: StrategyPolicy) -> Optional[dict]:
+def _replay_core(o, h, l, c, n, entry_idx: int, level: float, P: StrategyPolicy,
+                 direction: str = "long") -> Optional[dict]:
     """Replay policy P from entry_idx over up to H bars. Returns the strategy outcome or None if the
     occurrence is not fully resolved (entry_idx + H - 1 > last bar) — replay must never peek forward.
-    Check order follows v3 §8.2: STOP -> TARGET -> TRAIL -> INVALIDATION -> HORIZON."""
+    Check order follows v3 §8.2: STOP -> TARGET -> TRAIL -> INVALIDATION -> HORIZON.
+    ``direction`` selects the long branch (BYTE-IDENTICAL to the original) or its short mirror."""
     H = P.max_hold
     last = entry_idx + H - 1
     if entry_idx < 0 or last >= n or o[entry_idx] <= 0:
         return None
     entry_px = float(o[entry_idx])
-    stop_px = entry_px * (1 - P.stop_pct) if P.stop_pct else None
-    tgt_px = entry_px * (1 + P.target_pct) if P.target_pct else None
-    inval_px = level * (1 - P.buffer)          # structural stop = thesis broken (close-based)
 
-    peak = -np.inf
+    if direction == "long":
+        stop_px = entry_px * (1 - P.stop_pct) if P.stop_pct else None
+        tgt_px = entry_px * (1 + P.target_pct) if P.target_pct else None
+        inval_px = level * (1 - P.buffer)          # structural stop = thesis broken (close-based)
+
+        peak = -np.inf
+        exit_px = None
+        exit_reason = None
+        exit_d = last
+        dd = 0.0                                    # worst close-to-peak drawdown over the hold
+        peak_close = entry_px
+        for d in range(entry_idx, last + 1):
+            # drawdown texture on the close path
+            peak_close = max(peak_close, float(c[d]))
+            dd = min(dd, float(c[d]) / peak_close - 1)
+            # 1) hard intrabar STOP (optional)
+            if stop_px is not None and l[d] <= stop_px:
+                exit_px, exit_reason, exit_d = stop_px, "STOP", d; break
+            # 2) fixed TARGET (optional)
+            if tgt_px is not None and h[d] >= tgt_px:
+                exit_px, exit_reason, exit_d = tgt_px, "TARGET", d; break
+            # 3) TRAIL off the running peak high (update peak with this bar, then test this bar's low)
+            peak = max(peak, float(h[d]))
+            trail_px = peak * (1 - P.trail_pct)
+            if l[d] <= trail_px:
+                exit_px, exit_reason, exit_d = trail_px, "TRAIL", d; break
+            # 4) structural INVALIDATION (close below the reclaimed level)
+            if c[d] < inval_px:
+                exit_px, exit_reason, exit_d = float(c[d]), "INVALIDATION", d; break
+        if exit_reason is None:                     # 5) nothing triggered -> HORIZON at H
+            exit_px, exit_reason, exit_d = float(c[last]), "HORIZON", last
+
+        seg_hi = float(h[entry_idx:exit_d + 1].max())
+        seg_lo = float(l[entry_idx:exit_d + 1].min())
+        return {
+            "entry_px": round(entry_px, 4),
+            "exit_px": round(float(exit_px), 4),
+            "exit_reason": exit_reason,
+            "strategy_return": float(exit_px) / entry_px - 1 - COST,   # net of cost
+            "holding_period": int(exit_d - entry_idx + 1),
+            "strat_mfe": seg_hi / entry_px - 1,
+            "strat_mae": seg_lo / entry_px - 1,
+            "strat_drawdown": float(dd),
+        }
+
+    # ---- SHORT mirror: enter short at o[entry]; favourable = price DOWN, adverse = price UP -------
+    stop_px = entry_px * (1 + P.stop_pct) if P.stop_pct else None       # hard stop ABOVE entry
+    tgt_px = entry_px * (1 - P.target_pct) if P.target_pct else None    # target BELOW entry
+    inval_px = level * (1 + P.buffer)          # reclaimed level (close ABOVE) = thesis broken
+
+    trough = np.inf
     exit_px = None
     exit_reason = None
     exit_d = last
-    dd = 0.0                                    # worst close-to-peak drawdown over the hold
-    peak_close = entry_px
+    dd = 0.0
+    peak_pc = 1.0                              # peak short-profit ratio entry/close over the hold
     for d in range(entry_idx, last + 1):
-        # drawdown texture on the close path
-        peak_close = max(peak_close, float(c[d]))
-        dd = min(dd, float(c[d]) / peak_close - 1)
-        # 1) hard intrabar STOP (optional)
-        if stop_px is not None and l[d] <= stop_px:
+        pcd = entry_px / float(c[d])           # short unrealised profit ratio at this close
+        peak_pc = max(peak_pc, pcd)
+        dd = min(dd, pcd / peak_pc - 1)
+        # 1) hard intrabar STOP (optional) — price rises to stop
+        if stop_px is not None and h[d] >= stop_px:
             exit_px, exit_reason, exit_d = stop_px, "STOP", d; break
-        # 2) fixed TARGET (optional)
-        if tgt_px is not None and h[d] >= tgt_px:
+        # 2) fixed TARGET (optional) — price falls to target
+        if tgt_px is not None and l[d] <= tgt_px:
             exit_px, exit_reason, exit_d = tgt_px, "TARGET", d; break
-        # 3) TRAIL off the running peak high (update peak with this bar, then test this bar's low)
-        peak = max(peak, float(h[d]))
-        trail_px = peak * (1 - P.trail_pct)
-        if l[d] <= trail_px:
+        # 3) TRAIL off the running TROUGH low (update trough, then test this bar's high)
+        trough = min(trough, float(l[d]))
+        trail_px = trough * (1 + P.trail_pct)
+        if h[d] >= trail_px:
             exit_px, exit_reason, exit_d = trail_px, "TRAIL", d; break
-        # 4) structural INVALIDATION (close below the reclaimed level)
-        if c[d] < inval_px:
+        # 4) structural INVALIDATION (close back above the level)
+        if c[d] > inval_px:
             exit_px, exit_reason, exit_d = float(c[d]), "INVALIDATION", d; break
-    if exit_reason is None:                     # 5) nothing triggered -> HORIZON at H
+    if exit_reason is None:                     # 5) HORIZON at H
         exit_px, exit_reason, exit_d = float(c[last]), "HORIZON", last
 
     seg_hi = float(h[entry_idx:exit_d + 1].max())
@@ -107,10 +164,13 @@ def _replay_core(o, h, l, c, n, entry_idx: int, level: float, P: StrategyPolicy)
         "entry_px": round(entry_px, 4),
         "exit_px": round(float(exit_px), 4),
         "exit_reason": exit_reason,
-        "strategy_return": float(exit_px) / entry_px - 1 - COST,   # net of cost
+        # short P&L per notional = (entry - exit)/entry = 1 - exit/entry (arithmetic, matches the
+        # short pattern-evidence convention in evidence.py). The reciprocal entry/exit-1 flattered
+        # shorts on both tails — overstating short ETV into G2/G3 and loosening the G5 MAE cap.
+        "strategy_return": 1 - float(exit_px) / entry_px - COST,   # short P&L, net of cost
         "holding_period": int(exit_d - entry_idx + 1),
-        "strat_mfe": seg_hi / entry_px - 1,
-        "strat_mae": seg_lo / entry_px - 1,
+        "strat_mfe": 1 - seg_lo / entry_px,      # favourable = lowest low
+        "strat_mae": 1 - seg_hi / entry_px,      # adverse = highest high (negative)
         "strat_drawdown": float(dd),
     }
 
@@ -124,7 +184,8 @@ def replay_one(df: pd.DataFrame, occurrence, policy: StrategyPolicy = DEFAULT_PO
     level = _get(occurrence, "level", None)
     if level is None:
         return None
-    return _replay_core(o, h, l, c, len(c), entry_idx, float(level), policy)
+    direction = _get(occurrence, "direction", "long") or "long"
+    return _replay_core(o, h, l, c, len(c), entry_idx, float(level), policy, direction=direction)
 
 
 # --------------------------------------------------------------------- aggregated strategy evidence
@@ -136,7 +197,8 @@ def _ci_low(returns: np.ndarray) -> Optional[float]:
     return (float(returns.mean()) - 1.96 * se) * 100
 
 
-def strategy_baseline_etv(df: pd.DataFrame, policy: StrategyPolicy, as_of_idx: Optional[int] = None) -> Optional[float]:
+def strategy_baseline_etv(df: pd.DataFrame, policy: StrategyPolicy, as_of_idx: Optional[int] = None,
+                          direction: str = "long") -> Optional[float]:
     """Strategy-baseline: enter EVERY day's next open and exit under the SAME policy, so the edge
     isolates what the PATTERN adds over the exit machinery alone (v3 §9 G2). A random entry has NO
     pattern thesis/level to break, so the structural INVALIDATION is DISABLED for the baseline
@@ -148,9 +210,12 @@ def strategy_baseline_etv(df: pd.DataFrame, policy: StrategyPolicy, as_of_idx: O
     o, h, l, c = (df[k].values for k in ["open", "high", "low", "close"])
     n = len(c) if as_of_idx is None else min(len(c), int(as_of_idx) + 1)
     H = policy.max_hold
+    # no pattern thesis/level -> structural invalidation off. Long: level=-inf (close<level never
+    # fires). Short: level=+inf (close>level never fires). Direction sets the baseline trade side.
+    no_level = np.inf if direction == "short" else -np.inf
     rets = []
     for i in range(1, n - H + 1):
-        r = _replay_core(o, h, l, c, n, i, -np.inf, policy)   # no level -> structural invalidation off
+        r = _replay_core(o, h, l, c, n, i, no_level, policy, direction=direction)
         if r is not None:
             rets.append(r["strategy_return"])
     if not rets:

@@ -23,6 +23,7 @@ from .. import registry
 from . import data
 from .patterns import registry as patterns
 from . import evidence as ev
+from . import strategy as strat
 
 log = logging.getLogger("agents.chart")
 
@@ -129,13 +130,19 @@ class ChartAgent(BaseAgent):
         df.attrs["symbol"] = sym
 
         # Point-in-time: resolved precedents whose T+10 printed by the decision bar (§3/§7.1),
-        # and evidence computed only on data <= the decision bar.
+        # and evidence computed only on data <= the decision bar. Direction-aware: sloped patterns
+        # can be short; the horizontal path stays long / S-horiz-v1 (byte-identical).
         as_of = signal_idx if signal_idx >= 0 else len(df) - 1
+        direction = occurrence.get("direction", "long") or "long"
+        policy = (strat.DEFAULT_POLICY if pattern_id == "horizontal_trendline"
+                  else strat.TRENDLINE_SHORT_POLICY if direction == "short"
+                  else strat.TRENDLINE_POLICY)
         try:
-            events = det.historical_events(df, as_of_idx=as_of)
+            events = det.historical_events(df, as_of_idx=as_of, direction=direction)
             df_asof = df.iloc[:as_of + 1]
-            evidence = ev.pattern_evidence(df_asof, events, max_h=10)
-            decision = ev.decide(df_asof, events, evidence, as_of_idx=as_of)
+            evidence = ev.pattern_evidence(df_asof, events, max_h=10, direction=direction)
+            decision = ev.decide(df_asof, events, evidence, as_of_idx=as_of, policy=policy,
+                                 direction=direction)
         except Exception as e:  # noqa: BLE001
             base["reason"] = f"evidence/gate error for {sym} ({e}) — WATCH."
             return base
@@ -159,9 +166,9 @@ class ChartAgent(BaseAgent):
             result["intent"] = Intent(
                 agent_id=MANIFEST.agent_id,
                 stock=sym,
-                direction=occurrence.get("direction", "long"),
+                direction=direction,
                 signal_ts=str(sig_ts),
-                thesis=(f"I'm taking {sym} long on a {pattern_id.replace('_',' ')} "
+                thesis=(f"I'm taking {sym} {direction} on a {pattern_id.replace('_',' ')} "
                         f"{occurrence.get('stage','').lower()} at ~{occurrence.get('level')}. "
                         f"Under my governed exit policy {pol.get('version')} "
                         f"(trail {pol.get('trail_pct')}, max_hold {pol.get('max_hold')}, "
