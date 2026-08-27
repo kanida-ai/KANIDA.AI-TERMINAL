@@ -193,6 +193,70 @@ def test_trade_emits_paper_intent():
     return "paper intent cites strategy + policy"
 
 
+# ---------------------------------------------------------------- data-source parity (cloud wiring)
+def test_parquet_matches_sqlite():
+    """The cloud reads daily bars from S3/local Parquet (env AGENT_DATA_URI, the same source the
+    Agent Builder uses); local dev reads SQLite. This asserts the two branches are INDISTINGUISHABLE
+    — identical date index (both ns) and byte-identical OHLCV+nifty — so wiring the cloud data changes
+    the *source* only, never the numbers the detectors/evidence see. Skips if duckdb/pyarrow or the
+    R&D DB is absent (both are present in the cloud image)."""
+    if not data.db_available():
+        print("SKIP test_parquet_matches_sqlite — DB absent")
+        return "SKIP"
+    try:
+        import duckdb  # noqa: F401
+        import pyarrow as pa
+        import pyarrow.parquet as papq
+    except Exception:  # noqa: BLE001
+        print("SKIP test_parquet_matches_sqlite — duckdb/pyarrow not installed")
+        return "SKIP"
+    import sqlite3, tempfile, shutil, numpy as np
+
+    sqlite_path = os.environ.get("AGENT_CHART_DB") or data.DEFAULT_DB
+    tmp = tempfile.mkdtemp(prefix="chart_pq_")
+    saved = {k: os.environ.get(k) for k in ("AGENT_DATA_URI", "AGENT_CHART_DB")}
+    try:
+        # build a tiny hive-partitioned parquet (symbol=<sym>/data.parquet) matching the cloud schema
+        con = sqlite3.connect("file:" + sqlite_path.replace("\\", "/") + "?mode=ro", uri=True)
+        try:
+            for s in ("TITAN", data.NIFTY):
+                d0 = pd.read_sql_query(
+                    "SELECT substr(bar_time,1,10) date, open,high,low,close,volume "
+                    "FROM ohlc_daily WHERE symbol=? ORDER BY bar_time", con, params=(s,))
+                d0["date"] = pd.to_datetime(d0["date"]).dt.date
+                part = os.path.join(tmp, "symbol=" + s)
+                os.makedirs(part, exist_ok=True)
+                papq.write_table(pa.Table.from_pandas(d0, preserve_index=False),
+                                 os.path.join(part, "data.parquet"))
+        finally:
+            con.close()
+
+        def _load(uri, sqlite):
+            os.environ["AGENT_DATA_URI"] = uri
+            if sqlite:
+                os.environ["AGENT_CHART_DB"] = sqlite
+            else:
+                os.environ.pop("AGENT_CHART_DB", None)
+            data.load_daily.cache_clear(); data._nifty_close.cache_clear()
+            return data.load_daily("TITAN")
+
+        a = _load(tmp, None)         # Parquet branch
+        b = _load("", sqlite_path)   # SQLite branch
+        assert a.index.equals(b.index), "date index differs between Parquet and SQLite"
+        assert str(a.index.dtype) == "datetime64[ns]" == str(b.index.dtype), (a.index.dtype, b.index.dtype)
+        for c in ("open", "high", "low", "close", "volume", "nifty"):
+            assert np.array_equal(a[c].values, b[c].values), f"column {c} differs between sources"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        data.load_daily.cache_clear(); data._nifty_close.cache_clear()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return f"parquet==sqlite over {len(a)} bars"
+
+
 # ---------------------------------------------------------------- read-only endpoint smoke tests
 def test_endpoints_return_valid_json():
     """The 3 portal endpoints (scan/decision/storyline) each return well-formed, honest JSON for
@@ -240,7 +304,7 @@ if __name__ == "__main__":
     for fn in (test_package_imports_and_registers, test_titan_breakout_detected,
                test_replay_exit_reasons, test_pattern_vs_strategy_separation,
                test_trade_emits_paper_intent, test_decide_returns_valid_dict,
-               test_endpoints_return_valid_json):
+               test_parquet_matches_sqlite, test_endpoints_return_valid_json):
         try:
             r = fn()
             results.append((fn.__name__, "PASS", r))
