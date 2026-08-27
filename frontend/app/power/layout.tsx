@@ -20,7 +20,7 @@ import { CompassLogo } from '@/components/power/CompassLogo'
  * max-w-7xl main below. Legacy /power/* routes are unaffected.
  */
 const SHELL_PREFIXES = [
-  '/power/ask', '/power/signals', '/power/co-trading', '/power/autotrade',
+  '/power/ask', '/power/signals', '/power/agents', '/power/co-trading', '/power/autotrade',
   '/power/performance', '/power/plans', '/power/account', '/power/learn',
 ]
 
