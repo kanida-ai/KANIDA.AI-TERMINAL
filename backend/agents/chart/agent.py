@@ -135,7 +135,9 @@ class ChartAgent(BaseAgent):
         result = {
             "decision": decision["decision"],
             "reason": decision["reason"],
-            "evidence": evidence,
+            "evidence": evidence,                 # pattern-forward family (§8.1) — kept for research
+            "strategy": decision.get("strategy"),  # strategy-replay family (§8.2) — what the gates read
+            "policy": decision.get("policy"),
             "gates": decision.get("gates", []),
             "basis": decision.get("basis"),
             "spec_note": decision.get("spec_note"),
@@ -144,6 +146,8 @@ class ChartAgent(BaseAgent):
 
         if decision["decision"] == "TRADE":
             sig_ts = occurrence.get("context", {}).get("as_of_date") or ""
+            s = decision.get("strategy") or {}
+            pol = decision.get("policy") or {}
             result["intent"] = Intent(
                 agent_id=MANIFEST.agent_id,
                 stock=sym,
@@ -151,7 +155,11 @@ class ChartAgent(BaseAgent):
                 signal_ts=str(sig_ts),
                 thesis=(f"I'm taking {sym} long on a {pattern_id.replace('_',' ')} "
                         f"{occurrence.get('stage','').lower()} at ~{occurrence.get('level')}. "
-                        f"{decision['reason']}"),
+                        f"Under my governed exit policy {pol.get('version')} "
+                        f"(trail {pol.get('trail_pct')}, max_hold {pol.get('max_hold')}, "
+                        f"invalidate on close<level) this setup's replayed Strategy-ETV is "
+                        f"{s.get('etv')}% (win {s.get('win')}%, payoff {s.get('payoff')}, "
+                        f"n={s.get('n')}). {decision['reason']}"),
                 evidence_ref=f"{sym}:{pattern_id}:{as_of}",
                 mode="paper",   # agents can NEVER set live — that's an operator-armed step downstream
             )

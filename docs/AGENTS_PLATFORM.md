@@ -160,9 +160,10 @@ Per Shyam: stand the whole thing up, then add agents one by one.
 | **Chart Agent — multi-pattern library** (`backend/agents/chart/patterns/`, registry, guarded) | **BUILT (this branch)** — detectors self-register; a bad detector can't crash the agent/boot |
 | **Chart Agent — Horizontal-Trendline detector** (ported `_levels` clustering + live-stage `classify`, all `PARAMS` preserved; point-in-time) | **BUILT (this branch)** — flags TITAN 2022-08-30 breakout @ ~2565 |
 | **Chart Agent — pattern-forward evidence** (ported `pattern_evidence`: T+1..T+10 win/ETV/median/MFE/MAE + edge-vs-baseline) | **BUILT (this branch)** |
-| **Chart Agent — §9 decision gate stack** (G1 sample · G2 edge · G3 significance · G5 tail) | **BUILT (this branch)** — ⚠️ gates on **pattern-forward** ETV as an honest stand-in; TITAN verdict = WATCH (n=6 < 20) |
-| **Chart Agent — strategy-replay ETV (§8.2)** — the ETV the gates are *supposed* to read | **SPEC** — not built; every decision stamps `basis="pattern_forward"` + a SPEC note |
-| **Chart Agent — G4 nested-population coherence (§7.2/§7.3) & G6 strategy-recency** | **SPEC** — reported as `skipped` with reason, never silently passed |
+| **Chart Agent — strategy-replay ETV (§8.2)** (`strategy.py`: governed frozen policy `S-horiz-v1` — next-open entry, structural close-<level invalidation, 8% trail, optional target/hard-stop, H=T+10; `replay_one` + `strategy_evidence`; both outcome families kept separate) | **BUILT (this branch)** — resolved-only replay; costs on every trade; exits classified STOP/TARGET/TRAIL/INVALIDATION/HORIZON |
+| **Chart Agent — §9 gate stack now reads STRATEGY stats** (G1 sample · G2 Strategy-ETV>0 & edge vs same-policy baseline · G3 CI_low(Strategy-ETV) · G5 strat-MAE+payoff · G6 strategy-recency decay) | **BUILT (this branch)** — `basis="strategy_replay"`; TITAN 2022-08-30 still WATCH (n=6 < 20) |
+| **Chart Agent — G4 nested-population coherence (§7.2/§7.3)** | **SPEC** — reported as `skipped` with reason, never silently passed |
+| **Chart Agent — bootstrap CI (§7.3)** | **SPEC** — CI_low is a labelled normal-approx SE for now |
 | **Chart Agent — retest depth-floor (§5.4)** | wired but **DISABLED by default** (`retest_depth_max=None`) so BUILT behaviour is byte-identical; enable via governance |
 | **Chart Agent — triangle / channel detectors** | **SPEC** — registered skeletons returning `[]` with v3 TODOs (make the multi-pattern seam real) |
 | **Chart Agent — data loader** (`data.py`: SQLite fallback to R&D `kanida.db`, env `AGENT_CHART_DB`) | **BUILT (this branch)**; cloud feeds/S3 wiring = **SPEC** |

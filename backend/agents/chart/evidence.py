@@ -7,17 +7,19 @@ PART A — Pattern-Forward evidence (v3 §8.1)  [BUILT]
     quartiles, MFE/MAE, up/down split, target hit-rates. ``_baseline_edges`` adds the stock's own
     baseline (enter-every-day) ETV per horizon so we can report edge-vs-baseline (also in R&D).
 
-PART B — Decision gate stack (v3 §9)  [BUILT on pattern-forward; reads SPEC input]
-    ⚠️ HONESTY: v3 §9 says the gates must read the **STRATEGY-REPLAY ETV** (§8.2) — the stats of the
-    exact stop/target/trail policy the agent will trade. That replay engine is **[SPEC — NOT BUILT]**.
-    Until it exists, the gate reads the **PATTERN-FORWARD ETV** (§8.1) as an honest stand-in and
-    stamps ``basis="pattern_forward"`` + a SPEC note on every decision. We do NOT fabricate strategy
-    statistics. Gates that need populations we don't have (G4 nested coherence) and the strategy
-    replay (G6 strategy-recency) are reported as ``skipped`` with the reason, never silently passed.
+PART B — Decision gate stack (v3 §9)  [BUILT on STRATEGY-REPLAY stats]
+    The gates now read the **STRATEGY-REPLAY ETV** (§8.2, strategy.py) — the stats of the exact
+    governed stop/target/trail policy the agent will trade — as v3 §9 mandates. ``basis`` is stamped
+    ``"strategy_replay"``. The PATTERN-FORWARD family (§8.1) is still computed and returned ALONGSIDE
+    for research; it is NEVER overwritten by the strategy exit (two outcome families, §5/§8).
+    Still honestly labelled SPEC: G4 nested-population coherence (look-alike/sector engine, §7.2/§7.3)
+    is ``skipped`` with reason; CI_low is a normal-approx SE (bootstrap CI is §7.3 SPEC).
 """
 from __future__ import annotations
 from typing import Optional
 import numpy as np
+
+from . import strategy as strat
 
 # Cost + horizon conventions — copied from R&D chart_agent (v3 §3/§8.1).
 COST = 0.003                      # 30 bps round-trip
@@ -26,8 +28,10 @@ HORIZONS = [1, 3, 5]
 # Governed decision constants (v3 §9). Pre-declared per pattern; NOT fit on the deciding data.
 DECISION_HORIZON = 3              # headline horizon for the horizontal detector (R&D used T+3)
 N_MIN = 20                        # G1 minimum precedents
-MAE_CAP = 0.08                    # G5 tail: avg MAE must be >= -8%
+MAE_CAP = 0.08                    # G5 tail: avg strategy-MAE must be >= -8%
 PAYOFF_MIN = 1.0                  # G5 payoff floor (avg_win / |avg_loss|)
+MIN_RECENT = 3                    # G6 min recent precedents before decay can be judged
+DECAY_FRAC = 0.5                  # G6 decaying if recent Strategy-ETV < DECAY_FRAC * prior
 
 
 # ------------------------------------------------------- PART A · pattern-forward evidence (ported)
@@ -114,75 +118,91 @@ def _payoff_at(paths: list, h: int):
     return au, ad, po
 
 
-def decide(df, events, evidence: Optional[dict], as_of_idx: Optional[int] = None) -> dict:
-    """Run the v3 §9 gate stack and return {decision, reason, gates, basis, evidence_ref_horizon}.
+def decide(df, events, evidence: Optional[dict], as_of_idx: Optional[int] = None,
+           policy: Optional["strat.StrategyPolicy"] = None) -> dict:
+    """Run the v3 §9 gate stack on STRATEGY-REPLAY stats (§8.2) and return
+    {decision, reason, gates, basis, strategy, policy, ...}.
 
-    HONEST BASIS: gates read the PATTERN-FORWARD ETV (§8.1); the strategy-replay ETV (§8.2) is
-    [SPEC]. Recorded on the result so no reader mistakes this for the final strategy-gated decision."""
+    The gates read the strategy outcome under the frozen governed policy `S` — the same strategy the
+    agent trades. The pattern-forward family (``evidence``) is passed through untouched for research.
+    ``spec_note`` records only what remains SPEC (G4 coherence; bootstrap CI)."""
     H = DECISION_HORIZON
-    spec_note = ("gate reads pattern-forward ETV (v3 §8.1); strategy-replay ETV (§8.2) is SPEC — "
-                 "not yet built, so the final strategy-gated verdict may differ.")
-    if not evidence:
-        return {"decision": "WATCH", "reason": "no resolved precedents yet — insufficient evidence.",
-                "gates": [], "basis": "pattern_forward", "spec_note": spec_note,
-                "evidence_ref_horizon": H}
+    policy = policy or strat.DEFAULT_POLICY
+    spec_note = ("G4 nested-population coherence (§7.2/§7.3) and bootstrap CI (§7.3) remain SPEC; "
+                 "CI_low is a normal-approx SE. G1-G3,G5,G6 read the strategy-replay stats (§8.2).")
 
-    edges = _baseline_edges(df, evidence, as_of_idx=as_of_idx)
-    hz = evidence["horizons"][H]
-    n = evidence["summary"]["n"]
-    etv = hz["mean"]
-    edge = edges[H]["edge"]
-    ci_low = _ci_low_mean(evidence["paths"], H)
-    avg_up, avg_down, payoff = _payoff_at(evidence["paths"], H)   # G5 on the DECISION horizon (auditor #3b)
-    mae = hz["mae"]
+    strategy = strat.strategy_evidence(df, events, policy, as_of_idx=as_of_idx)
+    if not strategy:
+        return {"decision": "WATCH", "reason": "no resolved precedents yet — insufficient evidence.",
+                "gates": [], "basis": "strategy_replay", "spec_note": spec_note,
+                "evidence_ref_horizon": H, "strategy": None, "policy": policy.to_dict()}
+
+    n = strategy["n"]
+    etv = strategy["etv"]
+    ci_low = strategy["ci_low"]
+    payoff = strategy["payoff"]
+    mae = strategy["mae"]
+    base_etv = strat.strategy_baseline_etv(df, policy, as_of_idx=as_of_idx)
+    edge = round(etv - base_etv, 3) if base_etv is not None else None
+    rec = strategy["recency"]
 
     gates: list = []
 
     def add(name, passed, reason, **extra):
         gates.append({"gate": name, "pass": passed, "reason": reason, **extra})
 
-    # G1 · Sample
+    def out(decision, reason):
+        return _verdict(decision, reason, gates, H, spec_note, etv, edge, strategy, policy)
+
+    # G1 · Sample (strategy N = resolved occurrences replayed)
     g1 = n >= N_MIN
     add("G1_sample", g1, f"n={n} (>= {N_MIN})" if g1 else f"too few precedents (n={n} < {N_MIN})")
     if not g1:
-        return _verdict("WATCH", f"too few precedents (n={n} < {N_MIN}).", gates, H, spec_note, etv, edge)
+        return out("WATCH", f"too few precedents (n={n} < {N_MIN}).")
 
-    # G2 · Edge (ETV>0 AND edge>baseline)
-    g2 = (etv > 0) and (edge > 0)
+    # G2 · Edge — Strategy-ETV > 0 AND edge over the same-policy enter-every-day baseline > 0
     if etv <= 0:
-        add("G2_edge", False, f"no edge after costs (ETV T+{H} {etv:+.2f}%)")
-        return _verdict("NO_TRADE", f"no edge after costs (ETV T+{H} {etv:+.2f}%).", gates, H, spec_note, etv, edge)
-    if edge <= 0:
-        add("G2_edge", False, f"profitable ({etv:+.2f}%) but no edge vs baseline ({edge:+.2f}%)")
-        return _verdict("NO_TRADE", f"no edge vs the stock's own baseline (edge {edge:+.2f}%).", gates, H, spec_note, etv, edge)
-    add("G2_edge", True, f"ETV {etv:+.2f}% and edge {edge:+.2f}% vs baseline")
+        add("G2_edge", False, f"no edge after costs (Strategy-ETV {etv:+.2f}%)")
+        return out("NO_TRADE", f"no edge after costs (Strategy-ETV {etv:+.2f}% under {policy.version}).")
+    if edge is None or edge <= 0:
+        add("G2_edge", False, f"profitable ({etv:+.2f}%) but no edge vs same-policy baseline ({edge})")
+        return out("NO_TRADE", f"no edge vs the enter-every-day baseline under the same policy (edge {edge}).")
+    add("G2_edge", True, f"Strategy-ETV {etv:+.2f}% and edge {edge:+.2f}% vs same-policy baseline")
 
-    # G3 · Significance (CI low > 0)
+    # G3 · Significance — CI_low(Strategy-ETV) > 0
     g3 = ci_low is not None and ci_low > 0
-    add("G3_significance", g3, (f"CI_low(ETV T+{H}) = {ci_low:+.2f}% (normal-approx SE; bootstrap CI is SPEC §7.3)"
+    add("G3_significance", g3, (f"CI_low(Strategy-ETV) = {ci_low:+.2f}% (normal-approx SE; bootstrap CI is SPEC §7.3)"
                                 if ci_low is not None else "CI unavailable"))
     if not g3:
-        return _verdict("WATCH", f"edge inside the noise (95% CI_low {ci_low:+.2f}%).", gates, H, spec_note, etv, edge)
+        return out("WATCH", f"edge inside the noise (95% CI_low {ci_low}%).")
 
-    # G4 · Consistency across nested populations — [SPEC] (look-alike/sector engine not built, §7.2/§7.3)
+    # G4 · Consistency across nested populations — [SPEC] (look-alike/sector engine not built)
     add("G4_consistency", None, "skipped — nested-population coherence engine is SPEC (§7.2/§7.3); "
                                  "only the Stock tier exists today.", skipped=True)
 
-    # G5 · Tail (MAE cap AND payoff floor)
+    # G5 · Tail — strategy avg-MAE cap AND payoff floor
     g5 = (mae >= -MAE_CAP * 100) and (payoff is not None and payoff >= PAYOFF_MIN)
-    add("G5_tail", g5, f"avg MAE T+{H} {mae:+.2f}% (cap {-MAE_CAP*100:.0f}%), payoff {payoff}")
+    add("G5_tail", g5, f"avg strat-MAE {mae:+.2f}% (cap {-MAE_CAP*100:.0f}%), payoff {payoff}")
     if not g5:
-        return _verdict("NO_TRADE", f"risk/tail too large (MAE {mae:+.2f}%, payoff {payoff}).", gates, H, spec_note, etv, edge)
+        return out("NO_TRADE", f"risk/tail too large (strat-MAE {mae:+.2f}%, payoff {payoff}).")
 
-    # G6 · Recency (strategy-recency) — [SPEC] needs strategy replay (§8.2); reported, not silently passed
-    add("G6_recency", None, "skipped — strategy-recency needs the strategy-replay engine (§8.2, SPEC).",
-        skipped=True)
+    # G6 · Recency — recent-window Strategy-ETV not decaying (BUILT on strategy replay)
+    decaying = (rec["recent_n"] >= MIN_RECENT and rec["prior_etv"] is not None and rec["prior_etv"] > 0
+                and rec["recent_etv"] is not None and rec["recent_etv"] < DECAY_FRAC * rec["prior_etv"])
+    if rec["recent_n"] < MIN_RECENT:
+        add("G6_recency", True, f"recent n={rec['recent_n']} < {MIN_RECENT} — too few to judge decay; not blocked")
+    else:
+        add("G6_recency", not decaying,
+            f"recent Strategy-ETV {rec['recent_etv']}% vs prior {rec['prior_etv']}%")
+        if decaying:
+            return out("WATCH", f"edge fading — recent Strategy-ETV {rec['recent_etv']}% vs prior {rec['prior_etv']}%.")
 
-    return _verdict("TRADE", f"positive expectancy (+{etv:.2f}% T+{H}, +{edge:.2f}% edge, "
-                             f"CI_low {ci_low:+.2f}%) across {n} precedents.", gates, H, spec_note, etv, edge)
+    return out("TRADE", f"positive strategy expectancy (+{etv:.2f}% under {policy.version}, "
+                        f"+{edge:.2f}% edge, CI_low {ci_low:+.2f}%) across {n} precedents.")
 
 
-def _verdict(decision, reason, gates, H, spec_note, etv, edge):
+def _verdict(decision, reason, gates, H, spec_note, etv, edge, strategy, policy):
     return {"decision": decision, "reason": reason, "gates": gates,
-            "basis": "pattern_forward", "spec_note": spec_note,
-            "evidence_ref_horizon": H, "etv": etv, "edge": edge}
+            "basis": "strategy_replay", "spec_note": spec_note,
+            "evidence_ref_horizon": H, "etv": etv, "edge": edge,
+            "strategy": strategy, "policy": policy.to_dict()}
