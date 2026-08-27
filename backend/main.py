@@ -723,6 +723,15 @@ try:
 except Exception as _ab_e:
     log.warning("Agent Builder NOT mounted (non-fatal): %s", _ab_e)
 
+# Agent Platform (backend/agents) — mounted like agent_builder; guarded so a bad agent can
+# never crash boot. Agents EMIT intents only; execution routes through autotrade/ (gated).
+try:
+    from agents.router import router as agents_router
+    app.include_router(agents_router, prefix="/api", tags=["Agents"])
+    log.info("Agent Platform mounted at /api/agents/*")
+except Exception as _agents_e:
+    log.warning("Agent Platform NOT mounted (non-fatal): %s", _agents_e)
+
 app.include_router(quant_router,     prefix="/api", tags=["Quant"])
 app.include_router(backtest_router,  prefix="/api", tags=["Backtest"])
 app.include_router(live_router,      prefix="/api", tags=["Live"])
