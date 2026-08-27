@@ -23,6 +23,7 @@ _BUILTIN = (
     "agents.chart.patterns.falling_wedge",
     "agents.chart.patterns.rectangle",
     "agents.chart.patterns.channel",
+    "agents.chart.patterns.cup_and_handle",
 )
 
 
