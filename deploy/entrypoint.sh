@@ -59,6 +59,10 @@ export KANIDA_PG_POOL_MAX="32"
 # no KMS); needs task-role s3:GetObject/ListBucket on it. Backtest at /api/builder/*.
 export AGENT_DATA_URI="s3://kanida-cb-src-389642461326/kanida/daily/"
 export AGENT_NIFTY_SYMBOL="NIFTY 50"
+# Chart Agent screen store (2026-08): the serving task READS precomputed daily
+# screens from here (S3ScreenStore); the off-gateway precompute RunTask WRITES
+# them. Needs task-role s3:GetObject/PutObject on kanida/chart_screens/*.
+export AGENT_CHART_SCREEN_URI="s3://kanida-cb-src-389642461326/kanida/chart_screens/"
 export AWS_REGION="ap-south-1"
 echo "entrypoint: app DB paths -> $LOCAL_DIR (sync back every ${SYNC_SECS}s)"
 
