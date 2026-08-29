@@ -13,7 +13,7 @@ point-in-time (as_of = the requested date; only data <= that bar is used).
 """
 from __future__ import annotations
 import logging
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from . import registry
@@ -138,12 +138,16 @@ def _setup_to_row(s: dict) -> dict:
 @router.get("/agents/chart/scan")
 def chart_scan(date: Optional[str] = Query(None, description="as-of date YYYY-MM-DD (point-in-time)"),
                limit: int = Query(40, ge=1, le=500),
-               full: bool = Query(False, description="return the entire screen (ignore limit)")):
+               full: Annotated[bool, Query(description="return the entire screen (ignore limit)")] = False,
+               live: Annotated[bool, Query(description="force an on-request full-universe compute "
+                                           "(OFF-gateway only — can exceed a 60s ALB timeout)")] = False):
     """Full-universe live-stage screen for the as-of date. Point-in-time: only bars <= date.
 
-    Serves the POST-MARKET precomputed screen if present (target <1 s); else LIVE-computes across the
-    full universe via screener.scan_universe (slower, honestly flagged). Guarded — never 500-crashes.
-    Returns the setups (stock, pattern, stage, level, distance, volume_x, touches)."""
+    Serves the POST-MARKET precomputed screen (target <1 s). The full-universe compute (~9 patterns ×
+    universe over S3 Parquet) takes tens of seconds and WOULD 504 behind a 60s gateway, so it does NOT
+    run on the default request path — build_screen (via the post-market agents.chart.eod job) is the
+    serving path. If no precomputed screen exists this returns fast + honest (served="pending"); pass
+    ?live=1 only from OFF-gateway contexts (an ECS RunTask / local) to force the compute. Guarded."""
     try:
         from .chart import data as cdata
         from .chart import screener as scr
@@ -156,11 +160,19 @@ def chart_scan(date: Optional[str] = Query(None, description="as-of date YYYY-MM
             res = cached
             served = "precompute"
             serve_note = f"served precomputed screen (built_at {cached.get('built_at')})"
-        else:
+        elif live:
             res = scr.scan_universe_detailed(date)
             served = "live"
-            serve_note = ("no precomputed screen for this date — LIVE-computed on the request path "
-                          "(slower; run build_screen post-market to serve <1s)")
+            serve_note = ("live-computed on the request path (explicit ?live=1) — slow; can exceed a "
+                          "60s gateway timeout on the full universe. Use the post-market precompute.")
+        else:
+            # Never run the ~minute-long full-universe compute behind the request gateway (ALB 60s) —
+            # it times out. Serve precomputed only; if absent, return fast + honest and let the
+            # post-market EOD job (agents.chart.eod) build the screen.
+            return {"ok": True, "date": date, "served": "pending", "count": 0, "occurrences": [],
+                    "note": ("no precomputed screen for this date yet — the post-market job "
+                             "(agents.chart.eod) builds it; pass ?live=1 from an off-gateway context "
+                             "to force an on-request compute.")}
 
         setups = res.get("setups", [])
         rows = [_setup_to_row(s) for s in setups]
