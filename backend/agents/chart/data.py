@@ -203,10 +203,13 @@ def _sqlite_panel(lo: str, hi: str) -> pd.DataFrame:
 def _parquet_panel(lo: str, hi: str) -> pd.DataFrame:
     con = _duckdb_con()
     try:
+        # CAST the date COLUMN in the WHERE too: under Parquet hive_partitioning `date` is VARCHAR,
+        # and DuckDB refuses VARCHAR<=DATE ("Binder Error: Cannot compare VARCHAR and DATE"). SQLite
+        # is lenient so the suite missed it — the DuckDB-over-Parquet panel test below now covers it.
         return con.execute(
             f"SELECT symbol, CAST(date AS DATE) date, open,high,low,close,volume "
             f"FROM read_parquet('{_parquet_glob()}', hive_partitioning=1) "
-            f"WHERE date<=CAST(? AS DATE) AND date>=CAST(? AS DATE) AND symbol<>? "
+            f"WHERE CAST(date AS DATE)<=CAST(? AS DATE) AND CAST(date AS DATE)>=CAST(? AS DATE) AND symbol<>? "
             f"ORDER BY symbol, date", [hi, lo, NIFTY]).df()
     finally:
         con.close()

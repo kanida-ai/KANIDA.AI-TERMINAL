@@ -41,6 +41,61 @@ def _skip(name: str) -> bool:
     return False
 
 
+# (parquet) DuckDB-over-Parquet panel loader — the cloud path SQLite can't exercise ---------------
+def test_load_panel_duckdb_parquet_date_where():
+    """load_panel must work under DuckDB-over-Parquet, where the hive `date` column reads as VARCHAR.
+    Regression for the cloud-only 'Binder Error: Cannot compare VARCHAR and DATE' — the WHERE must
+    CAST(date AS DATE). SQLite is lenient so only this real-Parquet path catches it; pre-fix this
+    test raises the binder error. Skips if duckdb/pyarrow absent."""
+    try:
+        import duckdb  # noqa: F401
+        import pyarrow as pa
+        import pyarrow.parquet as papq
+    except Exception:  # noqa: BLE001
+        print("SKIP test_load_panel_duckdb_parquet_date_where — duckdb/pyarrow not installed")
+        return "SKIP"
+
+    tmp = tempfile.mkdtemp(prefix="chart_panel_pq_")
+    saved = {k: os.environ.get(k) for k in ("AGENT_DATA_URI", "AGENT_CHART_DB")}
+
+    def _clear():
+        data.load_daily.cache_clear(); data._nifty_close.cache_clear()
+        try:
+            data.all_symbols.cache_clear()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        # hive parquet with `date` stored as a STRING column (VARCHAR in duckdb) — reproduces cloud
+        dates = ["2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31"]
+        for sym in ("AAA", "BBB", data.NIFTY):
+            tbl = pa.table({"date": dates, "open": [100.0] * 5, "high": [101.0] * 5,
+                            "low": [99.0] * 5, "close": [100.5] * 5, "volume": [1000] * 5})
+            part = os.path.join(tmp, f"symbol={sym}")
+            os.makedirs(part, exist_ok=True)
+            papq.write_table(tbl, os.path.join(part, "data.parquet"))
+
+        os.environ["AGENT_DATA_URI"] = tmp
+        os.environ.pop("AGENT_CHART_DB", None)
+        _clear()
+
+        panel = data.load_panel("2026-07-31", lookback_days=400)   # pre-fix: raises Binder Error
+        assert isinstance(panel, dict)
+        assert "AAA" in panel and "BBB" in panel, f"symbols missing: {list(panel)}"
+        assert data.NIFTY not in panel, "NIFTY must be excluded from the panel"
+        assert len(panel["AAA"]) == 5, f"AAA bars {len(panel['AAA'])} (expected 5)"
+        narrow = data.load_panel("2026-07-31", lookback_days=2)    # window lower-bound honoured
+        assert len(narrow["AAA"]) <= 3, f"lookback window not applied: {len(narrow['AAA'])}"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        _clear()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return "load_panel OK over DuckDB/Parquet (VARCHAR date WHERE)"
+
+
 # (a) full-universe scan surfaces the known TITAN breakout ------------------------------------------
 def test_scan_universe_includes_titan_breakout():
     if _skip("test_scan_universe_includes_titan_breakout"):
