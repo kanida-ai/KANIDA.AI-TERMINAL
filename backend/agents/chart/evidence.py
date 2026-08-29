@@ -35,22 +35,31 @@ DECAY_FRAC = 0.5                  # G6 decaying if recent Strategy-ETV < DECAY_F
 
 
 # ------------------------------------------------------- PART A · pattern-forward evidence (ported)
-def pattern_evidence(df, events, max_h: int = 10) -> Optional[dict]:
+def pattern_evidence(df, events, max_h: int = 10, direction: str = "long") -> Optional[dict]:
     """PORTED from chart_agent.pattern_evidence. Forward paths + per-horizon stats for every
     occurrence. ``events`` need only expose ``.entry_idx``. Point-in-time is the caller's job
-    (pass resolved events / an as-of-sliced df)."""
+    (pass resolved events / an as-of-sliced df). The long path is BYTE-IDENTICAL to the original;
+    ``direction='short'`` negates the forward return and swaps MFE/MAE (favourable = price down)."""
     o, hi, lo, c = (df[k].values for k in ["open", "high", "low", "close"])
     n = len(c)
+    short = direction == "short"
     paths, mfe, mae = [], {h: [] for h in range(1, max_h + 1)}, {h: [] for h in range(1, max_h + 1)}
     for e in events:
         s = e.entry_idx
         if s + max_h - 1 >= n or o[s] <= 0:
             continue
-        path = [0.0] + [c[s + d - 1] / o[s] - 1 - COST for d in range(1, max_h + 1)]
+        if short:
+            path = [0.0] + [-(c[s + d - 1] / o[s] - 1) - COST for d in range(1, max_h + 1)]
+        else:
+            path = [0.0] + [c[s + d - 1] / o[s] - 1 - COST for d in range(1, max_h + 1)]
         paths.append(path)
         for h in range(1, max_h + 1):
-            mfe[h].append(hi[s:s + h].max() / o[s] - 1)
-            mae[h].append(lo[s:s + h].min() / o[s] - 1)
+            if short:
+                mfe[h].append(o[s] / lo[s:s + h].min() - 1)     # favourable = lowest low
+                mae[h].append(o[s] / hi[s:s + h].max() - 1)     # adverse = highest high
+            else:
+                mfe[h].append(hi[s:s + h].max() / o[s] - 1)
+                mae[h].append(lo[s:s + h].min() / o[s] - 1)
     if not paths:
         return None
     P = np.array(paths)
@@ -78,15 +87,20 @@ def pattern_evidence(df, events, max_h: int = 10) -> Optional[dict]:
     return {"paths": P.tolist(), "horizons": horizons, "summary": summary, "ref_h": max_h}
 
 
-def _baseline_edges(df, evidence: dict, as_of_idx: Optional[int] = None) -> dict:
+def _baseline_edges(df, evidence: dict, as_of_idx: Optional[int] = None, direction: str = "long") -> dict:
     """The stock's own baseline ETV (enter every day's next open, same cost) per horizon, and the
-    pattern's edge over it — mirrors R&D run_experiment. Point-in-time: baseline uses bars <= as_of."""
+    pattern's edge over it — mirrors R&D run_experiment. Point-in-time: baseline uses bars <= as_of.
+    ``direction='short'`` negates the baseline forward return (same-direction comparison)."""
     o, c = df["open"].values, df["close"].values
     n = len(c) if as_of_idx is None else min(len(c), int(as_of_idx) + 1)
     max_h = evidence["ref_h"]
+    short = direction == "short"
     edges = {}
     for h in range(1, max_h + 1):
-        base = np.array([c[i + h - 1] / o[i] - 1 - COST for i in range(1, n - h + 1) if o[i] > 0], float)
+        if short:
+            base = np.array([-(c[i + h - 1] / o[i] - 1) - COST for i in range(1, n - h + 1) if o[i] > 0], float)
+        else:
+            base = np.array([c[i + h - 1] / o[i] - 1 - COST for i in range(1, n - h + 1) if o[i] > 0], float)
         base_mean = float(np.nanmean(base)) * 100 if base.size else 0.0
         etv = evidence["horizons"][h]["mean"]
         edges[h] = {"baseline_ev": round(base_mean, 3), "edge": round(etv - base_mean, 3)}
@@ -119,7 +133,7 @@ def _payoff_at(paths: list, h: int):
 
 
 def decide(df, events, evidence: Optional[dict], as_of_idx: Optional[int] = None,
-           policy: Optional["strat.StrategyPolicy"] = None) -> dict:
+           policy: Optional["strat.StrategyPolicy"] = None, direction: str = "long") -> dict:
     """Run the v3 §9 gate stack on STRATEGY-REPLAY stats (§8.2) and return
     {decision, reason, gates, basis, strategy, policy, ...}.
 
@@ -142,7 +156,7 @@ def decide(df, events, evidence: Optional[dict], as_of_idx: Optional[int] = None
     ci_low = strategy["ci_low"]
     payoff = strategy["payoff"]
     mae = strategy["mae"]
-    base_etv = strat.strategy_baseline_etv(df, policy, as_of_idx=as_of_idx)
+    base_etv = strat.strategy_baseline_etv(df, policy, as_of_idx=as_of_idx, direction=direction)
     edge = round(etv - base_etv, 3) if base_etv is not None else None
     rec = strategy["recency"]
 

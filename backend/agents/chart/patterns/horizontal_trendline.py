@@ -214,10 +214,12 @@ class HorizontalTrendlineDetector(PatternDetector):
         )
         return [occ]
 
-    def historical_events(self, df: pd.DataFrame, as_of_idx: Optional[int] = None) -> list:
+    def historical_events(self, df: pd.DataFrame, as_of_idx: Optional[int] = None,
+                          direction: Optional[str] = None) -> list:
         """Resolved BREAKOUT->RETEST events (ported detector) for the evidence base. When as_of_idx
         is given, keep only occurrences whose T+10 has printed by then (entry_idx+9 <= as_of_idx),
-        i.e. the leak-proof as-of rule (v3 §3/§7.1)."""
+        i.e. the leak-proof as-of rule (v3 §3/§7.1). ``direction`` is accepted for a uniform detector
+        contract but IGNORED — the horizontal detector is long-only (output byte-identical)."""
         if as_of_idx is not None:
             k = int(as_of_idx)
             # Detect on the AS-OF SLICE so leak-freedom is STRUCTURAL, not empirical (auditor #1):
