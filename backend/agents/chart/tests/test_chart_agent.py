@@ -276,12 +276,17 @@ def test_endpoints_return_valid_json():
         print("SKIP test_endpoints_return_valid_json — DB absent")
         return "SKIP"
 
-    # scan — point-in-time as-of the date; TITAN breakout must be among the occurrences
-    s = R.chart_scan(date=TITAN_DATE, limit=40)
+    # scan — point-in-time as-of the date; TITAN breakout must be among the occurrences.
+    # live=True forces the on-request compute: the default path serves precomputed-only (returns
+    # served="pending" with no artifact) so it never blocks the 60s gateway; tests have no artifact.
+    s = R.chart_scan(date=TITAN_DATE, limit=40, live=True)
     assert json.dumps(s, default=str)              # JSON-serialisable
     assert s["ok"] is True and s["count"] >= 1, s
     syms = {r["stock"] for r in s["occurrences"]}
     assert "TITAN" in syms, syms
+    # and the default (no ?live) must NOT compute behind the gateway — fast honest pending
+    p = R.chart_scan(date=TITAN_DATE, limit=40)
+    assert p["ok"] is True and p["served"] == "pending" and p["count"] == 0, p
     titan = next(r for r in s["occurrences"] if r["stock"] == "TITAN")
     assert titan["stage"] == "BREAKOUT" and abs(titan["level"] - TITAN_LEVEL) / TITAN_LEVEL < 0.01
 
