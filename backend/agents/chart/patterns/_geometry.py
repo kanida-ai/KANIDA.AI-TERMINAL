@@ -29,6 +29,9 @@ GEOM_PARAMS.update(
     apex_max_frac=0.75,     # triangles/wedges valid only while progress-to-apex <= this
     min_pattern_bars=15,    # a pattern base must span at least this many bars (earliest anchor..k)
     breakdown_vol_mult=_HP["vol_mult"],   # bearish-break volume gate (SPEC knob; default = vol_mult)
+    min_contraction=0.20,   # apex patterns (wedges/triangles) must have NARROWED >= this fraction of
+                            # the overlap-window width by k; a barely-narrowing pair is a CHANNEL, not
+                            # a wedge — the wedge-vs-channel tightness knob (frozen; SPEC-until-OOS)
 )
 
 # Which taxonomy labels have a converging apex (expiry gate applies); rectangle/channel do not.
@@ -147,6 +150,7 @@ class GeomFit:
     converging: bool = False
     parallel: bool = False
     base_start: Optional[int] = None
+    contraction: float = 0.0     # fraction the channel has narrowed base->k (== progress to apex)
     label: Optional[str] = None
 
 
@@ -196,7 +200,19 @@ def fit_as_of(h, l, c, pvh, pvl, k: int, P: dict) -> GeomFit:
     den = upper.m - lower.m
     apex = None if abs(den) < 1e-12 else (lower.intercept - upper.intercept) / den
     fit.apex_x = apex
-    fit.converging = (den < 0) and (apex is not None) and (apex > k)
+    # Contraction = how much the gap between the two lines has NARROWED from the base to k (equals
+    # progress toward the apex for a true wedge/triangle). A pair whose lines barely close is a
+    # CHANNEL, not a wedge — so "converging" now requires a real minimum narrowing, not just an apex
+    # that exists somewhere far ahead. This is the wedge-vs-channel tightness fix.
+    # Measure over the OVERLAP window [max(upper.a, lower.a) .. k] where BOTH lines are interpolated
+    # within their own anchor span. Using min(anchors) would back-extrapolate the steeper line and
+    # inflate the width (a staggered-anchor artifact) — the overlap window is the honest narrowing.
+    ov = max(upper.a, lower.a)
+    w_ov = upper.val(ov) - lower.val(ov)
+    w_k = upper.val(k) - lower.val(k)
+    fit.contraction = (1.0 - w_k / w_ov) if w_ov > 0 else 0.0
+    fit.converging = ((den < 0) and (apex is not None) and (apex > k)
+                      and fit.contraction >= P["min_contraction"])
     mean_abs = (abs(upper.m) + abs(lower.m)) / 2.0
     both_flat = (_sign(upper.slope_pph, P["flat_eps"]) == "flat"
                  and _sign(lower.slope_pph, P["flat_eps"]) == "flat")
