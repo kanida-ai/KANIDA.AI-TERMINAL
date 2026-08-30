@@ -156,11 +156,41 @@ export function fetchStoryline(symbol: string, date: string): Promise<StorylineR
   return getJSON<StorylineResp>(`/api/agents/chart/storyline?${q.toString()}`)
 }
 
-// The most recent date that is known to serve a precomputed screen. The post-market EOD job
-// builds the screen for the current trading day; until it runs, /scan returns served="pending".
-// So we land the scanner on the latest populated date: try `today`, else fall back to this.
-// (A backend "latest available screen date" endpoint would remove the hardcode — see backend-needs.)
+// Last-known-good populated screen — the FINAL fallback if none of the probed recent dates is
+// precomputed (e.g. a brand-new environment). Normally the mount probe lands on the freshest date.
+// (A backend "latest available screen date" endpoint would remove all client probing — see backend-needs.)
 export const KNOWN_POPULATED_DATE = '2026-07-31'
+
+const isoDaysAgo = (n: number) => {
+  const d = new Date()
+  d.setUTCDate(d.getUTCDate() - n)
+  return d.toISOString().slice(0, 10)
+}
+
+/**
+ * Find the FRESHEST precomputed screen without a server-side "latest" endpoint (interim, no-outage).
+ * Probes the last `days` calendar days from today backward IN PARALLEL (covers weekends/holidays),
+ * and resolves to the most-recent date whose scan returned served="precompute" (with setups).
+ * Returns { date, scan } for that date, or null if none of the probed days is populated.
+ */
+export async function findFreshestScan(days = 7): Promise<{ date: string; scan: ScanResp } | null> {
+  const dates = Array.from({ length: days }, (_, i) => isoDaysAgo(i)) // today, yesterday, …
+  const results = await Promise.all(
+    dates.map(async (d) => {
+      try {
+        const scan = await fetchScan(d, { full: true })
+        return { date: d, scan }
+      } catch {
+        return null
+      }
+    }),
+  )
+  // dates[] is already newest→oldest, so the first qualifying hit is the freshest.
+  for (const r of results) {
+    if (r && r.scan.ok && r.scan.served === 'precompute' && r.scan.count > 0) return r
+  }
+  return null
+}
 
 // --------------------------------------------------------------------------- display metadata
 // Canonical direction per pattern — the detectors carry this as a class attribute but the manifest

@@ -376,27 +376,19 @@ export default function AgentsPage() {
   const [date, setDate] = useState<string>(todayISO())
   const [scan, setScan] = useState<A.ScanResp | null>(null)
   const [scanBusy, setScanBusy] = useState(true)
-  const [fallbackFrom, setFallbackFrom] = useState<string | null>(null)
+  const [staleFallback, setStaleFallback] = useState<string | null>(null) // set only when nothing recent was populated
 
   const [patternFilter, setPatternFilter] = useState<string>('ALL')
   const [stageFilter, setStageFilter] = useState<string>('ALL')
   const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'stage', dir: 'asc' })
   const [selected, setSelected] = useState<A.ScanRow | null>(null)
 
-  // one scan fetch; when allowFallback, hop to the known-populated date if today isn't precomputed yet
-  const runScan = useCallback(async (dt: string, allowFallback: boolean) => {
-    setScanBusy(true); setFallbackFrom(null)
+  // Manual scan for an EXACT date (from the date picker). No fallback — the honest
+  // pending/empty/error state for that date is what we want to show.
+  const runScan = useCallback(async (dt: string) => {
+    setScanBusy(true); setStaleFallback(null)
     try {
-      let res = await A.fetchScan(dt, { full: true })
-      if (allowFallback && (res.served !== 'precompute' || res.count === 0) && dt !== A.KNOWN_POPULATED_DATE) {
-        const fb = await A.fetchScan(A.KNOWN_POPULATED_DATE, { full: true })
-        if (fb.served === 'precompute' && fb.count > 0) {
-          setFallbackFrom(dt)
-          setDate(A.KNOWN_POPULATED_DATE)
-          res = fb
-        }
-      }
-      setScan(res)
+      setScan(await A.fetchScan(dt, { full: true }))
     } catch {
       setScan({ ok: false, date: dt, count: 0, occurrences: [], error: 'scanner unreachable' })
     } finally {
@@ -404,10 +396,33 @@ export default function AgentsPage() {
     }
   }, [])
 
+  // On mount: land on the FRESHEST precomputed screen. Probe the last 7 calendar days in parallel
+  // (handles weekends/holidays + the not-yet-built current day) and pick the most-recent populated
+  // date. If none is populated, fall back to the last-known-good date with an honest banner.
+  const landFreshest = useCallback(async () => {
+    setScanBusy(true); setStaleFallback(null)
+    try {
+      const fresh = await A.findFreshestScan(7)
+      if (fresh) {
+        setDate(fresh.date)
+        setScan(fresh.scan)
+      } else {
+        const fb = await A.fetchScan(A.KNOWN_POPULATED_DATE, { full: true })
+        setDate(A.KNOWN_POPULATED_DATE)
+        setStaleFallback(A.KNOWN_POPULATED_DATE)
+        setScan(fb)
+      }
+    } catch {
+      setScan({ ok: false, date: todayISO(), count: 0, occurrences: [], error: 'scanner unreachable' })
+    } finally {
+      setScanBusy(false)
+    }
+  }, [])
+
   useEffect(() => {
     A.fetchManifest().then(setManifest).catch(() => setManifest(null))
-    runScan(todayISO(), true) // land on the latest POPULATED screen, not an empty one
-  }, [runScan])
+    landFreshest() // auto-land on the freshest available precomputed screen
+  }, [landFreshest])
 
   const patterns = manifest?.patterns ?? []
   const occ = scan?.occurrences ?? []
@@ -527,7 +542,7 @@ export default function AgentsPage() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <label style={{ fontSize: 11, color: T.t3, fontWeight: 700 }}>SCAN DATE</label>
                 <input type="date" value={date} max={todayISO()} onChange={(e) => setDate(e.target.value)} style={{ ...inputStyle, width: 158 }} />
-                <button onClick={() => runScan(date, false)} disabled={scanBusy}
+                <button onClick={() => runScan(date)} disabled={scanBusy}
                   style={{ border: 'none', background: T.g, color: '#04120c', padding: '10px 18px', borderRadius: 10, fontSize: 13, fontWeight: 800, cursor: scanBusy ? 'wait' : 'pointer' }}>
                   {scanBusy ? 'Scanning…' : 'Scan'}
                 </button>
@@ -547,9 +562,9 @@ export default function AgentsPage() {
               )}
             </div>
 
-            {fallbackFrom && (
+            {staleFallback && (
               <div style={{ marginTop: 12, fontSize: 12, color: T.a, background: 'rgba(255,209,102,0.07)', border: `1px solid rgba(255,209,102,0.22)`, borderRadius: 10, padding: '9px 12px' }}>
-                No precomputed screen for {fallbackFrom} yet — the post-market job builds it after close. Showing the latest populated screen: <b>{date}</b>.
+                No precomputed screen in the last 7 days — the post-market job builds each day after close. Showing the last-known populated screen: <b>{date}</b>.
               </div>
             )}
 
