@@ -95,17 +95,27 @@ def _strategy_head(strategy: Optional[dict]) -> Optional[dict]:
     }
 
 
-def _recent_occurrence(sym: str, date: Optional[str], lookback: int = 90):
+_STAGE_RANK = {"BREAKOUT": 0, "RETEST": 1, "APPROACHING": 2, "FAILED": 3}
+
+
+def _recent_occurrence(sym: str, date: Optional[str], lookback: int = 90,
+                       pattern: Optional[str] = None):
     """Most recent LIVE-stage occurrence for SYM whose signal bar is <= date (point-in-time).
-    Walks back from the as-of bar calling the detector until a clean stage appears; returns a
-    (occurrence_dict, df, k_asof) triple, or (None, df, k) if there is no stage in the window."""
+    Walks back from the as-of bar; at each bar it runs the requested pattern's detector, or — when
+    ``pattern`` is None — EVERY registered detector (NOT hardcoded horizontal; fixes the drill-down
+    bug) and returns the most actionable stage found on the most recent bar. Returns
+    (occurrence_dict, df, k_asof) or (None, df, k)."""
     from .chart import data as cdata
     from .chart.patterns import registry as patterns
     from .chart.agent import _as_of_idx  # reuse the exact point-in-time bar resolver
 
-    det = patterns.get("horizontal_trendline")
-    if det is None:
-        raise RuntimeError("horizontal_trendline detector not available")
+    if pattern:
+        det = patterns.get(pattern)
+        if det is None:
+            raise RuntimeError(f"pattern '{pattern}' detector not available")
+        dets = [det]
+    else:
+        dets = patterns.all_patterns()
     df = cdata.load_daily(sym)
     df.attrs["symbol"] = sym
     k = _as_of_idx(df, date)
@@ -113,13 +123,20 @@ def _recent_occurrence(sym: str, date: Optional[str], lookback: int = 90):
         return None, df, k
     lo = max(0, k - lookback)
     for j in range(k, lo - 1, -1):
-        try:
-            occ = det.detect(df, as_of_idx=j)
-        except Exception as e:  # noqa: BLE001
-            log.debug("detect failed at %s[%d]: %s", sym, j, e)
-            continue
-        if occ:
-            return occ[0].to_dict(), df, k
+        best = None
+        for det in dets:
+            try:
+                occ = det.detect(df, as_of_idx=j)
+            except Exception as e:  # noqa: BLE001 — one bad detector must not sink the walk
+                log.debug("detect %s failed at %s[%d]: %s",
+                          getattr(det, "pattern_id", "?"), sym, j, e)
+                continue
+            if occ:
+                cand = occ[0].to_dict()
+                if best is None or _STAGE_RANK.get(cand.get("stage"), 9) < _STAGE_RANK.get(best.get("stage"), 9):
+                    best = cand
+        if best is not None:
+            return best, df, k
     return None, df, k
 
 
@@ -127,7 +144,7 @@ def _recent_occurrence(sym: str, date: Optional[str], lookback: int = 90):
 def _setup_to_row(s: dict) -> dict:
     """Normalise a screener setup (or a precomputed artifact row) to the endpoint's occurrence shape.
     Accepts both the screener's ``symbol`` key and the legacy ``stock`` key."""
-    return {
+    row = {
         "stock": s.get("symbol") or s.get("stock"),
         "pattern": s.get("pattern"),
         "stage": s.get("stage"),
@@ -138,6 +155,11 @@ def _setup_to_row(s: dict) -> dict:
         "touches": s.get("touches") if isinstance(s.get("touches"), int) else len(s.get("touches") or []),
         "as_of_date": s.get("as_of_date") or (s.get("context") or {}).get("as_of_date"),
     }
+    # storyline enrichment (present when the screen was built with enrich=True) — carried through
+    for f in ("tier", "quality_score", "evidence_summary", "hook"):
+        if f in s:
+            row[f] = s.get(f)
+    return row
 
 
 @router.get("/agents/chart/scan")
@@ -191,15 +213,75 @@ def chart_scan(date: Optional[str] = Query(None, description="as-of date YYYY-MM
                 "skipped_min_bars": res.get("skipped_min_bars"),
                 "skipped_stale": res.get("skipped_stale"),
                 "skipped_no_window": res.get("skipped_no_window"),
+                "enriched": res.get("enriched"),
+                "statistically_meaningful": res.get("statistically_meaningful"),
+                "qualified": res.get("qualified"),
+                "market_story": res.get("market_story"),
                 "count": len(rows), "occurrences": out_rows}
     except Exception as e:  # noqa: BLE001 — never 500-crash
         log.warning("chart_scan failed: %s", e)
         return {"ok": False, "date": date, "occurrences": [], "count": 0, "error": str(e)}
 
 
+@router.get("/agents/chart/bars")
+def chart_bars(symbol: str = Query(..., description="stock symbol, e.g. TITAN"),
+               date: Optional[str] = Query(None, description="as-of date YYYY-MM-DD (point-in-time)"),
+               lookback: int = Query(180, ge=1, le=2000,
+                                     description="number of daily bars up to & including date")):
+    """Point-in-time daily candles for drawing the chart: only bars dated <= date, the last
+    ``lookback`` of them. {symbol, date, lookback, bars:[{date,o,h,l,c,v}]}. Guarded (never 500)."""
+    sym = (symbol or "").strip().upper()
+    try:
+        from .chart import data as cdata
+        from .chart.agent import _as_of_idx
+        if not cdata.db_available():
+            return {"ok": False, "symbol": sym, "date": date, "bars": [],
+                    "note": f"data source unavailable ({cdata.db_path()}); SPEC: cloud feeds wiring."}
+        df = cdata.load_daily(sym)
+        k = _as_of_idx(df, date)
+        if k < 0:
+            return {"ok": True, "symbol": sym, "date": date, "lookback": lookback, "bars": [],
+                    "note": f"no bar on/before {date or 'latest'} for {sym}."}
+        lo = max(0, k - lookback + 1)
+        w = df.iloc[lo:k + 1]
+        bars = [{"date": str(idx.date()) if hasattr(idx, "date") else str(idx),
+                 "o": round(float(r.open), 4), "h": round(float(r.high), 4),
+                 "l": round(float(r.low), 4), "c": round(float(r.close), 4),
+                 "v": int(r.volume) if r.volume == r.volume else None}
+                for idx, r in w.iterrows()]
+        return {"ok": True, "symbol": sym, "date": str(df.index[k].date()),
+                "lookback": lookback, "count": len(bars), "bars": bars}
+    except Exception as e:  # noqa: BLE001 — never 500-crash
+        log.warning("chart_bars(%s) failed: %s", sym, e)
+        return {"ok": False, "symbol": sym, "date": date, "bars": [], "error": str(e)}
+
+
+@router.get("/agents/chart/setup")
+def chart_setup(symbol: str = Query(..., description="stock symbol, e.g. TITAN"),
+                pattern: str = Query(..., description="pattern_id, e.g. falling_wedge"),
+                date: Optional[str] = Query(None, description="as-of date YYYY-MM-DD (point-in-time)")):
+    """FULL per-setup detail for column-3: runs THAT pattern's detector (resolved via patterns.get —
+    NOT hardcoded horizontal) at the as-of date and returns geometry (real anchors for drawing),
+    quality (0-100), pattern-forward evidence, winner/loser paths, decision (§9 gates) and the watch
+    plan. Point-in-time; guarded (never 500). Small-N setups honestly return WATCH."""
+    sym = (symbol or "").strip().upper()
+    try:
+        from .chart import data as cdata
+        if not cdata.db_available():
+            return {"ok": False, "symbol": sym, "pattern": pattern, "date": date,
+                    "note": f"data source unavailable ({cdata.db_path()}); SPEC: cloud feeds wiring."}
+        from .chart import setup as csetup
+        return csetup.build_setup(sym, pattern, date)
+    except Exception as e:  # noqa: BLE001 — never 500-crash
+        log.warning("chart_setup(%s/%s) failed: %s", sym, pattern, e)
+        return {"ok": False, "symbol": sym, "pattern": pattern, "date": date, "error": str(e)}
+
+
 @router.get("/agents/chart/decision")
 def chart_decision(symbol: str = Query(..., description="stock symbol, e.g. TITAN"),
-                   date: Optional[str] = Query(None, description="as-of date YYYY-MM-DD")):
+                   date: Optional[str] = Query(None, description="as-of date YYYY-MM-DD"),
+                   pattern: Annotated[Optional[str], Query(description="restrict to one pattern_id "
+                                      "(default: best across all patterns)")] = None):
     """Most recent occurrence for SYM with signal <= date, run through decide() (honest WATCH at
     current N). Returns decision/reason/basis, the strategy-replay head, the pattern-forward numbers
     (T+1/3/5/10), gates, policy and the occurrence. Point-in-time throughout."""
@@ -210,7 +292,7 @@ def chart_decision(symbol: str = Query(..., description="stock symbol, e.g. TITA
         if not cdata.db_available():
             return {"ok": False, "symbol": sym, "date": date, "decision": None,
                     "note": f"data source unavailable ({cdata.db_path()}); SPEC: cloud feeds wiring."}
-        occ, _df, k = _recent_occurrence(sym, date)
+        occ, _df, k = _recent_occurrence(sym, date, pattern=pattern)
         if occ is None:
             return {"ok": True, "symbol": sym, "date": date, "decision": "WATCH",
                     "reason": f"no clean chart stage for {sym} on/around {date or 'latest'} "

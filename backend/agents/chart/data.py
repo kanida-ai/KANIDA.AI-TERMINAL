@@ -215,6 +215,38 @@ def _parquet_panel(lo: str, hi: str) -> pd.DataFrame:
         con.close()
 
 
+@lru_cache(maxsize=8)
+def _sector_map_cached(source: str) -> tuple:
+    """(symbol, sector) pairs from the SQLite ``instrument_labels`` table (a REAL sector source that
+    ships in kanida.db — 22 sectors, ~500 F&O/nifty500 names). Returned as a tuple of pairs so it is
+    hashable/cacheable. Guarded: if the table/column is absent (e.g. a Parquet-only source) returns ()
+    so callers report sector concentration as UNAVAILABLE rather than fabricating it."""
+    if _data_uri():
+        return ()   # Parquet source has no instrument_labels table — honest miss
+    path = _sqlite_path()
+    if not os.path.exists(path):
+        return ()
+    try:
+        con = sqlite3.connect(f"file:{os.path.abspath(path)}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT symbol, sector FROM instrument_labels "
+                "WHERE sector IS NOT NULL AND sector<>''").fetchall()
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 — table missing / db locked -> honest empty map
+        return ()
+    return tuple((str(s), str(sec)) for s, sec in rows)
+
+
+def sector_map() -> dict:
+    """{symbol -> sector} from the active source, or {} when no sector source exists (honest). Cached."""
+    return dict(_sector_map_cached(db_path()))
+
+
+sector_map.cache_clear = _sector_map_cached.cache_clear         # type: ignore[attr-defined]
+
+
 def load_panel(as_of_date, lookback_days: int) -> dict:
     """Point-in-time OHLCV panel for the FULL universe: {symbol -> date-indexed OHLCV frame}, every
     bar dated <= as_of_date and >= (as_of - lookback_days). One windowed query, split per symbol.
