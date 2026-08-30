@@ -31,7 +31,9 @@ patterns.load_builtin()
 
 # Stable mid-history cases (well before the volatile end-of-data tail). Verified real live setups.
 H_CASE = ("TITAN", "horizontal_trendline", "2026-04-08")      # BREAKOUT, has 8 precedents
-FW_CASE = ("SBIN", "falling_wedge", "2025-04-17")             # BREAKOUT long, sloped geometry
+# SBIN 2025-04-17 was RECLASSIFIED to a channel by the wedge-tightness fix (it only narrows ~5%);
+# SURAJLTD is a genuine converging falling wedge (~24% narrowing) that survives the tighter gate.
+FW_CASE = ("SURAJLTD", "falling_wedge", "2025-04-17")         # BREAKOUT long, sloped geometry
 AT_CASE = ("RELIANCE", "ascending_triangle", "2024-06-27")    # BREAKOUT long
 
 
