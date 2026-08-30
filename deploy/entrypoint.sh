@@ -63,6 +63,11 @@ export AGENT_NIFTY_SYMBOL="NIFTY 50"
 # screens from here (S3ScreenStore); the off-gateway precompute RunTask WRITES
 # them. Needs task-role s3:GetObject/PutObject on kanida/chart_screens/*.
 export AGENT_CHART_SCREEN_URI="s3://kanida-cb-src-389642461326/kanida/chart_screens/"
+# Chart Agent daily refresh (2026-08): run_eod(fetch=True) resolves the fetcher
+# from this env → the Kite daily-OHLC fetcher (reads the existing token from the
+# kite_tokens DB, no mint). Only fires when the auth-gated /api/agents/chart/refresh
+# endpoint is triggered. AGENT_ADMIN_TOKEN (the endpoint's auth) is a task-def env, not here.
+export AGENT_CHART_FETCH_FN="agents.chart.fetch_kite:refresh_daily"
 export AWS_REGION="ap-south-1"
 echo "entrypoint: app DB paths -> $LOCAL_DIR (sync back every ${SYNC_SECS}s)"
 
