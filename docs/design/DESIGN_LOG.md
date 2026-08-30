@@ -2059,3 +2059,59 @@ patterns, stale false SPEC text, no market screener). Files: `frontend/app/power
   hardcoded 2026-07-31); (2) an OHLC-bars endpoint for a true point-in-time candle chart in the
   drill-down (currently an honest schematic); (3) optional: add `direction` to `manifest.patterns[]`
   so the library direction isn't a client-side map.
+
+### 2026-08-29 (addendum) — scanner auto-lands on the freshest precomputed date
+Follow-up: current-day fetch now populates (2026-08-28 → served=precompute, 309 setups), but the
+mount still hardcoded 2026-07-31. Replaced the "try today→pending→hardcode 07-31" logic with a
+parallel probe: `findFreshestScan(7)` in `agents-api.ts` fires `/scan?date=D&full=1` for today..−6d
+concurrently (handles weekends/holidays + the not-yet-built current day) and resolves to the
+most-recent date with `served="precompute"` & count>0. Page `landFreshest()` sets that as the
+default; only if NONE of the 7 days is populated does it fall back to `KNOWN_POPULATED_DATE`
+(2026-07-31) with an honest "no precomputed screen in the last 7 days" banner. Manual date picker
+unchanged (exact date, honest pending/empty/error, no fallback).
+- **Verify:** `tsc --noEmit` clean; `next build` BUILD_EXIT=0. Replicated the exact probe order vs
+  api.kanida.ai: [08-29 pending, 08-28 precompute/309, 08-27..08-23 pending] → mount lands on
+  **2026-08-28 (309 setups)**, NOT 07-31. Interim only — a server-side `/scan/latest` is the later
+  backend follow-up (needs an ECS roll). NOT deployed.
+
+### 2026-08-29 (2) — Chart Agent rebuilt as the full 3-column AI-ANALYST UX (all 9 patterns)
+Acting on: operator spec + mock — replace the scanner-table page with a professional 3-column
+product (LEFT = what to look at · MIDDLE = what the AI tells me · RIGHT = show me the proof).
+Files: `frontend/app/power/(app)/agents/page.tsx` (full rebuild), `frontend/lib/agents-api.ts`
+(new contract types + fetchers), `frontend/components/power/agents/CandleChart.tsx` (new),
+`frontend/components/power/agents/DeepDivePanel.tsx` (new), `AppShell.tsx` (agents → full-bleed).
+- **LEFT (compact, `T.s1`):** MARKET SCAN SUMMARY big-number cells (Stocks Analyzed=`scan.scanned`,
+  Patterns Found=`scan.count`, Stat. Meaningful=`scan.statistically_meaningful`, Qualified=
+  `scan.qualified`) · PATTERN CATEGORIES driven by the LIVE manifest (All Opportunities + all 9
+  detectors, count from `by_pattern`/computed, click filters the middle) · MY AGENTS (Chart = ACTIVE;
+  Options/Earnings/Sector/Gap/Volume = SOON, honestly static).
+- **MIDDLE (dominant):** AI AGENT STORYLINE — scan-summary opening lines, filters row
+  [All|Qualified|Watch|Rejected] · Pattern family [All|Triangle|Wedge|Channel|Horizontal|Cup] ·
+  Dir [Bullish|Bearish] · Sort [Agent Rank|Quality|Historical Edge|Newest]. TOP FINDINGS = ranked
+  clickable one-liners, tier-iconed (🔥 qualified/⚡ strong/👀 watch/⚠ weak), progressive reveal
+  (top 18 → "View next 20 of N"). MARKET STORY breadth lines are REAL (bull/bear, breakout count,
+  >3× vol, top pattern); SECTOR + INTRADAY lines shown as honest "coming".
+- **RIGHT (rich, contextual — `DeepDivePanel`):** header STOCK · pattern · stage · QUALIFIED/WATCH
+  badge · quality score; six tabs [Pattern Chart | Quality | Historical Evidence | Win/Loss Path |
+  Decision | Watch Plan]. Buttons: "Set AutoTrade (When Eligible)" (disabled — per-user AutoTrade is
+  Launch-Pending) + "Add to Watchlist".
+- **CandleChart (the centrepiece, reusable):** real OHLC candles from `/bars` + overlay from
+  `/setup.geometry` — upper/lower trendlines extended to the breakout via their own slope, flat
+  level line (horizontal / cup rim / rectangle), touch markers, breakout-candle highlight, shaded
+  wedge/triangle body. All 9 patterns render through this one component (they differ only in which
+  lines/shape the geometry carries). Also reused by Watch Plan (confirmation/warning/invalidation levels).
+- **Contract:** built to the new `/scan` (tier, quality_score, evidence_summary, hook,
+  statistically_meaningful, qualified, by_pattern) + new `GET /setup` + `GET /bars`. These three are
+  currently 404 on api.kanida.ai (parallel backend build) — fetches are GUARDED (`getJSONSafe`) so
+  the page renders with honest loading/empty/"coming"/"insufficient precedents" states; NO fabricated
+  numbers, patterns, or paths. When the backend lacks tiers, findings fall back to 👀 watch (never
+  promoted) and hooks are formatted from REAL fields.
+- **Verify:** `npx tsc --noEmit` clean; `next build` BUILD_EXIT=0 (`/power/agents` compiled). Reused
+  locked `T` mint tokens (no new accents). NOT deployed/committed — orchestrator integrates vs the
+  live API once the backend lands.
+- **Backend needs:** (1) `GET /api/agents/chart/setup?symbol=&pattern=&date=` (geometry·quality·
+  evidence·paths·decision·watch_plan) — currently 404; (2) `GET /api/agents/chart/bars?symbol=&date=&
+  lookback=` (point-in-time OHLC) — currently 404; (3) ranked-scan fields on `/scan.occurrences[]`
+  (tier, quality_score, evidence_summary{n,win_t5,etv_t5}, hook) + top-level statistically_meaningful/
+  qualified/by_pattern — currently absent; (4) optional: sector tags + intraday tracking in the feed
+  to light up the two "coming" market-story lines.

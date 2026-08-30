@@ -33,6 +33,13 @@ export type ManifestResp = {
 export type Stage = 'BREAKOUT' | 'RETEST' | 'APPROACHING' | 'FAILED' | string
 export type Served = 'precompute' | 'pending' | 'live' | string
 
+// tier = the agent's qualitative confidence band for a single setup.
+//   qualified 🔥 · strong ⚡ · watch 👀 · weak ⚠.  When the backend does not (yet)
+//   emit a tier the client falls back to 'watch' (neutral) — it never promotes a
+//   setup to a higher band than the data supports.
+export type Tier = 'qualified' | 'strong' | 'watch' | 'weak' | string
+export type EvidenceSummary = { n?: number | null; win_t5?: number | null; etv_t5?: number | null } | null
+
 export type ScanRow = {
   stock: string
   pattern: string
@@ -42,7 +49,12 @@ export type ScanRow = {
   volume_x: number | null
   direction: string          // long | short
   touches: number
-  as_of_date: string | null
+  as_of_date?: string | null
+  // NEW contract fields (present once the ranked-scan backend lands; guarded everywhere)
+  tier?: Tier | null
+  quality_score?: number | null       // 0..100
+  evidence_summary?: EvidenceSummary
+  hook?: string | null                // the pre-baked storyline one-liner
 }
 export type ScanResp = {
   ok: boolean
@@ -53,6 +65,9 @@ export type ScanResp = {
   // coverage accounting — surfaced so the universe-vs-classified gap is labelled, never hidden
   universe_size?: number
   scanned?: number
+  statistically_meaningful?: number   // NEW: how many setups clear the min-sample bar
+  qualified?: number                  // NEW: how many pass every gate
+  by_pattern?: Record<string, number> // NEW: per-pattern occurrence counts
   skipped_min_bars?: number
   skipped_stale?: number
   skipped_no_window?: number
@@ -61,6 +76,18 @@ export type ScanResp = {
   screen_note?: string | null
   error?: string
 }
+
+// tier display metadata (glyph + tone). Kept here so the left/middle/right columns agree.
+export const TIER_META: Record<string, { glyph: string; label: string; tone: 'green' | 'amber' | 'neutral' | 'red' }> = {
+  qualified: { glyph: '🔥', label: 'Qualified', tone: 'green' },
+  strong:    { glyph: '⚡', label: 'Strong',    tone: 'amber' },
+  watch:     { glyph: '👀', label: 'Watch',     tone: 'neutral' },
+  weak:      { glyph: '⚠',  label: 'Weak',      tone: 'red' },
+}
+export function tierMeta(t?: Tier | null) {
+  return (t && TIER_META[t]) || TIER_META.watch
+}
+export const TIER_RANK: Record<string, number> = { qualified: 0, strong: 1, watch: 2, weak: 3 }
 
 // --------------------------------------------------------------------------- decision / storyline
 export type Gate = { gate: string; pass: boolean | null; reason: string; skipped?: boolean }
@@ -226,4 +253,94 @@ export function patternShort(id: string, fallbackName?: string): string {
   if (PATTERN_SHORT[id]) return PATTERN_SHORT[id]
   if (fallbackName) return fallbackName.split(/[·(]/)[0].trim()
   return id
+}
+
+// Coarse pattern FAMILY (for the middle-column pattern filter: Triangle/Wedge/Channel/Horizontal/Cup).
+export type PatternFamily = 'Triangle' | 'Wedge' | 'Channel' | 'Horizontal' | 'Cup' | 'Other'
+export function patternFamily(id: string): PatternFamily {
+  if (/triangle/.test(id)) return 'Triangle'
+  if (/wedge/.test(id)) return 'Wedge'
+  if (/channel/.test(id)) return 'Channel'
+  if (/cup/.test(id)) return 'Cup'
+  if (/horizontal|rectangle|trendline/.test(id)) return 'Horizontal'
+  return 'Other'
+}
+
+// --------------------------------------------------------------------------- setup (deep dive)
+// GET /api/agents/chart/setup?symbol=&pattern=&date=  — everything the RIGHT column renders.
+export type GeomPoint = { date: string; price: number }
+export type GeomLine = { a: GeomPoint; b: GeomPoint } | null
+export type LevelLine = { from?: GeomPoint; to?: GeomPoint; a?: GeomPoint; b?: GeomPoint } | null
+export type SetupGeometry = {
+  upper?: GeomLine
+  lower?: GeomLine
+  touches?: GeomPoint[]
+  breakout?: GeomPoint | null
+  level_line?: LevelLine
+  apex?: GeomPoint | null
+} | null
+export type QualitySub = Record<string, number>
+export type SetupQuality = { score?: number | null; subscores?: QualitySub; weights?: QualitySub } | null
+export type SetupHorizon = { win?: number | null; etv?: number | null; mfe?: number | null; mae?: number | null }
+export type SetupEvidence = {
+  n?: number | null
+  win_rate?: number | null
+  etv?: number | null
+  payoff?: number | null
+  mae?: number | null
+  mfe?: number | null
+  ci_low?: number | null
+  horizons?: Record<string, SetupHorizon>   // "1" | "3" | "5" | "10"
+} | null
+export type SetupPaths = { winners?: number[]; losers?: number[]; n_win?: number | null; n_loss?: number | null } | null
+export type SetupGate = { name: string; passed: boolean | null; detail?: string }
+export type SetupDecision = { verdict?: string | null; reason?: string; gates?: SetupGate[]; basis?: string | null } | null
+export type WatchPlan = { confirmation?: number | null; warning?: number | null; invalidation?: number | null } | null
+export type SetupResp = {
+  ok?: boolean
+  symbol?: string
+  pattern?: string
+  date?: string | null
+  stage?: string
+  direction?: string
+  level?: number | null
+  geometry?: SetupGeometry
+  quality?: SetupQuality
+  evidence?: SetupEvidence
+  paths?: SetupPaths
+  decision?: SetupDecision
+  watch_plan?: WatchPlan
+  note?: string
+  error?: string
+}
+
+// --------------------------------------------------------------------------- bars (candles)
+export type Bar = { date: string; o: number; h: number; l: number; c: number; v: number }
+export type BarsResp = { ok?: boolean; symbol?: string; date?: string | null; bars?: Bar[]; note?: string; error?: string }
+
+// Guarded fetch: returns a shaped error object instead of throwing, so the page
+// renders honest empty/coming states even while /setup and /bars are 404 during
+// the parallel backend build.
+async function getJSONSafe<T>(path: string, onErr: () => T): Promise<T> {
+  try {
+    const r = await fetch(`${API}${path}`, { cache: 'no-store' })
+    if (!r.ok) return onErr()
+    return (await r.json()) as T
+  } catch {
+    return onErr()
+  }
+}
+
+export function fetchSetup(symbol: string, pattern: string, date: string): Promise<SetupResp> {
+  const q = new URLSearchParams({ symbol, pattern })
+  if (date) q.set('date', date)
+  return getJSONSafe<SetupResp>(`/api/agents/chart/setup?${q.toString()}`,
+    () => ({ ok: false, symbol, pattern, error: 'setup-endpoint-unavailable' }))
+}
+
+export function fetchBars(symbol: string, date: string, lookback = 90): Promise<BarsResp> {
+  const q = new URLSearchParams({ symbol, lookback: String(lookback) })
+  if (date) q.set('date', date)
+  return getJSONSafe<BarsResp>(`/api/agents/chart/bars?${q.toString()}`,
+    () => ({ ok: false, symbol, bars: [], error: 'bars-endpoint-unavailable' }))
 }
