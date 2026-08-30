@@ -51,6 +51,27 @@ MIN_BARS = 130
 # Rank so the actionable stages surface first (same intent as the R&D console ranking).
 _STAGE_ORDER = {"BREAKOUT": 0, "RETEST": 1, "APPROACHING": 2, "FAILED": 3}
 
+# Sample bar for "statistically meaningful" (== §9 G1). Imported lazily to keep boot cheap/guarded.
+try:
+    from .evidence import N_MIN as _MEANINGFUL_N
+except Exception:  # noqa: BLE001
+    _MEANINGFUL_N = 20
+
+
+def _enrich_row(row: dict, occ_dict: dict) -> None:
+    """Attach REAL storyline enrichment (tier, quality_score, evidence_summary, hook) to a setup row.
+    Guarded — enrichment never sinks the scan. Reuses the occurrence so the detector isn't re-run."""
+    try:
+        from . import setup as _setup
+        e = _setup.enrich(row.get("symbol"), row.get("pattern"), row.get("as_of_date"), occ_dict)
+        row["tier"] = e.get("tier")
+        row["quality_score"] = e.get("quality_score")
+        row["evidence_summary"] = e.get("evidence_summary")
+        row["hook"] = e.get("hook")
+    except Exception as ex:  # noqa: BLE001
+        log.warning("enrich row %s/%s failed (non-fatal): %s",
+                    row.get("symbol"), row.get("pattern"), ex)
+
 
 # ------------------------------------------------------------------------------------ universe
 def universe(as_of_date=None, min_bars: int | None = None) -> list:
@@ -66,7 +87,7 @@ def universe(as_of_date=None, min_bars: int | None = None) -> list:
 
 # ------------------------------------------------------------------------------------ scan
 def scan_universe_detailed(as_of_date, pattern_ids=None, min_bars: int = MIN_BARS,
-                           lookback_days: int = LOOKBACK_DAYS) -> dict:
+                           lookback_days: int = LOOKBACK_DAYS, enrich: bool = False) -> dict:
     """Full-universe live-stage scan for ``as_of_date``, strictly point-in-time, WITH honest coverage
     accounting. Returns:
         {as_of_date, trading_day, note, universe_size, scanned, count,
@@ -124,7 +145,7 @@ def scan_universe_detailed(as_of_date, pattern_ids=None, min_bars: int = MIN_BAR
                 for occ in det.detect(df, as_of_idx=k):
                     d = occ.to_dict()
                     ctx = d.get("context") or {}
-                    out.append({
+                    row = {
                         "symbol": d.get("stock"),
                         "pattern": d.get("pattern"),
                         "stage": d.get("stage"),
@@ -134,7 +155,10 @@ def scan_universe_detailed(as_of_date, pattern_ids=None, min_bars: int = MIN_BAR
                         "touches": len(d.get("touches") or []),
                         "direction": d.get("direction", "long"),
                         "as_of_date": ctx.get("as_of_date"),
-                    })
+                    }
+                    if enrich:
+                        _enrich_row(row, d)
+                    out.append(row)
             except Exception as e:  # noqa: BLE001 — one bad detector/symbol must not sink the scan
                 log.warning("scan_universe: %s/%s failed (non-fatal): %s",
                             sym, getattr(det, "pattern_id", "?"), e)
@@ -145,17 +169,36 @@ def scan_universe_detailed(as_of_date, pattern_ids=None, min_bars: int = MIN_BAR
         last = None if market_max is None else str(market_max.date())
         note = (f"no trading on {as_of} (market last traded {last}) — empty screen, "
                 f"no prior session relabeled")
+
+    # storyline summary counts (REAL, from this scan). statistically_meaningful/qualified are only
+    # populated when enrich=True (they need the per-setup evidence); else honestly None.
+    statistically_meaningful = qualified = None
+    if enrich:
+        statistically_meaningful = sum(1 for r in out
+                                       if (r.get("evidence_summary") or {}).get("n", 0) >= _MEANINGFUL_N)
+        qualified = sum(1 for r in out if r.get("tier") == "qualified")
+
+    try:
+        from . import story as _story
+        market = _story.market_story(out, as_of)
+    except Exception as e:  # noqa: BLE001 — story is best-effort, never fatal
+        log.warning("market_story failed (non-fatal): %s", e)
+        market = None
+
     return {"as_of_date": as_of, "trading_day": trading_day, "note": note,
             "universe_size": len(universe), "scanned": scanned, "count": len(out),
             "skipped_min_bars": skipped_min_bars, "skipped_stale": skipped_stale,
-            "skipped_no_window": skipped_no_window, "setups": out}
+            "skipped_no_window": skipped_no_window,
+            "enriched": bool(enrich),
+            "statistically_meaningful": statistically_meaningful, "qualified": qualified,
+            "market_story": market, "setups": out}
 
 
 def scan_universe(as_of_date, pattern_ids=None, min_bars: int = MIN_BARS,
-                  lookback_days: int = LOOKBACK_DAYS) -> list:
+                  lookback_days: int = LOOKBACK_DAYS, enrich: bool = False) -> list:
     """The setups list for ``as_of_date`` (back-compat surface). See scan_universe_detailed for the
     freshness guard + coverage accounting. Empty on a non-trading D (never a relabeled prior session)."""
-    return scan_universe_detailed(as_of_date, pattern_ids, min_bars, lookback_days)["setups"]
+    return scan_universe_detailed(as_of_date, pattern_ids, min_bars, lookback_days, enrich)["setups"]
 
 
 # ------------------------------------------------------------------------------- precompute store
@@ -247,13 +290,17 @@ def _horizontal_params() -> dict:
         return {}
 
 
-def build_screen(as_of_date, pattern_ids=None) -> dict:
+def build_screen(as_of_date, pattern_ids=None, enrich: bool = True) -> dict:
     """POST-MARKET precompute: scan the full universe for ``as_of_date`` and write the per-date
     artifact (setups + coverage accounting + a note on non-trading days). Returns the payload.
-    MEASURES its own wall-clock. Store-write failures are reported honestly, never fatal (FIX 3)."""
+    MEASURES its own wall-clock. Store-write failures are reported honestly, never fatal (FIX 3).
+
+    ``enrich`` (default True) attaches the REAL storyline enrichment (tier/quality/evidence hook) to
+    every setup so the served artifact powers the 3-column UX without a per-request recompute. The
+    enrichment cost is measured in ``elapsed_sec`` (reported)."""
     as_of = str(as_of_date)
     t0 = time.perf_counter()
-    res = scan_universe_detailed(as_of_date, pattern_ids)
+    res = scan_universe_detailed(as_of_date, pattern_ids, enrich=enrich)
     elapsed = time.perf_counter() - t0
     payload = {
         "as_of_date": as_of,
@@ -267,6 +314,10 @@ def build_screen(as_of_date, pattern_ids=None) -> dict:
         "skipped_stale": res["skipped_stale"],
         "skipped_no_window": res["skipped_no_window"],
         "count": res["count"],
+        "enriched": res.get("enriched", False),
+        "statistically_meaningful": res.get("statistically_meaningful"),
+        "qualified": res.get("qualified"),
+        "market_story": res.get("market_story"),
         "elapsed_sec": round(elapsed, 3),
         "params": _horizontal_params(),
         "setups": res["setups"],
