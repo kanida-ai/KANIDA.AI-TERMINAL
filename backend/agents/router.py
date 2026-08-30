@@ -12,10 +12,15 @@ Every one is GUARDED (try/except -> honest JSON, never a 500 crash) and strictly
 point-in-time (as_of = the requested date; only data <= that bar is used).
 """
 from __future__ import annotations
+import hmac
 import logging
+import os
+import threading
+import uuid
+from datetime import datetime, timezone
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Response
 from . import registry
 
 log = logging.getLogger("agents.router")
@@ -306,3 +311,115 @@ def chart_storyline(symbol: str = Query(..., description="stock symbol, e.g. TIT
     except Exception as e:  # noqa: BLE001
         log.warning("chart_storyline(%s) failed: %s", sym, e)
         return {"ok": False, "symbol": sym, "date": date, "events": [], "error": str(e)}
+
+
+# ------------------------------------------------------------- ADMIN: current-day refresh (guarded)
+# This is the ONE agent endpoint that triggers a PROD-DATA WRITE (+ a Kite fetch), so it is
+# AUTH-GATED: every call must carry header ``X-Agent-Admin-Token`` == env ``AGENT_ADMIN_TOKEN``.
+#   * AGENT_ADMIN_TOKEN unset -> 503 (fail-closed; the endpoint is "not configured", like an
+#     unarmed middleware — we never run a prod write when no admin secret is configured).
+#   * header missing/mismatched -> 401 (constant-time compare via hmac.compare_digest).
+ADMIN_TOKEN_HEADER = "X-Agent-Admin-Token"
+
+# In-process job registry. PER-TASK ONLY: on multi-task ECS each task has its OWN dict, so a job_id
+# started on task A is unknown to task B. The AUTHORITATIVE cross-task completion signal is the S3
+# screen artifact — poll GET /api/agents/chart/scan?date=D until it reports served="precompute".
+_REFRESH_JOBS: dict = {}
+_REFRESH_LOCK = threading.Lock()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _require_admin(token: Optional[str]) -> None:
+    """Fail-closed admin gate. Raises 503 if AGENT_ADMIN_TOKEN is unset, 401 on a missing/wrong
+    header. Constant-time compare so the token is not leakable by timing."""
+    expected = os.environ.get("AGENT_ADMIN_TOKEN")
+    if not expected:
+        raise HTTPException(503, "admin refresh not configured (AGENT_ADMIN_TOKEN unset)")
+    if not token or not hmac.compare_digest(str(token), str(expected)):
+        raise HTTPException(401, "invalid or missing admin token")
+
+
+def _run_refresh_job(job_id: str, date: Optional[str]) -> None:
+    """Background worker: run the EOD refresh+scan+publish for DATE and record the outcome on the job.
+    Wrapped end-to-end so a failure records status='error' and never escapes the daemon thread. The
+    fetcher is resolved by run_eod from env AGENT_CHART_FETCH_FN (not hardcoded here)."""
+    try:
+        from .chart import eod  # lazy: import problems here must not affect module import / boot
+        res = eod.run_eod(date, fetch=True)
+        summary = {"count": res.get("count"), "scanned": res.get("scanned"),
+                   "by_pattern": res.get("by_pattern"), "stored": res.get("stored"),
+                   "fetched": res.get("fetched")}
+        with _REFRESH_LOCK:
+            job = _REFRESH_JOBS.get(job_id)
+            if job is not None:
+                job.update(status="done", finished_at=_now_iso(), result=summary)
+    except Exception as e:  # noqa: BLE001 — never let a background failure escape the thread
+        log.warning("chart refresh job %s failed: %s", job_id, e)
+        with _REFRESH_LOCK:
+            job = _REFRESH_JOBS.get(job_id)
+            if job is not None:
+                job.update(status="error", finished_at=_now_iso(), error=f"{type(e).__name__}: {e}")
+
+
+@router.post("/agents/chart/refresh")
+def chart_refresh(response: Response,
+                  date: Annotated[Optional[str], Query(description="as-of date YYYY-MM-DD "
+                                                       "(default: today)")] = None,
+                  x_agent_admin_token: Annotated[Optional[str], Header()] = None):
+    """ADMIN: kick off a current-day Chart Agent refresh (Kite fetch + full-universe scan + publish).
+
+    Auth: header ``X-Agent-Admin-Token`` == env ``AGENT_ADMIN_TOKEN`` (503 if unset, 401 if wrong).
+    Starts ``agents.chart.eod.run_eod(date, fetch=True)`` in a DAEMON thread and returns 202 with a
+    job_id immediately. SINGLE-FLIGHT: if a refresh is already running, returns 409 busy with the
+    running job_id (a second refresh is never started). Poll ``/agents/chart/refresh/status`` for the
+    per-task job record; the cross-task truth is the S3 screen artifact (see the status docstring)."""
+    _require_admin(x_agent_admin_token)
+    try:
+        with _REFRESH_LOCK:
+            running = next((jid for jid, j in _REFRESH_JOBS.items()
+                            if j.get("status") == "running"), None)
+            if running is not None:
+                response.status_code = 409
+                return {"ok": False, "status": "busy", "job_id": running}
+            job_id = uuid.uuid4().hex
+            started = _now_iso()
+            _REFRESH_JOBS[job_id] = {"status": "running", "date": date, "started_at": started,
+                                     "finished_at": None, "result": None, "error": None}
+        threading.Thread(target=_run_refresh_job, args=(job_id, date), daemon=True).start()
+        response.status_code = 202
+        return {"ok": True, "job_id": job_id, "status": "running", "date": date,
+                "started_at": started}
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 — never leak a 500; the intentional codes are raised above
+        log.warning("chart_refresh failed to start: %s", e)
+        response.status_code = 200
+        return {"ok": False, "error": str(e)}
+
+
+@router.get("/agents/chart/refresh/status")
+def chart_refresh_status(response: Response,
+                         job_id: Annotated[str, Query(description="job_id from POST refresh")],
+                         x_agent_admin_token: Annotated[Optional[str], Header()] = None):
+    """ADMIN: status of a refresh job started on THIS task. Returns the job record, or 404 if unknown.
+
+    IMPORTANT — the job registry is PER-TASK (in-process). On multi-task ECS a job_id is only known to
+    the task that started it; another task returns 404 for it. The AUTHORITATIVE, cross-task
+    completion signal is the S3 screen artifact: poll GET /api/agents/chart/scan?date=D until it
+    reports served="precompute"."""
+    _require_admin(x_agent_admin_token)
+    try:
+        with _REFRESH_LOCK:
+            job = _REFRESH_JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(404, f"no refresh job {job_id!r} on this task")
+            return {"ok": True, "job_id": job_id, **job}
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.warning("chart_refresh_status(%s) failed: %s", job_id, e)
+        response.status_code = 200
+        return {"ok": False, "job_id": job_id, "error": str(e)}

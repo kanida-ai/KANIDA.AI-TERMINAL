@@ -41,6 +41,23 @@ ADJUSTMENT = ("kite-native corporate-action-adjusted, dividend-unadjusted "
               "(historical_data interval='day', no continuous flag) — matches store basis; "
               "no re-adjustment applied")
 
+# ------------------------------------------------------------------- adjustment-drift guard config
+# Corporate-action-adjustment verification run BEFORE any append: we re-fetch a few ALREADY-STORED
+# bars from Kite and byte-compare OHLC to the store. If Kite's adjustment basis has drifted from the
+# store's basis (e.g. a split re-adjusted the whole history on one side but not the other), appending
+# the gap would silently stitch two incompatible bases together — so we ABORT instead.
+#
+# DRIFT_TOL: max allowed RELATIVE difference on ANY of open/high/low/close for a probed (symbol,date)
+#   before we declare the feed drifted. Tight (5 bps) — real corp-action re-adjustments move price by
+#   whole percent, so this never trips on float noise but always trips on a genuine basis mismatch.
+DRIFT_TOL = 5e-4
+# ADJ_GUARD_SAMPLE: how many liquid anchor symbols (that are present in the store) to probe.
+ADJ_GUARD_SAMPLE = 8
+# Liquid, long-listed NSE names used as the corp-action-adjustment anchor — whichever are present in
+# the store are probed. A store with none of these (e.g. a synthetic test store) has no trusted anchor
+# to verify against, so the guard is a documented no-op there (it never blocks a synthetic store).
+ADJ_GUARD_LIQUID = ("RELIANCE", "TCS", "INFY", "HDFCBANK", "SBIN", "ICICIBANK", "ITC", "LT")
+
 # Kite caps a single day-interval request at 2000 calendar days. Gap fills are tiny; this only
 # matters for back-filling a brand-new symbol's full history.
 _KITE_DAY_CAP = 2000
@@ -92,6 +109,106 @@ def _max_stored_parquet(symbol: str):
     if not row or row[0] is None:
         return None
     return _as_date(row[0])
+
+
+# ------------------------------------------------------- store: LAST stored bar (for the drift guard)
+def _last_stored_bar_sqlite(sqlite_path: str, symbol: str):
+    """(date, {open,high,low,close}) of the most recent stored bar for SYM, or None if absent."""
+    import os
+    import sqlite3
+    con = sqlite3.connect(f"file:{os.path.abspath(sqlite_path)}?mode=ro", uri=True)
+    try:
+        row = con.execute(
+            "SELECT substr(bar_time,1,10), open, high, low, close FROM ohlc_daily "
+            "WHERE symbol=? ORDER BY bar_time DESC LIMIT 1", (symbol,)).fetchone()
+    finally:
+        con.close()
+    if not row or row[0] is None:
+        return None
+    return date.fromisoformat(row[0]), {"open": row[1], "high": row[2], "low": row[3], "close": row[4]}
+
+
+def _last_stored_bar_parquet(symbol: str):
+    from . import data
+    con = data._duckdb_con()
+    try:
+        row = con.execute(
+            f"SELECT CAST(date AS DATE), open, high, low, close FROM read_parquet("
+            f"'{data._parquet_glob()}', hive_partitioning=1) WHERE symbol=? ORDER BY date DESC LIMIT 1",
+            [symbol]).fetchone()
+    finally:
+        con.close()
+    if not row or row[0] is None:
+        return None
+    return _as_date(row[0]), {"open": row[1], "high": row[2], "low": row[3], "close": row[4]}
+
+
+# ---------------------------------------------------------------- adjustment-drift guard (the gate)
+def _probe_candidates() -> list:
+    """Liquid anchor symbols that are actually present in the store (up to ADJ_GUARD_SAMPLE)."""
+    from . import data
+    store = set(data.all_symbols())
+    return [s for s in ADJ_GUARD_LIQUID if s in store][:ADJ_GUARD_SAMPLE]
+
+
+def _adjustment_guard(kite, token_map: dict, using_parquet: bool, sqlite_path: str):
+    """Verify Kite's feed still matches the store's corp-action-adjustment basis BEFORE we append.
+
+    For each liquid anchor present in the store, re-fetch its LAST stored date from Kite (the exact
+    same ``historical_data(interval="day")`` call the append uses, NO continuous flag) and compare
+    OHLC to the stored bar. Returns:
+        * ``None``  -> verified within DRIFT_TOL (or no anchor in this store): PROCEED to append.
+        * abort dict {"aborted": True, "reason": ..., "detail": [...]} -> DO NOT append.
+    Never raises: any unexpected error becomes an abort-with-reason (fail-closed)."""
+    try:
+        candidates = _probe_candidates()
+    except Exception as e:  # noqa: BLE001
+        return {"aborted": True, "detail": [],
+                "reason": f"adjustment guard could not verify ({type(e).__name__}: {e})"}
+    if not candidates:
+        log.info("adjustment guard: no liquid anchor symbol in store — corp-action check skipped "
+                 "(no trusted basis to compare); proceeding.")
+        return None
+
+    detail: list = []
+    probed = 0
+    for sym in candidates:
+        try:
+            last = (_last_stored_bar_parquet(sym) if using_parquet
+                    else _last_stored_bar_sqlite(sqlite_path, sym))
+            if last is None:
+                continue
+            d, stored = last
+            token = token_map.get(sym)
+            if not token:
+                continue
+            raw = kite.historical_data(
+                token, datetime.combine(d, datetime.min.time()),
+                datetime.combine(d, datetime.max.time()), "day")           # NO continuous flag
+            kbar = next((b for b in raw if _as_date(b["date"]) == d), None)
+            if kbar is None:
+                continue
+            probed += 1
+            for field in ("open", "high", "low", "close"):
+                sv = float(stored[field])
+                kv = float(kbar[field])
+                denom = abs(sv) if abs(sv) > 1e-9 else 1.0
+                rel = abs(sv - kv) / denom
+                if rel > DRIFT_TOL:
+                    detail.append({"symbol": sym, "date": d.isoformat(), "field": field,
+                                   "stored": sv, "kite": kv, "rel_diff": rel})
+        except Exception as e:  # noqa: BLE001 — a bad probe: try the next one
+            log.warning("adjustment guard: probe %s failed (%s) — trying next", sym, e)
+            continue
+
+    if detail:
+        return {"aborted": True, "reason": "adjustment drift vs store basis", "detail": detail}
+    if probed == 0:
+        return {"aborted": True, "detail": [],
+                "reason": "adjustment guard could not verify (no probe bar fetchable)"}
+    log.info("adjustment guard: %d anchor(s) match store basis within tol %.1e — proceeding.",
+             probed, DRIFT_TOL)
+    return None
 
 
 # --------------------------------------------------------------------------- store: append
@@ -240,6 +357,21 @@ def refresh_daily(as_of_date, symbols=None, _client=None) -> dict:
     # feed at all) but is raised so eod.run_eod records it as fetched='error: ...' and scans anyway.
     kite = _client if _client is not None else _get_kite_client()
     token_map = _build_token_map(kite)
+
+    # ADJUSTMENT-DRIFT GUARD: verify Kite's feed still matches the store's corp-action basis on a few
+    # already-stored liquid anchors BEFORE appending. On drift (or an unverifiable probe) we ABORT and
+    # append NOTHING, rather than silently stitch two incompatible price bases together.
+    try:
+        guard = _adjustment_guard(kite, token_map, using_parquet, sqlite_path)
+    except Exception as e:  # noqa: BLE001 — the guard itself must never crash the batch
+        guard = {"aborted": True, "detail": [],
+                 "reason": f"adjustment guard error ({type(e).__name__}: {e})"}
+    if guard is not None:
+        guard.setdefault("as_of_date", as_of_iso)
+        guard.setdefault("adjustment", ADJUSTMENT)
+        log.warning("refresh_daily(%s): ADJUSTMENT GUARD ABORT — %s (no rows appended)",
+                    as_of_iso, guard.get("reason"))
+        return guard
 
     min_from: date | None = None
     max_to: date | None = None

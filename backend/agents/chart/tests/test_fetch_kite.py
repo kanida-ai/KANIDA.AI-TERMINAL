@@ -79,6 +79,58 @@ def _new_store(seed):
     return path, (saved, saved_uri)
 
 
+def _new_store_bars(seed):
+    """Like _new_store but seed = {symbol: (last_date, (open,high,low,close))} so a guard test can
+    control the exact stored OHLC of the last bar. Returns (path, saved_env)."""
+    fd, path = tempfile.mkstemp(suffix=".db", prefix="fetch_kite_")
+    os.close(fd)
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE ohlc_daily (symbol TEXT NOT NULL, instrument_token INTEGER, "
+                "bar_time TEXT NOT NULL, open REAL, high REAL, low REAL, close REAL, "
+                "volume INTEGER, PRIMARY KEY (symbol, bar_time))")
+    for sym, (last, ohlc) in seed.items():
+        o, h, l, c = ohlc
+        con.execute("INSERT INTO ohlc_daily VALUES (?,?,?,?,?,?,?,?)",
+                    (sym, 111, f"{last.isoformat()} 00:00:00", o, h, l, c, 100))
+    con.commit()
+    con.close()
+    saved = os.environ.get("AGENT_CHART_DB")
+    saved_uri = os.environ.get("AGENT_DATA_URI")
+    os.environ["AGENT_CHART_DB"] = path
+    os.environ.pop("AGENT_DATA_URI", None)
+    data.all_symbols.cache_clear()
+    return path, (saved, saved_uri)
+
+
+class GuardKite:
+    """Mock KiteConnect for the adjustment-drift guard. historical_data returns weekday bars whose
+    OHLC comes from an explicit {date_iso: (o,h,l,c)} table (else a default bar). If return_empty,
+    historical_data always returns [] (simulates a probe that can't be fetched)."""
+    def __init__(self, tokens, table=None, return_empty=False):
+        self._tokens = tokens
+        self.table = table or {}
+        self.return_empty = return_empty
+
+    def instruments(self, exchange):
+        assert exchange == "NSE"
+        return [{"tradingsymbol": s, "instrument_token": t, "segment": "NSE"}
+                for s, t in self._tokens.items()]
+
+    def historical_data(self, token, from_date, to_date, interval):
+        if self.return_empty:
+            return []
+        fd = from_date.date() if isinstance(from_date, datetime) else from_date
+        td = to_date.date() if isinstance(to_date, datetime) else to_date
+        bars, d = [], fd
+        while d <= td:
+            if d.weekday() < 5:
+                o, h, l, c = self.table.get(d.isoformat(), (500.0, 505.0, 495.0, 502.0))
+                bars.append({"date": datetime.combine(d, time(0, 0)), "open": o, "high": h,
+                             "low": l, "close": c, "volume": 1000})
+            d += timedelta(days=1)
+        return bars
+
+
 def _restore(path, saved):
     s, s_uri = saved
     if s is None:
@@ -194,12 +246,63 @@ def test_missing_token_recorded_not_fatal():
         _restore(path, saved)
 
 
+def test_adjustment_guard_match_proceeds():
+    """(a) A liquid anchor whose stored last bar matches Kite within tol -> guard passes, gap appends."""
+    last = date(2026, 8, 24)
+    path, saved = _new_store_bars({"RELIANCE": (last, (100.0, 102.0, 99.0, 101.0))})
+    try:
+        kite = GuardKite({"RELIANCE": 555}, table={"2026-08-24": (100.0, 102.0, 99.0, 101.0)})
+        res = fetch_kite.refresh_daily(AS_OF, symbols=["RELIANCE"], _client=kite)
+        assert not res.get("aborted"), res
+        assert res["rows_added"] > 0, ("guard passed -> gap must append", res)
+        return f"guard match -> proceeded, {res['rows_added']} rows appended"
+    finally:
+        _restore(path, saved)
+
+
+def test_adjustment_guard_drift_aborts_no_rows():
+    """(b) A liquid anchor whose Kite OHLC drifts beyond tol -> ABORT, and NO rows are appended."""
+    last = date(2026, 8, 24)
+    path, saved = _new_store_bars({"RELIANCE": (last, (100.0, 102.0, 99.0, 101.0))})
+    try:
+        # ~10% higher on every field — a genuine corp-action re-adjustment, far beyond DRIFT_TOL.
+        kite = GuardKite({"RELIANCE": 555}, table={"2026-08-24": (110.0, 112.2, 108.9, 111.1)})
+        rows_before = _rows(path, "RELIANCE")
+        res = fetch_kite.refresh_daily(AS_OF, symbols=["RELIANCE"], _client=kite)
+        assert res.get("aborted") is True, res
+        assert res["reason"] == "adjustment drift vs store basis", res
+        assert res["detail"] and res["detail"][0]["symbol"] == "RELIANCE", res
+        assert _rows(path, "RELIANCE") == rows_before, "ABORT must append NOTHING"
+        return f"guard drift -> aborted, {len(res['detail'])} field(s) flagged, 0 rows appended"
+    finally:
+        _restore(path, saved)
+
+
+def test_adjustment_guard_no_probe_fetchable_aborts():
+    """(c) No probe bar fetchable (Kite returns []) -> ABORT with the clear reason, nothing appended."""
+    last = date(2026, 8, 24)
+    path, saved = _new_store_bars({"RELIANCE": (last, (100.0, 102.0, 99.0, 101.0))})
+    try:
+        kite = GuardKite({"RELIANCE": 555}, return_empty=True)
+        rows_before = _rows(path, "RELIANCE")
+        res = fetch_kite.refresh_daily(AS_OF, symbols=["RELIANCE"], _client=kite)
+        assert res.get("aborted") is True, res
+        assert res["reason"] == "adjustment guard could not verify (no probe bar fetchable)", res
+        assert _rows(path, "RELIANCE") == rows_before, "ABORT must append NOTHING"
+        return "guard unverifiable (no probe bar) -> aborted, 0 rows appended"
+    finally:
+        _restore(path, saved)
+
+
 if __name__ == "__main__":
     tests = [test_gap_range_only_missing_dates_leq_asof,
              test_idempotent_append_no_duplicates,
              test_adjustment_reported_and_values_unmodified,
              test_point_in_time_never_writes_bar_after_asof,
-             test_missing_token_recorded_not_fatal]
+             test_missing_token_recorded_not_fatal,
+             test_adjustment_guard_match_proceeds,
+             test_adjustment_guard_drift_aborts_no_rows,
+             test_adjustment_guard_no_probe_fetchable_aborts]
     results = []
     for fn in tests:
         try:
