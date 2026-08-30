@@ -47,7 +47,8 @@ export function AppShell({ children, displayName, email, isAdmin }: Props) {
     pathname.startsWith('/power/co-trading/') ||
     pathname === '/power/autotrade' ||
     pathname === '/power/signals' ||
-    pathname === '/power/performance'
+    pathname === '/power/performance' ||
+    pathname === '/power/agents'
 
   return (
     <div className="min-h-screen bg-black text-neutral-100 flex">
