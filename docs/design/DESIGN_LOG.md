@@ -2025,3 +2025,37 @@ knobs arm/floor/trail_giveback/stop_pct + step-lock ladder + `per_stock_stop_pct
 - **Theme:** reused locked mint/F2 tokens (`C`/`ICON`), `Field` primitive, `inputStyle`; no new colors.
 - **Verify:** `npx tsc --noEmit` clean; `next build` compiled successfully. NOT committed — operator ships.
 - **Backend needs (handoff):** none.
+
+---
+
+## 2026-08-29 — Chart Agent page rebuilt scanner-first, wired to the LIVE backend
+Acting on: operator feedback that `/power/agents` looked unchanged (inline-style, 3 hardcoded
+patterns, stale false SPEC text, no market screener). Files: `frontend/app/power/(app)/agents/page.tsx`
+(full rewrite) + `frontend/lib/agents-api.ts`.
+- **Pattern library from the manifest (not a constant):** removed the hardcoded `CHART_PATTERNS`
+  (Horizontal LIVE / Triangle+Channel SOON). Added `fetchManifest()` → GET `/api/agents/chart-v1`;
+  the library now renders all `manifest.patterns` (verified LIVE: 9 detectors, all `status:"built"`),
+  `built` → ACTIVE, `spec` → SOON. Canonical direction is a static DISPLAY map (`PATTERN_DIRECTION`,
+  mirrors the detector class attrs) since the manifest does not surface direction — labelled, not data.
+- **Market scanner is now the HERO:** date picker + full `/api/agents/chart/scan?date=…&full=1`,
+  sortable data-dense table (Stock/Pattern/Stage/Dir/Level/Dist/Vol/Touches), stage+pattern filter
+  chips with live counts, color-encoded stage (BREAKOUT filled green, RETEST outline green,
+  APPROACHING amber, FAILED red) and direction (long ▲ green / short ▼ red). Honest coverage line
+  (served badge + scanned N of universe_size + skipped min-bars/stale/no-window).
+- **Default lands on a POPULATED screen:** on mount tries `today`; today returns `served:"pending"`,
+  so it falls back to `KNOWN_POPULATED_DATE` (2026-07-31) and shows an honest amber note. Verified
+  LIVE: 2026-07-31 → served=precompute, 69 setups, scanned 790 of 1561 (skip 140/630/1). Manual date
+  changes do NOT auto-fallback — pending/empty dates show a designed post-market state, not an error.
+- **Drill-down overlay:** click a row → right-side focused panel with the storyline timeline, an
+  honest setup SCHEMATIC (real level line + price marker placed by real distance_pct — NOT candles;
+  no OHLC endpoint exists), and the evidence panel (strategy-replay ETV/win/payoff/CI/MAE/hold,
+  pattern-forward T+1/3/5/10, §9 gates, spec notes). Small-N → WATCH preserved; never a fake TRADE.
+- **Removed all stale/false text.** Design: kept locked dark + `T.g` mint tokens (no new accents),
+  built small reusable primitives (StagePill/DirTag/FilterChip/StatCell) instead of scattered inline
+  magic; responsive via `useBreakpoint`.
+- **Verify:** `npx tsc --noEmit` clean; `next build` BUILD_EXIT=0 (`/power/agents` compiled). All four
+  endpoints shape-verified against api.kanida.ai. NOT deployed — operator ships the gated deploy.
+- **Backend needs:** (1) a "latest available screen date" endpoint (so the default date isn't a
+  hardcoded 2026-07-31); (2) an OHLC-bars endpoint for a true point-in-time candle chart in the
+  drill-down (currently an honest schematic); (3) optional: add `direction` to `manifest.patterns[]`
+  so the library direction isn't a client-side map.
