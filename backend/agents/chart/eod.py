@@ -107,9 +107,14 @@ def run_eod(as_of_date=None, fetch: bool = True, fetch_fn=None) -> dict:
                             as_of, e)
 
     # ---------------------------------------------------------------- 2) SCAN (full universe)
+    # ONE post-market pass does BOTH: enrich=True attaches the per-setup storyline (tier/quality/hook)
+    # the middle column needs, AND precompute_setups=True writes a self-contained per-setup bundle for
+    # every setup so a column-3 click serves in MS (fast-path /setup + /bars). Off-gateway (RunTask) so
+    # the added build_setup+bars cost per setup is fine here (measured in payload['setup_precompute']).
     t0 = time.perf_counter()
-    payload = scr.build_screen(as_of)               # point-in-time, all registered patterns, publishes
+    payload = scr.build_screen(as_of, enrich=True, precompute_setups=True)
     result["scan_seconds"] = round(time.perf_counter() - t0, 3)
+    result["setup_precompute"] = payload.get("setup_precompute")
 
     result["scanned"] = payload.get("scanned", 0)
     result["count"] = payload.get("count", 0)
@@ -159,6 +164,10 @@ def _main(argv=None) -> int:
     print(f"  count      : {res['count']} setups")
     print(f"  by_pattern : {res['by_pattern']}")
     print(f"  stored     : {res['stored']}  (published={res['published']})")
+    sp = res.get("setup_precompute") or {}
+    if sp:
+        print(f"  setups B   : precomputed {sp.get('precomputed')} bundles in {sp.get('elapsed_sec')}s "
+              f"(errors={sp.get('errors')})")
     if res.get("note"):
         print(f"  note       : {res['note']}")
     return 0

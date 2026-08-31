@@ -124,6 +124,10 @@ def scan_universe_detailed(as_of_date, pattern_ids=None, min_bars: int = MIN_BAR
     dets = [d for d in patterns.all_patterns()
             if pattern_ids is None or d.pattern_id in set(pattern_ids)]
 
+    # REAL sector map (instrument_labels) — one lookup reused across every row; {} when no sector
+    # source exists (e.g. a Parquet-only cloud source) -> honest None per row, never fabricated.
+    sectors = data.sector_map()
+
     out: list = []
     scanned = skipped_min_bars = skipped_stale = skipped_no_window = 0
     for sym in universe:
@@ -154,6 +158,7 @@ def scan_universe_detailed(as_of_date, pattern_ids=None, min_bars: int = MIN_BAR
                         "volume_x": ctx.get("volume_x"),
                         "touches": len(d.get("touches") or []),
                         "direction": d.get("direction", "long"),
+                        "sector": sectors.get(sym),
                         "as_of_date": ctx.get("as_of_date"),
                     }
                     if enrich:
@@ -277,6 +282,156 @@ def _store():
     return LocalScreenStore(root)
 
 
+# ------------------------------------------------------------------- per-setup EVIDENCE store (option B)
+# Post-market the EOD job precomputes ONE self-contained bundle per (symbol,pattern,date) — the full
+# build_setup output PLUS the drawing bars — so a column-3 click serves in MS from a single object read
+# (both /setup AND /bars) instead of a live re-detect+replay+parquet-read. Store abstraction mirrors the
+# screen store so embed-in-screen vs per-setup-objects stays swappable.
+#
+# Key scheme: ``<prefix>/<date>/<symbol>_<pattern>.json`` (option B = per-setup objects).
+#   S3 (cloud):  AGENT_CHART_SETUP_URI, else DERIVED from AGENT_CHART_SCREEN_URI + "/setups" so it lands
+#                UNDER the existing screen prefix (e.g. s3://<bucket>/kanida/chart_screens/setups/...),
+#                reusing the task-role IAM already granted on chart_screens/* — ZERO new grant.
+#   Local (dev): AGENT_CHART_SETUP_DIR, else backend/var/chart_setups. Same key scheme.
+# read() is GUARDED -> None on any miss/error so the endpoint falls back to a live compute, never crashes.
+
+# Bars embedded in each bundle. 250 >= the 180-bar UI default so /bars can slice from the bundle.
+PRECOMPUTE_BARS_LOOKBACK = 250
+
+
+def _default_setup_dir() -> str:
+    backend = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(backend, "var", "chart_setups")
+
+
+def _safe(name: str) -> str:
+    """Filesystem/-key-safe token (symbols/patterns are alnum + _/- already; guard the odd space)."""
+    return "".join(ch if (ch.isalnum() or ch in "-_.") else "_" for ch in str(name))
+
+
+class LocalSetupStore:
+    """[BUILT] Per-setup JSON bundles on the local filesystem (dev default).
+    Path: ``<root>/<date>/<symbol>_<pattern>.json``."""
+
+    def __init__(self, root: str):
+        self.root = root
+
+    def _path(self, as_of: str, symbol: str, pattern: str) -> str:
+        return os.path.join(self.root, _safe(as_of), f"{_safe(symbol)}_{_safe(pattern)}.json")
+
+    def write(self, as_of: str, symbol: str, pattern: str, payload: dict) -> str:
+        path = self._path(as_of, symbol, pattern)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, separators=(",", ":"))
+        return path
+
+    def read(self, as_of: str, symbol: str, pattern: str):
+        try:
+            path = self._path(as_of, symbol, pattern)
+            if not os.path.exists(path):
+                return None
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:  # noqa: BLE001 — corrupt/locked file -> honest miss, never raise
+            log.debug("LocalSetupStore.read(%s/%s/%s) miss/err: %s", as_of, symbol, pattern, e)
+            return None
+
+
+class S3SetupStore:
+    """[BUILT] Per-setup S3 bundles (boto3 — already in the cloud image). Post-market precompute writes
+    one object per setup; a click reads exactly one (ms). read() is GUARDED — a missing key or any S3
+    error returns None so the endpoint live-falls-back, never crashes.
+    Key: ``<prefix>/<date>/<symbol>_<pattern>.json``."""
+
+    def __init__(self, uri: str):
+        self.uri = uri.rstrip("/")
+        rest = self.uri[len("s3://"):] if self.uri.startswith("s3://") else self.uri
+        self.bucket, _, self.prefix = rest.partition("/")
+
+    def _key(self, as_of: str, symbol: str, pattern: str) -> str:
+        pre = (self.prefix + "/") if self.prefix else ""
+        return f"{pre}{_safe(as_of)}/{_safe(symbol)}_{_safe(pattern)}.json"
+
+    def write(self, as_of: str, symbol: str, pattern: str, payload: dict) -> str:
+        import boto3
+        key = self._key(as_of, symbol, pattern)
+        boto3.client("s3").put_object(
+            Bucket=self.bucket, Key=key,
+            Body=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            ContentType="application/json")
+        return f"s3://{self.bucket}/{key}"
+
+    def read(self, as_of: str, symbol: str, pattern: str):
+        try:
+            import boto3
+            obj = boto3.client("s3").get_object(
+                Bucket=self.bucket, Key=self._key(as_of, symbol, pattern))
+            return json.loads(obj["Body"].read())
+        except Exception as e:  # noqa: BLE001 — NoSuchKey / creds / network -> honest miss, never raise
+            log.debug("S3SetupStore.read(%s/%s/%s) miss/err: %s", as_of, symbol, pattern, e)
+            return None
+
+
+def _setup_store():
+    """Resolve the per-setup store. Explicit AGENT_CHART_SETUP_URI wins; else DERIVE the S3 store from
+    the screen URI (nest under it as ``.../setups``) so it reuses the screen prefix + IAM; else Local."""
+    uri = os.environ.get("AGENT_CHART_SETUP_URI", "")
+    if not uri:
+        screen_uri = os.environ.get("AGENT_CHART_SCREEN_URI", "")
+        if screen_uri.startswith("s3://"):
+            uri = screen_uri.rstrip("/") + "/setups"
+    if uri.startswith("s3://"):
+        return S3SetupStore(uri)
+    root = os.environ.get("AGENT_CHART_SETUP_DIR") or _default_setup_dir()
+    return LocalSetupStore(root)
+
+
+def store_setup_bundle(as_of, symbol: str, pattern: str, bundle: dict) -> str:
+    """Persist one per-setup bundle. Returns the store path/URI. Raises only on a real store failure
+    (the caller — _precompute_setups — guards per-setup so one failure is non-fatal to the screen)."""
+    return _setup_store().write(str(as_of), symbol, pattern, bundle)
+
+
+def load_setup_bundle(as_of, symbol: str, pattern: str):
+    """Serve one precomputed per-setup bundle (None on any miss). ms on the request path. Never raises."""
+    if as_of is None or not symbol or not pattern:
+        return None
+    return _setup_store().read(str(as_of), str(symbol), str(pattern))
+
+
+def _precompute_setups(as_of, setups) -> dict:
+    """For EACH screener setup, build the FULL per-setup detail (build_setup) + drawing bars and write
+    one self-contained bundle to the per-setup store. Point-in-time is preserved (build_setup + bars are
+    both <= as_of). GUARDED per setup — a single failure is recorded and skipped, never fatal to the
+    screen. Returns {precomputed, errors, error_sample, elapsed_sec, bars_lookback}."""
+    from . import setup as _setup     # lazy: keep boot cheap + import problems non-fatal
+    store = _setup_store()
+    t0 = time.perf_counter()
+    n_ok = n_err = 0
+    errors: list = []
+    for s in setups:
+        sym = s.get("symbol") or s.get("stock")
+        pat = s.get("pattern")
+        if not sym or not pat:
+            continue
+        try:
+            detail = _setup.build_setup(sym, pat, str(as_of))
+            bars = _setup.build_bars(sym, str(as_of), PRECOMPUTE_BARS_LOOKBACK)
+            bundle = {**detail, "bars": bars, "bars_lookback": PRECOMPUTE_BARS_LOOKBACK,
+                      "precomputed_at": _now_iso()}
+            store.write(str(as_of), sym, pat, bundle)
+            n_ok += 1
+        except Exception as e:  # noqa: BLE001 — one bad setup must not sink the precompute
+            n_err += 1
+            if len(errors) < 20:
+                errors.append(f"{sym}/{pat}: {type(e).__name__}: {e}")
+            log.warning("precompute_setup %s/%s failed (non-fatal): %s", sym, pat, e)
+    return {"precomputed": n_ok, "errors": n_err, "error_sample": errors,
+            "bars_lookback": PRECOMPUTE_BARS_LOOKBACK,
+            "elapsed_sec": round(time.perf_counter() - t0, 3)}
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -290,14 +445,21 @@ def _horizontal_params() -> dict:
         return {}
 
 
-def build_screen(as_of_date, pattern_ids=None, enrich: bool = True) -> dict:
+def build_screen(as_of_date, pattern_ids=None, enrich: bool = True,
+                 precompute_setups: bool = False) -> dict:
     """POST-MARKET precompute: scan the full universe for ``as_of_date`` and write the per-date
     artifact (setups + coverage accounting + a note on non-trading days). Returns the payload.
     MEASURES its own wall-clock. Store-write failures are reported honestly, never fatal (FIX 3).
 
     ``enrich`` (default True) attaches the REAL storyline enrichment (tier/quality/evidence hook) to
     every setup so the served artifact powers the 3-column UX without a per-request recompute. The
-    enrichment cost is measured in ``elapsed_sec`` (reported)."""
+    enrichment cost is measured in ``elapsed_sec`` (reported).
+
+    ``precompute_setups`` (EOD path) additionally builds ONE self-contained per-setup bundle
+    (build_setup detail + drawing bars) for EACH setup and writes it to the per-setup store, so a
+    column-3 click serves in MS (both /setup and /bars) from a single object read. Point-in-time
+    preserved; GUARDED per setup (a failure is recorded, non-fatal — the screen still builds). Its
+    off-request wall-clock is reported under ``setup_precompute``."""
     as_of = str(as_of_date)
     t0 = time.perf_counter()
     res = scan_universe_detailed(as_of_date, pattern_ids, enrich=enrich)
@@ -330,6 +492,19 @@ def build_screen(as_of_date, pattern_ids=None, enrich: bool = True) -> dict:
     except Exception as e:  # noqa: BLE001 — a broken store must not crash the precompute
         payload["store_error"] = f"{type(e).__name__}: {e}"
         log.warning("build_screen(%s): store write failed (non-fatal): %s", as_of, e)
+
+    # Per-setup evidence bundles (EOD path) — precompute AFTER the screen is safely stored so a
+    # precompute problem can never lose the screen. Fully guarded; timing reported (off-request cost).
+    if precompute_setups:
+        try:
+            payload["setup_precompute"] = _precompute_setups(as_of, res["setups"])
+            log.info("build_screen(%s): precomputed %d/%d setup bundles in %.2fs (errors=%d)", as_of,
+                     payload["setup_precompute"]["precomputed"], payload["count"],
+                     payload["setup_precompute"]["elapsed_sec"], payload["setup_precompute"]["errors"])
+        except Exception as e:  # noqa: BLE001 — a broken per-setup store must not crash the screen
+            payload["setup_precompute"] = {"error": f"{type(e).__name__}: {e}"}
+            log.warning("build_screen(%s): setup precompute failed (non-fatal): %s", as_of, e)
+
     log.info("build_screen(%s): %d setups | scanned %d/%d (min_bars %d, stale %d, no_window %d) "
              "in %.2fs -> %s", as_of, payload["count"], payload["scanned"], payload["universe_size"],
              payload["skipped_min_bars"], payload["skipped_stale"], payload["skipped_no_window"],

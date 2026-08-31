@@ -358,9 +358,18 @@ def build_setup(symbol: str, pattern_id: str, date: Optional[str] = None) -> dic
 
     plan = watch_plan(level, direction)
 
+    # REAL sector from instrument_labels (data.sector_map). None when no sector source exists (e.g. a
+    # Parquet-only cloud source) — honest "—" in the UI, never fabricated. No real market-cap column
+    # exists in kanida.db, so marketCapCr is intentionally omitted (not fabricated).
+    try:
+        sector = data.sector_map().get(sym)
+    except Exception:  # noqa: BLE001
+        sector = None
+
     return {
         "ok": True, "symbol": sym, "pattern": pattern_id, "date": date, "as_of_date": as_of_date,
         "stage": occ.get("stage"), "direction": direction, "level": level,
+        "sector": sector,
         "context": occ.get("context"),
         "geometry": geometry,
         "quality": quality,
@@ -369,6 +378,29 @@ def build_setup(symbol: str, pattern_id: str, date: Optional[str] = None) -> dic
         "decision": _decision_head(decision),
         "watch_plan": plan,
     }
+
+
+# --------------------------------------------------------------------------- bars (candles)
+def build_bars(symbol: str, date: Optional[str] = None, lookback: int = 250) -> list:
+    """Point-in-time daily candles [{date,o,h,l,c,v}] for DRAWING — only bars dated <= ``date``, the
+    last ``lookback`` of them. Shaped BYTE-IDENTICALLY to router.chart_bars so a precomputed bundle and
+    the live /bars endpoint agree exactly. Guarded: returns [] on any problem (never raises)."""
+    sym = (symbol or "").strip().upper()
+    try:
+        df = data.load_daily(sym)
+    except Exception as e:  # noqa: BLE001
+        log.debug("build_bars(%s) load failed: %s", sym, e)
+        return []
+    k = _as_of_idx(df, date)
+    if k < 0 or k >= len(df):
+        return []
+    lo = max(0, k - lookback + 1)
+    w = df.iloc[lo:k + 1]
+    return [{"date": str(idx.date()) if hasattr(idx, "date") else str(idx),
+             "o": round(float(r.open), 4), "h": round(float(r.high), 4),
+             "l": round(float(r.low), 4), "c": round(float(r.close), 4),
+             "v": int(r.volume) if r.volume == r.volume else None}
+            for idx, r in w.iterrows()]
 
 
 # --------------------------------------------------------------------------- scan enrichment
