@@ -33,18 +33,22 @@ def _skip(name: str) -> bool:
 
 
 def _tmp_screen_dir():
-    """Isolate the screen store so tests never touch the real artifacts."""
+    """Isolate BOTH the screen store and the per-setup store so run_eod (which now precomputes
+    per-setup bundles too) never touches the real artifacts / pollutes backend/var."""
     tmp = tempfile.mkdtemp(prefix="chart_eod_")
-    saved = os.environ.get("AGENT_CHART_SCREEN_DIR")
+    saved = {"AGENT_CHART_SCREEN_DIR": os.environ.get("AGENT_CHART_SCREEN_DIR"),
+             "AGENT_CHART_SETUP_DIR": os.environ.get("AGENT_CHART_SETUP_DIR")}
     os.environ["AGENT_CHART_SCREEN_DIR"] = tmp
+    os.environ["AGENT_CHART_SETUP_DIR"] = os.path.join(tmp, "setups")
     return tmp, saved
 
 
 def _restore_screen_dir(tmp, saved):
-    if saved is None:
-        os.environ.pop("AGENT_CHART_SCREEN_DIR", None)
-    else:
-        os.environ["AGENT_CHART_SCREEN_DIR"] = saved
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
     shutil.rmtree(tmp, ignore_errors=True)
 
 

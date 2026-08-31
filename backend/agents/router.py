@@ -152,6 +152,7 @@ def _setup_to_row(s: dict) -> dict:
         "distance_pct": s.get("distance_pct") if "distance_pct" in s else (s.get("context") or {}).get("distance_to_level_pct"),
         "volume_x": s.get("volume_x") if "volume_x" in s else (s.get("context") or {}).get("volume_x"),
         "direction": s.get("direction", "long"),
+        "sector": s.get("sector"),
         "touches": s.get("touches") if isinstance(s.get("touches"), int) else len(s.get("touches") or []),
         "as_of_date": s.get("as_of_date") or (s.get("context") or {}).get("as_of_date"),
     }
@@ -227,9 +228,15 @@ def chart_scan(date: Optional[str] = Query(None, description="as-of date YYYY-MM
 def chart_bars(symbol: str = Query(..., description="stock symbol, e.g. TITAN"),
                date: Optional[str] = Query(None, description="as-of date YYYY-MM-DD (point-in-time)"),
                lookback: int = Query(180, ge=1, le=2000,
-                                     description="number of daily bars up to & including date")):
+                                     description="number of daily bars up to & including date"),
+               pattern: Optional[str] = Query(None, description="pattern_id — when set, serves bars "
+                                              "instantly from the precomputed per-setup bundle")):
     """Point-in-time daily candles for drawing the chart: only bars dated <= date, the last
-    ``lookback`` of them. {symbol, date, lookback, bars:[{date,o,h,l,c,v}]}. Guarded (never 500)."""
+    ``lookback`` of them. {symbol, date, lookback, bars:[{date,o,h,l,c,v}]}. Guarded (never 500).
+
+    FAST PATH: when ``pattern`` is supplied and a precomputed per-setup bundle exists for
+    (symbol,pattern,date) with >= ``lookback`` embedded bars, they are sliced + served in ms
+    (served="precompute"). Otherwise the live point-in-time read runs (served="live", honest note)."""
     sym = (symbol or "").strip().upper()
     try:
         from .chart import data as cdata
@@ -237,6 +244,21 @@ def chart_bars(symbol: str = Query(..., description="stock symbol, e.g. TITAN"),
         if not cdata.db_available():
             return {"ok": False, "symbol": sym, "date": date, "bars": [],
                     "note": f"data source unavailable ({cdata.db_path()}); SPEC: cloud feeds wiring."}
+        # FAST PATH — one object read serves the bars the same click already loaded for /setup.
+        if pattern:
+            try:
+                from .chart import screener as scr
+                bundle = scr.load_setup_bundle(date, sym, pattern)
+                bars_b = bundle.get("bars") if isinstance(bundle, dict) else None
+                if isinstance(bars_b, list) and len(bars_b) >= lookback:
+                    bars = bars_b[-lookback:]
+                    return {"ok": True, "symbol": sym,
+                            "date": bundle.get("as_of_date") or date, "lookback": lookback,
+                            "count": len(bars), "bars": bars, "served": "precompute",
+                            "note": f"served from precomputed bundle (precomputed_at "
+                                    f"{bundle.get('precomputed_at')})"}
+            except Exception as e:  # noqa: BLE001 — fast path must never sink the live fallback
+                log.debug("chart_bars fast-path %s/%s miss: %s", sym, pattern, e)
         df = cdata.load_daily(sym)
         k = _as_of_idx(df, date)
         if k < 0:
@@ -250,7 +272,9 @@ def chart_bars(symbol: str = Query(..., description="stock symbol, e.g. TITAN"),
                  "v": int(r.volume) if r.volume == r.volume else None}
                 for idx, r in w.iterrows()]
         return {"ok": True, "symbol": sym, "date": str(df.index[k].date()),
-                "lookback": lookback, "count": len(bars), "bars": bars}
+                "lookback": lookback, "count": len(bars), "bars": bars, "served": "live",
+                "note": ("live point-in-time read (no precomputed bundle for this key/lookback) — "
+                         "correct but slower; the post-market EOD job precomputes these.")}
     except Exception as e:  # noqa: BLE001 — never 500-crash
         log.warning("chart_bars(%s) failed: %s", sym, e)
         return {"ok": False, "symbol": sym, "date": date, "bars": [], "error": str(e)}
@@ -263,15 +287,36 @@ def chart_setup(symbol: str = Query(..., description="stock symbol, e.g. TITAN")
     """FULL per-setup detail for column-3: runs THAT pattern's detector (resolved via patterns.get —
     NOT hardcoded horizontal) at the as-of date and returns geometry (real anchors for drawing),
     quality (0-100), pattern-forward evidence, winner/loser paths, decision (§9 gates) and the watch
-    plan. Point-in-time; guarded (never 500). Small-N setups honestly return WATCH."""
+    plan. Point-in-time; guarded (never 500). Small-N setups honestly return WATCH.
+
+    FAST PATH: first tries the precomputed per-setup bundle for (symbol,pattern,date) — an instant
+    single-object read (served="precompute", bars embedded for the same click's /bars). Only if absent
+    does it live-compute build_setup (served="live", honest note). Both are point-in-time + correct."""
     sym = (symbol or "").strip().upper()
     try:
         from .chart import data as cdata
         if not cdata.db_available():
             return {"ok": False, "symbol": sym, "pattern": pattern, "date": date,
                     "note": f"data source unavailable ({cdata.db_path()}); SPEC: cloud feeds wiring."}
+        # FAST PATH — precomputed bundle (ms). Guarded so a store miss/error falls through to live.
+        try:
+            from .chart import screener as scr
+            bundle = scr.load_setup_bundle(date, sym, pattern)
+            if isinstance(bundle, dict):
+                out = dict(bundle)
+                out["served"] = "precompute"
+                out["serve_note"] = (f"served precomputed bundle (precomputed_at "
+                                     f"{bundle.get('precomputed_at')})")
+                return out
+        except Exception as e:  # noqa: BLE001 — fast path must never sink the live compute
+            log.debug("chart_setup fast-path %s/%s miss: %s", sym, pattern, e)
         from .chart import setup as csetup
-        return csetup.build_setup(sym, pattern, date)
+        res = csetup.build_setup(sym, pattern, date)
+        if isinstance(res, dict):
+            res["served"] = "live"
+            res["serve_note"] = ("live-computed on the request path (no precomputed bundle for this "
+                                 "key) — correct but slower; the post-market EOD job precomputes these.")
+        return res
     except Exception as e:  # noqa: BLE001 — never 500-crash
         log.warning("chart_setup(%s/%s) failed: %s", sym, pattern, e)
         return {"ok": False, "symbol": sym, "pattern": pattern, "date": date, "error": str(e)}
