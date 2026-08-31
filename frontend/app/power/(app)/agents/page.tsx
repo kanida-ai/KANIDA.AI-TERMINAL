@@ -1,90 +1,72 @@
 'use client'
 
 /**
- * /power/agents — the Chart Agent as a 3-column AI market ANALYST (not a screener).
+ * /power/agents — Chart Pattern Agent, rebuilt to the v4 design handoff
+ * (design_handoff_chart_pattern_agent). A three-column AI market ANALYST:
  *
- *   LEFT   = what to look at   → Market-scan summary · pattern categories · my agents
- *   MIDDLE = what the AI tells me → the AI AGENT STORYLINE: a ranked newswire of one-line
- *            findings, tier-iconed (🔥 qualified · ⚡ strong · 👀 watch · ⚠ weak),
- *            progressively revealed. Visually DOMINANT.
- *   RIGHT  = show me the proof  → EVIDENCE & DEEP DIVE: candlestick chart with the detected
- *            pattern DRAWN on it + quality · historical evidence · win/loss path · decision ·
- *            watch plan (see DeepDivePanel).
+ *   COLUMN 1  Agent desk      — scan summary · pattern categories · 23-agent network
+ *   COLUMN 2  AI Storyline     — the self-typing newswire (primary experience)
+ *   COLUMN 3  Evidence & Deep Dive — annotated candlestick · quality · evidence · decision
  *
- * WIRED TO THE BACKEND (nothing fabricated):
- *   • pattern library  ← GET /api/agents/chart-v1                    (manifest.patterns)
- *   • market scan      ← GET /api/agents/chart/scan?date=…&full=1    (summary + ranked occurrences)
- *   • deep dive        ← GET /api/agents/chart/{setup,bars}?symbol=… (right column)
- *
- * HONESTY: tier/quality/evidence are shown only when the backend emits them; where a datum is
- * genuinely absent the UI shows a "coming / insufficient data" state — never invented numbers.
- * SECTOR market-story and INTRADAY tracking are labelled "coming" until the feed carries them.
+ * WIRED TO THE REAL BACKEND (nothing fabricated):
+ *   • manifest ← GET /api/agents/chart-v1
+ *   • scan     ← GET /api/agents/chart/scan?date=…&full=1   (default date via findFreshestScan)
+ *   • setup    ← GET /api/agents/chart/setup?symbol=&pattern=&date=
+ *   • bars     ← GET /api/agents/chart/bars?symbol=&date=&lookback=
+ * Where the backend has no field (sector, market-cap, market-alignment, a pre-built
+ * distribution) the UI honestly shows "—" or omits it. Verdict/status come from the
+ * backend decision — never a parallel client rule. The narration is DERIVED from the
+ * real scan via the handoff copy templates.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { T } from '@/lib/theme'
 import { useBreakpoint } from '@/lib/terminal-ui'
 import * as A from '@/lib/agents-api'
-import { DeepDivePanel } from '@/components/power/agents/DeepDivePanel'
+import { V, FONT } from '@/components/power/agents/v4/tokens'
+import { AgentDesk } from '@/components/power/agents/v4/AgentDesk'
+import { Storyline } from '@/components/power/agents/v4/Storyline'
+import { EvidencePanel } from '@/components/power/agents/v4/EvidencePanel'
+import { toDetection, toSummary, rankDetections, type Detection } from '@/components/power/agents/v4/data'
+import { setScript, buildOpeningScript } from '@/components/power/agents/v4/narration'
 
-// ── format ──
-const pctS = (v?: number | null, dp = 1) => (v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(dp) + '%')
-const bigNum = (v?: number | null) => (v == null ? '—' : v.toLocaleString('en-IN'))
+// category label → pattern ids (mirrors AgentDesk families)
+const FAMILY_IDS: Record<string, string[]> = {
+  'Breakout Patterns': ['horizontal_trendline', 'rectangle'],
+  'Continuation Patterns': ['channel', 'cup_and_handle'],
+  'Triangle Patterns': ['ascending_triangle', 'descending_triangle', 'symmetrical_triangle'],
+  'Wedge Patterns': ['rising_wedge', 'falling_wedge'],
+}
 
-const toneColor = (t: 'green' | 'amber' | 'red' | 'neutral') =>
-  t === 'green' ? T.g : t === 'amber' ? T.a : t === 'red' ? T.r : T.t2
-
-// pretty one-liner for a finding when the backend has not pre-baked a hook
-function buildHook(o: A.ScanRow): string {
-  const parts: string[] = [`${A.patternShort(o.pattern)} ${String(o.stage).toLowerCase()}`]
-  if (o.distance_pct != null) parts.push(`${pctS(o.distance_pct)} past level`)
-  const es = o.evidence_summary
-  if (es && es.etv_t5 != null && es.n != null) parts.push(`T+5 edge ${pctS(es.etv_t5)} (n=${es.n})`)
-  else if (o.volume_x != null) parts.push(`${o.volume_x.toFixed(1)}× vol`)
+function hookFor(d: Detection): string {
+  const parts = [`${d.pattern} ${d.stage.toLowerCase()}`]
+  if (d.distancePct != null) parts.push(`${(d.distancePct >= 0 ? '+' : '') + d.distancePct.toFixed(1)}% past level`)
+  if (d.volumeX != null) parts.push(`${d.volumeX.toFixed(1)}× vol`)
   return parts.join(' · ')
 }
 
-// ── static "my agents" roster (honest: only the Chart agent is live; the rest are Coming Soon) ──
-const MY_AGENTS = [
-  { name: 'Chart Pattern Agent', live: true },
-  { name: 'Options Flow Agent', live: false },
-  { name: 'Earnings Agent', live: false },
-  { name: 'Sector Rotation Agent', live: false },
-  { name: 'Gap Agent', live: false },
-  { name: 'Volume Agent', live: false },
-]
-
-type VerdictFilter = 'ALL' | 'QUALIFIED' | 'WATCH' | 'REJECTED'
-type Family = 'ALL' | A.PatternFamily
-type DirFilter = 'ALL' | 'BULLISH' | 'BEARISH'
-type SortKey = 'rank' | 'quality' | 'edge' | 'newest'
-
-const SORTS: { key: SortKey; label: string }[] = [
-  { key: 'rank', label: 'Agent Rank' },
-  { key: 'quality', label: 'Quality' },
-  { key: 'edge', label: 'Historical Edge' },
-  { key: 'newest', label: 'Newest' },
-]
-const FAMILIES: Family[] = ['ALL', 'Triangle', 'Wedge', 'Channel', 'Horizontal', 'Cup']
+const KEYFRAMES = `
+@keyframes kaRise { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: none } }
+@keyframes kaCaret { 0%,45% { opacity: 1 } 55%,100% { opacity: 0 } }
+@keyframes kaPulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+@keyframes kaShimmer { 0% { background-position: -240px 0 } 100% { background-position: 240px 0 } }
+@keyframes kaSweep { 0% { transform: translateX(-100%) } 100% { transform: translateX(230%) } }
+@keyframes kaDot { 0%,100% { opacity: .25; transform: translateY(0) } 50% { opacity: 1; transform: translateY(-2px) } }
+`
 
 export default function AgentsPage() {
   const { width } = useBreakpoint()
-  const stacked = width < 1100
+  const stacked = width < 900
 
   const [manifest, setManifest] = useState<A.ManifestResp | null>(null)
   const [scan, setScan] = useState<A.ScanResp | null>(null)
-  const [date, setDate] = useState<string>('')
+  const [date, setDate] = useState('')
   const [busy, setBusy] = useState(true)
   const [stale, setStale] = useState(false)
 
-  const [leftPattern, setLeftPattern] = useState<string>('ALL')  // exact pattern id from the LEFT categories
-  const [verdict, setVerdict] = useState<VerdictFilter>('ALL')
-  const [family, setFamily] = useState<Family>('ALL')
-  const [dir, setDir] = useState<DirFilter>('ALL')
-  const [sort, setSort] = useState<SortKey>('rank')
-  const [visible, setVisible] = useState(18)
-  const [selected, setSelected] = useState<A.ScanRow | null>(null)
+  const [category, setCategory] = useState('all')
+  const [agent, setAgent] = useState('Chart Pattern Agent')
+  const [selected, setSelected] = useState<Detection | null>(null)
+  const [navOpen, setNavOpen] = useState<boolean | null>(null)  // null = auto by width
 
-  // land on the freshest precomputed screen (parallel probe; honest fallback)
   const land = useCallback(async () => {
     setBusy(true); setStale(false)
     try {
@@ -104,340 +86,111 @@ export default function AgentsPage() {
     land()
   }, [land])
 
-  const occ = scan?.occurrences ?? []
-  const patterns = manifest?.patterns ?? []
+  const allDets = useMemo(() => (scan?.occurrences ?? []).map(toDetection), [scan])
+  const summary = useMemo(() => toSummary(scan, allDets), [scan, allDets])
 
-  // per-pattern counts: backend by_pattern if present, else computed
-  const patternCounts = useMemo(() => {
-    if (scan?.by_pattern) return scan.by_pattern
-    const m: Record<string, number> = {}
-    occ.forEach((o) => { m[o.pattern] = (m[o.pattern] || 0) + 1 })
-    return m
-  }, [scan, occ])
-
-  const hasTiers = useMemo(() => occ.some((o) => o.tier), [occ])
-  const qualifiedCount = scan?.qualified ?? (hasTiers ? occ.filter((o) => o.tier === 'qualified' || o.tier === 'strong').length : null)
-  const meaningfulCount = scan?.statistically_meaningful ?? null
-
-  // filter + rank the findings
-  const findings = useMemo(() => {
-    const inVerdict = (o: A.ScanRow) => {
-      if (verdict === 'ALL') return true
-      const t = o.tier || 'watch'
-      if (verdict === 'QUALIFIED') return t === 'qualified' || t === 'strong'
-      if (verdict === 'WATCH') return t === 'watch'
-      return t === 'weak'
+  const ranked = useMemo(() => {
+    const inCat = (d: Detection) => {
+      if (category === 'all') return true
+      if (FAMILY_IDS[category]) return FAMILY_IDS[category].includes(d.patternId)
+      return d.patternId === category
     }
-    const inFamily = (o: A.ScanRow) => family === 'ALL' || A.patternFamily(o.pattern) === family
-    const inDir = (o: A.ScanRow) => dir === 'ALL' || (dir === 'BULLISH' ? o.direction !== 'short' : o.direction === 'short')
-    const inLeft = (o: A.ScanRow) => leftPattern === 'ALL' || o.pattern === leftPattern
-    const filtered = occ.filter((o) => inVerdict(o) && inFamily(o) && inDir(o) && inLeft(o))
-    const rank = (o: A.ScanRow) => A.TIER_RANK[o.tier || 'watch'] ?? 2
-    return [...filtered].sort((a, b) => {
-      if (sort === 'quality') return (b.quality_score ?? -1) - (a.quality_score ?? -1)
-      if (sort === 'edge') return (b.evidence_summary?.etv_t5 ?? -999) - (a.evidence_summary?.etv_t5 ?? -999)
-      if (sort === 'newest') return (b.as_of_date || '').localeCompare(a.as_of_date || '') || (b.volume_x ?? 0) - (a.volume_x ?? 0)
-      // rank: tier, then quality, then volume
-      return rank(a) - rank(b) || (b.quality_score ?? -1) - (a.quality_score ?? -1) || (b.volume_x ?? 0) - (a.volume_x ?? 0)
-    })
-  }, [occ, verdict, family, dir, leftPattern, sort])
+    return rankDetections(allDets.filter(inCat))
+  }, [allDets, category])
 
-  // auto-select the top finding once, so RIGHT is never empty
-  useEffect(() => { setVisible(18) }, [verdict, family, dir, leftPattern, sort])
+  // (re)build the narration script whenever the ranked pool changes
   useEffect(() => {
-    if (!selected && findings.length > 0) setSelected(findings[0])
-  }, [findings, selected])
+    if (busy) return
+    setScript(buildOpeningScript(summary, ranked, hookFor, ''))
+    if (ranked.length) setSelected((prev) => prev && ranked.some((d) => d.id === prev.id) ? prev : ranked[0])
+    else setSelected(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ranked, busy])
 
-  // market-story breadth lines (real; sector/intraday flagged coming)
-  const story = useMemo(() => {
-    const bull = occ.filter((o) => o.direction !== 'short').length
-    const bear = occ.filter((o) => o.direction === 'short').length
-    const breakouts = occ.filter((o) => o.stage === 'BREAKOUT').length
-    const hiVol = occ.filter((o) => (o.volume_x ?? 0) >= 3).length
-    const topPat = Object.entries(patternCounts).sort((a, b) => b[1] - a[1])[0]
-    const lines: string[] = []
-    if (occ.length) lines.push(`Breadth: ${bull} bullish vs ${bear} bearish setups across the screen.`)
-    if (breakouts) lines.push(`${breakouts} setups are at the breakout stage right now.`)
-    if (hiVol) lines.push(`${hiVol} confirm on heavy volume (>3× average).`)
-    if (topPat) lines.push(`Most-active pattern today: ${A.patternShort(topPat[0])} (${topPat[1]}).`)
-    return lines
-  }, [occ, patternCounts])
+  // ── nav sizing ──
+  const autoExpanded = width >= 1180
+  const expanded = navOpen ?? autoExpanded
+  const overlay = expanded && width < 1180 && !stacked
+  const navWidth = stacked ? 0 : overlay ? 0 : expanded ? 272 : 60
 
   const scanBad = scan && scan.ok === false
   const pending = scan?.served === 'pending'
+  const tsLabel = date ? `${date} · Market Closed` : ''
 
-  // ── column styles ──
-  const colScroll: React.CSSProperties = stacked
-    ? { }
-    : { height: '100dvh', overflowY: 'auto', minHeight: 0 }
+  const desk = (
+    <AgentDesk
+      summary={summary}
+      patterns={manifest?.patterns ?? []}
+      selectedCat={category}
+      onSelectCat={setCategory}
+      selectedAgent={agent}
+      onSelectAgent={setAgent}
+      collapsed={!expanded && !overlay}
+      onToggleCollapse={() => setNavOpen((o) => (o == null ? !autoExpanded : !o))}
+      loading={busy}
+    />
+  )
 
   return (
-    <div
-      style={{
-        display: 'flex', flexDirection: stacked ? 'column' : 'row',
-        height: stacked ? 'auto' : '100dvh', minHeight: 0,
-        color: T.t, fontFamily: 'var(--font-geist-sans), system-ui, sans-serif',
-        background: 'linear-gradient(180deg, #080812, #06060d)',
-      }}
-    >
-      {/* ══════════════ LEFT ══════════════ */}
-      <aside
-        style={{
-          ...colScroll,
-          width: stacked ? '100%' : 268, flexShrink: 0,
-          borderRight: stacked ? 'none' : `1px solid ${T.b}`,
-          borderBottom: stacked ? `1px solid ${T.b}` : 'none',
-          background: T.s1, padding: '16px 14px',
-        }}
-      >
-        {/* market scan summary */}
-        <Eyebrow>Market Scan Summary</Eyebrow>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 18 }}>
-          <SummaryStat label="Stocks Analyzed" value={busy ? '…' : bigNum(scan?.scanned)} />
-          <SummaryStat label="Patterns Found" value={busy ? '…' : bigNum(scan?.count)} color={T.t} />
-          <SummaryStat label="Stat. Meaningful" value={busy ? '…' : bigNum(meaningfulCount)} color={T.a} />
-          <SummaryStat label="Qualified" value={busy ? '…' : bigNum(qualifiedCount)} color={T.g} />
-        </div>
+    <div style={{ height: stacked ? 'auto' : '100%', display: 'flex', flexDirection: 'column', background: V.bg, color: V.text, fontFamily: FONT.sans }}>
+      <style>{KEYFRAMES}</style>
 
-        {/* pattern categories */}
-        <Eyebrow>Pattern Categories</Eyebrow>
-        <div style={{ marginBottom: 18 }}>
-          <CategoryRow label="All Opportunities" count={occ.length} active={leftPattern === 'ALL'} onClick={() => setLeftPattern('ALL')} strong />
-          {patterns.map((p) => (
-            <CategoryRow
-              key={p.pattern_id}
-              label={A.patternShort(p.pattern_id, p.name)}
-              count={patternCounts[p.pattern_id] ?? 0}
-              active={leftPattern === p.pattern_id}
-              onClick={() => setLeftPattern(leftPattern === p.pattern_id ? 'ALL' : p.pattern_id)}
-              soon={p.status !== 'built'}
-            />
-          ))}
-          {patterns.length === 0 && <div style={{ color: T.t3, fontSize: 11.5, padding: '6px 4px' }}>loading library…</div>}
-        </div>
-
-        {/* my agents */}
-        <Eyebrow>My Agents</Eyebrow>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {MY_AGENTS.map((a) => (
-            <div key={a.name} style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              padding: '9px 11px', borderRadius: 10,
-              background: a.live ? 'rgba(0,201,138,0.06)' : T.s2, border: `1px solid ${a.live ? T.gb : T.b}`,
-            }}>
-              <span style={{ fontSize: 12.5, fontWeight: 700, color: a.live ? T.t : T.t2 }}>{a.name}</span>
-              <span style={{
-                fontSize: 8.5, fontWeight: 900, letterSpacing: '.06em', padding: '2px 7px', borderRadius: 999,
-                color: a.live ? T.g : T.t3, background: a.live ? 'rgba(0,201,138,0.12)' : 'rgba(255,255,255,0.05)',
-                border: `1px solid ${a.live ? T.gb : T.b}`,
-              }}>{a.live ? 'ACTIVE' : 'SOON'}</span>
-            </div>
+      {/* top bar */}
+      <div style={{ height: 48, flexShrink: 0, background: V.panel, borderBottom: `1px solid ${V.border}`, display: 'flex', alignItems: 'center', gap: 18, padding: '10px 16px' }}>
+        <span style={{ width: 26, height: 26, borderRadius: 7, background: 'linear-gradient(140deg, #22d3ee, #3b82f6)', color: '#05121c', fontFamily: FONT.mono, fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>K</span>
+        <span style={{ fontFamily: FONT.sans, fontSize: 15, fontWeight: 600, color: V.text }}>KANIDA.AI</span>
+        <span style={{ fontFamily: FONT.mono, fontSize: 10, letterSpacing: '0.14em', color: V.cyan }}>AI AGENT NETWORK</span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 12px', borderRadius: 16, border: '1px solid #1c5c48', background: '#0b2320' }}>
+          <span style={{ width: 6, height: 6, borderRadius: '50%', background: V.green, animation: busy ? 'kaPulse 1.4s infinite' : 'none' }} />
+          <span style={{ fontFamily: FONT.sans, fontSize: 11.5, color: V.greenHi }}>{busy ? 'Market Analysis Running' : 'Market Analysis Complete'}</span>
+        </span>
+        {width >= 1100 && <span style={{ fontFamily: FONT.mono, fontSize: 11, color: V.faint, flexShrink: 0 }}>{tsLabel}</span>}
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          {['Filters ▽', 'View ⌄', 'Experienced ⌄'].map((c) => (
+            <span key={c} style={{ padding: '6px 12px', borderRadius: 7, border: `1px solid ${V.borderStrong}`, background: V.raised, fontFamily: FONT.sans, fontSize: 11.5, color: V.muted }}>{c}</span>
           ))}
         </div>
-      </aside>
+      </div>
 
-      {/* ══════════════ MIDDLE (dominant) ══════════════ */}
-      <main style={{ ...colScroll, flex: 1, minWidth: 0, padding: stacked ? '18px 16px' : '20px 26px' }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 4 }}>
-          <h1 style={{ fontSize: 22, fontWeight: 900, margin: 0, letterSpacing: '-.01em' }}>AI Agent Storyline</h1>
-          <span style={{ fontSize: 11, color: T.t3 }}>
-            {date && <>as of <b style={{ color: T.t2 }}>{date}</b>{scan?.served === 'precompute' ? ' · precomputed' : ''}</>}
-          </span>
-        </div>
+      {/* 3-column grid */}
+      <div style={{ flex: 1, minHeight: 0, position: 'relative', display: stacked ? 'flex' : 'grid', flexDirection: stacked ? 'column' : undefined,
+        gridTemplateColumns: stacked ? undefined : `${navWidth}px minmax(300px, 0.86fr) minmax(400px, 1.5fr)`, gap: 12, padding: 12,
+        transition: 'grid-template-columns 300ms cubic-bezier(0.4,0,0.2,1)' }}>
 
-        {stale && (
-          <div style={{ margin: '10px 0', fontSize: 12, color: T.a, background: 'rgba(255,209,102,0.07)', border: `1px solid rgba(255,209,102,0.22)`, borderRadius: 10, padding: '9px 12px' }}>
-            No precomputed screen in the last 7 days — showing the last-known populated screen ({date}). The post-market job builds each day after close.
-          </div>
+        {/* Column 1 — nav */}
+        {!stacked && !overlay && (
+          <Panel style={{ gridColumn: '1 / 2' }}>{desk}</Panel>
         )}
-
-        {/* scan-summary opening lines */}
-        {!busy && !scanBad && !pending && (
-          <div style={{ margin: '12px 0 6px', display: 'flex', flexDirection: 'column', gap: 5 }}>
-            <SummaryLine text={`Scan complete — ${bigNum(scan?.scanned)} stocks analyzed of ${bigNum(scan?.universe_size)} universe.`} />
-            <SummaryLine text={`${bigNum(scan?.count)} valid patterns detected across ${Object.keys(patternCounts).length} pattern types.`} />
-            <SummaryLine text={meaningfulCount != null ? `${bigNum(meaningfulCount)} clear the statistical-meaningfulness bar; ${bigNum(qualifiedCount)} fully qualify.` : `Statistical-meaningfulness & qualification tiers coming from the ranked-scan feed — most setups are small-N (WATCH).`} muted={meaningfulCount == null} />
-          </div>
+        {overlay && (
+          <div style={{ position: 'absolute', left: 12, top: 12, bottom: 12, width: 272, zIndex: 30, background: V.bg, border: `1px solid ${V.border}`, borderRadius: 11, boxShadow: '0 18px 48px rgba(0,0,0,0.62)', overflow: 'hidden' }}>{desk}</div>
         )}
+        {stacked && <Panel style={{ height: 420 }}>{desk}</Panel>}
 
-        {/* states */}
-        {busy ? (
-          <Empty>Scanning the universe…</Empty>
-        ) : scanBad ? (
-          <Empty><b style={{ color: T.r }}>Scanner unavailable.</b><br />{scan?.error || 'The agent data source is offline.'}</Empty>
-        ) : pending ? (
-          <Empty><b style={{ color: T.a }}>Screen builds post-market.</b><br />No precomputed screen for {date} yet — the EOD job scans after close.</Empty>
-        ) : (
-          <>
-            {/* filters */}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, alignItems: 'center', margin: '14px 0 6px', padding: '10px 0', borderTop: `1px solid ${T.b}`, borderBottom: `1px solid ${T.b}` }}>
-              <ChipGroup label="" options={[['ALL', 'All'], ['QUALIFIED', 'Qualified'], ['WATCH', 'Watch'], ['REJECTED', 'Rejected']]} value={verdict} onChange={(v) => setVerdict(v as VerdictFilter)} />
-              <ChipGroup label="Pattern" options={FAMILIES.map((f) => [f, f === 'ALL' ? 'All' : f] as [string, string])} value={family} onChange={(v) => setFamily(v as Family)} />
-              <ChipGroup label="Dir" options={[['ALL', 'All'], ['BULLISH', 'Bullish'], ['BEARISH', 'Bearish']]} value={dir} onChange={(v) => setDir(v as DirFilter)} />
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
-                <span style={{ fontSize: 10.5, color: T.t3, fontWeight: 800, letterSpacing: '.05em' }}>SORT</span>
-                <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}
-                  style={{ background: T.s2, border: `1px solid ${T.b2}`, color: T.t, borderRadius: 9, padding: '6px 9px', fontSize: 12, fontFamily: 'inherit', outline: 'none' }}>
-                  {SORTS.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
-                </select>
-              </div>
-            </div>
+        {/* Column 2 — storyline */}
+        <Panel style={{ ...(stacked ? { minHeight: 520 } : { gridColumn: '2 / 3' }) }}>
+          {busy ? <Center>Scanning the universe…</Center>
+            : scanBad ? <Center><b style={{ color: V.red }}>Scanner unavailable.</b><br />{scan?.error || 'The agent data source is offline.'}</Center>
+            : pending ? <Center><b style={{ color: V.amber }}>Screen builds post-market.</b><br />No precomputed screen for {date} yet — the EOD job scans after close.</Center>
+            : <>
+                {stale && <div style={{ margin: 10, fontFamily: FONT.sans, fontSize: 11.5, color: V.amber, background: '#241c07', border: '1px solid #5c4413', borderRadius: 8, padding: '8px 11px' }}>No precomputed screen in the last 7 days — showing the last-known populated screen ({date}).</div>}
+                <Storyline ranked={ranked} hookFor={hookFor} selectedId={selected?.id ?? null} onSelect={setSelected} ts="" />
+              </>}
+        </Panel>
 
-            {/* TOP FINDINGS */}
-            <div style={{ fontSize: 11, color: T.t3, textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 800, margin: '14px 0 8px' }}>
-              Top Findings <span style={{ color: T.t2, fontFamily: T.mono }}>{findings.length}</span>
-            </div>
-            {findings.length === 0 ? (
-              <Empty>No findings match this filter — clear a filter to widen the tape.</Empty>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                {findings.slice(0, visible).map((o, i) => (
-                  <FindingLine
-                    key={`${o.stock}-${o.pattern}-${i}`}
-                    row={o}
-                    active={selected?.stock === o.stock && selected?.pattern === o.pattern}
-                    onClick={() => setSelected(o)}
-                  />
-                ))}
-                {visible < findings.length && (
-                  <button
-                    onClick={() => setVisible((v) => v + 20)}
-                    style={{ marginTop: 10, alignSelf: 'flex-start', cursor: 'pointer', border: `1px solid ${T.b2}`, background: 'transparent', color: T.t2, borderRadius: 999, padding: '8px 16px', fontSize: 12.5, fontWeight: 700 }}
-                  >
-                    View next {Math.min(20, findings.length - visible)} of {findings.length}
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* MARKET STORY */}
-            <div style={{ fontSize: 11, color: T.t3, textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 800, margin: '22px 0 8px' }}>Market Story</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {story.map((s, i) => <SummaryLine key={i} text={s} />)}
-              <SummaryLine text="Sector rotation view — coming (sector tags are not yet in the scan feed)." muted />
-              <SummaryLine text="Intraday minute-tracking — coming (the agent runs post-market EOD today)." muted />
-            </div>
-          </>
-        )}
-      </main>
-
-      {/* ══════════════ RIGHT ══════════════ */}
-      <aside
-        style={{
-          ...(stacked ? {} : { height: '100dvh', minHeight: 0 }),
-          width: stacked ? '100%' : 412, flexShrink: 0,
-          borderLeft: stacked ? 'none' : `1px solid ${T.b}`,
-          borderTop: stacked ? `1px solid ${T.b}` : 'none',
-          background: T.s1, display: 'flex', flexDirection: 'column',
-          ...(stacked ? { minHeight: 560 } : {}),
-        }}
-      >
-        <div style={{ padding: '13px 16px 0' }}>
-          <Eyebrow>Evidence &amp; Deep Dive</Eyebrow>
-        </div>
-        <div style={{ flex: 1, minHeight: 0 }}>
-          {selected ? (
-            <DeepDivePanel row={selected} date={date} />
-          ) : (
-            <Empty>Click a finding in the storyline to see the proof — the pattern chart, quality, evidence, win/loss path, decision and watch plan.</Empty>
-          )}
-        </div>
-      </aside>
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────── small components
-function Eyebrow({ children }: { children: React.ReactNode }) {
-  return <div style={{ fontSize: 10.5, color: T.g, textTransform: 'uppercase', letterSpacing: '.12em', fontWeight: 800, marginBottom: 10 }}>{children}</div>
-}
-function Empty({ children }: { children: React.ReactNode }) {
-  return <div style={{ padding: '40px 20px', textAlign: 'center', color: T.t3, fontSize: 13, lineHeight: 1.7 }}>{children}</div>
-}
-function SummaryStat({ label, value, color = T.t }: { label: string; value: string; color?: string }) {
-  return (
-    <div style={{ background: T.s2, border: `1px solid ${T.b}`, borderRadius: 12, padding: '10px 11px' }}>
-      <div style={{ fontSize: 9, color: T.t3, textTransform: 'uppercase', letterSpacing: '.05em', fontWeight: 800, lineHeight: 1.3 }}>{label}</div>
-      <div style={{ fontFamily: T.mono, fontSize: 22, fontWeight: 900, color, marginTop: 3 }}>{value}</div>
-    </div>
-  )
-}
-function CategoryRow({ label, count, active, onClick, strong, soon }:
-  { label: string; count: number; active: boolean; onClick: () => void; strong?: boolean; soon?: boolean }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8,
-        padding: '7px 10px', borderRadius: 9, cursor: 'pointer', textAlign: 'left', marginBottom: 2,
-        background: active ? 'rgba(0,201,138,0.10)' : 'transparent',
-        border: `1px solid ${active ? T.gb : 'transparent'}`,
-      }}
-    >
-      <span style={{ fontSize: 12.5, fontWeight: strong ? 800 : 600, color: active ? T.g : soon ? T.t3 : T.t2, display: 'flex', alignItems: 'center', gap: 6 }}>
-        {label}
-        {soon && <span style={{ fontSize: 8, color: T.t3, border: `1px solid ${T.b}`, borderRadius: 4, padding: '0 4px', fontWeight: 800 }}>SOON</span>}
-      </span>
-      <span style={{ fontFamily: T.mono, fontSize: 11.5, fontWeight: 800, color: count > 0 ? (active ? T.g : T.t2) : T.t3 }}>{count}</span>
-    </button>
-  )
-}
-function ChipGroup({ label, options, value, onChange }:
-  { label: string; options: [string, string][]; value: string; onChange: (v: string) => void }) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-      {label && <span style={{ fontSize: 10.5, color: T.t3, fontWeight: 800, letterSpacing: '.05em' }}>{label.toUpperCase()}</span>}
-      <div style={{ display: 'flex', gap: 3, background: T.s2, border: `1px solid ${T.b}`, borderRadius: 999, padding: 2 }}>
-        {options.map(([v, l]) => {
-          const active = value === v
-          return (
-            <button key={v} onClick={() => onChange(v)}
-              style={{
-                cursor: 'pointer', border: 'none', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, fontWeight: active ? 800 : 600,
-                background: active ? 'rgba(0,201,138,0.16)' : 'transparent', color: active ? T.g : T.t3,
-              }}>
-              {l}
-            </button>
-          )
-        })}
+        {/* Column 3 — evidence */}
+        <Panel style={{ ...(stacked ? { minHeight: 640 } : { gridColumn: '3 / 4' }) }}>
+          {selected
+            ? <EvidencePanel d={selected} date={date} onBack={() => ranked[0] && setSelected(ranked[0])} />
+            : <Center>Click a finding in the storyline to see the proof — the pattern chart, quality, evidence, win/loss path, decision and watch plan.</Center>}
+        </Panel>
       </div>
     </div>
   )
 }
-function SummaryLine({ text, muted }: { text: string; muted?: boolean }) {
-  return (
-    <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 13, color: muted ? T.t3 : T.t2, lineHeight: 1.55 }}>
-      <span style={{ color: T.g, fontWeight: 900, flexShrink: 0 }}>›</span>
-      <span style={muted ? { fontStyle: 'italic' } : undefined}>{text}</span>
-    </div>
-  )
+
+function Panel({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
+  return <div style={{ minWidth: 0, border: `1px solid ${V.border}`, borderRadius: 11, background: V.panel, overflow: 'hidden', ...style }}>{children}</div>
 }
-function FindingLine({ row, active, onClick }: { row: A.ScanRow; active: boolean; onClick: () => void }) {
-  const meta = A.tierMeta(row.tier)
-  const c = toneColor(meta.tone)
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        width: '100%', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', textAlign: 'left',
-        padding: '10px 12px', borderRadius: 10, marginBottom: 3, border: `1px solid ${active ? T.gb : 'transparent'}`,
-        background: active ? 'rgba(0,201,138,0.08)' : 'transparent', transition: 'background .1s',
-      }}
-      onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.03)' }}
-      onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent' }}
-    >
-      <span style={{ fontSize: 14, flexShrink: 0, width: 18, textAlign: 'center' }}>{meta.glyph}</span>
-      <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: T.t2, lineHeight: 1.4 }}>
-        <b style={{ color: T.t, fontWeight: 800 }}>{row.stock}</b>
-        <span style={{ color: T.t3 }}> — </span>
-        {row.hook || buildHook(row)}
-      </span>
-      {row.tier && (
-        <span style={{ fontSize: 8.5, fontWeight: 900, letterSpacing: '.05em', padding: '2px 6px', borderRadius: 999, color: c, background: `${c}18`, border: `1px solid ${c}44`, flexShrink: 0 }}>
-          {meta.label.toUpperCase()}
-        </span>
-      )}
-      <span style={{ color: T.t3, fontSize: 14, flexShrink: 0 }}>›</span>
-    </button>
-  )
+function Center({ children }: { children: React.ReactNode }) {
+  return <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: 30, color: V.faint, fontFamily: FONT.sans, fontSize: 13, lineHeight: 1.7 }}>{children}</div>
 }
