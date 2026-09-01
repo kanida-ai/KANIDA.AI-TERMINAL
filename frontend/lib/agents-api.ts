@@ -279,9 +279,28 @@ export type SetupGeometry = {
   level_line?: LevelLine
   apex?: GeomPoint | null
 } | null
-export type QualitySub = Record<string, number>
-export type SetupQuality = { score?: number | null; subscores?: QualitySub; weights?: QualitySub } | null
-export type SetupHorizon = { win?: number | null; etv?: number | null; mfe?: number | null; mae?: number | null }
+export type QualitySub = Record<string, number | null>
+export type SetupQuality = { score?: number | null; subscores?: QualitySub; weights?: QualitySub; note?: string } | null
+// A horizon row carries the LIVE fields (win / mean-return / median / mfe / mae).
+// `etv` is kept for back-compat; the live API returns the average return under `mean`.
+export type SetupHorizon = {
+  win?: number | null
+  etv?: number | null
+  mean?: number | null
+  median?: number | null
+  p25?: number | null
+  p75?: number | null
+  mfe?: number | null
+  mae?: number | null
+}
+export type EvidenceSummaryBlock = {
+  n?: number | null
+  ref_h?: number | null
+  pct_up?: number | null
+  pct_down?: number | null
+  avg_up?: number | null
+  avg_down?: number | null
+} | null
 export type SetupEvidence = {
   n?: number | null
   win_rate?: number | null
@@ -290,28 +309,85 @@ export type SetupEvidence = {
   mae?: number | null
   mfe?: number | null
   ci_low?: number | null
-  horizons?: Record<string, SetupHorizon>   // "1" | "3" | "5" | "10"
+  ref_h?: number | null
+  summary?: EvidenceSummaryBlock
+  horizons?: Record<string, SetupHorizon>   // "1".."10"
 } | null
-export type SetupPaths = { winners?: number[]; losers?: number[]; n_win?: number | null; n_loss?: number | null } | null
-export type SetupGate = { name: string; passed: boolean | null; detail?: string }
-export type SetupDecision = { verdict?: string | null; reason?: string; gates?: SetupGate[]; basis?: string | null } | null
-export type WatchPlan = { confirmation?: number | null; warning?: number | null; invalidation?: number | null } | null
+export type SetupPaths = {
+  winners?: number[] | null
+  losers?: number[] | null
+  n_win?: number | null
+  n_loss?: number | null
+  n_total?: number | null
+  small_n?: boolean
+  note?: string
+} | null
+// Live gate rows use {gate, pass, reason}; the earlier draft used {name, passed, detail}.
+// Both variants are accepted and normalised in the UI.
+export type SetupGate = {
+  name?: string
+  passed?: boolean | null
+  detail?: string
+  gate?: string
+  pass?: boolean | null
+  reason?: string
+  skipped?: boolean
+}
+export type SetupStrategy = {
+  version?: string
+  n?: number | null
+  etv?: number | null
+  win?: number | null
+  payoff?: number | null
+  avg_win?: number | null
+  avg_loss?: number | null
+  mae?: number | null
+  ci_low?: number | null
+  avg_holding?: number | null
+} | null
+export type SetupDecision = {
+  verdict?: string | null
+  decision?: string | null      // live field name for the verdict
+  reason?: string
+  gates?: SetupGate[]
+  basis?: string | null
+  etv?: number | null
+  edge?: number | null
+  strategy?: SetupStrategy
+} | null
+export type WatchPlan = {
+  confirmation?: number | null
+  warning?: number | null
+  invalidation?: number | null
+  direction?: string
+  note?: string
+} | null
 export type SetupResp = {
   ok?: boolean
   symbol?: string
   pattern?: string
   date?: string | null
+  as_of_date?: string | null
   stage?: string
   direction?: string
   level?: number | null
+  sector?: string | null
+  context?: { distance_to_level_pct?: number | null; volume_x?: number | null; as_of_date?: string | null }
   geometry?: SetupGeometry
   quality?: SetupQuality
   evidence?: SetupEvidence
   paths?: SetupPaths
   decision?: SetupDecision
   watch_plan?: WatchPlan
+  bars?: Bar[]                   // embedded point-in-time candles (precomputed → instant)
   note?: string
   error?: string
+}
+
+// The live verdict lives under decision.decision (interim) OR decision.verdict.
+export function setupVerdict(d?: SetupDecision): string | null {
+  if (!d) return null
+  return (d.decision ?? d.verdict ?? null)
 }
 
 // --------------------------------------------------------------------------- bars (candles)
