@@ -20,6 +20,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Optional
 
+import json as _json
+
 from fastapi import APIRouter, Header, HTTPException, Query, Response
 from . import registry
 
@@ -28,6 +30,28 @@ router = APIRouter()
 registry.load_builtin()
 
 CHART_AGENT_ID = "chart-v1"
+
+
+def _safe_payload(payload: dict) -> dict:
+    """Return a JSON-SAFE version of ``payload``, VALIDATED to serialise, inside the handler's guard.
+
+    ROOT-CAUSE of the live chart_setup/chart_bars 500: FastAPI renders a returned dict with
+    ``json.dumps(..., allow_nan=False)`` AFTER the handler returns — OUTSIDE its try/except. So a
+    NaN/Inf, a numpy scalar (int64/bool_ are NOT json-native) or an ndarray leaking into the payload
+    raises during that serialisation and escapes as a bare HTTP 500, even though the handler is fully
+    guarded. Here we (1) sanitise (NaN/Inf/numpy -> None/python) and (2) PROVE it serialises with the
+    exact strict settings FastAPI uses. If anything still can't serialise, we degrade to an honest
+    ok:false dict — the endpoint therefore returns a plain dict (unchanged contract) and NEVER 500s."""
+    try:
+        from .chart.setup import json_safe
+        safe = json_safe(payload)
+        _json.dumps(safe, allow_nan=False)     # same strictness as FastAPI's renderer
+        return safe
+    except Exception as e:  # noqa: BLE001 — serialisation must never 500
+        log.warning("response payload not serialisable, degrading to ok:false: %s", e)
+        base = {k: payload.get(k) for k in ("symbol", "pattern", "date")
+                if isinstance(payload, dict) and k in payload}
+        return {"ok": False, **base, "error": f"response not serialisable: {e}"}
 
 
 @router.get("/agents/health")
@@ -242,8 +266,8 @@ def chart_bars(symbol: str = Query(..., description="stock symbol, e.g. TITAN"),
         from .chart import data as cdata
         from .chart.agent import _as_of_idx
         if not cdata.db_available():
-            return {"ok": False, "symbol": sym, "date": date, "bars": [],
-                    "note": f"data source unavailable ({cdata.db_path()}); SPEC: cloud feeds wiring."}
+            return _safe_payload({"ok": False, "symbol": sym, "date": date, "bars": [],
+                    "note": f"data source unavailable ({cdata.db_path()}); SPEC: cloud feeds wiring."})
         # FAST PATH — one object read serves the bars the same click already loaded for /setup.
         if pattern:
             try:
@@ -252,18 +276,18 @@ def chart_bars(symbol: str = Query(..., description="stock symbol, e.g. TITAN"),
                 bars_b = bundle.get("bars") if isinstance(bundle, dict) else None
                 if isinstance(bars_b, list) and len(bars_b) >= lookback:
                     bars = bars_b[-lookback:]
-                    return {"ok": True, "symbol": sym,
+                    return _safe_payload({"ok": True, "symbol": sym,
                             "date": bundle.get("as_of_date") or date, "lookback": lookback,
                             "count": len(bars), "bars": bars, "served": "precompute",
                             "note": f"served from precomputed bundle (precomputed_at "
-                                    f"{bundle.get('precomputed_at')})"}
+                                    f"{bundle.get('precomputed_at')})"})
             except Exception as e:  # noqa: BLE001 — fast path must never sink the live fallback
                 log.debug("chart_bars fast-path %s/%s miss: %s", sym, pattern, e)
         df = cdata.load_daily(sym)
         k = _as_of_idx(df, date)
         if k < 0:
-            return {"ok": True, "symbol": sym, "date": date, "lookback": lookback, "bars": [],
-                    "note": f"no bar on/before {date or 'latest'} for {sym}."}
+            return _safe_payload({"ok": True, "symbol": sym, "date": date, "lookback": lookback,
+                    "bars": [], "note": f"no bar on/before {date or 'latest'} for {sym}."})
         lo = max(0, k - lookback + 1)
         w = df.iloc[lo:k + 1]
         bars = [{"date": str(idx.date()) if hasattr(idx, "date") else str(idx),
@@ -271,13 +295,14 @@ def chart_bars(symbol: str = Query(..., description="stock symbol, e.g. TITAN"),
                  "l": round(float(r.low), 4), "c": round(float(r.close), 4),
                  "v": int(r.volume) if r.volume == r.volume else None}
                 for idx, r in w.iterrows()]
-        return {"ok": True, "symbol": sym, "date": str(df.index[k].date()),
+        return _safe_payload({"ok": True, "symbol": sym, "date": str(df.index[k].date()),
                 "lookback": lookback, "count": len(bars), "bars": bars, "served": "live",
                 "note": ("live point-in-time read (no precomputed bundle for this key/lookback) — "
-                         "correct but slower; the post-market EOD job precomputes these.")}
+                         "correct but slower; the post-market EOD job precomputes these.")})
     except Exception as e:  # noqa: BLE001 — never 500-crash
         log.warning("chart_bars(%s) failed: %s", sym, e)
-        return {"ok": False, "symbol": sym, "date": date, "bars": [], "error": str(e)}
+        return _safe_payload({"ok": False, "symbol": sym, "date": date, "bars": [],
+                                    "error": str(e)})
 
 
 @router.get("/agents/chart/setup")
@@ -296,8 +321,8 @@ def chart_setup(symbol: str = Query(..., description="stock symbol, e.g. TITAN")
     try:
         from .chart import data as cdata
         if not cdata.db_available():
-            return {"ok": False, "symbol": sym, "pattern": pattern, "date": date,
-                    "note": f"data source unavailable ({cdata.db_path()}); SPEC: cloud feeds wiring."}
+            return _safe_payload({"ok": False, "symbol": sym, "pattern": pattern, "date": date,
+                    "note": f"data source unavailable ({cdata.db_path()}); SPEC: cloud feeds wiring."})
         # FAST PATH — precomputed bundle (ms). Guarded so a store miss/error falls through to live.
         try:
             from .chart import screener as scr
@@ -307,7 +332,7 @@ def chart_setup(symbol: str = Query(..., description="stock symbol, e.g. TITAN")
                 out["served"] = "precompute"
                 out["serve_note"] = (f"served precomputed bundle (precomputed_at "
                                      f"{bundle.get('precomputed_at')})")
-                return out
+                return _safe_payload(out)
         except Exception as e:  # noqa: BLE001 — fast path must never sink the live compute
             log.debug("chart_setup fast-path %s/%s miss: %s", sym, pattern, e)
         from .chart import setup as csetup
@@ -316,10 +341,11 @@ def chart_setup(symbol: str = Query(..., description="stock symbol, e.g. TITAN")
             res["served"] = "live"
             res["serve_note"] = ("live-computed on the request path (no precomputed bundle for this "
                                  "key) — correct but slower; the post-market EOD job precomputes these.")
-        return res
+        return _safe_payload(res)
     except Exception as e:  # noqa: BLE001 — never 500-crash
         log.warning("chart_setup(%s/%s) failed: %s", sym, pattern, e)
-        return {"ok": False, "symbol": sym, "pattern": pattern, "date": date, "error": str(e)}
+        return _safe_payload({"ok": False, "symbol": sym, "pattern": pattern, "date": date,
+                                    "error": str(e)})
 
 
 @router.get("/agents/chart/decision")
