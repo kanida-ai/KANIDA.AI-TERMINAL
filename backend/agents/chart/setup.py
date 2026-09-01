@@ -20,6 +20,7 @@ builder never raises; on any problem it returns an honest ok:false / null-fields
 from __future__ import annotations
 from typing import Optional
 import logging
+import math
 import numpy as np
 
 from . import data
@@ -39,7 +40,53 @@ INVAL_BUFFER = strat.DEFAULT_POLICY.buffer     # 0.002
 WARN_BUFFER = 0.012                            # = horizontal_trendline.PARAMS["retest_tol"]
 
 
+# --------------------------------------------------------------------------- JSON safety
+def json_safe(obj):
+    """Recursively coerce a value into something FastAPI/json can serialise with ``allow_nan=False``.
+
+    ROOT-CAUSE FIX: FastAPI renders a returned dict with ``json.dumps(..., allow_nan=False)`` AFTER
+    the handler returns — i.e. OUTSIDE the endpoint's try/except. So a NaN/Inf, a numpy scalar
+    (int64/bool_ are NOT json-native) or an ndarray leaking into the bundle raises during
+    serialisation and escapes as a BARE HTTP 500, even though every builder is internally guarded.
+    Sanitising the bundle at its source (and again at the endpoint) makes that impossible.
+
+      numpy scalar  -> python scalar (.item())      numpy array -> list
+      NaN / +-Inf   -> None (honest 'unavailable', never a fabricated number)
+      dict / list   -> recursed
+    """
+    if obj is None or isinstance(obj, (str, bool, int)):
+        return obj
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, np.generic):          # np.float64/int64/bool_ scalars
+        v = obj.item()
+        return json_safe(v) if isinstance(v, float) else v
+    if isinstance(obj, np.ndarray):
+        return [json_safe(x) for x in obj.tolist()]
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(x) for x in obj]
+    return obj
+
+
 # --------------------------------------------------------------------------- geometry helpers
+def _dedupe_touches(touches):
+    """Drop duplicate touch anchors by (date, price) while preserving order (FIX 5). Two pivots that
+    resolve to the same bar/level would otherwise draw stacked anchors on the same candle."""
+    seen = set()
+    out = []
+    for t in touches or []:
+        if not t:
+            continue
+        key = (t.get("date"), t.get("price"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
 def _pt(dates, series, idx):
     """A {date, price} point at bar ``idx`` from a price series, or None if idx is out of range."""
     try:
@@ -88,7 +135,7 @@ def _sloped_geometry(occ, geom, dates, h, l, k):
     brk_series = h if broke_upper else l
     brk_val = uval if broke_upper else lval
     touches = [_pt(dates, brk_series, t) for t in (occ.get("touches") or [])]
-    touches = [t for t in touches if t]
+    touches = _dedupe_touches([t for t in touches if t])
 
     level = occ.get("level")
     level_line = None
@@ -126,7 +173,7 @@ def _horizontal_geometry(occ, dates, h, k):
     """Draw-geometry for the horizontal trendline: a flat level line + the touching pivot highs."""
     level = occ.get("level")
     touches = [_pt(dates, h, t) for t in (occ.get("touches") or [])]
-    touches = [t for t in touches if t]
+    touches = _dedupe_touches([t for t in touches if t])
     first = min((int(t) for t in (occ.get("touches") or [])), default=k)
     level_line = None
     if level is not None:
@@ -148,7 +195,7 @@ def _cup_geometry(occ, geom, dates, h, c, k):
     left = _pt(dates, h, Lr) if Lr is not None else None
     right = _pt(dates, h, Rr) if Rr is not None else None
     bottom = _pt(dates, c, bottom_idx) if bottom_idx is not None else None
-    touches = [t for t in (left, right) if t]
+    touches = _dedupe_touches([t for t in (left, right) if t])
     level_line = None
     if rim is not None and left is not None:
         tp = _pt(dates, h, k)
@@ -262,19 +309,29 @@ def watch_plan(level: Optional[float], direction: str = "long") -> dict:
 
 
 # --------------------------------------------------------------------------- tier (storyline feed)
+CONFIRMED_STAGES = ("BREAKOUT", "RETEST")
+
+
 def tier_of(stage: Optional[str], decision: Optional[str], evidence: Optional[dict],
             edge_positive: Optional[bool], n: int) -> str:
     """Derive the middle-column feed tier from stage + decision + evidence (REAL, no fabrication).
-      qualified : decision == TRADE.
-      strong    : a breakout/retest with >= ~10 resolved precedents AND positive expectancy.
-      watch     : approaching / forming (no break yet), or breakout with thin/immature evidence.
-      weak      : evidence weak / negative expectancy (decision NO_TRADE)."""
-    if decision == "TRADE":
+
+    HONESTY FIX 4: ``qualified`` means TRADE-READY. A setup is trade-ready only once it has actually
+    CONFIRMED — a BREAKOUT or a held RETEST (entry = next open exists) — AND clears the §9 evidence
+    gate (decision == TRADE). An APPROACHING setup has NOT triggered (no entry bar yet); FORMING /
+    FAILED likewise. So those can be at most ``watch`` (or ``weak`` on a NO_TRADE), NEVER qualified,
+    even if the historical-precedent edge is strong — the edge is not yet actionable.
+      qualified : decision == TRADE  AND  stage is confirmed (BREAKOUT/RETEST).
+      strong    : confirmed stage with >= ~10 resolved precedents AND positive expectancy.
+      watch     : approaching / forming (no break yet), or a confirmed stage with thin/immature
+                  evidence, or a positive edge that has not confirmed yet.
+      weak      : evidence weak / negative expectancy (decision == NO_TRADE)."""
+    confirmed = stage in CONFIRMED_STAGES
+    if decision == "TRADE" and confirmed:
         return "qualified"
     if decision == "NO_TRADE":
         return "weak"
-    broke = stage in ("BREAKOUT", "RETEST")
-    if broke and n >= 10 and edge_positive:
+    if confirmed and n >= 10 and edge_positive:
         return "strong"
     return "watch"
 
@@ -366,7 +423,11 @@ def build_setup(symbol: str, pattern_id: str, date: Optional[str] = None) -> dic
     except Exception:  # noqa: BLE001
         sector = None
 
-    return {
+    # json_safe: sanitise the ENTIRE bundle at its source so no NaN/Inf or numpy scalar can leak into
+    # the precompute artifact or the live response and blow up JSON serialisation (bare 500). This is
+    # what makes build_setup return a VALID bundle for APPROACHING (and every) stage — the honest
+    # evidence/paths may be small-N or None, but never a crash and never fabricated.
+    return json_safe({
         "ok": True, "symbol": sym, "pattern": pattern_id, "date": date, "as_of_date": as_of_date,
         "stage": occ.get("stage"), "direction": direction, "level": level,
         "sector": sector,
@@ -377,7 +438,7 @@ def build_setup(symbol: str, pattern_id: str, date: Optional[str] = None) -> dic
         "paths": paths,
         "decision": _decision_head(decision),
         "watch_plan": plan,
-    }
+    })
 
 
 # --------------------------------------------------------------------------- bars (candles)
