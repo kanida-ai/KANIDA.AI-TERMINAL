@@ -2,23 +2,26 @@
 
 /**
  * CandleChart — the reusable candlestick + pattern-overlay primitive for the
- * Chart Agent deep-dive. ALL nine patterns render through this single component;
- * they differ only in which lines / shape / levels the /setup geometry provides.
+ * Chart Agent evidence hero. ALL nine patterns render through this single
+ * component; they differ only in which lines / shape / levels the /setup
+ * geometry provides.
  *
- * It draws real OHLC candles from GET /api/agents/chart/bars, then overlays the
- * detector geometry from GET /api/agents/chart/setup:
+ * It draws real OHLC candles from the setup bundle (or GET /api/agents/chart/bars),
+ * then overlays the detector geometry from GET /api/agents/chart/setup:
  *   • trend lines   (upper / lower for wedges·triangles·channels), extended to
  *                    the breakout via the line's own slope,
  *   • level lines   (flat horizontals for horizontal-trendline · cup rim/base ·
  *                    watch-plan confirmation/warning/invalidation),
  *   • touch markers (the real swing highs/lows the detector anchored on),
  *   • a shaded body (the polygon between upper & lower — the wedge/triangle body),
- *   • a highlighted breakout candle.
+ *   • a highlighted breakout candle,
+ *   • a right-side price axis with the latest close highlighted.
  *
  * HONESTY: it renders only what it is given. No bars → honest empty state; no
- * geometry → candles alone. Nothing is invented.
+ * geometry → candles alone. Nothing is invented. Colours come from the shared
+ * Kanida mint token set (components/power/agents/ui.ts) — one system everywhere.
  */
-import { T } from '@/lib/theme'
+import { AT } from './ui'
 import type { Bar } from '@/lib/agents-api'
 
 export type ChartPoint = { date: string; price: number }
@@ -35,12 +38,13 @@ export type ChartMarker = { date: string; price: number; color?: string; ring?: 
 
 export function CandleChart({
   bars,
-  height = 300,
+  height = 320,
   lines = [],
   levels = [],
   markers = [],
   shade = null,
   highlightDate = null,
+  showPriceAxis = true,
   emptyLabel = 'Point-in-time candles unavailable for this setup yet.',
 }: {
   bars: Bar[]
@@ -50,14 +54,16 @@ export function CandleChart({
   markers?: ChartMarker[]
   shade?: { upper: ChartLine; lower: ChartLine; color?: string } | null
   highlightDate?: string | null
+  showPriceAxis?: boolean
   emptyLabel?: string
 }) {
-  const W = 720
+  const W = 760
   const H = height
   const padL = 8
-  const padR = 58          // room for price axis / level labels
+  const padR = showPriceAxis ? 64 : 12
   const padT = 14
-  const padB = 26          // room for a couple of date ticks
+  const padB = 44          // room for date ticks + volume band
+  const volH = 34          // volume histogram band height (inside padB)
   const plotL = padL
   const plotR = W - padR
   const plotT = padT
@@ -70,8 +76,8 @@ export function CandleChart({
       <div
         style={{
           height, display: 'flex', alignItems: 'center', justifyContent: 'center',
-          background: T.s2, border: `1px solid ${T.b}`, borderRadius: 14,
-          color: T.t3, fontSize: 12.5, textAlign: 'center', padding: 20, lineHeight: 1.6,
+          background: AT.card, border: `1px solid ${AT.line}`, borderRadius: 14,
+          color: AT.faint, fontSize: 12.5, textAlign: 'center', padding: 20, lineHeight: 1.6,
         }}
       >
         {emptyLabel}
@@ -98,6 +104,11 @@ export function CandleChart({
   const pad = (hi - lo) * 0.06
   lo -= pad; hi += pad
   const y = (p: number) => plotT + (1 - (p - lo) / (hi - lo)) * plotH
+
+  // ── volume domain (histogram band under the candles) ──
+  const maxVol = Math.max(1, ...bars.map((b) => b.v || 0))
+  const volTop = plotB + 6
+  const vy = (v: number) => (volH - 4) * (1 - (v || 0) / maxVol)
 
   // ── date → x index (exact, else nearest by chronological position) ──
   const idxByDate = new Map<string, number>()
@@ -136,7 +147,6 @@ export function CandleChart({
     const l = resolveLine(shade.lower)
     const xL = Math.min(u.x1, l.x1)
     const xR = Math.max(u.x2, l.x2)
-    // interpolate each line's y at xL and xR
     const yAt = (ln: { x1: number; y1: number; x2: number; y2: number }, x: number) => {
       if (ln.x2 === ln.x1) return ln.y1
       return ln.y1 + ((ln.y2 - ln.y1) * (x - ln.x1)) / (ln.x2 - ln.x1)
@@ -148,30 +158,34 @@ export function CandleChart({
   }
 
   const highlightI = highlightDate ? xIndexFor(highlightDate) : -1
+  const last = bars[n - 1]
+  const lastY = y(last.c)
 
   // sparse date ticks (first, middle, last)
   const tickIdxs = n <= 2 ? [0, n - 1] : [0, Math.floor(n / 2), n - 1]
+  // price-axis ticks
+  const axisTicks = showPriceAxis ? [hi - pad, (hi + lo) / 2, lo + pad] : []
 
   return (
-    <div style={{ background: T.s2, border: `1px solid ${T.b}`, borderRadius: 14, padding: 8 }}>
+    <div style={{ background: AT.card, border: `1px solid ${AT.line}`, borderRadius: 14, padding: 8 }}>
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block' }} preserveAspectRatio="none">
         {/* shaded pattern body */}
         {shadePoly && (
-          <polygon points={shadePoly} fill={shade!.color || 'rgba(0,201,138,0.09)'} stroke="none" />
+          <polygon points={shadePoly} fill={shade!.color || 'rgba(63,227,164,0.08)'} stroke="none" />
         )}
 
         {/* breakout candle highlight band */}
         {highlightI >= 0 && (
           <rect
             x={plotL + highlightI * cw} y={plotT} width={cw} height={plotH}
-            fill="rgba(0,201,138,0.10)" stroke="rgba(0,201,138,0.28)" strokeWidth={1}
+            fill="rgba(63,227,164,0.10)" stroke="rgba(63,227,164,0.28)" strokeWidth={1}
           />
         )}
 
         {/* level lines (flat horizontals) */}
         {levels.map((lv, i) => {
           const yy = y(lv.price)
-          const c = lv.color || T.b2
+          const c = lv.color || AT.line2
           return (
             <g key={`lv-${i}`}>
               <line
@@ -179,16 +193,28 @@ export function CandleChart({
                 stroke={c} strokeWidth={1.4} strokeDasharray={lv.dash === false ? undefined : '5 4'}
               />
               {lv.label && (
-                <text x={plotR + 4} y={yy + 3.5} fontSize={9.5} fill={c} fontFamily="monospace">{lv.label}</text>
+                <text x={plotR + 5} y={yy + 3.5} fontSize={9.5} fill={c} fontFamily="var(--font-geist-mono, monospace)">{lv.label}</text>
               )}
             </g>
+          )
+        })}
+
+        {/* volume histogram */}
+        {bars.map((b, i) => {
+          const up = b.c >= b.o
+          const h = (volH - 4) - vy(b.v)
+          return (
+            <rect
+              key={`v-${i}`} x={cx(i) - bodyW / 2} y={volTop + vy(b.v)} width={bodyW} height={Math.max(0.5, h)}
+              fill={up ? AT.mint : AT.red} opacity={0.28}
+            />
           )
         })}
 
         {/* candles */}
         {bars.map((b, i) => {
           const up = b.c >= b.o
-          const c = up ? T.g : T.r
+          const c = up ? AT.mint : AT.red
           const xc = cx(i)
           const yO = y(b.o), yC = y(b.c)
           const top = Math.min(yO, yC)
@@ -207,7 +233,7 @@ export function CandleChart({
           return (
             <line
               key={`ln-${i}`} x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2}
-              stroke={ln.color || T.a} strokeWidth={ln.width || 2}
+              stroke={ln.color || AT.mint} strokeWidth={ln.width || 2}
               strokeDasharray={ln.dash ? '6 4' : undefined} strokeLinecap="round"
             />
           )
@@ -217,22 +243,36 @@ export function CandleChart({
         {markers.map((m, i) => {
           const xi = xIndexFor(m.date)
           const mx = cx(xi), my = y(m.price)
-          const c = m.color || T.a
+          const c = m.color || AT.mint
           return (
             <g key={`m-${i}`}>
               {m.ring
-                ? <circle cx={mx} cy={my} r={5} fill="none" stroke={c} strokeWidth={2} />
-                : <circle cx={mx} cy={my} r={3.4} fill={c} stroke="#04120c" strokeWidth={1} />}
-              {m.label && <text x={mx + 6} y={my - 5} fontSize={9} fill={c} fontFamily="monospace">{m.label}</text>}
+                ? <circle cx={mx} cy={my} r={5.5} fill="none" stroke={c} strokeWidth={2} />
+                : <circle cx={mx} cy={my} r={3.6} fill="none" stroke={c} strokeWidth={1.6} />}
+              {m.label && <text x={mx + 7} y={my - 6} fontSize={9} fill={c} fontFamily="var(--font-geist-mono, monospace)">{m.label}</text>}
             </g>
           )
         })}
 
+        {/* right-side price axis + current-price tag */}
+        {showPriceAxis && (
+          <g>
+            {axisTicks.map((p, i) => (
+              <text key={`ax-${i}`} x={W - 6} y={y(p) + 3} fontSize={9} fill={AT.faint}
+                textAnchor="end" fontFamily="var(--font-geist-mono, monospace)">{p.toFixed(1)}</text>
+            ))}
+            <line x1={plotL} y1={lastY} x2={plotR} y2={lastY} stroke={AT.ink2} strokeWidth={1} strokeDasharray="2 3" opacity={0.5} />
+            <rect x={plotR + 2} y={lastY - 8} width={padR - 6} height={16} rx={3} fill={AT.mint} />
+            <text x={plotR + (padR - 6) / 2 + 2} y={lastY + 3.5} fontSize={9.5} fill="#04120c" textAnchor="middle" fontWeight={700}
+              fontFamily="var(--font-geist-mono, monospace)">{last.c.toFixed(1)}</text>
+          </g>
+        )}
+
         {/* date ticks */}
         {tickIdxs.map((i) => (
-          <text key={`t-${i}`} x={cx(i)} y={H - 8} fontSize={9} fill={T.t3} fontFamily="monospace"
+          <text key={`t-${i}`} x={cx(i)} y={H - 6} fontSize={9} fill={AT.faint} fontFamily="var(--font-geist-mono, monospace)"
             textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>
-            {(bars[i].date || '').slice(5)}
+            {(bars[i].date || '').slice(2)}
           </text>
         ))}
       </svg>

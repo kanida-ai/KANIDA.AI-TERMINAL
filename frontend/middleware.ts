@@ -35,7 +35,13 @@ const BASIC_REALM = 'Restricted'
 // the operator site-Basic-Auth like /api/power (else invited power users, who
 // don't have SITE_PASS, couldn't use it). NOTE: v0 uses an X-User-Id stub, so this
 // endpoint is currently unauthenticated — add power-JWT before public launch.
-const POWER_PORTAL_PATHS = ['/power', '/api/power', '/api/power-auth', '/api/builder', '/api/agents', '/legal']
+// '/dev' = DEV-ONLY preview routes (e.g. /dev/agents-preview) that render a
+// power surface WITHOUT the power-auth gate for local visual validation. Each
+// such page self-guards with notFound() when NODE_ENV === 'production', so in
+// prod there is nothing to serve behind this bypass — it only makes `next dev`
+// frictionless (otherwise the site-wide Basic Auth fails closed with 503 locally
+// when SITE_USER/SITE_PASS are unset).
+const POWER_PORTAL_PATHS = ['/power', '/api/power', '/api/power-auth', '/api/builder', '/api/agents', '/legal', '/dev']
 
 function unauthorized(): NextResponse {
   return new NextResponse(null, {
