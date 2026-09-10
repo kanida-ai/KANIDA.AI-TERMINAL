@@ -24,18 +24,29 @@ from typing import Optional
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import JSONResponse
 
+import os
+from typing import Union
+
 from .schemas import (
     ErrorBody,
     ErrorResponse,
     ExperimentDetail,
     ExperimentListResponse,
+    ExperimentRecord,
     ExperimentStatus,
+    ExperimentsResponse,
     FeedResponse,
     LearningsResponse,
     LoopResponse,
 )
 from .store import get_store
 from .research.store import get_research_store
+from .experiments.store import get_experiment_store
+
+
+def _research_source() -> bool:
+    """S2: `KANIDA_PATHFINDER_SOURCE=research` serves the experiment registry on /experiments."""
+    return os.environ.get("KANIDA_PATHFINDER_SOURCE", "mock").strip().lower() == "research"
 
 log = logging.getLogger("kanida.pathfinder")
 
@@ -81,37 +92,50 @@ def get_loop(request: Request) -> LoopResponse:
 
 @router.get(
     "/experiments",
-    response_model=ExperimentListResponse,
+    response_model=Union[ExperimentsResponse, ExperimentListResponse],
     responses=_ERRORS,
     summary="The edge-discovery pipeline",
     description=(
         "Every experiment across the lifecycle. Dead experiments are listed, not hidden.\n\n"
-        "Ordering is **losers first**: struggling and dead experiments lead, promoted ones "
-        "come last. `historical_return` and `virtual_return` are each a performance block "
-        "that structurally pairs expectancy with drawdown; `sample_flag` is derived from "
-        "`n` (`greyed` below 20, `flagged` below 50)."
+        "**S2 (`KANIDA_PATHFINDER_SOURCE=research`)** serves the experiment REGISTRY as "
+        "`ExperimentsResponse`: every experiment's PUBLIC card (theme + evidence + the seven-line "
+        "story — never a constituent, an entry, a target or a stop), the S1 findings the gate "
+        "declined with their trial counts (`not_opened`), and the running experiment scoreboard "
+        "(Right · Wrong · Inconclusive · n over graded periods, void apart, forward / backfilled "
+        "split). Losers first: buried, then testing, proposed last.\n\n"
+        "Other sources serve the P0/P1 `ExperimentListResponse`."
     ),
 )
 def get_experiments(
     request: Request,
     status: Optional[ExperimentStatus] = Query(
-        None, description="Filter by lifecycle status. Omit for all."
+        None, description="P0/P1 only: filter by lifecycle status. Omit for all."
     ),
-) -> ExperimentListResponse:
+):
+    if _research_source():
+        from .experiments.config import ENGINE_VERSION
+        from .experiments.views import experiments_response
+        xs = get_experiment_store()
+        body = experiments_response(xs, engine_version=ENGINE_VERSION) if xs is not None else None
+        if body is None:
+            return _error(404, "no_experiments", "The experiment loop has not run yet.", request)
+        return body
     return get_store().experiments(status)
 
 
 @router.get(
     "/experiment/{experiment_id}",
-    response_model=ExperimentDetail,
+    response_model=Union[ExperimentRecord, ExperimentDetail],
     responses=_ERRORS,
     summary="One experiment's full journey",
     description=(
-        "The whole story for a single experiment: the question, the deterministic "
-        "rulebook, the six story beats, every supporting fact, the evidence bundles, the "
-        "virtual book with its **losers-first** ledger, the append-only L1–L3 change-log "
-        "(what changed → why → evidence → previous version → new version → did it "
-        "improve), and — when the experiment died — its published post-mortem."
+        "**S2 (`KANIDA_PATHFINDER_SOURCE=research`)**: the in-app `ExperimentRecord` — versions "
+        "(v1, v2… with what changed, why, the trial count and the expectation FROZEN when each "
+        "opened), every counted trial, every period with its frozen grading rule, forward result, "
+        "expected-vs-actual and learning, the change-log, the post-mortem when buried, and the "
+        "graduation PROPOSAL when one exists (human-gated). Constituent names are withheld "
+        "pending RA review.\n\n"
+        "Other sources serve the P0/P1 `ExperimentDetail`."
     ),
 )
 def get_experiment(experiment_id: str, request: Request, response: Response):
@@ -120,6 +144,13 @@ def get_experiment(experiment_id: str, request: Request, response: Response):
             400, "invalid_experiment_id",
             "experiment_id must look like 'exp_0007'.", request,
         )
+    if _research_source():
+        from .experiments.views import record
+        xs = get_experiment_store()
+        rec = record(xs, experiment_id) if xs is not None else None
+        if rec is None:
+            return _error(404, "not_found", "No experiment with that id.", request)
+        return rec
     detail = get_store().experiment(experiment_id)
     if detail is None:
         return _error(404, "not_found", "No experiment with that id.", request)
@@ -157,6 +188,17 @@ def get_feed(
     feed = store.feed(date)
     if feed is None:
         return _error(404, "no_edition", "No research edition for that date.", request)
+    # S2: experiment cards with news on this edition, and the experiment scoreboard as of it —
+    # only when the process serves the research source (S1's own contract is untouched otherwise).
+    xs = get_experiment_store() if _research_source() else None
+    if xs is not None and xs.latest_edition() is not None:
+        from .experiments.views import cards_on
+        ed = feed.edition_date.isoformat()
+        feed = FeedResponse.model_validate({
+            **feed.model_dump(mode="json"),
+            "experiment_cards": [c.model_dump(mode="json") for c in cards_on(xs, ed)],
+            "experiments_scoreboard": xs.scoreboard(ed).model_dump(mode="json"),
+        })
     return feed
 
 

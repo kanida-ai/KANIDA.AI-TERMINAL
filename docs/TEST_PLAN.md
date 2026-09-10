@@ -9,6 +9,7 @@ what it built. **Rule: no requirement without a test row.**
 | **Pathfinder P1** (engine) | below | `backend/tests/test_pathfinder_p1.py` | **60 rows** |
 | **Pathfinder P2** (frontend) | below | `kanida-app/tests/{lib,contract}.test.ts` | **31 passing** |
 | **Pathfinder S1** (research engine + feed) | below | `backend/tests/test_pathfinder_s1.py` + `test_pathfinder_s1_audit.py` + `test_pathfinder_s1_audit2.py` + `test_pathfinder_s1_audit3.py` | **34 + 39 + 28 + 33 passing** |
+| **Pathfinder S2** (experiment loop) | below | `backend/tests/test_pathfinder_s2.py` | **44 passing** (34 + 10 audit pins) |
 | Trader slice | *to be appended by session 01/S1.1* | — | not started |
 
 Run:
@@ -370,6 +371,78 @@ row.
    across it; it does not correct the price basis. A point-in-time adjusted feed is the real fix.
 
 ---
+
+## Pathfinder S2 — the experiment loop (`backend/tests/test_pathfinder_s2.py`)
+
+Session S2 (`docs/sessions/PATHFINDER_S2_EXPERIMENTS.md`, hand-back `docs/handbacks/PF-S2.md`).
+Rows S2-01…S2-33 run on a **synthetic universe with an engineered CONDITIONAL edge** (hard one-day
+falls that came on a market-wide fall bounce over the next week; falls on ordinary days do not) so
+every branch of the loop is exercised on data the test controls, and the numbers the loop reports are
+recomputed independently in the row. The real-warehouse run is documented in the hand-back.
+
+```bash
+python -m pytest backend/tests/test_pathfinder_s2.py -q                 # 44 rows, ~80 s
+python scripts/run_pathfinder_scan.py --date 2026-07-29 --backfill 60   # the S1 editions the loop steps over
+python scripts/run_pathfinder_experiments.py                            # the loop, sealed at each edition
+```
+
+| Row | Asserts | Principle |
+|---|---|---|
+| S2-01 | the variant set is CLOSED (9 conditions × 2 horizons = 18), ordered, serialisable; every horizon inside the Constitution's `_exits` range | addendum 2/3 |
+| S2-02 | replay measures the S1 convention (`f{h}` − hurdle), recomputed independently; a signal inside the horizon of the seal is never a trade; a window past the seal raises | point-in-time |
+| S2-03 | the engineered edge is conditional: the conditioned variant clears expectancy on all three windows and the placebo; the unconditioned rule does not; windows split at `discovery_end` | NDP |
+| S2-04 | the book enters at the NEXT OPEN, exits at the horizon CLOSE, charges costs + slippage; on an earlier seal the positions are OPEN and nothing past the seal is read | entry = next open; seal |
+| S2-05 | the Constitution's limits bind (max new per session) and the selection rule is liquidity, descending | reuse book.py |
+| S2-06 | verdicts are symmetric in one standard error — the LARGER of the plain and cluster-robust estimates (three clusters collapsed CR0 to 0.04 and would have called noise Right); fewer trades than the frozen minimum = Inconclusive; comparison categories | addendum 4 |
+| S2-07 | a period with no closed trade is `void` with its reason, never counted | N5 |
+| S2-08 | the grading rule is frozen with the version (hash-versioned by `grading.py`); every outcome was judged under it; the expected value in the spec equals the frozen expectation | principle 5 |
+| S2-09 | the worth-testing gate = the Constitution's discovery gauntlet + the trailing-window check + implementability + novelty + evidence strength; each fails on the numbers | addendum 3/5 |
+| S2-10 | advisory gates (family-wise bar over the counted trials, pre-`discovery_end` window at 2× slippage, cluster-t) are recorded, never kill, and the family-wise bar divides α by the trial count | no silent p-hacking |
+| S2-11 | the 2× slippage gate is a different number from the hurdle gate | cost sensitivity |
+| S2-12 | a real S1 `dip` **no_trade** finding opens v1 with a FROZEN expectation (seal = the opening edition), 18 trials on the record numbered 1…18, one adopted, the candidate row points at the experiment, the S1 card's own facts travel with the version | done-when |
+| S2-13 | non-derivable findings and repeats are declined ON THE RECORD; a repeat is not re-researched; one experiment per family | novelty |
+| S2-14 | a declined family is not re-researched daily (`retry_after_sessions`); the decline records the best variant and its failed gates | no p-hacking by repetition |
+| S2-15 | forward marks and trades are written no earlier than their session; a re-walk of the period from the store's own rule on a LATER seal reproduces the trades and marks exactly | point-in-time; determinism |
+| S2-16 | expected-vs-actual is computed (mean of the stored trades), the gap is arithmetic, the statement is digit-free and honest ("weaker" / "at least as strong") | done-when |
+| S2-17 | a Wrong period runs the failure analysis, evaluates 7 counted revisions, adopts one → v2 (L3, validated on the seal, expectation frozen on the grading seal); v3; then BURIED with a post-mortem; nothing tracks a buried idea | addendum 3/6 |
+| S2-18 | learning never creates a version beyond `max_versions` | retirement rule |
+| S2-19 | the arena's constitutional score is the ported one (Test / Watch / Keep / Retire) | reuse arena.py |
+| S2-20 | the graduation gate runs after every graded period; a PROPOSAL exists only when every gate but the signature passes; on the unsigned draft it is `blocked_unsigned_constitution`; the registry never holds "promoted" | addendum 5/9 |
+| S2-21 | on a signed Constitution the proposal `awaits a human`; the incumbent is the same capital in the whole universe over the same window; with the edge reversed no proposal exists | champion/challenger |
+| S2-22 | the scoreboard counts each graded period once, excludes void, splits forward/backfilled, counts trials; nothing is graded as of the opening date | principle 8 |
+| S2-23 | a step run on its own session date is FORWARD; a later one is a BACKFILL; the card says which | A1 |
+| S2-24 | every table rejects UPDATE/DELETE; the chains verify; a rewritten row breaks its chain | append-only |
+| S2-25 | two builds of the same seals are identical but for timestamps, hashes included | determinism |
+| S2-26 | the public card tells seven digit-free beats from facts, names no stock, has no constituent field | addendum 6 |
+| S2-27 | the card contract refuses a trade instruction ("entry", "stop-loss", "buy", "target") and a constituent field | addendum 6 |
+| S2-28 | the record withholds constituents until RA review (`KANIDA_PF_RA_REVIEWED`), carries versions, trials (= `trials_total`), the change-log (`improved` null) and the proposal | addendum 6 |
+| S2-29 | the buried record publishes its post-mortem; `/experiments` lists losers first | principle 8 |
+| S2-30 | a model that writes a numeral is rejected on every beat and the engine narrates, visibly; a good completion is stamped `llm` + model under the ENGINE's headline | principle 2 |
+| S2-31 | no fact on any surface names a model in `computed_by`; no period ends after its `as_of` | principle 2 |
+| S2-32 | `/experiments`, `/experiment/{id}`, `/feed` (cards with the edition's backfilled flag, the scoreboard as of the edition) over HTTP; 404 with no registry — never fixtures; guarded 400/404 | done-when |
+| S2-25b | a card served for a PAST edition shows only what was known then (state, score, trial count as of that edition) | point-in-time on the served surface |
+| S2-33 | the P0 path is unchanged when the source is `mock` | no regression |
+
+### S2 quant-audit regressions (same file, rows `test_a*`)
+
+A `dev-quant-auditor` pass on the S2 loop (`docs/handbacks/PF-S2.md` §4) confirmed the numbers reproduce from
+the raw warehouse and found sixteen items; every CONFIRMED one is fixed and pinned:
+
+| Row | Finding | Pinned |
+|---|---|---|
+| A1 | the feed would have refused (500) the first FORWARD edition of an experiment opened in a backfill — the card's `backfilled` was the opening edition's forever. Now per news edition, with `opened_backfilled` alongside | `test_a1_*` |
+| A2 | chain hashes embedded timestamps inside JSON (`frozen_at`, facts' `computed_at`, story `at`), so two builds did not chain identically. Now content-only | S2-25 (rebuilt: two builds an hour apart, identical hashes) |
+| A4 | a wide per-period band could shelter a losing version forever; a rule that stops firing was tracked forever. Frozen CUMULATIVE rules in every version's `spec`: cluster-robust t below −z on ≥10 resolved trades over ≥5 signal days buries; 4 consecutive void periods bury (`rule_stopped_firing`) | `test_a4_*`, `test_a4b_*` |
+| A5 | the trailing window is seen by every variant (selection), and the card presented it as independent confirmation. Now a `trailing_looks` fact and a sentence on the card say it is a persistence check | S2-12 (fact present), narrative text |
+| A6 | outcomes copied the frozen `rule_version`; a changed grader could judge an old version silently. Now the grader's own version is stamped (`grader_version`) and a mismatch REFUSES to grade | `test_a6_*` |
+| A7 | the book could close a trade through a glitch / corporate-action bar (a fake −50%) that the evidence convention treats as NaN. Now such a trade is `unresolved`: listed, never graded | `test_a7_*` |
+| A8 | a model body with a banned word passed the narrate contract and broke the card at read time (500). Now lint at the source; engine fallback | `test_a8_*` |
+| A9 | the S1 subject fact could carry a stock name onto the public card. Now a fact whose value names a constituent of the book is withheld on the card | `test_a9_*` |
+| A10 | the placebo / baseline pool was not context-conditioned (incomplete P1 port) and the edge mixed raw with winsorised means. Now the pool is the rule's own kind of day; one convention | `test_a10_*` |
+| A11 | `improved` was never computed. Now: a successor version's forward mean vs its predecessor's, once graded; null until then | S2-28 |
+| A12 | the family-wise n during learning was the running trial index. Now the idea's whole trial count after the round | `test_a12_*` |
+| A13 | literal numerals in `why` / `what_we_kept` (engine text fields). Now digit-free; the counts are facts | S2-12/S2-17 |
+| A14 | `signals_seen` missed a signal on the seal day. Now seen, not taken | `test_a14_*` |
 
 ## Pathfinder P2 — the frontend (`kanida-app`)
 

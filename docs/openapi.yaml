@@ -32,10 +32,14 @@ paths:
       tags:
       - Pathfinder
       summary: One experiment's full journey
-      description: 'The whole story for a single experiment: the question, the deterministic rulebook,
-        the six story beats, every supporting fact, the evidence bundles, the virtual book with its **losers-first**
-        ledger, the append-only L1–L3 change-log (what changed → why → evidence → previous version → new
-        version → did it improve), and — when the experiment died — its published post-mortem.'
+      description: '**S2 (`KANIDA_PATHFINDER_SOURCE=research`)**: the in-app `ExperimentRecord` — versions
+        (v1, v2… with what changed, why, the trial count and the expectation FROZEN when each opened),
+        every counted trial, every period with its frozen grading rule, forward result, expected-vs-actual
+        and learning, the change-log, the post-mortem when buried, and the graduation PROPOSAL when one
+        exists (human-gated). Constituent names are withheld pending RA review.
+
+
+        Other sources serve the P0/P1 `ExperimentDetail`.'
       operationId: get_experiment_api_pathfinder_experiment__experiment_id__get
       parameters:
       - name: experiment_id
@@ -50,7 +54,10 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ExperimentDetail'
+                anyOf:
+                - $ref: '#/components/schemas/ExperimentRecord'
+                - $ref: '#/components/schemas/ExperimentDetail'
+                title: Response Get Experiment Api Pathfinder Experiment  Experiment Id  Get
         '400':
           description: Malformed request.
           content:
@@ -83,9 +90,14 @@ paths:
       description: 'Every experiment across the lifecycle. Dead experiments are listed, not hidden.
 
 
-        Ordering is **losers first**: struggling and dead experiments lead, promoted ones come last. `historical_return`
-        and `virtual_return` are each a performance block that structurally pairs expectancy with drawdown;
-        `sample_flag` is derived from `n` (`greyed` below 20, `flagged` below 50).'
+        **S2 (`KANIDA_PATHFINDER_SOURCE=research`)** serves the experiment REGISTRY as `ExperimentsResponse`:
+        every experiment''s PUBLIC card (theme + evidence + the seven-line story — never a constituent,
+        an entry, a target or a stop), the S1 findings the gate declined with their trial counts (`not_opened`),
+        and the running experiment scoreboard (Right · Wrong · Inconclusive · n over graded periods, void
+        apart, forward / backfilled split). Losers first: buried, then testing, proposed last.
+
+
+        Other sources serve the P0/P1 `ExperimentListResponse`.'
       operationId: get_experiments_api_pathfinder_experiments_get
       parameters:
       - name: status
@@ -95,16 +107,19 @@ paths:
           anyOf:
           - $ref: '#/components/schemas/ExperimentStatus'
           - type: 'null'
-          description: Filter by lifecycle status. Omit for all.
+          description: 'P0/P1 only: filter by lifecycle status. Omit for all.'
           title: Status
-        description: Filter by lifecycle status. Omit for all.
+        description: 'P0/P1 only: filter by lifecycle status. Omit for all.'
       responses:
         '200':
           description: Successful Response
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ExperimentListResponse'
+                anyOf:
+                - $ref: '#/components/schemas/ExperimentsResponse'
+                - $ref: '#/components/schemas/ExperimentListResponse'
+                title: Response Get Experiments Api Pathfinder Experiments Get
         '400':
           description: Malformed request.
           content:
@@ -274,6 +289,33 @@ components:
       - llm
       - human
       title: Author
+    BasketView:
+      properties:
+        description:
+          type: string
+          title: Description
+        constituents_visibility:
+          type: string
+          enum:
+          - withheld_pending_ra_review
+          - in_app_ra_reviewed
+          title: Constituents Visibility
+        ra_review_state:
+          type: string
+          title: Ra Review State
+        constituents:
+          items:
+            type: string
+          type: array
+          title: Constituents
+      additionalProperties: false
+      type: object
+      required:
+      - description
+      - constituents_visibility
+      - ra_review_state
+      title: BasketView
+      description: Constituents only inside the app under RA review (addendum 6).
     ChangeLogEntry:
       properties:
         seq:
@@ -354,6 +396,17 @@ components:
       description: 'The governance record. Every change: what → why → evidence → previous version
 
         → new version → did performance improve. Also customer-facing copy.'
+    ComparisonCategory:
+      type: string
+      enum:
+      - stronger
+      - weaker
+      - inconclusive
+      - failed
+      - void
+      - pending
+      title: ComparisonCategory
+      description: Expected vs actual, computed by the grader; the narrator may only repeat it.
     Confidence:
       type: string
       enum:
@@ -388,6 +441,8 @@ components:
       - data_quality
       - regime_dependent_and_regime_gone
       - superseded_by_newer_version
+      - revisions_exhausted
+      - rule_stopped_firing
       title: DeathCause
     Decision:
       type: string
@@ -499,6 +554,283 @@ components:
       description: 'S1 (spec addendum 7): where the evidence comes from. Stated on every fact and every
 
         finding so a reader never mistakes a whole-market base rate for a stock''s own history.'
+    Expectation:
+      properties:
+        frozen_at:
+          type: string
+          format: date-time
+          title: Frozen At
+        seal:
+          type: string
+          format: date
+          title: Seal
+          description: Data seal the expectation was computed on. No later bar was visible.
+        metric:
+          type: string
+          title: Metric
+        expectancy_net_pct:
+          type: number
+          title: Expectancy Net Pct
+          description: Mean net P&L per trade, winsorised, net of costs + slippage.
+        expectancy_2x_slippage_net_pct:
+          type: number
+          title: Expectancy 2X Slippage Net Pct
+        hit_rate_pct:
+          type: number
+          maximum: 100.0
+          minimum: 0.0
+          title: Hit Rate Pct
+          description: Supporting only — never the headline.
+        median_net_pct:
+          type: number
+          title: Median Net Pct
+        n:
+          type: integer
+          minimum: 1.0
+          title: N
+        signal_days:
+          type: integer
+          minimum: 1.0
+          title: Signal Days
+        period:
+          $ref: '#/components/schemas/DateRange'
+        trailing_expectancy_net_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Trailing Expectancy Net Pct
+          description: The same on the trailing validation window alone.
+        trailing_n:
+          type: integer
+          minimum: 0.0
+          title: Trailing N
+          default: 0
+        trailing_period:
+          anyOf:
+          - $ref: '#/components/schemas/DateRange'
+          - type: 'null'
+        discovery_expectancy_2x_slippage_net_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Discovery Expectancy 2X Slippage Net Pct
+          description: On the window ending at discovery_end alone, at twice the slippage (advisory).
+        discovery_n:
+          type: integer
+          minimum: 0.0
+          title: Discovery N
+          default: 0
+        edge_vs_baseline_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Edge Vs Baseline Pct
+        baseline_n:
+          type: integer
+          minimum: 0.0
+          title: Baseline N
+          default: 0
+        placebo_p:
+          anyOf:
+          - type: number
+            maximum: 1.0
+            minimum: 0.0
+          - type: 'null'
+          title: Placebo P
+        placebo_draws:
+          type: integer
+          minimum: 0.0
+          title: Placebo Draws
+          default: 0
+        cluster_t:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Cluster T
+        hurdle_pct:
+          type: number
+          minimum: 0.0
+          title: Hurdle Pct
+        computed_by:
+          type: string
+          title: Computed By
+        sample_flag:
+          $ref: '#/components/schemas/SampleFlag'
+          default: unknown
+      additionalProperties: false
+      type: object
+      required:
+      - frozen_at
+      - seal
+      - metric
+      - expectancy_net_pct
+      - expectancy_2x_slippage_net_pct
+      - hit_rate_pct
+      - median_net_pct
+      - n
+      - signal_days
+      - period
+      - hurdle_pct
+      - computed_by
+      title: Expectation
+      description: 'The historical expectation, recorded UP FRONT and never revised (spec: memory + versions).'
+    ExpectedVsActual:
+      properties:
+        expected_net_pct:
+          type: number
+          title: Expected Net Pct
+        actual_net_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Actual Net Pct
+        gap_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Gap Pct
+        category:
+          $ref: '#/components/schemas/ComparisonCategory'
+        statement:
+          type: string
+          title: Statement
+          description: Digit-free engine sentence with {{fact:…}} tokens.
+        fact_refs:
+          items:
+            type: string
+          type: array
+          title: Fact Refs
+      additionalProperties: false
+      type: object
+      required:
+      - expected_net_pct
+      - category
+      - statement
+      title: ExpectedVsActual
+    ExperimentBeat:
+      type: string
+      enum:
+      - noticed
+      - researched
+      - history_showed
+      - decided
+      - happened
+      - learned
+      - next
+      title: ExperimentBeat
+      description: The seven-line customer narrative (docs/sessions/PATHFINDER.md), in order.
+    ExperimentCard:
+      properties:
+        id:
+          type: string
+          pattern: ^exp_[a-z0-9_]+$
+          title: Id
+        opened_edition:
+          type: string
+          format: date
+          title: Opened Edition
+        news_edition:
+          type: string
+          format: date
+          title: News Edition
+          description: The edition this card's story was written on.
+        state:
+          $ref: '#/components/schemas/ExperimentState'
+        family:
+          type: string
+          title: Family
+        theme:
+          type: string
+          title: Theme
+          description: Sector / theme in words. Never a name, never an instruction.
+        source_finding_id:
+          type: string
+          pattern: ^fnd_[a-z0-9_]+$
+          title: Source Finding Id
+        evidence:
+          $ref: '#/components/schemas/FindingProvenance'
+        story:
+          items:
+            $ref: '#/components/schemas/ExperimentStoryLine'
+          type: array
+          maxItems: 7
+          minItems: 7
+          title: Story
+        facts:
+          items:
+            $ref: '#/components/schemas/Fact'
+          type: array
+          minItems: 1
+          title: Facts
+        versions_count:
+          type: integer
+          minimum: 1.0
+          title: Versions Count
+        trials_total:
+          type: integer
+          minimum: 1.0
+          title: Trials Total
+          description: Every variant ever evaluated for this experiment.
+        periods_graded:
+          type: integer
+          minimum: 0.0
+          title: Periods Graded
+        score:
+          $ref: '#/components/schemas/ExperimentScoreCounts'
+        latest_comparison:
+          $ref: '#/components/schemas/ComparisonCategory'
+        backfilled:
+          type: boolean
+          title: Backfilled
+          description: 'Whether the edition this card was written on (`news_edition`) was generated after
+            its session date. Per edition, like every S1 card (audit finding 1): a card can be forward
+            while the experiment was opened in a backfill.'
+        opened_backfilled:
+          type: boolean
+          title: Opened Backfilled
+          description: Whether the experiment's OPENING edition was a backfill.
+        record_label:
+          type: string
+          title: Record Label
+        llm_provider:
+          type: string
+          title: Llm Provider
+          default: none
+        disclosure:
+          type: string
+          title: Disclosure
+          default: Research experiment with virtual money — research validation, not advice and not a
+            recommendation. Nothing here tells you when to enter, exit, or where to place a stop; constituent
+            names appear only inside the app after Research Analyst review. Kanida never places an order
+            on your behalf.
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - opened_edition
+      - news_edition
+      - state
+      - family
+      - theme
+      - source_finding_id
+      - evidence
+      - story
+      - facts
+      - versions_count
+      - trials_total
+      - periods_graded
+      - score
+      - latest_comparison
+      - backfilled
+      - opened_backfilled
+      - record_label
+      title: ExperimentCard
+      description: 'The PUBLIC experiment card (spec addendum 6): theme + evidence + the seven-line story.
+        It has
+
+        no field that could carry a constituent list, an entry, a target, a stop or an execution —
+
+        that is enforced by this schema, not by convention.'
     ExperimentDetail:
       properties:
         id:
@@ -635,6 +967,73 @@ components:
       - facts
       title: ExperimentDetail
       description: The full journey — this is the screen the whole product is about.
+    ExperimentGradingRule:
+      properties:
+        kind:
+          type: string
+          const: experiment_edge
+          title: Kind
+        horizon_sessions:
+          type: integer
+          minimum: 1.0
+          title: Horizon Sessions
+        hurdle_pct:
+          type: number
+          minimum: 0.0
+          title: Hurdle Pct
+        min_trades:
+          type: integer
+          minimum: 1.0
+          title: Min Trades
+        metric:
+          type: string
+          title: Metric
+        right:
+          type: string
+          title: Right
+        wrong:
+          type: string
+          title: Wrong
+        inconclusive:
+          type: string
+          title: Inconclusive
+        void:
+          type: string
+          title: Void
+        frozen_at:
+          type: string
+          format: date-time
+          title: Frozen At
+        rule_version:
+          type: string
+          title: Rule Version
+        spec:
+          additionalProperties:
+            anyOf:
+            - type: string
+            - type: number
+            - type: integer
+            - items:
+                type: string
+              type: array
+          type: object
+          title: Spec
+      additionalProperties: false
+      type: object
+      required:
+      - kind
+      - horizon_sessions
+      - hurdle_pct
+      - min_trades
+      - metric
+      - right
+      - wrong
+      - inconclusive
+      - void
+      - frozen_at
+      - rule_version
+      title: ExperimentGradingRule
+      description: FROZEN when the version is created; read back unchanged when a period completes.
     ExperimentListResponse:
       properties:
         as_of:
@@ -667,6 +1066,292 @@ components:
       - count
       - items
       title: ExperimentListResponse
+    ExperimentRecord:
+      properties:
+        id:
+          type: string
+          pattern: ^exp_[a-z0-9_]+$
+          title: Id
+        opened_edition:
+          type: string
+          format: date
+          title: Opened Edition
+        news_edition:
+          type: string
+          format: date
+          title: News Edition
+          description: The edition this card's story was written on.
+        state:
+          $ref: '#/components/schemas/ExperimentState'
+        family:
+          type: string
+          title: Family
+        theme:
+          type: string
+          title: Theme
+          description: Sector / theme in words. Never a name, never an instruction.
+        source_finding_id:
+          type: string
+          pattern: ^fnd_[a-z0-9_]+$
+          title: Source Finding Id
+        evidence:
+          $ref: '#/components/schemas/FindingProvenance'
+        story:
+          items:
+            $ref: '#/components/schemas/ExperimentStoryLine'
+          type: array
+          maxItems: 7
+          minItems: 7
+          title: Story
+        facts:
+          items:
+            $ref: '#/components/schemas/Fact'
+          type: array
+          minItems: 1
+          title: Facts
+        versions_count:
+          type: integer
+          minimum: 1.0
+          title: Versions Count
+        trials_total:
+          type: integer
+          minimum: 1.0
+          title: Trials Total
+          description: Every variant ever evaluated for this experiment.
+        periods_graded:
+          type: integer
+          minimum: 0.0
+          title: Periods Graded
+        score:
+          $ref: '#/components/schemas/ExperimentScoreCounts'
+        latest_comparison:
+          $ref: '#/components/schemas/ComparisonCategory'
+        backfilled:
+          type: boolean
+          title: Backfilled
+          description: 'Whether the edition this card was written on (`news_edition`) was generated after
+            its session date. Per edition, like every S1 card (audit finding 1): a card can be forward
+            while the experiment was opened in a backfill.'
+        opened_backfilled:
+          type: boolean
+          title: Opened Backfilled
+          description: Whether the experiment's OPENING edition was a backfill.
+        record_label:
+          type: string
+          title: Record Label
+        llm_provider:
+          type: string
+          title: Llm Provider
+          default: none
+        disclosure:
+          type: string
+          title: Disclosure
+          default: Research experiment with virtual money — research validation, not advice and not a
+            recommendation. Nothing here tells you when to enter, exit, or where to place a stop; constituent
+            names appear only inside the app after Research Analyst review. Kanida never places an order
+            on your behalf.
+        question:
+          type: string
+          title: Question
+        current_rule_text:
+          type: string
+          title: Current Rule Text
+        direction:
+          $ref: '#/components/schemas/Direction'
+        versions:
+          items:
+            $ref: '#/components/schemas/VersionView'
+          type: array
+          minItems: 1
+          title: Versions
+        trials:
+          items:
+            $ref: '#/components/schemas/TrialView'
+          type: array
+          title: Trials
+        basket:
+          $ref: '#/components/schemas/BasketView'
+        worth_testing_gates:
+          items:
+            $ref: '#/components/schemas/GateView'
+          type: array
+          title: Worth Testing Gates
+        change_log:
+          items:
+            $ref: '#/components/schemas/ChangeLogEntry'
+          type: array
+          title: Change Log
+        post_mortem:
+          anyOf:
+          - $ref: '#/components/schemas/PostMortem'
+          - type: 'null'
+        proposal:
+          anyOf:
+          - $ref: '#/components/schemas/ProposalView'
+          - type: 'null'
+        constitution_version:
+          type: string
+          title: Constitution Version
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - opened_edition
+      - news_edition
+      - state
+      - family
+      - theme
+      - source_finding_id
+      - evidence
+      - story
+      - facts
+      - versions_count
+      - trials_total
+      - periods_graded
+      - score
+      - latest_comparison
+      - backfilled
+      - opened_backfilled
+      - record_label
+      - question
+      - current_rule_text
+      - direction
+      - versions
+      - trials
+      - basket
+      - worth_testing_gates
+      - constitution_version
+      title: ExperimentRecord
+      description: 'The in-app record: versions, trials, periods, expected vs actual, learning, proposal,
+        post-mortem.'
+    ExperimentScoreCounts:
+      properties:
+        right:
+          type: integer
+          minimum: 0.0
+          title: Right
+        wrong:
+          type: integer
+          minimum: 0.0
+          title: Wrong
+        inconclusive:
+          type: integer
+          minimum: 0.0
+          title: Inconclusive
+        n:
+          type: integer
+          minimum: 0.0
+          title: N
+        sample_flag:
+          $ref: '#/components/schemas/SampleFlag'
+          default: unknown
+        void:
+          type: integer
+          minimum: 0.0
+          title: Void
+          default: 0
+      additionalProperties: false
+      type: object
+      required:
+      - right
+      - wrong
+      - inconclusive
+      - n
+      title: ExperimentScoreCounts
+    ExperimentScoreboard:
+      properties:
+        right:
+          type: integer
+          minimum: 0.0
+          title: Right
+        wrong:
+          type: integer
+          minimum: 0.0
+          title: Wrong
+        inconclusive:
+          type: integer
+          minimum: 0.0
+          title: Inconclusive
+        n:
+          type: integer
+          minimum: 0.0
+          title: N
+        void:
+          type: integer
+          minimum: 0.0
+          title: Void
+          default: 0
+        pending:
+          type: integer
+          minimum: 0.0
+          title: Pending
+          description: Open periods as of the date.
+        forward:
+          $ref: '#/components/schemas/ScoreCounts'
+        backfilled:
+          $ref: '#/components/schemas/ScoreCounts'
+        by_family:
+          additionalProperties:
+            $ref: '#/components/schemas/ScoreCounts'
+          type: object
+          title: By Family
+        experiments_testing:
+          type: integer
+          minimum: 0.0
+          title: Experiments Testing
+        experiments_buried:
+          type: integer
+          minimum: 0.0
+          title: Experiments Buried
+        experiments_proposed:
+          type: integer
+          minimum: 0.0
+          title: Experiments Proposed
+        candidates_not_opened:
+          type: integer
+          minimum: 0.0
+          title: Candidates Not Opened
+        trials_total:
+          type: integer
+          minimum: 0.0
+          title: Trials Total
+        as_of:
+          type: string
+          format: date
+          title: As Of
+        record_label:
+          type: string
+          title: Record Label
+        sample_flag:
+          $ref: '#/components/schemas/SampleFlag'
+          default: unknown
+      additionalProperties: false
+      type: object
+      required:
+      - right
+      - wrong
+      - inconclusive
+      - n
+      - pending
+      - forward
+      - backfilled
+      - experiments_testing
+      - experiments_buried
+      - experiments_proposed
+      - candidates_not_opened
+      - trials_total
+      - as_of
+      - record_label
+      title: ExperimentScoreboard
+      description: Right · Wrong · Inconclusive · n over graded PERIODS; void apart; forward / backfilled
+        split.
+    ExperimentState:
+      type: string
+      enum:
+      - testing
+      - buried
+      - proposed
+      title: ExperimentState
     ExperimentStatus:
       type: string
       enum:
@@ -678,6 +1363,47 @@ components:
       - died
       title: ExperimentStatus
       description: The Pathfinder lifecycle. `died` is a first-class, published outcome.
+    ExperimentStoryLine:
+      properties:
+        headline:
+          type: string
+          title: Headline
+        body:
+          type: string
+          title: Body
+        produced_by:
+          $ref: '#/components/schemas/Author'
+        model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model
+        prompt_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Prompt Version
+        at:
+          type: string
+          format: date-time
+          title: At
+        fact_refs:
+          items:
+            type: string
+          type: array
+          title: Fact Refs
+        beat:
+          $ref: '#/components/schemas/ExperimentBeat'
+      additionalProperties: false
+      type: object
+      required:
+      - headline
+      - body
+      - produced_by
+      - at
+      - beat
+      title: ExperimentStoryLine
+      description: One of the seven beats. Same digit-free contract as every `Narrative`.
     ExperimentSummary:
       properties:
         id:
@@ -745,6 +1471,53 @@ components:
       - as_of
       title: ExperimentSummary
       description: List-row shape. The P0 brief's field list, made honest.
+    ExperimentsResponse:
+      properties:
+        as_of:
+          type: string
+          format: date
+          title: As Of
+        count:
+          type: integer
+          minimum: 0.0
+          title: Count
+        items:
+          items:
+            $ref: '#/components/schemas/ExperimentCard'
+          type: array
+          title: Items
+        not_opened:
+          items:
+            $ref: '#/components/schemas/RejectedCandidate'
+          type: array
+          title: Not Opened
+        scoreboard:
+          $ref: '#/components/schemas/ExperimentScoreboard'
+        llm_provider:
+          type: string
+          title: Llm Provider
+          default: none
+        engine_version:
+          type: string
+          title: Engine Version
+        disclosure:
+          type: string
+          title: Disclosure
+          default: Research experiment with virtual money — research validation, not advice and not a
+            recommendation. Nothing here tells you when to enter, exit, or where to place a stop; constituent
+            names appear only inside the app after Research Analyst review. Kanida never places an order
+            on your behalf.
+      additionalProperties: false
+      type: object
+      required:
+      - as_of
+      - count
+      - items
+      - scoreboard
+      - engine_version
+      title: ExperimentsResponse
+      description: 'GET /api/pathfinder/experiments (S2). Losers first: buried, then testing, proposed
+        last.'
     Fact:
       properties:
         id:
@@ -867,6 +1640,18 @@ components:
           type: string
           title: Record Label
           description: The label this edition is published under.
+        experiment_cards:
+          items:
+            $ref: '#/components/schemas/ExperimentCard'
+          type: array
+          title: Experiment Cards
+          description: 'S2: experiments with news on this edition, in their public form.'
+        experiments_scoreboard:
+          anyOf:
+          - $ref: '#/components/schemas/ExperimentScoreboard'
+          - type: 'null'
+          description: 'S2: the running experiment scoreboard as of this edition (independent n; void
+            excluded).'
       additionalProperties: false
       type: object
       required:
@@ -1067,6 +1852,123 @@ components:
       description: 'Spec addendum 7 — on EVERY card: n, period, regime, comparison group, cost hurdle,
 
         and the evidence level.'
+    ForwardResult:
+      properties:
+        as_of:
+          type: string
+          format: date
+          title: As Of
+        label:
+          type: string
+          title: Label
+          default: Virtual money · Forward-tracked · Not traded · Not PaRRVA-verified
+        capital_inr:
+          type: number
+          exclusiveMinimum: 0.0
+          title: Capital Inr
+        n_closed:
+          type: integer
+          minimum: 0.0
+          title: N Closed
+        n_open:
+          type: integer
+          minimum: 0.0
+          title: N Open
+        signal_days:
+          type: integer
+          minimum: 0.0
+          title: Signal Days
+        signals_seen:
+          type: integer
+          minimum: 0.0
+          title: Signals Seen
+        signals_taken:
+          type: integer
+          minimum: 0.0
+          title: Signals Taken
+        mean_net_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Mean Net Pct
+          description: Realised mean net P&L per closed RESOLVED trade.
+        hit_rate_pct:
+          anyOf:
+          - type: number
+            maximum: 100.0
+            minimum: 0.0
+          - type: 'null'
+          title: Hit Rate Pct
+        book_return_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Book Return Pct
+        max_drawdown_pct:
+          type: number
+          minimum: 0.0
+          title: Max Drawdown Pct
+        current_drawdown_pct:
+          type: number
+          minimum: 0.0
+          title: Current Drawdown Pct
+        n_unresolved:
+          type: integer
+          minimum: 0.0
+          title: N Unresolved
+          description: Closed trades excluded from the verdict because a glitch / corporate-action bar
+            sat inside their window (audit finding 7) — listed, never graded, as the evidence convention
+            treats the same case.
+          default: 0
+        sample_flag:
+          $ref: '#/components/schemas/SampleFlag'
+          default: unknown
+      additionalProperties: false
+      type: object
+      required:
+      - as_of
+      - capital_inr
+      - n_closed
+      - n_open
+      - signal_days
+      - signals_seen
+      - signals_taken
+      - max_drawdown_pct
+      - current_drawdown_pct
+      title: ForwardResult
+      description: What the virtual book actually did, marked to the seal. Return always with its drawdown.
+    GateView:
+      properties:
+        name:
+          type: string
+          title: Name
+        passed:
+          type: boolean
+          title: Passed
+        value:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Value
+        bar:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Bar
+        statement:
+          type: string
+          title: Statement
+        fatal:
+          type: boolean
+          title: Fatal
+          default: true
+      additionalProperties: false
+      type: object
+      required:
+      - name
+      - passed
+      - statement
+      title: GateView
     GradingKind:
       type: string
       enum:
@@ -1285,6 +2187,55 @@ components:
       - L4
       title: LearningLevel
       description: The 4-level learning hierarchy. L4 is human-controlled.
+    LearningView:
+      properties:
+        statement:
+          type: string
+          title: Statement
+          description: Digit-free, {{fact:…}} tokens only.
+        fact_refs:
+          items:
+            type: string
+          type: array
+          title: Fact Refs
+        level:
+          $ref: '#/components/schemas/LearningLevel'
+        trials_evaluated:
+          type: integer
+          minimum: 0.0
+          title: Trials Evaluated
+          description: Candidate revisions evaluated after this period — every one counted.
+        trials_passing:
+          type: integer
+          minimum: 0.0
+          title: Trials Passing
+        adopted_rule:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Adopted Rule
+          description: The next version's rule text, when a revision was adopted.
+        buried:
+          type: boolean
+          title: Buried
+          default: false
+        next_action:
+          type: string
+          enum:
+          - continue
+          - revise
+          - bury
+          - propose
+          title: Next Action
+      additionalProperties: false
+      type: object
+      required:
+      - statement
+      - level
+      - trials_evaluated
+      - trials_passing
+      - next_action
+      title: LearningView
     LearningsResponse:
       properties:
         as_of:
@@ -1668,6 +2619,101 @@ components:
       description: 'L-1 + L-2. Expectancy is required and first; every return is structurally
 
         paired with a drawdown. There is NO target/projection field, by design.'
+    PeriodView:
+      properties:
+        period_no:
+          type: integer
+          minimum: 1.0
+          title: Period No
+        start:
+          anyOf:
+          - type: string
+            format: date
+          - type: 'null'
+          title: Start
+          description: First signal session (null until the seal reaches it).
+        sessions:
+          type: integer
+          minimum: 1.0
+          title: Sessions
+        end:
+          anyOf:
+          - type: string
+            format: date
+          - type: 'null'
+          title: End
+        due:
+          anyOf:
+          - type: string
+            format: date
+          - type: 'null'
+          title: Due
+          description: Session on which the last possible trade closes.
+        status:
+          type: string
+          enum:
+          - pending
+          - open
+          - graded
+          - void
+          title: Status
+        forward:
+          $ref: '#/components/schemas/ForwardResult'
+        grading_rule:
+          $ref: '#/components/schemas/ExperimentGradingRule'
+        verdict:
+          anyOf:
+          - $ref: '#/components/schemas/Verdict'
+          - type: 'null'
+        grader_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Grader Version
+          description: The evaluator that actually judged the period (audit finding 6). The loop refuses
+            to grade under a grader whose version differs from the frozen rule's; this field is the receipt.
+        graded_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Graded At
+        data_as_of:
+          anyOf:
+          - type: string
+            format: date
+          - type: 'null'
+          title: Data As Of
+        realized_facts:
+          items:
+            $ref: '#/components/schemas/Fact'
+          type: array
+          title: Realized Facts
+        expected_vs_actual:
+          anyOf:
+          - $ref: '#/components/schemas/ExpectedVsActual'
+          - type: 'null'
+        learning:
+          anyOf:
+          - $ref: '#/components/schemas/LearningView'
+          - type: 'null'
+        backfilled:
+          type: boolean
+          title: Backfilled
+        record:
+          type: string
+          title: Record
+          default: simulated backfill — generated after the fact; not a forward track record
+      additionalProperties: false
+      type: object
+      required:
+      - period_no
+      - sessions
+      - status
+      - forward
+      - grading_rule
+      - backfilled
+      title: PeriodView
     PostMortem:
       properties:
         died_at:
@@ -1710,6 +2756,57 @@ components:
       - decided_by
       title: PostMortem
       description: Mandatory when status == died. Published — the graveyard is a feature.
+    ProposalView:
+      properties:
+        proposed_edition:
+          type: string
+          format: date
+          title: Proposed Edition
+        version:
+          type: integer
+          minimum: 1.0
+          title: Version
+        target_agent:
+          type: string
+          enum:
+          - trader
+          - investor
+          title: Target Agent
+        status:
+          type: string
+          enum:
+          - proposed_awaiting_human
+          - blocked_unsigned_constitution
+          title: Status
+        gates:
+          items:
+            $ref: '#/components/schemas/GateView'
+          type: array
+          title: Gates
+        incumbent:
+          type: string
+          title: Incumbent
+        decided_by:
+          type: string
+          const: engine
+          title: Decided By
+          default: engine
+        human_gate:
+          type: string
+          title: Human Gate
+          default: Promotion is a human act on a signed Constitution through the champion/challenger gate;
+            this record proposes, it does not promote.
+      additionalProperties: false
+      type: object
+      required:
+      - proposed_edition
+      - version
+      - target_agent
+      - status
+      - gates
+      - incumbent
+      title: ProposalView
+      description: A graduation PROPOSAL. Human-gated; never an automatic switch.
     Provenance:
       properties:
         data_source:
@@ -1762,6 +2859,58 @@ components:
       - computed_at
       title: Provenance
       description: 'L-4 + L-5: where a number came from, and the `as_of` it was computed at.'
+    RejectedCandidate:
+      properties:
+        finding_id:
+          type: string
+          pattern: ^fnd_[a-z0-9_]+$
+          title: Finding Id
+        edition_date:
+          type: string
+          format: date
+          title: Edition Date
+        template_id:
+          type: string
+          title: Template Id
+        family:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Family
+        trials_evaluated:
+          type: integer
+          minimum: 0.0
+          title: Trials Evaluated
+        reason:
+          type: string
+          title: Reason
+        best_rule_text:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Best Rule Text
+          description: The variant that came closest to clearing (fewest failed gates).
+        best_expectancy_net_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Best Expectancy Net Pct
+        best_failed_gates:
+          items:
+            type: string
+          type: array
+          title: Best Failed Gates
+          description: Its failed fatal gates as 'name=value vs bar'.
+      additionalProperties: false
+      type: object
+      required:
+      - finding_id
+      - edition_date
+      - template_id
+      - trials_evaluated
+      - reason
+      title: RejectedCandidate
+      description: An S1 finding the gate did NOT open — on the record with its trial count and reason.
     Rulebook:
       properties:
         universe:
@@ -2047,6 +3196,62 @@ components:
       - what_matters_now
       - discovery
       title: Tier
+    TrialView:
+      properties:
+        trial_no:
+          type: integer
+          minimum: 1.0
+          title: Trial No
+        context:
+          type: string
+          title: Context
+          description: '''opening'' or ''after v<k> period <p>''.'
+        signature:
+          type: string
+          title: Signature
+        rule_text:
+          type: string
+          title: Rule Text
+        passed:
+          type: boolean
+          title: Passed
+        adopted:
+          type: boolean
+          title: Adopted
+        reason:
+          type: string
+          title: Reason
+        expectancy_net_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Expectancy Net Pct
+        trailing_expectancy_net_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Trailing Expectancy Net Pct
+        n:
+          type: integer
+          minimum: 0.0
+          title: N
+          default: 0
+        gates:
+          items:
+            $ref: '#/components/schemas/GateView'
+          type: array
+          title: Gates
+      additionalProperties: false
+      type: object
+      required:
+      - trial_no
+      - context
+      - signature
+      - rule_text
+      - passed
+      - adopted
+      - reason
+      title: TrialView
     Trigger:
       properties:
         id:
@@ -2187,6 +3392,85 @@ components:
       - inconclusive
       - void
       title: Verdict
+    VersionView:
+      properties:
+        version:
+          type: integer
+          minimum: 1.0
+          title: Version
+        created_edition:
+          type: string
+          format: date
+          title: Created Edition
+        rule_text:
+          type: string
+          title: Rule Text
+          description: Engine rule definition (may carry digits — a definition, not a claim).
+        conditions:
+          items:
+            type: string
+          type: array
+          title: Conditions
+          description: Condition labels the rule adds, in order.
+        horizon_sessions:
+          type: integer
+          minimum: 1.0
+          title: Horizon Sessions
+        change:
+          type: string
+          title: Change
+          description: What changed from the previous version ('initial' for v1).
+        why:
+          type: string
+          title: Why
+        level:
+          $ref: '#/components/schemas/LearningLevel'
+        validation:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Validation
+        trials_for_this_version:
+          type: integer
+          minimum: 1.0
+          title: Trials For This Version
+          description: Variants evaluated to arrive at this version.
+        expectation:
+          $ref: '#/components/schemas/Expectation'
+        periods:
+          items:
+            $ref: '#/components/schemas/PeriodView'
+          type: array
+          title: Periods
+        status:
+          type: string
+          enum:
+          - open
+          - superseded
+          - buried
+          title: Status
+        backfilled:
+          type: boolean
+          title: Backfilled
+      additionalProperties: false
+      type: object
+      required:
+      - version
+      - created_edition
+      - rule_text
+      - conditions
+      - horizon_sessions
+      - change
+      - why
+      - level
+      - trials_for_this_version
+      - expectation
+      - periods
+      - status
+      - backfilled
+      title: VersionView
+      description: '`#id -> v1 -> v2 -> v3`: what changed, why, how many trials, the frozen expectation,
+        the periods.'
     VirtualBook:
       properties:
         metrics:

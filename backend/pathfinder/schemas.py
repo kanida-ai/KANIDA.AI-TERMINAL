@@ -175,6 +175,12 @@ class DeathCause(str, Enum):
     data_quality = "data_quality"
     regime_dependent_and_regime_gone = "regime_dependent_and_regime_gone"
     superseded_by_newer_version = "superseded_by_newer_version"
+    #: Added in S2 (spec addendum 3): the retirement rule. An idea that would need a version
+    #: beyond the founder's maximum is buried, whatever its last period said.
+    revisions_exhausted = "revisions_exhausted"
+    #: Added in S2 (audit finding 4): the rule went N consecutive periods without a single closed
+    #: trade — the condition it needs no longer occurs; tracking it forever would be a pretence.
+    rule_stopped_firing = "rule_stopped_firing"
 
 
 class EvidenceKind(str, Enum):
@@ -1148,9 +1154,19 @@ class FeedResponse(BaseModel):
     disclosure: str = RESEARCH_DISCLOSURE
     backfilled: bool = Field(..., description="This edition was generated after its date: a simulated backfill.")
     record_label: str = Field(..., description="The label this edition is published under.")
+    #: S2 — experiment cards with news on this edition (opened, period graded, revised, buried,
+    #: proposed). Public form only: theme + evidence, never a constituent list.
+    experiment_cards: list["ExperimentCard"] = Field(
+        default_factory=list, description="S2: experiments with news on this edition, in their public form.")
+    experiments_scoreboard: Optional["ExperimentScoreboard"] = Field(
+        None, description="S2: the running experiment scoreboard as of this edition (independent n; void excluded).")
 
     @model_validator(mode="after")
     def _ordered(self) -> "FeedResponse":
+        # a card is served on the edition its story was written on (`news_edition`); its backfilled
+        # flag is that edition's — the opening edition's flag is `opened_backfilled` (audit finding 1)
+        if any(card.backfilled != self.backfilled or card.news_edition != self.edition_date for card in self.experiment_cards):
+            raise ValueError("every experiment card must be this edition's and carry its backfilled flag")
         items = self.what_matters_now + self.discoveries
         if len(items) != self.published_count + self.continued_count:
             raise ValueError("published_count + continued_count must equal the findings served")
@@ -1171,6 +1187,467 @@ class FeedResponse(BaseModel):
         if any(f.tier != Tier.what_matters_now for f in self.what_matters_now):
             raise ValueError("what_matters_now must carry its tier")
         return self
+
+
+# ── S2: THE EXPERIMENT LOOP (docs/sessions/PATHFINDER_S2_EXPERIMENTS.md) ─────
+
+EXPERIMENT_DISCLOSURE = (
+    "Research experiment with virtual money — research validation, not advice and not a "
+    "recommendation. Nothing here tells you when to enter, exit, or where to place a stop; "
+    "constituent names appear only inside the app after Research Analyst review. Kanida never "
+    "places an order on your behalf."
+)
+
+#: Spec addendum 6 — words that would turn a public research card into a trade instruction.
+#: Enforced on every public experiment text, whoever wrote it (engine or model).
+PUBLIC_CARD_BANNED_RE = re.compile(
+    r"\b(entry|entries|exit price|target|targets|stop[- ]?loss|stoploss|execute|execution|"
+    r"place an order|buy|buying|sell|selling|take profit|book profit)\b", re.IGNORECASE)
+
+
+class ExperimentState(str, Enum):
+    testing = "testing"           # a version is open and being forward-tracked
+    buried = "buried"             # retired: the idea is dead, the post-mortem is public
+    proposed = "proposed"         # a graduation PROPOSAL exists; a human decides
+
+
+class ComparisonCategory(str, Enum):
+    """Expected vs actual, computed by the grader; the narrator may only repeat it."""
+    stronger = "stronger"         # Right, and at least as strong as history expected
+    weaker = "weaker"             # Right, but weaker than history expected
+    inconclusive = "inconclusive"
+    failed = "failed"             # Wrong
+    void = "void"                 # nothing to compare: no trade closed in the period
+    pending = "pending"
+
+
+class ExperimentBeat(str, Enum):
+    """The seven-line customer narrative (docs/sessions/PATHFINDER.md), in order."""
+    noticed = "noticed"
+    researched = "researched"
+    history_showed = "history_showed"
+    decided = "decided"
+    happened = "happened"
+    learned = "learned"
+    next = "next"
+
+
+class ExperimentGradingRule(BaseModel):
+    """FROZEN when the version is created; read back unchanged when a period completes."""
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["experiment_edge"]
+    horizon_sessions: int = Field(..., ge=1)
+    hurdle_pct: float = Field(..., ge=0)
+    min_trades: int = Field(..., ge=1)
+    metric: str
+    right: str
+    wrong: str
+    inconclusive: str
+    void: str
+    frozen_at: datetime
+    rule_version: str
+    spec: dict[str, str | float | int | list[str]] = Field(default_factory=dict)
+
+
+class Expectation(BaseModel):
+    """The historical expectation, recorded UP FRONT and never revised (spec: memory + versions)."""
+    model_config = ConfigDict(extra="forbid")
+
+    frozen_at: datetime
+    seal: date = Field(..., description="Data seal the expectation was computed on. No later bar was visible.")
+    metric: str
+    expectancy_net_pct: float = Field(..., description="Mean net P&L per trade, winsorised, net of costs + slippage.")
+    expectancy_2x_slippage_net_pct: float
+    hit_rate_pct: float = Field(..., ge=0, le=100, description="Supporting only — never the headline.")
+    median_net_pct: float
+    n: int = Field(..., ge=1)
+    signal_days: int = Field(..., ge=1)
+    period: DateRange
+    trailing_expectancy_net_pct: Optional[float] = Field(None, description="The same on the trailing validation window alone.")
+    trailing_n: int = Field(0, ge=0)
+    trailing_period: Optional[DateRange] = None
+    discovery_expectancy_2x_slippage_net_pct: Optional[float] = Field(
+        None, description="On the window ending at discovery_end alone, at twice the slippage (advisory).")
+    discovery_n: int = Field(0, ge=0)
+    edge_vs_baseline_pct: Optional[float] = None
+    baseline_n: int = Field(0, ge=0)
+    placebo_p: Optional[float] = Field(None, ge=0, le=1)
+    placebo_draws: int = Field(0, ge=0)
+    cluster_t: Optional[float] = None
+    hurdle_pct: float = Field(..., ge=0)
+    computed_by: str
+    sample_flag: SampleFlag = SampleFlag.unknown
+
+    @model_validator(mode="after")
+    def _check(self) -> "Expectation":
+        self.sample_flag = sample_flag_for(self.n)
+        if self.period.end > self.seal:
+            raise ValueError("expectation period ends after its seal — look-ahead")
+        for marker in ("claude", "gpt", "gemini", "sonnet", "haiku", "opus", "llm"):
+            if marker in self.computed_by.lower():
+                raise ValueError("computed_by names a model — the LLM does not compute")
+        return self
+
+
+class ForwardResult(BaseModel):
+    """What the virtual book actually did, marked to the seal. Return always with its drawdown."""
+    model_config = ConfigDict(extra="forbid")
+
+    as_of: date
+    label: str = VIRTUAL_LABEL
+    capital_inr: float = Field(..., gt=0)
+    n_closed: int = Field(..., ge=0)
+    n_open: int = Field(..., ge=0)
+    signal_days: int = Field(..., ge=0)
+    signals_seen: int = Field(..., ge=0)
+    signals_taken: int = Field(..., ge=0)
+    mean_net_pct: Optional[float] = Field(None, description="Realised mean net P&L per closed RESOLVED trade.")
+    hit_rate_pct: Optional[float] = Field(None, ge=0, le=100)
+    book_return_pct: Optional[float] = None
+    max_drawdown_pct: float = Field(..., ge=0)
+    current_drawdown_pct: float = Field(..., ge=0)
+    n_unresolved: int = Field(0, ge=0, description=(
+        "Closed trades excluded from the verdict because a glitch / corporate-action bar sat inside their window "
+        "(audit finding 7) — listed, never graded, as the evidence convention treats the same case."))
+    sample_flag: SampleFlag = SampleFlag.unknown
+
+    @model_validator(mode="after")
+    def _check(self) -> "ForwardResult":
+        self.sample_flag = sample_flag_for(self.n_closed)
+        if self.label != VIRTUAL_LABEL:
+            raise ValueError("a forward result carries the virtual-money label")
+        return self
+
+
+class ExpectedVsActual(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_net_pct: float
+    actual_net_pct: Optional[float] = None
+    gap_pct: Optional[float] = None
+    category: ComparisonCategory
+    statement: str = Field(..., description="Digit-free engine sentence with {{fact:…}} tokens.")
+    fact_refs: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _digit_free(self) -> "ExpectedVsActual":
+        if any(ch.isdigit() for ch in REF_TOKEN_RE.sub("", self.statement)):
+            raise ValueError("expected-vs-actual statement may not contain a literal numeral")
+        return self
+
+
+class LearningView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    statement: str = Field(..., description="Digit-free, {{fact:…}} tokens only.")
+    fact_refs: list[str] = Field(default_factory=list)
+    level: LearningLevel
+    trials_evaluated: int = Field(..., ge=0, description="Candidate revisions evaluated after this period — every one counted.")
+    trials_passing: int = Field(..., ge=0)
+    adopted_rule: Optional[str] = Field(None, description="The next version's rule text, when a revision was adopted.")
+    buried: bool = False
+    next_action: Literal["continue", "revise", "bury", "propose"]
+
+    @model_validator(mode="after")
+    def _check(self) -> "LearningView":
+        if any(ch.isdigit() for ch in REF_TOKEN_RE.sub("", self.statement)):
+            raise ValueError("learning statement may not contain a literal numeral")
+        if self.level == LearningLevel.L4:
+            raise ValueError("the loop cannot author an L4 change")
+        return self
+
+
+class PeriodView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    period_no: int = Field(..., ge=1)
+    start: Optional[date] = Field(None, description="First signal session (null until the seal reaches it).")
+    sessions: int = Field(..., ge=1)
+    end: Optional[date] = None
+    due: Optional[date] = Field(None, description="Session on which the last possible trade closes.")
+    status: Literal["pending", "open", "graded", "void"]
+    forward: ForwardResult
+    grading_rule: ExperimentGradingRule
+    verdict: Optional[Verdict] = None
+    grader_version: Optional[str] = Field(None, description=(
+        "The evaluator that actually judged the period (audit finding 6). The loop refuses to grade under a "
+        "grader whose version differs from the frozen rule's; this field is the receipt."))
+    graded_at: Optional[datetime] = None
+    data_as_of: Optional[date] = None
+    realized_facts: list[Fact] = Field(default_factory=list)
+    expected_vs_actual: Optional[ExpectedVsActual] = None
+    learning: Optional[LearningView] = None
+    backfilled: bool
+    record: str = BACKFILL_LABEL
+
+    @model_validator(mode="after")
+    def _check(self) -> "PeriodView":
+        if self.status == "graded" and self.verdict not in (Verdict.right, Verdict.wrong, Verdict.inconclusive):
+            raise ValueError("a graded period carries Right / Wrong / Inconclusive")
+        if self.status == "void" and self.verdict != Verdict.void:
+            raise ValueError("a void period carries verdict=void")
+        if self.status in ("open", "pending") and self.verdict is not None:
+            raise ValueError("an open period has no verdict")
+        self.record = BACKFILL_LABEL if self.backfilled else FORWARD_LABEL
+        return self
+
+
+class VersionView(BaseModel):
+    """`#id -> v1 -> v2 -> v3`: what changed, why, how many trials, the frozen expectation, the periods."""
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(..., ge=1)
+    created_edition: date
+    rule_text: str = Field(..., description="Engine rule definition (may carry digits — a definition, not a claim).")
+    conditions: list[str] = Field(..., description="Condition labels the rule adds, in order.")
+    horizon_sessions: int = Field(..., ge=1)
+    change: str = Field(..., description="What changed from the previous version ('initial' for v1).")
+    why: str
+    level: LearningLevel
+    validation: Optional[str] = None
+    trials_for_this_version: int = Field(..., ge=1, description="Variants evaluated to arrive at this version.")
+    expectation: Expectation
+    periods: list[PeriodView]
+    status: Literal["open", "superseded", "buried"]
+    backfilled: bool
+
+    @model_validator(mode="after")
+    def _check(self) -> "VersionView":
+        if self.level == LearningLevel.L4:
+            raise ValueError("a version is never an L4 change")
+        if self.level == LearningLevel.L3 and not self.validation:
+            raise ValueError("an L3 version states how it was backtested and forward-validated")
+        return self
+
+
+class ExperimentStoryLine(Narrative):
+    """One of the seven beats. Same digit-free contract as every `Narrative`."""
+    model_config = ConfigDict(extra="forbid")
+
+    beat: ExperimentBeat
+
+
+class ExperimentScoreCounts(ScoreCounts):
+    model_config = ConfigDict(extra="forbid")
+
+    void: int = Field(0, ge=0)
+
+
+class ExperimentCard(BaseModel):
+    """
+    The PUBLIC experiment card (spec addendum 6): theme + evidence + the seven-line story. It has
+    no field that could carry a constituent list, an entry, a target, a stop or an execution —
+    that is enforced by this schema, not by convention.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., pattern=r"^exp_[a-z0-9_]+$")
+    opened_edition: date
+    news_edition: date = Field(..., description="The edition this card's story was written on.")
+    state: ExperimentState
+    family: str
+    theme: str = Field(..., description="Sector / theme in words. Never a name, never an instruction.")
+    source_finding_id: str = Field(..., pattern=r"^fnd_[a-z0-9_]+$")
+    evidence: FindingProvenance
+    story: list[ExperimentStoryLine] = Field(..., min_length=7, max_length=7)
+    facts: list[Fact] = Field(..., min_length=1)
+    versions_count: int = Field(..., ge=1)
+    trials_total: int = Field(..., ge=1, description="Every variant ever evaluated for this experiment.")
+    periods_graded: int = Field(..., ge=0)
+    score: ExperimentScoreCounts
+    latest_comparison: ComparisonCategory
+    backfilled: bool = Field(..., description=(
+        "Whether the edition this card was written on (`news_edition`) was generated after its session date. "
+        "Per edition, like every S1 card (audit finding 1): a card can be forward while the experiment was opened in a backfill."))
+    opened_backfilled: bool = Field(..., description="Whether the experiment's OPENING edition was a backfill.")
+    record_label: str
+    llm_provider: str = "none"
+    disclosure: str = EXPERIMENT_DISCLOSURE
+
+    @model_validator(mode="after")
+    def _integrity(self) -> "ExperimentCard":
+        beats = [s.beat for s in self.story]
+        if beats != list(ExperimentBeat):
+            raise ValueError("the story tells the seven beats in order")
+        known = {f.id for f in self.facts}
+        used: set[str] = set()
+        for s in self.story:
+            used |= set(s.fact_refs)
+        dangling = used - known
+        if dangling:
+            raise ValueError(f"unresolvable fact refs: {sorted(dangling)}")
+        for text in [self.theme] + [s.headline for s in self.story] + [s.body for s in self.story]:
+            m = PUBLIC_CARD_BANNED_RE.search(text)
+            if m:
+                raise ValueError(f"public experiment card reads like a trade instruction ({m.group(0)!r}) — addendum 6")
+        if self.record_label != (BACKFILL_LABEL if self.backfilled else FORWARD_LABEL):
+            raise ValueError("record_label must match backfilled")
+        return self
+
+
+class GateView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    passed: bool
+    value: Optional[float] = None
+    bar: Optional[float] = None
+    statement: str
+    fatal: bool = True
+
+
+class TrialView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trial_no: int = Field(..., ge=1)
+    context: str = Field(..., description="'opening' or 'after v<k> period <p>'.")
+    signature: str
+    rule_text: str
+    passed: bool
+    adopted: bool
+    reason: str
+    expectancy_net_pct: Optional[float] = None
+    trailing_expectancy_net_pct: Optional[float] = None
+    n: int = Field(0, ge=0)
+    gates: list[GateView] = Field(default_factory=list)
+
+
+class BasketView(BaseModel):
+    """Constituents only inside the app under RA review (addendum 6)."""
+    model_config = ConfigDict(extra="forbid")
+
+    description: str
+    constituents_visibility: Literal["withheld_pending_ra_review", "in_app_ra_reviewed"]
+    ra_review_state: str
+    constituents: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check(self) -> "BasketView":
+        if self.constituents and self.constituents_visibility != "in_app_ra_reviewed":
+            raise ValueError("constituents may be listed only after RA review, inside the app")
+        return self
+
+
+class ProposalView(BaseModel):
+    """A graduation PROPOSAL. Human-gated; never an automatic switch."""
+    model_config = ConfigDict(extra="forbid")
+
+    proposed_edition: date
+    version: int = Field(..., ge=1)
+    target_agent: Literal["trader", "investor"]
+    status: Literal["proposed_awaiting_human", "blocked_unsigned_constitution"]
+    gates: list[GateView]
+    incumbent: str
+    decided_by: Literal["engine"] = "engine"
+    human_gate: str = ("Promotion is a human act on a signed Constitution through the champion/challenger gate; "
+                       "this record proposes, it does not promote.")
+
+
+class ExperimentRecord(ExperimentCard):
+    """The in-app record: versions, trials, periods, expected vs actual, learning, proposal, post-mortem."""
+    model_config = ConfigDict(extra="forbid")
+
+    question: str
+    current_rule_text: str
+    direction: Direction
+    versions: list[VersionView] = Field(..., min_length=1)
+    trials: list[TrialView]
+    basket: BasketView
+    worth_testing_gates: list[GateView]
+    change_log: list[ChangeLogEntry] = Field(default_factory=list)
+    post_mortem: Optional[PostMortem] = None
+    proposal: Optional[ProposalView] = None
+    constitution_version: str
+
+    @model_validator(mode="after")
+    def _record(self) -> "ExperimentRecord":
+        if (self.state == ExperimentState.buried) != (self.post_mortem is not None):
+            raise ValueError("a buried experiment publishes a post-mortem; only a buried one carries it")
+        if self.state == ExperimentState.proposed and self.proposal is None:
+            raise ValueError("a proposed experiment carries its proposal")
+        seqs = [c.seq for c in self.change_log]
+        if seqs != sorted(seqs) or len(set(seqs)) != len(seqs):
+            raise ValueError("change_log must be append-only: strictly increasing seq")
+        if len(self.trials) != self.trials_total:
+            raise ValueError("trials_total must equal the trials on the record")
+        return self
+
+
+class RejectedCandidate(BaseModel):
+    """An S1 finding the gate did NOT open — on the record with its trial count and reason."""
+    model_config = ConfigDict(extra="forbid")
+
+    finding_id: str = Field(..., pattern=r"^fnd_[a-z0-9_]+$")
+    edition_date: date
+    template_id: str
+    family: Optional[str] = None
+    trials_evaluated: int = Field(..., ge=0)
+    reason: str
+    best_rule_text: Optional[str] = Field(None, description="The variant that came closest to clearing (fewest failed gates).")
+    best_expectancy_net_pct: Optional[float] = None
+    best_failed_gates: list[str] = Field(default_factory=list, description="Its failed fatal gates as 'name=value vs bar'.")
+
+
+class ExperimentScoreboard(BaseModel):
+    """Right · Wrong · Inconclusive · n over graded PERIODS; void apart; forward / backfilled split."""
+    model_config = ConfigDict(extra="forbid")
+
+    right: int = Field(..., ge=0)
+    wrong: int = Field(..., ge=0)
+    inconclusive: int = Field(..., ge=0)
+    n: int = Field(..., ge=0)
+    void: int = Field(0, ge=0)
+    pending: int = Field(..., ge=0, description="Open periods as of the date.")
+    forward: ScoreCounts
+    backfilled: ScoreCounts
+    by_family: dict[str, ScoreCounts] = Field(default_factory=dict)
+    experiments_testing: int = Field(..., ge=0)
+    experiments_buried: int = Field(..., ge=0)
+    experiments_proposed: int = Field(..., ge=0)
+    candidates_not_opened: int = Field(..., ge=0)
+    trials_total: int = Field(..., ge=0)
+    as_of: date
+    record_label: str
+    sample_flag: SampleFlag = SampleFlag.unknown
+
+    @model_validator(mode="after")
+    def _check(self) -> "ExperimentScoreboard":
+        if self.right + self.wrong + self.inconclusive != self.n:
+            raise ValueError("counts must sum to n")
+        if self.forward.n + self.backfilled.n != self.n:
+            raise ValueError("forward + backfilled must equal n")
+        self.sample_flag = sample_flag_for(self.n)
+        return self
+
+
+class ExperimentsResponse(BaseModel):
+    """GET /api/pathfinder/experiments (S2). Losers first: buried, then testing, proposed last."""
+    model_config = ConfigDict(extra="forbid")
+
+    as_of: date
+    count: int = Field(..., ge=0)
+    items: list[ExperimentCard]
+    not_opened: list[RejectedCandidate] = Field(default_factory=list)
+    scoreboard: ExperimentScoreboard
+    llm_provider: str = "none"
+    engine_version: str
+    disclosure: str = EXPERIMENT_DISCLOSURE
+
+    @model_validator(mode="after")
+    def _check(self) -> "ExperimentsResponse":
+        if self.count != len(self.items):
+            raise ValueError("count must equal items")
+        order = {ExperimentState.buried: 0, ExperimentState.testing: 1, ExperimentState.proposed: 2}
+        ranks = [order[i.state] for i in self.items]
+        if ranks != sorted(ranks):
+            raise ValueError("losers first: buried, then testing, proposed last")
+        return self
+
+
+# The feed carries experiment cards (defined after it). Resolve the forward references now, so
+# the contract is complete at import time rather than on first use.
+FeedResponse.model_rebuild()
 
 
 # ── Errors (guarded — never leak internals) ──────────────────────────────────

@@ -193,6 +193,32 @@ reader tells a simulated backfill from a forward record.
 observation (today's move, today's z-score) carries no `n` and says so; the flag is still never
 derived by hand for a statistic.
 
+## The S2 experiment registry (`backend/pathfinder/experiments/store.py`)
+
+Session S2 added a third SQLite file (`KANIDA_PATHFINDER_EXPERIMENTS_DB`, default
+`var/pathfinder_experiments.db`) so the S1 store stays byte-for-byte what S1 built. Every table is
+**append-only** (UPDATE/DELETE rejected by trigger); the tables that are the record are **hash-chained**
+(P1 `repository.py` convention; the timestamp columns AND the timestamp keys inside JSON columns are
+outside the hashed payload — audit A2 — so two rebuilds of the same seals produce identical chains:
+`verify_all_chains()`). Schema version 2; a registry under an earlier version is refused on open and
+archived, never migrated. The file opens in WAL mode so the API reads while the after-close loop writes.
+
+| Table | One row per | What it holds |
+|---|---|---|
+| `pfx_editions` | loop step (edition date) | engine version (`pathfinder_experiments@<semver>+code.<hash of experiments/*.py>`), Constitution version, every parameter (`params_json`: the founder stubs, the hurdle, the risk limits, the gauntlet), `backfilled` |
+| `pfx_candidates` | S1 ROOT finding considered | the family it names (or why none), **trials evaluated**, the experiment it opened or the reason it did not (best variant, its expectancy, its failed gates) |
+| `pfx_trials` | variant evaluated, EVER | owner (finding at opening / experiment after a period), `trial_no` (monotonic per idea), the variant, its stats on the three windows, every gate with value and bar, `passed`, `adopted` — the count a reader divides the p-value by |
+| `pfx_experiments` ⛓ | experiment | family, source finding, theme (public text), question, direction, threshold, capital, the S1 card's provenance (`evidence_json`), the opening gates, `backfilled` |
+| `pfx_versions` ⛓ | version (`v1`, `v2`…) | the rule (`variant_json`), `change` / `why` / `level` (L1–L3, never L4) / `validation`, the **expectation frozen at creation** (`expectation_json` + its facts, with the S1 card's facts by their original ids), the **grading rule frozen at creation** (`grading_rule_json`, `rule_version` = hash of `grading.py`), `trials_for_version` |
+| `pfx_periods` ⛓ | tracking period of a version | `start_after` (the first signal session is the next session after it — resolved when the seal reaches it), `sessions` |
+| `pfx_marks` | (period, session) | the virtual book marked to close, open positions, closed-to-date — written no earlier than the session |
+| `pfx_trades` | closed virtual trade | symbol, signal / entry / exit dates and prices, gross and net P&L, costs, **`resolved`** + `unresolved_reason` (audit A7: a trade through a glitch / corporate-action bar is listed, never graded) — **the only table that names a constituent; no public surface reads it** |
+| `pfx_outcomes` ⛓ | graded period (once, ever) | verdict (`right` / `wrong` / `inconclusive` / `void`), the frozen rule's version AND **`grader_version`** (audit A6: the evaluator that ran; a mismatch refuses to grade), the forward result, expected-vs-actual (category + digit-free statement), the realised facts, the learning (statement, trials evaluated / passing, adopted rule, next action) |
+| `pfx_post_mortems` ⛓ | buried experiment | cause (`revisions_exhausted` / `edge_did_not_persist_oos` / `rule_stopped_firing`), retired version, what was kept, a digit-free summary |
+| `pfx_gate_checks` | (version, edition) | the graduation gate's every gate with value and bar, `proposable` |
+| `pfx_proposals` ⛓ | graduation PROPOSAL | target agent, status (`blocked_unsigned_constitution` / `proposed_awaiting_human`), the gates, the incumbent — there is no "promoted" anywhere |
+| `pfx_narratives` | (experiment, edition with news) | the seven-line story and every fact it cites, who wrote it |
+
 ## Founder inputs still stubbed
 
 - The **Constitution document** itself (`constitution_versions.document`): risk limits, honesty
