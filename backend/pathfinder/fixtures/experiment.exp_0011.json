@@ -1,0 +1,642 @@
+{
+  "id": "exp_0011",
+  "hypothesis": "After an index-wide down day, stocks that did NOT make a new 10-session low outperform the index over the next 3 sessions.",
+  "status": "promising",
+  "opened_at": "2026-02-02T18:40:00+05:30",
+  "strategy_version": "strategy@v1.2",
+  "constitution_version": "constitution@1.3.0",
+  "historical_return": {
+    "basis": "historical_replay",
+    "label": "Simulated · Not traded · Not PaRRVA-verified",
+    "expectancy_pct_per_trade": 0.27,
+    "expectancy_2x_slippage_pct_per_trade": 0.14,
+    "total_return_pct": null,
+    "max_drawdown_pct": 9.8,
+    "current_drawdown_pct": 0.0,
+    "win_rate_pct": 51.0,
+    "avg_win_pct": 1.34,
+    "avg_loss_pct": -0.84,
+    "payoff_ratio": 1.6,
+    "n": 96,
+    "occurrences": 241,
+    "sample_flag": "ok",
+    "provenance": {
+      "data_source": "kite_eod_adjusted_nifty500",
+      "date_range": {
+        "start": "2018-01-01",
+        "end": "2025-12-31"
+      },
+      "as_of": "2026-09-08",
+      "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
+      "computed_by": "replay_engine@1.4.0",
+      "computed_at": "2026-09-08T16:05:00+05:30",
+      "universe": "nifty500_pit"
+    }
+  },
+  "virtual_return": {
+    "basis": "virtual_book",
+    "label": "Virtual money · Forward-tracked · Not traded · Not PaRRVA-verified",
+    "expectancy_pct_per_trade": 0.21,
+    "expectancy_2x_slippage_pct_per_trade": 0.08,
+    "total_return_pct": 2.4,
+    "max_drawdown_pct": 4.6,
+    "current_drawdown_pct": 1.9,
+    "win_rate_pct": 50.0,
+    "avg_win_pct": 1.19,
+    "avg_loss_pct": -0.77,
+    "payoff_ratio": 1.55,
+    "n": 34,
+    "occurrences": 52,
+    "sample_flag": "flagged",
+    "provenance": {
+      "data_source": "kite_eod_adjusted_nifty500",
+      "date_range": {
+        "start": "2026-01-05",
+        "end": "2026-09-08"
+      },
+      "as_of": "2026-09-08",
+      "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
+      "computed_by": "book_engine@2.3.1",
+      "computed_at": "2026-09-08T16:05:00+05:30",
+      "universe": "nifty500_pit"
+    }
+  },
+  "occurrences": 52,
+  "n": 34,
+  "sample_flag": "flagged",
+  "spark": {
+    "basis": "virtual_equity_pct",
+    "points": [
+      0.0,
+      0.7,
+      1.9,
+      1.1,
+      2.8,
+      3.4,
+      2.2,
+      3.1,
+      2.4
+    ],
+    "date_range": {
+      "start": "2026-01-05",
+      "end": "2026-09-08"
+    },
+    "as_of": "2026-09-08"
+  },
+  "as_of": "2026-09-08T16:05:00+05:30",
+  "question": "Does refusing to break down on a bad day mean anything?",
+  "rationale": "A relative-strength question the observer can pose cheaply every single down day, which makes it a good candidate for continuous evidence accumulation.",
+  "rulebook": {
+    "universe": "nifty500_pit",
+    "direction": "long",
+    "entry": "Index closes down more than 1% AND the stock did not print a new 10-session low that session. Fill at the NEXT session open.",
+    "invalidation": "A subsequent close below the 10-session low. No price target is set.",
+    "exit": "Hard stop at -3.5%; horizon exit at 3 sessions.",
+    "horizon_sessions": 3,
+    "sizing": "Equal-weight, 2% of virtual capital per idea, maximum 10 concurrent.",
+    "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule"
+  },
+  "stage": "review",
+  "story": [
+    {
+      "beat": "noticed",
+      "headline": "On bad days, some names simply refuse to break",
+      "body": "On broad down days a consistent minority of names decline to print a new short-term low. The observer can see this cheaply, every time it happens.",
+      "produced_by": "llm",
+      "model": "claude-sonnet-5",
+      "prompt_version": "observe@3",
+      "at": "2026-02-02T18:41:00+05:30",
+      "fact_refs": []
+    },
+    {
+      "beat": "hypothesis",
+      "headline": "I am testing whether that refusal is information",
+      "body": "The discovery window supports it mildly, at {{fact:fct_e11_hist_exp}} per trade across enough qualifying index sessions to be worth forward testing.",
+      "produced_by": "llm",
+      "model": "claude-sonnet-5",
+      "prompt_version": "hypothesize@4",
+      "at": "2026-02-02T18:42:00+05:30",
+      "fact_refs": [
+        "fct_e11_hist_exp"
+      ]
+    },
+    {
+      "beat": "experiment",
+      "headline": "Long side, three-session horizon, virtual capital",
+      "body": "Signals are filled at the next open, stopped at a fixed distance, and force-exited at the horizon.",
+      "produced_by": "engine",
+      "model": null,
+      "prompt_version": null,
+      "at": "2026-02-02T18:43:00+05:30",
+      "fact_refs": []
+    },
+    {
+      "beat": "outcome",
+      "headline": "Forward is holding up, on a sample too small to trust",
+      "body": "Forward expectancy is {{fact:fct_e11_virt_exp}} across {{fact:fct_e11_virt_n}} closed trades, with a worst drawdown of {{fact:fct_e11_virt_dd}}. At doubled slippage it thins to {{fact:fct_e11_virt_exp_2x}} — still positive, which is the part that makes this one interesting rather than merely encouraging.",
+      "produced_by": "llm",
+      "model": "claude-haiku-4-5",
+      "prompt_version": "narrate@5",
+      "at": "2026-09-08T16:05:00+05:30",
+      "fact_refs": [
+        "fct_e11_virt_exp",
+        "fct_e11_virt_n",
+        "fct_e11_virt_dd",
+        "fct_e11_virt_exp_2x"
+      ]
+    },
+    {
+      "beat": "learning",
+      "headline": "I widened the trigger to earn a sample, not a result",
+      "body": "The original down-day threshold produced too few opportunities to learn from. Widening it inside the approved range was a parameter change, not a new idea, so it did not need a new strategy version.",
+      "produced_by": "llm",
+      "model": "claude-sonnet-5",
+      "prompt_version": "reflect@4",
+      "at": "2026-09-08T16:05:00+05:30",
+      "fact_refs": []
+    },
+    {
+      "beat": "next",
+      "headline": "Next: is this just the low-volatility names?",
+      "body": "Refusing to make a new low may simply be what a quiet stock does on a loud day. The next test neutralises volatility and asks whether anything is left.",
+      "produced_by": "llm",
+      "model": "claude-sonnet-5",
+      "prompt_version": "decide_next@3",
+      "at": "2026-09-08T16:05:00+05:30",
+      "fact_refs": []
+    }
+  ],
+  "facts": [
+    {
+      "id": "fct_e11_hist_exp",
+      "label": "expectancy per trade, historical replay",
+      "value": 0.27,
+      "unit": "pct_per_trade",
+      "n": 96,
+      "sample_flag": "ok",
+      "provenance": {
+        "data_source": "kite_eod_adjusted_nifty500",
+        "date_range": {
+          "start": "2018-01-01",
+          "end": "2025-12-31"
+        },
+        "as_of": "2026-09-08",
+        "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
+        "computed_by": "book_engine@2.3.1",
+        "computed_at": "2026-09-08T16:05:00+05:30",
+        "universe": "nifty500_pit"
+      },
+      "note": null
+    },
+    {
+      "id": "fct_e11_virt_exp",
+      "label": "expectancy per trade, forward virtual book",
+      "value": 0.21,
+      "unit": "pct_per_trade",
+      "n": 34,
+      "sample_flag": "flagged",
+      "provenance": {
+        "data_source": "kite_eod_adjusted_nifty500",
+        "date_range": {
+          "start": "2026-01-05",
+          "end": "2026-09-08"
+        },
+        "as_of": "2026-09-08",
+        "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
+        "computed_by": "book_engine@2.3.1",
+        "computed_at": "2026-09-08T16:05:00+05:30",
+        "universe": "nifty500_pit"
+      },
+      "note": null
+    },
+    {
+      "id": "fct_e11_virt_exp_2x",
+      "label": "expectancy per trade at 2x slippage, forward",
+      "value": 0.08,
+      "unit": "pct_per_trade",
+      "n": 34,
+      "sample_flag": "flagged",
+      "provenance": {
+        "data_source": "kite_eod_adjusted_nifty500",
+        "date_range": {
+          "start": "2026-01-05",
+          "end": "2026-09-08"
+        },
+        "as_of": "2026-09-08",
+        "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
+        "computed_by": "book_engine@2.3.1",
+        "computed_at": "2026-09-08T16:05:00+05:30",
+        "universe": "nifty500_pit"
+      },
+      "note": null
+    },
+    {
+      "id": "fct_e11_virt_dd",
+      "label": "worst drawdown, forward virtual book",
+      "value": 4.6,
+      "unit": "pct",
+      "n": 34,
+      "sample_flag": "flagged",
+      "provenance": {
+        "data_source": "kite_eod_adjusted_nifty500",
+        "date_range": {
+          "start": "2026-01-05",
+          "end": "2026-09-08"
+        },
+        "as_of": "2026-09-08",
+        "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
+        "computed_by": "book_engine@2.3.1",
+        "computed_at": "2026-09-08T16:05:00+05:30",
+        "universe": "nifty500_pit"
+      },
+      "note": null
+    },
+    {
+      "id": "fct_e11_virt_n",
+      "label": "closed virtual trades so far",
+      "value": 34,
+      "unit": "count",
+      "n": 34,
+      "sample_flag": "flagged",
+      "provenance": {
+        "data_source": "kite_eod_adjusted_nifty500",
+        "date_range": {
+          "start": "2026-01-05",
+          "end": "2026-09-08"
+        },
+        "as_of": "2026-09-08",
+        "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
+        "computed_by": "book_engine@2.3.1",
+        "computed_at": "2026-09-08T16:05:00+05:30",
+        "universe": "nifty500_pit"
+      },
+      "note": null
+    },
+    {
+      "id": "fct_e11_breadth",
+      "label": "index sessions in the discovery window that met the down-day condition",
+      "value": 188,
+      "unit": "count",
+      "n": 96,
+      "sample_flag": "ok",
+      "provenance": {
+        "data_source": "kite_eod_adjusted_nifty500",
+        "date_range": {
+          "start": "2018-01-01",
+          "end": "2025-12-31"
+        },
+        "as_of": "2026-09-08",
+        "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
+        "computed_by": "book_engine@2.3.1",
+        "computed_at": "2026-09-08T16:05:00+05:30",
+        "universe": "nifty500_pit"
+      },
+      "note": null
+    }
+  ],
+  "evidence": [
+    {
+      "id": "evd_e11_replay",
+      "kind": "historical_replay",
+      "title": "Strategy-replay over the discovery window",
+      "label": "Simulated · Not traded · Not PaRRVA-verified",
+      "performance": {
+        "basis": "historical_replay",
+        "label": "Simulated · Not traded · Not PaRRVA-verified",
+        "expectancy_pct_per_trade": 0.27,
+        "expectancy_2x_slippage_pct_per_trade": 0.14,
+        "total_return_pct": null,
+        "max_drawdown_pct": 9.8,
+        "current_drawdown_pct": 0.0,
+        "win_rate_pct": 51.0,
+        "avg_win_pct": 1.34,
+        "avg_loss_pct": -0.84,
+        "payoff_ratio": 1.6,
+        "n": 96,
+        "occurrences": 241,
+        "sample_flag": "ok",
+        "provenance": {
+          "data_source": "kite_eod_adjusted_nifty500",
+          "date_range": {
+            "start": "2018-01-01",
+            "end": "2025-12-31"
+          },
+          "as_of": "2026-09-08",
+          "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
+          "computed_by": "replay_engine@1.4.0",
+          "computed_at": "2026-09-08T16:05:00+05:30",
+          "universe": "nifty500_pit"
+        }
+      },
+      "fact_refs": [
+        "fct_e11_hist_exp",
+        "fct_e11_breadth"
+      ],
+      "provenance": {
+        "data_source": "kite_eod_adjusted_nifty500",
+        "date_range": {
+          "start": "2018-01-01",
+          "end": "2025-12-31"
+        },
+        "as_of": "2026-09-08",
+        "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
+        "computed_by": "replay_engine@1.4.0",
+        "computed_at": "2026-09-08T16:05:00+05:30",
+        "universe": "nifty500_pit"
+      },
+      "interpretation": null
+    },
+    {
+      "id": "evd_e11_forward",
+      "kind": "forward_virtual",
+      "title": "Forward virtual book",
+      "label": "Virtual money · Forward-tracked · Not traded · Not PaRRVA-verified",
+      "performance": {
+        "basis": "virtual_book",
+        "label": "Virtual money · Forward-tracked · Not traded · Not PaRRVA-verified",
+        "expectancy_pct_per_trade": 0.21,
+        "expectancy_2x_slippage_pct_per_trade": 0.08,
+        "total_return_pct": 2.4,
+        "max_drawdown_pct": 4.6,
+        "current_drawdown_pct": 1.9,
+        "win_rate_pct": 50.0,
+        "avg_win_pct": 1.19,
+        "avg_loss_pct": -0.77,
+        "payoff_ratio": 1.55,
+        "n": 34,
+        "occurrences": 52,
+        "sample_flag": "flagged",
+        "provenance": {
+          "data_source": "kite_eod_adjusted_nifty500",
+          "date_range": {
+            "start": "2026-01-05",
+            "end": "2026-09-08"
+          },
+          "as_of": "2026-09-08",
+          "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
+          "computed_by": "book_engine@2.3.1",
+          "computed_at": "2026-09-08T16:05:00+05:30",
+          "universe": "nifty500_pit"
+        }
+      },
+      "fact_refs": [
+        "fct_e11_virt_exp",
+        "fct_e11_virt_exp_2x",
+        "fct_e11_virt_dd",
+        "fct_e11_virt_n"
+      ],
+      "provenance": {
+        "data_source": "kite_eod_adjusted_nifty500",
+        "date_range": {
+          "start": "2026-01-05",
+          "end": "2026-09-08"
+        },
+        "as_of": "2026-09-08",
+        "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
+        "computed_by": "book_engine@2.3.1",
+        "computed_at": "2026-09-08T16:05:00+05:30",
+        "universe": "nifty500_pit"
+      },
+      "interpretation": null
+    }
+  ],
+  "virtual_book": {
+    "metrics": {
+      "basis": "virtual_book",
+      "label": "Virtual money · Forward-tracked · Not traded · Not PaRRVA-verified",
+      "expectancy_pct_per_trade": 0.21,
+      "expectancy_2x_slippage_pct_per_trade": 0.08,
+      "total_return_pct": 2.4,
+      "max_drawdown_pct": 4.6,
+      "current_drawdown_pct": 1.9,
+      "win_rate_pct": 50.0,
+      "avg_win_pct": 1.19,
+      "avg_loss_pct": -0.77,
+      "payoff_ratio": 1.55,
+      "n": 34,
+      "occurrences": 52,
+      "sample_flag": "flagged",
+      "provenance": {
+        "data_source": "kite_eod_adjusted_nifty500",
+        "date_range": {
+          "start": "2026-01-05",
+          "end": "2026-09-08"
+        },
+        "as_of": "2026-09-08",
+        "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
+        "computed_by": "book_engine@2.3.1",
+        "computed_at": "2026-09-08T16:05:00+05:30",
+        "universe": "nifty500_pit"
+      }
+    },
+    "capital_inr": 1000000.0,
+    "ledger_losers_first": [
+      {
+        "id": "trd_e11_01",
+        "symbol": "GRANULES",
+        "direction": "long",
+        "signal_date": "2026-05-12",
+        "entry_date": "2026-05-13",
+        "entry_price": 612.4,
+        "exit_date": "2026-05-18",
+        "exit_price": 587.05,
+        "exit_reason": "stop",
+        "holding_sessions": 5,
+        "pnl_pct_gross": -4.14,
+        "pnl_pct_net": -4.44,
+        "costs_pct": 0.3,
+        "slippage_bps": 10.0,
+        "mfe_pct": 0.3,
+        "mae_pct": -4.61,
+        "as_of": "2026-09-08"
+      },
+      {
+        "id": "trd_e11_02",
+        "symbol": "KEI",
+        "direction": "long",
+        "signal_date": "2026-07-02",
+        "entry_date": "2026-07-03",
+        "entry_price": 4180.0,
+        "exit_date": "2026-07-08",
+        "exit_price": 4062.55,
+        "exit_reason": "stop",
+        "holding_sessions": 5,
+        "pnl_pct_gross": -2.81,
+        "pnl_pct_net": -3.11,
+        "costs_pct": 0.3,
+        "slippage_bps": 10.0,
+        "mfe_pct": 0.63,
+        "mae_pct": -3.28,
+        "as_of": "2026-09-08"
+      },
+      {
+        "id": "trd_e11_03",
+        "symbol": "APLAPOLLO",
+        "direction": "long",
+        "signal_date": "2026-08-12",
+        "entry_date": "2026-08-13",
+        "entry_price": 1655.3,
+        "exit_date": "2026-08-18",
+        "exit_price": 1638.2,
+        "exit_reason": "horizon",
+        "holding_sessions": 5,
+        "pnl_pct_gross": -1.03,
+        "pnl_pct_net": -1.33,
+        "costs_pct": 0.3,
+        "slippage_bps": 10.0,
+        "mfe_pct": 0.55,
+        "mae_pct": -1.62,
+        "as_of": "2026-09-08"
+      },
+      {
+        "id": "trd_e11_04",
+        "symbol": "SUPREMEIND",
+        "direction": "long",
+        "signal_date": "2026-03-25",
+        "entry_date": "2026-03-26",
+        "entry_price": 5240.0,
+        "exit_date": "2026-03-31",
+        "exit_price": 5266.4,
+        "exit_reason": "horizon",
+        "holding_sessions": 5,
+        "pnl_pct_gross": 0.5,
+        "pnl_pct_net": 0.2,
+        "costs_pct": 0.3,
+        "slippage_bps": 10.0,
+        "mfe_pct": 1.24,
+        "mae_pct": -0.88,
+        "as_of": "2026-09-08"
+      },
+      {
+        "id": "trd_e11_05",
+        "symbol": "ASTRAL",
+        "direction": "long",
+        "signal_date": "2026-06-24",
+        "entry_date": "2026-06-25",
+        "entry_price": 1490.75,
+        "exit_date": "2026-06-30",
+        "exit_price": 1521.1,
+        "exit_reason": "trail",
+        "holding_sessions": 5,
+        "pnl_pct_gross": 2.04,
+        "pnl_pct_net": 1.74,
+        "costs_pct": 0.3,
+        "slippage_bps": 10.0,
+        "mfe_pct": 2.36,
+        "mae_pct": -0.44,
+        "as_of": "2026-09-08"
+      },
+      {
+        "id": "trd_e11_06",
+        "symbol": "DIXON",
+        "direction": "long",
+        "signal_date": "2026-02-04",
+        "entry_date": "2026-02-05",
+        "entry_price": 18420.0,
+        "exit_date": "2026-02-10",
+        "exit_price": 19038.6,
+        "exit_reason": "trail",
+        "holding_sessions": 5,
+        "pnl_pct_gross": 3.36,
+        "pnl_pct_net": 3.06,
+        "costs_pct": 0.3,
+        "slippage_bps": 10.0,
+        "mfe_pct": 3.8,
+        "mae_pct": -0.51,
+        "as_of": "2026-09-08"
+      }
+    ],
+    "open_positions": []
+  },
+  "change_log": [
+    {
+      "seq": 1,
+      "level": "L1",
+      "at": "2026-06-11T18:40:00+05:30",
+      "what_changed": "Appended thirty forward observations to the evidence base.",
+      "why": "Observation-threshold trigger.",
+      "evidence_refs": [
+        "evd_e11_forward"
+      ],
+      "previous_version": null,
+      "new_version": "evidence@2026-06-11",
+      "performance_before": null,
+      "performance_after": null,
+      "improved": null,
+      "decided_by": "engine",
+      "approved_by": null,
+      "constitution_version": "constitution@1.3.0",
+      "validation": null
+    },
+    {
+      "seq": 2,
+      "level": "L2",
+      "at": "2026-08-04T18:40:00+05:30",
+      "what_changed": "Widened the index down-day threshold from 1.5% to 1.0%.",
+      "why": "Too few qualifying days at the tighter threshold; the wider one stays inside the approved range of 0.75% to 2.00% and roughly doubles the sample.",
+      "evidence_refs": [
+        "evd_e11_replay"
+      ],
+      "previous_version": "strategy@v1.1",
+      "new_version": "strategy@v1.2",
+      "performance_before": null,
+      "performance_after": null,
+      "improved": null,
+      "decided_by": "llm",
+      "approved_by": null,
+      "constitution_version": "constitution@1.3.0",
+      "validation": null
+    }
+  ],
+  "post_mortem": null,
+  "triggers": [
+    {
+      "id": "trg_e11_obs",
+      "type": "observation_threshold",
+      "description": "Reached thirty new closed observations since the last review.",
+      "fired_at": "2026-06-11T18:35:00+05:30",
+      "fired_by": "engine",
+      "fact_refs": [
+        "fct_e11_virt_n"
+      ]
+    }
+  ],
+  "llm_usage": {
+    "window": "experiment_lifetime",
+    "by_model": [
+      {
+        "model": "claude-sonnet-5",
+        "calls": 16,
+        "input_tokens": 214500,
+        "output_tokens": 19400,
+        "cache_read_input_tokens": 178200,
+        "cache_creation_input_tokens": 24100,
+        "cost_usd": 0.31
+      },
+      {
+        "model": "claude-haiku-4-5",
+        "calls": 27,
+        "input_tokens": 131700,
+        "output_tokens": 22800,
+        "cache_read_input_tokens": 107900,
+        "cache_creation_input_tokens": 13400,
+        "cost_usd": 0.15
+      }
+    ],
+    "total_cost_usd": 0.46,
+    "daily_budget_usd": null,
+    "budget_used_pct": null,
+    "as_of": "2026-09-08T16:05:00+05:30"
+  },
+  "next_review": {
+    "id": "trg_e11_next",
+    "type": "observation_threshold",
+    "description": "Review again after the next thirty closed observations.",
+    "fired_at": "2026-09-08T16:05:00+05:30",
+    "fired_by": "engine",
+    "fact_refs": [
+      "fct_e11_virt_n"
+    ]
+  },
+  "disclosure": "Pathfinder is a research lab. Everything here is a hypothesis under test with virtual money, not advice and not a recommendation. No returns are promised. Kanida never places an order on your behalf."
+}

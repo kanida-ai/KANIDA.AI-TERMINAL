@@ -732,6 +732,24 @@ try:
 except Exception as _agents_e:
     log.warning("Agent Platform NOT mounted (non-fatal): %s", _agents_e)
 
+# Pathfinder (P0, 2026-09-08) — the research-loop READ API (/api/pathfinder/*).
+# DEFAULT OFF. Ships DISABLED unless KANIDA_PATHFINDER_ENABLED=true, because P0
+# serves hand-authored MOCK fixtures and mock research must never be reachable
+# from the live product surface by accident. The frontend track builds against
+# the standalone mock instead: `uvicorn pathfinder.mock_app:app --port 8010`.
+# P1 lands the Postgres-backed store; enabling then is an env flip, not a code
+# change. Guarded like agent_builder so a bad import can never crash boot.
+if os.environ.get("KANIDA_PATHFINDER_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on"):
+    try:
+        from pathfinder.router import router as pathfinder_router
+        app.include_router(pathfinder_router, prefix="/api", tags=["Pathfinder"])
+        log.info("Pathfinder mounted at /api/pathfinder/* (source=%s)",
+                 os.environ.get("KANIDA_PATHFINDER_SOURCE", "mock"))
+    except Exception as _pf_e:
+        log.warning("Pathfinder NOT mounted (non-fatal): %s", _pf_e)
+else:
+    log.info("Pathfinder NOT mounted (KANIDA_PATHFINDER_ENABLED is off) — this is the default.")
+
 app.include_router(quant_router,     prefix="/api", tags=["Quant"])
 app.include_router(backtest_router,  prefix="/api", tags=["Backtest"])
 app.include_router(live_router,      prefix="/api", tags=["Live"])

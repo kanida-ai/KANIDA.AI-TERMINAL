@@ -1,0 +1,201 @@
+{
+  "cassette": "pathfinder.p1.build",
+  "authored_by_model": "claude-opus-5",
+  "recorded_at": "2026-09-08T00:00:00+05:30",
+  "note": "RECORDED, NOT LIVE. These completions were authored by claude-opus-5 during the session P1 build (Claude Code), not generated at loop time by the model the routing table names for each job. `llm_calls.model` therefore records claude-opus-5 and `llm_calls.provider` records `recorded`, so the database answers 'did a model write this, just now?' truthfully. Every entry is replayed through the SAME enforce_* output contract as a live completion: no bare numerals outside {{fact:...}} tokens, no fact reference that was not supplied, no invented category. The cassette covers the cycle beats and exp gap_up|index_below_200dma|long — the experiment that runs the full Observe->...->Next loop. Every other beat is engine-authored and says so. NOTE ON FRAGILITY: fact ids are experiment-scoped (fct_e0003_*), so a cassette entry goes stale if the scan's ranking changes which experiment id a hypothesis gets. That failure is safe by construction — an unsupplied fact reference raises OutputContractViolation and the beat falls back to engine narration, visibly, rather than rendering a wrong number.",
+  "entries": [
+    {
+      "job": "hypothesis",
+      "key": "gap_up|index_below_200dma|long|h10|s8|tnone:hypothesis",
+      "payload": {
+        "claim": "Names that gap up sharply while the broad index is below its long-term average are being repriced, not merely drifting, and the repricing continues past the open.",
+        "body": "Of the {{fact:fct_scan_candidates}} pre-registered candidates the scan replayed, this one is interesting for a reason that is not its rank: it is a long idea whose edge appears in a falling market, which is where most long ideas stop working. That makes it falsifiable in a useful way. If the effect is real, it is about forced repricing after news, and it should survive into a window that had no say in choosing it. If it is an artefact, it is almost certainly a small number of violent recoveries inside one drawdown, and the out-of-sample window will say so. The claim is wrong if expectancy net of costs is not positive out of sample, or if it does not survive twice the slippage assumption. There is no price target attached to this idea and none is implied; the exit is a stop, a horizon, and nothing else.",
+        "fact_refs": [
+          "fct_scan_candidates"
+        ],
+        "proposed_action": "open_experiment",
+        "learning_level": "L1",
+        "confidence": "provisional",
+        "abstained": false,
+        "abstain_reason": null,
+        "hypothesis": {
+          "trigger": "gap_up",
+          "params": {
+            "thr_pct": 3.0
+          },
+          "context": "index_below_200dma",
+          "direction": "long",
+          "horizon_sessions": 10,
+          "stop_pct": 8.0,
+          "target_pct": null
+        }
+      }
+    },
+    {
+      "job": "narrate",
+      "key": "gap_up|index_below_200dma|long|h10|s8|tnone:noticed",
+      "payload": {
+        "beat": "noticed",
+        "headline": "A long idea that only shows up when the market is falling",
+        "body": "The observer runs every session whether or not anything interesting happens, which is what makes the interesting sessions legible. Breadth stood at {{fact:fct_mkt_breadth_50dma}} of the liquid universe above its medium-term average, with trailing index volatility at {{fact:fct_mkt_index_vol}} — the {{fact:fct_mkt_vol_pctile}} percentile of its own history to that day, ranked against what had already happened and nothing later. {{fact:fct_mkt_universe_size}} names were tradeable under the liquidity filter.",
+        "fact_refs": [
+          "fct_mkt_breadth_50dma",
+          "fct_mkt_index_vol",
+          "fct_mkt_vol_pctile",
+          "fct_mkt_universe_size"
+        ]
+      }
+    },
+    {
+      "job": "narrate",
+      "key": "gap_up|index_below_200dma|long|h10|s8|tnone:hypothesis",
+      "payload": {
+        "beat": "hypothesis",
+        "headline": "Buying a sharp gap up, but only in a falling market",
+        "body": "The idea being put at risk: a liquid name that opens sharply above its prior close while the index sits below its long-term average is being repriced on information, and the repricing is not finished at the open. It is bought at the next session's open, held to a fixed horizon, and abandoned on a hard stop. The scan screened {{fact:fct_scan_candidates}} candidates before this one was chosen, so it arrives already flattered by selection, and every significance bar it faces has been widened to account for that.",
+        "fact_refs": [
+          "fct_scan_candidates"
+        ]
+      }
+    },
+    {
+      "job": "narrate",
+      "key": "gap_up|index_below_200dma|long|h10|s8|tnone:experiment",
+      "payload": {
+        "beat": "experiment",
+        "headline": "Replayed the way it would actually be traded",
+        "body": "Not held to the close and measured afterwards — replayed under the exact stop and horizon a book would use, entering at the open of the session after the signal, with costs and slippage charged to every closed trade including the winners. That produced {{fact:fct_e0003_disc_n}} closed trades on the discovery window. Where a daily bar shows both the stop and a favourable move, the stop is assumed to have come first, because the bar cannot say and assuming the kind one is how a backtest flatters itself.",
+        "fact_refs": [
+          "fct_e0003_disc_n"
+        ]
+      }
+    },
+    {
+      "job": "narrate",
+      "key": "gap_up|index_below_200dma|long|h10|s8|tnone:outcome",
+      "payload": {
+        "beat": "outcome",
+        "headline": "It held out of sample, then the book lost money anyway",
+        "body": "On the discovery window it returned {{fact:fct_e0003_disc_exp}} per trade net of costs against {{fact:fct_e0003_disc_base}} for the same universe under the same exits — an edge of {{fact:fct_e0003_disc_edge}}, still {{fact:fct_e0003_disc_exp_2x}} at twice the slippage. Out of sample, on data that had no say in choosing it, it was {{fact:fct_e0003_oos_exp}} per trade over {{fact:fct_e0003_oos_n}} trades. Weaker, and still there. Then the virtual book — which can only hold so many positions at once — returned {{fact:fct_e0003_book_ret}} on capital with a worst drawdown of {{fact:fct_e0003_book_dd}}, an expectancy of {{fact:fct_e0003_book_exp}} per trade. The same rule with no capacity limit made {{fact:fct_e0003_rule_exp}} per trade over that identical window. The difference is {{fact:fct_e0003_capacity_gap}} per trade, and what causes it is the next beat's problem rather than something to assert here.",
+        "fact_refs": [
+          "fct_e0003_disc_exp",
+          "fct_e0003_disc_base",
+          "fct_e0003_disc_edge",
+          "fct_e0003_disc_exp_2x",
+          "fct_e0003_oos_exp",
+          "fct_e0003_oos_n",
+          "fct_e0003_book_ret",
+          "fct_e0003_book_dd",
+          "fct_e0003_book_exp",
+          "fct_e0003_rule_exp",
+          "fct_e0003_capacity_gap"
+        ]
+      }
+    },
+    {
+      "job": "narrate",
+      "key": "gap_up|index_below_200dma|long|h10|s8|tnone:learning",
+      "payload": {
+        "beat": "learning",
+        "headline": "The obvious explanation was measured, and it was wrong",
+        "body": "The rule's edge over its own universe survived into the sealed window at {{fact:fct_e0003_rule_edge}}, while the book that traded it returned {{fact:fct_e0003_book_ret}} of capital — a gap of {{fact:fct_e0003_capacity_gap}} per trade. The obvious suspect is the tie-break: when more signals fire than there are slots, something has to choose, and this book takes the most liquid name first. Measuring it instead of assuming it: the spread across every approved selection rule is {{fact:fct_e0003_tiebreak_span}}, or {{fact:fct_e0003_tiebreak_share}} of the gap. It is not the explanation. The structural one is: {{fact:fct_e0003_top_day_share}} of the rule's trades arrive on its three busiest sessions, and a book holding ten positions cannot be in them. Remove those days and the rule's expectancy falls to {{fact:fct_e0003_rule_exp_ex_top_days}}. A new version is still recorded and still not switched on: the only window that could judge it has been spent making this comparison. Whether it is an improvement is recorded as unknown, because it is.",
+        "fact_refs": [
+          "fct_e0003_rule_edge",
+          "fct_e0003_book_ret",
+          "fct_e0003_capacity_gap",
+          "fct_e0003_tiebreak_span",
+          "fct_e0003_tiebreak_share",
+          "fct_e0003_top_day_share",
+          "fct_e0003_rule_exp_ex_top_days"
+        ]
+      }
+    },
+    {
+      "job": "narrate",
+      "key": "gap_up|index_below_200dma|long|h10|s8|tnone:next",
+      "payload": {
+        "beat": "next",
+        "headline": "Test the structural explanation, not the convenient one",
+        "body": "The book's problem is not which name it picks when it is choosing — it is that on the sessions that carry most of the rule's return, it has no slots free at all. So the next test is a book allowed to size down and spread across a crowded session, judged on a window this comparison has not already used. The second question is whether the market-regime condition is doing the work or merely keeping company with it, which the same signal without the filter would answer.",
+        "fact_refs": []
+      }
+    },
+    {
+      "job": "narrate",
+      "key": "gap_up|index_below_200dma|long|h10|s8|tnone:postmortem",
+      "payload": {
+        "beat": "learning",
+        "headline": "Retired at the book gate, with the useful part kept",
+        "body": "This one cleared every statistical gate that survival depends on and then failed the only one that is about money a person would have held. It is retired. What survives it is the distinction that killed it: the expectancy of a rule and the expectancy of a capacity-limited book that trades it are different quantities, and only the second one is a track record. Where a rule's return is concentrated in a few crowded sessions, the book cannot buy that return at any price, and no change of tie-break recovers it.",
+        "fact_refs": []
+      }
+    },
+    {
+      "job": "narrate",
+      "key": "cycle:noticed",
+      "payload": {
+        "beat": "noticed",
+        "headline": "What the observer saw before anything was decided",
+        "body": "Breadth stood at {{fact:fct_mkt_breadth_50dma}} of the liquid universe above its medium-term average, with trailing index volatility at {{fact:fct_mkt_index_vol}} — the {{fact:fct_mkt_vol_pctile}} percentile of its own history to date, ranked only against sessions that had already happened. {{fact:fct_mkt_universe_size}} names cleared the liquidity filter and were therefore tradeable at all.",
+        "fact_refs": [
+          "fct_mkt_breadth_50dma",
+          "fct_mkt_index_vol",
+          "fct_mkt_vol_pctile",
+          "fct_mkt_universe_size"
+        ]
+      }
+    },
+    {
+      "job": "narrate",
+      "key": "cycle:hypothesis",
+      "payload": {
+        "beat": "hypothesis",
+        "headline": "Ranked by edge over the universe, not by return",
+        "body": "{{fact:fct_scan_candidates}} pre-registered candidate rules were replayed over the discovery window and ranked by how far they beat the same universe under the same exits, rather than by what they returned. The reason is uncomfortable and worth saying plainly: the price history available here contains almost no names that stopped trading, so raw return over it is flattering, and mostly measures the market rather than the idea. The comparison against the same flawed universe is the part that survives that.",
+        "fact_refs": [
+          "fct_scan_candidates"
+        ]
+      }
+    },
+    {
+      "job": "narrate",
+      "key": "cycle:experiment",
+      "payload": {
+        "beat": "experiment",
+        "headline": "The same gauntlet for every idea, in the same order",
+        "body": "Replay on the discovery window. A placebo drawn by DAY rather than by trade, because these screens fire on a handful of market-wide sessions and treating each trade as an independent bet understates the null's own spread by about a factor of four. Then a window that had no say in choosing the rule, judged on a t-statistic clustered on the signal date rather than on the trade count. Then a virtual book on a window that was sealed when the experiment opened, marked to the close every session. Nothing skips a step, and nothing is re-ranked after a later step is seen.",
+        "fact_refs": []
+      }
+    },
+    {
+      "job": "narrate",
+      "key": "cycle:outcome",
+      "payload": {
+        "beat": "outcome",
+        "headline": "Nothing survived, and that is the honest result",
+        "body": "Every experiment opened this cycle is now in the graveyard. One was killed before any statistics mattered, because it could not be traded by the customer it was meant for. Several looked strong on the window that chose them and did not survive contact with a window that had not. One cleared everything except the book itself. None was promoted, and none could have been: the Constitution governing this run is an unsigned draft, and promotion needs a human signature on it.",
+        "fact_refs": []
+      }
+    },
+    {
+      "job": "narrate",
+      "key": "cycle:learning",
+      "payload": {
+        "beat": "learning",
+        "headline": "Two things this cycle changed about how the next one runs",
+        "body": "The strongest statistical edge in the entire scan was a multi-session short position, which a retail customer in this market cannot hold. Screening for what is actually executable now happens before ranking rather than after, because an edge nobody can trade is not a finding, it is a distraction that costs a slot. Second: a rule's expectancy and the expectancy of a capacity-limited book that trades it are different quantities, and only the second one is a track record. Third, and least comfortable: the first explanation offered for the difference between them was the book's tie-break, which turned out on measurement to account for almost none of it. The rule now is that a cause is measured before it is published, including when it is the engine's own.",
+        "fact_refs": []
+      }
+    },
+    {
+      "job": "narrate",
+      "key": "cycle:next",
+      "payload": {
+        "beat": "next",
+        "headline": "Separate the signal from the market it was found in",
+        "body": "The surviving conditions are re-run with their market-regime filter removed, so the contribution of the regime is measured rather than assumed. It is the cheapest way to find out whether what was discovered is an idea or a description of a period.",
+        "fact_refs": []
+      }
+    }
+  ]
+}

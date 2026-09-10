@@ -1,0 +1,1572 @@
+openapi: 3.1.0
+info:
+  title: KANIDA.AI API
+  version: 0.1.0
+  description: 'The KANIDA.AI product contract — the seam between the engine track and the app track.
+
+
+    Product laws that are enforced *in the schemas*, not merely documented:
+
+    - **Expectancy is the hero metric**; `win_rate_pct` is optional and never the headline.
+
+    - **Every return is paired with its drawdown** — a performance block cannot exist without `max_drawdown_pct`
+    and `current_drawdown_pct`.
+
+    - **No return promises and no target prices** — there is deliberately no target, projection or expected-return
+    field anywhere in this contract.
+
+    - **Every number carries n + date range + data source + cost convention** via `Provenance`; `sample_flag`
+    is derived (`greyed` below n=20, `flagged` below n=50).
+
+    - **Point-in-time is law** — every `Provenance` carries an `as_of`.
+
+    - **Losers first** — ledgers are named `ledger_losers_first` and sorted ascending by net P&L.
+
+    - **Backtests are labelled** ''Simulated · Not traded · Not PaRRVA-verified''.
+
+    - **The LLM never calculates** — narrative text authored by a model contains no literal numerals,
+    only `{{fact:<id>}}` references resolved against `facts[]`.'
+paths:
+  /api/pathfinder/experiment/{experiment_id}:
+    get:
+      tags:
+      - Pathfinder
+      summary: One experiment's full journey
+      description: 'The whole story for a single experiment: the question, the deterministic rulebook,
+        the six story beats, every supporting fact, the evidence bundles, the virtual book with its **losers-first**
+        ledger, the append-only L1–L3 change-log (what changed → why → evidence → previous version → new
+        version → did it improve), and — when the experiment died — its published post-mortem.'
+      operationId: get_experiment_api_pathfinder_experiment__experiment_id__get
+      parameters:
+      - name: experiment_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Experiment Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExperimentDetail'
+        '400':
+          description: Malformed request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No such resource.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Unexpected server error (details are not disclosed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/pathfinder/experiments:
+    get:
+      tags:
+      - Pathfinder
+      summary: The edge-discovery pipeline
+      description: 'Every experiment across the lifecycle. Dead experiments are listed, not hidden.
+
+
+        Ordering is **losers first**: struggling and dead experiments lead, promoted ones come last. `historical_return`
+        and `virtual_return` are each a performance block that structurally pairs expectancy with drawdown;
+        `sample_flag` is derived from `n` (`greyed` below 20, `flagged` below 50).'
+      operationId: get_experiments_api_pathfinder_experiments_get
+      parameters:
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - $ref: '#/components/schemas/ExperimentStatus'
+          - type: 'null'
+          description: Filter by lifecycle status. Omit for all.
+          title: Status
+        description: Filter by lifecycle status. Omit for all.
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExperimentListResponse'
+        '400':
+          description: Malformed request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No such resource.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Unexpected server error (details are not disclosed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/pathfinder/learnings:
+    get:
+      tags:
+      - Pathfinder
+      summary: What Pathfinder has learned, and what it is testing next
+      description: '`learned[]` is what the agent now believes, each tied to the experiments and evidence
+        that produced it and tagged with its learning level (L1 evidence, L2 parameter, L3 strategy —
+        L4 Constitution changes are human-only and never authored here). `testing_next[]` is what it decided
+        to test next and why now, including the ones that are blocked and why.'
+      operationId: get_learnings_api_pathfinder_learnings_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LearningsResponse'
+        '400':
+          description: Malformed request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No such resource.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Unexpected server error (details are not disclosed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pathfinder/loop:
+    get:
+      tags:
+      - Pathfinder
+      summary: The live research loop, as a story
+      description: 'One cycle of the loop: what the deterministic observer noticed, the hypothesis it
+        justified waking the LLM for, the virtual experiment, what happened, what was learned and changed,
+        and what is next — plus the supporting `facts` every narrative sentence references.
+
+
+        **Every number in this payload originates in `facts[]`, computed by a deterministic engine.**
+        LLM-authored story text contains no literal numerals; it carries `{{fact:<id>}}` references the
+        client resolves against `facts[]`.'
+      operationId: get_loop_api_pathfinder_loop_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoopResponse'
+        '400':
+          description: Malformed request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No such resource.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Unexpected server error (details are not disclosed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  schemas:
+    Author:
+      type: string
+      enum:
+      - engine
+      - llm
+      - human
+      title: Author
+    ChangeLogEntry:
+      properties:
+        seq:
+          type: integer
+          minimum: 1.0
+          title: Seq
+        level:
+          $ref: '#/components/schemas/LearningLevel'
+        at:
+          type: string
+          format: date-time
+          title: At
+        what_changed:
+          type: string
+          title: What Changed
+        why:
+          type: string
+          title: Why
+        evidence_refs:
+          items:
+            type: string
+          type: array
+          minItems: 1
+          title: Evidence Refs
+        previous_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Previous Version
+          description: Null only for the very first version of a thing.
+        new_version:
+          type: string
+          title: New Version
+        performance_before:
+          anyOf:
+          - $ref: '#/components/schemas/PerformanceBlock'
+          - type: 'null'
+        performance_after:
+          anyOf:
+          - $ref: '#/components/schemas/PerformanceBlock'
+          - type: 'null'
+        improved:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Improved
+          description: null = not yet enough forward evidence to say. Never guessed.
+        decided_by:
+          $ref: '#/components/schemas/Author'
+        approved_by:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Approved By
+          description: Human approver, when required.
+        constitution_version:
+          type: string
+          title: Constitution Version
+        validation:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Validation
+          description: 'For L3: how the new version was backtested AND forward-validated before replacing.'
+      additionalProperties: false
+      type: object
+      required:
+      - seq
+      - level
+      - at
+      - what_changed
+      - why
+      - evidence_refs
+      - new_version
+      - decided_by
+      - constitution_version
+      title: ChangeLogEntry
+      description: 'The governance record. Every change: what → why → evidence → previous version
+
+        → new version → did performance improve. Also customer-facing copy.'
+    Confidence:
+      type: string
+      enum:
+      - provisional
+      - supported
+      - strong
+      title: Confidence
+    DateRange:
+      properties:
+        start:
+          type: string
+          format: date
+          title: Start
+        end:
+          type: string
+          format: date
+          title: End
+      additionalProperties: false
+      type: object
+      required:
+      - start
+      - end
+      title: DateRange
+    DeathCause:
+      type: string
+      enum:
+      - no_edge_after_costs
+      - not_implementable_under_cost_convention
+      - not_distinguishable_from_chance
+      - edge_did_not_persist_oos
+      - sample_too_small
+      - data_quality
+      - regime_dependent_and_regime_gone
+      - superseded_by_newer_version
+      title: DeathCause
+    Direction:
+      type: string
+      enum:
+      - long
+      - short
+      title: Direction
+    ErrorBody:
+      properties:
+        code:
+          type: string
+          title: Code
+          description: Stable machine code, e.g. 'not_found'.
+        message:
+          type: string
+          title: Message
+          description: Safe, human-readable. Never a stack trace or SQL.
+        request_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Request Id
+      additionalProperties: false
+      type: object
+      required:
+      - code
+      - message
+      title: ErrorBody
+    ErrorResponse:
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorBody'
+      additionalProperties: false
+      type: object
+      required:
+      - error
+      title: ErrorResponse
+    Evidence:
+      properties:
+        id:
+          type: string
+          pattern: ^evd_[a-z0-9_]+$
+          title: Id
+        kind:
+          $ref: '#/components/schemas/EvidenceKind'
+        title:
+          type: string
+          title: Title
+        label:
+          type: string
+          title: Label
+          description: The simulated or virtual-money honesty label.
+        performance:
+          anyOf:
+          - $ref: '#/components/schemas/PerformanceBlock'
+          - type: 'null'
+        fact_refs:
+          items:
+            type: string
+          type: array
+          title: Fact Refs
+        provenance:
+          $ref: '#/components/schemas/Provenance'
+        interpretation:
+          anyOf:
+          - $ref: '#/components/schemas/StoryLine'
+          - type: 'null'
+          description: Optional LLM reading of THIS bundle. Subject to L-8.
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - kind
+      - title
+      - label
+      - provenance
+      title: Evidence
+      description: A deterministic evidence bundle the LLM may interpret (never produce).
+    EvidenceKind:
+      type: string
+      enum:
+      - historical_replay
+      - forward_virtual
+      - regime_split
+      - cost_sensitivity
+      - placebo
+      - novelty_check
+      title: EvidenceKind
+    ExperimentDetail:
+      properties:
+        id:
+          type: string
+          pattern: ^exp_[a-z0-9_]+$
+          title: Id
+        hypothesis:
+          type: string
+          title: Hypothesis
+        status:
+          $ref: '#/components/schemas/ExperimentStatus'
+        opened_at:
+          type: string
+          format: date-time
+          title: Opened At
+        strategy_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Strategy Version
+        constitution_version:
+          type: string
+          title: Constitution Version
+        historical_return:
+          anyOf:
+          - $ref: '#/components/schemas/PerformanceBlock'
+          - type: 'null'
+          description: Strategy-replay over the discovery window. Null while queued.
+        virtual_return:
+          anyOf:
+          - $ref: '#/components/schemas/PerformanceBlock'
+          - type: 'null'
+          description: The forward virtual book. Null until the first closed trade.
+        occurrences:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Occurrences
+        n:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: N
+        sample_flag:
+          $ref: '#/components/schemas/SampleFlag'
+          default: unknown
+        spark:
+          anyOf:
+          - $ref: '#/components/schemas/Spark'
+          - type: 'null'
+        as_of:
+          type: string
+          format: date-time
+          title: As Of
+        question:
+          type: string
+          title: Question
+          description: The question the agent asked itself.
+        rationale:
+          type: string
+          title: Rationale
+        rulebook:
+          $ref: '#/components/schemas/Rulebook'
+        stage:
+          $ref: '#/components/schemas/LoopStage'
+        story:
+          items:
+            $ref: '#/components/schemas/StoryLine'
+          type: array
+          minItems: 1
+          title: Story
+          description: The loop story, in beat order.
+        facts:
+          items:
+            $ref: '#/components/schemas/Fact'
+          type: array
+          title: Facts
+          description: Every fact referenced anywhere in this payload.
+        evidence:
+          items:
+            $ref: '#/components/schemas/Evidence'
+          type: array
+          title: Evidence
+        virtual_book:
+          anyOf:
+          - $ref: '#/components/schemas/VirtualBook'
+          - type: 'null'
+        change_log:
+          items:
+            $ref: '#/components/schemas/ChangeLogEntry'
+          type: array
+          title: Change Log
+          description: Append-only L1–L3 history (an L4 change is recorded, never authored here).
+        post_mortem:
+          anyOf:
+          - $ref: '#/components/schemas/PostMortem'
+          - type: 'null'
+        triggers:
+          items:
+            $ref: '#/components/schemas/Trigger'
+          type: array
+          title: Triggers
+        llm_usage:
+          anyOf:
+          - $ref: '#/components/schemas/LlmUsage'
+          - type: 'null'
+        next_review:
+          anyOf:
+          - $ref: '#/components/schemas/Trigger'
+          - type: 'null'
+          description: The condition that will next wake the LLM for this experiment.
+        disclosure:
+          type: string
+          title: Disclosure
+          default: Pathfinder is a research lab. Everything here is a hypothesis under test with virtual
+            money, not advice and not a recommendation. No returns are promised. Kanida never places an
+            order on your behalf.
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - hypothesis
+      - status
+      - opened_at
+      - constitution_version
+      - as_of
+      - question
+      - rationale
+      - rulebook
+      - stage
+      - story
+      - facts
+      title: ExperimentDetail
+      description: The full journey — this is the screen the whole product is about.
+    ExperimentListResponse:
+      properties:
+        as_of:
+          type: string
+          format: date-time
+          title: As Of
+        status_filter:
+          anyOf:
+          - $ref: '#/components/schemas/ExperimentStatus'
+          - type: 'null'
+        count:
+          type: integer
+          minimum: 0.0
+          title: Count
+        items:
+          items:
+            $ref: '#/components/schemas/ExperimentSummary'
+          type: array
+          title: Items
+        disclosure:
+          type: string
+          title: Disclosure
+          default: Pathfinder is a research lab. Everything here is a hypothesis under test with virtual
+            money, not advice and not a recommendation. No returns are promised. Kanida never places an
+            order on your behalf.
+      additionalProperties: false
+      type: object
+      required:
+      - as_of
+      - count
+      - items
+      title: ExperimentListResponse
+    ExperimentStatus:
+      type: string
+      enum:
+      - queued
+      - testing
+      - validating
+      - promising
+      - promoted
+      - died
+      title: ExperimentStatus
+      description: The Pathfinder lifecycle. `died` is a first-class, published outcome.
+    ExperimentSummary:
+      properties:
+        id:
+          type: string
+          pattern: ^exp_[a-z0-9_]+$
+          title: Id
+        hypothesis:
+          type: string
+          title: Hypothesis
+        status:
+          $ref: '#/components/schemas/ExperimentStatus'
+        opened_at:
+          type: string
+          format: date-time
+          title: Opened At
+        strategy_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Strategy Version
+        constitution_version:
+          type: string
+          title: Constitution Version
+        historical_return:
+          anyOf:
+          - $ref: '#/components/schemas/PerformanceBlock'
+          - type: 'null'
+          description: Strategy-replay over the discovery window. Null while queued.
+        virtual_return:
+          anyOf:
+          - $ref: '#/components/schemas/PerformanceBlock'
+          - type: 'null'
+          description: The forward virtual book. Null until the first closed trade.
+        occurrences:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Occurrences
+        n:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: N
+        sample_flag:
+          $ref: '#/components/schemas/SampleFlag'
+          default: unknown
+        spark:
+          anyOf:
+          - $ref: '#/components/schemas/Spark'
+          - type: 'null'
+        as_of:
+          type: string
+          format: date-time
+          title: As Of
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - hypothesis
+      - status
+      - opened_at
+      - constitution_version
+      - as_of
+      title: ExperimentSummary
+      description: List-row shape. The P0 brief's field list, made honest.
+    Fact:
+      properties:
+        id:
+          type: string
+          pattern: ^fct_[a-z0-9_]+$
+          title: Id
+        label:
+          type: string
+          title: Label
+          description: Human label, e.g. 'expectancy per trade, net of costs'.
+        value:
+          anyOf:
+          - type: number
+          - type: integer
+          - type: string
+          title: Value
+        unit:
+          $ref: '#/components/schemas/Unit'
+        n:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: N
+          description: Sample size behind the number. Required for statistics.
+        sample_flag:
+          $ref: '#/components/schemas/SampleFlag'
+          default: unknown
+        provenance:
+          $ref: '#/components/schemas/Provenance'
+        note:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Note
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - label
+      - value
+      - unit
+      - provenance
+      title: Fact
+      description: 'A single deterministic number. THE ONLY PLACE A NUMBER MAY ORIGINATE.
+
+
+        LLM prose references a fact by id; the client substitutes the rendered value.
+
+        This is what makes "the LLM never calculates" machine-checkable.'
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    Learning:
+      properties:
+        id:
+          type: string
+          pattern: ^lrn_[a-z0-9_]+$
+          title: Id
+        statement:
+          $ref: '#/components/schemas/StoryLine'
+        level:
+          $ref: '#/components/schemas/LearningLevel'
+        learned_at:
+          type: string
+          format: date-time
+          title: Learned At
+        from_experiments:
+          items:
+            type: string
+          type: array
+          minItems: 1
+          title: From Experiments
+        evidence_refs:
+          items:
+            type: string
+          type: array
+          title: Evidence Refs
+        fact_refs:
+          items:
+            type: string
+          type: array
+          title: Fact Refs
+        confidence:
+          $ref: '#/components/schemas/Confidence'
+        n:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: N
+        sample_flag:
+          $ref: '#/components/schemas/SampleFlag'
+          default: unknown
+        applied_in:
+          items:
+            type: string
+          type: array
+          title: Applied In
+          description: Strategy versions this learning changed.
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - statement
+      - level
+      - learned_at
+      - from_experiments
+      - confidence
+      title: Learning
+      description: Something Pathfinder now believes, and what it is applied in.
+    LearningLevel:
+      type: string
+      enum:
+      - L1
+      - L2
+      - L3
+      - L4
+      title: LearningLevel
+      description: The 4-level learning hierarchy. L4 is human-controlled.
+    LearningsResponse:
+      properties:
+        as_of:
+          type: string
+          format: date-time
+          title: As Of
+        constitution_version:
+          type: string
+          title: Constitution Version
+        learned:
+          items:
+            $ref: '#/components/schemas/Learning'
+          type: array
+          title: Learned
+        testing_next:
+          items:
+            $ref: '#/components/schemas/NextTest'
+          type: array
+          title: Testing Next
+        facts:
+          items:
+            $ref: '#/components/schemas/Fact'
+          type: array
+          title: Facts
+        disclosure:
+          type: string
+          title: Disclosure
+          default: Pathfinder is a research lab. Everything here is a hypothesis under test with virtual
+            money, not advice and not a recommendation. No returns are promised. Kanida never places an
+            order on your behalf.
+      additionalProperties: false
+      type: object
+      required:
+      - as_of
+      - constitution_version
+      - learned
+      - testing_next
+      - facts
+      title: LearningsResponse
+    LlmUsage:
+      properties:
+        window:
+          type: string
+          enum:
+          - today_ist
+          - experiment_lifetime
+          title: Window
+        by_model:
+          items:
+            $ref: '#/components/schemas/ModelUsage'
+          type: array
+          title: By Model
+        total_cost_usd:
+          type: number
+          minimum: 0.0
+          title: Total Cost Usd
+        daily_budget_usd:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Daily Budget Usd
+        budget_used_pct:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Budget Used Pct
+        as_of:
+          type: string
+          format: date-time
+          title: As Of
+      additionalProperties: false
+      type: object
+      required:
+      - window
+      - by_model
+      - total_cost_usd
+      - as_of
+      title: LlmUsage
+      description: Real token instrumentation from day 1 + the hard daily cap.
+    LoopResponse:
+      properties:
+        as_of:
+          type: string
+          format: date-time
+          title: As Of
+        cycle_id:
+          type: string
+          pattern: ^cyc_[a-z0-9_\-]+$
+          title: Cycle Id
+        stage:
+          $ref: '#/components/schemas/LoopStage'
+        constitution_version:
+          type: string
+          title: Constitution Version
+        active_experiment_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Active Experiment Id
+        trigger:
+          anyOf:
+          - $ref: '#/components/schemas/Trigger'
+          - type: 'null'
+          description: What woke the LLM for this cycle.
+        story:
+          items:
+            $ref: '#/components/schemas/StoryLine'
+          type: array
+          minItems: 1
+          title: Story
+          description: 'The beats in order: noticed → hypothesis → experiment → outcome → learning → next.'
+        facts:
+          items:
+            $ref: '#/components/schemas/Fact'
+          type: array
+          title: Facts
+        counts:
+          additionalProperties:
+            type: integer
+          propertyNames:
+            $ref: '#/components/schemas/ExperimentStatus'
+          type: object
+          title: Counts
+          description: Experiment count by status — the edge-discovery pipeline.
+        llm_usage:
+          anyOf:
+          - $ref: '#/components/schemas/LlmUsage'
+          - type: 'null'
+        disclosure:
+          type: string
+          title: Disclosure
+          default: Pathfinder is a research lab. Everything here is a hypothesis under test with virtual
+            money, not advice and not a recommendation. No returns are promised. Kanida never places an
+            order on your behalf.
+      additionalProperties: false
+      type: object
+      required:
+      - as_of
+      - cycle_id
+      - stage
+      - constitution_version
+      - story
+      - facts
+      - counts
+      title: LoopResponse
+      description: GET /api/pathfinder/loop — the live loop, AS A STORY, plus its supporting facts.
+    LoopStage:
+      type: string
+      enum:
+      - observe
+      - hypothesize
+      - test
+      - interpret
+      - trade
+      - track
+      - review
+      - learn
+      - next
+      title: LoopStage
+      description: Where the loop currently is. Mirrors the core-principle pipeline.
+    ModelUsage:
+      properties:
+        model:
+          type: string
+          title: Model
+        calls:
+          type: integer
+          minimum: 0.0
+          title: Calls
+        input_tokens:
+          type: integer
+          minimum: 0.0
+          title: Input Tokens
+        output_tokens:
+          type: integer
+          minimum: 0.0
+          title: Output Tokens
+        cache_read_input_tokens:
+          type: integer
+          minimum: 0.0
+          title: Cache Read Input Tokens
+        cache_creation_input_tokens:
+          type: integer
+          minimum: 0.0
+          title: Cache Creation Input Tokens
+        cost_usd:
+          type: number
+          minimum: 0.0
+          title: Cost Usd
+      additionalProperties: false
+      type: object
+      required:
+      - model
+      - calls
+      - input_tokens
+      - output_tokens
+      - cache_read_input_tokens
+      - cache_creation_input_tokens
+      - cost_usd
+      title: ModelUsage
+      description: Per-model token + cost instrumentation, straight from the provider response.
+    NextTest:
+      properties:
+        id:
+          type: string
+          pattern: ^nxt_[a-z0-9_]+$
+          title: Id
+        question:
+          type: string
+          title: Question
+        why_now:
+          $ref: '#/components/schemas/StoryLine'
+        triggered_by:
+          anyOf:
+          - $ref: '#/components/schemas/Trigger'
+          - type: 'null'
+        planned_test:
+          type: string
+          title: Planned Test
+          description: The DETERMINISTIC test that will be run.
+        blocked_by:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Blocked By
+        queued_experiment_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Queued Experiment Id
+        fact_refs:
+          items:
+            type: string
+          type: array
+          title: Fact Refs
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - question
+      - why_now
+      - planned_test
+      title: NextTest
+      description: What the agent decided to test next, and why now.
+    PerformanceBlock:
+      properties:
+        basis:
+          type: string
+          enum:
+          - historical_replay
+          - virtual_book
+          title: Basis
+          description: historical_replay = strategy-replay over history under the exact entry/exit/horizon
+            actually traded (never hold-to-close). virtual_book = forward, virtual money, marked daily.
+        label:
+          type: string
+          title: Label
+          description: Mandatory honesty label — the simulated or virtual-money label.
+        expectancy_pct_per_trade:
+          type: number
+          title: Expectancy Pct Per Trade
+          description: Expected value per trade, %, NET of the stated cost convention.
+        expectancy_2x_slippage_pct_per_trade:
+          type: number
+          title: Expectancy 2X Slippage Pct Per Trade
+          description: Same expectancy re-run at 2x slippage (the sensitivity gate).
+        total_return_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Total Return Pct
+          description: Cumulative return of the book over date_range, net of costs.
+        max_drawdown_pct:
+          type: number
+          minimum: 0.0
+          title: Max Drawdown Pct
+          description: Worst peak-to-trough drawdown over date_range. ALWAYS shown.
+        current_drawdown_pct:
+          type: number
+          minimum: 0.0
+          title: Current Drawdown Pct
+          description: Drawdown from the running peak as of `provenance.as_of`.
+        win_rate_pct:
+          anyOf:
+          - type: number
+            maximum: 100.0
+            minimum: 0.0
+          - type: 'null'
+          title: Win Rate Pct
+          description: Supporting only. Never render this as the headline metric.
+        avg_win_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Avg Win Pct
+        avg_loss_pct:
+          anyOf:
+          - type: number
+            maximum: 0.0
+          - type: 'null'
+          title: Avg Loss Pct
+          description: Negative by convention.
+        payoff_ratio:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Payoff Ratio
+        n:
+          type: integer
+          minimum: 0.0
+          title: N
+          description: Closed trades behind these numbers.
+        occurrences:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Occurrences
+          description: Raw pattern occurrences observed (>= n; some are not tradeable).
+        sample_flag:
+          $ref: '#/components/schemas/SampleFlag'
+          default: unknown
+        provenance:
+          $ref: '#/components/schemas/Provenance'
+      additionalProperties: false
+      type: object
+      required:
+      - basis
+      - label
+      - expectancy_pct_per_trade
+      - expectancy_2x_slippage_pct_per_trade
+      - max_drawdown_pct
+      - current_drawdown_pct
+      - n
+      - provenance
+      title: PerformanceBlock
+      description: 'L-1 + L-2. Expectancy is required and first; every return is structurally
+
+        paired with a drawdown. There is NO target/projection field, by design.'
+    PostMortem:
+      properties:
+        died_at:
+          type: string
+          format: date-time
+          title: Died At
+        cause:
+          $ref: '#/components/schemas/DeathCause'
+        summary:
+          $ref: '#/components/schemas/StoryLine'
+        what_we_kept:
+          type: string
+          title: What We Kept
+          description: The learning that survives the death.
+        evidence_refs:
+          items:
+            type: string
+          type: array
+          minItems: 1
+          title: Evidence Refs
+        retired_version:
+          type: string
+          title: Retired Version
+        decided_by:
+          $ref: '#/components/schemas/Author'
+        approved_by:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Approved By
+      additionalProperties: false
+      type: object
+      required:
+      - died_at
+      - cause
+      - summary
+      - what_we_kept
+      - evidence_refs
+      - retired_version
+      - decided_by
+      title: PostMortem
+      description: Mandatory when status == died. Published — the graveyard is a feature.
+    Provenance:
+      properties:
+        data_source:
+          type: string
+          title: Data Source
+          description: Dataset identifier, e.g. 'kite_eod_adjusted_nifty500'.
+        date_range:
+          $ref: '#/components/schemas/DateRange'
+          description: The window the number was computed over.
+        as_of:
+          type: string
+          format: date
+          title: As Of
+          description: Point-in-time cutoff. No input to this number post-dates it.
+        cost_convention:
+          type: string
+          title: Cost Convention
+          description: 'Versioned cost + slippage convention applied, e.g. ''costs_v3: brokerage+STT+exchange+GST+stamp,
+            slippage 10bps, entry next open''.'
+        computed_by:
+          type: string
+          title: Computed By
+          description: The DETERMINISTIC component that computed it, e.g. 'book_engine@2.3.1'. A model
+            id must never appear here — the LLM does not compute.
+        computed_at:
+          type: string
+          format: date-time
+          title: Computed At
+          description: IST timestamp of the computation.
+        universe:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Universe
+          description: Point-in-time universe, e.g. 'nifty500_pit'.
+      additionalProperties: false
+      type: object
+      required:
+      - data_source
+      - date_range
+      - as_of
+      - cost_convention
+      - computed_by
+      - computed_at
+      title: Provenance
+      description: 'L-4 + L-5: where a number came from, and the `as_of` it was computed at.'
+    Rulebook:
+      properties:
+        universe:
+          type: string
+          title: Universe
+        direction:
+          $ref: '#/components/schemas/Direction'
+        entry:
+          type: string
+          title: Entry
+          description: Signal condition. Fill = NEXT OPEN after the signal bar.
+        invalidation:
+          type: string
+          title: Invalidation
+          description: What makes the idea wrong. Replaces 'target price'.
+        exit:
+          type: string
+          title: Exit
+          description: 'Deterministic exit: stop / trail / horizon.'
+        horizon_sessions:
+          type: integer
+          minimum: 1.0
+          title: Horizon Sessions
+        sizing:
+          type: string
+          title: Sizing
+        cost_convention:
+          type: string
+          title: Cost Convention
+      additionalProperties: false
+      type: object
+      required:
+      - universe
+      - direction
+      - entry
+      - invalidation
+      - exit
+      - horizon_sessions
+      - sizing
+      - cost_convention
+      title: Rulebook
+      description: The deterministic rule under test. No target price — invalidation instead.
+    SampleFlag:
+      type: string
+      enum:
+      - ok
+      - flagged
+      - greyed
+      - unknown
+      title: SampleFlag
+    Spark:
+      properties:
+        basis:
+          type: string
+          enum:
+          - virtual_equity_pct
+          - historical_equity_pct
+          title: Basis
+        points:
+          items:
+            type: number
+          type: array
+          maxItems: 400
+          minItems: 2
+          title: Points
+        date_range:
+          $ref: '#/components/schemas/DateRange'
+        as_of:
+          type: string
+          format: date
+          title: As Of
+      additionalProperties: false
+      type: object
+      required:
+      - basis
+      - points
+      - date_range
+      - as_of
+      title: Spark
+      description: A sparkline series. Points are cumulative % to date — never a projection.
+    StoryBeat:
+      type: string
+      enum:
+      - noticed
+      - hypothesis
+      - experiment
+      - outcome
+      - learning
+      - next
+      title: StoryBeat
+      description: The six beats of the living-research-loop story. Order is the UX law.
+    StoryLine:
+      properties:
+        beat:
+          $ref: '#/components/schemas/StoryBeat'
+        headline:
+          type: string
+          title: Headline
+        body:
+          type: string
+          title: Body
+        produced_by:
+          $ref: '#/components/schemas/Author'
+        model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model
+          description: Model id, when produced_by == 'llm' (e.g. 'claude-sonnet-5').
+        prompt_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Prompt Version
+        at:
+          type: string
+          format: date-time
+          title: At
+        fact_refs:
+          items:
+            type: string
+          type: array
+          title: Fact Refs
+          description: Every fact id referenced in `body`/`headline`.
+      additionalProperties: false
+      type: object
+      required:
+      - beat
+      - headline
+      - body
+      - produced_by
+      - at
+      title: StoryLine
+      description: 'One beat of the loop story.
+
+
+        L-8: if `produced_by == "llm"`, `headline` and `body` must contain no literal
+
+        numerals — every number is a fact reference resolved by the client.'
+    Trigger:
+      properties:
+        id:
+          type: string
+          pattern: ^trg_[a-z0-9_]+$
+          title: Id
+        type:
+          $ref: '#/components/schemas/TriggerType'
+        description:
+          type: string
+          title: Description
+        fired_at:
+          type: string
+          format: date-time
+          title: Fired At
+        fired_by:
+          type: string
+          const: engine
+          title: Fired By
+          description: Only the deterministic observer fires a trigger — never a clock, never the LLM.
+          default: engine
+        fact_refs:
+          items:
+            type: string
+          type: array
+          title: Fact Refs
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - type
+      - description
+      - fired_at
+      title: Trigger
+      description: What woke the LLM up. Always fired by the deterministic observer.
+    TriggerType:
+      type: string
+      enum:
+      - unusual_market_condition
+      - observation_threshold
+      - performance_deviation
+      - scheduled_review
+      - human_request
+      title: TriggerType
+      description: Autonomy = continuous cheap observation, intelligent LLM activation.
+    Unit:
+      type: string
+      enum:
+      - pct
+      - pct_per_trade
+      - bps
+      - count
+      - ratio
+      - days
+      - sessions
+      - x
+      - inr
+      - text
+      title: Unit
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+    VirtualBook:
+      properties:
+        metrics:
+          $ref: '#/components/schemas/PerformanceBlock'
+        capital_inr:
+          type: number
+          exclusiveMinimum: 0.0
+          title: Capital Inr
+          description: Virtual capital. Never real money.
+        ledger_losers_first:
+          items:
+            $ref: '#/components/schemas/VirtualTrade'
+          type: array
+          title: Ledger Losers First
+          description: 'L-7: closed trades sorted ASCENDING by pnl_pct_net — worst first, always.'
+        open_positions:
+          items:
+            $ref: '#/components/schemas/VirtualTrade'
+          type: array
+          title: Open Positions
+      additionalProperties: false
+      type: object
+      required:
+      - metrics
+      - capital_inr
+      - ledger_losers_first
+      title: VirtualBook
+    VirtualTrade:
+      properties:
+        id:
+          type: string
+          pattern: ^trd_[a-z0-9_]+$
+          title: Id
+        symbol:
+          type: string
+          title: Symbol
+        direction:
+          $ref: '#/components/schemas/Direction'
+        signal_date:
+          type: string
+          format: date
+          title: Signal Date
+          description: Bar that produced the signal.
+        entry_date:
+          type: string
+          format: date
+          title: Entry Date
+          description: Next session after signal_date.
+        entry_price:
+          type: number
+          exclusiveMinimum: 0.0
+          title: Entry Price
+          description: Adjusted open of entry_date.
+        exit_date:
+          anyOf:
+          - type: string
+            format: date
+          - type: 'null'
+          title: Exit Date
+        exit_price:
+          anyOf:
+          - type: number
+            exclusiveMinimum: 0.0
+          - type: 'null'
+          title: Exit Price
+        exit_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Exit Reason
+          description: stop | trail | horizon | invalidation | open
+        holding_sessions:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Holding Sessions
+        pnl_pct_gross:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Pnl Pct Gross
+        pnl_pct_net:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Pnl Pct Net
+          description: After the stated cost convention. The ledger sorts on this.
+        costs_pct:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Costs Pct
+        slippage_bps:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Slippage Bps
+        mfe_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Mfe Pct
+        mae_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Mae Pct
+        as_of:
+          type: string
+          format: date
+          title: As Of
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - symbol
+      - direction
+      - signal_date
+      - entry_date
+      - entry_price
+      - as_of
+      title: VirtualTrade
+      description: One virtual trade. Entry = next open after the signal bar (quant law).
+tags:
+- name: Pathfinder
+  description: 'The autonomous research loop: an LLM research brain around a deterministic quant engine.
+    Read-only. Pathfinder emits research, never an order.'

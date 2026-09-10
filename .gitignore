@@ -92,3 +92,6 @@ universe_engine/data/db/
 
 # Agent Builder local runtime state (SQLite wallet) — never commit
 backend/agent_builder/*.db
+
+# Pathfinder engine run artefacts (session P1) — regenerate with scripts/run_pathfinder_loop.py
+var/

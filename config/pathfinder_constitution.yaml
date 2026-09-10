@@ -1,0 +1,174 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PATHFINDER CONSTITUTION — L4. HUMAN-CONTROLLED ONLY.
+#
+# The agent learns INSIDE this document. It cannot rewrite it, and no code path
+# in backend/pathfinder/ has a write to it. An L2 parameter change is checked
+# against `approved_parameter_ranges` below; an L3 strategy version is checked
+# against `learning`; a change here is a human editing this file and bumping
+# `version`.
+#
+# ⚠ STATUS: UNSIGNED DRAFT.
+# Session P1 wrote this because the loop could not enforce L2 without it (see
+# docs/handbacks/P0.md §4 — "the approved ranges" were the named blocker). It has
+# NOT been reviewed or approved by the founder. While `approved_by` reads
+# UNSIGNED, `governance.py` REFUSES to promote any experiment past `promising`.
+# Promotion is a human act on a signed Constitution.
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "constitution@1.0.0-draft"
+previous_version: null
+effective_from: "2026-09-08T00:00:00+05:30"
+authored_by: human
+approved_by: "UNSIGNED — draft prepared in session P1, awaiting founder approval"
+
+# ── Risk limits ──────────────────────────────────────────────────────────────
+risk:
+  # Pathfinder trades VIRTUAL money only. These are limits on the simulation, and
+  # they are what makes the published track record a claim about a strategy that
+  # could actually have been run.
+  virtual_capital_inr: 1000000
+  max_fraction_per_position: 0.10
+  max_concurrent_positions: 10
+  max_positions_per_symbol: 1
+  max_new_positions_per_session: 5
+  hard_stop_required: true            # every rulebook must carry a stop
+  leverage: 1.0                       # no leverage in research, ever
+  short_selling_allowed: true         # simulated only; see compliance.execution
+
+# ── Honesty rules (mirrors CLAUDE.md; enforced in code + schema + DB) ────────
+honesty:
+  hero_metric: expectancy_pct_per_trade
+  win_rate_may_be_headline: false
+  every_return_shown_with_drawdown: true
+  losers_shown_first: true
+  target_prices_allowed: false
+  return_promises_allowed: false
+  sample_flag_greyed_below_n: 20
+  sample_flag_flagged_below_n: 50
+  numbers_may_originate_in: [engine]        # never `llm`, never `human`
+  results_must_be_rerun_at_slippage_multiple: 2.0
+  death_requires_published_post_mortem: true
+  survivorship_must_be_disclosed: true
+
+# ── Compliance boundaries ────────────────────────────────────────────────────
+compliance:
+  research_only: true
+  advice_or_recommendation: false
+  execution:
+    # The agent emits research. It has no order path of any kind.
+    may_place_orders: false
+    may_propose_orders_to_a_broker: false
+    customer_path: "Kite Publisher hand-off — the user confirms in their own broker"
+  ra_approval_required_before_customer_display: true
+  disclosure_required_on_every_response: true
+
+# ── Permitted actions (anything not listed is forbidden) ─────────────────────
+permitted_actions:
+  engine:
+    - observe_market
+    - fire_trigger
+    - evaluate_candidate_grid
+    - replay_strategy
+    - compute_evidence
+    - mark_virtual_book
+    - record_learning
+    - transition_status
+  llm:
+    - propose_hypothesis        # composed ONLY from the closed primitive library
+    - interpret_evidence
+    - critique_outcome
+    - decide_next_experiment
+    - narrate
+    - classify
+  llm_forbidden:
+    - compute_any_number
+    - invent_a_trigger_primitive
+    - set_a_parameter_outside_its_approved_range
+    - author_or_amend_this_document
+    - promote_an_experiment
+    - place_or_propose_an_order
+
+# ── The learning hierarchy ───────────────────────────────────────────────────
+learning:
+  L1_evidence:
+    automatic: true
+  L2_parameter:
+    requires_range_check: true
+    may_move_outside_approved_range: false
+  L3_strategy:
+    requires_backtest: true
+    requires_forward_validation: true
+    may_replace_incumbent_without_validation: false
+  L4_constitution:
+    author: human_only
+    agent_may_propose: false
+
+# ── The go/no-go gauntlet (docs/STRATEGY_METHODOLOGY.md §1) ──────────────────
+gauntlet:
+  discovery_window_only_for_selection: true
+  min_expectancy_pct_net: 0.0
+  min_expectancy_pct_net_at_2x_slippage: 0.0
+  min_n_for_promotion: 50
+  min_edge_vs_baseline_pct: 0.0
+  max_placebo_p_value: 0.05          # signal must beat 95% of same-size random draws
+  requires_out_of_sample_hold: true
+  requires_invalidation_not_a_target: true
+  requires_novelty_check: true
+  # Promotion additionally requires a SIGNED Constitution. See the status note above.
+  promotion_requires_signed_constitution: true
+
+# ── Autonomy: what may wake the LLM ──────────────────────────────────────────
+autonomy:
+  llm_woken_by: [unusual_market_condition, observation_threshold, performance_deviation, human_request]
+  clock_may_wake_llm: false
+  observation_review_threshold: 30
+  unusual_condition_percentile: 0.95      # |expanding percentile| beyond this is "unusual"
+  performance_deviation_pct_per_trade: 0.5
+
+# ── LLM budget + routing (routing changes are an L4 decision) ───────────────
+llm:
+  daily_budget_usd: 5.00                  # ⚠ founder input pending — placeholder
+  job_model_routing:
+    hypothesis: claude-sonnet-5
+    critique: claude-sonnet-5
+    decide_next: claude-sonnet-5
+    narrate: claude-haiku-4-5
+    classify: claude-haiku-4-5
+    hard_research: claude-opus-5
+
+# ── L2: the approved parameter ranges ────────────────────────────────────────
+# A hypothesis parameter outside its range is REJECTED, never clamped. Missing a
+# trigger here means the agent may not use that trigger at all.
+approved_parameter_ranges:
+  _exits:
+    horizon_sessions: {min: 1, max: 10}
+    stop_pct: {min: 1.0, max: 12.0}
+    target_pct: {min: 1.0, max: 20.0}
+  gap_up:
+    thr_pct: {min: 1.0, max: 10.0}
+  gap_down:
+    thr_pct: {min: 1.0, max: 10.0}
+  breakout:
+    lookback: {min: 10, max: 252}
+  breakdown:
+    lookback: {min: 10, max: 252}
+  oversold:
+    lookback: {min: 2, max: 20}
+    thr_pct: {min: 3.0, max: 25.0}
+  overbought:
+    lookback: {min: 2, max: 20}
+    thr_pct: {min: 3.0, max: 25.0}
+  streak_up:
+    sessions: {min: 2, max: 7}
+  streak_down:
+    sessions: {min: 2, max: 7}
+  volume_dry_up:
+    sessions: {min: 2, max: 10}
+    ratio: {min: 0.4, max: 1.0}
+  pullback_in_uptrend:
+    trend_lookback: {min: 20, max: 200}
+    pullback_pct: {min: 3.0, max: 20.0}
+  inside_day:
+    sessions: {min: 1, max: 5}
+  range_expansion:
+    mult: {min: 1.2, max: 4.0}

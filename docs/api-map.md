@@ -2,6 +2,47 @@
 
 Every endpoint, grouped by product. Mount points are in `backend/main.py`.
 
+> **Two layers, don't confuse them.** Everything below the "Product" heading is the **new
+> KANIDA.AI product contract**, specified in `docs/openapi.yaml` and built contract-first. Everything
+> from "Power User" down is the **existing** operator/Phase-2 surface, documented as-is. New product
+> work extends `docs/openapi.yaml`; it does not fork these.
+
+---
+
+# Product — the contract-first surface (`docs/openapi.yaml`)
+
+## Pathfinder — `/api/pathfinder/*` (read-only)
+
+The autonomous research loop. **Read-only by construction** — Pathfinder emits research, never an
+order, and has no write surface on the customer path.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/pathfinder/loop` | The live loop as a story (six beats) + the deterministic `facts[]` every sentence references. |
+| `GET /api/pathfinder/experiments?status=` | The edge-discovery pipeline. Ordered **losers first**; dead experiments are listed, not hidden. |
+| `GET /api/pathfinder/experiment/{id}` | One experiment's full journey: rulebook, story, facts, evidence, losers-first virtual ledger, the append-only L1–L3 change-log, and the post-mortem when it died. |
+| `GET /api/pathfinder/learnings` | What was learned (with level + confidence + n) and what is being tested next, including what is blocked and why. |
+
+- **Router:** `backend/pathfinder/router.py` · **Contract:** `backend/pathfinder/schemas.py`
+  (`docs/openapi.yaml` is **generated** from it — `python scripts/gen_openapi.py`).
+- **Mount:** `backend/main.py`, **default OFF**. Ships disabled unless
+  `KANIDA_PATHFINDER_ENABLED=true`, because P0 serves hand-authored mock fixtures.
+- **Mock server (what the frontend builds against):**
+  `cd backend && uvicorn pathfinder.mock_app:app --port 8010`.
+- **Data source:** `KANIDA_PATHFINDER_SOURCE=mock` (P0 fixtures) → `postgres` (P1 engine). Swapping
+  is an env var, not a code change; `postgres` raises until P1 lands rather than silently serving
+  fixtures as engine output.
+- Errors are guarded: `{"error": {"code", "message", "request_id"}}` on 400/404/500. Nothing internal
+  is ever disclosed.
+
+## Trader slice — `/api/trader/*`
+
+*Not yet built — owned by `docs/sessions/01-api-contract.md`.*
+
+---
+
+# Existing surfaces
+
 ## Power User — `/api/power/*` (8 routers, invite-gated)
 
 | Router file | Mount | Purpose |
@@ -48,3 +89,18 @@ Mounted in `main.py` but mostly pre-Falcon. **Audit consumers before removing.**
 Next.js rewrites (`next.config.ts`) proxy `/api/power/*` and friends to
 `BACKEND_ORIGIN` (api.kanida.ai). `middleware.ts` applies HTTP Basic Auth to
 everything except `/power/*`.
+
+
+### Pathfinder data source (P1)
+
+`KANIDA_PATHFINDER_SOURCE` selects what the four `/api/pathfinder/*` endpoints serve. The router,
+the schemas and the tests do not change between them — that is the point of the seam.
+
+| Value | Serves | Notes |
+|---|---|---|
+| `mock` *(default)* | P0's hand-authored fixtures | Labelled as fixtures on every response. |
+| `engine` | the real loop's authoritative tables | SQLite mirror at `KANIDA_PATHFINDER_DB` (default `var/pathfinder.db`). **Raises** if the database is absent rather than falling back to fixtures. |
+| `postgres` | the same tables on Postgres | **Raises** — needs a driver and credentials P1 did not have. |
+
+Produce the engine data with `python scripts/run_pathfinder_loop.py --fresh --llm recorded`.
+`KANIDA_PATHFINDER_LLM` selects the gateway provider: `auto` (default) · `live` · `recorded` · `none`.

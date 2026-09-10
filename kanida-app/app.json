@@ -1,0 +1,47 @@
+{
+  "expo": {
+    "name": "KANIDA.AI",
+    "slug": "kanida",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "kanida",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "backgroundColor": "#08090C",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "ai.kanida.app",
+      "icon": "./assets/expo.icon"
+    },
+    "android": {
+      "package": "ai.kanida.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#08090C",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "output": "static",
+      "bundler": "metro",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#08090C",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 76
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}
