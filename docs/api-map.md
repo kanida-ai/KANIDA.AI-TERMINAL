@@ -22,6 +22,7 @@ order, and has no write surface on the customer path.
 | `GET /api/pathfinder/experiments?status=` | The edge-discovery pipeline. Ordered **losers first**; dead experiments are listed, not hidden. |
 | `GET /api/pathfinder/experiment/{id}` | One experiment's full journey: rulebook, story, facts, evidence, losers-first virtual ledger, the append-only L1–L3 change-log, and the post-mortem when it died. |
 | `GET /api/pathfinder/learnings` | What was learned (with level + confidence + n) and what is being tested next, including what is blocked and why. |
+| `GET /api/pathfinder/feed?date=` | **S1.** The clarity-first after-close edition: findings ranked by usefulness (`what_matters_now` = the first 2–3, then `discoveries`), each with a digit-free `narrative` (numbers are `{{fact:…}}` refs into `facts[]`), full `provenance` (level · n · period · regime · comparison group · cost hurdle), a `grading_rule` frozen at publication, its `grading` state, plus the running `scoreboard` (Right · Wrong · Inconclusive · n). No minimum count — never padded. |
 
 - **Router:** `backend/pathfinder/router.py` · **Contract:** `backend/pathfinder/schemas.py`
   (`docs/openapi.yaml` is **generated** from it — `python scripts/gen_openapi.py`).
@@ -32,6 +33,10 @@ order, and has no write surface on the customer path.
 - **Data source:** `KANIDA_PATHFINDER_SOURCE=mock` (P0 fixtures) → `postgres` (P1 engine). Swapping
   is an env var, not a code change; `postgres` raises until P1 lands rather than silently serving
   fixtures as engine output.
+- **Feed source (S1):** `/feed` reads the research store at `KANIDA_PATHFINDER_RESEARCH_DB`
+  (default `var/pathfinder_research.db`), written by `python scripts/run_pathfinder_scan.py`
+  (`--date`, `--backfill N`, `--llm none|auto|recorded|live`; price warehouse via `KANIDA_DB`). No
+  store → a guarded 404 `no_edition`, never fixtures.
 - Errors are guarded: `{"error": {"code", "message", "request_id"}}` on 400/404/500. Nothing internal
   is ever disclosed.
 

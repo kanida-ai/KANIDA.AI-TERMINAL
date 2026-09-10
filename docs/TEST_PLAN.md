@@ -8,6 +8,7 @@ what it built. **Rule: no requirement without a test row.**
 | **Pathfinder P0** (contract + mock) | below | `backend/tests/test_pathfinder_p0.py` | **37 passing** |
 | **Pathfinder P1** (engine) | below | `backend/tests/test_pathfinder_p1.py` | **60 rows** |
 | **Pathfinder P2** (frontend) | below | `kanida-app/tests/{lib,contract}.test.ts` | **31 passing** |
+| **Pathfinder S1** (research engine + feed) | below | `backend/tests/test_pathfinder_s1.py` + `test_pathfinder_s1_audit.py` | **34 + 39 passing** |
 | Trader slice | *to be appended by session 01/S1.1* | — | not started |
 
 Run:
@@ -218,6 +219,100 @@ rows above now cover all four:
    runs did not reproduce it, and the root cause was not established. `run_book` now raises rather
    than returning a silent empty book, so the failure mode is a crash instead of an optimistic zero.
 
+
+---
+
+## Pathfinder S1 — the research engine + clarity-first feed (`backend/tests/test_pathfinder_s1.py`)
+
+Requirements traced: the LOCKED spec `docs/sessions/PATHFINDER.md` (12 principles, 7 addenda) and
+the S1 brief's "done when". Rows S1-01…S1-33 run on a **synthetic fat-tailed universe** where every
+bar is under the test's control; S1-34 runs on the **real warehouse** and skips when it is absent.
+
+```bash
+python -m pytest backend/tests/test_pathfinder_s1.py -q        # 34 rows, ~20s with the warehouse
+python -m pytest backend/tests/test_pathfinder_s1_audit.py -q  # 39 audit regressions, ~50s with the warehouse
+python scripts/run_pathfinder_scan.py --fresh --backfill 12    # the real store the feed serves
+```
+
+| Row | Asserts | Law |
+|---|---|---|
+| S1-01 | forward outcomes `f1/f3/f5/r5cc` are NaN in the last *h* rows and present in the row before (no off-by-one either way) | point-in-time |
+| S1-02 | `f{h}` = close[t+h] / **open[t+1]** − 1 — entry is the next open, not the signal close | entry = next open |
+| S1-03 | **seal invariance**: the frame sealed at D equals the frame built from history truncated at D, column for column | point-in-time |
+| S1-04 | a sealed frame refuses to widen | point-in-time |
+| S1-05 | a 0.0 price is a hole: NaN close, NaN return, NaN forward outcome; no ±inf anywhere | never fabricate |
+| S1-06 | the library holds exactly the six seeded templates, each with a computation, question, source and grading kinds | addendum 2 |
+| S1-07 | the scan runs **only** what the library holds (patching the library to one template yields one template's cards) | principle 3 |
+| S1-08 | every template fires on an engineered close (dip / surge / anomaly / pair / theme / regime) | — |
+| S1-09 | a calm close yields fewer cards — nothing is padded | addendum 1 |
+| S1-10 | every card carries level · n · period · regime · comparison group · cost hurdle · universe · source · as_of | addendum 7 |
+| S1-11 | every fact carries provenance with a level, no period past `as_of`, no model in `computed_by` | principle 4 |
+| S1-12 | narratives are digit-free (headline: no digit at all; body: only `{{fact}}` tokens), every ref resolves, every narrative cites a fact | principle 2 |
+| S1-13 | small samples are labelled (`greyed` < 20), never hidden | CLAUDE.md |
+| S1-14 | the hurdle is on every card and the decision is the one the facts + hurdle imply (the prototype's rules) | cost-aware |
+| S1-15 | a `Narrative` with a bare numeral is unrepresentable | principle 2 |
+| S1-16 | directional / no-trade verdicts: Right beyond +hurdle, Wrong beyond −hurdle, **Inconclusive inside** (long, short, no-trade) | addendum 4 |
+| S1-17 | no grade before the horizon completes | principle 5 |
+| S1-18 | theme call vs theme watch: the "not yet a cycle" call is Wrong when it clearly was one | addendum 4 |
+| S1-19 | anomaly-move and pair-convergence verdicts (pair uses 2× hurdle) | addendum 4 |
+| S1-20 | **the rule is frozen**: the hurdle is changed in config after publication; the grade uses the frozen one | principle 5 |
+| S1-21 | findings grade exactly when their horizon closes; `due_session` and `data_as_of` are recorded | principle 5 |
+| S1-22 | scoreboard counts sum to n; per-template split sums; snapshots are appended | principle 8 |
+| S1-23 | findings, grades, editions and snapshots reject UPDATE/DELETE; one grade per finding, ever | append-only |
+| S1-24 | an edition is never recomputed | append-only |
+| S1-25 | the threshold gates publication; **zero published is a valid edition**; rejected candidates are on the record with scores | addendum 1 |
+| S1-26 | ranks strictly increase, usefulness strictly decreases, the first ≤3 are `what_matters_now` | clarity-first |
+| S1-27 | novelty decays for a repeated finding | ranking |
+| S1-28 | evidence strength rewards sample and clarity | ranking |
+| S1-29 | a model that writes a numeral is rejected by the contract and the engine narrates, visibly | principle 2 |
+| S1-30 | the model may only veto a card that already cleared the threshold; it is never asked about the rest; a good narration is stamped `llm` + model | principle 2 |
+| S1-31 | `GET /feed` over HTTP: ranked, tiered, digit-free, provenance, frozen rule, grading state, scoreboard; an earlier edition shows its grades | done-when |
+| S1-32 | feed errors are guarded (400 bad date, 404 no edition, nothing internal leaks) | guarded errors |
+| S1-33 | no research store → 404, never fixtures | honesty |
+| S1-34 | **port fidelity on the real warehouse**, close 2026-07-29: IT led 8/15, +11.7% vs +2.6%, persistence 70% (n=3,316 — the prototype's 3,296 dropped 20 sessions to a data hole, verified by re-injecting it), pair 89% of 412, dip n=12,632, surge n=24,727 (the prototype's 24,734 included a +inf off a 0.0 bar and six listing-day glitch bars — see A-D1) | reuse, don't re-derive |
+
+### S1 quant-audit regressions (`backend/tests/test_pathfinder_s1_audit.py`, 39 rows)
+
+Each row encodes the auditor's recomputed expectation and **failed on the engine as handed over**
+(`docs/handbacks/PF-S1.md` §4). Rows prefixed `real` run on the warehouse at close 2026-07-29.
+
+| Row | Asserts | Finding |
+|---|---|---|
+| A-C1 | `pf_editions.engine_version` and every `computed_by` carry the content hash of `research/*.py`; the hash changes when a file changes; **the same seal scanned twice into two stores yields byte-identical `card_json`** (synthetic and real); a share of exactly 0% / 100% over n≥100 is refused at mint time (the smoke run's `big_move=0.0%` over 13,119) | C1 |
+| A-C2 | `rotation_reject` (and `theme_watch`) are **Wrong** when the sector beat the market by more than the hurdle even though it ranks fourth at the horizon (the old rule graded that Right); rank at horizon is a fact, not a verdict input; the rule text names no top-three condition | C2 |
+| A-C3 | the "not a cycle" verdicts are symmetric: lagged by > hurdle → Right, inside → Inconclusive | C3 |
+| A-C4 | z is measured on the **lift beyond a minimum** over the unconditional control (47.35% vs 48.44% on 13,154 → z = 0; the old z vs 50% was > 6); the card mints `base_big_move` (n = every resolved stock-session), `lift`, names the control in `comparison_group`; a zero-lift card is `no_trade` (`no_trade_call`/5), evidence strength 0.5 | C4 |
+| A-C5 | episodes = first day of each run of consecutive extreme sessions; `n` = episodes; the key facts are the spread trade's hit rate and median; event-day facts are labelled overlapping; `snapped_back` is labelled a width statistic, not a trade result | C5 |
+| A-C7 | the strong gate is `leaders like this` (sector beat the market on ≥ 9/15 sessions with a higher cumulative return) on the graded metric (sector − market f5) **plus expectancy**; `persistence` is labelled "any leader … context only" | C7 |
+| A-C8 | a pct/ratio/x statistic without n is refused; a parameter / single observation is minted with `sample_flag = not_applicable` and **no n**; no card carries an n on `move_today`, `volume_x`, `sigma`, `threshold`, `watch_*_move`, `other_*_return`, `window` | C8 |
+| A-P1 | the strict feed contract rejects "nine in ten", "half", "doubled", "most of the time", "usually", "one in four" without a fact ref **in the same sentence**, rejects zero refs, rejects number words in the headline; **the model's headline is discarded and the engine's kept** | P1 |
+| A-P2 | `rule_version` ends with the sha256 of `grading.py`; `build_rule` refuses an incomplete spec; `evaluate` raises rather than reading live config for a missing key | P2 |
+| A-P7 | a sealed / resealed frame has none of `next_open`, `_d{h}`, `_c{h}`, `_badfwd{h}`; the last five rows of every symbol carry no week-later outcome (synthetic + real 497-name frame) | P7 |
+| A-P4 | `scoreboard(X).pending` counts findings graded on a seal later than X | P4 |
+| A-P5 | `dip_decision` / `surge_decision` / `carry_decision` / `call_on_excess` refuse a call whose median clears costs with negative expectancy; every group card mints an `expectancy` fact | P5 |
+| A-D1 | a >4x / <0.25x close-to-close bar is a hole: its return is NaN and every forward window straddling it is NaN (synthetic); with the guard off the auditor's exact rotation numbers (770 / 41.8% / −0.42%) and the old surge n (24,733) reproduce | found while fixing |
+| real-C4 | DCMSHRIRAM 07-29: big 47.35% (n 13,154), base 48.44% (n > 1.25M), lift −1.09 pp, z = 0, `no_trade`, evidence 0.5, usefulness < 0.70; `volume_x`/`move_today`/`move_threshold` have no n | C4 |
+| real-C5 | HDFCBANK/ICICIBANK: 412 event-days = 121 episodes; on the 412: Right 51.0% / Wrong 31.3% / median +0.69%; on the 121: 52.1% / 28.9% / +0.71% / up 62.0%; snapped-back 89.1% of 412 kept as context | C5 |
+| real-C6 | Telecommunication flip: 771 flips / 41.8% / −0.42% on sector − market **f5**; 36.9% beat by > hurdle; label and rule metric say "next open"; `rotation_reject` | C6 |
+| real-C7 | IT leader: like-this n = 2,655, beat-by->hurdle 45.95% (< 58), expectancy < 0 → `watch`; any-leader persistence 70.1% of 3,316 is context | C7 |
+| real-C8/P5 | dip n = 12,632, median 0.00%, expectancy₁ ≈ 0, expectancy₅ ≈ +0.08% (the raw mean was +14.3% off one 831x bar) → no_trade; surge n = 24,727, expectancy < 0 → reject | C8/P5/D1 |
+
+### Known gaps for S1
+
+1. **The "unexplained regime reading" was not unexplained.** The `RISK_OFF … breadth 10%` edition
+   sat in `var/pathfinder_research_smoke.db`, a store written by the code **before**
+   `scan.py`/`data.py`/`regime.py` were patched; the same store carried `big_move = 0.0%` over
+   13,119 cases. The hand-over described it as a non-reproducible glitch — it was a stale run of
+   superseded code. The smoke store is deleted; every edition now records the code hash (A-C1), a
+   determinism test pins two builds to identical cards, and the 0%/100%-share guard would have
+   refused the bad fact. The `build_regime` cross-check stays.
+2. **No live-model row.** S1-29/30 and A-P1 exercise the contract with a fake provider; the recorded
+   provider has no cassettes for feed keys, so every real edition is engine-narrated and says so.
+   The P1 engine's own narrate path (`engine/narrator.py`) still uses the non-strict contract.
+3. **The Postgres target** is untouched by S1 — the research store is SQLite only.
+4. **Survivorship** (audit P3): today's Nifty-500 membership and today's sector labels are applied
+   to 2013→2026 history; base rates are cost-hurdle decisions rather than absolute returns, which
+   limits but does not remove the bias. No point-in-time membership in the warehouse.
 
 ---
 

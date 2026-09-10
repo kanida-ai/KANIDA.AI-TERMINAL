@@ -43,6 +43,51 @@ def assert_no_bare_numerals(text: str, *, where: str) -> None:
         )
 
 
+#: S1 audit P1 — a number written as a word is still a number the model produced. "Nine in
+#: ten", "half", "doubled", "most of the time" are quantities. Any sentence that carries one
+#: must also carry a `{{fact:…}}` reference, or it is the model inventing a statistic.
+NUMBER_WORD_RE = re.compile(
+    r"\b(?:zero|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|"
+    r"fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|"
+    r"eighty|ninety|hundreds?|thousands?|millions?|billions?|dozens?|half|halves|thirds?|"
+    r"quarters?|fifths?|tenths?|percent|percentage|per\s+cent|doubl(?:e|ed|es|ing)|"
+    r"tripl(?:e|ed|es|ing)|twice|thrice|\w+-?fold)\b"
+    r"|\bone\s+(?:in|out\s+of)\s+\w+",
+    re.IGNORECASE,
+)
+QUANTIFIER_RE = re.compile(
+    r"\b(?:majority|minority|most(?:\s+of)?(?:\s+the)?\s+(?:time|cases|days|sessions|stocks|"
+    r"names|sectors|pairs)|almost\s+all|nearly\s+all|all\s+but|almost\s+always|almost\s+never|"
+    r"always|never|usually|rarely|seldom|often|frequently|typically|mostly|commonly|"
+    r"more\s+often\s+than\s+not|every\s+time|each\s+time)\b",
+    re.IGNORECASE,
+)
+_SENTENCE_RE = re.compile(r"(?<=[.!?;])\s+")
+
+
+def assert_quantities_referenced(text: str, *, where: str) -> None:
+    """
+    Every sentence that states a quantity in words (a number word or a frequency
+    quantifier) must point at a computed fact in the same sentence. The digit check
+    catches "0.7%"; this catches "nine in ten" and "usually".
+    """
+    for sentence in _SENTENCE_RE.split(str(text)):
+        if not sentence.strip():
+            continue
+        hit = NUMBER_WORD_RE.search(sentence) or QUANTIFIER_RE.search(sentence)
+        if hit and not FACT_REF_RE.search(sentence):
+            raise OutputContractViolation(
+                f"{where}: LLM-authored prose states a quantity in words ({hit.group(0)!r}) "
+                "with no {{fact:<id>}} reference in the same sentence. Quantities must be facts."
+            )
+
+
+def assert_no_number_words(text: str, *, where: str) -> None:
+    hit = NUMBER_WORD_RE.search(str(text))
+    if hit:
+        raise OutputContractViolation(f"{where}: may not carry a number word ({hit.group(0)!r})")
+
+
 def assert_refs_supplied(refs: Iterable[str], facts: Sequence[dict[str, Any]], *, where: str) -> None:
     """A model may not return a fact id it was never given. That would be invention."""
     known = {str(f["id"]) for f in facts}
@@ -81,7 +126,13 @@ def enforce_reason(payload: dict[str, Any], facts: Sequence[dict[str, Any]], *, 
     return payload
 
 
-def enforce_narrate(payload: dict[str, Any], facts: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def enforce_narrate(payload: dict[str, Any], facts: Sequence[dict[str, Any]], *,
+                    strict: bool = False) -> dict[str, Any]:
+    """
+    The narrate contract. `strict=True` (the S1 research feed, audit P1) additionally
+    requires at least one fact reference, bans number words in the headline, and requires
+    every sentence of the body that states a quantity in words to cite a fact.
+    """
     for key in ("beat", "headline", "body", "fact_refs"):
         if key not in payload:
             raise OutputContractViolation(f"narrate: missing required field {key!r}")
@@ -95,6 +146,16 @@ def enforce_narrate(payload: dict[str, Any], facts: Sequence[dict[str, Any]]) ->
     assert_refs_supplied(refs, facts, where="narrate")
     assert_no_bare_numerals(str(payload["body"]), where="narrate.body")
     assert_refs_used_are_declared([str(payload["body"])], refs, where="narrate")
+    if strict:
+        if not refs:
+            raise OutputContractViolation(
+                "narrate: a narration that cites no fact is a story, not evidence — at least one fact_ref is required"
+            )
+        used = {m.group("id") for m in FACT_REF_RE.finditer(str(payload["body"]))}
+        if not used:
+            raise OutputContractViolation("narrate: the body must actually use at least one {{fact:<id>}} token")
+        assert_no_number_words(str(payload["headline"]), where="narrate.headline")
+        assert_quantities_referenced(str(payload["body"]), where="narrate.body")
     return payload
 
 

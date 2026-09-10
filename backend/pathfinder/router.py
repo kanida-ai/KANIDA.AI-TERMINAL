@@ -30,16 +30,19 @@ from .schemas import (
     ExperimentDetail,
     ExperimentListResponse,
     ExperimentStatus,
+    FeedResponse,
     LearningsResponse,
     LoopResponse,
 )
 from .store import get_store
+from .research.store import get_research_store
 
 log = logging.getLogger("kanida.pathfinder")
 
 router = APIRouter(prefix="/pathfinder", tags=["Pathfinder"])
 
 _EXPERIMENT_ID_RE = re.compile(r"^exp_[a-z0-9_]+$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _ERRORS = {
     400: {"model": ErrorResponse, "description": "Malformed request."},
@@ -121,6 +124,40 @@ def get_experiment(experiment_id: str, request: Request, response: Response):
     if detail is None:
         return _error(404, "not_found", "No experiment with that id.", request)
     return detail
+
+
+@router.get(
+    "/feed",
+    response_model=FeedResponse,
+    responses=_ERRORS,
+    summary="The clarity-first research feed for one close (S1)",
+    description=(
+        "The after-close edition: findings ranked by usefulness, **clarity first** — "
+        "`what_matters_now` holds the first two or three, `discoveries` the rest. There is "
+        "**no minimum count and no padding**: an edition with four findings is a valid edition.\n\n"
+        "Every finding was **computed before it was written** by a template from the question "
+        "library and carries: a digit-free `narrative` whose numbers are `{{fact:<id>}}` "
+        "references into `facts[]`; full `provenance` (evidence level, n, period, regime, "
+        "comparison group, cost hurdle); a `grading_rule` **frozen at publication**; and its "
+        "`grading` state (pending, or graded Right / Wrong / Inconclusive with the realised "
+        "facts). `scoreboard` is the running public record with n.\n\n"
+        "`date` selects an edition (YYYY-MM-DD); omit it for the latest. Research items only — "
+        "no entry, target, stop or execution is ever implied."
+    ),
+)
+def get_feed(
+    request: Request,
+    date: Optional[str] = Query(None, description="Edition close date, YYYY-MM-DD. Omit for the latest."),
+):
+    if date is not None and not _DATE_RE.match(date):
+        return _error(400, "invalid_date", "date must look like 2026-07-29.", request)
+    store = get_research_store()
+    if store is None:
+        return _error(404, "no_edition", "No research edition has been published yet.", request)
+    feed = store.feed(date)
+    if feed is None:
+        return _error(404, "no_edition", "No research edition for that date.", request)
+    return feed
 
 
 @router.get(

@@ -12,4 +12,7 @@ Layout
   mock_app.py    standalone mock server (what the frontend track builds against)
   llm/gateway.py pathfinder_llm gateway CONTRACT (Protocol only — no provider in P0)
   fixtures/      honest sample data
+  research/      S1 — the research engine behind GET /api/pathfinder/feed: question library,
+                 sealed after-close scan, usefulness ranking, frozen grading, append-only store
+  engine/        P1 — the earlier 288-rule experiment loop (kept; S2 reuses its gate + seal)
 """

@@ -76,6 +76,18 @@ promoted; the graveyard is populated with real post-mortems.
 **After:** S0.2. **Context:** `Kanida_Falcon/engine/state_engine/baseline.py`, `scripts/regime.py`.
 **Steps:** 1) Base-rate engine: founder's 10–15 observation rules → daily count/base-rate/n. 2) Regime detector: breadth + India-VIX bucket + expiry proximity → RISK_ON/NEUTRAL/OFF. 3) Wire both into the product path (not research-only). 4) Test n + regime tags populate.
 **Done when:** daily base-rate cards + a populated regime tag are available to the API.
+**STATUS: PARTLY DELIVERED by Pathfinder S1** (`docs/handbacks/PF-S1.md`) — the regime detector
+(`backend/pathfinder/research/regime.py`, breadth + VIX percentile + A/D, no expiry proximity yet)
+and six template-based base-rate cards are computed after every close and served by
+`GET /api/pathfinder/feed`. The founder's own 10–15 observation rules are still an input.
+
+### Pathfinder S1 — engine core, rebuilt to the LOCKED spec (`docs/sessions/PATHFINDER.md`)
+**STATUS: DELIVERED** (`docs/handbacks/PF-S1.md`). Question library (6 seeded templates porting
+`pathfinder_theme.py` / `pathfinder_demo.py`), after-close scan sealed at its date, usefulness
+ranking with a threshold and no minimum count, provenance on every card, grading rules frozen at
+publication, append-only scoreboard, `GET /api/pathfinder/feed`. S2 (experiment loop, virtual
+capital, promotion gate) and S3 (swipeable feed UI) follow — see `docs/sessions/PATHFINDER_S2_*.md`,
+`PATHFINDER_S3_*.md`.
 
 ---
 

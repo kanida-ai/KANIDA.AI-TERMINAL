@@ -163,6 +163,32 @@ cannot answer the question that matters most about a narrative sentence: *did a 
 just now?* A recorded replay and a live call are different facts about the world, and the record now
 says which. Whoever runs `0001_pathfinder.sql` should add the same column and CHECK.
 
+## The S1 research store (`backend/pathfinder/research/store.py`)
+
+Session S1 rebuilt the engine to the locked spec and added a second, self-contained SQLite store
+(`KANIDA_PATHFINDER_RESEARCH_DB`, default `var/pathfinder_research.db`) for the clarity-first feed.
+Every table is **append-only** (UPDATE and DELETE are rejected by triggers):
+
+| Table | One row per | What it holds |
+|---|---|---|
+| `pf_editions` | after-close edition (date) | data seal, regime label, universe scanned, candidates considered, the usefulness threshold and every template parameter used (`params_json`), and `engine_version` = `pathfinder_research@<semver>+code.<sha256[:12] of research/*.py>` — the edition is attributable to the exact code that computed it (audit C1); `pf_grades.rule_version` likewise carries the hash of `grading.py` (P2) |
+| `pf_findings` | **published** finding | rank, tier, template, subject, decision, novelty key, usefulness, **`grading_rule_json` + `frozen_at`** (the rule as frozen at publication), and `card_json` — the full `Finding` (facts with provenance, digit-free narrative, provenance block) |
+| `pf_candidates` | every computed card, published or not | its score components and the reason (`below usefulness threshold` / `held by llm` / `published`) — what the engine chose *not* to publish is on the record |
+| `pf_grades` | graded finding (**at most one, ever** — PK) | verdict, the data seal it was graded on, the due session, the rule version, the realised facts |
+| `pf_scoreboard` | grading pass | a snapshot of `Right · Wrong · Inconclusive · n · pending` and the per-template split |
+
+The published count of an edition is **derived** from `pf_findings` at read time; the edition row
+is never updated. A date that already has an edition is refused, not recomputed. The scoreboard
+served by `/feed` is computed from `pf_grades` (the snapshots answer "what did it say on date X");
+its `pending` is "published on or before X and not graded on a seal ≤ X" (P4).
+
+A store written by superseded code cannot be corrected in place (append-only): it is **deleted and
+rebuilt** (`run_pathfinder_scan.py --fresh`). `engine_version` is how a reader tells them apart.
+
+`Fact.sample_flag` gained `not_applicable` (C8): a parameter (a configured threshold) or a single
+observation (today's move, today's z-score) carries no `n` and says so; the flag is still never
+derived by hand for a statistic.
+
 ## Founder inputs still stubbed
 
 - The **Constitution document** itself (`constitution_versions.document`): risk limits, honesty

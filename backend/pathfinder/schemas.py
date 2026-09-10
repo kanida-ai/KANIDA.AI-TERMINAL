@@ -117,6 +117,10 @@ class SampleFlag(str, Enum):
     flagged = "flagged"  # 20 <= n < 50
     greyed = "greyed"    # n < 20
     unknown = "unknown"  # no sample yet (a queued experiment)
+    #: S1 audit C8: a PARAMETER (a threshold the engine was configured with) or a SINGLE
+    #: OBSERVATION (today's move, today's z-score) is not a statistic and has no sample.
+    #: Before this flag existed the engine invented an n to satisfy the schema.
+    not_applicable = "not_applicable"
 
 
 class Unit(str, Enum):
@@ -188,6 +192,17 @@ class Confidence(str, Enum):
     strong = "strong"
 
 
+class EvidenceLevel(str, Enum):
+    """
+    S1 (spec addendum 7): where the evidence comes from. Stated on every fact and every
+    finding so a reader never mistakes a whole-market base rate for a stock's own history.
+    """
+    same_stock = "same_stock"        # this stock's (or this pair's) own history
+    peer_group = "peer_group"        # its sector peers
+    sector = "sector"                # the sector as a group
+    whole_market = "whole_market"    # every stock in the universe
+
+
 # ── Value objects ────────────────────────────────────────────────────────────
 
 class DateRange(BaseModel):
@@ -232,6 +247,10 @@ class Provenance(BaseModel):
     universe: Optional[str] = Field(
         None, description="Point-in-time universe, e.g. 'nifty500_pit'."
     )
+    level: Optional[EvidenceLevel] = Field(
+        None,
+        description="S1: same_stock / peer_group / sector / whole_market — where this number's evidence comes from.",
+    )
 
 
 class Fact(BaseModel):
@@ -256,11 +275,18 @@ class Fact(BaseModel):
 
     @model_validator(mode="after")
     def _derive_and_check(self) -> "Fact":
+        # A parameter or a single observation (S1 audit C8) carries NO n and says so. It may
+        # be declared only with n=None; the flag is never "derived" into or out of it.
+        if self.sample_flag == SampleFlag.not_applicable:
+            if self.n is not None:
+                raise ValueError(f"fact {self.id}: not_applicable cannot carry an n")
+            return self
         # L-6: the flag is derived, never asserted by hand.
         self.sample_flag = sample_flag_for(self.n)
         # L-4: a statistic without an n is not a number we are allowed to show.
         if self.unit in {Unit.pct, Unit.pct_per_trade, Unit.ratio, Unit.x} and self.n is None:
-            raise ValueError(f"fact {self.id}: statistic of unit {self.unit} requires n")
+            raise ValueError(f"fact {self.id}: statistic of unit {self.unit} requires n "
+                             "(or sample_flag=not_applicable for a parameter / single observation)")
         return self
 
 
@@ -767,6 +793,272 @@ class LearningsResponse(BaseModel):
         dangling = used - known
         if dangling:
             raise ValueError(f"unresolvable fact refs: {sorted(dangling)}")
+        return self
+
+
+# ── S1: the clarity-first FEED (docs/sessions/PATHFINDER_S1_ENGINE.md) ───────
+
+FINDING_DISCLOSURE = (
+    "Research item, not a recommendation. Computed from historical data before it was "
+    "written; the grading rule was frozen at publication. No entry, target, stop or "
+    "execution is implied. Kanida never places an order on your behalf."
+)
+
+
+class Decision(str, Enum):
+    """The research decision vocabulary (pathfinder_demo.py). Research, never an order."""
+    virtual_long = "virtual_long"
+    virtual_short = "virtual_short"
+    watch = "watch"
+    no_trade = "no_trade"
+    new_experiment = "new_experiment"
+    continue_ = "continue"
+    reject = "reject"
+
+
+class SubjectKind(str, Enum):
+    stock = "stock"
+    sector = "sector"
+    pair = "pair"
+    market = "market"
+
+
+class Tier(str, Enum):
+    what_matters_now = "what_matters_now"   # the first two or three — clarity in thirty seconds
+    discovery = "discovery"                 # everything after — keep discovering
+
+
+class GradingKind(str, Enum):
+    """
+    Per-finding-type grading rules (spec addendum 4). Each kind names ONE deterministic
+    evaluator in research/grading.py; the parameters are frozen in `GradingRule.spec`.
+    """
+    directional_call = "directional_call"   # VIRTUAL LONG/SHORT: realised move vs ±hurdle
+    no_trade_call = "no_trade_call"         # NO TRADE: Right if a trade would have lost after costs
+    theme_call = "theme_call"               # sector beat the market over the horizon by > hurdle
+    theme_watch = "theme_watch"             # "not yet a cycle": Wrong if the sector beat the market by > hurdle
+    rotation_reject = "rotation_reject"     # "a one-day flip is noise": Wrong if the sector beat the market by > hurdle
+    anomaly_move = "anomaly_move"           # a move of at least X% within the window
+    pair_convergence = "pair_convergence"   # the spread converged by more than 2x hurdle
+
+
+class Verdict(str, Enum):
+    right = "right"
+    wrong = "wrong"
+    inconclusive = "inconclusive"
+
+
+class GradingStatus(str, Enum):
+    pending = "pending"     # horizon not yet complete
+    graded = "graded"
+
+
+class FindingProvenance(BaseModel):
+    """
+    Spec addendum 7 — on EVERY card: n, period, regime, comparison group, cost hurdle,
+    and the evidence level.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    level: EvidenceLevel
+    n: int = Field(..., ge=0, description="Primary sample size behind the decision.")
+    sample_flag: SampleFlag = SampleFlag.unknown
+    period: DateRange = Field(..., description="Historical window the evidence covers.")
+    regime: str = Field(..., description="Market regime the finding was computed in (engine label).")
+    comparison_group: str = Field(..., description="What the subject is compared against.")
+    cost_hurdle_pct: float = Field(..., ge=0, description="Round-trip cost hurdle used to judge meaningfulness.")
+    cost_convention: str
+    data_source: str
+    universe: str
+    as_of: date
+    computed_by: str
+    computed_at: datetime
+
+    @model_validator(mode="after")
+    def _derive(self) -> "FindingProvenance":
+        self.sample_flag = sample_flag_for(self.n)
+        if self.period.end > self.as_of:
+            raise ValueError("finding provenance: period ends after as_of — look-ahead")
+        for marker in ("claude", "gpt", "gemini", "sonnet", "haiku", "opus", "llm"):
+            if marker in self.computed_by.lower():
+                raise ValueError("computed_by names a model — the LLM does not compute")
+        return self
+
+
+class GradingRule(BaseModel):
+    """FROZEN at publication. Never decided after the event (spec principle 5)."""
+    model_config = ConfigDict(extra="forbid")
+
+    kind: GradingKind
+    horizon_sessions: int = Field(..., ge=1)
+    hurdle_pct: float = Field(..., ge=0)
+    metric: str = Field(..., description="Exactly what is measured when the horizon completes.")
+    right: str
+    wrong: str
+    inconclusive: str
+    frozen_at: datetime
+    rule_version: str
+    spec: dict[str, str | float | int | list[str]] = Field(
+        default_factory=dict, description="Evaluator parameters, frozen with the rule.")
+
+
+class GradingState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: GradingStatus
+    due_session: Optional[date] = Field(None, description="First session the horizon is complete.")
+    verdict: Optional[Verdict] = None
+    graded_at: Optional[datetime] = None
+    data_as_of: Optional[date] = Field(None, description="Data seal the grade was computed on.")
+    realized_facts: list[Fact] = Field(default_factory=list, description="What actually happened.")
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "GradingState":
+        if self.status == GradingStatus.graded and self.verdict is None:
+            raise ValueError("a graded finding must carry a verdict")
+        if self.status == GradingStatus.pending and self.verdict is not None:
+            raise ValueError("a pending finding cannot carry a verdict")
+        return self
+
+
+class Narrative(BaseModel):
+    """
+    The finding's story. L-8 holds for BOTH authors here: no literal numeral outside a
+    `{{fact:…}}` token, whoever wrote it. `headline` carries no digit at all.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    headline: str
+    body: str
+    produced_by: Author
+    model: Optional[str] = None
+    prompt_version: Optional[str] = None
+    at: datetime
+    fact_refs: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _digit_free(self) -> "Narrative":
+        if any(ch.isdigit() for ch in self.headline):
+            raise ValueError("narrative headline may not contain a digit")
+        if any(ch.isdigit() for ch in REF_TOKEN_RE.sub("", self.body)):
+            raise ValueError("narrative body may not contain a literal numeral — use a fact ref")
+        used = {m.group("id") for m in FACT_REF_RE.finditer(self.body)}
+        missing = used - set(self.fact_refs)
+        if missing:
+            raise ValueError(f"fact refs used but not declared: {sorted(missing)}")
+        if self.produced_by == Author.llm and not self.model:
+            raise ValueError("llm-authored narrative must name its model")
+        if self.produced_by != Author.llm and self.model:
+            raise ValueError("only an llm-authored narrative may name a model")
+        return self
+
+
+class UsefulnessScore(BaseModel):
+    """Deterministic ranking components (research/ranking.py). The threshold gates publication."""
+    model_config = ConfigDict(extra="forbid")
+
+    total: float = Field(..., ge=0, le=1)
+    evidence_strength: float = Field(..., ge=0, le=1)
+    novelty: float = Field(..., ge=0, le=1)
+    trader_relevance: float = Field(..., ge=0, le=1)
+    magnitude: float = Field(..., ge=0, le=1)
+    threshold: float = Field(..., ge=0, le=1)
+    version: str
+
+
+class Finding(BaseModel):
+    """One evidence card: question -> computed evidence -> decision -> frozen grading rule."""
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., pattern=r"^fnd_[a-z0-9_]+$")
+    edition_date: date
+    rank: int = Field(..., ge=1)
+    tier: Tier
+    template_id: str
+    question: str = Field(..., description="The library question this card answers (engine text).")
+    subject: str
+    subject_kind: SubjectKind
+    decision: Decision
+    decision_reason: str = Field(..., description="Digit-free, engine-authored one-liner.")
+    narrative: Narrative
+    facts: list[Fact] = Field(..., min_length=1)
+    key_fact_refs: list[str] = Field(default_factory=list, description="The facts to render first.")
+    provenance: FindingProvenance
+    grading_rule: GradingRule
+    grading: GradingState
+    usefulness: UsefulnessScore
+    related_symbols: list[str] = Field(default_factory=list)
+    follow_up_questions: list[str] = Field(default_factory=list)
+    disclosure: str = FINDING_DISCLOSURE
+
+    @model_validator(mode="after")
+    def _integrity(self) -> "Finding":
+        known = {f.id for f in self.facts} | {f.id for f in self.grading.realized_facts}
+        used = set(self.narrative.fact_refs) | set(self.key_fact_refs)
+        dangling = used - known
+        if dangling:
+            raise ValueError(f"unresolvable fact refs: {sorted(dangling)}")
+        if any(ch.isdigit() for ch in REF_TOKEN_RE.sub("", self.decision_reason)):
+            raise ValueError("decision_reason may not contain a literal numeral")
+        if self.usefulness.total < self.usefulness.threshold:
+            raise ValueError("a finding below the usefulness threshold may not be published")
+        return self
+
+
+class ScoreCounts(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    right: int = Field(..., ge=0)
+    wrong: int = Field(..., ge=0)
+    inconclusive: int = Field(..., ge=0)
+    n: int = Field(..., ge=0)
+    sample_flag: SampleFlag = SampleFlag.unknown
+
+    @model_validator(mode="after")
+    def _sum(self) -> "ScoreCounts":
+        if self.right + self.wrong + self.inconclusive != self.n:
+            raise ValueError("scoreboard counts must sum to n")
+        self.sample_flag = sample_flag_for(self.n)
+        return self
+
+
+class Scoreboard(ScoreCounts):
+    """`Right · Wrong · Inconclusive · n` — running, public, append-only underneath."""
+    model_config = ConfigDict(extra="forbid")
+
+    pending: int = Field(..., ge=0, description="Published findings whose horizon has not completed.")
+    by_template: dict[str, ScoreCounts] = Field(default_factory=dict)
+    as_of: date
+
+
+class FeedResponse(BaseModel):
+    """GET /api/pathfinder/feed?date= — the clarity-first edition for one close."""
+    model_config = ConfigDict(extra="forbid")
+
+    edition_date: date
+    data_as_of: date = Field(..., description="Last bar in the data the edition was computed on.")
+    generated_at: datetime
+    regime: str
+    universe_scanned: int = Field(..., ge=0)
+    candidates_considered: int = Field(..., ge=0)
+    published_count: int = Field(..., ge=0, description="Can legitimately be small. Never padded.")
+    usefulness_threshold: float
+    what_matters_now: list[Finding] = Field(..., description="The first two or three: clarity in thirty seconds.")
+    discoveries: list[Finding] = Field(..., description="Keep swiping: more high-quality findings.")
+    scoreboard: Scoreboard
+    llm_provider: str = Field(..., description="Who narrated: 'none' means engine-templated.")
+    disclosure: str = RESEARCH_DISCLOSURE
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "FeedResponse":
+        items = self.what_matters_now + self.discoveries
+        if len(items) != self.published_count:
+            raise ValueError("published_count must equal the findings served")
+        ranks = [f.rank for f in items]
+        if ranks != sorted(ranks) or len(set(ranks)) != len(ranks):
+            raise ValueError("findings must be served in strictly increasing rank")
+        if any(f.tier != Tier.what_matters_now for f in self.what_matters_now):
+            raise ValueError("what_matters_now must carry its tier")
         return self
 
 

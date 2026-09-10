@@ -129,6 +129,68 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/pathfinder/feed:
+    get:
+      tags:
+      - Pathfinder
+      summary: The clarity-first research feed for one close (S1)
+      description: 'The after-close edition: findings ranked by usefulness, **clarity first** — `what_matters_now`
+        holds the first two or three, `discoveries` the rest. There is **no minimum count and no padding**:
+        an edition with four findings is a valid edition.
+
+
+        Every finding was **computed before it was written** by a template from the question library and
+        carries: a digit-free `narrative` whose numbers are `{{fact:<id>}}` references into `facts[]`;
+        full `provenance` (evidence level, n, period, regime, comparison group, cost hurdle); a `grading_rule`
+        **frozen at publication**; and its `grading` state (pending, or graded Right / Wrong / Inconclusive
+        with the realised facts). `scoreboard` is the running public record with n.
+
+
+        `date` selects an edition (YYYY-MM-DD); omit it for the latest. Research items only — no entry,
+        target, stop or execution is ever implied.'
+      operationId: get_feed_api_pathfinder_feed_get
+      parameters:
+      - name: date
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Edition close date, YYYY-MM-DD. Omit for the latest.
+          title: Date
+        description: Edition close date, YYYY-MM-DD. Omit for the latest.
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedResponse'
+        '400':
+          description: Malformed request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No such resource.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Unexpected server error (details are not disclosed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/pathfinder/learnings:
     get:
       tags:
@@ -327,6 +389,18 @@ components:
       - regime_dependent_and_regime_gone
       - superseded_by_newer_version
       title: DeathCause
+    Decision:
+      type: string
+      enum:
+      - virtual_long
+      - virtual_short
+      - watch
+      - no_trade
+      - new_experiment
+      - continue
+      - reject
+      title: Decision
+      description: The research decision vocabulary (pathfinder_demo.py). Research, never an order.
     Direction:
       type: string
       enum:
@@ -414,6 +488,17 @@ components:
       - placebo
       - novelty_check
       title: EvidenceKind
+    EvidenceLevel:
+      type: string
+      enum:
+      - same_stock
+      - peer_group
+      - sector
+      - whole_market
+      title: EvidenceLevel
+      description: 'S1 (spec addendum 7): where the evidence comes from. Stated on every fact and every
+
+        finding so a reader never mistakes a whole-market base rate for a stock''s own history.'
     ExperimentDetail:
       properties:
         id:
@@ -710,6 +795,358 @@ components:
         LLM prose references a fact by id; the client substitutes the rendered value.
 
         This is what makes "the LLM never calculates" machine-checkable.'
+    FeedResponse:
+      properties:
+        edition_date:
+          type: string
+          format: date
+          title: Edition Date
+        data_as_of:
+          type: string
+          format: date
+          title: Data As Of
+          description: Last bar in the data the edition was computed on.
+        generated_at:
+          type: string
+          format: date-time
+          title: Generated At
+        regime:
+          type: string
+          title: Regime
+        universe_scanned:
+          type: integer
+          minimum: 0.0
+          title: Universe Scanned
+        candidates_considered:
+          type: integer
+          minimum: 0.0
+          title: Candidates Considered
+        published_count:
+          type: integer
+          minimum: 0.0
+          title: Published Count
+          description: Can legitimately be small. Never padded.
+        usefulness_threshold:
+          type: number
+          title: Usefulness Threshold
+        what_matters_now:
+          items:
+            $ref: '#/components/schemas/Finding'
+          type: array
+          title: What Matters Now
+          description: 'The first two or three: clarity in thirty seconds.'
+        discoveries:
+          items:
+            $ref: '#/components/schemas/Finding'
+          type: array
+          title: Discoveries
+          description: 'Keep swiping: more high-quality findings.'
+        scoreboard:
+          $ref: '#/components/schemas/Scoreboard'
+        llm_provider:
+          type: string
+          title: Llm Provider
+          description: 'Who narrated: ''none'' means engine-templated.'
+        disclosure:
+          type: string
+          title: Disclosure
+          default: Pathfinder is a research lab. Everything here is a hypothesis under test with virtual
+            money, not advice and not a recommendation. No returns are promised. Kanida never places an
+            order on your behalf.
+      additionalProperties: false
+      type: object
+      required:
+      - edition_date
+      - data_as_of
+      - generated_at
+      - regime
+      - universe_scanned
+      - candidates_considered
+      - published_count
+      - usefulness_threshold
+      - what_matters_now
+      - discoveries
+      - scoreboard
+      - llm_provider
+      title: FeedResponse
+      description: GET /api/pathfinder/feed?date= — the clarity-first edition for one close.
+    Finding:
+      properties:
+        id:
+          type: string
+          pattern: ^fnd_[a-z0-9_]+$
+          title: Id
+        edition_date:
+          type: string
+          format: date
+          title: Edition Date
+        rank:
+          type: integer
+          minimum: 1.0
+          title: Rank
+        tier:
+          $ref: '#/components/schemas/Tier'
+        template_id:
+          type: string
+          title: Template Id
+        question:
+          type: string
+          title: Question
+          description: The library question this card answers (engine text).
+        subject:
+          type: string
+          title: Subject
+        subject_kind:
+          $ref: '#/components/schemas/SubjectKind'
+        decision:
+          $ref: '#/components/schemas/Decision'
+        decision_reason:
+          type: string
+          title: Decision Reason
+          description: Digit-free, engine-authored one-liner.
+        narrative:
+          $ref: '#/components/schemas/Narrative'
+        facts:
+          items:
+            $ref: '#/components/schemas/Fact'
+          type: array
+          minItems: 1
+          title: Facts
+        key_fact_refs:
+          items:
+            type: string
+          type: array
+          title: Key Fact Refs
+          description: The facts to render first.
+        provenance:
+          $ref: '#/components/schemas/FindingProvenance'
+        grading_rule:
+          $ref: '#/components/schemas/GradingRule'
+        grading:
+          $ref: '#/components/schemas/GradingState'
+        usefulness:
+          $ref: '#/components/schemas/UsefulnessScore'
+        related_symbols:
+          items:
+            type: string
+          type: array
+          title: Related Symbols
+        follow_up_questions:
+          items:
+            type: string
+          type: array
+          title: Follow Up Questions
+        disclosure:
+          type: string
+          title: Disclosure
+          default: Research item, not a recommendation. Computed from historical data before it was written;
+            the grading rule was frozen at publication. No entry, target, stop or execution is implied.
+            Kanida never places an order on your behalf.
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - edition_date
+      - rank
+      - tier
+      - template_id
+      - question
+      - subject
+      - subject_kind
+      - decision
+      - decision_reason
+      - narrative
+      - facts
+      - provenance
+      - grading_rule
+      - grading
+      - usefulness
+      title: Finding
+      description: 'One evidence card: question -> computed evidence -> decision -> frozen grading rule.'
+    FindingProvenance:
+      properties:
+        level:
+          $ref: '#/components/schemas/EvidenceLevel'
+        n:
+          type: integer
+          minimum: 0.0
+          title: N
+          description: Primary sample size behind the decision.
+        sample_flag:
+          $ref: '#/components/schemas/SampleFlag'
+          default: unknown
+        period:
+          $ref: '#/components/schemas/DateRange'
+          description: Historical window the evidence covers.
+        regime:
+          type: string
+          title: Regime
+          description: Market regime the finding was computed in (engine label).
+        comparison_group:
+          type: string
+          title: Comparison Group
+          description: What the subject is compared against.
+        cost_hurdle_pct:
+          type: number
+          minimum: 0.0
+          title: Cost Hurdle Pct
+          description: Round-trip cost hurdle used to judge meaningfulness.
+        cost_convention:
+          type: string
+          title: Cost Convention
+        data_source:
+          type: string
+          title: Data Source
+        universe:
+          type: string
+          title: Universe
+        as_of:
+          type: string
+          format: date
+          title: As Of
+        computed_by:
+          type: string
+          title: Computed By
+        computed_at:
+          type: string
+          format: date-time
+          title: Computed At
+      additionalProperties: false
+      type: object
+      required:
+      - level
+      - n
+      - period
+      - regime
+      - comparison_group
+      - cost_hurdle_pct
+      - cost_convention
+      - data_source
+      - universe
+      - as_of
+      - computed_by
+      - computed_at
+      title: FindingProvenance
+      description: 'Spec addendum 7 — on EVERY card: n, period, regime, comparison group, cost hurdle,
+
+        and the evidence level.'
+    GradingKind:
+      type: string
+      enum:
+      - directional_call
+      - no_trade_call
+      - theme_call
+      - theme_watch
+      - rotation_reject
+      - anomaly_move
+      - pair_convergence
+      title: GradingKind
+      description: 'Per-finding-type grading rules (spec addendum 4). Each kind names ONE deterministic
+
+        evaluator in research/grading.py; the parameters are frozen in `GradingRule.spec`.'
+    GradingRule:
+      properties:
+        kind:
+          $ref: '#/components/schemas/GradingKind'
+        horizon_sessions:
+          type: integer
+          minimum: 1.0
+          title: Horizon Sessions
+        hurdle_pct:
+          type: number
+          minimum: 0.0
+          title: Hurdle Pct
+        metric:
+          type: string
+          title: Metric
+          description: Exactly what is measured when the horizon completes.
+        right:
+          type: string
+          title: Right
+        wrong:
+          type: string
+          title: Wrong
+        inconclusive:
+          type: string
+          title: Inconclusive
+        frozen_at:
+          type: string
+          format: date-time
+          title: Frozen At
+        rule_version:
+          type: string
+          title: Rule Version
+        spec:
+          additionalProperties:
+            anyOf:
+            - type: string
+            - type: number
+            - type: integer
+            - items:
+                type: string
+              type: array
+          type: object
+          title: Spec
+          description: Evaluator parameters, frozen with the rule.
+      additionalProperties: false
+      type: object
+      required:
+      - kind
+      - horizon_sessions
+      - hurdle_pct
+      - metric
+      - right
+      - wrong
+      - inconclusive
+      - frozen_at
+      - rule_version
+      title: GradingRule
+      description: FROZEN at publication. Never decided after the event (spec principle 5).
+    GradingState:
+      properties:
+        status:
+          $ref: '#/components/schemas/GradingStatus'
+        due_session:
+          anyOf:
+          - type: string
+            format: date
+          - type: 'null'
+          title: Due Session
+          description: First session the horizon is complete.
+        verdict:
+          anyOf:
+          - $ref: '#/components/schemas/Verdict'
+          - type: 'null'
+        graded_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Graded At
+        data_as_of:
+          anyOf:
+          - type: string
+            format: date
+          - type: 'null'
+          title: Data As Of
+          description: Data seal the grade was computed on.
+        realized_facts:
+          items:
+            $ref: '#/components/schemas/Fact'
+          type: array
+          title: Realized Facts
+          description: What actually happened.
+      additionalProperties: false
+      type: object
+      required:
+      - status
+      title: GradingState
+    GradingStatus:
+      type: string
+      enum:
+      - pending
+      - graded
+      title: GradingStatus
     HTTPValidationError:
       properties:
         detail:
@@ -989,6 +1426,47 @@ components:
       - cost_usd
       title: ModelUsage
       description: Per-model token + cost instrumentation, straight from the provider response.
+    Narrative:
+      properties:
+        headline:
+          type: string
+          title: Headline
+        body:
+          type: string
+          title: Body
+        produced_by:
+          $ref: '#/components/schemas/Author'
+        model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model
+        prompt_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Prompt Version
+        at:
+          type: string
+          format: date-time
+          title: At
+        fact_refs:
+          items:
+            type: string
+          type: array
+          title: Fact Refs
+      additionalProperties: false
+      type: object
+      required:
+      - headline
+      - body
+      - produced_by
+      - at
+      title: Narrative
+      description: 'The finding''s story. L-8 holds for BOTH authors here: no literal numeral outside
+        a
+
+        `{{fact:…}}` token, whoever wrote it. `headline` carries no digit at all.'
     NextTest:
       properties:
         id:
@@ -1205,6 +1683,12 @@ components:
           - type: 'null'
           title: Universe
           description: Point-in-time universe, e.g. 'nifty500_pit'.
+        level:
+          anyOf:
+          - $ref: '#/components/schemas/EvidenceLevel'
+          - type: 'null'
+          description: 'S1: same_stock / peer_group / sector / whole_market — where this number''s evidence
+            comes from.'
       additionalProperties: false
       type: object
       required:
@@ -1265,7 +1749,83 @@ components:
       - flagged
       - greyed
       - unknown
+      - not_applicable
       title: SampleFlag
+    ScoreCounts:
+      properties:
+        right:
+          type: integer
+          minimum: 0.0
+          title: Right
+        wrong:
+          type: integer
+          minimum: 0.0
+          title: Wrong
+        inconclusive:
+          type: integer
+          minimum: 0.0
+          title: Inconclusive
+        n:
+          type: integer
+          minimum: 0.0
+          title: N
+        sample_flag:
+          $ref: '#/components/schemas/SampleFlag'
+          default: unknown
+      additionalProperties: false
+      type: object
+      required:
+      - right
+      - wrong
+      - inconclusive
+      - n
+      title: ScoreCounts
+    Scoreboard:
+      properties:
+        right:
+          type: integer
+          minimum: 0.0
+          title: Right
+        wrong:
+          type: integer
+          minimum: 0.0
+          title: Wrong
+        inconclusive:
+          type: integer
+          minimum: 0.0
+          title: Inconclusive
+        n:
+          type: integer
+          minimum: 0.0
+          title: N
+        sample_flag:
+          $ref: '#/components/schemas/SampleFlag'
+          default: unknown
+        pending:
+          type: integer
+          minimum: 0.0
+          title: Pending
+          description: Published findings whose horizon has not completed.
+        by_template:
+          additionalProperties:
+            $ref: '#/components/schemas/ScoreCounts'
+          type: object
+          title: By Template
+        as_of:
+          type: string
+          format: date
+          title: As Of
+      additionalProperties: false
+      type: object
+      required:
+      - right
+      - wrong
+      - inconclusive
+      - n
+      - pending
+      - as_of
+      title: Scoreboard
+      description: '`Right · Wrong · Inconclusive · n` — running, public, append-only underneath.'
     Spark:
       properties:
         basis:
@@ -1355,6 +1915,20 @@ components:
         L-8: if `produced_by == "llm"`, `headline` and `body` must contain no literal
 
         numerals — every number is a fact reference resolved by the client.'
+    SubjectKind:
+      type: string
+      enum:
+      - stock
+      - sector
+      - pair
+      - market
+      title: SubjectKind
+    Tier:
+      type: string
+      enum:
+      - what_matters_now
+      - discovery
+      title: Tier
     Trigger:
       properties:
         id:
@@ -1414,6 +1988,53 @@ components:
       - inr
       - text
       title: Unit
+    UsefulnessScore:
+      properties:
+        total:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Total
+        evidence_strength:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Evidence Strength
+        novelty:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Novelty
+        trader_relevance:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Trader Relevance
+        magnitude:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Magnitude
+        threshold:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Threshold
+        version:
+          type: string
+          title: Version
+      additionalProperties: false
+      type: object
+      required:
+      - total
+      - evidence_strength
+      - novelty
+      - trader_relevance
+      - magnitude
+      - threshold
+      - version
+      title: UsefulnessScore
+      description: Deterministic ranking components (research/ranking.py). The threshold gates publication.
     ValidationError:
       properties:
         loc:
@@ -1440,6 +2061,13 @@ components:
       - msg
       - type
       title: ValidationError
+    Verdict:
+      type: string
+      enum:
+      - right
+      - wrong
+      - inconclusive
+      title: Verdict
     VirtualBook:
       properties:
         metrics:

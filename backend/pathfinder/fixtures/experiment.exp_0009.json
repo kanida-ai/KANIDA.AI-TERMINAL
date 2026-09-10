@@ -30,7 +30,8 @@
       "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
       "computed_by": "replay_engine@1.4.0",
       "computed_at": "2026-09-08T16:05:00+05:30",
-      "universe": "nifty500_pit"
+      "universe": "nifty500_pit",
+      "level": null
     }
   },
   "virtual_return": {
@@ -58,7 +59,8 @@
       "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
       "computed_by": "book_engine@2.3.1",
       "computed_at": "2026-09-08T16:05:00+05:30",
-      "universe": "nifty500_pit"
+      "universe": "nifty500_pit",
+      "level": null
     }
   },
   "occurrences": 44,
@@ -187,7 +189,8 @@
         "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
         "computed_by": "book_engine@2.3.1",
         "computed_at": "2026-09-08T16:05:00+05:30",
-        "universe": "nifty500_pit"
+        "universe": "nifty500_pit",
+        "level": null
       },
       "note": null
     },
@@ -208,7 +211,8 @@
         "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
         "computed_by": "book_engine@2.3.1",
         "computed_at": "2026-09-08T16:05:00+05:30",
-        "universe": "nifty500_pit"
+        "universe": "nifty500_pit",
+        "level": null
       },
       "note": null
     },
@@ -229,7 +233,8 @@
         "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
         "computed_by": "book_engine@2.3.1",
         "computed_at": "2026-09-08T16:05:00+05:30",
-        "universe": "nifty500_pit"
+        "universe": "nifty500_pit",
+        "level": null
       },
       "note": null
     },
@@ -250,7 +255,8 @@
         "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
         "computed_by": "book_engine@2.3.1",
         "computed_at": "2026-09-08T16:05:00+05:30",
-        "universe": "nifty500_pit"
+        "universe": "nifty500_pit",
+        "level": null
       },
       "note": null
     },
@@ -271,7 +277,8 @@
         "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
         "computed_by": "book_engine@2.3.1",
         "computed_at": "2026-09-08T16:05:00+05:30",
-        "universe": "nifty500_pit"
+        "universe": "nifty500_pit",
+        "level": null
       },
       "note": null
     },
@@ -292,7 +299,8 @@
         "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
         "computed_by": "book_engine@2.3.1",
         "computed_at": "2026-09-08T16:05:00+05:30",
-        "universe": "nifty500_pit"
+        "universe": "nifty500_pit",
+        "level": null
       },
       "note": "Constitution gate: no promotion below fifty closed trades."
     }
@@ -328,7 +336,8 @@
           "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
           "computed_by": "replay_engine@1.4.0",
           "computed_at": "2026-09-08T16:05:00+05:30",
-          "universe": "nifty500_pit"
+          "universe": "nifty500_pit",
+          "level": null
         }
       },
       "fact_refs": [
@@ -345,7 +354,8 @@
         "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
         "computed_by": "replay_engine@1.4.0",
         "computed_at": "2026-09-08T16:05:00+05:30",
-        "universe": "nifty500_pit"
+        "universe": "nifty500_pit",
+        "level": null
       },
       "interpretation": null
     },
@@ -379,7 +389,8 @@
           "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
           "computed_by": "book_engine@2.3.1",
           "computed_at": "2026-09-08T16:05:00+05:30",
-          "universe": "nifty500_pit"
+          "universe": "nifty500_pit",
+          "level": null
         }
       },
       "fact_refs": [
@@ -397,7 +408,8 @@
         "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
         "computed_by": "book_engine@2.3.1",
         "computed_at": "2026-09-08T16:05:00+05:30",
-        "universe": "nifty500_pit"
+        "universe": "nifty500_pit",
+        "level": null
       },
       "interpretation": null
     },
@@ -421,7 +433,8 @@
         "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
         "computed_by": "book_engine@2.3.1",
         "computed_at": "2026-09-08T16:05:00+05:30",
-        "universe": "nifty500_pit"
+        "universe": "nifty500_pit",
+        "level": null
       },
       "interpretation": {
         "beat": "outcome",
@@ -464,7 +477,8 @@
         "cost_convention": "costs_v3: brokerage+STT+exchange+GST+stamp, slippage 10bps, entry next open, exit at rule",
         "computed_by": "book_engine@2.3.1",
         "computed_at": "2026-09-08T16:05:00+05:30",
-        "universe": "nifty500_pit"
+        "universe": "nifty500_pit",
+        "level": null
       }
     },
     "capital_inr": 1000000.0,
