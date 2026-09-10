@@ -97,7 +97,10 @@ python scripts/gen_openapi.py --check                            # contract in s
 `backend/tests/test_pathfinder_s1.py`: **34 passed** (S1-01…S1-34). `backend/tests/test_pathfinder_s1_audit.py`:
 **39 passed** (A-C1…A-D1 + the real-warehouse rows, `docs/TEST_PLAN.md`). P0 and P1 unchanged and
 passing (`gen_openapi.py --check` in sync after the two enum additions).
-Whole backend suite: <<SUITE>>
+Whole backend suite: **1,724 passed, 1 skipped, 2 failed** — the two failures are the same pre-existing
+AutoTrade rows recorded in the first hand-over (`test_broker_held_semantics::test_rupeezy_left_at_the_safe_default_pending_certification`,
+`test_per_stock_step_lock::test_square_off_flattens_all_in_stock_mode`) in files this session did not
+touch (`git diff HEAD -- backend/autotrade` is empty).
 
 ### 3.2 The real run — thirteen editions, 2026-07-13 → 2026-07-29, rebuilt from scratch after the fixes
 
