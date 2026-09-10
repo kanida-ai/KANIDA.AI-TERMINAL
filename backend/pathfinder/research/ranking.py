@@ -10,9 +10,13 @@ computed by the engine; the LLM may only veto a card that already cleared the th
 
     evidence_strength   sqrt(min(1, n/100)) * (0.5 + 0.5 * min(1, |z|/3))
                         n = primary sample, z = binomial z of the base rate vs chance
-    novelty             1.0 never published in the lookback; 0.6 same subject, different
-                        decision; 0.25 same (template, subject, decision) — plus the regime
-                        state for the market card, so a changed regime is news again
+    novelty             keyed on the card's EVIDENCE SIGNATURE (S1 second audit A2), not on
+                        the day's subject: 1.0 never published in the lookback; 0.6 same
+                        template and subject on different evidence / decision; 0.25 the same
+                        claim (the same group statistic and comparison group for a dip /
+                        surge / anomaly / market card; the same sector or pair and decision
+                        for a theme / rotation / pair card). Twenty-three dip/surge cards
+                        carrying one identical statistic were "new" under the old key.
     trader_relevance    template weight * decision weight
     magnitude           how unusual today's observation is (template-specific, 0..1)
 
@@ -43,10 +47,20 @@ NoveltyFn = Callable[[str], float]      # novelty_key -> 0..1
 
 
 def novelty_key(draft: CardDraft, regime_state: str) -> str:
-    key = f"{draft.template_id}|{draft.subject}|{draft.decision.value}"
-    if draft.template_id == "market_regime":
-        key += f"|{regime_state}"
-    return key
+    """
+    `<template>|<subject>|<evidence signature>`. The signature is the claim (statistic +
+    comparison group, or sector / pair + decision); the subject is kept in the key ONLY so
+    the 0.6 "same subject, different evidence" tier can be recognised — an identical
+    signature under a different subject is the same claim and scores 0.25.
+    """
+    sig = draft.evidence_signature or f"{draft.template_id}|{draft.decision.value}"
+    if draft.template_id == "market_regime" and regime_state not in sig:
+        sig += f"|{regime_state}"
+    return f"{draft.template_id}|{draft.subject}|{sig}"
+
+
+def signature_of(novelty_key_: str) -> str:
+    return novelty_key_.split("|", 2)[2]
 
 
 def evidence_strength(n: int, z: float) -> float:

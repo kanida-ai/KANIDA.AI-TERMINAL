@@ -851,6 +851,15 @@ class Verdict(str, Enum):
 class GradingStatus(str, Enum):
     pending = "pending"     # horizon not yet complete
     graded = "graded"
+    continued = "continued" # a continuation of an open call: graded ONCE, through the finding it continues
+
+
+#: S1 second audit A1 — a store that was backfilled is labelled as such, on the feed, on the
+#: scoreboard and on every card. "Forward" means the edition was generated on its own session
+#: date (IST), before the graded outcome could have been known; anything generated later is
+#: a SIMULATED BACKFILL, whatever the seal says.
+BACKFILL_LABEL = "simulated backfill — generated after the fact; not a forward track record"
+FORWARD_LABEL = "forward record — generated on its own session date, before the outcome"
 
 
 class FindingProvenance(BaseModel):
@@ -873,6 +882,10 @@ class FindingProvenance(BaseModel):
     as_of: date
     computed_by: str
     computed_at: datetime
+    disclosures: list[str] = Field(
+        default_factory=list,
+        description=("User-facing data caveats (S1 second audit A4/A7/A8): survivorship of the universe, "
+                     "what the prices are and are not adjusted for, and which bars were excluded."))
 
     @model_validator(mode="after")
     def _derive(self) -> "FindingProvenance":
@@ -911,13 +924,23 @@ class GradingState(BaseModel):
     graded_at: Optional[datetime] = None
     data_as_of: Optional[date] = Field(None, description="Data seal the grade was computed on.")
     realized_facts: list[Fact] = Field(default_factory=list, description="What actually happened.")
+    backfilled: bool = Field(
+        False, description="True when the finding was generated after its edition date: a simulated backfill.")
+    record: str = Field(BACKFILL_LABEL, description="The label the grade is published under.")
+    continues: Optional[str] = Field(
+        None, description="For status=continued: the finding id this one continues and is graded through.")
 
     @model_validator(mode="after")
     def _consistent(self) -> "GradingState":
         if self.status == GradingStatus.graded and self.verdict is None:
             raise ValueError("a graded finding must carry a verdict")
-        if self.status == GradingStatus.pending and self.verdict is not None:
-            raise ValueError("a pending finding cannot carry a verdict")
+        if self.status != GradingStatus.graded and self.verdict is not None:
+            raise ValueError("only a graded finding carries a verdict")
+        if self.status == GradingStatus.continued and not self.continues:
+            raise ValueError("a continued finding must name the finding it continues")
+        if self.status != GradingStatus.continued and self.continues:
+            raise ValueError("only a continued finding names a finding it continues")
+        self.record = BACKFILL_LABEL if self.backfilled else FORWARD_LABEL
         return self
 
 
@@ -990,9 +1013,21 @@ class Finding(BaseModel):
     related_symbols: list[str] = Field(default_factory=list)
     follow_up_questions: list[str] = Field(default_factory=list)
     disclosure: str = FINDING_DISCLOSURE
+    backfilled: bool = Field(False, description="Generated after its edition date (simulated backfill).")
+    continues: Optional[str] = Field(
+        None, pattern=r"^fnd_[a-z0-9_]+$",
+        description=("The open finding this card continues (S1 second audit A2): the same claim on the same "
+                     "evidence while the original's horizon is still running. Not a new publication; not "
+                     "graded separately."))
 
     @model_validator(mode="after")
     def _integrity(self) -> "Finding":
+        if (self.continues is not None) != (self.decision == Decision.continue_):
+            raise ValueError("a continuation carries decision=continue and names the finding it continues")
+        if self.continues is not None and self.grading.continues != self.continues:
+            raise ValueError("a continuation's grading state must name the same finding")
+        if self.backfilled != self.grading.backfilled:
+            raise ValueError("the card and its grading state must agree on backfilled")
         known = {f.id for f in self.facts} | {f.id for f in self.grading.realized_facts}
         used = set(self.narrative.fact_refs) | set(self.key_fact_refs)
         dangling = used - known
@@ -1000,7 +1035,9 @@ class Finding(BaseModel):
             raise ValueError(f"unresolvable fact refs: {sorted(dangling)}")
         if any(ch.isdigit() for ch in REF_TOKEN_RE.sub("", self.decision_reason)):
             raise ValueError("decision_reason may not contain a literal numeral")
-        if self.usefulness.total < self.usefulness.threshold:
+        # A continuation is not a publication: it rides on the root finding that cleared the
+        # threshold, and carries its own (novelty-discounted) score for the record.
+        if self.continues is None and self.usefulness.total < self.usefulness.threshold:
             raise ValueError("a finding below the usefulness threshold may not be published")
         return self
 
@@ -1023,12 +1060,33 @@ class ScoreCounts(BaseModel):
 
 
 class Scoreboard(ScoreCounts):
-    """`Right · Wrong · Inconclusive · n` — running, public, append-only underneath."""
+    """
+    `Right · Wrong · Inconclusive · n` — running, public, append-only underneath.
+
+    S1 second audit A1/A2: the headline counts are INDEPENDENT grades (one per claim per
+    non-overlapping horizon; continuations are graded through the finding they continue), split
+    into `forward` (generated on the session date) and `backfilled` (simulated). `n_total` is
+    every grade row including any re-grade of the same claim; `n` is the independent count.
+    """
     model_config = ConfigDict(extra="forbid")
 
     pending: int = Field(..., ge=0, description="Published findings whose horizon has not completed.")
     by_template: dict[str, ScoreCounts] = Field(default_factory=dict)
     as_of: date
+    forward: ScoreCounts = Field(..., description="Grades on findings generated on their own session date.")
+    backfilled: ScoreCounts = Field(..., description="Grades on findings generated after the fact (simulated backfill).")
+    n_total: int = Field(..., ge=0, description="Every grade row, including re-grades of the same claim.")
+    n_independent: int = Field(..., ge=0, description="Grades on independent claims — equals n.")
+    continued: int = Field(0, ge=0, description="Continuation cards folded into an existing grade (not counted).")
+    record_label: str = Field(..., description="What this scoreboard is: a forward record, a backfill, or mixed.")
+
+    @model_validator(mode="after")
+    def _split(self) -> "Scoreboard":
+        if self.forward.n + self.backfilled.n != self.n:
+            raise ValueError("forward + backfilled must equal n")
+        if self.n_independent != self.n or self.n_total < self.n:
+            raise ValueError("n is the independent count; n_total cannot be smaller")
+        return self
 
 
 class FeedResponse(BaseModel):
@@ -1041,19 +1099,28 @@ class FeedResponse(BaseModel):
     regime: str
     universe_scanned: int = Field(..., ge=0)
     candidates_considered: int = Field(..., ge=0)
-    published_count: int = Field(..., ge=0, description="Can legitimately be small. Never padded.")
+    published_count: int = Field(..., ge=0, description="NEW findings this edition. Can legitimately be small. Never padded.")
+    continued_count: int = Field(0, ge=0, description="Continuations of open calls served alongside (not new publications).")
     usefulness_threshold: float
     what_matters_now: list[Finding] = Field(..., description="The first two or three: clarity in thirty seconds.")
     discoveries: list[Finding] = Field(..., description="Keep swiping: more high-quality findings.")
     scoreboard: Scoreboard
     llm_provider: str = Field(..., description="Who narrated: 'none' means engine-templated.")
     disclosure: str = RESEARCH_DISCLOSURE
+    backfilled: bool = Field(..., description="This edition was generated after its date: a simulated backfill.")
+    record_label: str = Field(..., description="The label this edition is published under.")
 
     @model_validator(mode="after")
     def _ordered(self) -> "FeedResponse":
         items = self.what_matters_now + self.discoveries
-        if len(items) != self.published_count:
-            raise ValueError("published_count must equal the findings served")
+        if len(items) != self.published_count + self.continued_count:
+            raise ValueError("published_count + continued_count must equal the findings served")
+        if sum(1 for f in items if f.continues) != self.continued_count:
+            raise ValueError("continued_count must equal the continuations served")
+        if any(f.backfilled != self.backfilled for f in items):
+            raise ValueError("every card must carry the edition's backfilled flag")
+        if self.record_label != (BACKFILL_LABEL if self.backfilled else FORWARD_LABEL):
+            raise ValueError("record_label must match backfilled")
         ranks = [f.rank for f in items]
         if ranks != sorted(ranks) or len(set(ranks)) != len(ranks):
             raise ValueError("findings must be served in strictly increasing rank")

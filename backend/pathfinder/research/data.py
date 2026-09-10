@@ -28,9 +28,22 @@ HOLE: its return is NaN, and any forward outcome whose window straddles it is Na
 guard the surge template counted them as +6% "jumps" and a dip's five-day mean was +14% off one
 831x "return".
 
+Corporate-action days (S1 second audit A4): the warehouse is split/bonus-adjusted but NOT
+demerger-adjusted (CGPOWER −71.7% on 2016-03-15, TATACHEM −56.2%, ABFRL −55.9%, ADANIENT
+−41.9%) and carries unadjusted split-like prints (JBCHEPHARM −49% on 2023-09-18, SPLPETRO
+−50%). A split / bonus / demerger / rights ex-date from the `corp_actions` table (`_ca`), or
+any single-day |move| beyond `corp_action_ret_guard_pct` (`_ca_suspect`, a SUSPECTED
+corporate action — the table only starts in 2020), is treated exactly like a glitch bar: the
+return is NaN, so it can be neither a dip / surge case nor the day's subject, and every
+forward window straddling it is NaN.
+
+Synthetic opens (A7): a bar whose open equals its close to the tick (`_synth_open`) is a
+placeholder open, not a tradeable price (1.5% of bars; 4.2% in 2013). No forward outcome is
+minted from an entry at such an open: `f{h}` for the row before it is NaN.
+
 Universe = today's Nifty-500 membership (`in_nifty500=1 AND is_active=1`). That is a
 survivorship-biased universe for ABSOLUTE returns (see engine/market.py for the measured
-extent); it is stated on every provenance as `universe`.
+extent); it is stated on every provenance as `universe` and in `data_disclosures`.
 """
 from __future__ import annotations
 
@@ -48,9 +61,27 @@ HORIZONS = (1, 3, 5)
 MOVE_WINDOW = 5
 #: A one-session close-to-close ratio outside this band is a data hole, not a price move.
 GLITCH_RATIO = (0.25, 4.0)
+#: Corporate-action types whose ex-date changes the price basis. Dividends, AGMs, buybacks do not.
+CORP_ACTION_TYPES = ("split", "bonus", "demerger", "rights")
 #: Columns that carry post-seal information on the unsealed history. Never present on a sealed frame.
-POST_SEAL_COLUMNS = ("next_open",) + tuple(f"_d{h}" for h in HORIZONS) + tuple(f"_c{h}" for h in HORIZONS) \
-    + tuple(f"_badfwd{h}" for h in HORIZONS)
+POST_SEAL_COLUMNS = ("next_open", "_next_synth") + tuple(f"_d{h}" for h in HORIZONS) \
+    + tuple(f"_c{h}" for h in HORIZONS) + tuple(f"_badfwd{h}" for h in HORIZONS)
+
+
+@dataclass(frozen=True)
+class DataExclusions:
+    """What the data rules removed, for the edition record and the provenance disclosure."""
+    corp_action_bars: int
+    suspected_corp_action_bars: int
+    glitch_bars: int
+    synthetic_open_bars: int
+    corp_actions_loaded: int
+
+    def as_dict(self) -> dict[str, int]:
+        return {"corp_action_bars": self.corp_action_bars,
+                "suspected_corp_action_bars": self.suspected_corp_action_bars,
+                "glitch_bars": self.glitch_bars, "synthetic_open_bars": self.synthetic_open_bars,
+                "corp_actions_loaded": self.corp_actions_loaded}
 
 
 class LookAheadError(RuntimeError):
@@ -64,7 +95,16 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True)
 
 
-def _causal_columns(df: pd.DataFrame) -> pd.DataFrame:
+def load_corp_actions(con: sqlite3.Connection) -> Optional[pd.DataFrame]:
+    """The warehouse's `corp_actions` table (symbol, ex_date, action_type), or None if absent."""
+    has = con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'corp_actions'").fetchone()
+    if not has:
+        return None
+    return pd.read_sql_query("SELECT symbol, substr(ex_date,1,10) AS ex_date, action_type FROM corp_actions", con)
+
+
+def _causal_columns(df: pd.DataFrame, cfg: ResearchConfig,
+                    corp_actions: Optional[pd.DataFrame] = None) -> tuple[pd.DataFrame, DataExclusions]:
     """Backward-looking derived columns. Safe to compute on the full history."""
     df = df.sort_values(["symbol", "d"], kind="mergesort").reset_index(drop=True)
     # A zero or negative price is a data hole, not a price (MAZDOCK carries eight 0.0 bars).
@@ -77,11 +117,35 @@ def _causal_columns(df: pd.DataFrame) -> pd.DataFrame:
     # Glitch bars: a >4x or <0.25x close-to-close ratio is a hole. The return is NaN and the
     # bar is remembered (`_bad`) so forward windows straddling it can be blanked in `sealed()`.
     ratio = 1.0 + df["ret"]
-    bad = ratio.notna() & ((ratio > GLITCH_RATIO[1]) | (ratio < GLITCH_RATIO[0]))
+    glitch = ratio.notna() & ((ratio > GLITCH_RATIO[1]) | (ratio < GLITCH_RATIO[0]))
+    # Corporate-action days (A4): the ex-date from the NSE table, and any |move| beyond the
+    # guard as a suspected one. Same treatment as a glitch bar.
+    ca = pd.Series(False, index=df.index)
+    n_ca_loaded = 0
+    if cfg.exclude_corp_actions and corp_actions is not None and len(corp_actions):
+        cax = corp_actions[corp_actions["action_type"].isin(CORP_ACTION_TYPES)]
+        n_ca_loaded = int(len(cax))
+        keys = set(zip(cax["symbol"].astype(str), cax["ex_date"].astype(str).str.slice(0, 10)))
+        if keys:
+            ca = pd.Series([(s, d) in keys for s, d in zip(df["symbol"], df["d"])], index=df.index)
+    suspect = pd.Series(False, index=df.index)
+    if cfg.exclude_corp_actions:
+        suspect = df["ret"].notna() & (df["ret"].abs() > cfg.corp_action_ret_guard_pct / 100.0) & ~ca & ~glitch
+    bad = glitch | ca | suspect
     df.loc[bad, "ret"] = np.nan
     df["_bad"] = bad.astype(int)
+    df["_ca"] = ca.astype(int)
+    df["_ca_suspect"] = suspect.astype(int)
+    # Synthetic opens (A7): open == close to the tick is a placeholder, not an entry price.
+    synth = df["open"].notna() & df["close"].notna() & (df["open"] == df["close"]) if cfg.exclude_synthetic_opens \
+        else pd.Series(False, index=df.index)
+    df["_synth_open"] = synth.astype(int)
+    excl = DataExclusions(corp_action_bars=int(ca.sum()), suspected_corp_action_bars=int(suspect.sum()),
+                          glitch_bars=int(glitch.sum()), synthetic_open_bars=int(synth.sum()),
+                          corp_actions_loaded=n_ca_loaded)
     g = df.groupby("symbol", sort=False)
     df["oc"] = df["close"] / df["open"] - 1.0                 # open -> close, same session
+    df.loc[synth, "oc"] = np.nan
     df["ma20"] = g["close"].transform(lambda s: s.rolling(20).mean())
     df["vol20"] = g["volume"].transform(lambda s: s.rolling(20).mean().shift(1))
     df["r15"] = df["close"] / g["close"].shift(15) - 1.0
@@ -90,12 +154,13 @@ def _causal_columns(df: pd.DataFrame) -> pd.DataFrame:
     # any outcome whose resolving bar lies past the seal. POST-SEAL information: these
     # columns exist only on the unsealed history and are dropped by `sealed()`.
     df["next_open"] = g["open"].shift(-1)
+    df["_next_synth"] = g["_synth_open"].shift(-1).fillna(0).astype(int)   # the entry open is synthetic
     for h in HORIZONS:
         df[f"_d{h}"] = g["d"].shift(-h)
         df[f"_c{h}"] = g["close"].shift(-h)
         fwd = sum(g["_bad"].shift(-k).fillna(0) for k in range(1, h + 1))
-        df[f"_badfwd{h}"] = fwd.astype(int)                   # a glitch bar inside (t, t+h]
-    return df
+        df[f"_badfwd{h}"] = fwd.astype(int)                   # a glitch / corp-action bar inside (t, t+h]
+    return df, excl
 
 
 @dataclass
@@ -109,6 +174,10 @@ class MarketData:
     requested_as_of: str
     cfg: ResearchConfig
     _full: Optional[pd.DataFrame] = None     # unsealed history, kept for re-sealing only
+    exclusions: Optional[DataExclusions] = None
+    #: Last bar the unsealed history held when this frame was built — the data the engine
+    #: COULD see at generation time (A1: an edition is backfilled when this lies past it).
+    data_through: Optional[str] = None
 
     # ── construction ────────────────────────────────────────────────────────
 
@@ -127,6 +196,7 @@ class MarketData:
             vix = pd.read_sql_query(
                 "SELECT substr(bar_time,1,10) AS d, close FROM ohlc_daily WHERE symbol = ? "
                 "AND bar_time >= ? ORDER BY bar_time", con, params=[cfg.vix_symbol, cfg.history_start])
+            ca = load_corp_actions(con)
         if raw.empty:
             raise RuntimeError("no price data for the Nifty-500 universe")
         # The warehouse PK is (symbol, bar_time); a date can appear twice with different
@@ -135,22 +205,26 @@ class MarketData:
         raw = raw.drop_duplicates(subset=["symbol", "d"], keep="last")
         idx = idx.drop_duplicates("d", keep="last").set_index("d")["close"].astype(float)
         vix = vix.drop_duplicates("d", keep="last").set_index("d")["close"].astype(float)
-        return cls.from_frame(raw, idx, vix, cfg, as_of=as_of)
+        return cls.from_frame(raw, idx, vix, cfg, as_of=as_of, corp_actions=ca)
 
     @classmethod
     def from_frame(cls, raw: pd.DataFrame, index_close: pd.Series, vix_close: pd.Series,
-                   cfg: ResearchConfig, *, as_of: Optional[str] = None) -> "MarketData":
-        """Build from an in-memory long frame (tests). Columns: symbol,d,open,close,volume,sector,in_nifty50."""
+                   cfg: ResearchConfig, *, as_of: Optional[str] = None,
+                   corp_actions: Optional[pd.DataFrame] = None) -> "MarketData":
+        """
+        Build from an in-memory long frame (tests). Columns: symbol,d,open,close,volume,sector,in_nifty50.
+        `corp_actions` (optional): symbol, ex_date, action_type — as the warehouse table.
+        """
         raw = raw.copy()
         raw["d"] = raw["d"].astype(str).str.slice(0, 10)
         for c in ("open", "close", "volume"):
             raw[c] = raw[c].astype(float)
         if "in_nifty50" not in raw:
             raw["in_nifty50"] = 0
-        full = _causal_columns(raw)
+        full, excl = _causal_columns(raw, cfg, corp_actions)
         last = str(full["d"].max())
         md = cls(df=full, index_close=index_close, vix_close=vix_close, as_of=last,
-                 requested_as_of=last, cfg=cfg, _full=full)
+                 requested_as_of=last, cfg=cfg, _full=full, exclusions=excl, data_through=last)
         return md.sealed(as_of or last)
 
     def sealed(self, as_of: str) -> "MarketData":
@@ -165,19 +239,21 @@ class MarketData:
         if df.empty:
             raise LookAheadError(f"no session on or before {as_of}")
         actual = str(df["d"].max())
-        # Forward outcomes exist only when the resolving bar is inside the seal AND the
-        # window holds no glitch bar.
+        # Forward outcomes exist only when the resolving bar is inside the seal, the window
+        # holds no glitch / corporate-action bar, and the entry open is a real price (A7).
         for h in HORIZONS:
             ok = df[f"_d{h}"].notna() & (df[f"_d{h}"] <= actual) & (df[f"_badfwd{h}"] == 0)
-            df[f"f{h}"] = np.where(ok, df[f"_c{h}"] / df["next_open"] - 1.0, np.nan)
-        okm = df[f"_d{MOVE_WINDOW}"].notna() & (df[f"_d{MOVE_WINDOW}"] <= actual) & (df[f"_badfwd{MOVE_WINDOW}"] == 0)
-        df["r5cc"] = np.where(okm, df[f"_c{MOVE_WINDOW}"] / df["close"] - 1.0, np.nan)
+            df[f"f{h}"] = np.where(ok & (df["_next_synth"] == 0), df[f"_c{h}"] / df["next_open"] - 1.0, np.nan)
+            # The close-to-close move over h sessions (the anomaly's statistic; A8: one per horizon
+            # so the grader can read the rule's own horizon, never a fixed window).
+            df[f"r{h}cc"] = np.where(ok, df[f"_c{h}"] / df["close"] - 1.0, np.nan)
         # THE SEAL, physically: no post-seal price survives on the frame handed out.
         df = df.drop(columns=list(POST_SEAL_COLUMNS))
         return MarketData(
             df=df, index_close=self.index_close[self.index_close.index <= actual],
             vix_close=self.vix_close[self.vix_close.index <= actual],
-            as_of=actual, requested_as_of=as_of, cfg=self.cfg, _full=base)
+            as_of=actual, requested_as_of=as_of, cfg=self.cfg, _full=base,
+            exclusions=self.exclusions, data_through=self.data_through)
 
     # ── calendar ────────────────────────────────────────────────────────────
 

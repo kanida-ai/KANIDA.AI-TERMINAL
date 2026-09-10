@@ -56,7 +56,8 @@ class ScanContext:
 
     @property
     def hurdle(self) -> float:
-        return self.cfg.cost_hurdle_pct
+        """Round-trip hurdle = costs + slippage both ways (S1 second audit A5)."""
+        return self.cfg.hurdle_pct
 
     @property
     def today(self) -> str:
@@ -83,6 +84,11 @@ class CardDraft:
     headline: str                        # digit-free, token-free (engine template)
     body: str                            # digit-free with {{fact:...}} tokens
     slug: str
+    #: S1 second audit A2 — what the card's CLAIM rests on, at display precision: the
+    #: statistic and its comparison group for a group card (NOT the day's subject, which
+    #: changes daily while the claim does not); the sector / pair and the decision for a
+    #: card whose subject is the evidence. Novelty and continuation are keyed on this.
+    evidence_signature: str = ""
     related_symbols: list[str] = field(default_factory=list)
     follow_ups: list[str] = field(default_factory=list)
 
@@ -141,7 +147,20 @@ def _rate(df: pd.DataFrame, mask: pd.Series, h: int, cfg: ResearchConfig
     if len(r) == 0:
         return 0, None, None, None
     return (int(len(r)), float((r > 0).mean() * 100.0), float(r.median() * 100.0),
-            _wmean(r, cfg.expectancy_winsor_pct) * 100.0 - cfg.cost_hurdle_pct)
+            _wmean(r, cfg.expectancy_winsor_pct) * 100.0 - cfg.hurdle_pct)
+
+
+def _sig(*parts: Any) -> str:
+    """An evidence signature (A2). Floats are rendered at the precision the card displays."""
+    out = []
+    for x in parts:
+        if isinstance(x, float):
+            out.append(f"{x:.2f}")
+        elif isinstance(x, Decision):
+            out.append(x.value)
+        else:
+            out.append(str(x))
+    return "|".join(out)
 
 
 def _fs(ctx: ScanContext, tag: str, subject: str, *, start: Optional[str] = None) -> FactSet:
@@ -223,7 +242,7 @@ def compute_market_regime(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft
            wr, "pct", n=n)
     fs.add("typical", "typical next-session move, next open to close (median)", med, "pct", n=n)
     fs.add("expectancy", "expectancy of the next-session move net of the hurdle (winsorised mean)", etv, "pct", n=n)
-    fs.add("hurdle", "round-trip cost hurdle", H * 100, "bps")
+    fs.add("hurdle", "round-trip hurdle: costs plus slippage both ways", H * 100, "bps")
     fs.add("regime", "market regime today", ctx.regime.state, "text")
     if ctx.regime.breadth200_pct is not None:
         fs.add("breadth", "share of Nifty-five-hundred names above their two-hundred-day average",
@@ -262,6 +281,7 @@ def compute_market_regime(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft
                               "hit rate judged against the coin flip",
         grading_rule=rule, magnitude=min(1.0, abs(m * 100) / 2.0), evidence_z=_z(wr, n),
         headline=headline, body=body, slug=_fslug(fs),
+        evidence_signature=_sig("market_regime", decision, ctx.regime.state, round(wr, 1), med, etv),
         follow_ups=["Does the answer change when breadth is weak?",
                     "Is the follow-through different in a risk-off regime?"],
     )]
@@ -311,7 +331,7 @@ def _group_move_card(ctx: ScanContext, p: dict[str, Any], *, tag: str, is_dip: b
         fs.add("hit_5", "share higher over the next trading week", wr5, "pct", n=n5)
         fs.add("typical_5", "typical one-week move (median)", med5, "pct", n=n5)
         fs.add("expectancy_5", "expectancy of the one-week move net of the hurdle (winsorised mean)", etv5, "pct", n=n5)
-    fs.add("hurdle", "round-trip cost hurdle", H * 100, "bps")
+    fs.add("hurdle", "round-trip hurdle: costs plus slippage both ways", H * 100, "bps")
     fs.add("regime", "market regime today", ctx.regime.state, "text")
     # Peer group (same sector) and the stock's own history, each labelled by its n.
     if isinstance(sector, str) and sector:
@@ -403,6 +423,10 @@ def _group_move_card(ctx: ScanContext, p: dict[str, Any], *, tag: str, is_dip: b
                          "hit rate judged against the coin flip, moves against the cost hurdle",
         grading_rule=rule, magnitude=min(1.0, abs(float(subj["ret"])) / 0.12), evidence_z=_z(wr1, n1),
         headline=headline, body=body, slug=_fslug(fs), related_symbols=[sym], follow_ups=follow,
+        # The claim is the GROUP statistic; the subject changes every day while the claim does
+        # not (A2: twenty-three identical dip/surge cards were published as "new" findings).
+        evidence_signature=_sig(tag, decision, abs(p["threshold_pct"]), round(wr1, 1), med1, etv1,
+                                *(() if not (is_dip and n5) else (round(wr5, 1), med5, etv5))),
     )]
 
 
@@ -488,7 +512,7 @@ def compute_volume_anomaly(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraf
            min_lift, "pct", sample="parameter")
     fs.add("up_share", "share of anomaly days that were higher a week later", up, "pct", n=nn)
     fs.add("base_up_share", "share of ALL stock-sessions that were higher a week later", base_up, "pct", n=nall)
-    fs.add("hurdle", "round-trip cost hurdle", H * 100, "bps")
+    fs.add("hurdle", "round-trip hurdle: costs plus slippage both ways", H * 100, "bps")
     fs.add("regime", "market regime today", ctx.regime.state, "text")
     if len(own):
         fs.add("own_cases", "this stock's own prior anomaly days", int(len(own)), "count", level=EvidenceLevel.same_stock)
@@ -538,6 +562,7 @@ def compute_volume_anomaly(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraf
                          "are judged by their LIFT over that control",
         grading_rule=rule, magnitude=min(1.0, float(u["volx"]) / 10.0), evidence_z=z,
         headline=headline, body=body, slug=_fslug(fs),
+        evidence_signature=_sig("volume_anomaly", decision, round(big, 1), round(base_big, 1), round(lift, 1)),
         related_symbols=[sym],
         follow_ups=["Do anomaly days that came after a fall resolve differently from those after a rise?",
                     "Does the direction of the following session predict the week?"],
@@ -597,7 +622,7 @@ def compute_relationship(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]
     ext_c = ext_all[ext_all + h < len(zarr)]                    # resolved inside the seal only
     conv = np.abs(zarr[ext_c + h]) < np.abs(zarr[ext_c])
     nc = int(len(conv))
-    c6 = float(conv.mean() * 100.0) if nc else 0.0
+    c6 = float(conv.mean() * 100.0) if nc else None       # withheld, never 0.0 "of 0 times" (A6)
     # THE GRADED METRIC (S1 audit C5): the spread trade from the NEXT OPEN, long the cheap leg,
     # short the rich leg, judged against twice the hurdle (two legs) — exactly what the frozen
     # rule measures. Computed per event-day, then on EPISODES (first day of each run of
@@ -650,11 +675,12 @@ def compute_relationship(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]
            d_wrong, "pct", n=ne, level=EvidenceLevel.same_stock)
     fs.add("event_spread_typical", "typical spread-trade return over the overlapping session-days (median)",
            d_med, "pct", n=ne, level=EvidenceLevel.same_stock)
-    fs.add("stretched_before", "stretched sessions with a resolved week-later spread width (overlapping)", nc, "count",
-           level=EvidenceLevel.same_stock)
-    fs.add("snapped_back", "share of those where the spread WIDTH had narrowed a week later, close to close — a width statistic, not a trade result",
-           c6, "pct", n=nc, level=EvidenceLevel.same_stock)
-    fs.add("hurdle", "round-trip cost hurdle per leg", H * 100, "bps")
+    if nc:
+        fs.add("stretched_before", "stretched sessions with a resolved week-later spread width (overlapping)", nc, "count",
+               level=EvidenceLevel.same_stock)
+        fs.add("snapped_back", "share of those where the spread WIDTH had narrowed a week later, close to close — a width statistic, not a trade result",
+               c6, "pct", n=nc, level=EvidenceLevel.same_stock)
+    fs.add("hurdle", "round-trip hurdle per leg: costs plus slippage both ways", H * 100, "bps")
     fs.add("regime", "market regime today", ctx.regime.state, "text")
 
     experiment = call_on_excess(n=nep, up_pct=e_up, med=e_med, etv=e_etv, H=H2, min_hit=p.get("min_hit_pct", 58.0))
@@ -666,8 +692,9 @@ def compute_relationship(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]
         f"{fs.token('episodes')} prior stretches of this pair it cleared both legs' costs "
         f"{fs.token('spread_right')} of the time and lost more than costs {fs.token('spread_wrong')} of the time, "
         f"with a typical return of {fs.token('spread_typical')} and an expectancy of {fs.token('spread_expectancy')} "
-        f"net of costs. The gap itself had narrowed a week later {fs.token('snapped_back')} of the time, but a "
-        f"narrower gap is not a paid trade, so that is context, not the claim. "
+        f"net of costs. "
+        + (f"The gap itself had narrowed a week later {fs.token('snapped_back')} of the time, but a "
+           "narrower gap is not a paid trade, so that is context, not the claim. " if nc else "")
         + ("The trade has paid more often than not, but the short leg is hard for retail to hold, so it stays a "
            "research experiment in convergence rather than a call." if experiment else
            "The spread trade does not clear costs reliably enough to test, so this is a watch, not a call.")
@@ -688,6 +715,8 @@ def compute_relationship(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]
                          f"{zz.index[0]}, one per run of consecutive sessions; the spread trade's hit rate is judged "
                          "against the coin flip and its return against twice the cost hurdle (two legs)",
         grading_rule=rule, magnitude=min(1.0, abs(zt) / 3.0), evidence_z=_z(e_up, nep),
+        evidence_signature=_sig("relationship", a, b, "short_a_long_b" if zt > 0 else "long_a_short_b",
+                                Decision.new_experiment if experiment else Decision.watch),
         headline=("A stretched pair: history says the spread trade has paid more often than not" if experiment
                   else "A stretched pair, but history says the spread trade does not reliably pay"),
         body=body, slug=_fslug(fs), related_symbols=[a, b],
@@ -725,14 +754,20 @@ def _sector_tables(md: MarketData, window: int, min_names: int, h: int):
     return d2, sret, mkt, roll, rel, rank, exn
 
 
-def _persistence(rel: pd.DataFrame, rank: pd.DataFrame, h: int) -> tuple[float, int]:
-    """Any leader-session: was the day's leader still top-three h sessions later? (the prototype's statistic)"""
+def _persistence(rel: pd.DataFrame, rank: pd.DataFrame, h: int, *, stride: int = 1) -> tuple[Optional[float], int]:
+    """
+    Any leader-session: was the day's leader still top-three h sessions later? (the prototype's
+    statistic). `stride = h` samples NON-OVERLAPPING windows (S1 second audit A3: at h = 5 with
+    every session counted, 70% is a window-overlap artefact — the same leader is measured five
+    times over the same week; at h = 15 on non-overlapping windows it is ~25%). Returns
+    (None, 0) rather than a zero sentinel when nothing resolved (A6).
+    """
     valid = rel.notna().any(axis=1).to_numpy()
     cols = list(rel.columns)
     lead = rel[valid].idxmax(axis=1).reindex(rel.index)
     rk = rank.to_numpy()
     hits: list[bool] = []
-    for i in range(len(rel) - h):
+    for i in range(0, len(rel) - h, max(1, stride)):
         if not valid[i]:
             continue
         s = lead.iloc[i]
@@ -741,15 +776,33 @@ def _persistence(rel: pd.DataFrame, rank: pd.DataFrame, h: int) -> tuple[float, 
         v = rk[i + h, cols.index(s)]
         if not np.isnan(v):
             hits.append(v <= 3)
-    return (float(np.mean(hits) * 100.0) if hits else 0.0), len(hits)
+    return (float(np.mean(hits) * 100.0) if hits else None), len(hits)
+
+
+def _effective_n(session_idx: np.ndarray, sector_idx: np.ndarray, h: int) -> int:
+    """
+    Independent cases among overlapping leader-sessions (A3 "use an effective n"): the same
+    sector leading on consecutive sessions is one episode per non-overlapping h-session
+    window, not one case per day. Greedy: a case is counted, then the same sector's cases
+    inside the next h - 1 sessions are folded into it.
+    """
+    last: dict[int, int] = {}
+    n = 0
+    for t, sct in zip(session_idx.tolist(), sector_idx.tolist()):
+        if sct in last and t < last[sct] + h:
+            continue
+        last[sct] = t
+        n += 1
+    return n
 
 
 def _leaders_like_this(sret: pd.DataFrame, mkt: pd.Series, rel: pd.DataFrame, exn: pd.DataFrame,
-                       window: int, min_days: int) -> np.ndarray:
+                       window: int, min_days: int, h: int = 5) -> tuple[np.ndarray, int]:
     """
     The graded metric on the card's OWN criteria (S1 audit C7): for every past session whose
     leader had beaten the market on at least `min_days` of `window` sessions with a higher
-    cumulative return, the leader's sector-minus-market f{h}. Returns the array (in %).
+    cumulative return, the leader's sector-minus-market f{h}. Returns (the array in %, the
+    effective number of independent cases — see `_effective_n`).
     """
     days_out = sret.gt(mkt, axis=0).rolling(window).sum()
     cum = np.expm1(np.log1p(sret).rolling(window).sum())
@@ -763,7 +816,7 @@ def _leaders_like_this(sret: pd.DataFrame, mkt: pd.Series, rel: pd.DataFrame, ex
     mc = mcum.to_numpy()[rows]
     ex = exn.to_numpy()[rows, li]
     like = (sc > mc) & (do >= min_days) & ~np.isnan(ex)
-    return ex[like] * 100.0
+    return ex[like] * 100.0, _effective_n(rows[like], li[like], h)
 
 
 def compute_theme_cycle(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]:
@@ -782,22 +835,46 @@ def compute_theme_cycle(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]:
     mkt_cum = float((mrec + 1).prod() - 1)
     tdy = md.today_rows()
     secn = tdy[tdy["sector"] == top].dropna(subset=["ma20"])
-    breadth = float((secn["close"] > secn["ma20"]).mean() * 100.0) if len(secn) else 0.0
-    persist, nP = _persistence(rel, rank, h)
-    like = _leaders_like_this(sret, mkt, rel, exn, WIN, min_days)
+    persist, nP = _persistence(rel, rank, h)                       # overlapping, context only
+    persist_nx, nPx = _persistence(rel, rank, WIN, stride=WIN)      # non-overlapping, mechanical (A3)
+    like, nL_eff = _leaders_like_this(sret, mkt, rel, exn, WIN, min_days, h)
     nL = int(len(like))
-    l_beat = float((like > H).mean() * 100.0) if nL else 0.0
-    l_lag = float((like < -H).mean() * 100.0) if nL else 0.0
-    l_up = float((like > 0).mean() * 100.0) if nL else 0.0
-    l_med = float(np.median(like)) if nL else 0.0
-    l_etv = (_wmean(like, cfg.expectancy_winsor_pct) - H) if nL else 0.0
     members = sorted(tdy[tdy["sector"] == top]["symbol"].unique().tolist())
-    wl = tdy[tdy["sector"] == top].dropna(subset=["r15"]).sort_values("r15", ascending=False).head(p["watchlist"])
-    looks_like_a_cycle = sec_cum > mkt_cum and days_out >= min_days
-    strong = looks_like_a_cycle and call_on_excess(n=nL, up_pct=l_up, med=l_med, etv=l_etv, H=H,
-                                                   min_hit=p.get("min_hit_pct", 58.0))
+    cards: list[CardDraft] = []
     prev = md.prev_session
     prev_top = str(rel.loc[prev].idxmax()) if prev in rel.index and rel.loc[prev].notna().any() else None
+    if nL > 0:
+        cards.append(_theme_leader_card(ctx, p, top=top, members=members, sret=sret, mkt=mkt, rel=rel, rank=rank,
+                                        recent=recent, mrec=mrec, days_out=days_out, sec_cum=sec_cum, mkt_cum=mkt_cum,
+                                        secn=secn, tdy=tdy, like=like, nL=nL, nL_eff=nL_eff, persist=persist, nP=nP,
+                                        persist_nx=persist_nx, nPx=nPx, prev_top=prev_top, min_days=min_days))
+    # else: no past leader-session like this one has resolved — there is no base rate to
+    # judge the leader by, so the theme card is WITHHELD (A6), never rendered with zeros.
+    cards.extend(_rotation_cards(ctx, p, sret=sret, roll=roll, exn=exn, rel=rel, tdy=tdy))
+    return cards
+
+
+def _theme_leader_card(ctx: ScanContext, p: dict[str, Any], *, top: str, members: list[str], sret, mkt, rel, rank,
+                       recent, mrec, days_out: int, sec_cum: float, mkt_cum: float, secn, tdy, like: np.ndarray,
+                       nL: int, nL_eff: int, persist: Optional[float], nP: int, persist_nx: Optional[float],
+                       nPx: int, prev_top: Optional[str], min_days: int) -> CardDraft:
+    md, cfg, H = ctx.md, ctx.cfg, ctx.hurdle
+    WIN, h = p["window"], p["horizon"]
+    l_beat = float((like > H).mean() * 100.0)
+    l_lag = float((like < -H).mean() * 100.0)
+    l_up = float((like > 0).mean() * 100.0)
+    l_med = float(np.median(like))
+    l_etv = _wmean(like, cfg.expectancy_winsor_pct) - H
+    lead_today = rel.loc[ctx.today].dropna().sort_values(ascending=False)
+    breadth = float((secn["close"] > secn["ma20"]).mean() * 100.0) if len(secn) else None
+    wl = tdy[tdy["sector"] == top].dropna(subset=["r15"]).sort_values("r15", ascending=False).head(p["watchlist"])
+    looks_like_a_cycle = sec_cum > mkt_cum and days_out >= min_days
+    # THE STRONG TEST (A3/A5): the graded metric's conditional base rate on leaders meeting the
+    # card's own criteria must clear the hurdle in EXPECTANCY (mean excess > costs + slippage),
+    # in median, and in hit rate — on the EFFECTIVE n, not the overlapping session count.
+    strong = looks_like_a_cycle and call_on_excess(n=nL_eff, up_pct=l_up, med=l_med, etv=l_etv, H=H,
+                                                   min_hit=p.get("min_hit_pct", 58.0))
+    market_names = int(tdy[tdy["sector"].isin(sret.columns)]["symbol"].nunique())
 
     fs = _fs(ctx, "theme", top, start=str(rel.index[0]))
     fs.add("sector", "the sector in play", top, "text", level=EvidenceLevel.sector)
@@ -805,13 +882,17 @@ def compute_theme_cycle(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]:
     fs.add("days_out", "sessions in the window the sector beat the market", days_out, "count", level=EvidenceLevel.sector)
     fs.add("sector_return", "sector return over the window (equal weight over its names)", sec_cum * 100, "pct",
            n=len(members), level=EvidenceLevel.sector)
-    fs.add("market_return", "market return over the same window (equal weight over all names)", mkt_cum * 100, "pct",
-           n=int(tdy["symbol"].nunique()), level=EvidenceLevel.whole_market)
-    fs.add("breadth", "share of the sector's names above their twenty-session average", breadth, "pct",
-           n=int(len(secn)), level=EvidenceLevel.sector)
+    fs.add("market_return", "market return over the same window (equal weight over every name in a sector "
+                            "with at least the minimum number of names)", mkt_cum * 100, "pct",
+           n=market_names, level=EvidenceLevel.whole_market)
+    if breadth is not None:
+        fs.add("breadth", "share of the sector's names above their twenty-session average", breadth, "pct",
+               n=int(len(secn)), level=EvidenceLevel.sector)
     fs.add("like_this_cases", f"past leader-sessions like this one: the leader had beaten the market on at least "
-                              f"{min_days} of {WIN} sessions with a higher cumulative return",
+                              f"{min_days} of {WIN} sessions with a higher cumulative return (overlapping sessions)",
            nL, "count")
+    fs.add("like_this_independent", "independent cases among them: one per sector per non-overlapping horizon "
+                                    "window — the effective n the evidence is weighed on", nL_eff, "count")
     fs.add("like_this_beat", "share of leaders like this whose sector then beat the market by more than the hurdle over the next week, next open to close",
            l_beat, "pct", n=nL, level=EvidenceLevel.whole_market)
     fs.add("like_this_lagged", "share of leaders like this whose sector then lagged the market by more than the hurdle",
@@ -822,11 +903,18 @@ def compute_theme_cycle(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]:
            l_med, "pct", n=nL, level=EvidenceLevel.whole_market)
     fs.add("like_this_expectancy", "expectancy of sector-minus-market net of the hurdle for leaders like this (winsorised mean)",
            l_etv, "pct", n=nL, level=EvidenceLevel.whole_market)
-    fs.add("persistence", "share of ALL past leader-sessions (any leader, however thin its lead) still a top-three sector a week later — the prototype's statistic, context only",
-           persist, "pct", n=nP, level=EvidenceLevel.whole_market,
-           degenerate_ok=(len(rel.columns) <= 3))          # "top three" of three sectors is a tautology
-    fs.add("persistence_cases", "past leader-sessions the any-leader persistence rate is measured on", nP, "count")
-    fs.add("hurdle", "round-trip cost hurdle", H * 100, "bps")
+    if persist is not None:
+        fs.add("persistence", "share of ALL past leader-sessions (any leader, however thin its lead) still a top-three "
+                              "sector a week later — the prototype's statistic on OVERLAPPING windows, context only",
+               persist, "pct", n=nP, level=EvidenceLevel.whole_market,
+               degenerate_ok=(len(rel.columns) <= 3))          # "top three" of three sectors is a tautology
+        fs.add("persistence_cases", "past leader-sessions the any-leader persistence rate is measured on (overlapping)", nP, "count")
+    if persist_nx is not None:
+        fs.add("persistence_mechanical", f"share of past leaders still a top-three sector {WIN} sessions later, measured on "
+                                         "NON-overlapping windows — the mechanical persistence, no overlap artefact",
+               persist_nx, "pct", n=nPx, level=EvidenceLevel.whole_market,
+               degenerate_ok=(len(rel.columns) <= 3))
+    fs.add("hurdle", "round-trip hurdle: costs plus slippage both ways", H * 100, "bps")
     fs.add("regime", "market regime today", ctx.regime.state, "text")
     for i, (_, r) in enumerate(wl.iterrows(), start=1):
         fs.add(f"watch_{i}", "watchlist name inside the sector", str(r["symbol"]), "text", level=EvidenceLevel.same_stock)
@@ -849,7 +937,7 @@ def compute_theme_cycle(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]:
 
     if strong:
         decision = Decision.virtual_long
-        reason = "A real rotation, not noise: the sector beat the market on most sessions, the move is broad, and leaders like this went on to beat the market after costs more often than not."
+        reason = "A real rotation, not noise: the sector beat the market on most sessions, the move is broad, and leaders like this went on to beat the market by more than costs and slippage, in expectancy and more often than not."
         kind = GradingKind.theme_call
         headline = "A sector is in play, and the evidence says it is a real rotation"
         verdict_line = "The research book takes a virtual sector tilt; I will say so the moment the evidence weakens."
@@ -870,15 +958,19 @@ def compute_theme_cycle(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]:
     body = (
         f"{fs.token('sector')} is the strongest sector by relative strength over the last "
         f"{fs.token('window')} sessions. The proof: it beat the market on {fs.token('days_out')} of those "
-        f"sessions, returning {fs.token('sector_return')} against the market's {fs.token('market_return')}; "
-        f"the move is broad, with {fs.token('breadth')} of its names above their twenty-session average. "
-        f"The test that matters: across {fs.token('like_this_cases')} past sessions when a sector led like "
-        f"this, it went on to beat the market by more than costs over the next week {fs.token('like_this_beat')} "
-        f"of the time and lagged by more than costs {fs.token('like_this_lagged')} of the time, with a typical "
+        f"sessions, returning {fs.token('sector_return')} against the market's {fs.token('market_return')}"
+        + (f"; the move is broad, with {fs.token('breadth')} of its names above their twenty-session average. "
+           if breadth is not None else ". ")
+        + f"The test that matters: across {fs.token('like_this_cases')} past sessions when a sector led like "
+        f"this ({fs.token('like_this_independent')} independent cases once overlapping sessions are folded), it "
+        f"went on to beat the market by more than costs and slippage over the next week {fs.token('like_this_beat')} "
+        f"of the time and lagged by more than that {fs.token('like_this_lagged')} of the time, with a typical "
         f"edge of {fs.token('like_this_typical_excess')} and an expectancy of {fs.token('like_this_expectancy')} "
-        f"net of costs. For context, any day's leader was still a top-three sector a week later "
-        f"{fs.token('persistence')} of {fs.token('persistence_cases')} times, but staying ranked is not the "
-        f"same as paying. {verdict_line}"
+        f"net of the hurdle of {fs.token('hurdle')}. "
+        + (f"For context, a leader was still a top-three sector {fs.token('window')} sessions later "
+           f"{fs.token('persistence_mechanical')} of the time on non-overlapping windows; staying ranked is not "
+           "the same as paying. " if persist_nx is not None else "")
+        + f"{verdict_line}"
         + (f" Inside the sector, the strongest names are {wl_txt}." if wl_txt else "")
         + (f" Other themes on the radar: {others_txt}." if others_txt else "")
         + (f" Yesterday I flagged {fs.token('prev_leader')}; today it ranks {fs.token('prev_leader_rank_today')}."
@@ -888,24 +980,30 @@ def compute_theme_cycle(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]:
     rule = build_rule(kind, horizon=h, hurdle_pct=H,
                       spec={"sector": top, "members": members, "window": WIN, "min_names": p["min_names"]},
                       frozen_at=ctx.computed_at, subject=top)
-    cards = [CardDraft(
+    return CardDraft(
         template_id="theme_cycle", question=THEME_CYCLE.question, subject=top, subject_kind=SubjectKind.sector,
         level=EvidenceLevel.sector, decision=decision, decision_reason=reason, facts=fs,
         key_facts=[fs.id("days_out"), fs.id("sector_return"), fs.id("market_return"), fs.id("like_this_beat"),
-                   fs.id("like_this_typical_excess")],
-        n=nL, comparison_group=f"the equal-weight market of all sectors with at least {p['min_names']} names, "
+                   fs.id("like_this_expectancy")],
+        n=nL_eff, comparison_group=f"the equal-weight market of all sectors with at least {p['min_names']} names, "
                                f"over the last {WIN} sessions; 'leaders like this' = every past leader-session since "
                                f"{rel.index[0]} whose leader had beaten that market on at least {min_days} of {WIN} "
                                "sessions with a higher cumulative return, judged on sector-minus-market from the next "
                                "open to the horizon close against the cost hurdle",
-        grading_rule=rule, magnitude=min(1.0, 0.5 * days_out / WIN + 0.5 * breadth / 100.0),
-        evidence_z=_z(l_up, nL), headline=headline, body=body, slug=_fslug(fs),
+        grading_rule=rule, magnitude=min(1.0, 0.5 * days_out / WIN + 0.5 * (breadth or 0.0) / 100.0),
+        evidence_z=_z(l_up, nL_eff), headline=headline, body=body, slug=_fslug(fs),
+        evidence_signature=_sig("theme_cycle", "leader", top, decision),
         related_symbols=[str(r["symbol"]) for _, r in wl.iterrows()],
         follow_ups=["Which names inside the sector are doing the work, and which are lagging?",
                     "Has this sector led in this regime before, and for how long?"],
-    )]
+    )
 
-    # ── the laggard -> leader rotation flip (pathfinder_demo.py §5) ─────────
+
+def _rotation_cards(ctx: ScanContext, p: dict[str, Any], *, sret, roll, exn, rel, tdy) -> list[CardDraft]:
+    """The laggard -> leader rotation flip (pathfinder_demo.py §5)."""
+    md, cfg, H = ctx.md, ctx.cfg, ctx.hurdle
+    WIN, h = p["window"], p["horizon"]
+    cards: list[CardDraft] = []
     trank = sret.loc[ctx.today].rank(ascending=False)
     lrank = roll.loc[ctx.today].rank(ascending=False)
     ncol = len(sret.columns)
@@ -922,11 +1020,13 @@ def compute_theme_cycle(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]:
         hitmask = cond & exn.notna()
         vals = exn.to_numpy()[hitmask.to_numpy()] * 100.0
         nr = int(len(vals))
-        beat = float((vals > 0).mean() * 100.0) if nr else 0.0
-        beat_h = float((vals > H).mean() * 100.0) if nr else 0.0
-        lag_h = float((vals < -H).mean() * 100.0) if nr else 0.0
-        med = float(np.median(vals)) if nr else 0.0
-        etv = (_wmean(vals, cfg.expectancy_winsor_pct) - H) if nr else 0.0
+        if nr == 0:
+            return cards          # no resolved flip in history: no base rate, no card (A6)
+        beat = float((vals > 0).mean() * 100.0)
+        beat_h = float((vals > H).mean() * 100.0)
+        lag_h = float((vals < -H).mean() * 100.0)
+        med = float(np.median(vals))
+        etv = _wmean(vals, cfg.expectancy_winsor_pct) - H
         smem = sorted(tdy[tdy["sector"] == s]["symbol"].unique().tolist())
         fr = _fs(ctx, "rotation", s, start=str(rel.index[0]))
         fr.add("sector", "the sector that flipped", s, "text", level=EvidenceLevel.sector)
@@ -944,7 +1044,7 @@ def compute_theme_cycle(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]:
                n=nr, level=EvidenceLevel.whole_market)
         fr.add("expectancy", "expectancy of sector-minus-market net of the hurdle (winsorised mean)", etv, "pct",
                n=nr, level=EvidenceLevel.whole_market)
-        fr.add("hurdle", "round-trip cost hurdle", H * 100, "bps")
+        fr.add("hurdle", "round-trip hurdle: costs plus slippage both ways", H * 100, "bps")
         fr.add("regime", "market regime today", ctx.regime.state, "text")
         # The decision follows the base rate, not the story. The prototype opened an
         # experiment unconditionally; the history says a flip like this usually does NOT
@@ -967,7 +1067,8 @@ def compute_theme_cycle(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]:
             f"day of noise. Across {fr.token('flips')} such flips in history, the sector went on to beat "
             f"the market over the following week {fr.token('beat_market')} of the time, beat it by more than "
             f"costs {fr.token('beat_after_costs')} of the time, with a typical edge of {fr.token('typical_excess')} "
-            f"and an expectancy of {fr.token('expectancy')} net of costs. {rclose} Regime: {fr.token('regime')}."
+            f"and an expectancy of {fr.token('expectancy')} net of a hurdle of {fr.token('hurdle')} for costs and "
+            f"slippage. {rclose} Regime: {fr.token('regime')}."
         )
         rrule = build_rule(rkind, horizon=h, hurdle_pct=H,
                            spec={"sector": s, "members": smem, "window": WIN, "min_names": p["min_names"]},
@@ -983,6 +1084,7 @@ def compute_theme_cycle(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]:
                              "next open to the horizon close, judged against the coin flip and the cost hurdle",
             grading_rule=rrule, magnitude=min(1.0, 0.5 * int(lrank[s]) / ncol), evidence_z=_z(beat, nr),
             headline=rhead, body=rbody, slug=_fslug(fr),
+            evidence_signature=_sig("theme_cycle", "rotation", s, rdecision),
             related_symbols=[], follow_ups=["Did the flip come on broad participation or one large name?"],
         ))
     return cards

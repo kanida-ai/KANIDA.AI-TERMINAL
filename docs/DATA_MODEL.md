@@ -171,19 +171,23 @@ Every table is **append-only** (UPDATE and DELETE are rejected by triggers):
 
 | Table | One row per | What it holds |
 |---|---|---|
-| `pf_editions` | after-close edition (date) | data seal, regime label, universe scanned, candidates considered, the usefulness threshold and every template parameter used (`params_json`), and `engine_version` = `pathfinder_research@<semver>+code.<sha256[:12] of research/*.py>` — the edition is attributable to the exact code that computed it (audit C1); `pf_grades.rule_version` likewise carries the hash of `grading.py` (P2) |
-| `pf_findings` | **published** finding | rank, tier, template, subject, decision, novelty key, usefulness, **`grading_rule_json` + `frozen_at`** (the rule as frozen at publication), and `card_json` — the full `Finding` (facts with provenance, digit-free narrative, provenance block) |
+| `pf_editions` | after-close edition (date) | data seal, regime label, universe scanned, candidates considered, the usefulness threshold and every template parameter used (`params_json`, incl. the hurdle, slippage and the data-exclusion counts), `engine_version` = `pathfinder_research@<semver>+code.<sha256[:12] of research/*.py>` — the edition is attributable to the exact code that computed it (audit C1); `pf_grades.rule_version` likewise carries the hash of `grading.py` (P2); **`backfilled`** (second audit A1: 1 when `generated_at` falls after the edition's session date in IST — a simulated backfill, never a forward record) and `data_through` (the last bar the warehouse held at generation) |
+| `pf_findings` | **published** finding | rank, tier, template, subject, decision, `novelty_key` = `template\|subject\|evidence signature` (A2), usefulness, **`grading_rule_json` + `frozen_at`** (the rule as frozen at publication), `card_json` — the full `Finding` (facts with provenance, digit-free narrative, provenance block with `disclosures`), **`backfilled`**, and **`continues`** — the ROOT finding this card continues when it repeats an open claim (A2): a continuation is served, not counted as a publication, and never graded on its own |
 | `pf_candidates` | every computed card, published or not | its score components and the reason (`below usefulness threshold` / `held by llm` / `published`) — what the engine chose *not* to publish is on the record |
 | `pf_grades` | graded finding (**at most one, ever** — PK) | verdict, the data seal it was graded on, the due session, the rule version, the realised facts |
-| `pf_scoreboard` | grading pass | a snapshot of `Right · Wrong · Inconclusive · n · pending` and the per-template split |
+| `pf_scoreboard` | grading pass | a snapshot of `Right · Wrong · Inconclusive · n · pending`, the per-template split, and (A1/A2) `forward_json` / `backfilled_json` (the split by generation), `n_total` (every grade row) and `continued` (continuation cards folded into an existing grade); `n` is the INDEPENDENT count |
+| `pf_meta` | key | `schema_version` — a store under a superseded schema is refused on open (`StoreSchemaError`) |
 
 The published count of an edition is **derived** from `pf_findings` at read time; the edition row
 is never updated. A date that already has an edition is refused, not recomputed. The scoreboard
 served by `/feed` is computed from `pf_grades` (the snapshots answer "what did it say on date X");
 its `pending` is "published on or before X and not graded on a seal ≤ X" (P4).
 
-A store written by superseded code cannot be corrected in place (append-only): it is **deleted and
-rebuilt** (`run_pathfinder_scan.py --fresh`). `engine_version` is how a reader tells them apart.
+A store written by superseded code cannot be corrected in place (append-only): it is **archived and
+rebuilt** — `run_pathfinder_scan.py --archive-store --i-understand-this-archives-the-store` renames
+it to `<store>.archived-<timestamp>`; nothing deletes it (second audit A8; the old `--fresh` deleted
+the store and is gone). `engine_version` is how a reader tells them apart; `backfilled` is how a
+reader tells a simulated backfill from a forward record.
 
 `Fact.sample_flag` gained `not_applicable` (C8): a parameter (a configured threshold) or a single
 observation (today's move, today's z-score) carries no `n` and says so; the flag is still never

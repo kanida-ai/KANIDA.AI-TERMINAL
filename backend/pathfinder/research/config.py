@@ -44,9 +44,9 @@ def research_code_hash() -> str:
     return code_hash(*sorted(RESEARCH_DIR.glob("*.py")))
 
 
-ENGINE_SEMVER = "1.1.0"
+ENGINE_SEMVER = "1.2.0"
 ENGINE_VERSION = f"pathfinder_research@{ENGINE_SEMVER}+code.{research_code_hash()}"
-GRADING_RULES_SEMVER = "1.1.0"           # the hashed form lives in grading.py (P2)
+GRADING_RULES_SEMVER = "1.2.0"           # the hashed form lives in grading.py (P2)
 RANKING_VERSION = "usefulness@1.0.0"
 
 
@@ -75,8 +75,27 @@ class ResearchConfig:
     price_db: str = field(default_factory=lambda: os.environ.get("KANIDA_DB", DEFAULT_PRICE_DB))
     research_db: str = field(
         default_factory=lambda: os.environ.get("KANIDA_PATHFINDER_RESEARCH_DB", DEFAULT_RESEARCH_DB))
-    data_source: str = "kanida_falcon.ohlc_daily (NSE EOD, corporate-action back-adjusted)"
+    #: S1 second audit A4 — the honest label. The warehouse is split/bonus-adjusted; demergers
+    #: (CGPOWER 2016-03-15 −71.7%, TATACHEM 2020-03-04 −56.2%, ABFRL 2025-05-22 −55.9%,
+    #: ADANIENT 2015-06-03 −41.9%) and some split-like events (JBCHEPHARM 2023-09-18,
+    #: SPLPETRO 2022-06-07, −49/−50%) are NOT adjusted. Corporate-action days are excluded
+    #: from every base rate and from subject selection (see data.py); the exclusion is on
+    #: every card's provenance.
+    data_source: str = ("kanida_falcon.ohlc_daily (NSE EOD; split/bonus-adjusted; demergers and some "
+                        "other corporate actions UNADJUSTED — corporate-action days excluded, see provenance)")
     universe_id: str = "nifty500_current_membership (in_nifty500=1 AND is_active=1)"
+    #: A4 — exclude split / bonus / demerger / rights ex-dates (the warehouse's `corp_actions`
+    #: table, NSE, 2020-01 →) and any single-day |close-to-close| move beyond
+    #: `corp_action_ret_guard_pct` (flagged as a SUSPECTED corporate action; the table starts
+    #: in 2020 and the four named demergers before it print −42% to −72%).
+    exclude_corp_actions: bool = True
+    corp_action_ret_guard_pct: float = 30.0
+    #: A7 — a bar whose open equals its close to the tick is treated as a SYNTHETIC open (a
+    #: placeholder the feed filled from the close: 1.5% of bars, 4.2% in 2013, 0.24% in 2026).
+    #: The next-open entry is not a verifiable price there, so every forward outcome that
+    #: would enter at it is NaN (unresolved). Before this the dip card's "typical next-session
+    #: move" was exactly 0.0% — the median sat on the pile of zero outcomes.
+    exclude_synthetic_opens: bool = True
     #: First bar considered. The warehouse starts 2013-01-01.
     history_start: str = "2013-01-01"
     index_symbol: str = "NIFTY 50"
@@ -87,6 +106,11 @@ class ResearchConfig:
     #: net move does not clear this is "NO TRADE"; a graded outcome inside ±hurdle is
     #: "Inconclusive". pathfinder_demo.py uses 0.30.
     cost_hurdle_pct: float = field(default_factory=lambda: _f("KANIDA_PF_COST_HURDLE_PCT", 0.30))
+    #: FOUNDER INPUT (S1 second audit A5) — slippage, % of notional, EACH WAY. The prototype
+    #: had no slippage term though the contract (`Provenance.cost_convention`) promised one.
+    #: Stub: 0.10% each way. The hurdle every decision and every grade is judged against is
+    #: `hurdle_pct` = cost_hurdle_pct + 2 * slippage_pct.
+    slippage_pct: float = field(default_factory=lambda: _f("KANIDA_PF_SLIPPAGE_PCT", 0.10))
 
     # ── usefulness threshold (FOUNDER INPUT) ────────────────────────────────
     #: Publish only cards whose usefulness clears this. NO minimum count, NO padding.
@@ -141,12 +165,37 @@ class ResearchConfig:
         return self.engine_version.rsplit("+code.", 1)[-1]
 
     @property
+    def hurdle_pct(self) -> float:
+        """The round-trip hurdle every decision and grade is judged against: costs + slippage both ways."""
+        return round(self.cost_hurdle_pct + 2.0 * self.slippage_pct, 6)
+
+    @property
     def cost_convention(self) -> str:
         return (
-            f"pf_cost_hurdle_v1: {self.cost_hurdle_pct:.2f}% round-trip hurdle (prototype "
-            "default; founder input pending); entry = next session's open after the signal "
-            "close, exit = close of the horizon session; a result inside ±hurdle is Inconclusive"
+            f"pf_cost_hurdle_v2: {self.hurdle_pct:.2f}% round-trip hurdle = {self.cost_hurdle_pct:.2f}% "
+            f"costs + {self.slippage_pct:.2f}% slippage each way (prototype cost default, slippage stub; "
+            "founder inputs pending); entry = next session's open after the signal close, exit = close "
+            "of the horizon session; a result inside ±hurdle is Inconclusive"
         )
+
+    @property
+    def data_disclosures(self) -> list[str]:
+        """User-facing sentences carried on every finding's provenance (A4, A7, A8)."""
+        out = [
+            "Survivorship: the universe is today's Nifty-500 membership with today's sector labels applied "
+            "to the whole history; it holds no delisted name, so absolute base rates flatter the past.",
+            "Prices are split/bonus-adjusted only; demergers and some other corporate actions are not adjusted.",
+        ]
+        if self.exclude_corp_actions:
+            out.append(
+                "Corporate-action days are excluded from every base rate and from subject selection: split, "
+                "bonus, demerger and rights ex-dates from the NSE corporate-action table, plus any single-day "
+                f"move beyond {self.corp_action_ret_guard_pct:.0f}% flagged as a suspected corporate action.")
+        if self.exclude_synthetic_opens:
+            out.append(
+                "A bar whose open equals its close to the tick is treated as a synthetic open; no outcome is "
+                "measured from an entry at such an open.")
+        return out
 
 
 def load_config() -> ResearchConfig:

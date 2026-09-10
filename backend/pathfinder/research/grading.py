@@ -252,12 +252,13 @@ def evaluate(rule: GradingRule, *, finding_slug: str, edition_date: str, md: Mar
         if kind != GradingKind.theme_call:
             # Recorded, not judged (S1 audit C2): a bottom-four sector is top-three five
             # sessions later 4% of the time, so "dropped out of the top three" was a verdict
-            # the subject satisfied by construction.
+            # the subject satisfied by construction. Withheld, never zero, when the sector
+            # cannot be ranked at the horizon (second audit A6: no zero sentinels).
             ranks = _sector_rank_on(md, due, window, min_names)
             rk = ranks.get(str(spec["sector"]))
-            fs.add("rank_at_horizon", "sector relative-strength rank at the horizon (recorded, not judged)",
-                   (int(rk) if rk is not None and not pd.isna(rk) else 0), "count",
-                   level=EvidenceLevel.sector)
+            if rk is not None and not pd.isna(rk):
+                fs.add("rank_at_horizon", "sector relative-strength rank at the horizon (recorded, not judged)",
+                       int(rk), "count", level=EvidenceLevel.sector)
         if kind == GradingKind.theme_call:
             verdict = _band(excess, H)
         else:
@@ -267,12 +268,16 @@ def evaluate(rule: GradingRule, *, finding_slug: str, edition_date: str, md: Mar
 
     elif kind == GradingKind.anomaly_move:
         sym = str(spec["symbol"])
+        # The RULE's horizon (second audit A8) — never a fixed week.
+        col = f"r{h}cc"
+        if col not in md.df:
+            raise ValueError(f"horizon {h} is not a computed close-to-close window")
         rows = md.df[(md.df["symbol"] == sym) & (md.df["d"] == edition_date)]
-        if rows.empty or pd.isna(rows.iloc[0]["r5cc"]):
+        if rows.empty or pd.isna(rows.iloc[0][col]):
             return None
-        mv = abs(float(rows.iloc[0]["r5cc"])) * 100
+        mv = abs(float(rows.iloc[0][col])) * 100
         thr = float(spec["move_pct"])
-        fs.add("week_move", "absolute close-to-close move from the signal close to a week later",
+        fs.add("week_move", f"absolute close-to-close move from the signal close to the close {h} sessions later",
                mv, "pct", sample="observation", level=EvidenceLevel.same_stock)
         if mv >= thr:
             verdict = Verdict.right
@@ -295,5 +300,5 @@ def evaluate(rule: GradingRule, *, finding_slug: str, edition_date: str, md: Mar
     else:  # pragma: no cover
         raise ValueError(f"no evaluator for {kind}")
 
-    fs.add("hurdle", "cost hurdle the verdict was judged against", H * 100, "bps")
+    fs.add("hurdle", "round-trip hurdle (costs plus slippage both ways) the verdict was judged against", H * 100, "bps")
     return GradeResult(verdict=verdict, facts=fs, due_session=due)

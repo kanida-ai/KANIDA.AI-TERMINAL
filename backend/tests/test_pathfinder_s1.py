@@ -83,10 +83,22 @@ def synthetic():
     return synth()
 
 
+#: PASS-1 CONVENTIONS. This suite pins the S1 engine math as first audited: hurdle = 0.30%
+#: costs with no slippage term, and the grader fixtures below build "flat" bars as
+#: (open, close) = (100, 100). The second audit added a slippage term (A5) and treats an
+#: open equal to its close as a synthetic open (A7); those conventions are pinned in
+#: `test_pathfinder_s1_audit2.py`. Setting them explicitly here keeps these rows pinned to
+#: the numbers they were written against, and says so.
+PASS1 = dict(slippage_pct=0.0, exclude_synthetic_opens=False)
+#: ...and before the corporate-action exclusion (A4): the real-warehouse pins below and in the
+#: pass-1 audit suite reproduce the prototypes' and the first auditor's exact counts under it.
+PASS1_DATA = dict(PASS1, exclude_corp_actions=False)
+
+
 @pytest.fixture()
 def cfg(tmp_path) -> ResearchConfig:
     return ResearchConfig(research_db=str(tmp_path / "r.db"), price_db="unused",
-                          usefulness_threshold=0.0, pairs=(("B0", "B1"), ("A0", "A1")))
+                          usefulness_threshold=0.0, pairs=(("B0", "B1"), ("A0", "A1")), **PASS1)
 
 
 def scan_dates(synthetic):
@@ -372,7 +384,7 @@ def test_s1_20_the_grading_rule_is_frozen_at_publication_not_read_from_config(sy
     assert all(f.grading_rule.frozen_at == AT and f.grading.status.value == "pending" for f in items)
     # The founder changes the hurdle AFTER publication. The grade must use the frozen one.
     later = ResearchConfig(research_db=cfg.research_db, price_db="unused", cost_hurdle_pct=5.0,
-                           usefulness_threshold=0.0, pairs=cfg.pairs)
+                           usefulness_threshold=0.0, pairs=cfg.pairs, **PASS1)
     md_later = load(synthetic, later, as_of=scan_dates(synthetic)[329])
     graded = grade_due(store, md_later, later, graded_at=AT)
     assert graded
@@ -531,8 +543,10 @@ def test_s1_29_a_model_that_writes_a_number_is_rejected_and_the_engine_narrates(
 
 
 def test_s1_30_the_model_may_only_veto_a_card_that_cleared_the_threshold(synthetic, tmp_path):
+    # 0.70: since the second audit the theme card is weighed on its EFFECTIVE n (A3), which
+    # caps its evidence strength below the old 1.0 — the veto semantics are what is tested.
     cfg2 = ResearchConfig(research_db=str(tmp_path / "v.db"), price_db="unused",
-                          usefulness_threshold=0.75, pairs=(("B0", "B1"),))
+                          usefulness_threshold=0.70, pairs=(("B0", "B1"),), **PASS1)
     store = ResearchStore(cfg2.research_db)
     fake = _FakeLLM(label="hold")
     nar = Narrator(fake, provider_name="fake")
@@ -640,7 +654,7 @@ def test_s1_34_theme_and_pair_math_reproduce_the_prototype_on_real_data(tmp_path
     that the next-open convention does not touch).
     """
     from datetime import datetime as _dt
-    cfg = ResearchConfig(research_db=str(tmp_path / "r.db"), usefulness_threshold=0.0)
+    cfg = ResearchConfig(research_db=str(tmp_path / "r.db"), usefulness_threshold=0.0, **PASS1_DATA)
     md = MarketData.load(cfg, as_of="2026-07-29")
     if md.as_of != "2026-07-29":
         pytest.skip("warehouse does not contain 2026-07-29")

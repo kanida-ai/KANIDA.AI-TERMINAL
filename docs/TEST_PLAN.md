@@ -8,7 +8,7 @@ what it built. **Rule: no requirement without a test row.**
 | **Pathfinder P0** (contract + mock) | below | `backend/tests/test_pathfinder_p0.py` | **37 passing** |
 | **Pathfinder P1** (engine) | below | `backend/tests/test_pathfinder_p1.py` | **60 rows** |
 | **Pathfinder P2** (frontend) | below | `kanida-app/tests/{lib,contract}.test.ts` | **31 passing** |
-| **Pathfinder S1** (research engine + feed) | below | `backend/tests/test_pathfinder_s1.py` + `test_pathfinder_s1_audit.py` | **34 + 39 passing** |
+| **Pathfinder S1** (research engine + feed) | below | `backend/tests/test_pathfinder_s1.py` + `test_pathfinder_s1_audit.py` + `test_pathfinder_s1_audit2.py` | **34 + 39 + 28 passing** |
 | Trader slice | *to be appended by session 01/S1.1* | — | not started |
 
 Run:
@@ -231,7 +231,8 @@ bar is under the test's control; S1-34 runs on the **real warehouse** and skips 
 ```bash
 python -m pytest backend/tests/test_pathfinder_s1.py -q        # 34 rows, ~20s with the warehouse
 python -m pytest backend/tests/test_pathfinder_s1_audit.py -q  # 39 audit regressions, ~50s with the warehouse
-python scripts/run_pathfinder_scan.py --fresh --backfill 12    # the real store the feed serves
+python scripts/run_pathfinder_scan.py --backfill 12            # the real store the feed serves (append-only;
+#   to rebuild: --archive-store --i-understand-this-archives-the-store — the old store is renamed, never deleted)
 ```
 
 | Row | Asserts | Law |
@@ -297,6 +298,28 @@ Each row encodes the auditor's recomputed expectation and **failed on the engine
 | real-C7 | IT leader: like-this n = 2,655, beat-by->hurdle 45.95% (< 58), expectancy < 0 → `watch`; any-leader persistence 70.1% of 3,316 is context | C7 |
 | real-C8/P5 | dip n = 12,632, median 0.00%, expectancy₁ ≈ 0, expectancy₅ ≈ +0.08% (the raw mean was +14.3% off one 831x bar) → no_trade; surge n = 24,727, expectancy < 0 → reject | C8/P5/D1 |
 
+### S1 SECOND quant-audit regressions (`backend/tests/test_pathfinder_s1_audit2.py`, 28 rows)
+
+A second, independent audit of the post-fix engine (commit 69c1f95) found eight further issues
+(`docs/handbacks/PF-S1.md` §4, "Second audit"). Each row below **fails on that commit** (the file
+does not even collect against it) and encodes the second auditor's recomputed number. The
+`real` rows run under the SECOND audit's conventions — hurdle 0.30% + 2 × 0.10% slippage = 0.50%,
+corporate-action days and synthetic opens excluded; the pass-1 suites pin the pass-1 conventions
+explicitly (`PASS1` / `PASS1_DATA` in `test_pathfinder_s1.py`) so the first auditor's numbers still
+reproduce.
+
+| Row | Asserts | Finding |
+|---|---|---|
+| A2-A1 | an edition generated after its session date (IST) is `backfilled = 1` on the edition, on every finding and on every grade; the feed and every card carry the label "simulated backfill — not a forward track record"; the scoreboard splits `forward` / `backfilled` and **forward is 0** on a backfilled store, visibly; a scan run on the session's own date is `backfilled = 0` and its grades land in `forward`; one day late is a backfill; a store under the superseded schema is refused (`StoreSchemaError`), never relabelled | A1 |
+| A2-A2 | `novelty_key` = `template\|subject\|evidence signature`; the same group statistic under a different subject scores 0.25; a group card's signature carries the statistic, not the stock; a repeat of an OPEN claim on the next sessions is a `continue` pointing at the ROOT finding, served after the new findings in `discovery`, excluded from `published_count`, recorded in `pf_candidates` as a continuation, **never graded**; once the root's horizon completes the same claim is a new publication; the scoreboard's `n` = `n_independent`, `n_total` counts grade rows, `continued` counts folded cards | A2 |
+| A2-A3 | `_effective_n` folds the same sector inside one horizon window; `_persistence(stride=window)` samples non-overlapping windows and returns `(None, 0)` rather than a zero; `call_on_excess` refuses a call whose expectancy is negative at the slippage-inclusive hurdle or whose effective n is small; **real**: IT leader like-this beat 42.3% / lagged 38.3% / median +0.07% / expectancy −0.37% on 2,649 sessions = **879 independent cases** (= the card's n), overlapping persistence 70.0% labelled OVERLAPPING context, mechanical h=15 persistence **25.5% of 220** in the body instead → `watch` | A3 |
+| A2-A4 | `data_source` no longer says "back-adjusted" and says UNADJUSTED; a −40% print with no table entry is a suspected corporate action and a table split ex-date is one, both NaN returns, neither the day's subject nor a dip case (with the rule off the −40% print IS the subject); a dividend is not excluded; every finding's provenance carries the exclusion and survivorship disclosures and the edition records the exclusion counts; **real**: CGPOWER 2016-03-15, TATACHEM 2020-03-04, ABFRL 2025-05-22, ADANIENT 2015-06-03, JBCHEPHARM 2023-09-18, SPLPETRO 2022-06-07 are holes; no dip case ≤ −30% remains (the auditor's 23); 179 table + 45 suspected + 6 glitch bars excluded; dip n 12,368 | A4 |
+| A2-A5 | `hurdle_pct` = 0.30 + 2 × 0.10 = 0.50 on every decision (`ScanContext.hurdle`, `_rate`), every frozen rule and every provenance; the hurdle fact says slippage; `KANIDA_PF_SLIPPAGE_PCT` is a founder input; **real**: the rotation flip is 776 / 34.4% beat-by-hurdle / expectancy −0.72% → reject, IT expectancy < 0 → watch, both at 50 bps | A5 |
+| A2-A6 | a statistic over n = 0 cannot be minted (`FactSet.add` refuses "0.0% of 0 times"); the grader withholds `rank_at_horizon` when the sector cannot be ranked (never 0); the theme card is withheld when no leader like this has resolved; persistence facts are withheld when nothing resolved; no pair fact carries n = 0 | A6 |
+| A2-A7 | a bar whose open equals its close is `_synth_open`; `f{h}` of the row entering at it is NaN while `r{h}cc` is untouched; with the rule off the outcome is exactly 0.0 (the artefact); **real**: 19,083 synthetic-open bars; dip hit 50.6% and median **+0.10%** (was 0.0%) → still no_trade | A7 |
+| A2-A8 | `archive_store` refuses without `--i-understand-this-archives-the-store`, renames to `.archived-<stamp>`, never deletes; `--fresh` exits; the anomaly grader reads `r{h}cc` for the RULE's horizon (a 3-session rule is Right where a 5-session rule is Wrong); the theme grader's realised market move equals the template's `fmkt` on the same date and `market_return.n` counts that market's names | A8 |
+| A2-HTTP | `/api/pathfinder/feed` serves `backfilled`, `record_label`, `continued_count`, per-card `grading.record` / `continues` / status `continued`, provenance `disclosures`, the honest `data_source`, no fact with n = 0, and a scoreboard with `forward.n == 0`, `backfilled.n == n == n_independent`, `continued ≥ 1` | A1/A2/A4/A6 |
+
 ### Known gaps for S1
 
 1. **The "unexplained regime reading" was not unexplained.** The `RISK_OFF … breadth 10%` edition
@@ -310,9 +333,16 @@ Each row encodes the auditor's recomputed expectation and **failed on the engine
    provider has no cassettes for feed keys, so every real edition is engine-narrated and says so.
    The P1 engine's own narrate path (`engine/narrator.py`) still uses the non-strict contract.
 3. **The Postgres target** is untouched by S1 — the research store is SQLite only.
-4. **Survivorship** (audit P3): today's Nifty-500 membership and today's sector labels are applied
-   to 2013→2026 history; base rates are cost-hurdle decisions rather than absolute returns, which
-   limits but does not remove the bias. No point-in-time membership in the warehouse.
+4. **Survivorship** (audit P3 / second audit A8): today's Nifty-500 membership and today's sector
+   labels are applied to 2013→2026 history and the universe holds no delisted name; base rates are
+   cost-hurdle decisions rather than absolute returns, which limits but does not remove the bias.
+   No point-in-time membership in the warehouse. Now a user-facing sentence on every provenance.
+5. **No forward record exists yet** (second audit A1). Every edition in the store was generated on
+   2026-09-10 for sessions in July: the scoreboard is a **simulated backfill** and says so on the
+   feed, on every card and in `forward = 0`. A forward record starts only when the scan runs on the
+   session's own date after the EOD bar lands; no test can create one against a stale warehouse.
+6. **Demergers are not adjusted** (A4). The engine excludes the ex-date bar and every forward window
+   across it; it does not correct the price basis. A point-in-time adjusted feed is the real fix.
 
 ---
 

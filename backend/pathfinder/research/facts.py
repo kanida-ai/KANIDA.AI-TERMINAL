@@ -85,6 +85,11 @@ class FactSet:
             value = round(value, 4)
         if n is not None:
             n = int(n)
+            # S1 second audit A6: "0.0% of 0 times" is not a statistic, it is a sentinel
+            # rendered as a value. A statistic over zero cases cannot be minted; the caller
+            # withholds the fact (or the card) instead.
+            if n <= 0:
+                raise ValueError(f"fact {fid}: a statistic over n={n} cases cannot be minted — withhold it")
         # Fail-loud guard (S1 audit C1): a share of exactly 0% or 100% over a hundred or
         # more cases is, in this engine, a computation bug (a mis-aligned frame, a
         # dtype accident), not a finding. The superseded smoke run published big_move=0.0%

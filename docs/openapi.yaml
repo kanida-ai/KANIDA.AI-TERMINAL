@@ -825,7 +825,13 @@ components:
           type: integer
           minimum: 0.0
           title: Published Count
-          description: Can legitimately be small. Never padded.
+          description: NEW findings this edition. Can legitimately be small. Never padded.
+        continued_count:
+          type: integer
+          minimum: 0.0
+          title: Continued Count
+          description: Continuations of open calls served alongside (not new publications).
+          default: 0
         usefulness_threshold:
           type: number
           title: Usefulness Threshold
@@ -853,6 +859,14 @@ components:
           default: Pathfinder is a research lab. Everything here is a hypothesis under test with virtual
             money, not advice and not a recommendation. No returns are promised. Kanida never places an
             order on your behalf.
+        backfilled:
+          type: boolean
+          title: Backfilled
+          description: 'This edition was generated after its date: a simulated backfill.'
+        record_label:
+          type: string
+          title: Record Label
+          description: The label this edition is published under.
       additionalProperties: false
       type: object
       required:
@@ -868,6 +882,8 @@ components:
       - discoveries
       - scoreboard
       - llm_provider
+      - backfilled
+      - record_label
       title: FeedResponse
       description: GET /api/pathfinder/feed?date= — the clarity-first edition for one close.
     Finding:
@@ -942,6 +958,20 @@ components:
           default: Research item, not a recommendation. Computed from historical data before it was written;
             the grading rule was frozen at publication. No entry, target, stop or execution is implied.
             Kanida never places an order on your behalf.
+        backfilled:
+          type: boolean
+          title: Backfilled
+          description: Generated after its edition date (simulated backfill).
+          default: false
+        continues:
+          anyOf:
+          - type: string
+            pattern: ^fnd_[a-z0-9_]+$
+          - type: 'null'
+          title: Continues
+          description: 'The open finding this card continues (S1 second audit A2): the same claim on the
+            same evidence while the original''s horizon is still running. Not a new publication; not graded
+            separately.'
       additionalProperties: false
       type: object
       required:
@@ -1011,6 +1041,13 @@ components:
           type: string
           format: date-time
           title: Computed At
+        disclosures:
+          items:
+            type: string
+          type: array
+          title: Disclosures
+          description: 'User-facing data caveats (S1 second audit A4/A7/A8): survivorship of the universe,
+            what the prices are and are not adjusted for, and which bars were excluded.'
       additionalProperties: false
       type: object
       required:
@@ -1136,6 +1173,22 @@ components:
           type: array
           title: Realized Facts
           description: What actually happened.
+        backfilled:
+          type: boolean
+          title: Backfilled
+          description: 'True when the finding was generated after its edition date: a simulated backfill.'
+          default: false
+        record:
+          type: string
+          title: Record
+          description: The label the grade is published under.
+          default: simulated backfill — generated after the fact; not a forward track record
+        continues:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Continues
+          description: 'For status=continued: the finding id this one continues and is graded through.'
       additionalProperties: false
       type: object
       required:
@@ -1146,6 +1199,7 @@ components:
       enum:
       - pending
       - graded
+      - continued
       title: GradingStatus
     HTTPValidationError:
       properties:
@@ -1815,6 +1869,32 @@ components:
           type: string
           format: date
           title: As Of
+        forward:
+          $ref: '#/components/schemas/ScoreCounts'
+          description: Grades on findings generated on their own session date.
+        backfilled:
+          $ref: '#/components/schemas/ScoreCounts'
+          description: Grades on findings generated after the fact (simulated backfill).
+        n_total:
+          type: integer
+          minimum: 0.0
+          title: N Total
+          description: Every grade row, including re-grades of the same claim.
+        n_independent:
+          type: integer
+          minimum: 0.0
+          title: N Independent
+          description: Grades on independent claims — equals n.
+        continued:
+          type: integer
+          minimum: 0.0
+          title: Continued
+          description: Continuation cards folded into an existing grade (not counted).
+          default: 0
+        record_label:
+          type: string
+          title: Record Label
+          description: 'What this scoreboard is: a forward record, a backfill, or mixed.'
       additionalProperties: false
       type: object
       required:
@@ -1824,8 +1904,22 @@ components:
       - n
       - pending
       - as_of
+      - forward
+      - backfilled
+      - n_total
+      - n_independent
+      - record_label
       title: Scoreboard
-      description: '`Right · Wrong · Inconclusive · n` — running, public, append-only underneath.'
+      description: '`Right · Wrong · Inconclusive · n` — running, public, append-only underneath.
+
+
+        S1 second audit A1/A2: the headline counts are INDEPENDENT grades (one per claim per
+
+        non-overlapping horizon; continuations are graded through the finding they continue), split
+
+        into `forward` (generated on the session date) and `backfilled` (simulated). `n_total` is
+
+        every grade row including any re-grade of the same claim; `n` is the independent count.'
     Spark:
       properties:
         basis:

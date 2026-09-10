@@ -51,7 +51,7 @@ from pathfinder.research.regime import build_regime, regime_on                  
 from pathfinder.research.scan import grade_due, run_scan                                    # noqa: E402
 from pathfinder.research.store import ResearchStore                                         # noqa: E402
 from pathfinder.schemas import Decision, Fact, GradingKind, GradingRule, SampleFlag, Verdict  # noqa: E402
-from tests.test_pathfinder_s1 import AT, _tiny, load, scan_dates, synth                     # noqa: E402
+from tests.test_pathfinder_s1 import AT, PASS1, PASS1_DATA, _tiny, load, scan_dates, synth  # noqa: E402
 
 H = 0.30
 
@@ -61,10 +61,17 @@ def synthetic():
     return synth()
 
 
+#: PASS-1 CONVENTIONS — see test_pathfinder_s1.PASS1. Every row here encodes the FIRST
+#: auditor's recomputed number, which was measured at H = 0.30 with no slippage and before
+#: the second audit's data rules (corporate-action exclusion A4, synthetic opens A7). The
+#: second audit's conventions and their deltas are pinned in `test_pathfinder_s1_audit2.py`;
+#: the real-warehouse rows below add `PASS1_DATA` so the auditor's exact numbers still reproduce.
+
+
 @pytest.fixture()
 def cfg(tmp_path) -> ResearchConfig:
     return ResearchConfig(research_db=str(tmp_path / "r.db"), price_db="unused",
-                          usefulness_threshold=0.0, pairs=(("B0", "B1"), ("A0", "A1")))
+                          usefulness_threshold=0.0, pairs=(("B0", "B1"), ("A0", "A1")), **PASS1)
 
 
 def _facts(draft) -> dict[str, Fact]:
@@ -245,7 +252,9 @@ def test_c7_the_strong_gate_uses_leaders_like_this_and_expectancy_not_any_leader
     theme = LIB.compute_theme_cycle(ctx, LIB.parameters_for(LIB.THEME_CYCLE, cfg))[0]
     v = _facts(theme)
     assert "any leader" in v["persistence"].label and "context only" in v["persistence"].label
-    assert theme.n == v["like_this_cases"].value and v["like_this_beat"].n == theme.n
+    # second audit A3: the card's n is the EFFECTIVE (independent) count; the rate is over every session
+    assert theme.n == v["like_this_independent"].value and v["like_this_beat"].n == v["like_this_cases"].value
+    assert theme.n <= v["like_this_cases"].value
     assert "next open" in v["like_this_beat"].label
     strong = (v["sector_return"].value > v["market_return"].value and v["days_out"].value >= 9
               and LIB.call_on_excess(n=theme.n, up_pct=v["like_this_up"].value, med=v["like_this_typical_excess"].value,
@@ -465,7 +474,7 @@ real = pytest.mark.skipif(not Path(PRICE_DB).exists(), reason="price warehouse n
 def real_ctx():
     if not Path(PRICE_DB).exists():
         pytest.skip("price warehouse not present")
-    cfg = ResearchConfig(research_db="unused", usefulness_threshold=0.0)
+    cfg = ResearchConfig(research_db="unused", usefulness_threshold=0.0, **PASS1_DATA)
     md = MarketData.load(cfg, as_of="2026-07-29")
     if md.as_of != "2026-07-29":
         pytest.skip("warehouse does not contain 2026-07-29")
@@ -531,7 +540,10 @@ def test_real_c7_it_leader_is_a_watch_because_leaders_like_this_did_not_pay(real
     d, _ = cards[("theme_cycle", "Information Technology")]
     v = _facts(d)
     assert v["days_out"].value == 8 and v["sector_return"].value > v["market_return"].value
-    assert v["like_this_cases"].value == 2655 and d.n == 2655
+    # second audit A3: 2,655 overlapping leader-sessions are 879 independent cases, and the
+    # card's n is the effective count
+    assert v["like_this_cases"].value == 2655 and v["like_this_beat"].n == 2655
+    assert d.n == v["like_this_independent"].value == 879
     assert v["like_this_beat"].value == pytest.approx(45.95, abs=0.1) and v["like_this_beat"].value < 58
     assert v["like_this_expectancy"].value < 0
     assert v["persistence"].value == pytest.approx(70.1, abs=0.1) and v["persistence"].n == 3316
@@ -554,7 +566,7 @@ def test_real_c8_p5_dip_and_surge_after_the_glitch_fix(real_ctx):
 @real
 def test_real_d1_the_auditors_770_reproduces_with_the_glitch_guard_off(monkeypatch):
     monkeypatch.setattr(DATA, "GLITCH_RATIO", (0.0, float("inf")))
-    cfg = ResearchConfig(research_db="unused", usefulness_threshold=0.0)
+    cfg = ResearchConfig(research_db="unused", usefulness_threshold=0.0, **PASS1_DATA)
     md = MarketData.load(cfg, as_of="2026-07-29")
     assert (md.df["ret"].dropna() > 4).sum() == 6, "the six listing-day glitch bars are back as 'returns'"
     ctx = LIB.ScanContext(md=md, cfg=cfg, regime=regime_on(build_regime(md), md.as_of), computed_at=AT)
@@ -579,7 +591,7 @@ def test_real_c1_the_same_seal_scanned_twice_is_byte_identical(real_ctx, tmp_pat
     cfg, md, ctx, cards = real_ctx
     out = []
     for k in (1, 2):
-        c = ResearchConfig(research_db=str(tmp_path / f"r{k}.db"))
+        c = ResearchConfig(research_db=str(tmp_path / f"r{k}.db"), **PASS1_DATA)
         st = ResearchStore(c.research_db)
         rep = run_scan(c, st, md=md, computed_at=AT)
         assert not rep.skipped and rep.published
