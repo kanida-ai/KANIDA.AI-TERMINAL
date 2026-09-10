@@ -200,13 +200,15 @@ Session S2 added a third SQLite file (`KANIDA_PATHFINDER_EXPERIMENTS_DB`, defaul
 **append-only** (UPDATE/DELETE rejected by trigger); the tables that are the record are **hash-chained**
 (P1 `repository.py` convention; the timestamp columns AND the timestamp keys inside JSON columns are
 outside the hashed payload — audit A2 — so two rebuilds of the same seals produce identical chains:
-`verify_all_chains()`). Schema version 2; a registry under an earlier version is refused on open and
-archived, never migrated. The file opens in WAL mode so the API reads while the after-close loop writes.
+`verify_all_chains()`). **Schema version 3** (`pfx_meta.schema_version = 3`, since the S2 re-audit — N4 added
+`pfx_candidates.family_trials_all_time INTEGER NOT NULL DEFAULT 0`, the family's trial count after that
+evaluation across every finding, retry and revision; a registry under schema 1 or 2 is refused on open and
+archived, never migrated). The file opens in WAL mode so the API reads while the after-close loop writes.
 
 | Table | One row per | What it holds |
 |---|---|---|
 | `pfx_editions` | loop step (edition date) | engine version (`pathfinder_experiments@<semver>+code.<hash of experiments/*.py>`), Constitution version, every parameter (`params_json`: the founder stubs, the hurdle, the risk limits, the gauntlet), `backfilled` |
-| `pfx_candidates` | S1 ROOT finding considered | the family it names (or why none), **trials evaluated**, the experiment it opened or the reason it did not (best variant, its expectancy, its failed gates) |
+| `pfx_candidates` | S1 ROOT finding considered | the family it names (or why none), **trials evaluated**, **`family_trials_all_time`** (schema 3, re-audit N4: the family's trials EVER, as of this evaluation — the count the family-wise significance bar divides by; never restarts on a retry), the experiment it opened or the reason it did not (best variant, its expectancy on the BOOK-selected population — re-audit N1 — its failed gates) |
 | `pfx_trials` | variant evaluated, EVER | owner (finding at opening / experiment after a period), `trial_no` (monotonic per idea), the variant, its stats on the three windows, every gate with value and bar, `passed`, `adopted` — the count a reader divides the p-value by |
 | `pfx_experiments` ⛓ | experiment | family, source finding, theme (public text), question, direction, threshold, capital, the S1 card's provenance (`evidence_json`), the opening gates, `backfilled` |
 | `pfx_versions` ⛓ | version (`v1`, `v2`…) | the rule (`variant_json`), `change` / `why` / `level` (L1–L3, never L4) / `validation`, the **expectation frozen at creation** (`expectation_json` + its facts, with the S1 card's facts by their original ids), the **grading rule frozen at creation** (`grading_rule_json`, `rule_version` = hash of `grading.py`), `trials_for_version` |

@@ -19,6 +19,7 @@ import { radius, space } from '@/design/tokens';
 import { count, dateShort } from '@/lib/format';
 import {
   decisionCopy,
+  dueBasisShort,
   experimentStateCopy,
   gradingStatusCopy,
   levelCopy,
@@ -130,7 +131,7 @@ export function GradingLine({ grading, horizonSessions, editionDate }: { grading
   const when =
     grading.status === 'pending'
       ? grading.due_session
-        ? `due ${dateShort(grading.due_session)}`
+        ? `due ${dateShort(grading.due_session)}${dueBasisShort(grading.due_session_basis) ? ' (projected)' : ''}`
         : horizonSessions && editionDate
           ? `due ${horizonSessions} session${horizonSessions === 1 ? '' : 's'} after ${dateShort(editionDate)}`
           : 'due session not stamped by the engine'

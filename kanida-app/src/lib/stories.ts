@@ -29,7 +29,16 @@ import type {
 } from '@/api/types';
 
 export type FollowUp = { findingId: string; subject: string; question: string };
-export type PendingHorizon = { findingId: string; subject: string; headline: string; due: string | null; horizonSessions: number; editionDate: string };
+export type PendingHorizon = {
+  findingId: string;
+  subject: string;
+  headline: string;
+  due: string | null;
+  /** the server's `due_session_basis` — "projected: …" when the date is a calendar estimate */
+  dueBasis: string | null;
+  horizonSessions: number;
+  editionDate: string;
+};
 
 export type Story =
   | {
@@ -50,6 +59,8 @@ export type Story =
       universeScanned: number;
       threshold: number;
       regime: string;
+      /** the feed's `engine_version` when served; the edition header is the source otherwise */
+      engineVersion: string | null;
     }
   | { kind: 'experiment'; id: string; card: ExperimentCard }
   | {
@@ -117,6 +128,7 @@ export function buildStories(feed: FeedResponse, registry: ExperimentsResponse |
       universeScanned: feed.universe_scanned,
       threshold: feed.usefulness_threshold,
       regime: feed.regime,
+      engineVersion: feed.engine_version ?? null,
     });
   }
 
@@ -159,6 +171,7 @@ export function buildStories(feed: FeedResponse, registry: ExperimentsResponse |
         subject: f.subject,
         headline: f.narrative.headline,
         due: f.grading.due_session ?? null,
+        dueBasis: f.grading.due_session_basis ?? null,
         horizonSessions: f.grading_rule.horizon_sessions,
         editionDate: f.edition_date,
       });

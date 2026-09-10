@@ -477,6 +477,15 @@ components:
           - type: string
           - type: 'null'
           title: Request Id
+        use:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Use
+          description: 'For code=not_served_by_source: the paths that ARE served by the configured data
+            source.'
       additionalProperties: false
       type: object
       required:
@@ -1663,6 +1672,23 @@ components:
         This is what makes "the LLM never calculates" machine-checkable.'
     FeedResponse:
       properties:
+        engine_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Engine Version
+          description: 'Integration polish (S3 §4.5): the code that computed this edition — the S1 research
+            engine version stamped on the edition row (`pathfinder_research@<semver>+code.<hash>`) and,
+            when experiment cards ride on it, the S2 experiments engine version (`pathfinder_experiments@…`),
+            ''; ''-joined. A content hash is a fact; a semver is a promise.'
+        schema_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Schema Version
+          description: The shape of this response (`pathfinder_feed@<semver>`) plus the store schemas
+            it was read from (`+research_store.<n>+experiments_store.<n>`). Additive changes bump the
+            semver.
         edition_date:
           type: string
           format: date
@@ -2204,6 +2230,15 @@ components:
           - type: 'null'
           title: Void Reason
           description: 'For status=void: why the outcome could not be measured (S1 third audit N5).'
+        due_session_basis:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Due Session Basis
+          description: 'Integration polish (S3 §4.4): where `due_session` came from. `session_calendar:
+            …` when the engine stamped it from the sealed data''s session list; `projected: …` when the
+            API projected it over the exchange calendar because the seal had not reached the horizon.
+            A projection is a calendar estimate, never the date the grade is judged on.'
       additionalProperties: false
       type: object
       required:

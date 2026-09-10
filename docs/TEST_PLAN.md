@@ -611,4 +611,28 @@ cd kanida-app && npm run test:all
    honest states were verified by eye (see the hand-back for exactly what was seen).
 3. **The contract mirror (`src/api/types.ts`) is hand-maintained.** The concurrent S2 re-audit added
    optional fields to `Expectation`, `ForwardResult`, `LearningView`, `RejectedCandidate` while S3 was
-   in flight; they are additive and ignored by the client until mirrored.
+   in flight; they are additive and ignored by the client until mirrored. *(Closed by the integration
+   polish below: every re-audit field is mirrored and rendered.)*
+
+## Pathfinder integration polish — the S3 §4 seams (`backend/tests/test_pathfinder_polish.py`, `kanida-app`)
+
+Hand-back: `docs/handbacks/PF-POLISH.md`. Backend rows run in the S1/S2 command (300 pass = 294 + these 6).
+
+| Row | Requirement | Test | What it pins |
+|---|---|---|---|
+| PL-01 | **Never a 500.** `/loop` and `/learnings` under `KANIDA_PATHFINDER_SOURCE=research` | `test_pl01_loop_and_learnings_are_guarded_under_the_research_source_never_500` | 404 `not_served_by_source`, `error.use` names `/feed` and `/experiments`; no traceback / SQL in the body; `/feed` and `/experiments` with no store still answer `no_edition` / `no_experiments`. |
+| PL-01b | the mock source is unchanged | `test_pl01b_the_mock_source_still_serves_loop_and_learnings` | both 200 under `mock`. |
+| PL-02 | the mock app's `/` and `/healthz` under the research source | `test_pl02_root_and_healthz_never_raise_under_the_research_source` | 200; `data_source` names the research source, never "mock"; the endpoints listed are the served ones. |
+| PL-03 | the exchange-calendar projection | `test_pl03_the_projection_skips_weekends_and_nse_closures` | Fri → Mon; Republic Day and Gandhi Jayanti skipped; n = 0 refused. |
+| PL-04 | `engine_version` / `schema_version` on the feed; `due_session` on every pending card, LABELLED | `test_pl04_the_served_feed_stamps_versions_and_a_labelled_due_session_on_pending_cards` | the edition row's research engine hash (+ the S2 hash when cards ride on it); an engine-stamped date keeps `session_calendar`; a null one is projected and says `projected`; a graded card's verdict and realised facts are untouched; the whole payload re-validates. |
+| PL-04b | additive contract | `test_pl04b_the_contract_carries_the_new_fields_as_optional_additive` | the new fields default to null. |
+| PL-10 | app: `GateView.insufficient` never renders as FAIL | `tests/lib.test.ts` · `an insufficient gate reads "not enough data" …` | glyph `·`, label *not enough data*, neutral tone; passed / failed / advisory keep theirs. |
+| PL-11 | app: a projected due session is labelled | `tests/lib.test.ts` · `a projected due session is labelled; the engine's own is not` | `dueBasisShort` → `projected` only for a `projected: …` basis. |
+| PL-12 | app: additive fields propagate, never invented | `tests/feed.test.ts` · `the next story carries each pending card's due-session basis verbatim …` | `dueBasis` verbatim on the next story (null when not served); the empty-edition story names `engine_version` only when served. |
+| PL-13 | contract (live): the feed names its engine and shape | `contract.test.ts` · `the feed names the engine that computed it …` | `pathfinder_research@x.y.z+code.<12 hex>`; `pathfinder_experiments@` when cards ride; `pathfinder_feed@…+research_store.n+experiments_store.n`. |
+| PL-14 | contract (live): every pending card has a due session with a basis | `contract.test.ts` · `every pending card has a due session, and a projected one says so …` | due after the edition; basis `session_calendar` or `projected`; a grade never rests on a projection; a continuation is never projected from its own edition. |
+| PL-15 | contract (live): legacy endpoints never 500 | `contract.test.ts` · `the P0/P1 endpoints the research source does not serve …` | 404 `not_served_by_source` with `use[]`, no internals. |
+
+Gates on the final tree: backend 300 passed · `gen_openapi.py --check` in sync (35 additive lines) ·
+`npm run typecheck` clean · `npx expo lint` 0/0 · `npm test` 36 passed · `npm run test:contract` 19 passed
+against the live research API on `:8010` · `npx expo export --platform all` exit 0 (17 static routes).

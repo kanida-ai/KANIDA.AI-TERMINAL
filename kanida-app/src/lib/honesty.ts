@@ -321,3 +321,32 @@ export function researchSafe(text: string): string {
 export function recordShort(backfilled: boolean): string {
   return backfilled ? 'Simulated backfill' : 'Forward record';
 }
+
+// ── gates ────────────────────────────────────────────────────────────────────
+
+/**
+ * How a gate reads on screen. An `insufficient` gate (S2 re-audit N2/N5) is one whose
+ * statistic could not be computed on the record it has — too few signal days. It is
+ * NOT a failure and must never render as one: "not enough data", neutral, no cross.
+ */
+export function gateCopy(g: { passed: boolean; fatal: boolean; insufficient?: boolean }): {
+  glyph: string;
+  label: 'cleared' | 'not enough data' | 'failed' | 'advisory miss';
+  tone: ToneKey;
+} {
+  if (g.insufficient) return { glyph: '·', label: 'not enough data', tone: 'neutral' };
+  if (g.passed) return { glyph: '✓', label: 'cleared', tone: 'positive' };
+  return g.fatal ? { glyph: '✕', label: 'failed', tone: 'negative' } : { glyph: '✕', label: 'advisory miss', tone: 'caution' };
+}
+
+// ── due sessions ─────────────────────────────────────────────────────────────
+
+/**
+ * A pending card's due session is either the engine's (from the sealed data's session
+ * list) or the API's projection over the exchange calendar, when the seal had not reached
+ * the horizon. The screen says "projected" whenever it is the latter, so a calendar
+ * estimate can never pass for a data fact.
+ */
+export function dueBasisShort(basis: string | null | undefined): 'projected' | null {
+  return basis && basis.startsWith('projected') ? 'projected' : null;
+}

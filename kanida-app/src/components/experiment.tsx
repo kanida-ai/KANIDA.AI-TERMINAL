@@ -24,7 +24,7 @@ import type {
 import { useTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
 import { EMPTY, count, dateShort, dateTimeIST, humanise, inr, pct, pctAbs, rangeWithSpan } from '@/lib/format';
-import { BEAT_LABEL, comparisonCopy, figureTone, publicSafe, sampleCopy, toneColor, toneSoft, verdictCopy } from '@/lib/honesty';
+import { BEAT_LABEL, comparisonCopy, figureTone, gateCopy, publicSafe, sampleCopy, toneColor, toneSoft, verdictCopy } from '@/lib/honesty';
 
 import { LevelPill } from './ChangeLog';
 import { RecordLine, SampleChip, VerdictPill } from './chips';
@@ -146,10 +146,22 @@ export function VersionCard({ v, isCurrent }: { v: VersionView; isCurrent: boole
   );
 }
 
-/** The historical expectation, frozen up front. The block IS its provenance. */
+const isNum = (v: number | null | undefined): v is number => v !== null && v !== undefined;
+
+/**
+ * The historical expectation, frozen up front. The block IS its provenance.
+ *
+ * S2 re-audit N1: the FROZEN figure is the book-selected one — measured over the trades the
+ * virtual book would actually have taken under its limits, i.e. the strategy that is traded.
+ * The equal-weighted figure over every firing is served as context only and is labelled so;
+ * it is the S1 card's population, most of which the book cannot take.
+ * N3: the concentration facts say how much of the window rode on its best days.
+ */
 export function ExpectationBlock({ e }: { e: Expectation }) {
   const { c } = useTheme();
   const grey = e.sample_flag === 'greyed';
+  const hasContext = isNum(e.equal_weighted_expectancy_net_pct) || isNum(e.signals_fired);
+  const hasConcentration = isNum(e.top3_days_share_pct) || isNum(e.expectancy_without_best_day_net_pct) || isNum(e.trailing_expectancy_without_best_day_net_pct);
   return (
     <Stack gap={space.md}>
       <Row style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: space.sm }}>
@@ -157,19 +169,53 @@ export function ExpectationBlock({ e }: { e: Expectation }) {
         <SampleChip n={e.n} flag={e.sample_flag} />
       </Row>
       <Row style={{ gap: space.lg, flexWrap: 'wrap', alignItems: 'flex-start' }}>
-        <Metric label="Expectancy / trade" value={pct(e.expectancy_net_pct)} tone={figureTone(e.sample_flag, e.expectancy_net_pct, c)} size="lg" hint="net of costs — the metric that decides" />
+        <Metric label="Expectancy / trade · book-selected" value={pct(e.expectancy_net_pct)} tone={figureTone(e.sample_flag, e.expectancy_net_pct, c)} size="lg" hint="net of costs, on the trades the book would take — the frozen figure that decides" />
         <Metric label="At 2× slippage" value={pct(e.expectancy_2x_slippage_net_pct)} tone={figureTone(e.sample_flag, e.expectancy_2x_slippage_net_pct, c)} hint={e.expectancy_2x_slippage_net_pct > 0 ? 'survives the gate' : 'does NOT survive the gate'} />
         <Metric label="Median / trade" value={pct(e.median_net_pct)} tone={grey ? c.textGreyed : c.text} />
         <Metric label="Hit rate (supporting)" value={pctAbs(e.hit_rate_pct)} tone={c.textSecondary} />
       </Row>
+      {e.population ? (
+        <Txt variant="caption" tone="muted">
+          Population: {e.population}
+        </Txt>
+      ) : null}
+      {hasContext ? (
+        <Row style={{ gap: space.lg, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+          <Metric
+            label="Equal-weighted, every firing"
+            value={isNum(e.equal_weighted_expectancy_net_pct) ? pct(e.equal_weighted_expectancy_net_pct) : EMPTY}
+            tone={c.textSecondary}
+            size="sm"
+            hint={`context: all signals, untakeable by the book${e.equal_weighted_n ? ` · n = ${count(e.equal_weighted_n)}` : ''} — not the expectation`}
+          />
+          <Metric
+            label="Signals fired · skipped"
+            value={`${isNum(e.signals_fired) ? count(e.signals_fired) : EMPTY} · ${isNum(e.signals_skipped) ? count(e.signals_skipped) : EMPTY}`}
+            tone={c.textSecondary}
+            size="sm"
+            hint="firings the book's limits could not take are skipped, not imagined"
+          />
+        </Row>
+      ) : null}
       <Row style={{ gap: space.lg, flexWrap: 'wrap' }}>
         <Metric label="Signal days" value={count(e.signal_days)} tone={c.textSecondary} size="sm" hint="independent clusters" />
-        <Metric label="Trailing window" value={e.trailing_expectancy_net_pct === null || e.trailing_expectancy_net_pct === undefined ? EMPTY : pct(e.trailing_expectancy_net_pct)} tone={c.textSecondary} size="sm" hint={e.trailing_period ? `n = ${count(e.trailing_n)} · ${rangeWithSpan(e.trailing_period)} · a persistence check, not a holdout` : undefined} />
-        <Metric label="Edge vs baseline" value={e.edge_vs_baseline_pct === null || e.edge_vs_baseline_pct === undefined ? EMPTY : pct(e.edge_vs_baseline_pct)} tone={c.textSecondary} size="sm" hint={`pool n = ${count(e.baseline_n)} · same kind of day`} />
-        <Metric label="Placebo p" value={e.placebo_p === null || e.placebo_p === undefined ? EMPTY : e.placebo_p.toFixed(3)} tone={c.textSecondary} size="sm" hint={`${count(e.placebo_draws)} day-blocked draws`} />
-        <Metric label="Cluster t" value={e.cluster_t === null || e.cluster_t === undefined ? EMPTY : e.cluster_t.toFixed(2)} tone={c.textSecondary} size="sm" />
-        <Metric label="Discovery window · 2×" value={e.discovery_expectancy_2x_slippage_net_pct === null || e.discovery_expectancy_2x_slippage_net_pct === undefined ? EMPTY : pct(e.discovery_expectancy_2x_slippage_net_pct)} tone={c.textSecondary} size="sm" hint={`n = ${count(e.discovery_n)} · advisory`} />
+        <Metric label="Trailing window" value={isNum(e.trailing_expectancy_net_pct) ? pct(e.trailing_expectancy_net_pct) : EMPTY} tone={c.textSecondary} size="sm" hint={e.trailing_period ? `n = ${count(e.trailing_n)} · ${rangeWithSpan(e.trailing_period)} · a persistence check, not a holdout` : undefined} />
+        <Metric label="Edge vs baseline" value={isNum(e.edge_vs_baseline_pct) ? pct(e.edge_vs_baseline_pct) : EMPTY} tone={c.textSecondary} size="sm" hint={`pool n = ${count(e.baseline_n)} · same kind of day`} />
+        <Metric label="Placebo p" value={isNum(e.placebo_p) ? e.placebo_p.toFixed(3) : EMPTY} tone={c.textSecondary} size="sm" hint={`${count(e.placebo_draws)} day-blocked draws${isNum(e.placebo_se) ? ` · se ${e.placebo_se.toFixed(3)}` : ''}${e.placebo_convention ? ` · ${e.placebo_convention}` : ''}`} />
+        <Metric label="Cluster t" value={isNum(e.cluster_t) ? e.cluster_t.toFixed(2) : EMPTY} tone={c.textSecondary} size="sm" hint={e.cluster_t_kind ?? undefined} />
+        <Metric label="Discovery window · 2×" value={isNum(e.discovery_expectancy_2x_slippage_net_pct) ? pct(e.discovery_expectancy_2x_slippage_net_pct) : EMPTY} tone={c.textSecondary} size="sm" hint={`n = ${count(e.discovery_n)} · advisory`} />
       </Row>
+      {hasConcentration ? (
+        <Stack gap={space.xs}>
+          <Label>Concentration — how much rode on the best days</Label>
+          <Row style={{ gap: space.lg, flexWrap: 'wrap' }}>
+            <Metric label="Top-3 days' share of P&L" value={isNum(e.top3_days_share_pct) ? pctAbs(e.top3_days_share_pct) : EMPTY} tone={c.textSecondary} size="sm" hint="of the whole window's net P&L; above 100% means the rest lost" />
+            <Metric label="Without the best day" value={isNum(e.expectancy_without_best_day_net_pct) ? pct(e.expectancy_without_best_day_net_pct) : EMPTY} tone={isNum(e.expectancy_without_best_day_net_pct) ? figureTone(e.sample_flag, e.expectancy_without_best_day_net_pct, c) : c.textSecondary} size="sm" hint="expectancy with the single best signal day removed" />
+            <Metric label="Trailing · top-3 share" value={isNum(e.trailing_top3_days_share_pct) ? pctAbs(e.trailing_top3_days_share_pct) : EMPTY} tone={c.textSecondary} size="sm" />
+            <Metric label="Trailing · without best day" value={isNum(e.trailing_expectancy_without_best_day_net_pct) ? pct(e.trailing_expectancy_without_best_day_net_pct) : EMPTY} tone={isNum(e.trailing_expectancy_without_best_day_net_pct) ? figureTone(e.sample_flag, e.trailing_expectancy_without_best_day_net_pct, c) : c.textSecondary} size="sm" hint="the persistence check with its best day removed" />
+          </Row>
+        </Stack>
+      ) : null}
       <Stack gap={2}>
         <Label>How this was counted</Label>
         <Txt variant="caption" tone="muted" numeric>
@@ -244,6 +290,7 @@ export function PeriodCard({ p }: { p: PeriodView }) {
 
           <Txt variant="caption" tone="muted" numeric>
             {inr(f.capital_inr)} virtual capital · {sampleCopy[f.sample_flag].short} · marked to {dateShort(f.as_of)}
+            {f.drawdown_convention ? ` · drawdown: ${f.drawdown_convention}` : ''}
           </Txt>
 
           {eva && cmp ? (
@@ -298,7 +345,12 @@ export function PeriodCard({ p }: { p: PeriodView }) {
 
 // ── trials ───────────────────────────────────────────────────────────────────
 
-export function TrialsLedger({ trials }: { trials: TrialView[] }) {
+/**
+ * The p-hacking ledger. `familyTrialsAllTime` (S2 re-audit N4) is the FAMILY's count across
+ * every finding, retry and revision — the number the family-wise significance bar divides by.
+ * It never restarts, so it is shown beside this experiment's own count, never in its place.
+ */
+export function TrialsLedger({ trials, familyTrialsAllTime }: { trials: TrialView[]; familyTrialsAllTime?: number | null }) {
   const { c } = useTheme();
   return (
     <Card>
@@ -309,6 +361,12 @@ export function TrialsLedger({ trials }: { trials: TrialView[] }) {
             {count(trials.length)} on the record · the p-hacking ledger
           </Txt>
         </Row>
+        {familyTrialsAllTime !== null && familyTrialsAllTime !== undefined ? (
+          <Txt variant="caption" tone="muted" numeric>
+            Family trials, all time: {count(familyTrialsAllTime)} — every trial this hypothesis family has ever had, across every finding, retry and
+            revision. The family-wise significance bar divides by this count; it never restarts.
+          </Txt>
+        ) : null}
         {trials.map((t) => (
           <View key={t.trial_no} style={{ gap: 4, paddingVertical: space.sm, borderTopWidth: 1, borderTopColor: c.border }}>
             <Row style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: space.sm }}>
@@ -349,16 +407,23 @@ export function GatesList({ gates, title }: { gates: GateView[]; title: string }
     <Card>
       <Stack gap={space.sm}>
         <Label>{title}</Label>
-        {gates.map((g) => (
+        {gates.map((g) => {
+          const copy = gateCopy(g);
+          return (
           <Row key={g.name} style={{ alignItems: 'flex-start', gap: space.sm, paddingVertical: 4 }}>
-            <Txt variant="smallStrong" color={g.passed ? c.positive : g.fatal ? c.negative : c.caution} style={{ width: 18 }}>
-              {g.passed ? '✓' : '✕'}
+            <Txt variant="smallStrong" color={toneColor(copy.tone, c)} style={{ width: 18 }}>
+              {copy.glyph}
             </Txt>
             <Stack gap={2} style={{ flex: 1 }}>
               <Row gap={space.sm} style={{ flexWrap: 'wrap' }}>
                 <Txt variant="smallStrong" mono>
                   {g.name}
                 </Txt>
+                {g.insufficient ? (
+                  <Pill fg={toneColor('neutral', c)} bordered>
+                    not enough data
+                  </Pill>
+                ) : null}
                 {!g.fatal ? (
                   <Pill fg={c.textMuted} bordered>
                     advisory
@@ -374,9 +439,15 @@ export function GatesList({ gates, title }: { gates: GateView[]; title: string }
               <Txt variant="caption" tone="secondary">
                 {g.statement}
               </Txt>
+              {g.insufficient ? (
+                <Txt variant="caption" tone="muted">
+                  Its statistic could not be computed on the record it has (too few signal days) — not passed, not a measured failure.
+                </Txt>
+              ) : null}
             </Stack>
           </Row>
-        ))}
+          );
+        })}
       </Stack>
     </Card>
   );

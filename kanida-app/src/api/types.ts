@@ -215,6 +215,12 @@ export type GradingState = {
   record: string;
   continues?: string | null;
   void_reason?: string | null;
+  /**
+   * where `due_session` came from: `session_calendar: …` (the engine, from the sealed data)
+   * or `projected: …` (the API, over the exchange calendar, because the seal had not reached
+   * the horizon). A projection is a calendar estimate, never the date the grade is judged on.
+   */
+  due_session_basis?: string | null;
 };
 
 /** Digit-free for BOTH authors; every number is a `{{fact:…}}` reference. */
@@ -286,6 +292,10 @@ export type Scoreboard = ScoreCounts & {
 };
 
 export type FeedResponse = {
+  /** the code that computed this edition: `pathfinder_research@…+code.<hash>`, plus `; pathfinder_experiments@…` when cards ride on it */
+  engine_version?: string | null;
+  /** `pathfinder_feed@<semver>+research_store.<n>+experiments_store.<n>` */
+  schema_version?: string | null;
   edition_date: string;
   data_as_of: string;
   generated_at: string;
@@ -361,6 +371,28 @@ export type Expectation = {
   hurdle_pct: number;
   computed_by: string;
   sample_flag: SampleFlag;
+  // ── S2 re-audit, additive ──
+  /** N1: the population the FROZEN expectation is measured on — the book's own selection (the strategy the book trades) */
+  population?: string;
+  /** every resolved firing of the rule on the window */
+  signals_fired?: number | null;
+  /** firings the book's limits could not take */
+  signals_skipped?: number | null;
+  /** CONTEXT, not the expectation: the same rule over every firing equal-weighted (the S1 card's population) */
+  equal_weighted_expectancy_net_pct?: number | null;
+  equal_weighted_n?: number;
+  /** N3: share of the window's net P&L carried by its three best signal days (defined when the total is positive) */
+  top3_days_share_pct?: number | null;
+  /** N3: expectancy with the best signal day removed */
+  expectancy_without_best_day_net_pct?: number | null;
+  trailing_top3_days_share_pct?: number | null;
+  trailing_expectancy_without_best_day_net_pct?: number | null;
+  /** N8: the statistic the placebo compares (winsorised on both sides) */
+  placebo_convention?: string | null;
+  /** N8: binomial standard error of `placebo_p` at `placebo_draws` */
+  placebo_se?: number | null;
+  /** N5: CR3 (small-cluster corrected), judged against Student's t(G-1) */
+  cluster_t_kind?: string | null;
 };
 
 export type ForwardResult = {
@@ -379,6 +411,8 @@ export type ForwardResult = {
   current_drawdown_pct: number;
   n_unresolved: number;
   sample_flag: SampleFlag;
+  /** N9: the ONE convention every S2 drawdown is stated in */
+  drawdown_convention?: string;
 };
 
 export type ExpectedVsActual = {
@@ -464,6 +498,8 @@ export type ExperimentCard = {
   record_label: string;
   llm_provider: string;
   disclosure: string;
+  /** N4: every trial this experiment's FAMILY has ever had as of this card's edition — the count the family-wise bar divides by; never restarts */
+  family_trials_all_time?: number;
 };
 
 export type GateView = {
@@ -473,6 +509,8 @@ export type GateView = {
   bar?: number | null;
   statement: string;
   fatal: boolean;
+  /** N2/N5: the statistic could not be computed on the record it has (too few signal days) — not passed, not a measured failure */
+  insufficient?: boolean;
 };
 
 export type TrialView = {
@@ -530,8 +568,11 @@ export type RejectedCandidate = {
   trials_evaluated: number;
   reason: string;
   best_rule_text?: string | null;
+  /** N1: on the BOOK-selected population (the strategy the book trades), not every firing */
   best_expectancy_net_pct?: number | null;
   best_failed_gates: string[];
+  /** N4: the family's trial count after this evaluation, across every finding and retry */
+  family_trials_all_time?: number | null;
 };
 
 export type ExperimentScoreboard = {
@@ -566,5 +607,6 @@ export type ExperimentsResponse = {
 };
 
 export type ApiErrorBody = {
-  error: { code: string; message: string; request_id?: string | null };
+  /** `use`: for `not_served_by_source`, the paths the configured source DOES serve */
+  error: { code: string; message: string; request_id?: string | null; use?: string[] | null };
 };

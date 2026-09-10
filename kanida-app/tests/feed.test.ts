@@ -410,3 +410,21 @@ test('the backfill label is present on every graded card and on the scoreboard, 
   assert.equal(f.scoreboard.record_label, BACKFILL_LABEL);
   assert.equal(f.experiments_scoreboard?.record_label, BACKFILL_LABEL);
 });
+
+// ── integration polish: additive fields propagate, never invented ────────────
+
+test('the next story carries each pending card\'s due-session basis verbatim, and the empty edition names the engine version when served', () => {
+  const projected = finding('fnd_p', 'what_matters_now', 1, {
+    grading: { status: 'pending', due_session: '2026-08-05', due_session_basis: 'projected: weekdays after the edition net of NSE closures', realized_facts: [], backfilled: true, record: BACKFILL_LABEL },
+  });
+  const stamped = finding('fnd_s', 'what_matters_now', 2);
+  const s = buildStories(feed({ what_matters_now: [projected, stamped], discoveries: [], published_count: 2 }), REGISTRY).find((x) => x.kind === 'next');
+  assert.ok(s && s.kind === 'next');
+  assert.equal(s.pending[0].due, '2026-08-05');
+  assert.match(String(s.pending[0].dueBasis), /^projected/);
+  assert.equal(s.pending[1].dueBasis, null, 'no basis served means no basis claimed');
+  const empty = buildStories(feed({ what_matters_now: [], discoveries: [], published_count: 0, engine_version: 'pathfinder_research@1.3.0+code.abc' }), REGISTRY)[0];
+  assert.ok(empty.kind === 'empty_edition' && empty.engineVersion === 'pathfinder_research@1.3.0+code.abc');
+  const bare = buildStories(feed({ what_matters_now: [], discoveries: [], published_count: 0 }), REGISTRY)[0];
+  assert.ok(bare.kind === 'empty_edition' && bare.engineVersion === null);
+});

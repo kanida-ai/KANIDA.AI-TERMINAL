@@ -12,6 +12,8 @@ import test from 'node:test';
 import { factValue, pct, pctAbs, rangeLabel, EMPTY } from '../src/lib/format.ts';
 import {
   decisionCopy,
+  dueBasisShort,
+  gateCopy,
   improvedCopy,
   isDebunk,
   publicSafe,
@@ -172,4 +174,21 @@ test('the compliance lint withholds a trade instruction and passes research pros
   assert.equal(readsLikeOrder('the target is the prior high'), true);
   assert.equal(researchSafe('execute at the close'), WITHHELD);
   assert.equal(publicSafe('A real drop, but the bounce does not beat costs.'), 'A real drop, but the bounce does not beat costs.');
+});
+
+// ── integration polish: the re-audit's additive fields ──────────────────────
+
+test('an insufficient gate reads "not enough data" and is never a failure; passed and failed keep their glyphs', () => {
+  assert.deepEqual(gateCopy({ passed: false, fatal: true, insufficient: true }), { glyph: '·', label: 'not enough data', tone: 'neutral' });
+  assert.deepEqual(gateCopy({ passed: true, fatal: true }), { glyph: '✓', label: 'cleared', tone: 'positive' });
+  assert.deepEqual(gateCopy({ passed: false, fatal: true }), { glyph: '✕', label: 'failed', tone: 'negative' });
+  assert.deepEqual(gateCopy({ passed: false, fatal: false, insufficient: false }), { glyph: '✕', label: 'advisory miss', tone: 'caution' });
+  assert.notEqual(gateCopy({ passed: false, fatal: true, insufficient: true }).glyph, '✕', 'insufficient must not render a cross');
+});
+
+test('a projected due session is labelled; the engine\'s own is not', () => {
+  assert.equal(dueBasisShort('projected: weekdays after the edition net of NSE closures …'), 'projected');
+  assert.equal(dueBasisShort('session_calendar: the n-th session after the edition in the sealed data'), null);
+  assert.equal(dueBasisShort(null), null);
+  assert.equal(dueBasisShort(undefined), null);
 });

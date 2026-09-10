@@ -30,6 +30,7 @@ import { count, dateShort, factValue, pct, pctAbs, rangeLabel } from '@/lib/form
 import {
   BEAT_LABEL,
   comparisonCopy,
+  dueBasisShort,
   experimentStateCopy,
   isGreyed,
   publicSafe,
@@ -337,7 +338,8 @@ function ExperimentSlide({ card, ctx }: { card: ExperimentCard; ctx: SlideContex
         </Row>
 
         <Txt variant="caption" tone="muted" numeric>
-          v{card.versions_count} · {count(card.trials_total)} variants counted · {count(card.periods_graded)} periods graded · opened{' '}
+          v{card.versions_count} · {count(card.trials_total)} variants counted
+          {card.family_trials_all_time !== undefined ? ` (family all time ${count(card.family_trials_all_time)})` : ''} · {count(card.periods_graded)} periods graded · opened{' '}
           {dateShort(card.opened_edition)} · {state.meaning}
         </Txt>
 
@@ -482,6 +484,7 @@ export function ClosestCandidate({ r, engine, asOf, compact = false }: { r: Reje
       <Row style={{ justifyContent: 'space-between', gap: space.sm, flexWrap: 'wrap' }}>
         <Txt variant="caption" tone="muted" numeric>
           {r.template_id} · {dateShort(r.edition_date)} · {count(r.trials_evaluated)} trials
+          {r.family_trials_all_time !== null && r.family_trials_all_time !== undefined ? ` · family all time ${count(r.family_trials_all_time)}` : ''}
         </Txt>
         {r.best_expectancy_net_pct !== null && r.best_expectancy_net_pct !== undefined ? (
           <Row gap={4}>
@@ -490,10 +493,10 @@ export function ClosestCandidate({ r, engine, asOf, compact = false }: { r: Reje
             </Txt>
             <EngineFigure
               value={pct(r.best_expectancy_net_pct)}
-              label="expectancy per trade, net, of the closest variant"
+              label="expectancy per trade, net, of the closest variant — book-selected population"
               engine={engine}
               asOf={asOf}
-              what="The closest variant's mean net P&L per trade on the whole sealed history — reported on the decline record; it cleared every gate but the one named below."
+              what="The closest variant's mean net P&L per trade on the whole sealed history, over the trades the virtual book would actually have taken (the strategy the book trades — not every firing). Reported on the decline record; the gates it failed are named below."
               variant="small"
               color={c.textSecondary}
             />
@@ -689,7 +692,9 @@ function NextSlide({ story, ctx }: { story: Extract<Story, { kind: 'next' }>; ct
                   {p.subject}
                 </Txt>
                 <Txt variant="caption" tone="muted" numeric>
-                  {p.due ? `due ${dateShort(p.due)}` : `due ${p.horizonSessions} session${p.horizonSessions === 1 ? '' : 's'} after ${dateShort(p.editionDate)}`}
+                  {p.due
+                    ? `due ${dateShort(p.due)}${dueBasisShort(p.dueBasis) ? ' (projected)' : ''}`
+                    : `due ${p.horizonSessions} session${p.horizonSessions === 1 ? '' : 's'} after ${dateShort(p.editionDate)}`}
                 </Txt>
               </Row>
             ))}
@@ -712,7 +717,9 @@ function NextSlide({ story, ctx }: { story: Extract<Story, { kind: 'next' }>; ct
 
 function EmptyEditionSlide({ story, ctx }: { story: Extract<Story, { kind: 'empty_edition' }>; ctx: SlideContext }) {
   const { c } = useTheme();
-  const engine = `edition ${story.editionDate} header · generated ${story.generatedAt}`;
+  const engine = story.engineVersion
+    ? `${story.engineVersion} · edition ${story.editionDate} header · generated ${story.generatedAt}`
+    : `edition ${story.editionDate} header · generated ${story.generatedAt}`;
   return (
     <Frame ctx={ctx}>
       <Stack gap={space.md} style={{ flex: 1 }}>

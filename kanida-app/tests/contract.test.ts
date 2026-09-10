@@ -390,3 +390,40 @@ test('every payload carries its research disclosure', () => {
   for (const ed of editions) for (const f of findings(ed)) assert.match(String((f as unknown as { disclosure: string }).disclosure), /not a recommendation/i);
   assert.match(registry.disclosure, /research/i);
 });
+
+// ── integration polish (after S1 / S2 / S3) ──────────────────────────────────
+
+test('the feed names the engine that computed it and the shape it is served in', () => {
+  for (const ed of editions) {
+    assert.match(String(ed.engine_version), /^pathfinder_research@\d+\.\d+\.\d+\+code\.[0-9a-f]{12}/, `${ed.edition_date}: engine_version`);
+    if (ed.experiment_cards.length > 0) assert.match(String(ed.engine_version), /pathfinder_experiments@/, 'cards on the edition => the S2 engine is named too');
+    assert.match(String(ed.schema_version), /^pathfinder_feed@\d+\.\d+\.\d+\+research_store\.\d+\+experiments_store\.\d+$/);
+  }
+});
+
+test('every pending card has a due session, and a projected one says so — the app never states a date it was not given', () => {
+  for (const ed of editions) {
+    for (const f of findings(ed)) {
+      const g = f.grading as typeof f.grading & { due_session_basis: string | null };
+      if (g.status === 'pending') {
+        assert.ok(g.due_session, `${f.id}: pending without a due session`);
+        assert.ok(g.due_session > ed.edition_date, `${f.id}: due session not after the edition`);
+        assert.match(String(g.due_session_basis), /^(session_calendar|projected)/, `${f.id}: due session without a basis`);
+      }
+      if (g.status === 'continued' && g.due_session) assert.match(String(g.due_session_basis), /^session_calendar/, `${f.id}: a continuation is never projected from its own edition`);
+      if (g.status === 'graded' || g.status === 'void') assert.match(String(g.due_session_basis ?? 'session_calendar'), /^session_calendar/, `${f.id}: a grade never rests on a projection`);
+    }
+  }
+});
+
+test('the P0/P1 endpoints the research source does not serve answer with a guarded 404 naming the served paths — never a 500', async () => {
+  for (const path of ['/api/pathfinder/loop', '/api/pathfinder/learnings']) {
+    const res = await fetch(`${BASE}${path}`);
+    assert.notEqual(res.status, 500, `${path} -> 500`);
+    assert.equal(res.status, 404, `${path} -> ${res.status}`);
+    const body = (await res.json()) as { error?: { code: string; message: string; use?: string[] } };
+    assert.equal(body.error?.code, 'not_served_by_source');
+    assert.ok(body.error?.use?.includes('/api/pathfinder/feed') && body.error?.use?.includes('/api/pathfinder/experiments'));
+    assert.ok(!/Traceback|RuntimeError|sqlite/i.test(body.error!.message));
+  }
+});

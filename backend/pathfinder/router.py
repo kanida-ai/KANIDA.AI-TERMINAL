@@ -42,11 +42,67 @@ from .schemas import (
 from .store import get_store
 from .research.store import get_research_store
 from .experiments.store import get_experiment_store
+from .sessions import BASIS_PROJECTED, BASIS_SESSION_CALENDAR, project_session_after
 
 
 def _research_source() -> bool:
     """S2: `KANIDA_PATHFINDER_SOURCE=research` serves the experiment registry on /experiments."""
     return os.environ.get("KANIDA_PATHFINDER_SOURCE", "mock").strip().lower() == "research"
+
+
+#: The paths the research source serves. `/loop` and `/learnings` are the P0/P1 loop story and
+#: are NOT served by it (S3 §4.1) — they answer with a guarded 404 naming these, never a 500.
+RESEARCH_SOURCE_PATHS = ["/api/pathfinder/feed", "/api/pathfinder/experiments", "/api/pathfinder/experiment/{experiment_id}"]
+
+
+def _not_served(request: Request) -> JSONResponse:
+    rid = getattr(request.state, "request_id", None) or uuid.uuid4().hex[:12]
+    return JSONResponse(
+        status_code=404,
+        content=ErrorResponse(error=ErrorBody(
+            code="not_served_by_source",
+            message="Not served by the research source (KANIDA_PATHFINDER_SOURCE=research). "
+                    "Use /api/pathfinder/feed for the edition and /api/pathfinder/experiments for the registry.",
+            request_id=rid, use=RESEARCH_SOURCE_PATHS)).model_dump(),
+    )
+
+
+def schema_version_string() -> str:
+    from .research.store import SCHEMA_VERSION as RESEARCH_SCHEMA
+    from .experiments.store import SCHEMA_VERSION as EXPERIMENTS_SCHEMA
+    from .schemas import FEED_SCHEMA_SEMVER
+    return f"pathfinder_feed@{FEED_SCHEMA_SEMVER}+research_store.{RESEARCH_SCHEMA}+experiments_store.{EXPERIMENTS_SCHEMA}"
+
+
+def serve_feed(feed: FeedResponse, *, research_engine: Optional[str], experiment_cards: Optional[list] = None,
+               experiments_scoreboard: Optional[dict] = None, experiments_engine: Optional[str] = None) -> FeedResponse:
+    """
+    The served form of an edition (integration polish, S3 §4.4 / §4.5): the S2 cards and scoreboard
+    attached, `engine_version` / `schema_version` stamped, and every PENDING card given a `due_session` —
+    the engine's own when it stamped one (`session_calendar`), else a LABELLED projection over the
+    exchange calendar (`projected`). The grade never reads the projected date. A continuation keeps
+    whatever its root's horizon gave it (its base date is the root's edition, not this card's).
+    Validated once, as a whole, so the contract's own laws are re-checked on the served bytes.
+    """
+    body = feed.model_dump(mode="json")
+    if experiment_cards is not None:
+        body["experiment_cards"] = experiment_cards
+        body["experiments_scoreboard"] = experiments_scoreboard
+    parts = [v for v in (research_engine, experiments_engine if experiment_cards is not None else None) if v]
+    body["engine_version"] = "; ".join(parts) if parts else None
+    body["schema_version"] = schema_version_string()
+    for tier in ("what_matters_now", "discoveries"):
+        for f in body[tier]:
+            g = f["grading"]
+            if g.get("due_session"):
+                g["due_session_basis"] = g.get("due_session_basis") or BASIS_SESSION_CALENDAR
+            elif g["status"] == "pending":
+                # only a PENDING root: a continuation is graded through its root's horizon, whose
+                # base date is the root's edition, not this card's — never projected from here
+                g["due_session"] = project_session_after(
+                    feed.edition_date, int(f["grading_rule"]["horizon_sessions"])).isoformat()
+                g["due_session_basis"] = BASIS_PROJECTED
+    return FeedResponse.model_validate(body)
 
 log = logging.getLogger("kanida.pathfinder")
 
@@ -86,7 +142,9 @@ def _error(status: int, code: str, message: str, request: Request) -> JSONRespon
         "carries `{{fact:<id>}}` references the client resolves against `facts[]`."
     ),
 )
-def get_loop(request: Request) -> LoopResponse:
+def get_loop(request: Request):
+    if _research_source():
+        return _not_served(request)
     return get_store().loop()
 
 
@@ -188,18 +246,23 @@ def get_feed(
     feed = store.feed(date)
     if feed is None:
         return _error(404, "no_edition", "No research edition for that date.", request)
+    ed = feed.edition_date.isoformat()
+    row = store.edition(ed)
+    research_engine = row["engine_version"] if row is not None else None
     # S2: experiment cards with news on this edition, and the experiment scoreboard as of it —
     # only when the process serves the research source (S1's own contract is untouched otherwise).
     xs = get_experiment_store() if _research_source() else None
     if xs is not None and xs.latest_edition() is not None:
+        from .experiments.config import ENGINE_VERSION as XENGINE
         from .experiments.views import cards_on
-        ed = feed.edition_date.isoformat()
-        feed = FeedResponse.model_validate({
-            **feed.model_dump(mode="json"),
-            "experiment_cards": [c.model_dump(mode="json") for c in cards_on(xs, ed)],
-            "experiments_scoreboard": xs.scoreboard(ed).model_dump(mode="json"),
-        })
-    return feed
+        xrow = xs.one("SELECT engine_version FROM pfx_editions WHERE edition_date = ?", [ed])
+        return serve_feed(
+            feed, research_engine=research_engine,
+            experiment_cards=[c.model_dump(mode="json") for c in cards_on(xs, ed)],
+            experiments_scoreboard=xs.scoreboard(ed).model_dump(mode="json"),
+            experiments_engine=(xrow["engine_version"] if xrow is not None else XENGINE),
+        )
+    return serve_feed(feed, research_engine=research_engine)
 
 
 @router.get(
@@ -215,5 +278,7 @@ def get_feed(
         "including the ones that are blocked and why."
     ),
 )
-def get_learnings(request: Request) -> LearningsResponse:
+def get_learnings(request: Request):
+    if _research_source():
+        return _not_served(request)
     return get_store().learnings()

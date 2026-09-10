@@ -957,6 +957,11 @@ class GradingState(BaseModel):
         None, description="For status=continued: the finding id this one continues and is graded through.")
     void_reason: Optional[str] = Field(
         None, description="For status=void: why the outcome could not be measured (S1 third audit N5).")
+    due_session_basis: Optional[str] = Field(None, description=(
+        "Integration polish (S3 §4.4): where `due_session` came from. `session_calendar: …` when the engine "
+        "stamped it from the sealed data's session list; `projected: …` when the API projected it over the "
+        "exchange calendar because the seal had not reached the horizon. A projection is a calendar estimate, "
+        "never the date the grade is judged on."))
 
     @model_validator(mode="after")
     def _consistent(self) -> "GradingState":
@@ -1134,10 +1139,23 @@ class Scoreboard(ScoreCounts):
         return self
 
 
+#: The shape version of `FeedResponse`. Bumped on every additive change so a client can tell
+#: which fields it may expect; the STORE schemas ride alongside in the served string.
+FEED_SCHEMA_SEMVER = "1.1.0"
+
+
 class FeedResponse(BaseModel):
     """GET /api/pathfinder/feed?date= — the clarity-first edition for one close."""
     model_config = ConfigDict(extra="forbid")
 
+    engine_version: Optional[str] = Field(None, description=(
+        "Integration polish (S3 §4.5): the code that computed this edition — the S1 research engine version "
+        "stamped on the edition row (`pathfinder_research@<semver>+code.<hash>`) and, when experiment cards ride "
+        "on it, the S2 experiments engine version (`pathfinder_experiments@…`), '; '-joined. A content hash is a "
+        "fact; a semver is a promise."))
+    schema_version: Optional[str] = Field(None, description=(
+        "The shape of this response (`pathfinder_feed@<semver>`) plus the store schemas it was read from "
+        "(`+research_store.<n>+experiments_store.<n>`). Additive changes bump the semver."))
     edition_date: date
     data_as_of: date = Field(..., description="Last bar in the data the edition was computed on.")
     generated_at: datetime
@@ -1695,6 +1713,8 @@ class ErrorBody(BaseModel):
     code: str = Field(..., description="Stable machine code, e.g. 'not_found'.")
     message: str = Field(..., description="Safe, human-readable. Never a stack trace or SQL.")
     request_id: Optional[str] = None
+    use: Optional[list[str]] = Field(None, description=(
+        "For code=not_served_by_source: the paths that ARE served by the configured data source."))
 
 
 class ErrorResponse(BaseModel):

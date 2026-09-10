@@ -97,6 +97,7 @@ function RecordBody({ rec }: { rec: ExperimentRecord }) {
         <Txt variant="caption" tone="muted" numeric>
           {rec.id} · opened {dateShort(rec.opened_edition)} · news {dateShort(rec.news_edition)} · v{rec.versions_count} ·{' '}
           {count(rec.trials_total)} trials · {count(rec.periods_graded)} periods graded · {rec.direction} · {rec.constitution_version}
+          {rec.family_trials_all_time !== undefined ? ` · family trials all time ${count(rec.family_trials_all_time)}` : ''}
         </Txt>
         <RecordLine label={rec.record_label} backfilled={rec.backfilled} />
         {rec.opened_backfilled !== rec.backfilled ? (
@@ -162,7 +163,7 @@ function RecordBody({ rec }: { rec: ExperimentRecord }) {
       </Section>
 
       <Section kicker="Trials" title="Every variant ever evaluated, counted">
-        <TrialsLedger trials={rec.trials} />
+        <TrialsLedger trials={rec.trials} familyTrialsAllTime={rec.family_trials_all_time ?? null} />
       </Section>
 
       <Section kicker="The basket" title="Sector / theme and evidence — names under RA review only">

@@ -78,26 +78,41 @@ async def _guarded_500(request: Request, exc: Exception) -> JSONResponse:
 app.include_router(pathfinder_router, prefix="/api")
 
 
-@app.get("/", include_in_schema=False)
-def root() -> dict:
-    return {
-        "service": "kanida-pathfinder-mock",
-        "data_source": get_store().source_name,
-        "warning": (
-            "MOCK DATA. Hand-authored honest fixtures — not engine output, not real "
-            "results, nothing was traded."
-        ),
-        "disclosure": RESEARCH_DISCLOSURE,
-        "endpoints": [
+def _source() -> tuple[str, str, list[str]]:
+    """(source name, warning, endpoints) — never raises, never says 'fixtures' for the research source."""
+    from .router import RESEARCH_SOURCE_PATHS, _research_source
+    if _research_source():
+        return (
+            "research (S1 feed + S2 experiments) — engine output from the point-in-time stores; never fixtures",
+            "RESEARCH SOURCE. Editions and experiments computed by the engine on the sealed warehouse; "
+            "a backfilled edition is labelled so on every payload. Nothing was traded.",
+            RESEARCH_SOURCE_PATHS,
+        )
+    return (
+        get_store().source_name,
+        "MOCK DATA. Hand-authored honest fixtures — not engine output, not real results, nothing was traded.",
+        [
             "/api/pathfinder/loop",
             "/api/pathfinder/experiments?status=",
             "/api/pathfinder/experiment/{experiment_id}",
             "/api/pathfinder/learnings",
         ],
+    )
+
+
+@app.get("/", include_in_schema=False)
+def root() -> dict:
+    name, warning, endpoints = _source()
+    return {
+        "service": "kanida-pathfinder-mock",
+        "data_source": name,
+        "warning": warning,
+        "disclosure": RESEARCH_DISCLOSURE,
+        "endpoints": endpoints,
         "docs": "/docs",
     }
 
 
 @app.get("/healthz", include_in_schema=False)
 def healthz() -> dict:
-    return {"ok": True, "data_source": get_store().source_name}
+    return {"ok": True, "data_source": _source()[0]}

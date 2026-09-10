@@ -94,6 +94,13 @@ def get_store() -> PathfinderStore:
             "(see docs/handbacks/P1.md). Use `engine` for the verified SQLite mirror. "
             "Refusing to fall back to fixtures."
         )
+    elif source == "research":
+        # S1/S2: the research source serves /feed and /experiments from its own stores; the P0/P1
+        # loop story has no research-store implementation and the router 404s it before reaching here.
+        raise RuntimeError(
+            "KANIDA_PATHFINDER_SOURCE=research serves /api/pathfinder/feed and /api/pathfinder/experiments "
+            "only; the P0/P1 loop and learnings reads are not implemented over the research store."
+        )
     else:
         raise RuntimeError(f"unknown KANIDA_PATHFINDER_SOURCE: {source!r}")
     return _store
