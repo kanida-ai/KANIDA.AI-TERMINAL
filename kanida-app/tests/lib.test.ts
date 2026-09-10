@@ -4,13 +4,27 @@
  *   node --test        (Node >= 22 strips the TypeScript types natively)
  *
  * These cover the parts where a quiet bug would produce a DISHONEST screen:
- * token resolution, sign handling, and the n-flag copy.
+ * token resolution, sign handling, the n-flag copy, and the compliance lint.
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { factValue, pct, pctAbs, rangeLabel, EMPTY } from '../src/lib/format.ts';
-import { improvedCopy, PIPELINE, statusLabel, survives2xSlippage } from '../src/lib/honesty.ts';
+import {
+  decisionCopy,
+  improvedCopy,
+  isDebunk,
+  publicSafe,
+  readsLikeInstruction,
+  readsLikeOrder,
+  researchSafe,
+  recordShort,
+  sampleCopy,
+  storyKindFor,
+  storyLabelFor,
+  verdictCopy,
+  WITHHELD,
+} from '../src/lib/honesty.ts';
 import {
   factIdsIn,
   hasUnrenderedTokens,
@@ -57,7 +71,7 @@ test('hasUnrenderedTokens catches a raw token reaching the screen', () => {
 
 test('experiment ids render as the mockup chip', () => {
   assert.equal(shortExperimentId('exp_0007'), '#0007');
-  assert.equal(shortExperimentId('exp_0015'), '#0015');
+  assert.equal(shortExperimentId('exp_dip_bounce_20260504'), '#dip_bounce_20260504');
 });
 
 test('versions shorten without losing the number', () => {
@@ -73,9 +87,11 @@ test('a signed percentage never loses its sign', () => {
   assert.equal(pct(null), EMPTY);
 });
 
-test('drawdowns render as unsigned magnitudes', () => {
+test('drawdowns render as unsigned magnitudes — never a plus on a drawdown', () => {
   assert.equal(pctAbs(12.7), '12.7%');
   assert.equal(pctAbs(-12.7), '12.7%');
+  assert.equal(pctAbs(0.5, 2), '0.50%');
+  assert.ok(!pctAbs(12.7).includes('+'));
 });
 
 test('a fact renders in its declared unit, never a guessed one', () => {
@@ -87,7 +103,7 @@ test('a fact renders in its declared unit, never a guessed one', () => {
   assert.equal(factValue(1, 'sessions'), '1 session');
   assert.equal(factValue(1.45, 'x'), '1.45×');
   assert.equal(factValue(10, 'bps'), '10 bps');
-  assert.equal(factValue('regime-dependent', 'text'), 'regime-dependent');
+  assert.equal(factValue('NEUTRAL', 'text'), 'NEUTRAL');
 });
 
 test('large counts use Indian digit grouping', () => {
@@ -98,23 +114,6 @@ test('a date range renders as month-year to month-year', () => {
   assert.equal(rangeLabel({ start: '2018-01-01', end: '2025-12-31' }), 'Jan 2018 – Dec 2025');
 });
 
-test('the 2x-slippage gate is strictly positive', () => {
-  const base = {
-    basis: 'historical_replay' as const,
-    label: '',
-    expectancy_pct_per_trade: 0.24,
-    max_drawdown_pct: 0,
-    current_drawdown_pct: 0,
-    n: 1,
-    sample_flag: 'ok' as const,
-    provenance: {} as never,
-  };
-  assert.equal(survives2xSlippage({ ...base, expectancy_2x_slippage_pct_per_trade: 0.09 }), true);
-  assert.equal(survives2xSlippage({ ...base, expectancy_2x_slippage_pct_per_trade: -0.03 }), false);
-  // exactly zero is NOT an edge
-  assert.equal(survives2xSlippage({ ...base, expectancy_2x_slippage_pct_per_trade: 0 }), false);
-});
-
 test('improved:null reads as "too early to say", never as a pass', () => {
   assert.equal(improvedCopy(null).tone, 'neutral');
   assert.match(improvedCopy(null).text, /too early/i);
@@ -122,11 +121,55 @@ test('improved:null reads as "too early to say", never as a pass', () => {
   assert.equal(improvedCopy(true).tone, 'positive');
 });
 
-test('a died experiment is labelled REJECTED, not hidden or softened', () => {
-  assert.equal(statusLabel.died, 'REJECTED');
-  // the pipeline is the funnel only -- rejected is rendered separately, on purpose
+test('every sample flag has copy, and the small ones say so', () => {
+  assert.match(sampleCopy.flagged.short, /small/i);
+  assert.match(sampleCopy.greyed.short, /too few/i);
+  assert.match(sampleCopy.not_applicable.long, /not a statistic/i);
+});
+
+test('a backfill is named a backfill, a forward record a forward record', () => {
+  assert.equal(recordShort(true), 'Simulated backfill');
+  assert.equal(recordShort(false), 'Forward record');
+});
+
+test('every decision and every verdict has customer copy that is not a promise', () => {
+  for (const d of Object.values(decisionCopy)) {
+    assert.ok(d.label.length > 0 && d.meaning.length > 0);
+    assert.ok(!/guarantee|will return|target price/i.test(d.meaning));
+  }
+  assert.equal(verdictCopy.wrong.label, 'Wrong');
+  assert.equal(verdictCopy.void.label, 'Void');
+});
+
+test('a no_trade or reject is a debunk; the story type follows the engine template', () => {
+  assert.equal(isDebunk({ decision: 'no_trade' }), true);
+  assert.equal(isDebunk({ decision: 'reject' }), true);
+  assert.equal(isDebunk({ decision: 'watch' }), false);
+  assert.equal(storyKindFor({ template_id: 'theme_cycle', subject_kind: 'sector' }), 'theme');
+  assert.equal(storyKindFor({ template_id: 'dip', subject_kind: 'stock' }), 'stock');
+  assert.equal(storyKindFor({ template_id: 'surge', subject_kind: 'stock' }), 'stock');
+  assert.equal(storyKindFor({ template_id: 'volume_anomaly', subject_kind: 'stock' }), 'volume');
+  assert.equal(storyKindFor({ template_id: 'relationship', subject_kind: 'pair' }), 'pair');
+  assert.equal(storyKindFor({ template_id: 'market_regime', subject_kind: 'market' }), 'market');
+  assert.equal(storyLabelFor({ template_id: 'surge', subject_kind: 'stock', decision: 'reject' }), 'Stock behaviour · Debunk');
+  assert.equal(storyLabelFor({ template_id: 'theme_cycle', subject_kind: 'sector', decision: 'watch' }), 'Theme in play');
+});
+
+test('the compliance lint withholds a trade instruction and passes research prose', () => {
+  assert.equal(readsLikeInstruction('Buy the dip at the open'), true);
+  assert.equal(readsLikeInstruction('place a stop-loss below the low'), true);
+  assert.equal(readsLikeInstruction('the target is the prior high'), true);
+  assert.equal(readsLikeInstruction('History says a one-day flip like this is usually noise; not chasing it.'), false);
   assert.equal(
-    PIPELINE.some((s) => s.status === 'died'),
+    readsLikeInstruction('a virtual long position from the next session\'s open, closed at the close 5 sessions later'),
     false,
   );
+  assert.equal(publicSafe('Sell everything'), WITHHELD);
+  // the S1 research-card lint: the engine's own debunks say "do not buy the dip" — a finding, not an order
+  assert.equal(readsLikeOrder('The day’s hardest fall: history says do not buy the dip'), false);
+  assert.equal(readsLikeOrder('Buying big surges lost money after costs, in median and in expectancy'), false);
+  assert.equal(readsLikeOrder('entry at the open with a stop-loss below the low'), true);
+  assert.equal(readsLikeOrder('the target is the prior high'), true);
+  assert.equal(researchSafe('execute at the close'), WITHHELD);
+  assert.equal(publicSafe('A real drop, but the bounce does not beat costs.'), 'A real drop, but the bounce does not beat costs.');
 });

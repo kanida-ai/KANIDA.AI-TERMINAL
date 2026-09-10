@@ -4,8 +4,10 @@ import { View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { api } from '@/api/client';
+import type { FeedResponse } from '@/api/types';
 import { useResource } from '@/api/useResource';
-import { AsOfStamp, PathfinderAvatar, ActiveBadge } from '@/components/agent';
+import { ActiveBadge, AsOfStamp, PathfinderAvatar } from '@/components/agent';
+import { RecordChip } from '@/components/chips';
 import { FactsProvider, RichText } from '@/components/facts';
 import { Page } from '@/components/Page';
 import { Resourced, SkeletonCard } from '@/components/states';
@@ -13,10 +15,11 @@ import { Card, Label, Row, Stack, Touchable, Txt } from '@/components/ui';
 import { useLayout } from '@/design/responsive';
 import { useTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
-import { dateTimeIST } from '@/lib/format';
+import { dateShort, dateTimeIST } from '@/lib/format';
+import { findingsOf } from '@/lib/stories';
 
 /**
- * Home. In this slice only Pathfinder is built, so only Pathfinder shows
+ * Home. Only Pathfinder is built in this slice, so only Pathfinder shows
  * numbers. Trader and Investor render as explicitly unbuilt rather than as
  * plausible-looking cards -- a placeholder that looks like data is a lie with
  * good typography.
@@ -24,7 +27,7 @@ import { dateTimeIST } from '@/lib/format';
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const layout = useLayout();
-  const loop = useResource((signal) => api.loop(signal), []);
+  const feed = useResource((signal) => api.feed(null, signal), []);
 
   const skeleton = useCallback(
     () => (
@@ -38,8 +41,8 @@ export default function HomeScreen() {
 
   return (
     <Page
-      refreshing={loop.refreshing}
-      onRefresh={loop.refresh}
+      refreshing={feed.refreshing}
+      onRefresh={feed.refresh}
       bottomInset={layout.isWide ? 0 : 72}
       contentStyle={{ paddingTop: layout.isWide ? space.xxl : insets.top + space.lg }}>
       <Stack gap={space.xs}>
@@ -51,21 +54,8 @@ export default function HomeScreen() {
         </Txt>
       </Stack>
 
-      <Resourced
-        data={loop.data}
-        error={loop.error}
-        loading={loop.loading}
-        onRetry={loop.refresh}
-        skeleton={skeleton()}>
-        {(data) => (
-          <FactsProvider facts={data.facts}>
-            <PathfinderHomeCard
-              counts={data.counts}
-              headline={data.story[0]?.headline ?? ''}
-              asOf={data.as_of}
-            />
-          </FactsProvider>
-        )}
+      <Resourced data={feed.data} error={feed.error} loading={feed.loading} onRetry={feed.refresh} skeleton={skeleton()}>
+        {(data) => <PathfinderHomeCard feed={data} />}
       </Resourced>
 
       <UnbuiltAgentCard
@@ -84,27 +74,18 @@ export default function HomeScreen() {
   );
 }
 
-function PathfinderHomeCard({
-  counts,
-  headline,
-  asOf,
-}: {
-  counts: Partial<Record<string, number>>;
-  headline: string;
-  asOf: string;
-}) {
+function PathfinderHomeCard({ feed }: { feed: FeedResponse }) {
   const { c } = useTheme();
   const router = useRouter();
-
-  const live = (counts.testing ?? 0) + (counts.validating ?? 0) + (counts.promising ?? 0);
-  const promising = counts.promising ?? 0;
-  const rejected = counts.died ?? 0;
+  const findings = findingsOf(feed);
+  const first = feed.what_matters_now[0] ?? feed.discoveries[0] ?? null;
+  const sb = feed.scoreboard;
 
   return (
     <Touchable
       accessibilityRole="link"
-      accessibilityLabel="Open the Pathfinder agent"
-      onPress={() => router.push('/pathfinder/overview')}>
+      accessibilityLabel="Open the Pathfinder feed"
+      onPress={() => router.push('/pathfinder')}>
       <Card accent={c.pathfinder}>
         <Stack gap={space.lg}>
           <Row style={{ justifyContent: 'space-between', gap: space.md }}>
@@ -112,11 +93,11 @@ function PathfinderHomeCard({
               <PathfinderAvatar size={44} />
               <Stack gap={2} style={{ flex: 1 }}>
                 <Row gap={space.sm} style={{ flexWrap: 'wrap' }}>
-                  <Txt variant="subheading">Pathfinder Agent</Txt>
+                  <Txt variant="subheading">Pathfinder</Txt>
                   <ActiveBadge />
                 </Row>
                 <Txt variant="small" tone="secondary">
-                  Discover repeatable market edges
+                  What matters now, in thirty seconds · then depth
                 </Txt>
               </Stack>
             </Row>
@@ -125,37 +106,42 @@ function PathfinderHomeCard({
             </Txt>
           </Row>
 
-          {headline ? (
-            <View style={{ backgroundColor: c.bgSunken, borderRadius: radius.md, padding: space.md }}>
-              <Label>Right now</Label>
-              <RichText variant="bodyStrong" style={{ marginTop: 4 }}>
-                {headline}
-              </RichText>
-            </View>
-          ) : null}
+          <View style={{ backgroundColor: c.bgSunken, borderRadius: radius.md, padding: space.md, gap: 4 }}>
+            <Row style={{ justifyContent: 'space-between', gap: space.sm, flexWrap: 'wrap' }}>
+              <Label>Edition {dateShort(feed.edition_date)}</Label>
+              <RecordChip backfilled={feed.backfilled} />
+            </Row>
+            {first ? (
+              <FactsProvider facts={first.facts}>
+                <RichText variant="bodyStrong" numberOfLines={3}>
+                  {first.narrative.headline}
+                </RichText>
+              </FactsProvider>
+            ) : (
+              <Txt variant="bodyStrong">Nothing cleared the usefulness threshold on this close — a valid edition.</Txt>
+            )}
+          </View>
 
           <Row style={{ gap: space.lg, flexWrap: 'wrap' }}>
-            <HomeStat label="Live experiments" value={live} tone={c.text} />
-            <HomeStat label="Promising" value={promising} tone={promising > 0 ? c.positive : c.text} />
-            <HomeStat label="Rejected · published" value={rejected} tone={c.negative} />
+            <HomeStat label="Stories today" value={findings.length} tone={c.text} />
+            <HomeStat label="Right · Wrong · Incl." value={`${sb.right} · ${sb.wrong} · ${sb.inconclusive}`} tone={c.text} />
+            <HomeStat label={`n = ${sb.n} · forward ${sb.forward.n}`} value={feed.experiments_scoreboard ? `${feed.experiments_scoreboard.experiments_testing} testing` : '—'} tone={c.textSecondary} />
           </Row>
 
-          <Txt variant="caption" tone="muted">
-            No blended return is shown across experiments. Averaging books with different rules,
-            horizons and sample sizes would be a number this app invented rather than measured — each
-            experiment carries its own.
+          <Txt variant="caption" color={feed.backfilled ? c.caution : c.positive}>
+            {feed.record_label}
           </Txt>
 
-          <AsOfStamp asOf={dateTimeIST(asOf)} />
+          <AsOfStamp asOf={dateTimeIST(feed.generated_at)} />
         </Stack>
       </Card>
     </Touchable>
   );
 }
 
-function HomeStat({ label, value, tone }: { label: string; value: number; tone: string }) {
+function HomeStat({ label, value, tone }: { label: string; value: number | string; tone: string }) {
   return (
-    <Stack gap={2} style={{ flexGrow: 1, flexBasis: 0, minWidth: 78 }}>
+    <Stack gap={2} style={{ flexGrow: 1, flexBasis: 0, minWidth: 96 }}>
       <Txt variant="metricSm" numeric color={tone}>
         {value}
       </Txt>

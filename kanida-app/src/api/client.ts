@@ -2,36 +2,35 @@
  * The Pathfinder API client.
  *
  * ============================================================================
- *  SWAPPING THE P0 MOCK FOR THE P1 ENGINE IS A BASE-URL CHANGE. NOTHING ELSE.
+ *  THE BASE URL IS THE ONLY ENVIRONMENT SEAM. NOTHING ELSE CHANGES.
  * ============================================================================
  *
- *   EXPO_PUBLIC_API_BASE_URL=http://127.0.0.1:8010     # P0 mock  (default)
- *   EXPO_PUBLIC_API_BASE_URL=https://api.kanida.ai     # P1 engine
+ *   EXPO_PUBLIC_API_BASE_URL=http://127.0.0.1:8010     # the research engine, locally
+ *   EXPO_PUBLIC_API_BASE_URL=https://api.kanida.ai     # the same contract, deployed
  *
  * Set it in `.env` (see `.env.example`) or in the EAS build profile. Paths,
- * types, parsing and every screen stay identical -- P0 and P1 serve the same
- * contract (docs/openapi.yaml).
+ * types, parsing and every screen stay identical (docs/openapi.yaml).
  *
  * This module is the ONLY place in the app that knows a hostname exists.
+ *
+ * Three reads, all under the research source (`KANIDA_PATHFINDER_SOURCE=research`):
+ *
+ *   GET /api/pathfinder/feed?date=          the clarity-first edition (S1) + experiment cards (S2)
+ *   GET /api/pathfinder/experiments         the registry: cards, the declined, the scoreboard (S2)
+ *   GET /api/pathfinder/experiment/{id}     one experiment's full record (S2)
  */
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
-import type {
-  ExperimentDetail,
-  ExperimentListResponse,
-  ExperimentStatus,
-  LearningsResponse,
-  LoopResponse,
-} from './types';
+import type { ExperimentRecord, ExperimentsResponse, FeedResponse } from './types';
 
-/** Where the P0 mock listens (backend/pathfinder/mock_app.py). */
-const MOCK_PORT = 8010;
+/** Where the research engine listens locally (backend/pathfinder/mock_app.py). */
+const LOCAL_PORT = 8010;
 
 /**
  * On a physical phone `127.0.0.1` is the phone, not the dev laptop. When no
  * base URL is configured we fall back to the Metro host that is already serving
- * this bundle, so `npm start` -> scan QR -> the app reaches the mock with no
+ * this bundle, so `npm start` -> scan QR -> the app reaches the engine with no
  * extra configuration. Explicit config always wins.
  */
 function inferredDevBaseUrl(): string {
@@ -41,20 +40,20 @@ function inferredDevBaseUrl(): string {
     '';
   const host = hostUri.split(':')[0];
   if (host && host !== 'localhost' && host !== '127.0.0.1') {
-    return `http://${host}:${MOCK_PORT}`;
+    return `http://${host}:${LOCAL_PORT}`;
   }
   if (Platform.OS === 'android') {
     // Android emulator loopback to the host machine.
-    return `http://10.0.2.2:${MOCK_PORT}`;
+    return `http://10.0.2.2:${LOCAL_PORT}`;
   }
-  return `http://127.0.0.1:${MOCK_PORT}`;
+  return `http://127.0.0.1:${LOCAL_PORT}`;
 }
 
 export const API_BASE_URL: string = (
   process.env.EXPO_PUBLIC_API_BASE_URL || inferredDevBaseUrl()
 ).replace(/\/+$/, '');
 
-/** True when we are pointed at something that is not the local P0 mock. */
+/** True when we are pointed at something that is not a local engine. */
 export const IS_LIVE_ENGINE = !/(^|\/\/)(127\.0\.0\.1|localhost|10\.0\.2\.2|192\.168\.|10\.)/.test(
   API_BASE_URL,
 );
@@ -146,21 +145,46 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   return body as T;
 }
 
+/**
+ * A small per-session memo. The feed is read-only and an edition never changes
+ * once published (the store is append-only), so the same edition served twice
+ * is the same bytes. The memo makes "open a story's depth, come back" instant
+ * and keeps the pager where it was. `invalidate()` on a manual refresh.
+ */
+const memo = new Map<string, Promise<unknown>>();
+
+function remembered<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
+  const hit = memo.get(key) as Promise<T> | undefined;
+  if (hit) return hit;
+  const p = fetcher().catch((err: unknown) => {
+    memo.delete(key);
+    throw err;
+  });
+  memo.set(key, p);
+  return p;
+}
+
+export function invalidate(): void {
+  memo.clear();
+}
+
+/** A date must look like 2026-07-29 before it goes into a query string. */
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
 export const api = {
-  /** GET /api/pathfinder/loop -- the live loop, as a story. */
-  loop: (signal?: AbortSignal) => get<LoopResponse>('/api/pathfinder/loop', signal),
+  /** GET /api/pathfinder/feed?date= -- the edition for one close; latest when omitted. */
+  feed: (date?: string | null, signal?: AbortSignal) => {
+    const q = date && DATE_RE.test(date) ? `?date=${encodeURIComponent(date)}` : '';
+    return remembered(`feed${q}`, () => get<FeedResponse>(`/api/pathfinder/feed${q}`, signal));
+  },
 
-  /** GET /api/pathfinder/experiments?status= -- losers first, died leads. */
-  experiments: (status?: ExperimentStatus | null, signal?: AbortSignal) =>
-    get<ExperimentListResponse>(
-      `/api/pathfinder/experiments${status ? `?status=${encodeURIComponent(status)}` : ''}`,
-      signal,
-    ),
+  /** GET /api/pathfinder/experiments -- the registry, losers first, with the declined and the scoreboard. */
+  experiments: (signal?: AbortSignal) =>
+    remembered('experiments', () => get<ExperimentsResponse>('/api/pathfinder/experiments', signal)),
 
-  /** GET /api/pathfinder/experiment/{id} -- the full journey incl. the change-log. */
+  /** GET /api/pathfinder/experiment/{id} -- versions, trials, periods, learning, proposal, post-mortem. */
   experiment: (id: string, signal?: AbortSignal) =>
-    get<ExperimentDetail>(`/api/pathfinder/experiment/${encodeURIComponent(id)}`, signal),
-
-  /** GET /api/pathfinder/learnings -- learned + testing next. */
-  learnings: (signal?: AbortSignal) => get<LearningsResponse>('/api/pathfinder/learnings', signal),
+    remembered(`experiment:${id}`, () =>
+      get<ExperimentRecord>(`/api/pathfinder/experiment/${encodeURIComponent(id)}`, signal),
+    ),
 };

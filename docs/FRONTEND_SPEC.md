@@ -96,3 +96,56 @@ land. Founder: drop the two PNGs in and the next session reconciles.
 - Trader and Investor agent screens (same frame, later slice).
 - Strategy Lab's version-to-version diff — blocked on a contract resource.
 - Light theme was implemented and is legible, but the dark theme is the designed one.
+
+---
+
+## S3 build record — the swipeable feed (supersedes the P2 Pathfinder screens)
+
+Session S3 (`docs/sessions/PATHFINDER_S3_FEED.md`, hand-back `docs/handbacks/PF-S3.md`) replaced the
+P2 Overview / Experiments / Learnings / Strategy Lab sub-tabs with **one full-screen, vertically
+swipeable story feed** on the real S1/S2 contract. The agent-agnostic shell (tabs, `AgentHeader`,
+tokens, `facts.tsx`, `honesty.ts`, the base-URL seam) is kept; the P0-shaped screens and components
+(`ExperimentCard`, `Pipeline`, `Ledger`, `Performance`, `Evidence`, `Story`, `Sparkline`) are gone —
+the research source does not serve `/loop` or `/learnings`.
+
+**⚠️ The mockup PNGs were still absent** (`docs/design/mockups/` holds only `PLACE_MOCKUPS_HERE.md`).
+The feed was built from the Design DNA above plus the elevation direction in
+`docs/design/mockups/PLACE_MOCKUPS_HERE.md` ("the mockup is the baseline, Instagram is the bar").
+Pixel-matching awaits the founder's images.
+
+### The surface
+
+| Route | What it is |
+|---|---|
+| `/pathfinder` (`?date=`, `?story=`) | **The feed.** One story per screen; swipe up for the next; progress rail on top (one segment per story, filled to the current one, each tappable); edition + regime + record chip in the chrome. Story order = the engine's: what matters now → discoveries → experiment cards (or the honest "nothing cleared the gate" story) → the scoreboard → what I'm testing next. |
+| `/pathfinder/story/[id]?date=` | **Depth for a finding:** full narrative, the decision and its reason, the evidence (level · n · period · regime · comparison group · cost hurdle · data source · universe · disclosures), every fact as a tappable row, the rule frozen at publication, the grade with realised facts, related stocks, follow-up questions, the usefulness score against the threshold. |
+| `/pathfinder/experiment/[id]` | **Depth for an experiment:** the seven beats in full, versions (rule, conditions, change, why, level, validation, trial count, the frozen expectation, every period with expected-vs-actual and the learning), every counted trial, the worth-testing gates, the basket (constituents withheld pending RA review), the change-log, the post-mortem when buried, the graduation proposal when one exists. |
+| `/pathfinder/experiments` | The registry, losers first, then everything the gate declined grouped by the reason on the record, researched candidates first with the closest variant and the gate it failed. |
+| `/pathfinder/scoreboard?date=` | Right · Wrong · Inconclusive · n (independent), forward vs backfilled, pending / void / regraded / continued, by question type; the experiment scoreboard beside it. |
+
+### Story anatomy (every slide shares the rhythm)
+
+kicker (story type · position: *What matters now · 1 of 3*) → subject → the engine's headline (hero
+type, digit-free) → two to four **key-fact tiles** (`key_fact_refs`, numeric only, each tappable for
+provenance) → the lede (the first sentences of the narrative, every figure a fact) → the decision pill
+and its one-line reason → the grading line (pending with the frozen horizon, or the verdict) with the
+record chip → provenance chips (level · n · period · regime · hurdle) → *Evidence & provenance →*.
+On a short viewport the middle section shrinks and clips so the footer always fits.
+
+### Design decisions taken in S3 (each extends or interprets the spec)
+
+| # | Decision | Why |
+|---|---|---|
+| 1 | **Paging is a plain `ScrollView` with `pagingEnabled`**, every story a direct child sized to the viewport. | react-native-web renders it as CSS scroll-snap (`scroll-snap-type: y mandatory`); native pages natively. One file, no fork, no virtualised-list snap bugs. Stories outside index ± 1 are not rendered. |
+| 2 | **"Deeper" is a horizontal swipe, ArrowRight / Enter, or the story's own button.** Back returns to the same story because the pager remembers its position per edition, and depth links carry `?date=` so a shared link opens the right edition. | The spec's "swipe deeper"; the browser back button must behave on web. |
+| 3 | **Desktop is the same pager in a phone-width column** with an index rail on the left, arrow buttons on the right and keyboard paging (↑ ↓ j k Space, → for depth). | Instagram's desktop is a phone column; the design system scales, it does not reflow into a dashboard. |
+| 4 | **The story types are derived from the engine's `template_id` + `decision`, never from prose**: theme (`theme_cycle`), stock behaviour (`dip` / `surge`), volume anomaly, relationship, market; a `no_trade` / `reject` decision adds *· Debunk*. | The label must be a fact about the card, not a guess about its wording. |
+| 5 | **A zero-experiment edition renders a story, not a blank**: "Nothing cleared the gate", with the counted trials, the declined count, and the closest variant with the one gate it failed (a statistical near-miss ranks before an unimplementable one). | The real S2 result is that nothing opened; the spec says Pathfinder can fail publicly. |
+| 6 | **A zero-finding edition renders one honest story** ("Nothing cleared the usefulness threshold on 24 Jul 2026", with the candidate count) and then the scoreboard. | Principle 1 / addendum 1: never pad. The 24 Jul 2026 edition is real. |
+| 7 | **A figure the engine reports without a fact card** (a scoreboard tally, the registry's counts, a declined variant's expectancy) renders as an `EngineFigure`: tappable, and its sheet says which engine reported it, as of when, and that **no n / window card was served** for it. | "Every number is a computed fact" — and where the contract serves a bare number, the app says so rather than inventing a provenance or hiding the number. Flagged as a contract gap in the hand-back. |
+| 8 | **Two compliance lints, both client-side and visible.** Experiment surfaces use the server's `PUBLIC_CARD_BANNED_RE` word list verbatim; S1 research cards use the narrower *shape-of-an-order* list (entry · exit price · target · stop-loss · execute · place an order · take/book profit) because the S1 engine's own debunks say "do not buy the dip". A failing line is replaced by a visible `[withheld — …]`. | Addendum 6, without withholding honest debunk copy. |
+| 9 | **The record label is rendered three ways** — chip in the chrome, chip on the scoreboard story, the engine's sentence verbatim — and the grading line on every card carries its own `record`. | Second audit A1: a backfill must never pass for a track record at a glance. |
+| 10 | **When the engine has not stamped `due_session` on a pending card, the grading line states the frozen rule's own horizon** ("due 5 sessions after 29 Jul 2026"). | A parameter of the frozen rule, not a number the app invented. The gap is flagged in the hand-back. |
+| 11 | **The Home card reads the feed, not `/loop`.** It shows the edition, the record chip, the first headline, the story count and Right · Wrong · Inconclusive with n and forward n. | `/loop` and `/learnings` return a guarded 500 under the research source (contract gap, hand-back). |
+| 12 | **No sort control, no filter that re-ranks.** The registry lists losers first as served; the feed is the engine's order. | Inherited from P2 decision 8. |
+| 13 | **Inline facts stay neutral in colour; the key-fact tiles too.** Colour is reserved for the verdict, the decision and the scoreboard tallies. | Inherited from P2 decision 3. |

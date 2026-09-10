@@ -7,7 +7,8 @@ what it built. **Rule: no requirement without a test row.**
 |---|---|---|---|
 | **Pathfinder P0** (contract + mock) | below | `backend/tests/test_pathfinder_p0.py` | **37 passing** |
 | **Pathfinder P1** (engine) | below | `backend/tests/test_pathfinder_p1.py` | **60 rows** |
-| **Pathfinder P2** (frontend) | below | `kanida-app/tests/{lib,contract}.test.ts` | **31 passing** |
+| **Pathfinder P2** (frontend, mock source) | below | `kanida-app/tests/{lib,contract.p0}.test.ts` | superseded by S3 for the Pathfinder surface; P0 contract rows kept for the mock source |
+| **Pathfinder S3** (the swipeable feed) | below | `kanida-app/tests/{lib,feed,contract}.test.ts` | **33 unit + 16 contract passing** |
 | **Pathfinder S1** (research engine + feed) | below | `backend/tests/test_pathfinder_s1.py` + `test_pathfinder_s1_audit.py` + `test_pathfinder_s1_audit2.py` + `test_pathfinder_s1_audit3.py` | **34 + 39 + 28 + 33 passing** |
 | **Pathfinder S2** (experiment loop) | below | `backend/tests/test_pathfinder_s2.py` | **44 passing** (34 + 10 audit pins) |
 | Trader slice | *to be appended by session 01/S1.1* | — | not started |
@@ -501,6 +502,9 @@ unchanged, every screen renders honestly against real data with no code change.
 
 ### Known gaps for P2
 
+(Superseded by S3 below for the Pathfinder surface; the P2 contract rows now live in
+`tests/contract.p0.test.ts` and run only against the mock source.)
+
 1. **No on-device render test.** `npx expo export --platform all` proves iOS, Android and web all
    *bundle* from this one source (1238 / 1387 / 832 modules, exit 0), and the web target was driven
    by hand at 375 px and 1440 px in both themes. The iOS and Android bundles were **not run on a
@@ -508,3 +512,79 @@ unchanged, every screen renders honestly against real data with no code change.
    picks up the app: `npm run ios` / `npm run android`.
 2. **No visual-regression or a11y automation.** Contrast, focus rings and touch targets were
    designed for and inspected by hand, not asserted.
+
+---
+
+## Pathfinder S3 — the swipeable feed (`kanida-app`)
+
+Session S3 (`docs/sessions/PATHFINDER_S3_FEED.md`, hand-back `docs/handbacks/PF-S3.md`). Three suites,
+all on Node's built-in runner:
+
+```bash
+cd backend && KANIDA_PATHFINDER_SOURCE=research uvicorn pathfinder.mock_app:app --port 8010   # the server under test
+cd kanida-app && npm test               # lib + feed rows, no server
+cd kanida-app && npm run test:contract  # rows against the LIVE research API
+cd kanida-app && npm run test:all
+```
+
+### Unit rows — `tests/lib.test.ts` (17 rows) and `tests/feed.test.ts` (16 rows)
+
+| ID | Requirement | Test | Passes when |
+|---|---|---|---|
+| S3-01…05 | `{{fact:…}}` tokens resolved, never printed (P2-01…05 kept) | `parseSegments …`, `factIdsIn …`, `hasUnrenderedTokens …` | as P2. |
+| S3-06 | Experiment ids read as a chip | `experiment ids render as the mockup chip` | `exp_dip_bounce_20260504` → `#dip_bounce_20260504`. |
+| S3-08 | **A loss never renders as a gain** | `a signed percentage never loses its sign` | true minus; null → `—`. |
+| S3-09 | **No `+` on a drawdown** | `drawdowns render as unsigned magnitudes — never a plus on a drawdown` | `pctAbs` never emits `+`. |
+| S3-10 | The unit decides | `a fact renders in its declared unit, never a guessed one` | as P2-10. |
+| S3-14 | Every sample flag has honest copy | `every sample flag has copy, and the small ones say so` | flagged = "small sample", greyed = "too few to read", `not_applicable` says "not a statistic". |
+| S3-15 | A backfill is named | `a backfill is named a backfill, a forward record a forward record` | `recordShort`. |
+| S3-16 | Decision / verdict copy is not a promise | `every decision and every verdict has customer copy that is not a promise` | no "guarantee / will return / target price"; Wrong and Void are labelled as such. |
+| S3-17 | Story types come from the engine's template | `a no_trade or reject is a debunk; the story type follows the engine template` | theme / stock / volume / pair / market; `· Debunk` on no_trade / reject. |
+| S3-18 | **Compliance lint (addendum 6)** | `the compliance lint withholds a trade instruction and passes research prose` | "Buy the dip at the open", "stop-loss", "target" withheld; the engine's research rule text passes; the S1 debunk "history says do not buy the dip" passes the order lint but "entry … stop-loss" does not. |
+| S3-19 | **Clarity first, in the engine's order** | `the feed order is clarity first: what matters now, discoveries, experiments, scoreboard, next` | finding ×4 → no_experiment → scoreboard → next; tier positions 1 of 3. |
+| S3-20 | **No padding** | `a four-finding edition renders four finding stories — no padding` | exactly four. |
+| S3-21 | **A zero-finding edition is a story, not a blank** | `an edition that published nothing renders ONE honest story, then the scoreboard — never a blank` | `empty_edition` → `no_experiment` → `scoreboard`, with the candidate count. |
+| S3-22 | **Nothing cleared the gate is a story** | `when no experiment opened, the story says so and names the closest variant and its failed gate` | only researched candidates are "closest"; a statistical near-miss ranks before an unimplementable one; trials and declined counts carried. |
+| S3-23 | The registry may be absent | `the no-experiment story survives a registry that has not loaded, without inventing anything` | `registry: null`, `closest: []`. |
+| S3-24 | An experiment card is a story | `an experiment card on the edition becomes an experiment story in the feed, after the findings` | seven beats; title = theme. |
+| S3-25 | **Backfill label verbatim on the scoreboard** | `the scoreboard story carries the record label and the forward/backfilled split verbatim` | `BACKFILL_LABEL`, forward n 0, backfilled n 21. |
+| S3-26 | Forward is forward | `a forward edition is labelled forward, not backfilled` | `FORWARD_LABEL`. |
+| S3-27 | What's next is real | `the next story collects every follow-up question and every pending horizon …` | four follow-ups, four pending; no next story when nothing is pending or asked. |
+| S3-28 | **Paging + depth navigation** | `the index is clamped inside the feed and a story can be found by id for back-navigation` | `clampIndex`, `indexOfStory` (used by `?story=` and the position memory). |
+| S3-29 | Key facts are numeric and greyed stays greyed | `key facts are numeric, in the engine's order, and greyed samples stay flagged` | text subject skipped; flag preserved. |
+| S3-30 | The lede never splits a token | `the lede keeps whole sentences and never splits a fact token` | sentence split; no `{{` in text runs. |
+| S3-31 | **No raw token can reach the screen** | `every fact token in every story narrative resolves against the story's own facts` | every ref resolvable; headline never carries a token. |
+| S3-32 | **No trade instruction on the surface** | `no composed copy on the research surface reads like a trade instruction` | decision reasons, headlines, follow-ups, themes, beat headlines, rule texts, titles. |
+| S3-33 | **Backfill label on every graded card** | `the backfill label is present on every graded card and on the scoreboard, verbatim` | `grading.record` = `BACKFILL_LABEL` on every card of a backfilled edition. |
+
+### Contract rows — `tests/contract.test.ts` (16 rows, live research API)
+
+| ID | Requirement | Test | Passes when |
+|---|---|---|---|
+| S3-40 | Clarity first | `the latest edition serves clarity first …` | ≤ 3 in `what_matters_now`, tiers right, ranks strictly increasing, served = published + continued. |
+| S3-41 | **Never padded** | `nothing served is below the usefulness threshold` | every served card ≥ the edition's threshold, across the latest + 6 prior editions. |
+| S3-42 | **Digit-free narrative, resolvable facts** | `every narrative is digit-free outside its fact tokens, and every token resolves …` | no digit in headline / bare body / reason; every `{{fact}}` and `key_fact_ref` served; model named iff llm-authored. |
+| S3-43 | **Provenance on every fact, no look-ahead, no model** | `every fact carries provenance with a window that ends no later than its as_of, and no model computed it` | six provenance fields; `date_range.end ≤ as_of`; `computed_by` names no model; statistics carry n; `not_applicable` carries none. |
+| S3-44 | **Addendum-7 provenance on every card** | `every card carries the addendum-7 provenance …` | level ∈ 4; n; period ≤ as_of; regime; comparison group; hurdle > 0; disclosures ≥ 1; flag matches n. |
+| S3-45 | **Rule frozen at publication; grading state consistent** | `the grading rule was frozen at publication …` | right / wrong / inconclusive legs; graded ⇒ verdict; void ⇒ reason; continued ⇒ `continues`; card and grade agree on `backfilled`; `record` matches. |
+| S3-46 | **Backfill label everywhere; the split sums** | `the backfill label is on the edition, on every card and on the scoreboard — and the split sums` | `record_label` ↔ `backfilled`; R+W+I = n; forward + backfilled = n; `n_independent = n`; `regraded = n_total − n`; a scoreboard with forward n 0 says backfill. |
+| S3-47 | **No order on the research surface** | `no card, question, reason or follow-up … reads like an order` | headline / body / reason / question / follow-ups pass the order lint; no field named target / stop / entry_price / projection. |
+| S3-48 | A zero-finding edition is valid | `an edition that published nothing is still a valid, honest edition` | `published_count 0`, scoreboard present, label present (the 24 Jul 2026 edition). |
+| S3-49 | Guarded errors (feed) | `the feed guards its errors …` | `?date=DROP` → 400, `?date=1999-01-01` → 404, no internals. |
+| S3-50 | Registry counts, losers first, label | `the registry counts agree with its items, lists losers first, and carries the record label` | count = items; buried → testing → proposed; sums; engine version; disclosure. |
+| S3-51 | **The declined are on the record** | `every declined candidate is on the record with a reason; the researched ones name the closest variant and its failed gates` | reason ≥ 10 chars; researched ⇒ rule text + failed gate; rule text passes the instruction lint; `trials_total` ≥ declined trials. |
+| S3-52 | **Seven digit-free beats, no constituent field** | `every public experiment card tells the seven beats in order …` | beats in order; digit-free; facts resolve; instruction lint; `record_label` ↔ `backfilled`; no `constituents` / `basket` on a card; a feed card's `news_edition` is the edition's. |
+| S3-53 | The record | `an experiment record, when one exists, carries versions, trials, periods and a withheld or RA-reviewed basket` | versions ≥ 1; trials = `trials_total`; expectation period ≤ seal; graded periods carry a verdict and the record label; constituents only when RA-reviewed; buried ⇔ post-mortem. |
+| S3-54 | Guarded errors (experiment) | `the experiment endpoint guards its errors …` | `DROP` → 400, `exp_nope` → 404. |
+| S3-55 | Disclosure everywhere | `every payload carries its research disclosure` | feed, every finding, the registry. |
+
+### Known gaps for S3
+
+1. **No on-device render test** (inherited): `npx expo export --platform all` exits 0 for iOS, Android
+   and web; the web target was driven by hand at 375 px (dark) and at desktop width (the user's
+   Chrome, light). No macOS / Android SDK on this machine.
+2. **No visual-regression or a11y automation.** The pager, the progress rail, the depth flow and the
+   honest states were verified by eye (see the hand-back for exactly what was seen).
+3. **The contract mirror (`src/api/types.ts`) is hand-maintained.** The concurrent S2 re-audit added
+   optional fields to `Expectation`, `ForwardResult`, `LearningView`, `RejectedCandidate` while S3 was
+   in flight; they are additive and ignored by the client until mirrored.

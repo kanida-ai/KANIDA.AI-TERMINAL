@@ -1,70 +1,53 @@
 /**
- * Fact rendering -- the client side of "the LLM never calculates".
+ * Fact rendering -- the client side of "the engine computes, the model narrates".
  *
  * The engine sends narrative with NO numerals in it, plus a `facts[]` array of
  * deterministic numbers. This module substitutes each `{{fact:...}}` token back
  * into the sentence as a tappable figure, and lets the reader open the number's
- * full provenance: n, date range, data source, cost convention, and the
- * deterministic component that computed it.
+ * full provenance: n, sample flag, evidence level, window, data source, cost
+ * convention, and the deterministic component that computed it.
  *
  * DESIGN DECISION -- inline facts are rendered in a NEUTRAL emphasis, not
  * green/red. A fact carries no semantic direction: `12.7%` is a good number when
  * it is a win rate and a bad one when it is a drawdown, and the sentence around
- * it already says which. Colour is reserved for the metric components, where the
- * field name tells us what "up" means. Miscolouring a drawdown green would be a
- * dishonest chart of one number.
+ * it already says which. Colour is reserved for the labelled metrics.
  */
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 
-import type { Evidence, Fact, StoryLine } from '@/api/types';
+import type { Fact } from '@/api/types';
 import { useTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
-import {
-  EMPTY,
-  dateShort,
-  dateTimeIST,
-  factValue,
-  rangeWithSpan,
-  unitHint,
-} from '@/lib/format';
-import { sampleCopy, sampleTone } from '@/lib/honesty';
+import { EMPTY, dateShort, dateTimeIST, factValue, rangeWithSpan, unitHint } from '@/lib/format';
+import { levelCopy, sampleCopy, sampleTone } from '@/lib/honesty';
 import { parseSegments, shortExperimentId, shortVersion } from '@/lib/tokens';
 
 import { Card, Divider, Label, Pill, Row, Stack, Txt } from './ui';
 
 type FactsValue = {
   facts: Map<string, Fact>;
-  evidence: Map<string, Evidence>;
   open: (fact: Fact) => void;
 };
 
 const FactsContext = createContext<FactsValue>({
   facts: new Map(),
-  evidence: new Map(),
   open: () => {},
 });
 
-export function FactsProvider({
-  facts,
-  evidence = [],
-  children,
-}: {
-  facts: Fact[];
-  evidence?: Evidence[];
-  children: ReactNode;
-}) {
+/**
+ * Provides the facts a subtree may reference, and owns the provenance sheet.
+ * Nest freely: an inner provider sees its own facts first, then the outer ones.
+ */
+export function FactsProvider({ facts, children }: { facts: Fact[]; children: ReactNode }) {
+  const parent = useContext(FactsContext);
   const [active, setActive] = useState<Fact | null>(null);
   const open = useCallback((f: Fact) => setActive(f), []);
-  const value = useMemo<FactsValue>(
-    () => ({
-      facts: new Map(facts.map((f) => [f.id, f])),
-      evidence: new Map(evidence.map((e) => [e.id, e])),
-      open,
-    }),
-    [facts, evidence, open],
-  );
+  const value = useMemo<FactsValue>(() => {
+    const merged = new Map(parent.facts);
+    for (const f of facts) merged.set(f.id, f);
+    return { facts: merged, open };
+  }, [facts, open, parent.facts]);
   return (
     <FactsContext.Provider value={value}>
       {children}
@@ -76,6 +59,8 @@ export function FactsProvider({
 export function useFacts() {
   return useContext(FactsContext);
 }
+
+type Variant = 'body' | 'lede' | 'small' | 'smallStrong' | 'bodyStrong' | 'heading' | 'subheading' | 'title' | 'hero';
 
 /**
  * Prose with reference tokens resolved.
@@ -89,19 +74,24 @@ export function RichText({
   variant = 'body',
   tone = 'default',
   style,
+  numberOfLines,
+  color,
 }: {
   children: string;
-  variant?: 'body' | 'small' | 'bodyStrong' | 'heading' | 'subheading' | 'title';
+  variant?: Variant;
   tone?: 'default' | 'secondary' | 'muted';
   style?: object;
+  numberOfLines?: number;
+  color?: string;
 }) {
   const { c } = useTheme();
-  const { facts, evidence, open } = useFacts();
+  const { facts, open } = useFacts();
   const router = useRouter();
   const segments = parseSegments(children);
+  const factColor = color ?? c.text;
 
   return (
-    <Txt variant={variant} tone={tone} style={style}>
+    <Txt variant={variant} tone={tone} color={color} style={style} numberOfLines={numberOfLines}>
       {segments.map((seg, i) => {
         if (seg.kind === 'text') return seg.text;
 
@@ -123,7 +113,7 @@ export function RichText({
               onPress={() => open(fact)}
               accessibilityRole="button"
               accessibilityLabel={`${fact.label}: ${factValue(fact.value, fact.unit)}. Tap for provenance.`}
-              color={grey ? c.textGreyed : c.text}
+              color={grey ? c.textGreyed : factColor}
               style={{
                 fontWeight: '700',
                 textDecorationLine: 'underline',
@@ -151,10 +141,9 @@ export function RichText({
         }
 
         if (seg.kind === 'evd') {
-          const ev = evidence.get(seg.id);
           return (
             <Txt key={i} variant={variant} tone="secondary" style={{ fontWeight: '600' }}>
-              {ev ? ev.title : seg.id}
+              {seg.id}
             </Txt>
           );
         }
@@ -169,12 +158,17 @@ export function RichText({
   );
 }
 
-/** Headline of a story beat, with tokens resolved. */
-export function RichHeadline({ line, style }: { line: StoryLine; style?: object }) {
+/** A tappable figure standing on its own (a key-fact tile, a row in the numbers table). */
+export function FactPress({ fact, children, style }: { fact: Fact; children: ReactNode; style?: object }) {
+  const { open } = useFacts();
   return (
-    <RichText variant="heading" style={style}>
-      {line.headline}
-    </RichText>
+    <Pressable
+      onPress={() => open(fact)}
+      accessibilityRole="button"
+      accessibilityLabel={`${fact.label}: ${factValue(fact.value, fact.unit)}. Tap for provenance.`}
+      style={({ pressed }) => [{ opacity: pressed ? 0.7 : 1 }, style]}>
+      {children}
+    </Pressable>
   );
 }
 
@@ -187,10 +181,9 @@ function FactSheet({ fact, onClose }: { fact: Fact | null; onClose: () => void }
   if (!fact) return null;
   const p = fact.provenance;
   const flagTone = sampleTone(fact.sample_flag, c);
-  const isStatistic =
-    fact.n !== null && fact.n !== undefined
-      ? true
-      : ['pct', 'pct_per_trade', 'ratio', 'x'].includes(fact.unit);
+  const hasN = fact.n !== null && fact.n !== undefined;
+  const isStatistic = hasN || ['pct', 'pct_per_trade', 'ratio', 'x'].includes(fact.unit);
+  const isParameter = fact.sample_flag === 'not_applicable';
 
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
@@ -212,20 +205,24 @@ function FactSheet({ fact, onClose }: { fact: Fact | null; onClose: () => void }
               </Txt>
             </Stack>
 
-            {/*
-              n only means something for a STATISTIC. A raw count ("conditions
-              evaluated today") has no sample behind it, and stamping it
-              "no sample yet" would invent a caveat rather than remove one.
-            */}
-            {isStatistic ? (
+            {isParameter ? (
+              <Txt variant="small" tone="secondary">
+                {sampleCopy.not_applicable.long}
+              </Txt>
+            ) : isStatistic ? (
               <>
                 <Row gap={space.sm} style={{ flexWrap: 'wrap' }}>
                   <Pill fg={flagTone} bordered>
-                    {fact.n === null || fact.n === undefined ? 'n —' : `n = ${fact.n}`}
+                    {hasN ? `n = ${fact.n}` : 'n —'}
                   </Pill>
                   <Pill fg={flagTone} bordered>
                     {sampleCopy[fact.sample_flag].short}
                   </Pill>
+                  {p.level ? (
+                    <Pill fg={c.pathfinder} bordered>
+                      {levelCopy[p.level].short}
+                    </Pill>
+                  ) : null}
                 </Row>
                 {fact.sample_flag !== 'ok' ? (
                   <Txt variant="small" tone="secondary">
@@ -234,14 +231,22 @@ function FactSheet({ fact, onClose }: { fact: Fact | null; onClose: () => void }
                 ) : null}
               </>
             ) : (
-              <Txt variant="small" tone="secondary">
-                A direct observation, not a statistic — there is no sample behind it to size.
-              </Txt>
+              <Row gap={space.sm} style={{ flexWrap: 'wrap' }}>
+                <Txt variant="small" tone="secondary" style={{ flexShrink: 1 }}>
+                  A count or a label, not a statistic — there is no sample behind it to size.
+                </Txt>
+                {p.level ? (
+                  <Pill fg={c.pathfinder} bordered>
+                    {levelCopy[p.level].short}
+                  </Pill>
+                ) : null}
+              </Row>
             )}
 
             <Divider />
 
             <Stack gap={space.md}>
+              {p.level ? <SheetRow label="Evidence from" value={levelCopy[p.level].long} /> : null}
               <SheetRow label="Window" value={rangeWithSpan(p.date_range)} />
               <SheetRow label="Point-in-time as of" value={dateShort(p.as_of)} />
               <SheetRow label="Data source" value={p.data_source} mono />
@@ -262,8 +267,8 @@ function FactSheet({ fact, onClose }: { fact: Fact | null; onClose: () => void }
 
             <Divider />
             <Txt variant="caption" tone="muted">
-              Computed by the deterministic engine. The language model reads this number; it never
-              produces one.
+              Computed by the deterministic engine before it was written about. The language model
+              may read this number; it never produces one.
             </Txt>
 
             <Pressable

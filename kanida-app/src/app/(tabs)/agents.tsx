@@ -28,7 +28,7 @@ export default function AgentsScreen() {
       <Touchable
         accessibilityRole="link"
         accessibilityLabel="Open the Pathfinder agent"
-        onPress={() => router.push('/pathfinder/overview')}>
+        onPress={() => router.push('/pathfinder')}>
         <Card accent={c.pathfinder}>
           <Row gap={space.md}>
             <PathfinderAvatar size={44} />
@@ -38,7 +38,7 @@ export default function AgentsScreen() {
                 <ActiveBadge />
               </Row>
               <Txt variant="small" tone="secondary">
-                Discover repeatable market edges · Test → Validate → Evolve
+                Discover repeatable market edges · Test → Validate → Evolve · the swipeable feed
               </Txt>
             </Stack>
             <Txt variant="heading" tone="muted">

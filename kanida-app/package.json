@@ -42,10 +42,11 @@
     "web": "expo start --web",
     "build:web": "expo export --platform web",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/lib.test.ts",
+    "test": "node --test tests/lib.test.ts tests/feed.test.ts",
     "test:contract": "node --test tests/contract.test.ts",
-    "test:all": "node --test tests/lib.test.ts tests/contract.test.ts",
-    "lint": "expo lint"
+    "test:all": "node --test tests/lib.test.ts tests/feed.test.ts tests/contract.test.ts",
+    "lint": "expo lint",
+    "test:contract:p0": "node --test tests/contract.p0.test.ts"
   },
   "private": true
 }

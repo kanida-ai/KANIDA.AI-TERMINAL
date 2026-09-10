@@ -8,6 +8,7 @@ import { StatusBar } from 'expo-status-bar';
 import { useColorScheme } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
+import { FigureSheetProvider } from '@/components/chips';
 import { ThemeProvider } from '@/design/theme';
 import { palettes } from '@/design/tokens';
 
@@ -40,11 +41,13 @@ export default function RootLayout() {
     <SafeAreaProvider>
       <ThemeProvider>
         <NavThemeProvider value={navTheme}>
-          <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
-          <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: c.bg } }}>
-            <Stack.Screen name="(tabs)" />
-            <Stack.Screen name="pathfinder" />
-          </Stack>
+          <FigureSheetProvider>
+            <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
+            <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: c.bg } }}>
+              <Stack.Screen name="(tabs)" />
+              <Stack.Screen name="pathfinder" />
+            </Stack>
+          </FigureSheetProvider>
         </NavThemeProvider>
       </ThemeProvider>
     </SafeAreaProvider>

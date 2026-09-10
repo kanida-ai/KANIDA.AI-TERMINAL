@@ -2,15 +2,15 @@
  * The shared agent-screen chrome from FRONTEND_SPEC:
  *
  *   back arrow · agent avatar · name · green Active badge · one-line mandate
- *   ------------------------------------------------------------------------
- *   sub-tabs
  *
  * Trader and Investor will reuse this exact frame; Pathfinder is the first
- * build, so the component is written agent-agnostic from the start.
+ * build, so the component is written agent-agnostic from the start. The
+ * Pathfinder FEED itself is full-screen and carries its own top chrome; this
+ * header sits on the depth screens (a story's evidence, an experiment's record,
+ * the scoreboard, the registry).
  */
-import { Link, usePathname, useRouter } from 'expo-router';
-import type { ComponentProps } from 'react';
-import { ScrollView, View } from 'react-native';
+import { useRouter } from 'expo-router';
+import { View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useTheme } from '@/design/theme';
@@ -18,8 +18,6 @@ import { useLayout } from '@/design/responsive';
 import { radius, space } from '@/design/tokens';
 
 import { Row, Stack, Touchable, Txt } from './ui';
-
-type Href = ComponentProps<typeof Link>['href'];
 
 /** The violet flask. Drawn, not imported -- no asset pipeline for one glyph. */
 export function PathfinderAvatar({ size = 40 }: { size?: number }) {
@@ -105,54 +103,6 @@ export function AgentHeader({
           </Stack>
         </Row>
       </View>
-    </View>
-  );
-}
-
-export type SubTab = { key: string; label: string; href: Href };
-
-/** Horizontally scrollable sub-tabs. Real routes, so every tab is deep-linkable. */
-export function SubTabs({ tabs }: { tabs: SubTab[] }) {
-  const { c } = useTheme();
-  const pathname = usePathname();
-  const layout = useLayout();
-
-  return (
-    <View style={{ backgroundColor: c.bg, borderBottomWidth: 1, borderBottomColor: c.border }}>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{
-          paddingHorizontal: layout.gutter,
-          gap: space.xs,
-          paddingVertical: space.sm,
-          width: '100%',
-          maxWidth: layout.contentWidth + layout.gutter * 2,
-          alignSelf: 'center',
-        }}>
-        {tabs.map((t) => {
-          const active = pathname.endsWith(`/${t.key}`);
-          return (
-            <Link key={t.key} href={t.href} asChild>
-              <Touchable
-                accessibilityRole="tab"
-                accessibilityState={{ selected: active }}
-                style={{
-                  paddingHorizontal: space.lg,
-                  paddingVertical: space.sm,
-                  borderRadius: radius.pill,
-                  backgroundColor: active ? c.pathfinderSoft : 'transparent',
-                }}>
-                <Txt
-                  variant="smallStrong"
-                  color={active ? c.pathfinder : c.textSecondary}>
-                  {t.label}
-                </Txt>
-              </Touchable>
-            </Link>
-          );
-        })}
-      </ScrollView>
     </View>
   );
 }

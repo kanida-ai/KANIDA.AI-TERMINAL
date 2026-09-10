@@ -195,6 +195,12 @@ export const type = {
   /** the hero number */
   metric: { fontSize: 26, lineHeight: 30, fontWeight: '700' as const, letterSpacing: -0.5 },
   metricSm: { fontSize: 18, lineHeight: 22, fontWeight: '700' as const, letterSpacing: -0.3 },
+  /** the scoreboard's three figures */
+  metricLg: { fontSize: 40, lineHeight: 44, fontWeight: '700' as const, letterSpacing: -1 },
+  /** a story's headline — readable from across the room, one finding per screen */
+  hero: { fontSize: 28, lineHeight: 34, fontWeight: '700' as const, letterSpacing: -0.6 },
+  /** the story's lede — one size up from body, calmer line height */
+  lede: { fontSize: 16.5, lineHeight: 25, fontWeight: '400' as const },
 } as const;
 
 export const motion = {
