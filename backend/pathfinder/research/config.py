@@ -12,6 +12,24 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import pandas as pd
+
+# ── DETERMINISM GUARD (S1 third pass, found while rebuilding the store) ──────────────────
+# pandas routes large-frame arithmetic (> 1e6 elements: the forward-return columns
+# `_c{h} / next_open - 1` on the 1.25M-row universe) through numexpr when it is installed.
+# On this host (numexpr 2.14.1, 12 threads; pandas 2.3.3; numpy 2.3.5) that path
+# INTERMITTENTLY returned an all-zero `f5` column: in 4 passes over 13 seals one pass gave
+# f5.abs().mean() == 0.0 with 7 more non-NaN rows than every other pass, and two of three
+# full rebuilds were refused by the C1 degenerate-share guard ("like_this_beat 0.0% over
+# 877", "big_move 0.0% over 13,100"). With numexpr off: 0 mismatches in the same probe and
+# two byte-identical rebuilds. The first pass's "smoke store" (`big_move = 0.0%` over
+# 13,119 cases, hand-back §5.1) has the same signature and was very likely this, not
+# "superseded code". Every number this engine mints must be reproducible, so the numexpr
+# and bottleneck backends are OFF for any process that imports the research engine.
+# (`test_pathfinder_s1_audit3.py` pins the option; the A-C1 determinism rows pin the effect.)
+pd.set_option("compute.use_numexpr", False)
+pd.set_option("compute.use_bottleneck", False)
+
 IST = timezone(timedelta(hours=5, minutes=30))
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RESEARCH_DIR = Path(__file__).resolve().parent
@@ -44,9 +62,9 @@ def research_code_hash() -> str:
     return code_hash(*sorted(RESEARCH_DIR.glob("*.py")))
 
 
-ENGINE_SEMVER = "1.2.0"
+ENGINE_SEMVER = "1.3.0"
 ENGINE_VERSION = f"pathfinder_research@{ENGINE_SEMVER}+code.{research_code_hash()}"
-GRADING_RULES_SEMVER = "1.2.0"           # the hashed form lives in grading.py (P2)
+GRADING_RULES_SEMVER = "1.3.0"           # the hashed form lives in grading.py (P2)
 RANKING_VERSION = "usefulness@1.0.0"
 
 
@@ -130,6 +148,11 @@ class ResearchConfig:
     #: Novelty: a (template, subject, decision) already published within this many
     #: editions is discounted.
     novelty_lookback_editions: int = 5
+    #: S1 third audit N2 — a group card's CLAIM is (template, decision, comparison group); a
+    #: fresh reading of the same statistic is the same claim unless the primary statistic
+    #: moved by more than this many percentage points. A rounded signature ("|-1.20" vs
+    #: "|-1.10") re-opened one null claim three times and graded it three times.
+    claim_tolerance_pp: float = 1.0
 
     # ── template parameters (ported verbatim from the prototypes) ───────────
     dip_pct: float = -6.0            # a "hard dip" is a close-to-close drop of 6%+

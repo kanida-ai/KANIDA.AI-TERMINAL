@@ -12,6 +12,14 @@ backfill and was presented as a track record**. All eight fixed and pinned
 (`backend/tests/test_pathfinder_s1_audit2.py`, 28 rows); the store archived (never deleted) and
 rebuilt under the new conventions; §3.2/§3.3 rewritten as what they are: **a simulated backfill, not
 a forward track record. Forward n = 0 today.**
+**Third pass (2026-09-10):** a THIRD re-audit of commit f34ecea verified all sixteen earlier fixes
+and found six more edge-leaks (N1–N6, §4 "Third audit"): continuations bypassed the threshold and
+were served; rounded signatures re-opened one claim and graded it three times as independent; the
+pair *watch* was graded as a convergence *call*; `like_this_*` facts carried the overlapping n;
+unmeasurable outcomes stayed pending forever; the quantifier ban missed "a handful", "many", "few".
+All six fixed and pinned (`backend/tests/test_pathfinder_s1_audit3.py`, 33 rows, 29 of which fail
+on f34ecea); the store archived and rebuilt again; §3.2's two false claims ("never padded", "nothing
+was graded twice") corrected below.
 
 > **Governing sentence, honoured in code:** Pathfinder computes market evidence first and uses GenAI
 > only to decide what is worth investigating and to explain verified results. **No number in this
@@ -31,6 +39,14 @@ a forward track record. Forward n = 0 today.**
 > as anything else: `backfilled` is on every edition, card and grade, and a repeated open claim is a
 > `continue` that is graded once.
 
+> **What the third audit taught, in one line:** a rule that is honest in the general case can still
+> leak at its edges — a continuation exempted from the threshold is padding, a claim keyed on a rounded
+> string is several claims, a grading kind chosen by template rather than by decision judges a claim
+> the card never made, and a `None` that means "not yet" and a `None` that means "never" must not be
+> the same `None`. Each edge is now a contract (`Finding`, `FeedResponse`, `Scoreboard`) rather than a
+> convention, and the independent n is recomputed from the grade rows themselves rather than assumed
+> from how they were published.
+
 ---
 
 ## 1. What was built
@@ -45,13 +61,13 @@ the same guarded router, `docs/openapi.yaml` regenerated from the Pydantic contr
 | `data.py` | **The seal.** *Second audit:* corporate-action days (split / bonus / demerger / rights ex-dates from the warehouse's `corp_actions` table, plus any single-day \|move\| > 30% as a suspected one) and the six glitch bars are holes — NaN return, NaN for every forward window across them — and are counted per edition (A4); a bar whose open equals its close is a **synthetic open** and no outcome is measured from an entry at it (A7); `r{h}cc` is minted per horizon so the anomaly grader reads the rule's own horizon (A8).  A frame built for one `as_of` holds no later bar — and, since the audit, **no later price either**: the helper columns forward outcomes are minted from (`next_open`, `_d{h}`, `_c{h}`, `_badfwd{h}`) exist only on the private unsealed history and are dropped from every sealed frame (P7). Forward outcomes (`f1/f3/f5` = close[t+h] / **open[t+1]** − 1; `r5cc` = the week-later move) are NaN until resolved inside the seal. Zero prices are holes; so are the warehouse's six listing-day glitch bars (a > 4x or < 0.25x close-to-close ratio — DELHIVERY +9,200% on listing day): their return is NaN and every forward window straddling them is NaN (D1). |
 | `regime.py` | Port of `Kanida_Falcon/scripts/regime.py` (breadth 200/50, NIFTY trend, VIX percentile, A/D → RISK_ON/NEUTRAL/RISK_OFF). Provenance only, never a forecast. Independent long-frame breadth cross-check on the last session. |
 | `facts.py` | *Second audit A6:* a statistic over n = 0 cannot be minted — "0.0% of 0 times" is unrepresentable. The only way a number is minted: `FactSet.add()` → a `Fact` with data source, period, `as_of`, cost convention, `computed_by` **pinned to the code hash**, universe and evidence level. Three kinds of number: a **statistic** (n required for pct/ratio/x), a **parameter**, a **single observation** (no n, `sample_flag = not_applicable`) — an invented n is refused (C8). A share of exactly 0% or 100% over ≥ 100 cases is refused at mint time (C1). |
-| `library.py` | *Second audit:* every decision and every frozen rule is judged against `cfg.hurdle_pct` = costs + slippage both ways (A5); each card carries an **evidence signature** — the statistic and comparison group for a group card, the sector / pair and decision otherwise (A2); the theme card is judged on the graded metric's conditional base rate with an **effective n** (one case per sector per non-overlapping horizon), states persistence as the non-overlapping mechanical number, and is withheld when no leader like it has resolved (A3/A6). **The question library** — `question → parameters → computation → evidence card`. Six seeded templates porting the two prototypes' math: `market_regime`, `theme_cycle` (+ the laggard→leader rotation flip), `dip`, `surge`, `volume_anomaly`, `relationship`. Every decision-bearing base rate is now the **graded metric** (next open → horizon close), judged against a **named control**, with **expectancy** (winsorised mean net of hurdle) minted and gating next to the median (C4–C7, P5). The decision rules are pure functions (`dip_decision`, `surge_decision`, `carry_decision`, `call_on_excess`) pinned by tests. |
-| `grading.py` | *Second audit:* rank at the horizon is withheld, never zero (A6); the anomaly kind reads the rule's horizon (A8); the hurdle includes slippage (A5). Per-type Right / Wrong / Inconclusive rules (`directional_call`, `no_trade_call`, `theme_call`, `theme_watch`, **`rotation_reject`**, `anomaly_move`, `pair_convergence`) built **at publication** and stored with the finding. Every verdict is **symmetric in the graded metric** (C2/C3); rank at the horizon is recorded as a fact, never judged. `rule_version` = `grading_rules@1.1.0+code.<sha256 of grading.py>`; a spec must be complete when frozen and the evaluator never reads live config (P2). The theme kinds define "the market" exactly as the templates do (sectors with ≥ min_names names). |
+| `library.py` | *Third audit:* each template declares `claim_parts` — how many leading parts of its evidence signature are the CLAIM (template, decision, comparison group); the next part is the primary statistic, and `same_claim()` treats a repeat inside `cfg.claim_tolerance_pp` (1 pp) as the same claim (N2); the anomaly signature leads with the lift; the pair card freezes `pair_watch` for a watch and `pair_convergence` for an experiment — the kind follows the decision (N3); `like_this_*` statistics are minted on the effective n, the overlapping count stays a labelled count fact (N4). *Second audit:* every decision and every frozen rule is judged against `cfg.hurdle_pct` = costs + slippage both ways (A5); each card carries an **evidence signature** — the statistic and comparison group for a group card, the sector / pair and decision otherwise (A2); the theme card is judged on the graded metric's conditional base rate with an **effective n** (one case per sector per non-overlapping horizon), states persistence as the non-overlapping mechanical number, and is withheld when no leader like it has resolved (A3/A6). **The question library** — `question → parameters → computation → evidence card`. Six seeded templates porting the two prototypes' math: `market_regime`, `theme_cycle` (+ the laggard→leader rotation flip), `dip`, `surge`, `volume_anomaly`, `relationship`. Every decision-bearing base rate is now the **graded metric** (next open → horizon close), judged against a **named control**, with **expectancy** (winsorised mean net of hurdle) minted and gating next to the median (C4–C7, P5). The decision rules are pure functions (`dip_decision`, `surge_decision`, `carry_decision`, `call_on_excess`) pinned by tests. |
+| `grading.py` | *Third audit:* `pair_watch` — Right if the declined spread trade lost more than twice the hurdle, Wrong if it paid more than twice, Inconclusive inside (symmetric, like `theme_watch`) (N3); a rule whose horizon completed inside the seal but whose outcome is a data hole (synthetic open at entry, corporate-action / glitch bar inside the window, more than a fifth of a sector unresolved) returns a **`void`** grade carrying the reason — not Right / Wrong / Inconclusive, never counted, never pending forever; `None` now means only "not yet due" (N5). *Second audit:* rank at the horizon is withheld, never zero (A6); the anomaly kind reads the rule's horizon (A8); the hurdle includes slippage (A5). Per-type Right / Wrong / Inconclusive rules (`directional_call`, `no_trade_call`, `theme_call`, `theme_watch`, **`rotation_reject`**, `anomaly_move`, `pair_convergence`) built **at publication** and stored with the finding. Every verdict is **symmetric in the graded metric** (C2/C3); rank at the horizon is recorded as a fact, never judged. `rule_version` = `grading_rules@1.1.0+code.<sha256 of grading.py>`; a spec must be complete when frozen and the evaluator never reads live config (P2). The theme kinds define "the market" exactly as the templates do (sectors with ≥ min_names names). |
 | `ranking.py` | Usefulness = 0.30 evidence strength + 0.20 novelty + 0.30 trader relevance + 0.20 magnitude; publication threshold 0.65. No quota, no padding. *Second audit A2:* novelty is keyed on the **evidence signature**, not the day's subject — the same group statistic under a new stock is the same claim (0.25). Evidence strength takes the template's `evidence_z`, which is now the z of the base rate against its control (the lift for the anomaly, the coin flip for hit rates, on independent episodes for the pair). |
 | `narrate.py` | The model's two permitted jobs: `classify` publish/hold on a card that already cleared the threshold; `narrate` the **body** from the card's fact table under the **engine's headline** (the model's headline is discarded — the decision is not the model's to restate). The strict feed contract (`enforce_narrate(strict=True)`) is re-applied here so no provider can skip it (P1). Without a provider the engine's own digit-free template narrates and the card says `produced_by = "engine"`. |
-| `store.py` | *Second audit:* `backfilled` on every edition and finding, the scoreboard split `forward` / `backfilled` with `n` = independent grades, `n_total`, `continued` (A1/A2); `continues` on a finding that repeats an open claim — served, not counted, never graded on its own (A2); a store under a superseded schema is refused on open, and the script archives rather than deletes (A8). Append-only SQLite (`pf_editions`, `pf_findings`, `pf_candidates`, `pf_grades`, `pf_scoreboard`); triggers reject UPDATE/DELETE; one grade per finding, ever; rejected candidates kept with their scores. `pf_editions.engine_version` carries the research code hash (C1); `scoreboard(X).pending` is "pending as of X" (P4). A store written by superseded code is deleted and rebuilt — it cannot be corrected. |
-| `scan.py` | seal → regime → every library question → score → threshold → (model veto) → narrate → publish → **grade whatever completed its horizon** → snapshot the scoreboard. An edition is never recomputed. *Second audit:* `is_backfilled(edition, computed_at)` — generated after the session date in IST is a backfill (A1); a draft whose signature matches an OPEN root finding becomes a `continue` after the new findings, outside "what matters now" (A2); every provenance carries `cfg.data_disclosures` (A4/A7/A8). |
-| `llm/contracts.py` | The gateway contract, plus the strict feed mode: number words and frequency quantifiers ("nine in ten", "half", "doubled", "most of the time", "usually") must sit in a sentence that cites a fact; at least one fact reference; no number word in a headline. |
+| `store.py` | *Third audit:* schema 3 (a v2 store is refused on open, archived, rebuilt); `novelty()` / `open_root()` match on the claim within the tolerance (N2); `scoreboard()` derives `n` from the grade rows as one grade per claim per non-overlapping horizon — a grade of a claim whose earlier grade (independent or itself folded) was still measuring at this edition date is folded, `regraded = n_total − n` (N2); `void` grade rows are counted apart (`void`) and never in n (N5). *Second audit:* `backfilled` on every edition and finding, the scoreboard split `forward` / `backfilled` with `n` = independent grades, `n_total`, `continued` (A1/A2); `continues` on a finding that repeats an open claim — served, not counted, never graded on its own (A2); a store under a superseded schema is refused on open, and the script archives rather than deletes (A8). Append-only SQLite (`pf_editions`, `pf_findings`, `pf_candidates`, `pf_grades`, `pf_scoreboard`); triggers reject UPDATE/DELETE; one grade per finding, ever; rejected candidates kept with their scores. `pf_editions.engine_version` carries the research code hash (C1); `scoreboard(X).pending` is "pending as of X" (P4). A store written by superseded code is deleted and rebuilt — it cannot be corrected. |
+| `scan.py` | seal → regime → every library question → score → **threshold FIRST** → continuation-or-new → (model veto) → narrate → publish → **grade whatever completed its horizon** (void when unmeasurable) → snapshot the scoreboard. An edition is never recomputed. *Third audit N1:* a sub-threshold draft that repeats an open claim is a `pf_candidates` row ("below usefulness threshold (continues <root>)") and is NOT served — before this, `root is not None` was tested before the threshold and fifteen of nineteen continuations in the store were served below 0.65. *Second audit:* `is_backfilled(edition, computed_at)` — generated after the session date in IST is a backfill (A1); a draft whose signature matches an OPEN root finding becomes a `continue` after the new findings, outside "what matters now" (A2); every provenance carries `cfg.data_disclosures` (A4/A7/A8). |
+| `llm/contracts.py` | The gateway contract, plus the strict feed mode: number words and frequency quantifiers ("nine in ten", "half", "doubled", "most of the time", "usually") must sit in a sentence that cites a fact; at least one fact reference; no number word in a headline. *Third audit N6:* the quantifier list now also bans "a handful", "few", "many", "several", "a couple", "the bulk", "nearly every", "most", "some", "plenty", "a majority", "almost all", "hardly any" (and siblings) — "A handful of cases bounced, and many did not." was accepted with no fact. |
 
 **Contract (`backend/pathfinder/schemas.py`, `docs/openapi.yaml`):** `EvidenceLevel`,
 `Provenance.level`, `FindingProvenance`, `GradingRule`, `GradingState`, `Narrative` (digit-free for
@@ -62,7 +78,11 @@ Post-audit additions: `SampleFlag.not_applicable`, `GradingKind.rotation_reject`
 `GradingState.backfilled` / `record` / `continues` and `GradingStatus.continued`;
 `FindingProvenance.disclosures`; `Scoreboard.forward` / `backfilled` / `n_total` / `n_independent` /
 `continued` / `record_label`; the labels `BACKFILL_LABEL` ("simulated backfill — generated after the
-fact; not a forward track record") and `FORWARD_LABEL`.
+fact; not a forward track record") and `FORWARD_LABEL`. **Third audit:** `GradingKind.pair_watch`;
+`Verdict.void`, `GradingStatus.void`, `GradingState.void_reason`; `Scoreboard.regraded` / `void`;
+`KINDS_FOR_DECISION` — the `Finding` contract refuses a decision frozen under a kind that judges a
+different claim (a watch under a call kind); the `Finding` threshold check no longer exempts
+continuations and `FeedResponse` refuses any served card below the edition's threshold.
 
 **Deviations from the prototypes (all justified in code comments and pinned by S1-34 / the audit rows):**
 1. **Entry = next open, and every decision-bearing statistic is measured that way.** The prototypes
@@ -106,6 +126,7 @@ curl http://127.0.0.1:8010/api/pathfinder/feed?date=2026-07-22
 python -m pytest backend/tests/test_pathfinder_s1.py -q          # 34 rows
 python -m pytest backend/tests/test_pathfinder_s1_audit.py -q    # 39 audit regressions (pass-1 conventions, explicit)
 python -m pytest backend/tests/test_pathfinder_s1_audit2.py -q   # 28 second-audit regressions (pass-2 conventions)
+python -m pytest backend/tests/test_pathfinder_s1_audit3.py -q   # 33 third-audit regressions (N1–N6 + D2 + HTTP)
 python -m pytest backend/tests -q                                # the whole backend suite
 python scripts/gen_openapi.py --check                            # contract in sync
 ```
@@ -117,10 +138,16 @@ python scripts/gen_openapi.py --check                            # contract in s
 `backend/tests/test_pathfinder_s1.py`: **34 passed** (S1-01…S1-34). `backend/tests/test_pathfinder_s1_audit.py`:
 **39 passed** (A-C1…A-D1 + the real-warehouse rows, `docs/TEST_PLAN.md`). `backend/tests/test_pathfinder_s1_audit2.py`:
 **28 passed** (the second audit, A2-A1…A2-A8 + HTTP; the file does not collect against the pre-fix
-engine). P0 and P1 unchanged and passing (`gen_openapi.py --check` in sync after the contract
-additions). The pass-1 suites pin the pass-1 conventions explicitly (`PASS1` / `PASS1_DATA`); the
-pass-2 suite pins the defaults (hurdle 0.50% incl. slippage, corporate-action days and synthetic
-opens excluded).
+engine). `backend/tests/test_pathfinder_s1_audit3.py`: **33 passed** (the third audit, N1–N6 + D2 + HTTP;
+the file collects on f34ecea and **29 of 33 rows fail there** — verified in a `git worktree` at that
+commit; the four that pass are three quantifier phrases the old list already caught and a
+plain-prose sanity row). **134 passed** across the four S1 files (~85 s with the warehouse). P0 and
+P1 unchanged and passing (`gen_openapi.py --check` in sync after the contract additions). The
+pass-1 suites pin the pass-1 conventions explicitly (`PASS1` / `PASS1_DATA`); the pass-2 suite
+pins the defaults (hurdle 0.50% incl. slippage, corporate-action days and synthetic opens
+excluded). Three earlier pins were superseded by N4 and updated in place: `like_this_*`
+statistics now carry `n` = the effective count (A-C7 synthetic; real-C7 879, not 2,655; A2-A3
+879, not 2,649).
 
 ### 3.2 The real run — thirteen editions, 2026-07-13 → 2026-07-29: a SIMULATED BACKFILL, not a forward track record
 
@@ -132,45 +159,64 @@ is a track record. The forward record starts at zero and begins with the first s
 session's own date after the EOD bar lands (§8).
 
 **Provenance of this table:** `var/pathfinder_research.db`, built by `run_pathfinder_scan.py
---archive-store --i-understand-this-archives-the-store --backfill 12` on the second-pass code
-(`engine_version` = `pathfinder_research@1.2.0+code.84efb0cfb4dd`, `rule_version` =
-`grading_rules@1.2.0+code.d5f3e3fce7ac`). The previous store (pass-1 code, 49 findings, n = 39) is
-`var/pathfinder_research.db.archived-20260910T091954` — archived, not deleted (A8); its numbers are
-superseded and not comparable. Data rules on this build: 179 corporate-action bars + 45 suspected +
-6 glitch bars excluded; 19,083 synthetic opens carry no outcome. Threshold 0.65, hurdle 0.50%.
-**Never padded; continuations are not publications; n is independent:**
+--archive-store --i-understand-this-archives-the-store --backfill 12` on the third-pass code
+(`engine_version` = `pathfinder_research@1.3.0+code.9dbfc17c712d`, `rule_version` =
+`grading_rules@1.3.0+code.fd36d023094d`, store schema 3, `claim_tolerance_pp = 1.0` in every
+edition's params). The pass-2 store is `var/pathfinder_research.db.archived-20260910T100104` (pass-1:
+`…T091954`; two refused partial builds from the D2 fault, §5.8: `…T100402`, `…T101535`) — archived,
+not deleted (A8); their numbers are superseded and not comparable. Data rules on this build: 179
+corporate-action bars + 45 suspected + 6 glitch bars excluded; 19,083 synthetic opens carry no
+outcome. Threshold 0.65, hurdle 0.50%.
 
-| Edition | Candidates | Published (new) | Continued | Graded that day | Scoreboard after (independent n; pending = as of that date) |
-|---|---|---|---|---|---|
-| 07-13 | 4 | 4 | 0 | — | pending 4 |
-| 07-14 | 5 | 2 | 2 | 2 | R1 W0 I1 n=2 · pending 4 |
-| 07-15 | 5 | 2 | 2 | 2 | R1 W0 I3 n=4 · pending 4 |
-| 07-16 | 5 | 2 | 1 | 2 | R3 W0 I3 n=6 · pending 4 |
-| 07-17 | 5 | 1 | 2 | 1 | R4 W0 I3 n=7 · pending 4 |
-| 07-20 | 6 | 3 | 0 | 3 | R6 W1 I3 n=10 · pending 4 |
-| 07-21 | 6 | 3 | 1 | 1 | R6 W1 I4 n=11 · pending 6 |
-| 07-22 | 6 | 4 | 2 | 2 | R8 W1 I4 n=13 · pending 8 |
-| 07-23 | 6 | 1 | 3 | 4 | R10 W2 I5 n=17 · pending 5 |
-| 07-24 | 6 | 1 | 3 | 1 | R10 W2 I6 n=18 · pending 5 |
-| 07-27 | 5 | 1 | 2 | 3 | R11 W3 I7 n=21 · pending 3 |
-| 07-28 | 6 | 1 | 1 | 2 | R12 W3 I8 n=23 · pending 2 |
-| 07-29 | 7 | 3 | 0 | 2 | **Right 12 · Wrong 4 · Inconclusive 9 · n=25 (independent) · forward 0 · backfilled 25** · 19 continuations folded · pending 3 |
+**What the second-pass version of this section claimed, and what was true.** It said "never padded;
+continuations are not publications; n is independent" and "`n_total = n`: nothing was graded
+twice". Neither held. Fifteen of the nineteen continuations it served were **below the 0.65
+threshold** (min 0.3952) — the 07-23 feed served one publishable card and three sub-threshold ones
+(0.649, 0.558, 0.535) — because a repeat of an open claim was recognised *before* the threshold was
+applied and the `Finding` contract exempted it. And the volume-anomaly debunk was **graded three
+times as three independent claims** (ANURAS 07-13 → TORNTPHARM 07-16 → SOBHA 07-21, each inside
+the previous horizon, signatures `…|-1.20` / `…|-1.10` / `…|-1.10`) because the claim was keyed on a
+rounded string; the scoreboard showed `volume_anomaly (1, 2, 0)` with `n_total == n`. What is now
+enforced: the threshold gates every served card, continuation or not (`Finding`, `FeedResponse`,
+the scan order); the claim is (template, decision, comparison group) with the primary statistic
+inside 1 pp; and `n` is recomputed from the grade rows as one grade per claim per non-overlapping
+horizon (`regraded = n_total − n` on the served scoreboard) rather than assumed from publication.
 
-**28 new findings** published out of 72 candidates (the pass-1 store published 49 of 72 — the
-second auditor's "the threshold does not gate"); **19 continuations** served but not counted; 25
-independent grades from 25 grade rows (`n_total = n`: nothing was graded twice). What the
-continue semantics did to the repeats the auditor counted: Realty was published **once** (07-13,
-`watch`, graded Right on 07-20: excess −1.13%) and continued four times; IT once (07-22, `watch`)
-and continued four times; HDFCBANK/ICICIBANK once (07-20, `watch` at the 0.50% hurdle — the spread
-trade's expectancy is −0.20% net of both legs, so it is no longer an experiment) and continued
-four times; the volume debunk chains (ANURAS → ALKEM, UNIONBANK; SOBHA → TTML, PVRINOX, …) are one
-claim each. Dip cards: four published in thirteen editions (the identical group statistic is
-novelty 0.25 and mostly falls below the bar), graded 3 Right · 1 Inconclusive.
+| Edition | Candidates | Published (new) | Continued (served) | Below threshold (of which repeats of an open claim) | Graded that day | Scoreboard after (independent n; pending = as of that date) |
+|---|---|---|---|---|---|---|
+| 07-13 | 4 | 4 | 0 | 0 | — | pending 4 |
+| 07-14 | 5 | 2 | 1 | 2 (1) | 2 | R1 W0 I1 n=2 · pending 4 |
+| 07-15 | 5 | 2 | 1 | 2 (1) | 2 | R1 W0 I3 n=4 · pending 4 |
+| 07-16 | 5 | 1 | 0 | 4 (2) | 2 | R3 W0 I3 n=6 · pending 3 |
+| 07-17 | 5 | 1 | 0 | 4 (2) | 1 | R4 W0 I3 n=7 · pending 3 |
+| 07-20 | 6 | 2 | 0 | 4 (0) | 3 | R6 W1 I3 n=10 · pending 2 |
+| 07-21 | 6 | 2 | 1 | 3 (0) | 0 | R6 W1 I3 n=10 · pending 4 |
+| 07-22 | 6 | 4 | 1 | 1 (1) | 1 | R7 W1 I3 n=11 · pending 7 |
+| 07-23 | 6 | 1 | 0 | 5 (3) | 3 | R9 W1 I4 n=14 · pending 5 |
+| 07-24 | 6 | **0** | 0 | 6 (3) | 1 | R9 W1 I5 n=15 · pending 4 |
+| 07-27 | 5 | 1 | 0 | 4 (2) | 2 | R11 W1 I5 n=17 · pending 3 |
+| 07-28 | 6 | 1 | 0 | 5 (1) | 2 | R12 W1 I6 n=19 · pending 2 |
+| 07-29 | 7 | 4 | 0 | 3 (0) | 2 | **Right 12 · Wrong 2 · Inconclusive 7 · n=21 (independent) · n_total 21 · regraded 0 · void 0 · forward 0 · backfilled 21** · 4 continuations served · pending 4 |
 
-By template (independent grades): dip (3, 0, 1) · market_regime (0, 0, 6) · relationship (0, 1, 0)
-· surge (6, 0, 2) · theme_cycle (2, 1, 0) · volume_anomaly (1, 2, 0). The market card's no-trade is
-Inconclusive six times out of six — at a 0.50% hurdle the equal-weight market's next-session move
-never left the band; that is the honest reading of a null result, not a win.
+**25 new findings** published out of 72 candidates (pass 2: 28 new + 19 continuations served; pass
+1: 49), **4 continuations served** (every one ≥ 0.65 on its own novelty-discounted score: Realty
+07-14/07-15, HDFCBANK/ICICIBANK 07-21/07-22), **16 repeats of an open claim withheld as
+sub-threshold candidates** (on the record in `pf_candidates` with their scores and the root they
+would have continued). **07-24 published nothing** — a valid edition under addendum 1. 21 independent
+grades from 21 grade rows: with continuation detection on the claim rather than the string,
+TORNTPHARM 07-16 is a (sub-threshold) continuation of ANURAS and SOBHA 07-21 is a new root only
+because ANURAS's horizon completed on 07-20 — no re-grade could form, so `regraded = 0` here; the
+fold is exercised by A3-N2 on a store where detection is disabled. The HDFCBANK/ICICIBANK watch of
+07-20 is graded **Right** by `pair_watch` (spread trade −2.26%: not worth calling) — it was Wrong
+under `pair_convergence`, a claim the card did not make. Dip cards: three published, graded 2 Right ·
+1 Inconclusive.
+
+By template (independent grades): dip (2, 0, 1) · market_regime (0, 0, 4) · relationship (1, 0, 0)
+· surge (6, 0, 2) · theme_cycle (2, 1, 0) · volume_anomaly (1, 1, 0). The market card's no-trade is
+Inconclusive four times out of four — at a 0.50% hurdle the equal-weight market's next-session move
+never left the band; that is the honest reading of a null result, not a win. The volume debunk is
+now graded twice on two non-overlapping horizons (ANURAS 07-13 Wrong, SOBHA 07-21 Right) instead of
+three times on overlapping ones.
 
 ### 3.3 Port fidelity (S1-34, real warehouse, close 2026-07-29) — under the pass-1 data rules, with the pass-2 deltas
 
@@ -192,50 +238,44 @@ expectancy −0.20% → watch. This is a simulated backfill of base rates, not a
 ### 3.4 Determinism and end-to-end verification
 
 **Determinism (C1).** The store was built twice from scratch (`--backfill 12`) into two files by two
-independent processes on the second-pass code. Compared table by table with only timestamps
-(`computed_at`, `at`, `frozen_at`, `graded_at`, `created_at`, `generated_at`) removed: **47/47
-findings identical (28 new + 19 continuations), 25/25 grades identical (verdicts and realised
-facts), 13/13 editions identical, 72/72 candidates identical.** Every grade carries
-`rule_version = grading_rules@1.2.0+code.d5f3e3fce7ac`. The same property is pinned by A-C1 on the
-synthetic universe and on the real 07-29 seal. A second run of the scan for the latest date
-(2026-07-29) is refused as already published (append-only), grades nothing new, and the edition
-stays `backfilled = 1` — the warehouse's last bar is six weeks old, so no edition can be forward
-until the EOD pipeline lands a bar on its own day; the same-day case is pinned by A2-A1.
+independent processes on the third-pass code, **sequentially** (see §5.8 for why the first attempt,
+run in parallel and then alone, was refused by the C1 guard — the numexpr fault, now fixed).
+Compared table by table with only timestamps (`computed_at`, `at`, `frozen_at`, `graded_at`,
+`created_at`, `generated_at`) removed: **13/13 editions, 29/29 findings (25 new + 4 continuations),
+21/21 grades (verdicts and realised facts), 72/72 candidates identical.** Every grade carries
+`rule_version = grading_rules@1.3.0+code.fd36d023094d`. The same property is pinned by A-C1 on the
+synthetic universe and on the real 07-29 seal; the numexpr/bottleneck backends are pinned off by
+A3-D2. Build time 1 m 45 s per store.
 
-**Over HTTP** (`uvicorn pathfinder.mock_app:app --port 8010`, real calls):
+**Over HTTP** (`uvicorn pathfinder.mock_app:app --port 8010`, real calls against the rebuilt store):
 
 ```
-GET /api/pathfinder/feed -> 200 | edition 2026-07-29 | regime NEUTRAL (risk score 46/100, breadth>200DMA 56%) | llm none
-backfilled=True | record_label: simulated backfill — generated after the fact; not a forward track record
-universe 497 · candidates 7 · published 3 · continued 0 · threshold 0.65
-  #1 what_matters_now theme_cycle  Telecommunication  reject    u=0.86 n=776    rotation_reject/5 H=0.5 pending backfilled=True
-  #2 what_matters_now surge        PCBL               reject    u=0.71 n=24302  no_trade_call/1   H=0.5 pending backfilled=True
-  #3 what_matters_now dip          J&KBANK            no_trade  u=0.66 n=12368  no_trade_call/1   H=0.5 pending backfilled=True
-       record (every card): simulated backfill — generated after the fact; not a forward track record
-data_source: kanida_falcon.ohlc_daily (NSE EOD; split/bonus-adjusted; demergers and some other corporate actions UNADJUSTED — corporate-action days excluded, see provenance)
-disclosures: Survivorship (no delisted name; today's members and sector labels on history) · split/bonus-adjusted only ·
-             corporate-action days excluded (table ex-dates + |move| > 30%) · synthetic opens carry no outcome
-cost_convention: pf_cost_hurdle_v2: 0.50% round-trip hurdle = 0.30% costs + 0.10% slippage each way (slippage stub; founder inputs pending) ...
-facts with n=0: [] | bodies with 'of 0 times': []
-SCOREBOARD Right 12 · Wrong 4 · Inconclusive 9 · n=25 (independent) · n_total 25 · continued 19 · forward 0 · backfilled 25 · pending 3
-  record_label: simulated backfill — generated after the fact; not a forward track record
-  by template: dip (3,0,1) · market_regime (0,0,6) · relationship (0,1,0) · surge (6,0,2) · theme_cycle (2,1,0) · volume_anomaly (1,2,0)
-GET /feed?date=2026-07-23 -> 200 · published 1 · continued 3 · backfilled True
-  NIFTY 50 (equal weight)  no_trade  graded     inconclusive
-  HDFCBANK / ICICIBANK     continue  continued  continues fnd_20260720_pair_hdfcbank_icicibank
-  Information Technology   continue  continued  continues fnd_20260722_theme_information_technology
-  PVRINOX                  continue  continued  continues fnd_20260721_volume_sobha
-GET /feed?date=2026-07-13 theme Realty watch -> RIGHT · realised excess -1.13% · rank_at_horizon 1 (recorded, not judged) · hurdle 50 bps
-GET /feed?date=DROP -> 400 · GET /feed?date=1999-01-01 -> 404 · GET /api/pathfinder/loop -> 200 (P0 surface intact)
+GET /api/pathfinder/feed?date=2026-07-23 -> 200 | backfilled=True | threshold 0.65 | published 1 · continued 0 · served 1
+  #1 what_matters_now market_regime  NIFTY 50 (equal weight)  no_trade  u=0.650  no_trade_call/1  graded inconclusive
+     (pass 2 served this card plus three continuations at 0.649 / 0.558 / 0.535 — now pf_candidates rows
+      "below usefulness threshold (continues fnd_20260720_pair_hdfcbank_icicibank / …theme_information_technology / …volume_sobha)")
+  SCOREBOARD R9 W1 I4 n=14 · n_independent 14 · n_total 14 · regraded 0 · void 0 · continued 4 · pending 5 · forward 0 · backfilled 14
+
+GET /api/pathfinder/feed -> 200 | edition 2026-07-29 | regime NEUTRAL | backfilled=True | published 4 · continued 0 · served 4
+  #1 what_matters_now theme_cycle     Telecommunication  reject    u=0.86  rotation_reject/5  pending
+  #2 what_matters_now surge           PCBL               reject    u=0.71  no_trade_call/1    pending
+  #3 what_matters_now volume_anomaly  DCMSHRIRAM         no_trade  u=0.69  no_trade_call/5    pending
+  #4 discovery        dip             J&KBANK            no_trade  u=0.66  no_trade_call/1    pending
+  record_label (edition, every card, scoreboard): simulated backfill — generated after the fact; not a forward track record
+  SCOREBOARD Right 12 · Wrong 2 · Inconclusive 7 · n=21 (independent) · n_total 21 · regraded 0 · void 0 · continued 4 · forward 0 · backfilled 21 · pending 4
+  by template: dip (2,0,1) · market_regime (0,0,4) · relationship (1,0,0) · surge (6,0,2) · theme_cycle (2,1,0) · volume_anomaly (1,1,0)
+
+GET /feed?date=2026-07-20 HDFCBANK / ICICIBANK watch -> kind pair_watch · verdict RIGHT · spread_trade -2.2575%
+  rule.right: "Right if it was not worth calling: the spread trade lost more than twice the cost hurdle (two legs)"
+GET /feed?date=DROP -> 400 · GET /feed?date=1999-01-01 -> 404
 ```
 
-What the feed now shows against the second audit: the backfill label on the edition, every card and
-the scoreboard, with **forward 0**; repeated open claims as `continue` → `continued` pointing at
-their root, not as new publications and not in `published_count`; **independent n** next to
-`n_total` and the folded count; corporate-action days excluded and disclosed, the data source
-labelled honestly; the theme decisions judged against the slippage-inclusive hurdle on the graded
-metric's conditional base rate; no zero-count statistic anywhere. Four of the 07-29 cards were
-computed and **not** published (below 0.65) — in `pf_candidates` with their scores.
+No served card is below the threshold on any edition (asserted over every `pf_findings` row and by
+the `FeedResponse` contract); the scoreboard carries `regraded` and `void` next to `n_total`; the
+backfill labels are intact on the edition, every card and the scoreboard; the pair watch is judged
+on the claim it made. The 07-29 edition computed seven cards and published four; the three below
+0.65 (the market card at 0.64, IT at 0.63, the pair at 0.59) are in `pf_candidates` with their
+scores.
 
 ## 4. The quant audit
 
@@ -288,6 +328,22 @@ running under the pass-1 conventions **explicitly** (`PASS1` = no slippage, synt
 `PASS1_DATA` also keeps corporate-action days) — the same device pass 1 used for the 770-flip
 reproduction with the glitch guard off. The pass-2 suite pins the defaults.
 
+### Third audit (re-audit of commit f34ecea) — N1–N6, all fixed and pinned in `backend/tests/test_pathfinder_s1_audit3.py`
+
+A third `dev-quant-auditor` pass verified all sixteen earlier fixes in place and found three
+CONFIRMED edge-leaks and three PLAUSIBLE ones. All six fixed (plus D2, found while rebuilding); 29 of the suite's 33 rows fail on
+f34ecea (verified in a `git worktree` at that commit — the file collects there because the new
+symbols are imported inside the rows).
+
+| # | Finding (third auditor) | What changed | Pinned by |
+|---|---|---|---|
+| **N1** (confirmed) | Continuations bypassed the usefulness threshold: `scan.py` tested `root is not None` before `s.total < s.threshold`, and `Finding` exempted continuations from the threshold invariant. In the store 15 of 19 continuations were below 0.65 (min 0.3952); the 07-23 feed served one publishable card and three sub-threshold ones (0.649 / 0.558 / 0.535). §3.2 said "never padded". | The threshold is applied **first**, to every draft. A sub-threshold repeat of an open claim goes to `pf_candidates` (`decision = continue`, "below usefulness threshold (continues <root>)") and is not served. `Finding` refuses any card below its threshold, continuation or not; `FeedResponse` refuses a served card below the edition's threshold. | A3-N1 (×2), A3-HTTP |
+| **N2** (confirmed) | Rounded signatures re-opened the same claim: ANURAS 07-13 `…\|-1.20` (h = 5, due 07-20) → TORNTPHARM 07-16 `…\|-1.10` published NEW and graded while ANURAS was open → SOBHA 07-21 `…\|-1.10` NEW while TORNTPHARM was open. One null claim, three overlapping grades (W, W, R), reported as `volume_anomaly (1,2,0)` with `n_total == n`. §3.2 said "nothing was graded twice". | Each template declares `claim_parts`: the claim is (template, decision, comparison group) and the next signature part is the primary statistic (hit rate; the anomaly's lift, now leading its signature); `same_claim()` folds a repeat inside `cfg.claim_tolerance_pp` = **1 pp**. `novelty()` / `open_root()` match on the claim. `scoreboard()` computes `n` from the grade rows: one grade per claim per non-overlapping horizon — a grade whose claim was still being measured by an earlier grade at its edition date is folded (`regraded = n_total − n`), whatever the store holds. The auditor's chain yields ONE grade. | A3-N2 (×4), A3-HTTP |
+| **N3** (confirmed) | The pair `watch` was graded by `pair_convergence` — a claim the card did not make. `fnd_20260720_pair_hdfcbank_icicibank` said "a watch, not a call" and was graded WRONG because the spread lost 2.26% (had it converged the non-call would have been RIGHT — flattering). | The kind follows the **decision**: `GradingKind.pair_watch` — Right if the declined spread trade lost more than twice the hurdle, Wrong if it paid more than twice, Inconclusive inside — listed in `RELATIONSHIP.grading_kinds`; `KINDS_FOR_DECISION` in the `Finding` contract makes a watch under a call kind unrepresentable. On the rebuilt store the 07-20 watch is graded **Right** by `pair_watch`. | A3-N3 (×2), real-N3 (HDFCBANK/ICICIBANK sealed 07-20: −2.26% → Right) |
+| **N4** (plausible) | `like_this_*` statistics were minted with `n` = the overlapping session count (2,645) while the decision, the z and the provenance used the effective 878; the fact-level `sample_flag` derived from the inflated n. | Minted on `nL_eff`; `like_this_cases` stays a count fact labelled overlapping. Three earlier pins updated (§3.1). | A3-N4 |
+| **N5** (plausible) | A permanently unresolvable outcome (synthetic next open, corporate action inside the window, > 20% of a sector's members NaN) returned `None` from `evaluate` forever → the finding stayed `pending` indefinitely. | When the horizon has completed inside the seal and the outcome is a hole, `evaluate` returns a **`void`** grade with the reason (`Verdict.void`, `GradingStatus.void`, `void_reason`); stored in `pf_grades` (CHECK extended), counted in `Scoreboard.void`, excluded from `n` / `n_total` / `pending`. `None` now means only "not yet due". | A3-N5 (×2) |
+| **N6** (plausible) | `QUANTIFIER_RE` missed "a handful", "few", "many", "several", "a couple", "the bulk", "nearly every"; the probe "A handful of cases bounced, and many did not." was accepted without a fact ref. | The list extended with those and "most", "some", "plenty", "a majority", "almost all", "hardly any", "numerous", "virtually every", "the lion's share" … — each needs a fact reference in its sentence. | A3-N6 (×19) |
+
 ## 5. Risks
 
 ### 5.1 The "unexplained regime reading" was a stale run — corrected account
@@ -300,6 +356,10 @@ during the session; it also carried `big_move = 0.0%` over 13,119 cases on the 0
 What now prevents a repeat: every edition and every fact records the code hash; a determinism test
 (synthetic and real) pins two builds of the same seal to identical cards; a 0%/100% share over ≥ 100
 cases cannot be minted; the smoke store is gone. The `build_regime` long-frame cross-check stays.
+**Third-pass correction:** the `big_move = 0.0%` in that store was very probably not superseded
+code at all but the intermittent numexpr fault found and fixed in the third pass (§5.8, D2) — the
+signature is identical. The regime reading may still have been stale code; the zero share was
+the library fault.
 
 ### 5.2 The model is not in the loop yet
 No `ANTHROPIC_API_KEY`; the recorded provider has no cassettes for feed keys. Every real edition is
@@ -337,6 +397,26 @@ and every surface says so: `record_label`, `backfilled` on each card and grade, 
 becomes a forward record only from the first scan run on a session's own date after the EOD bar lands
 (§8). Until then nothing here is a track record, and the hand-back does not call it one.
 
+### 5.8 D2 — the engine was intermittently NON-deterministic: pandas' numexpr backend zeroed a forward column (third pass; found, fixed, pinned)
+While rebuilding for the third pass, three of four full rebuilds were refused by the C1
+degenerate-share guard — on different seals and different facts each time
+(`volume_unionbank_big_move = 0.0% over 13,100` at 07-15; `theme_realty_like_this_beat = 0.0%
+over 877` at 07-15 and again at 07-17), while the fourth passed all thirteen editions, and every
+refused seal recomputed correctly on its own. A probe that recomputed the theme and anomaly cards
+for every seal four times in one process found it: **with numexpr enabled, one pass produced an
+`f5` column with `abs().mean() == 0.0` and seven more non-NaN rows than every other pass** — the
+1.25M-row `_c5 / next_open - 1` arithmetic in `data.sealed()` is routed by pandas through numexpr
+(2.14.1, 12 threads, under pandas 2.3.3 / numpy 2.3.5), which intermittently returned garbage on
+this host. **With numexpr disabled the same probe had zero mismatches** and the two rebuilds in
+§3.4 are byte-identical. Fix: `research/config.py` turns `compute.use_numexpr` and
+`compute.use_bottleneck` OFF for any process that imports the engine; pinned by A3-D2.
+Two consequences: (1) the guard did exactly what it exists for — a zero share over thousands of
+cases was refused at mint time and no such edition ever reached a store; (2) **§5.1 is corrected**
+— the first pass's smoke store (`big_move = 0.0%` over 13,119 cases) has exactly this signature
+and was almost certainly this bug, not superseded code; the code-hash stamping, the determinism
+rows and the guard remain the right defences, and they are what caught it this time. The
+partial stores from the refused builds were archived, not deleted (§7).
+
 ### 5.6 Not built (S2/S3 by design)
 No virtual capital, no experiment registry/versions, no promotion gate, no swipeable UI.
 
@@ -352,7 +432,8 @@ No virtual capital, no experiment registry/versions, no promotion gate, no swipe
 | Usefulness threshold + weights | 0.65; weights 0.30/0.20/0.30/0.20; template relevance 1.0/1.0/0.7/0.6/0.5/0.5; decision weights | `config.usefulness_threshold`, `ranking.py` |
 | **Anomaly minimum lift** (new, C4) | **5 percentage points** over the unconditional rate | `config.anomaly_min_lift_pp` / `KANIDA_PF_ANOMALY_MIN_LIFT_PP` |
 | Expectancy winsorisation (new, P5) | 1% each tail | `config.expectancy_winsor_pct` |
-| Per-type grading rules | the seven kinds above, ±hurdle band, pair = 2× | `grading.build_rule` |
+| **Claim tolerance** (new, third audit N2) | **1 percentage point** on the primary statistic (hit rate / lift): a repeat inside it is the same claim | `config.claim_tolerance_pp` (recorded in every edition's `params_json`) |
+| Per-type grading rules | the eight kinds above (incl. `pair_watch`), ±hurdle band, pair = 2× | `grading.build_rule` |
 | Pair list | (TMPV, M&M) (HDFCBANK, ICICIBANK) (INFY, TCS) (SBIN, BANKBARODA) | `config.pairs` / `KANIDA_PF_PAIRS` |
 | Template parameters | dip −6%, surge +6%, hit-rate bar 58%, fade bar 45%, volume 3× / ±1.5% / 3% move, regime band ±0.2%, theme window 15 / min 5 names / horizon 5 / "like this" ≥ 9 of 15, pair z-window 60 / 2σ | `config.py` |
 | "What matters now" size | 3 | `config.what_matters_now` |
@@ -370,6 +451,12 @@ Second pass: `backend/tests/test_pathfinder_s1_audit2.py` (new), `docs/openapi.y
 `GradingStatus.continued`), `docs/TEST_PLAN.md` (the 28 second-audit rows, known gaps 5–6),
 `docs/DATA_MODEL.md` (the new columns, archive-not-delete), `var/pathfinder_research.db` rebuilt
 (the previous store is `var/pathfinder_research.db.archived-<timestamp>`, not deleted).
+Third pass: `backend/tests/test_pathfinder_s1_audit3.py` (new, 33 rows), `docs/openapi.yaml`
+regenerated (`pair_watch`, `void`, `void_reason`, `regraded`, `Scoreboard.void`),
+`backend/pathfinder/fixtures/*.json` refreshed, `docs/TEST_PLAN.md` (the third-audit rows, the
+three superseded pins), `docs/DATA_MODEL.md` (void verdicts, the independence fold, schema 3),
+`var/pathfinder_research.db` archived and rebuilt again (schema 3; the pass-2 store is
+`var/pathfinder_research.db.archived-20260910T100104`).
 
 ## 8. Next step
 

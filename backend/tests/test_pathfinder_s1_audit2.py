@@ -245,7 +245,7 @@ def test_real_a3_it_leader_is_judged_on_the_graded_metrics_conditional_base_rate
     assert v["like_this_typical_excess"].value == pytest.approx(0.07, abs=0.01)
     assert v["like_this_expectancy"].value == pytest.approx(-0.37, abs=0.01) and v["like_this_expectancy"].value < 0
     assert v["like_this_cases"].value == 2649 and v["like_this_independent"].value == 879 == d.n
-    assert v["like_this_beat"].n == 2649 and "overlapping" in v["like_this_cases"].label
+    assert v["like_this_beat"].n == 879 and "overlapping" in v["like_this_cases"].label     # third audit N4: effective n
     # persistence: the overlapping 70% is context and says so; the mechanical h = 15 number is ~25%
     assert v["persistence"].value == pytest.approx(70.0, abs=0.1) and "OVERLAPPING" in v["persistence"].label
     assert v["persistence_mechanical"].value == pytest.approx(25.5, abs=0.5) and v["persistence_mechanical"].n == 220

@@ -55,9 +55,16 @@ NUMBER_WORD_RE = re.compile(
     r"|\bone\s+(?:in|out\s+of)\s+\w+",
     re.IGNORECASE,
 )
+#: S1 third audit N6 — "a handful", "few", "many", "several", "a couple", "the bulk", "nearly
+#: every" (and "most", "some", "plenty", "a majority", "almost all", "hardly any") are counts the
+#: model made up. "A handful of cases bounced, and many did not." was accepted with no fact.
 QUANTIFIER_RE = re.compile(
-    r"\b(?:majority|minority|most(?:\s+of)?(?:\s+the)?\s+(?:time|cases|days|sessions|stocks|"
-    r"names|sectors|pairs)|almost\s+all|nearly\s+all|all\s+but|almost\s+always|almost\s+never|"
+    r"\b(?:(?:a\s+|the\s+)?(?:vast\s+|large\s+|small\s+|slim\s+|narrow\s+|clear\s+)?majority|minority|"
+    r"most|some|few|fewer|many|several|plenty|numerous|countless|"
+    r"a\s+handful|handfuls?|a\s+couple|couples?\s+of|the\s+bulk|the\s+lion'?s\s+share|"
+    r"hardly\s+any|scarcely\s+any|barely\s+any|next\s+to\s+none|"
+    r"almost\s+all|nearly\s+all|virtually\s+all|all\s+but|almost\s+every|nearly\s+every|virtually\s+every|"
+    r"almost\s+always|almost\s+never|nearly\s+always|"
     r"always|never|usually|rarely|seldom|often|frequently|typically|mostly|commonly|"
     r"more\s+often\s+than\s+not|every\s+time|each\s+time)\b",
     re.IGNORECASE,

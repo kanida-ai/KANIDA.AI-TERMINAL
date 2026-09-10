@@ -93,7 +93,7 @@ def main() -> int:
         moved = archive_store(cfg.research_db, acknowledged=args.ack_archive)
         if moved is not None:
             print(f"archived the previous store to {moved}")
-    store = ResearchStore(cfg.research_db)
+    store = ResearchStore(cfg.research_db, claim_tolerance_pp=cfg.claim_tolerance_pp)
     narrator = _narrator(args.llm)
 
     full = MarketData.load(cfg, as_of=args.date)
@@ -130,7 +130,8 @@ def main() -> int:
             print(f"  GRADED     {fid} -> {v.upper()}")
         sb = store.scoreboard(rep.data_as_of)
         print(f"  SCOREBOARD Right {sb.right} · Wrong {sb.wrong} · Inconclusive {sb.inconclusive} · "
-              f"n={sb.n} (independent; {sb.n_total} grade rows, {sb.continued} continuations folded) · "
+              f"n={sb.n} (independent; {sb.n_total} grade rows, {sb.regraded} re-grades folded, "
+              f"{sb.continued} continuations folded, {sb.void} void) · "
               f"forward {sb.forward.n} · backfilled {sb.backfilled.n} · pending {sb.pending} · {sb.record_label}")
     store.close()
     print(f"\nwritten to {cfg.research_db}")

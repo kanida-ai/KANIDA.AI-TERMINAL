@@ -8,7 +8,7 @@ what it built. **Rule: no requirement without a test row.**
 | **Pathfinder P0** (contract + mock) | below | `backend/tests/test_pathfinder_p0.py` | **37 passing** |
 | **Pathfinder P1** (engine) | below | `backend/tests/test_pathfinder_p1.py` | **60 rows** |
 | **Pathfinder P2** (frontend) | below | `kanida-app/tests/{lib,contract}.test.ts` | **31 passing** |
-| **Pathfinder S1** (research engine + feed) | below | `backend/tests/test_pathfinder_s1.py` + `test_pathfinder_s1_audit.py` + `test_pathfinder_s1_audit2.py` | **34 + 39 + 28 passing** |
+| **Pathfinder S1** (research engine + feed) | below | `backend/tests/test_pathfinder_s1.py` + `test_pathfinder_s1_audit.py` + `test_pathfinder_s1_audit2.py` + `test_pathfinder_s1_audit3.py` | **34 + 39 + 28 + 33 passing** |
 | Trader slice | *to be appended by session 01/S1.1* | — | not started |
 
 Run:
@@ -319,6 +319,31 @@ reproduce.
 | A2-A7 | a bar whose open equals its close is `_synth_open`; `f{h}` of the row entering at it is NaN while `r{h}cc` is untouched; with the rule off the outcome is exactly 0.0 (the artefact); **real**: 19,083 synthetic-open bars; dip hit 50.6% and median **+0.10%** (was 0.0%) → still no_trade | A7 |
 | A2-A8 | `archive_store` refuses without `--i-understand-this-archives-the-store`, renames to `.archived-<stamp>`, never deletes; `--fresh` exits; the anomaly grader reads `r{h}cc` for the RULE's horizon (a 3-session rule is Right where a 5-session rule is Wrong); the theme grader's realised market move equals the template's `fmkt` on the same date and `market_return.n` counts that market's names | A8 |
 | A2-HTTP | `/api/pathfinder/feed` serves `backfilled`, `record_label`, `continued_count`, per-card `grading.record` / `continues` / status `continued`, provenance `disclosures`, the honest `data_source`, no fact with n = 0, and a scoreboard with `forward.n == 0`, `backfilled.n == n == n_independent`, `continued ≥ 1` | A1/A2/A4/A6 |
+
+Three pins in the pass-1/pass-2 suites were superseded by the third audit's N4 and updated in
+place: `like_this_*` statistics now carry `n` = the effective (independent) count, not the
+overlapping session count (A-C7 synthetic: `n == like_this_independent`; real-C7: 879, not 2,655;
+A2-A3 real: 879, not 2,649).
+
+### S1 THIRD quant-audit regressions (`backend/tests/test_pathfinder_s1_audit3.py`, 33 rows)
+
+A third, independent re-audit of commit f34ecea verified all sixteen earlier fixes and found six
+further leaks (`docs/handbacks/PF-S1.md` §4, "Third audit"). The file **collects** on f34ecea
+(new symbols are imported inside the rows) and **29 of its 33 rows fail there** — verified by
+running it in a `git worktree` at that commit; the four that pass are three quantifier phrases the
+old list already caught (`a majority`, `almost all`, `the vast majority`) and a plain-prose sanity
+row.
+
+| Row | Asserts | Finding |
+|---|---|---|
+| A3-N1 | the usefulness threshold is applied FIRST: a sub-threshold repeat of an open claim is a `pf_candidates` row (`decision = continue`, reason `below usefulness threshold (continues fnd_…)`, `published = 0`, no finding id) and is NOT served; `rep.continued` is empty; `Finding` refuses a continuation below its threshold (the exemption is gone); `FeedResponse` refuses any served card below the edition's threshold | N1 |
+| A3-N2 | `independent_grades`: the ANURAS 07-13 → TORNTPHARM 07-16 → SOBHA 07-21 chain (lift −1.20 / −1.10 / −1.10, each inside the previous horizon) is ONE independent grade; a repeat on/after the previous due session is independent; a different decision or a statistic beyond the tolerance is a new claim; `claim_of` / `same_claim` read each template's `claim_parts`; `open_root` and `novelty` treat a hit rate re-read 0.9 pp away as the same open claim (continue, 0.25) and 1.5 pp away as new; with publication-time detection disabled the scoreboard still reports `n_total > n == n_independent`, `regraded = n_total − n` from the grade rows | N2 |
+| A3-N3 | `GradingKind.pair_watch` exists and is in `RELATIONSHIP.grading_kinds`; a losing spread trade is **Right**, a paying one Wrong, inside twice the hurdle Inconclusive (the call kind reads the other way); the template freezes `pair_watch` for a watch and `pair_convergence` for an experiment; the `Finding` contract refuses a `watch` under `pair_convergence` (`KINDS_FOR_DECISION`); **real**: HDFCBANK/ICICIBANK sealed 2026-07-20 is a watch frozen under `pair_watch`, spread trade −2.26% by 07-27 → **Right** (was Wrong) | N3 |
+| A3-N4 | every `like_this_*` statistic carries `n` = `like_this_independent` = the card's n; the overlapping count is its own labelled count fact; the fact-level `sample_flag` derives from the effective n | N4 |
+| A3-N5 | a directional rule whose entry bar is a synthetic open returns a `void` `GradeResult` with the reason once the horizon completed, `None` while it has not; pair and theme kinds close the same way; through the store a void finding is status `void` / verdict `void` with `void_reason`, is not in `pending()`, `scoreboard.void == 1`, `n` and `n_total` exclude it | N5 |
+| A3-N6 | "A handful of cases bounced, and many did not." is rejected; each of "a handful", "few", "many", "several", "a couple", "the bulk", "nearly every", "most", "some", "plenty", "a majority", "almost all", "hardly any" (and siblings) needs a fact reference in its sentence; cited in the same sentence it passes; plain prose passes | N6 |
+| A3-HTTP | `/api/pathfinder/feed` serves nothing below `usefulness_threshold`, `continued_count == 0` where the repeat was sub-threshold, and a scoreboard carrying `regraded == n_total − n` and `void` | N1/N2/N5 |
+| A3-D2 | importing the research engine turns pandas' `compute.use_numexpr` and `compute.use_bottleneck` OFF — on this host numexpr 2.14.1 intermittently returned an all-zero `f5` column for the 1.25M-row forward-return arithmetic (three of four rebuilds refused by the C1 guard; a 4-pass probe: 1 mismatch with numexpr on, 0 off) | D2 (found while rebuilding; `PF-S1.md` §5.8) |
 
 ### Known gaps for S1
 

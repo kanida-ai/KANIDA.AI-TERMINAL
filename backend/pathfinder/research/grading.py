@@ -21,6 +21,18 @@ realised FACT; it is no longer a verdict input.
 The rule text is versioned by the CONTENT HASH of this file (`GRADING_RULES_VERSION`,
 S1 audit P2), and a rule's `spec` must be complete at build time — `evaluate()` never
 reaches for the live config, so a config change after publication cannot change a grade.
+
+S1 third audit:
+  * N3 — the kind is chosen ON THE DECISION. A pair `watch` ("does not clear costs reliably;
+    a watch, not a call") is graded `pair_watch`: Right if the spread trade lost more than
+    twice the hurdle, Wrong if it paid more than twice the hurdle. It was graded
+    `pair_convergence` — a claim the card never made — and a losing spread made a non-call
+    "Wrong". Same device as the theme template's watch -> `theme_watch`.
+  * N5 — when the horizon has completed and the outcome still cannot be measured (a
+    synthetic open at entry, a corporate-action hole inside the window, more than a fifth of
+    a sector's names unresolved) the finding is closed with a `void` grade that carries the
+    reason. Void is not Right / Wrong / Inconclusive and is not counted; before this the
+    finding stayed `pending` forever.
 """
 from __future__ import annotations
 
@@ -59,6 +71,7 @@ REQUIRED_SPEC: dict[GradingKind, tuple[str, ...]] = {
     GradingKind.rotation_reject: ("sector", "members", "window", "min_names"),
     GradingKind.anomaly_move: ("symbol", "move_pct"),
     GradingKind.pair_convergence: ("a", "b", "direction"),
+    GradingKind.pair_watch: ("a", "b", "direction"),
 }
 
 
@@ -113,12 +126,18 @@ def build_rule(kind: GradingKind | str, *, horizon: int, hurdle_pct: float,
                   f"from the next session's open to the close {h} later, in percent")
         right = f"Right if the spread converged by more than twice {_H} (two legs)"
         wrong = f"Wrong if the spread widened by more than twice {_H}"
+    elif kind == GradingKind.pair_watch:
+        metric = (f"{subject}: the spread trade's return (long the cheap leg, short the rich leg) "
+                  f"from the next session's open to the close {h} later, in percent — the trade the card "
+                  "declined to call")
+        right = f"Right if it was not worth calling: the spread trade lost more than twice {_H} (two legs)"
+        wrong = f"Wrong if it was a call after all: the spread trade paid more than twice {_H}"
     else:  # pragma: no cover
         raise ValueError(f"unknown grading kind {kind}")
     inconclusive = f"Inconclusive if the outcome finished inside {_H} either way"
     if kind == GradingKind.anomaly_move:
         inconclusive = f"Inconclusive if the move fell short of the threshold by no more than {_H}"
-    if kind == GradingKind.pair_convergence:
+    if kind in (GradingKind.pair_convergence, GradingKind.pair_watch):
         inconclusive = f"Inconclusive if the spread trade finished inside twice {_H} either way"
     return GradingRule(
         kind=kind, horizon_sessions=horizon, hurdle_pct=hurdle_pct, metric=metric,
@@ -133,6 +152,11 @@ class GradeResult:
     verdict: Verdict
     facts: FactSet
     due_session: str
+    void_reason: Optional[str] = None      # set iff verdict == Verdict.void (N5)
+
+
+class _Unmeasurable(Exception):
+    """The horizon is complete but the outcome has a hole in it (N5). Carries the reason."""
 
 
 def _band(x: float, hurdle: float) -> Verdict:
@@ -198,6 +222,10 @@ def evaluate(rule: GradingRule, *, finding_slug: str, edition_date: str, md: Mar
     Apply a FROZEN rule on a frame sealed at the grading date. Returns None while the
     horizon is incomplete. Every realised number is minted as a fact. `cfg` is used for
     fact provenance (data source, cost convention) ONLY — never for a rule parameter.
+
+    N5: once the horizon has completed inside the seal (`due <= md.as_of`) and the outcome
+    is still a hole, the result is a `void` grade carrying the reason — never a silent None
+    that leaves the finding pending forever.
     """
     h = int(rule.horizon_sessions)
     H = float(rule.hurdle_pct)
@@ -210,20 +238,39 @@ def evaluate(rule: GradingRule, *, finding_slug: str, edition_date: str, md: Mar
     fs = FactSet(finding_slug=f"{finding_slug}_grade", cfg=cfg, as_of=md.as_of,
                  period_start=edition_date, period_end=due, component="grader",
                  computed_at=graded_at)
+    try:
+        verdict = _judge(rule, spec, h=h, H=H, edition_date=edition_date, due=due, md=md, fs=fs)
+    except _Unmeasurable as e:
+        if due > md.as_of:            # pragma: no cover — a due session inside the seal is <= as_of by construction
+            return None
+        reason = str(e)
+        fs.add("void_reason", "why the outcome could not be measured once the horizon completed", reason, "text")
+        fs.add("hurdle", "round-trip hurdle (costs plus slippage both ways) the verdict would have been judged against",
+               H * 100, "bps")
+        return GradeResult(verdict=Verdict.void, facts=fs, due_session=due, void_reason=reason)
+    fs.add("hurdle", "round-trip hurdle (costs plus slippage both ways) the verdict was judged against", H * 100, "bps")
+    return GradeResult(verdict=verdict, facts=fs, due_session=due)
+
+
+def _judge(rule: GradingRule, spec: dict[str, Any], *, h: int, H: float, edition_date: str, due: str,
+           md: MarketData, fs: FactSet) -> Verdict:
+    """The per-kind evaluator. Raises `_Unmeasurable` when the outcome has a hole in it."""
     kind = rule.kind
 
     if kind in (GradingKind.directional_call, GradingKind.no_trade_call):
         if spec.get("subject_kind") == "market":
             got = _market_fwd(md, edition_date, h, nifty50_only=bool(spec["nifty50_only"]))
             if got is None:
-                return None
+                raise _Unmeasurable("fewer than four in five of the market's names have a resolved outcome over the window "
+                                    "(data holes: synthetic opens, corporate-action days, glitch bars)")
             r, n = got
             fs.add("realized", "realised equal-weight market move, next open to horizon close",
                    r * 100, "pct", n=n, level=EvidenceLevel.whole_market)
         else:
             r = _fwd(md, str(spec["symbol"]), edition_date, h)
             if r is None:
-                return None
+                raise _Unmeasurable(f"{spec['symbol']}: no measurable outcome from the next open to the horizon close "
+                                    "(a synthetic open at entry, or a corporate-action / glitch bar inside the window)")
             fs.add("realized", "realised move, next open to horizon close", r * 100, "pct",
                    sample="observation", level=EvidenceLevel.same_stock)
         x = r * 100
@@ -241,7 +288,8 @@ def evaluate(rule: GradingRule, *, finding_slug: str, edition_date: str, md: Mar
         sec = rows[rows["symbol"].isin(members)][f"f{h}"].dropna()
         mk = rows[f"f{h}"].dropna()
         if sec.empty or mk.empty or len(sec) < 0.8 * len(members):
-            return None
+            raise _Unmeasurable(f"{spec['sector']}: more than a fifth of the sector's names have no resolved outcome over "
+                                "the window (data holes: synthetic opens, corporate-action days, glitch bars)")
         excess = (float(sec.mean()) - float(mk.mean())) * 100
         fs.add("sector_move", "realised equal-weight sector move, next open to horizon close",
                float(sec.mean()) * 100, "pct", n=int(len(sec)), level=EvidenceLevel.sector)
@@ -274,7 +322,8 @@ def evaluate(rule: GradingRule, *, finding_slug: str, edition_date: str, md: Mar
             raise ValueError(f"horizon {h} is not a computed close-to-close window")
         rows = md.df[(md.df["symbol"] == sym) & (md.df["d"] == edition_date)]
         if rows.empty or pd.isna(rows.iloc[0][col]):
-            return None
+            raise _Unmeasurable(f"{sym}: no measurable close-to-close move across the window "
+                                "(a corporate-action / glitch bar inside it)")
         mv = abs(float(rows.iloc[0][col])) * 100
         thr = float(spec["move_pct"])
         fs.add("week_move", f"absolute close-to-close move from the signal close to the close {h} sessions later",
@@ -286,19 +335,23 @@ def evaluate(rule: GradingRule, *, finding_slug: str, edition_date: str, md: Mar
         else:
             verdict = Verdict.wrong
 
-    elif kind == GradingKind.pair_convergence:
+    elif kind in (GradingKind.pair_convergence, GradingKind.pair_watch):
         a, b = str(spec["a"]), str(spec["b"])
         fa, fb = _fwd(md, a, edition_date, h), _fwd(md, b, edition_date, h)
         if fa is None or fb is None:
-            return None
+            raise _Unmeasurable(f"{a}/{b}: a leg has no measurable outcome from the next open to the horizon close "
+                                "(a synthetic open at entry, or a corporate-action / glitch bar inside the window)")
         sign = -1.0 if spec.get("direction") == "short_a_long_b" else 1.0
         pnl = sign * (np.log1p(fa) - np.log1p(fb)) * 100
         fs.add("spread_trade", "spread trade return, long the cheap leg and short the rich leg",
                float(pnl), "pct", sample="observation", level=EvidenceLevel.same_stock)
-        verdict = _band(float(pnl), 2 * H)
+        if kind == GradingKind.pair_convergence:
+            verdict = _band(float(pnl), 2 * H)
+        else:
+            # N3: the card said "not a call". Right if the declined trade lost more than
+            # costs, Wrong if it paid more than costs. Symmetric, like theme_watch.
+            verdict = _band(-float(pnl), 2 * H)
 
     else:  # pragma: no cover
         raise ValueError(f"no evaluator for {kind}")
-
-    fs.add("hurdle", "round-trip hurdle (costs plus slippage both ways) the verdict was judged against", H * 100, "bps")
-    return GradeResult(verdict=verdict, facts=fs, due_session=due)
+    return verdict

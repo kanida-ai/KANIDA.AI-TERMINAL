@@ -104,6 +104,11 @@ class QuestionTemplate:
     trader_relevance: float              # FOUNDER INPUT — 0..1 weight in the ranking
     source: str                          # which prototype proved it
     review: str = "founder review pending — prototype-proven on real data"
+    #: S1 third audit N2 — how many leading `|`-parts of the evidence signature are the CLAIM
+    #: (template, decision, comparison group). The part right after them, if any, is the
+    #: PRIMARY STATISTIC: a repeat inside `cfg.claim_tolerance_pp` of an open claim is the same
+    #: claim (a continuation), not a new one. 0 = the whole signature is the claim, no statistic.
+    claim_parts: int = 0
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -148,6 +153,35 @@ def _rate(df: pd.DataFrame, mask: pd.Series, h: int, cfg: ResearchConfig
         return 0, None, None, None
     return (int(len(r)), float((r > 0).mean() * 100.0), float(r.median() * 100.0),
             _wmean(r, cfg.expectancy_winsor_pct) * 100.0 - cfg.hurdle_pct)
+
+
+def claim_of(template_id: str, signature: str) -> tuple[str, Optional[float]]:
+    """
+    (claim key, primary statistic) of an evidence signature (N2). The claim is the first
+    `claim_parts` parts of the signature as the template declares them; the statistic is the
+    next part. A template that declares none (or an unknown template) claims the whole
+    signature, with no statistic — exact match only.
+    """
+    t = TEMPLATES.get(template_id)
+    k = int(t.claim_parts) if t is not None else 0
+    parts = signature.split("|")
+    if k <= 0 or len(parts) <= k:
+        return signature, None
+    try:
+        return "|".join(parts[:k]), float(parts[k])
+    except ValueError:
+        return signature, None
+
+
+def same_claim(template_id: str, sig_a: str, sig_b: str, tolerance_pp: float) -> bool:
+    """The same claim: identical claim key and a primary statistic inside the tolerance (or none)."""
+    ka, sa = claim_of(template_id, sig_a)
+    kb, sb = claim_of(template_id, sig_b)
+    if ka != kb:
+        return False
+    if sa is None or sb is None:
+        return sa is None and sb is None
+    return abs(sa - sb) <= float(tolerance_pp)
 
 
 def _sig(*parts: Any) -> str:
@@ -294,6 +328,7 @@ MARKET_REGIME = QuestionTemplate(
     computation=compute_market_regime, level=EvidenceLevel.whole_market,
     grading_kinds=(GradingKind.no_trade_call, GradingKind.directional_call),
     trader_relevance=1.0, source="pathfinder_demo.py §1 MARKET REGIME",
+    claim_parts=3,      # market_regime | decision | regime ; primary statistic = hit rate
 )
 
 
@@ -445,6 +480,7 @@ DIP = QuestionTemplate(
     computation=compute_dip, level=EvidenceLevel.whole_market,
     grading_kinds=(GradingKind.directional_call, GradingKind.no_trade_call),
     trader_relevance=0.7, source="pathfinder_demo.py §2 THE DIP",
+    claim_parts=3,      # dip | decision | threshold ; primary statistic = next-session hit rate
 )
 
 SURGE = QuestionTemplate(
@@ -454,6 +490,7 @@ SURGE = QuestionTemplate(
     computation=compute_surge, level=EvidenceLevel.whole_market,
     grading_kinds=(GradingKind.directional_call, GradingKind.no_trade_call),
     trader_relevance=0.6, source="pathfinder_demo.py §3 THE SURGE",
+    claim_parts=3,      # surge | decision | threshold ; primary statistic = next-session hit rate
 )
 
 
@@ -562,7 +599,10 @@ def compute_volume_anomaly(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraf
                          "are judged by their LIFT over that control",
         grading_rule=rule, magnitude=min(1.0, float(u["volx"]) / 10.0), evidence_z=z,
         headline=headline, body=body, slug=_fslug(fs),
-        evidence_signature=_sig("volume_anomaly", decision, round(big, 1), round(base_big, 1), round(lift, 1)),
+        # N2: the claim is (template, decision) against the unconditional control; the LIFT is
+        # the primary statistic, so a re-reading of −1.1 pp against an open −1.2 pp is the same
+        # null claim, not a new one (ANURAS -> TORNTPHARM -> SOBHA were graded three times).
+        evidence_signature=_sig("volume_anomaly", decision, round(lift, 1), round(big, 1), round(base_big, 1)),
         related_symbols=[sym],
         follow_ups=["Do anomaly days that came after a fall resolve differently from those after a rise?",
                     "Does the direction of the following session predict the week?"],
@@ -576,6 +616,7 @@ VOLUME_ANOMALY = QuestionTemplate(
     computation=compute_volume_anomaly, level=EvidenceLevel.whole_market,
     grading_kinds=(GradingKind.anomaly_move, GradingKind.no_trade_call),
     trader_relevance=0.5, source="pathfinder_demo.py §4 VOLUME ANOMALY",
+    claim_parts=2,      # volume_anomaly | decision ; primary statistic = lift over the control (pp)
 )
 
 
@@ -700,7 +741,10 @@ def compute_relationship(ctx: ScanContext, p: dict[str, Any]) -> list[CardDraft]
            "The spread trade does not clear costs reliably enough to test, so this is a watch, not a call.")
         + f" Regime: {fs.token('regime')}."
     )
-    rule = build_rule(GradingKind.pair_convergence, horizon=h, hurdle_pct=H,
+    # N3: the kind follows the DECISION. An experiment claims convergence and is graded on it;
+    # a watch claims "not worth calling" and is graded on that (Right if the declined spread
+    # trade lost more than both legs' costs) — the theme template's watch -> theme_watch device.
+    rule = build_rule(GradingKind.pair_convergence if experiment else GradingKind.pair_watch, horizon=h, hurdle_pct=H,
                       spec={"a": a, "b": b, "direction": "short_a_long_b" if zt > 0 else "long_a_short_b",
                             "z_window": p["z_window"]},
                       frozen_at=ctx.computed_at, subject=f"{a}/{b}")
@@ -730,8 +774,9 @@ RELATIONSHIP = QuestionTemplate(
     question="Two stocks that normally move together have come apart. Does a spread trade from the next open pay within a week?",
     parameters={"pairs": None, "z_window": 60, "z_extreme": 2.0, "min_history": 160, "horizon": 5, "min_hit_pct": 58.0},
     computation=compute_relationship, level=EvidenceLevel.same_stock,
-    grading_kinds=(GradingKind.pair_convergence,),
+    grading_kinds=(GradingKind.pair_convergence, GradingKind.pair_watch),
     trader_relevance=0.5, source="pathfinder_demo.py §6 RELATIONSHIP",
+    claim_parts=5,      # relationship | a | b | direction | decision ; no statistic — the pair and the decision ARE the claim
 )
 
 
@@ -893,16 +938,19 @@ def _theme_leader_card(ctx: ScanContext, p: dict[str, Any], *, top: str, members
            nL, "count")
     fs.add("like_this_independent", "independent cases among them: one per sector per non-overlapping horizon "
                                     "window — the effective n the evidence is weighed on", nL_eff, "count")
+    # N4: the statistics are minted on the EFFECTIVE n — the independent cases the decision,
+    # the z and the provenance are weighed on — not on the overlapping session count, which
+    # would inflate every fact-level sample flag. The overlapping count is its own fact above.
     fs.add("like_this_beat", "share of leaders like this whose sector then beat the market by more than the hurdle over the next week, next open to close",
-           l_beat, "pct", n=nL, level=EvidenceLevel.whole_market)
+           l_beat, "pct", n=nL_eff, level=EvidenceLevel.whole_market)
     fs.add("like_this_lagged", "share of leaders like this whose sector then lagged the market by more than the hurdle",
-           l_lag, "pct", n=nL, level=EvidenceLevel.whole_market)
+           l_lag, "pct", n=nL_eff, level=EvidenceLevel.whole_market)
     fs.add("like_this_up", "share of leaders like this whose sector then beat the market at all",
-           l_up, "pct", n=nL, level=EvidenceLevel.whole_market)
+           l_up, "pct", n=nL_eff, level=EvidenceLevel.whole_market)
     fs.add("like_this_typical_excess", "typical sector-minus-market over the next week for leaders like this (median)",
-           l_med, "pct", n=nL, level=EvidenceLevel.whole_market)
+           l_med, "pct", n=nL_eff, level=EvidenceLevel.whole_market)
     fs.add("like_this_expectancy", "expectancy of sector-minus-market net of the hurdle for leaders like this (winsorised mean)",
-           l_etv, "pct", n=nL, level=EvidenceLevel.whole_market)
+           l_etv, "pct", n=nL_eff, level=EvidenceLevel.whole_market)
     if persist is not None:
         fs.add("persistence", "share of ALL past leader-sessions (any leader, however thin its lead) still a top-three "
                               "sector a week later — the prototype's statistic on OVERLAPPING windows, context only",
@@ -1097,6 +1145,7 @@ THEME_CYCLE = QuestionTemplate(
     computation=compute_theme_cycle, level=EvidenceLevel.sector,
     grading_kinds=(GradingKind.theme_call, GradingKind.theme_watch, GradingKind.rotation_reject),
     trader_relevance=1.0, source="pathfinder_theme.py + pathfinder_demo.py §5",
+    claim_parts=4,      # theme_cycle | leader/rotation | sector | decision ; no statistic
 )
 
 

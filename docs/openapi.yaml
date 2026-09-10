@@ -1077,6 +1077,7 @@ components:
       - rotation_reject
       - anomaly_move
       - pair_convergence
+      - pair_watch
       title: GradingKind
       description: 'Per-finding-type grading rules (spec addendum 4). Each kind names ONE deterministic
 
@@ -1189,6 +1190,12 @@ components:
           - type: 'null'
           title: Continues
           description: 'For status=continued: the finding id this one continues and is graded through.'
+        void_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Void Reason
+          description: 'For status=void: why the outcome could not be measured (S1 third audit N5).'
       additionalProperties: false
       type: object
       required:
@@ -1200,6 +1207,7 @@ components:
       - pending
       - graded
       - continued
+      - void
       title: GradingStatus
     HTTPValidationError:
       properties:
@@ -1879,17 +1887,33 @@ components:
           type: integer
           minimum: 0.0
           title: N Total
-          description: Every grade row, including re-grades of the same claim.
+          description: Every Right / Wrong / Inconclusive grade row, including re-grades of the same claim.
         n_independent:
           type: integer
           minimum: 0.0
           title: N Independent
-          description: Grades on independent claims — equals n.
+          description: Grades on distinct (claim, non-overlapping horizon) — equals n. A grade of a claim
+            whose earlier grade's horizon was still running is folded into that earlier grade (S1 third
+            audit N2).
         continued:
           type: integer
           minimum: 0.0
           title: Continued
           description: Continuation cards folded into an existing grade (not counted).
+          default: 0
+        regraded:
+          type: integer
+          minimum: 0.0
+          title: Regraded
+          description: 'Grade rows folded into an earlier, overlapping grade of the same claim: n_total
+            - n.'
+          default: 0
+        void:
+          type: integer
+          minimum: 0.0
+          title: Void
+          description: Findings closed without a verdict because the outcome could not be measured (S1
+            third audit N5). Not in n, not in n_total.
           default: 0
         record_label:
           type: string
@@ -2161,6 +2185,7 @@ components:
       - right
       - wrong
       - inconclusive
+      - void
       title: Verdict
     VirtualBook:
       properties:

@@ -21,6 +21,16 @@ S1 second audit:
   * A store written under a superseded schema is refused on open (`StoreSchemaError`) —
     it cannot be migrated in place, only archived and rebuilt (append-only).
 
+S1 third audit:
+  * N2 — the same CLAIM is (template, decision, comparison group) with the primary statistic
+    inside `claim_tolerance_pp` (`library.same_claim`), not an identical rounded signature:
+    `|-1.20` and `|-1.10` re-opened one null claim and graded it three times. `novelty()` and
+    `open_root()` match on the claim; `scoreboard()` counts one grade per claim per
+    non-overlapping horizon — a grade whose claim was already graded on a horizon still
+    running at its edition date is folded (`regraded`), whatever the store holds.
+  * N5 — a `void` grade row closes a finding whose outcome could not be measured; it is not
+    Right / Wrong / Inconclusive and is counted separately (`void`), never in n.
+
 Reads are served through `feed()`; the router never touches SQL.
 """
 from __future__ import annotations
@@ -39,7 +49,9 @@ from ..schemas import (
 )
 from .config import DEFAULT_RESEARCH_DB
 
-SCHEMA_VERSION = 2
+#: 3 = third audit: `void` verdicts, claim-keyed signatures (the anomaly signature leads with
+#: the lift). A store written under an earlier version is refused on open — archive and rebuild.
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS pf_editions (
@@ -93,7 +105,7 @@ CREATE TABLE IF NOT EXISTS pf_grades (
     graded_at           TEXT NOT NULL,
     data_as_of          TEXT NOT NULL,
     due_session         TEXT NOT NULL,
-    verdict             TEXT NOT NULL CHECK (verdict IN ('right','wrong','inconclusive')),
+    verdict             TEXT NOT NULL CHECK (verdict IN ('right','wrong','inconclusive','void')),
     rule_version        TEXT NOT NULL,
     realized_json       TEXT NOT NULL
 );
@@ -145,14 +157,50 @@ def _empty_counts() -> ScoreCounts:
     return ScoreCounts(right=0, wrong=0, inconclusive=0, n=0)
 
 
+def independent_grades(rows: list, same_claim: Callable[[str, str, str], bool]) -> list:
+    """
+    N2 — the grade rows that count. `rows` are Right / Wrong / Inconclusive grade rows joined
+    to their finding (`template_id`, `novelty_key`, `edition_date`, `due_session`), in edition
+    order. A row is FOLDED when an earlier row of the same claim (same template; claim key and
+    primary statistic within tolerance — `library.same_claim`) was still measuring its horizon
+    at this row's edition date (`earlier.due_session > row.edition_date`): the two grades share
+    outcome sessions and are one observation, not two. Earlier rows count whether they were
+    themselves independent or folded, so a chain of overlapping re-grades of one claim
+    (ANURAS 07-13 -> TORNTPHARM 07-16 -> SOBHA 07-21, each inside the previous horizon) is ONE
+    grade — the first. A repeat published on or after the earlier due session is independent.
+    """
+    out = []
+    seen: list = []
+    for r in rows:
+        tmpl = r["template_id"]
+        _, _, sig = r["novelty_key"].split("|", 2)
+        # a continuation is graded through its root, never on its own (A2) — defensive
+        folded = ("continues" in r.keys()) and r["continues"] is not None
+        for e in seen:
+            if folded:
+                break
+            if e["template_id"] == tmpl and e["due_session"] > r["edition_date"] \
+                    and same_claim(tmpl, e["novelty_key"].split("|", 2)[2], sig):
+                folded = True
+                break
+        seen.append(r)
+        if not folded:
+            out.append(r)
+    return out
+
+
 class ResearchStore:
     """SQLite, one connection per thread (FastAPI runs sync endpoints in a threadpool)."""
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, *, claim_tolerance_pp: float = 1.0) -> None:
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self.source_name = f"pathfinder research store (S1) — {db_path}"
+        #: N2 — the tolerance on a group card's primary statistic inside which a repeat is the
+        #: same claim. Recorded on every edition's params; used by novelty, continuation and
+        #: the scoreboard's independence fold.
+        self.claim_tolerance_pp = float(claim_tolerance_pp)
         existing = self.path.exists() and self.path.stat().st_size > 0
         if existing:
             self._check_schema()
@@ -162,6 +210,8 @@ class ResearchStore:
 
     def _check_schema(self) -> None:
         """Refuse a store written by a superseded schema — it cannot be corrected in place."""
+        hint = ("An append-only store is never migrated: archive it "
+                "(run_pathfinder_scan.py --archive-store --i-understand-this-archives-the-store) and rebuild.")
         tables = {r[0] for r in self.con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         for t, cols in _REQUIRED.items():
             if t not in tables:
@@ -169,10 +219,14 @@ class ResearchStore:
             have = {r[1] for r in self.con.execute(f"PRAGMA table_info({t})")}
             missing = [c for c in cols if c not in have]
             if missing:
+                raise StoreSchemaError(f"{self.path}: table {t} lacks {missing} — written under a superseded schema. {hint}")
+        if "pf_meta" in tables:
+            row = self.con.execute("SELECT value FROM pf_meta WHERE key = 'schema_version'").fetchone()
+            have_v = int(row[0]) if row else 0
+            if have_v < SCHEMA_VERSION:
                 raise StoreSchemaError(
-                    f"{self.path}: table {t} lacks {missing} — written under a superseded schema. "
-                    "An append-only store is never migrated: archive it "
-                    "(run_pathfinder_scan.py --archive-store --i-understand-this-archives-the-store) and rebuild.")
+                    f"{self.path}: schema_version {have_v} < {SCHEMA_VERSION} — its signatures and verdicts were "
+                    f"written under superseded conventions. {hint}")
 
     @property
     def con(self) -> sqlite3.Connection:
@@ -262,10 +316,15 @@ class ResearchStore:
         tmpl, subj, sig = key.split("|", 2)
         return tmpl, subj, sig
 
+    def _same_claim(self, tmpl: str, sig_a: str, sig_b: str) -> bool:
+        from .library import same_claim
+        return same_claim(tmpl, sig_a, sig_b, self.claim_tolerance_pp)
+
     def novelty(self, key: str, *, before: str, lookback_editions: int) -> float:
         """
         1.0 never seen in the lookback; 0.6 same template and subject on different evidence;
-        0.25 the same claim (identical evidence signature) — whatever the subject (A2).
+        0.25 the same claim — the same (template, decision, comparison group) with the primary
+        statistic inside the tolerance (N2) — whatever the subject (A2).
         """
         eds = self._lookback(before, lookback_editions)
         if not eds:
@@ -275,7 +334,7 @@ class ResearchStore:
             f"SELECT novelty_key FROM pf_findings WHERE edition_date IN ({ph})", eds).fetchall()
         keys = [self._split_key(r[0]) for r in rows]
         tmpl, subj, sig = self._split_key(key)
-        if any(k[0] == tmpl and k[2] == sig for k in keys):
+        if any(k[0] == tmpl and self._same_claim(tmpl, k[2], sig) for k in keys):
             return 0.25
         if any(k[0] == tmpl and k[1] == subj for k in keys):
             return 0.6
@@ -300,7 +359,7 @@ class ResearchStore:
             "ORDER BY edition_date DESC, rank", eds).fetchall()
         for r in rows:
             t, _, s = self._split_key(r["novelty_key"])
-            if t == tmpl and s == sig and is_open(r["edition_date"], int(r["horizon_sessions"])):
+            if t == tmpl and self._same_claim(tmpl, s, sig) and is_open(r["edition_date"], int(r["horizon_sessions"])):
                 return r
         return None
 
@@ -312,11 +371,16 @@ class ResearchStore:
         g = self._grade_row(row["finding_id"])
         if g is not None:
             realized = [Fact.model_validate(x) for x in json.loads(g["realized_json"])]
+            verdict = Verdict(g["verdict"])
+            void_reason = None
+            if verdict == Verdict.void:
+                void_reason = next((str(x.value) for x in realized if x.id.endswith("_void_reason")), "outcome unmeasurable")
             f = f.model_copy(update={"grading": GradingState(
-                status=GradingStatus.graded, due_session=date.fromisoformat(g["due_session"]),
-                verdict=Verdict(g["verdict"]), graded_at=datetime.fromisoformat(g["graded_at"]),
+                status=GradingStatus.void if verdict == Verdict.void else GradingStatus.graded,
+                due_session=date.fromisoformat(g["due_session"]),
+                verdict=verdict, graded_at=datetime.fromisoformat(g["graded_at"]),
                 data_as_of=date.fromisoformat(g["data_as_of"]), realized_facts=realized,
-                backfilled=bool(row["backfilled"]))})
+                backfilled=bool(row["backfilled"]), void_reason=void_reason)})
         return f
 
     def findings_for(self, edition_date: str) -> list[Finding]:
@@ -341,13 +405,17 @@ class ResearchStore:
             c = counts(rows)
             return ScoreCounts(**c, n=sum(c.values()))
 
-        all_rows = self.con.execute(
-            "SELECT g.verdict, f.template_id, f.backfilled, f.continues FROM pf_grades g "
-            "JOIN pf_findings f ON f.finding_id = g.finding_id WHERE g.data_as_of <= ?", [as_of]).fetchall()
-        # Independent grades: on root findings only. A continuation is never graded on its own
-        # (pending() skips it), so in a store built by this code n_total == n; a store that
-        # carried re-grades of the same claim would show them in n_total and not in n.
-        indep = [r for r in all_rows if r["continues"] is None]
+        graded = self.con.execute(
+            "SELECT g.verdict, g.due_session, f.template_id, f.backfilled, f.continues, f.edition_date, f.rank, "
+            "f.novelty_key FROM pf_grades g JOIN pf_findings f ON f.finding_id = g.finding_id "
+            "WHERE g.data_as_of <= ? ORDER BY f.edition_date, f.rank", [as_of]).fetchall()
+        void = sum(1 for r in graded if r["verdict"] == Verdict.void.value)
+        all_rows = [r for r in graded if r["verdict"] != Verdict.void.value]
+        # Independent grades (N2): one per claim per NON-overlapping horizon, computed from the
+        # grade rows themselves — never assumed from how the rows were published. A grade of a
+        # claim that an earlier grade (independent or folded) was still measuring at this
+        # edition date is a re-grade of the same outcome and is folded into that earlier one.
+        indep = independent_grades(all_rows, self._same_claim)
         tot = counts(indep)
         by: dict[str, ScoreCounts] = {}
         for t in sorted({r["template_id"] for r in indep}):
@@ -371,7 +439,7 @@ class ResearchStore:
         return Scoreboard(**tot, n=sum(tot.values()), pending=int(pending), by_template=by,
                           as_of=date.fromisoformat(as_of), forward=fwd, backfilled=bf,
                           n_total=len(all_rows), n_independent=sum(tot.values()), continued=int(continued),
-                          record_label=label)
+                          regraded=len(all_rows) - sum(tot.values()), void=int(void), record_label=label)
 
     def feed(self, edition_date: Optional[str] = None) -> Optional[FeedResponse]:
         ed = edition_date or self.latest_edition()

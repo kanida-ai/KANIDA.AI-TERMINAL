@@ -840,18 +840,38 @@ class GradingKind(str, Enum):
     rotation_reject = "rotation_reject"     # "a one-day flip is noise": Wrong if the sector beat the market by > hurdle
     anomaly_move = "anomaly_move"           # a move of at least X% within the window
     pair_convergence = "pair_convergence"   # the spread converged by more than 2x hurdle
+    pair_watch = "pair_watch"               # "not a call": Wrong if the spread trade paid more than 2x hurdle (S1 third audit N3)
+
+
+#: S1 third audit N3 — the grading rule must judge the claim the card made (principle 5 /
+#: addendum 4). A `watch` is graded by a watch kind, a call by a call kind, a null decision by a
+#: null kind. The pair `watch` was frozen under `pair_convergence` and a losing spread made a
+#: non-call "Wrong"; this table makes that unrepresentable.
+KINDS_FOR_DECISION: dict[str, frozenset[str]] = {
+    "watch": frozenset({"theme_watch", "pair_watch"}),
+    "virtual_long": frozenset({"directional_call", "theme_call"}),
+    "virtual_short": frozenset({"directional_call"}),
+    "new_experiment": frozenset({"theme_call", "anomaly_move", "pair_convergence"}),
+    "no_trade": frozenset({"no_trade_call"}),
+    "reject": frozenset({"no_trade_call", "rotation_reject"}),
+}
 
 
 class Verdict(str, Enum):
     right = "right"
     wrong = "wrong"
     inconclusive = "inconclusive"
+    #: S1 third audit N5 — the horizon completed but the outcome cannot be measured (a synthetic
+    #: open, a corporate action inside the window, too many members unresolved). Closed, with
+    #: the reason on the record; NOT Right / Wrong / Inconclusive and NOT counted in n.
+    void = "void"
 
 
 class GradingStatus(str, Enum):
     pending = "pending"     # horizon not yet complete
     graded = "graded"
     continued = "continued" # a continuation of an open call: graded ONCE, through the finding it continues
+    void = "void"           # horizon complete, outcome unmeasurable: closed without a verdict, not counted
 
 
 #: S1 second audit A1 — a store that was backfilled is labelled as such, on the feed, on the
@@ -929,13 +949,19 @@ class GradingState(BaseModel):
     record: str = Field(BACKFILL_LABEL, description="The label the grade is published under.")
     continues: Optional[str] = Field(
         None, description="For status=continued: the finding id this one continues and is graded through.")
+    void_reason: Optional[str] = Field(
+        None, description="For status=void: why the outcome could not be measured (S1 third audit N5).")
 
     @model_validator(mode="after")
     def _consistent(self) -> "GradingState":
-        if self.status == GradingStatus.graded and self.verdict is None:
-            raise ValueError("a graded finding must carry a verdict")
-        if self.status != GradingStatus.graded and self.verdict is not None:
-            raise ValueError("only a graded finding carries a verdict")
+        if self.status == GradingStatus.graded and self.verdict not in (Verdict.right, Verdict.wrong, Verdict.inconclusive):
+            raise ValueError("a graded finding must carry a Right / Wrong / Inconclusive verdict")
+        if self.status == GradingStatus.void and (self.verdict != Verdict.void or not self.void_reason):
+            raise ValueError("a void finding carries verdict=void and the reason the outcome could not be measured")
+        if self.status not in (GradingStatus.graded, GradingStatus.void) and self.verdict is not None:
+            raise ValueError("only a graded or void finding carries a verdict")
+        if self.status != GradingStatus.void and self.void_reason:
+            raise ValueError("only a void finding carries a void_reason")
         if self.status == GradingStatus.continued and not self.continues:
             raise ValueError("a continued finding must name the finding it continues")
         if self.status != GradingStatus.continued and self.continues:
@@ -1035,10 +1061,15 @@ class Finding(BaseModel):
             raise ValueError(f"unresolvable fact refs: {sorted(dangling)}")
         if any(ch.isdigit() for ch in REF_TOKEN_RE.sub("", self.decision_reason)):
             raise ValueError("decision_reason may not contain a literal numeral")
-        # A continuation is not a publication: it rides on the root finding that cleared the
-        # threshold, and carries its own (novelty-discounted) score for the record.
-        if self.continues is None and self.usefulness.total < self.usefulness.threshold:
-            raise ValueError("a finding below the usefulness threshold may not be published")
+        allowed = KINDS_FOR_DECISION.get(self.decision.value)
+        if allowed is not None and self.grading_rule.kind.value not in allowed:
+            raise ValueError(f"a {self.decision.value} may not be graded as {self.grading_rule.kind.value}: "
+                             "the rule must judge the claim the card made")
+        # S1 third audit N1: the threshold gates EVERY served card, continuation or not. A
+        # continuation that fell below it is a candidate on the record, never a card in the
+        # feed (spec principle 1 / addendum 1: never pad).
+        if self.usefulness.total < self.usefulness.threshold:
+            raise ValueError("a finding below the usefulness threshold may not be served — continuation or not")
         return self
 
 
@@ -1075,9 +1106,15 @@ class Scoreboard(ScoreCounts):
     as_of: date
     forward: ScoreCounts = Field(..., description="Grades on findings generated on their own session date.")
     backfilled: ScoreCounts = Field(..., description="Grades on findings generated after the fact (simulated backfill).")
-    n_total: int = Field(..., ge=0, description="Every grade row, including re-grades of the same claim.")
-    n_independent: int = Field(..., ge=0, description="Grades on independent claims — equals n.")
+    n_total: int = Field(..., ge=0, description="Every Right / Wrong / Inconclusive grade row, including re-grades of the same claim.")
+    n_independent: int = Field(..., ge=0, description=(
+        "Grades on distinct (claim, non-overlapping horizon) — equals n. A grade of a claim whose earlier grade's "
+        "horizon was still running is folded into that earlier grade (S1 third audit N2)."))
     continued: int = Field(0, ge=0, description="Continuation cards folded into an existing grade (not counted).")
+    regraded: int = Field(0, ge=0, description="Grade rows folded into an earlier, overlapping grade of the same claim: n_total - n.")
+    void: int = Field(0, ge=0, description=(
+        "Findings closed without a verdict because the outcome could not be measured (S1 third audit N5). "
+        "Not in n, not in n_total."))
     record_label: str = Field(..., description="What this scoreboard is: a forward record, a backfill, or mixed.")
 
     @model_validator(mode="after")
@@ -1086,6 +1123,8 @@ class Scoreboard(ScoreCounts):
             raise ValueError("forward + backfilled must equal n")
         if self.n_independent != self.n or self.n_total < self.n:
             raise ValueError("n is the independent count; n_total cannot be smaller")
+        if self.regraded != self.n_total - self.n:
+            raise ValueError("regraded must be n_total - n")
         return self
 
 
@@ -1119,6 +1158,11 @@ class FeedResponse(BaseModel):
             raise ValueError("continued_count must equal the continuations served")
         if any(f.backfilled != self.backfilled for f in items):
             raise ValueError("every card must carry the edition's backfilled flag")
+        # S1 third audit N1: nothing below the usefulness threshold is served — not as a new
+        # finding, not as a continuation. The threshold is the edition's, not the card's.
+        below = [f.id for f in items if f.usefulness.total < self.usefulness_threshold]
+        if below:
+            raise ValueError(f"served cards below the usefulness threshold: {below} — never pad")
         if self.record_label != (BACKFILL_LABEL if self.backfilled else FORWARD_LABEL):
             raise ValueError("record_label must match backfilled")
         ranks = [f.rank for f in items]

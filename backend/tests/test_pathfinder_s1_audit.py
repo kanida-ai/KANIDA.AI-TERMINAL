@@ -252,8 +252,9 @@ def test_c7_the_strong_gate_uses_leaders_like_this_and_expectancy_not_any_leader
     theme = LIB.compute_theme_cycle(ctx, LIB.parameters_for(LIB.THEME_CYCLE, cfg))[0]
     v = _facts(theme)
     assert "any leader" in v["persistence"].label and "context only" in v["persistence"].label
-    # second audit A3: the card's n is the EFFECTIVE (independent) count; the rate is over every session
-    assert theme.n == v["like_this_independent"].value and v["like_this_beat"].n == v["like_this_cases"].value
+    # second audit A3: the card's n is the EFFECTIVE (independent) count; the rate is computed over every
+    # session but (third audit N4) MINTED on the effective n — the overlapping count is its own fact
+    assert theme.n == v["like_this_independent"].value and v["like_this_beat"].n == v["like_this_independent"].value
     assert theme.n <= v["like_this_cases"].value
     assert "next open" in v["like_this_beat"].label
     strong = (v["sector_return"].value > v["market_return"].value and v["days_out"].value >= 9
@@ -541,8 +542,8 @@ def test_real_c7_it_leader_is_a_watch_because_leaders_like_this_did_not_pay(real
     v = _facts(d)
     assert v["days_out"].value == 8 and v["sector_return"].value > v["market_return"].value
     # second audit A3: 2,655 overlapping leader-sessions are 879 independent cases, and the
-    # card's n is the effective count
-    assert v["like_this_cases"].value == 2655 and v["like_this_beat"].n == 2655
+    # card's n is the effective count; third audit N4: so is every like_this statistic's n
+    assert v["like_this_cases"].value == 2655 and v["like_this_beat"].n == 879
     assert d.n == v["like_this_independent"].value == 879
     assert v["like_this_beat"].value == pytest.approx(45.95, abs=0.1) and v["like_this_beat"].value < 58
     assert v["like_this_expectancy"].value < 0

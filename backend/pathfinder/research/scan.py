@@ -18,6 +18,15 @@ S1 second audit:
     not counted as a publication and never graded on its own. Once the root's horizon
     completes, the same claim is a new publication and is graded independently — one grade
     per claim per non-overlapping horizon.
+
+S1 third audit:
+  * N1 — the usefulness threshold is applied FIRST, to every draft. A sub-threshold draft
+    that repeats an open claim is recorded in `pf_candidates` ("below threshold (continues
+    <root>)") and is NOT served: fifteen of nineteen continuations in the store were below
+    the bar and the 07-23 feed served three of them. Never pad (principle 1 / addendum 1).
+  * N2 — continuation and novelty match on the CLAIM within a tolerance on the primary
+    statistic (library.same_claim), not on a rounded signature string.
+  * N5 — a due finding whose outcome cannot be measured is closed with a `void` grade.
 """
 from __future__ import annotations
 
@@ -51,7 +60,7 @@ class ScanReport:
     continued: list[str] = field(default_factory=list)
     held: list[str] = field(default_factory=list)
     below_threshold: list[str] = field(default_factory=list)
-    graded: list[tuple[str, str]] = field(default_factory=list)
+    graded: list[tuple[str, str]] = field(default_factory=list)      # (finding id, verdict) — includes "void"
     narration_failures: list[str] = field(default_factory=list)
     llm_provider: str = "none"
     skipped: bool = False
@@ -74,7 +83,11 @@ def is_backfilled(edition_date: str, computed_at: datetime) -> bool:
 
 def grade_due(store: ResearchStore, md: MarketData, cfg: ResearchConfig, *,
               graded_at: Optional[datetime] = None) -> list[tuple[str, str]]:
-    """Grade every published ROOT finding whose horizon completed on or before `md.as_of`."""
+    """
+    Grade every published ROOT finding whose horizon completed on or before `md.as_of`. A
+    finding whose horizon completed but whose outcome is a data hole is closed `void` (N5)
+    — it never stays pending forever.
+    """
     from ..schemas import GradingRule
     graded_at = graded_at or now_ist()
     out: list[tuple[str, str]] = []
@@ -143,7 +156,7 @@ def run_scan(cfg: ResearchConfig, store: ResearchStore, *, md: Optional[MarketDa
     # same seal must produce identical cards (test_pathfinder_s1_audit: determinism).
     params = {t.id: {k: v for k, v in parameters_for(t, cfg).items() if k != "pairs"} for t in LIB.LIBRARY}
     params |= {"pairs": list(cfg.pairs), "cost_hurdle_pct": cfg.cost_hurdle_pct, "slippage_pct": cfg.slippage_pct,
-               "hurdle_pct": cfg.hurdle_pct,
+               "hurdle_pct": cfg.hurdle_pct, "claim_tolerance_pp": store.claim_tolerance_pp,
                "data_exclusions": md.exclusions.as_dict() if md.exclusions else None}
     store.put_edition(
         edition_date=edition, data_as_of=md.as_of, generated_at=computed_at.isoformat(),
@@ -165,15 +178,18 @@ def run_scan(cfg: ResearchConfig, store: ResearchStore, *, md: Optional[MarketDa
     continuations: list[tuple[CardDraft, str, object, object]] = []
     for d, t, key, s, root in scored:
         fid = _finding_id(d)
+        # N1: the threshold FIRST, for every draft. A continuation below the bar is a
+        # candidate on the record, not a card in the feed.
+        if s.total < s.threshold:
+            why = "below usefulness threshold" + (f" (continues {root['finding_id']})" if root is not None else "")
+            rep.below_threshold.append(f"{fid} ({s.total:.2f}){' continues ' + root['finding_id'] if root is not None else ''}")
+            store.put_candidate(edition_date=edition, template_id=d.template_id, subject=d.subject,
+                                decision=(Decision.continue_.value if root is not None else d.decision.value),
+                                novelty_key=key, usefulness=s.total,
+                                score=s.model_dump(), published=False, reason=why, finding_id=None)
+            continue
         if root is not None:
             continuations.append((d, key, s, root))
-            continue
-        if s.total < s.threshold:
-            rep.below_threshold.append(f"{fid} ({s.total:.2f})")
-            store.put_candidate(edition_date=edition, template_id=d.template_id, subject=d.subject,
-                                decision=d.decision.value, novelty_key=key, usefulness=s.total,
-                                score=s.model_dump(), published=False, reason="below usefulness threshold",
-                                finding_id=None)
             continue
         sel = narrator.select(d, fid)
         if not sel.publish:
@@ -205,8 +221,9 @@ def run_scan(cfg: ResearchConfig, store: ResearchStore, *, md: Optional[MarketDa
                             finding_id=fid)
         rep.published.append(f"{fid} [{d.decision.value}] {s.total:.2f}")
 
-    # 2b. Continuations (A2): the same claim as an OPEN finding. Served after the new findings,
-    # never in "what matters now", never a publication, never graded on their own.
+    # 2b. Continuations (A2): the same claim as an OPEN finding, and (N1) ABOVE the threshold on
+    # their own novelty-discounted score. Served after the new findings, never in "what
+    # matters now", never a publication, never graded on their own.
     for d, key, s, root in continuations:
         fid = _finding_id(d)
         rank += 1
