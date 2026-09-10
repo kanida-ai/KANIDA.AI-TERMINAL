@@ -39,8 +39,10 @@ from ..research.facts import FactSet
 from ..schemas import Verdict
 from .book import BookRun
 from .config import ExperimentConfig
-from .gate import gate_rows, summarize, worth_testing_gates
-from .hypotheses import CONDITION_BY_ID, Conditioning, Variant, VariantEvidence, Windows, candidate_conditions, measure
+from .gate import gate_rows, summarize_evidence, worth_testing_gates
+from .hypotheses import (
+    CONDITION_BY_ID, BookLimits, Conditioning, Variant, VariantEvidence, Windows, candidate_conditions, measure,
+)
 
 
 @dataclass
@@ -88,7 +90,14 @@ def failure_conditioning(run: BookRun, cx: Conditioning, variant: Variant, fs: F
 
 def learn(*, verdict: Verdict, variant: Variant, version: int, run: BookRun, md: MarketData, cx: Conditioning,
           w: Windows, rcfg: ResearchConfig, xcfg: ExperimentConfig, c: Constitution, evidence_strength: float,
-          fs: FactSet, trial_no_start: int) -> Learning:
+          fs: FactSet, trial_no_start: int, family_trials_before: Optional[int] = None,
+          limits: Optional[BookLimits] = None) -> Learning:
+    """
+    `family_trials_before` (re-audit N4) is the family's ALL-TIME trial count before this round — across
+    every finding, retry and revision — and is what the family-wise bar divides by; it defaults to the
+    experiment's own count (`trial_no_start - 1`) only when a caller has nothing wider. `limits` makes
+    every candidate's evidence the book-selected population (re-audit N1), as the opening gate measured.
+    """
     out = Learning(verdict=verdict, facts=fs)
     worst, share = failure_conditioning(run, cx, variant, fs)
     out.worst_condition, out.worst_share = worst, share
@@ -103,22 +112,26 @@ def learn(*, verdict: Verdict, variant: Variant, version: int, run: BookRun, md:
     losers = [t for t in run.graded if t.pnl_pct_net is not None and t.pnl_pct_net <= 0]
     trial_no = trial_no_start
     cands = candidate_conditions(variant.conditions)
-    # the family-wise bar counts EVERY trial the idea will have had after this round, whatever the
-    # candidate's position in the loop (audit finding 12)
-    n_trials = trial_no_start - 1 + len(cands)
+    # the family-wise bar counts EVERY trial the FAMILY will have had after this round — all time, across
+    # every finding and retry (re-audit N4), whatever the candidate's position in the loop (audit finding 12)
+    before = (trial_no_start - 1) if family_trials_before is None else int(family_trials_before)
+    n_trials = before + len(cands)
+    alpha = float(c.document["gauntlet"]["max_placebo_p_value"])
     for cid in cands:
         cond = CONDITION_BY_ID[cid]
         cand = variant.with_condition(cond.id)
-        ev = measure(cand, md, cx, w, rcfg=rcfg, draws=xcfg.placebo_draws, seed=xcfg.rng_seed + trial_no)
+        ev = measure(cand, md, cx, w, rcfg=rcfg, draws=xcfg.placebo_draws, seed=xcfg.rng_seed + trial_no, limits=limits,
+                     bar=alpha, draws_near_bar=xcfg.placebo_draws_near_bar)
         g = worth_testing_gates(ev, c=c, xcfg=xcfg, n_trials=n_trials, evidence_strength=evidence_strength,
                                 novel=True, novelty_note="a revision of an open experiment, not a new claim")
         by = cx.by_date(cond.id)
         excl = (float(np.mean([not bool(by.get(t.signal_date, False)) for t in losers]) * 100.0) if losers else None)
         reason = "clears the gate" if g.passed else "fails: " + "; ".join(x.name for x in g.failures)
-        out.trials.append(Trial(trial_no, cand, g.passed, reason,
-                                {"whole": summarize(ev.whole), "discovery": summarize(ev.discovery), "trailing": summarize(ev.trailing)},
-                                gate_rows(g), loser_share_excluded=excl, evidence=ev))
+        out.trials.append(Trial(trial_no, cand, g.passed, reason, summarize_evidence(ev), gate_rows(g),
+                                loser_share_excluded=excl, evidence=ev))
         trial_no += 1
+    fs.add("family_trials_all_time", "every trial this family has ever had after this round, across every finding, retry "
+                                     "and revision — the count the family-wise bar divides by", n_trials, "count")
     passing = [t for t in out.trials if t.passed]
     fs.add("revision_trials", "candidate revisions evaluated after this period (every one counted)", len(out.trials), "count")
     fs.add("revision_passing", "of those, revisions that cleared the gate on the sealed history", len(passing), "count")

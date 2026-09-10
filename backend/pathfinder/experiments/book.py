@@ -32,7 +32,27 @@ import pandas as pd
 
 from ..research.config import ResearchConfig
 from ..research.data import MarketData
-from .hypotheses import Conditioning, Variant
+from .hypotheses import BookLimits, Conditioning, Variant
+
+#: Re-audit N9 — the one drawdown convention every S2 surface uses, stated where it is computed.
+DRAWDOWN_CONVENTION = ("percent decline of the equity curve from its running peak (peak-relative), marked to close "
+                       "every session; the curve starts at the capital, so the first peak is the capital itself")
+
+
+def drawdowns_relative_to_peak(curve: np.ndarray) -> tuple[float, float]:
+    """(worst, current) drawdown in % of the running peak of `curve` (equity / capital, 1.0 = flat)."""
+    arr = np.asarray(curve, dtype=float)
+    if arr.size == 0:
+        return 0.0, 0.0
+    peak = np.maximum.accumulate(np.r_[1.0, arr])[1:]
+    dd = (peak - arr) / peak * 100.0
+    return float(dd.max()), float(dd[-1])
+
+
+def limits_of(*, max_new_per_session: int, max_concurrent: int) -> BookLimits:
+    """The book's selection limits, for `hypotheses.replay` to replay the same strategy over history (N1)."""
+    return BookLimits(max_new_per_session=int(max_new_per_session), max_concurrent=int(max_concurrent))
+
 
 @dataclass(frozen=True)
 class VTrade:
@@ -93,12 +113,13 @@ class BookRun:
         return (self.equity.to_numpy(float) / self.capital_inr - 1.0) * 100.0
 
     def drawdowns(self) -> tuple[float, float]:
-        c = self.equity_pct
-        if c.size == 0:
-            return 0.0, 0.0
-        peak = np.maximum.accumulate(np.r_[0.0, c])[1:]
-        dd = peak - c
-        return float(dd.max()), float(dd[-1])
+        """
+        (worst, current) drawdown on ONE convention everywhere (re-audit N9): the percent decline of
+        the equity curve from its running peak — `DRAWDOWN_CONVENTION` — the same arithmetic the
+        version's compounded forward curve, the incumbent and the open-period view use.
+        """
+        return drawdowns_relative_to_peak(self.equity.to_numpy(float) / self.capital_inr if not self.equity.empty
+                                          else np.array([], dtype=float))
 
     @property
     def total_return_pct(self) -> Optional[float]:

@@ -37,6 +37,8 @@ So the gates are arranged the way the statistics actually work:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -53,17 +55,57 @@ class ConstitutionError(RuntimeError):
     """The Constitution is missing, malformed, or was asked to change. All fatal."""
 
 
+#: The top-level key that carries a human signature. It is EXCLUDED from the hash it signs.
+SIGNATURE_KEY = "signature"
+
+
+def constitution_content_sha256(document: dict[str, Any]) -> str:
+    """
+    SHA-256 of the Constitution's CONTENT — every key but the signature block — in a canonical
+    JSON form (sorted keys, no whitespace), so re-indenting or re-ordering the YAML does not
+    change what was signed, and any change to a governed number does.
+    """
+    body = {k: v for k, v in document.items() if k != SIGNATURE_KEY}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class Constitution:
     version: str
     document: dict[str, Any]
     approved_by: str
     effective_from: str
+    #: S2 re-audit N7. A signature is three explicit facts — WHO signed, WHEN, and the sha256 of
+    #: WHAT they signed — not the absence of the word "UNSIGNED" in a free-text field.
+    signed_by: Optional[str] = None
+    signed_at: Optional[str] = None
+    document_sha256: Optional[str] = None
 
     @property
     def is_signed(self) -> bool:
-        """An unsigned draft governs the run but may not authorise a promotion."""
-        return not self.approved_by.strip().upper().startswith("UNSIGNED")
+        """
+        True only when the signature block names a signer, a time, AND a document hash that
+        equals the hash of this document's content (`constitution_content_sha256`). A hash
+        that does not match means the document changed after it was signed: unsigned. An
+        `approved_by` that merely does not say UNSIGNED signs nothing (re-audit N7).
+        """
+        if not (self.signed_by and str(self.signed_by).strip()):
+            return False
+        if not (self.signed_at and str(self.signed_at).strip()):
+            return False
+        if not (self.document_sha256 and str(self.document_sha256).strip()):
+            return False
+        return str(self.document_sha256).strip().lower() == constitution_content_sha256(self.document)
+
+    @property
+    def signature_status(self) -> str:
+        if self.is_signed:
+            return f"signed by {self.signed_by} at {self.signed_at}"
+        if self.signed_by or self.signed_at or self.document_sha256:
+            if self.signed_by and self.signed_at and self.document_sha256:
+                return "signature present but its document hash does not match this document — treated as UNSIGNED"
+            return "incomplete signature block (needs signed_by, signed_at, document_sha256) — treated as UNSIGNED"
+        return f"UNSIGNED draft ({self.approved_by})"
 
     @property
     def approved_ranges(self) -> dict[str, dict[str, Any]]:
@@ -91,10 +133,16 @@ def load_constitution(path: str | Path) -> Constitution:
             raise ConstitutionError(f"Constitution is missing `{required}`")
     if doc.get("authored_by") != "human":
         raise ConstitutionError("the Constitution must be human-authored (L4)")
+    sig = doc.get(SIGNATURE_KEY) or {}
+    if not isinstance(sig, dict):
+        raise ConstitutionError(f"`{SIGNATURE_KEY}` must be a mapping with signed_by, signed_at, document_sha256")
     return Constitution(
         version=str(doc["version"]), document=doc,
         approved_by=str(doc["approved_by"]),
         effective_from=str(doc.get("effective_from", "")),
+        signed_by=(None if sig.get("signed_by") is None else str(sig["signed_by"])),
+        signed_at=(None if sig.get("signed_at") is None else str(sig["signed_at"])),
+        document_sha256=(None if sig.get("document_sha256") is None else str(sig["document_sha256"])),
     )
 
 
@@ -140,10 +188,14 @@ class Gate:
     #: An advisory gate is recorded and published but does not kill. It exists so a
     #: known weakness is visible in the record instead of being quietly forgiven.
     fatal: bool = True
+    #: S2 re-audit N2/N5: a gate whose statistic cannot be computed on the record it has
+    #: (too few signal days for a null or a cluster test) is INSUFFICIENT — never passed,
+    #: and distinguishable from a measured failure. `passed` is False whenever this is True.
+    insufficient: bool = False
 
     def __str__(self) -> str:
-        mark = ("PASS" if self.passed else "FAIL") if self.fatal else \
-               ("ok  " if self.passed else "NOTE")
+        mark = ("PASS" if self.passed else ("N/A " if self.insufficient else "FAIL")) if self.fatal else \
+               ("ok  " if self.passed else ("n/a " if self.insufficient else "NOTE"))
         v = "—" if self.value is None else f"{self.value:.4g}"
         b = "—" if self.bar is None else f"{self.bar:.4g}"
         tag = "" if self.fatal else " [advisory]"
@@ -168,8 +220,8 @@ class GateSet:
         return [g for g in self.gates if not g.passed and not g.fatal]
 
     def add(self, name: str, passed: bool, value: Optional[float],
-            bar: Optional[float], statement: str, fatal: bool = True) -> None:
-        self.gates.append(Gate(name, passed, value, bar, statement, fatal))
+            bar: Optional[float], statement: str, fatal: bool = True, insufficient: bool = False) -> None:
+        self.gates.append(Gate(name, bool(passed) and not insufficient, value, bar, statement, fatal, insufficient))
 
 
 def discovery_gauntlet(
@@ -274,8 +326,8 @@ def promotion_gauntlet(c: Constitution, *, discovery: GateSet, validation: GateS
     signed = c.is_signed
     g.add("constitution_signed", signed, None, None,
           ("Constitution is signed" if signed else
-           f"Constitution {c.version} is an UNSIGNED draft ({c.approved_by}); "
-           "no experiment may be promoted until a human signs it"))
+           f"Constitution {c.version}: {c.signature_status}; "
+           "no experiment may be promoted until a human signs it (signed_by, signed_at, document_sha256)"))
     for gate in list(discovery.gates) + list(validation.gates):
         if not gate.fatal:                       # the advisories become requirements here
             g.add(gate.name, gate.passed, gate.value, gate.bar, gate.statement)
@@ -288,8 +340,8 @@ def promotion_gate(c: Constitution) -> Gate:
     return Gate(
         "constitution_signed", signed, None, None,
         ("Constitution is signed" if signed else
-         f"Constitution {c.version} is an UNSIGNED draft ({c.approved_by}); "
-         "no experiment may be promoted until a human signs it"),
+         f"Constitution {c.version}: {c.signature_status}; "
+         "no experiment may be promoted until a human signs it (signed_by, signed_at, document_sha256)"),
     )
 
 

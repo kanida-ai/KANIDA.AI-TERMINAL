@@ -125,31 +125,48 @@ def engine_beats(t: T, *, family_id: str, s1: dict[str, str], story: dict[str, A
         f"{t(s1['expectancy_1'])} net of costs — as a group, no edge to act on."
     )
     # 2. researched
+    fam_trials = (f" Counting every trial this family has ever had, on every card and every retry, the record stands at "
+                  f"{t(story['family_trials_all_time'])}; that is the number the bar is divided by."
+                  if story.get("family_trials_all_time") else "")
     researched_body = (
         f"The card's own follow-up question was whether that answer depends on the kind of day the move came on. I evaluated "
-        f"{t(story['trials_opening'])} variants of the rule over a closed set of conditions and horizons — every one is on the "
+        f"{t(story['trials_opening'])} variants of the rule over a closed set of conditions and study windows — every one is on the "
         f"record — and {t(story['passing_opening'])} cleared the gate: expectancy net of costs and at twice the slippage on the "
         f"whole sealed history, an edge over every stock-session in the same window, a day-blocked placebo, and the same edge "
         f"again on the trailing window alone. The bar the best of that many trials must clear to be called significant is "
-        f"recorded next to the result."
+        f"recorded next to the result.{fam_trials}"
     )
-    # 3. history showed
+    # 3. history showed — the research described as a study (re-audit N6): a theme, a condition, a study window,
+    # and the population the virtual book could actually have taken (re-audit N1), never an instruction
+    ew = (f" Counted over every firing equal-weighted — the population the research card measured, which a book with "
+          f"limits cannot take — the same rule shows {t(story['equal_weighted_expectancy'])} across "
+          f"{t(story['equal_weighted_n'])} cases; the two are stated side by side, and the book's own is the one I test."
+          if story.get("equal_weighted_expectancy") and story.get("equal_weighted_n") else "")
+    loo = (f" With its single best day removed the trailing window shows {t(story['trailing_without_best_day'])}"
+           + (f", and its three best days carry {t(story['trailing_top3_share'])} of its net result"
+              if story.get("trailing_top3_share") else "")
+           + " — so the persistence check is read with its concentration, never alone."
+           if story.get("trailing_without_best_day") else "")
     hist_body = (
-        f"The rule I kept looks at {group} {t(story['condition_label'])}, held for {t(story['horizon'])}. On the whole sealed "
-        f"history it returned {t(story['expectancy_net'])} per trade net of costs and slippage across {t(story['n'])} cases on "
-        f"{t(story['signal_days'])} sessions, {t(story['hit_rate'])} of them positive, an edge of {t(story['edge'])} over every "
-        f"stock-session in the same window; on the trailing window alone it returned {t(story['trailing_expectancy'])} across "
-        f"{t(story['trailing_n'])} cases — a persistence check, not an independent holdout: that window was seen for all "
-        f"{t(story['trailing_looks'])} variants before this one was chosen. The day-blocked placebo puts the chance of a random "
-        f"draw this good at {t(story['placebo_p'])}."
-        + (f" On the window before {t(story['discovery_end'])} alone the edge does not survive twice the slippage, and on "
-           f"independent signal days it is not yet distinguishable from chance — both are on the record, and both are what the "
-           f"virtual test exists to settle." if story.get("advisories_failed") else "")
+        f"The rule I kept studies {group} {t(story['condition_label'])}, over a study window of {t(story['horizon'])} after the "
+        f"signal. Measured as the virtual book itself would have taken it — the most liquid names first, a capped number per "
+        f"session, a capped number at once — the rule fired {t(story['signals_fired'])} times on the whole sealed history and "
+        f"the book could take {t(story['n'])} of them on {t(story['signal_days'])} sessions ({t(story['signals_skipped'])} it "
+        f"could not); those returned {t(story['expectancy_net'])} per trade net of costs and slippage, {t(story['hit_rate'])} "
+        f"of them positive, an edge of {t(story['edge'])} over every stock-session in the same window.{ew} On the trailing window "
+        f"alone the book's own population returned {t(story['trailing_expectancy'])} across {t(story['trailing_n'])} cases — a "
+        f"persistence check, not an independent holdout: that window was seen for all {t(story['trailing_looks'])} variants "
+        f"before this one was chosen.{loo} The day-blocked placebo puts the chance of a random draw this good at "
+        f"{t(story['placebo_p'])}."
+        + (f" On the window before {t(story['discovery_end'])} alone the edge does not survive twice the slippage, or on "
+           f"independent signal days it is not yet distinguishable from chance, or the trailing window does not hold without "
+           f"its best day — each advisory is on the record, and each is what the virtual test exists to settle."
+           if story.get("advisories_failed") else "")
     )
-    # 4. decided
+    # 4. decided — the study design, not a sizing instruction (re-audit N6)
     decided_body = (
-        f"I decided to test it with virtual money: {t(story['capital'])} of research capital, at most {t(story['fraction'])} in any "
-        f"one position, tracked in periods of {t(story['period_sessions'])} sessions. The grading rule was frozen before the first "
+        f"I decided to test it with virtual money: {t(story['capital'])} of research capital spread across the names the rule "
+        f"selects, tracked in periods of {t(story['period_sessions'])} sessions. The grading rule was frozen before the first "
         f"session: right if the period's mean net result clears one standard error above zero, wrong if it falls one below, "
         f"inconclusive inside, and nothing to grade if the rule never fired."
     )

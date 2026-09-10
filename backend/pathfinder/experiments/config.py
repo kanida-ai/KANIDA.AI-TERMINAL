@@ -77,6 +77,14 @@ class ExperimentConfig:
     retry_after_sessions: int = field(default_factory=lambda: _i("KANIDA_PFX_RETRY_AFTER_SESSIONS", 60))
     #: Day-blocked placebo draws (the null the gauntlet's `max_placebo_p_value` is judged on).
     placebo_draws: int = field(default_factory=lambda: _i("KANIDA_PFX_PLACEBO_DRAWS", 1000))
+    #: Re-audit N8 — when the p sits within two binomial standard errors of the bar, the null is
+    #: re-drawn to this many draws before the gate reads it (1,000 draws put ±0.009 around 0.05).
+    placebo_draws_near_bar: int = field(default_factory=lambda: _i("KANIDA_PFX_PLACEBO_DRAWS_NEAR_BAR", 5000))
+    #: FOUNDER INPUT (re-audit N2/N5) — the fewest independent signal days the FORWARD record must
+    #: hold before its fixed-day permutation null and its cluster t are read at all; below it the
+    #: graduation gate is `insufficient`, never passed. The frozen cumulative kill keeps its own
+    #: floor (`grading.CUMULATIVE_MIN_SIGNAL_DAYS`).
+    min_forward_signal_days: int = field(default_factory=lambda: _i("KANIDA_PFX_MIN_FORWARD_SIGNAL_DAYS", 5))
     rng_seed: int = 20260910
 
     # ── identity ────────────────────────────────────────────────────────────
@@ -96,7 +104,8 @@ class ExperimentConfig:
             "min_trades_to_grade": self.min_trades_to_grade, "max_versions": self.max_versions,
             "min_evidence_strength": self.min_evidence_strength, "min_n_history": self.min_n_history,
             "min_n_trailing": self.min_n_trailing, "placebo_draws": self.placebo_draws, "rng_seed": self.rng_seed,
-            "retry_after_sessions": self.retry_after_sessions,
+            "retry_after_sessions": self.retry_after_sessions, "placebo_draws_near_bar": self.placebo_draws_near_bar,
+            "min_forward_signal_days": self.min_forward_signal_days,
         }
 
 

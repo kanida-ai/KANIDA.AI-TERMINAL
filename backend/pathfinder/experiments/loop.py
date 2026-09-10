@@ -35,15 +35,15 @@ from ..research.store import ResearchStore
 from ..schemas import (
     ComparisonCategory, EvidenceLevel, Expectation, ExpectedVsActual, Finding, ForwardResult, DateRange, Verdict,
 )
-from .book import BookRun, passive_incumbent, run_book
+from .book import BookRun, drawdowns_relative_to_peak, limits_of, passive_incumbent, run_book
 from .config import ExperimentConfig
 from .gate import (
-    ForwardRecord, gate_rows, graduation_gates, proposal_status, summarize, worth_testing_gates,
+    ForwardRecord, gate_rows, graduation_gates, proposal_status, summarize_evidence, worth_testing_gates,
 )
 from .grading import GRADING_RULES_VERSION, build_experiment_rule, compare, cumulative_verdict, judge
 from .hypotheses import (
-    CONDITION_BY_ID, Conditioning, Variant, VariantEvidence, Windows, block_placebo_means, cluster_robust_t,
-    family_for, measure, not_derivable_reason, threshold_of, variants_for, windows_for,
+    CONDITION_BY_ID, BookLimits, Conditioning, Variant, VariantEvidence, Windows, cluster_robust_t, family_for, measure,
+    not_derivable_reason, placebo_p_value, threshold_of, variants_for, windows_for,
 )
 from .learning import Learning, learn
 from .narrate import Beat, ExperimentNarrator, T, engine_beats
@@ -95,6 +95,16 @@ def _risk(c: Constitution) -> dict[str, float]:
             "max_concurrent": int(r["max_concurrent_positions"]), "max_new": int(r["max_new_positions_per_session"])}
 
 
+def _limits(c: Constitution) -> BookLimits:
+    """The book's selection limits, so history is replayed as the book would have taken it (re-audit N1)."""
+    r = _risk(c)
+    return limits_of(max_new_per_session=r["max_new"], max_concurrent=r["max_concurrent"])
+
+
+def _alpha(c: Constitution) -> float:
+    return float(c.document["gauntlet"]["max_placebo_p_value"])
+
+
 def _book(variant: Variant, md: MarketData, cx: Conditioning, *, start: str, xcfg: ExperimentConfig,
           rcfg: ResearchConfig, c: Constitution) -> BookRun:
     r = _risk(c)
@@ -119,26 +129,57 @@ def expectation_facts(fs: FactSet, ev: VariantEvidence, *, xcfg: ExperimentConfi
     v = ev.variant
     fs.add("rule", "the rule under test", v.rule_text(), "text")
     fs.add("condition", "the condition the rule adds", " and ".join(CONDITION_BY_ID[c].label for c in v.conditions), "text")
-    fs.add("horizon", "sessions held, next open to horizon close", v.horizon, "sessions", sample="parameter")
-    fs.add("cases", "cases on the whole sealed history", w.n, "count")
+    fs.add("horizon", "sessions from the next open to the horizon close — the study window", v.horizon, "sessions", sample="parameter")
+    # re-audit N1: the population every number below is measured on — the book's own — stated first
+    fs.add("population", "the population the expectation is measured on: the trades the virtual book itself would have "
+                         "taken under its limits, not every signal", w.selection, "text")
+    fs.add("signals_fired", "signals the rule fired on the whole sealed history (every resolved firing)", w.n_fired, "count")
+    fs.add("signals_skipped", "of those, firings the book's limits could not take (its per-session cap, concurrency cap, "
+                              "one per symbol) — not trades it could have made", w.n_skipped, "count")
+    fs.add("cases", "cases on the whole sealed history the book would have taken", w.n, "count")
     fs.add("signal_days", "distinct signal sessions those cases came from", w.signal_days, "count")
     fs.add("hit_rate", "share of cases positive net of costs (supporting, never the headline)", w.hit_pct, "pct", n=w.n)
     fs.add("median_net", "median net result per case", w.median_net, "pct", n=w.n)
-    fs.add("expectancy_net", "expectancy per trade net of costs and slippage on the whole sealed history (winsorised mean)",
+    fs.add("expectancy_net", "expectancy per trade net of costs and slippage on the whole sealed history (winsorised mean) — "
+                             "the book-selected population, the strategy the book trades: THE frozen expectation",
            w.expectancy_net, "pct", n=w.n)
     fs.add("expectancy_2x", "the same expectancy at twice the slippage", w.expectancy_2x_net, "pct", n=w.n)
+    if ev.equal_weighted is not None:
+        e = ev.equal_weighted
+        fs.add("equal_weighted_expectancy", "CONTEXT, not the expectation: the same rule counted over every firing "
+                                            "equal-weighted — the population the S1 card measured, which the book cannot take",
+               e.expectancy_net, "pct", n=e.n)
+        fs.add("equal_weighted_cases", "cases in that equal-weighted count", e.n, "count")
     fs.add("baseline_net", "every stock-session in the same window under the same exits, net (the baseline)",
            w.baseline_net, "pct", n=w.baseline_n)
     fs.add("edge", "the rule's mean minus the baseline's, gross of both", w.edge_pct, "pct", n=w.n)
     if w.placebo_p is not None:
-        fs.add("placebo_p", "day-blocked placebo: share of same-shape random draws at least this good", w.placebo_p, "ratio", n=w.placebo_draws)
+        fs.add("placebo_p", "day-blocked placebo: share of same-shape random draws at least this good (winsorised means on "
+                            "both sides; the draw count rises near the bar)", w.placebo_p, "ratio", n=w.placebo_draws)
+        fs.add("placebo_draws", "random draws the placebo p rests on", w.placebo_draws, "count")
     if w.cluster_t is not None:
-        fs.add("cluster_t", "t-statistic with trades clustered on their signal day", w.cluster_t, "ratio", n=w.signal_days)
+        fs.add("cluster_t", "CR3 cluster-robust t-statistic with trades clustered on their signal day", w.cluster_t, "ratio",
+               n=w.signal_days)
+    # re-audit N3: concentration — how much of the window one or three days carry
+    if w.top3_days_share_pct is not None:
+        fs.add("top3_days_share", "share of the whole history's net P&L carried by its three best signal days",
+               w.top3_days_share_pct, "pct", n=w.signal_days)
+    if w.expectancy_without_best_day_net is not None:
+        fs.add("expectancy_without_best_day", "expectancy on the whole sealed history with its single best signal day removed",
+               w.expectancy_without_best_day_net, "pct", n=w.n)
     fs.add("discovery_end", "last session of the discovery window", xcfg.discovery_end, "text")
     if t.n:
         fs.add("trailing_cases", "cases on the trailing validation window alone", t.n, "count")
         fs.add("trailing_expectancy", "expectancy net of costs on the trailing validation window alone", t.expectancy_net, "pct", n=t.n)
         fs.add("trailing_expectancy_2x", "the same at twice the slippage", t.expectancy_2x_net, "pct", n=t.n)
+        fs.add("trailing_signal_days", "distinct signal sessions on the trailing window", t.signal_days, "count")
+        if t.top3_days_share_pct is not None:
+            fs.add("trailing_top3_days_share", "share of the trailing window's net P&L carried by its three best signal days",
+                   t.top3_days_share_pct, "pct", n=t.signal_days)
+        if t.expectancy_without_best_day_net is not None:
+            fs.add("trailing_expectancy_without_best_day", "expectancy on the trailing window with its single best signal day "
+                                                           "removed — the persistence check without its best day",
+                   t.expectancy_without_best_day_net, "pct", n=t.n)
     if d.n:
         fs.add("discovery_cases", "cases on the discovery window alone", d.n, "count")
         fs.add("discovery_expectancy", "expectancy net of costs on the discovery window alone", d.expectancy_net, "pct", n=d.n)
@@ -154,11 +195,12 @@ def trailing_looks_fact(fs: FactSet, n_trials: int) -> None:
 
 
 def expectation_model(ev: VariantEvidence, *, frozen_at: datetime, seal: str, rcfg: ResearchConfig, computed_by: str) -> Expectation:
-    w, t, d = ev.whole, ev.trailing, ev.discovery
+    w, t, d, e = ev.whole, ev.trailing, ev.discovery, ev.equal_weighted
     return Expectation(
         frozen_at=frozen_at, seal=date.fromisoformat(seal),
         metric=("mean net P&L per trade, next open to horizon close, net of costs and slippage both ways, "
-                "winsorised at one percent either tail"),
+                "winsorised at one percent either tail — over the trades the virtual book itself would have taken "
+                "under its limits (the measured strategy), not over every signal"),
         expectancy_net_pct=float(w.expectancy_net), expectancy_2x_slippage_net_pct=float(w.expectancy_2x_net),
         hit_rate_pct=float(w.hit_pct), median_net_pct=float(w.median_net), n=w.n, signal_days=w.signal_days,
         period=DateRange(start=date.fromisoformat(w.window_start), end=date.fromisoformat(w.window_end)),
@@ -166,19 +208,27 @@ def expectation_model(ev: VariantEvidence, *, frozen_at: datetime, seal: str, rc
         trailing_period=(DateRange(start=date.fromisoformat(t.window_start), end=date.fromisoformat(t.window_end)) if t.n else None),
         discovery_expectancy_2x_slippage_net_pct=d.expectancy_2x_net, discovery_n=d.n,
         edge_vs_baseline_pct=w.edge_pct, baseline_n=w.baseline_n, placebo_p=w.placebo_p, placebo_draws=w.placebo_draws,
-        cluster_t=w.cluster_t, hurdle_pct=rcfg.hurdle_pct, computed_by=computed_by)
+        cluster_t=w.cluster_t, hurdle_pct=rcfg.hurdle_pct, computed_by=computed_by,
+        # re-audit N1 / N3 / N8 (additive)
+        population=w.selection, signals_fired=w.n_fired, signals_skipped=w.n_skipped,
+        equal_weighted_expectancy_net_pct=(None if e is None else e.expectancy_net), equal_weighted_n=(0 if e is None else e.n),
+        top3_days_share_pct=w.top3_days_share_pct, expectancy_without_best_day_net_pct=w.expectancy_without_best_day_net,
+        trailing_top3_days_share_pct=t.top3_days_share_pct,
+        trailing_expectancy_without_best_day_net_pct=t.expectancy_without_best_day_net,
+        placebo_convention=w.placebo_convention, placebo_se=w.placebo_se, cluster_t_kind="CR3")
 
 
 def _version_row(store: ExperimentStore, eid: str, version: int, *, edition: str, ev: VariantEvidence, change: str, why: str,
                  level: str, validation: Optional[str], trials: int, computed_at: datetime, fact_cfg: ResearchConfig,
-                 rcfg: ResearchConfig, xcfg: ExperimentConfig, source_facts: list, backfilled: bool) -> None:
+                 rcfg: ResearchConfig, xcfg: ExperimentConfig, source_facts: list, backfilled: bool, c: Constitution) -> None:
     fs = FactSet(finding_slug=f"{eid}_v{version}_expectation", cfg=fact_cfg, as_of=edition,
                  period_start=ev.whole.window_start, period_end=edition, component="experiment_research", computed_at=computed_at)
     expectation_facts(fs, ev, xcfg=xcfg, rcfg=rcfg)
     trailing_looks_fact(fs, trials)
     exp = expectation_model(ev, frozen_at=computed_at, seal=edition, rcfg=rcfg, computed_by=fs.component)
     rule = build_experiment_rule(ev.variant, expected_net_pct=exp.expectancy_net_pct, hurdle_pct=rcfg.hurdle_pct,
-                                 min_trades=xcfg.min_trades_to_grade, frozen_at=computed_at)
+                                 min_trades=xcfg.min_trades_to_grade, frozen_at=computed_at, alpha=_alpha(c),
+                                 selection=ev.whole.selection)
     store.put_version(
         experiment_id=eid, version=version, created_edition=edition, variant_json=_j(ev.variant.as_dict()),
         change=change, why=why, level=level, validation=validation, expectation_json=exp.model_dump_json(),
@@ -221,7 +271,9 @@ def consider_finding(f: Finding, *, md: MarketData, cx: Conditioning, w: Windows
     fam = family_for(f)
     row: dict[str, Any] = dict(edition_date=D, finding_id=f.id, template_id=f.template_id, family_id=(fam.id if fam else None),
                                trials_evaluated=0, opened_experiment_id=None, best_signature=None, best_rule_text=None,
-                               best_expectancy_net=None, best_failed_gates_json="[]", created_at=computed_at.isoformat())
+                               best_expectancy_net=None, best_failed_gates_json="[]",
+                               family_trials_all_time=(store.family_trials(fam.id) if fam else 0),
+                               created_at=computed_at.isoformat())
     if fam is None:
         store.put_candidate(**row, reason=not_derivable_reason(f))
         rep.declined.append(f"{f.id}: not derivable")
@@ -244,17 +296,23 @@ def consider_finding(f: Finding, *, md: MarketData, cx: Conditioning, w: Windows
     thr = threshold_of(f, fam)
     variants = variants_for(fam, thr)
     strength = float(f.usefulness.evidence_strength)
+    # re-audit N4: the family-wise bar divides by every trial the FAMILY has ever had — across every
+    # finding and every retry — plus this round; never by this round alone
+    family_before = store.family_trials(fam.id)
+    n_family = family_before + len(variants)
+    limits = _limits(c)
     trials: list[_OpenTrial] = []
     for i, v in enumerate(variants, start=1):
-        ev = measure(v, md, cx, w, rcfg=rcfg, draws=xcfg.placebo_draws, seed=xcfg.rng_seed + i)
-        g = worth_testing_gates(ev, c=c, xcfg=xcfg, n_trials=len(variants), evidence_strength=strength, novel=True,
+        # re-audit N1: measured as the book would have taken it; N8: adaptive draws near the bar
+        ev = measure(v, md, cx, w, rcfg=rcfg, draws=xcfg.placebo_draws, seed=xcfg.rng_seed + i, limits=limits, bar=_alpha(c),
+                     draws_near_bar=xcfg.placebo_draws_near_bar)
+        g = worth_testing_gates(ev, c=c, xcfg=xcfg, n_trials=n_family, evidence_strength=strength, novel=True,
                                 novelty_note=f"no experiment exists for family {fam.id}")
         reason = "clears the gate" if g.passed else "fails: " + "; ".join(x.name for x in g.failures)
-        trials.append(_OpenTrial(i, v, g.passed, reason,
-                                 {"whole": summarize(ev.whole), "discovery": summarize(ev.discovery), "trailing": summarize(ev.trailing)},
-                                 gate_rows(g), evidence=ev))
+        trials.append(_OpenTrial(i, v, g.passed, reason, summarize_evidence(ev), gate_rows(g), evidence=ev))
     passing = [t for t in trials if t.passed]
     row["trials_evaluated"] = len(trials)
+    row["family_trials_all_time"] = n_family
     # the variant that came CLOSEST to clearing (fewest failed fatal gates, then expectancy) — the
     # one a founder reading the decline needs to see, not the one with the prettiest expectancy
     def _closeness(t: _OpenTrial) -> tuple:
@@ -289,7 +347,7 @@ def consider_finding(f: Finding, *, md: MarketData, cx: Conditioning, w: Windows
                       "(more than one did; every one evaluated is a counted trial on the record)" if len(passing) > 1 else
                       "the one variant that cleared the worth-testing gate (every one evaluated is a counted trial on the record)"),
                  level="L1", validation=None, trials=len(trials), computed_at=computed_at, fact_cfg=xcfg.fact_cfg(rcfg), rcfg=rcfg,
-                 xcfg=xcfg, source_facts=_source_facts(f), backfilled=backfilled)
+                 xcfg=xcfg, source_facts=_source_facts(f), backfilled=backfilled, c=c)
     store.put_period(experiment_id=eid, version=1, period_no=1, start_after=D, sessions=xcfg.period_sessions, opened_edition=D,
                      backfilled=int(backfilled), created_at=computed_at.isoformat())
     row["opened_experiment_id"] = eid
@@ -357,8 +415,44 @@ def _learning_statement(lr: Learning, fs: FactSet, version: int, xcfg: Experimen
     return text, refs
 
 
+def fixed_day_permutation_means(md: MarketData, variant: Variant, day_counts: dict[str, int], *, draws: int, seed: int
+                                ) -> np.ndarray:
+    """
+    The FORWARD null (re-audit N2): the version's own signal days are held FIXED; from each signal
+    day's pool of resolved stock-sessions (every name with a resolved `f{h}` on that day) as many
+    random names are drawn, without replacement, as the book took that day; the draw's statistic is
+    the plain mean over all of them (the convention the record is graded on). Days are not resampled:
+    on a forward window every qualifying day IS a signal day, so a day-blocked draw resamples the
+    signal's own days and its p says nothing (the re-audit measured 0.53 on five days; a conditioned
+    day-blocked pool was degenerate). Returns `draws` null means, gross of the hurdle.
+    """
+    df = md.df
+    col = f"f{variant.horizon}"
+    rng = np.random.default_rng(seed)
+    total = 0
+    acc = np.zeros(draws, dtype=float)
+    for d in sorted(day_counts):
+        k = int(day_counts[d])
+        if k <= 0:
+            continue
+        pool = variant.sign * df.loc[(df["d"] == d) & df[col].notna(), col].to_numpy(dtype=float) * 100.0
+        m = pool.size
+        if m == 0:
+            continue
+        if m >= k:
+            keys = rng.random((draws, m))
+            idx = np.argpartition(keys, k - 1, axis=1)[:, :k]
+        else:
+            idx = rng.integers(0, m, size=(draws, k))
+        acc += pool[idx].sum(axis=1)
+        total += k
+    if total == 0:
+        return np.array([], dtype=float)
+    return acc / total
+
+
 def _version_forward(store: ExperimentStore, eid: str, version: int, *, md: MarketData, xcfg: ExperimentConfig,
-                     rcfg: ResearchConfig, first_start: str) -> ForwardRecord:
+                     rcfg: ResearchConfig, first_start: str, alpha: Optional[float] = None) -> ForwardRecord:
     """The version's forward record across all its periods (RESOLVED trades only), on the frame sealed at D."""
     rows = store.trades(eid, version, resolved_only=True)
     net = [float(r["pnl_pct_net"]) for r in rows]
@@ -377,32 +471,27 @@ def _version_forward(store: ExperimentStore, eid: str, version: int, *, md: Mark
         last_eq = float(r["equity_inr"])
         last_p = r["period_no"]
     total = (curve[-1] - 1.0) * 100.0 if curve else None
-    mdd = 0.0
-    if curve:
-        arr = np.array(curve)
-        peak = np.maximum.accumulate(np.r_[1.0, arr])[1:]
-        mdd = float(((peak - arr) / peak * 100.0).max())
+    # re-audit N9: the ONE drawdown convention (`book.DRAWDOWN_CONVENTION`), the same call the book makes
+    mdd = drawdowns_relative_to_peak(np.array(curve, dtype=float))[0] if curve else 0.0
     p: Optional[float] = None
     draws = 0
+    p_se: Optional[float] = None
     ct = None
-    if net:
+    G = len(set(days))
+    if net and G >= xcfg.min_forward_signal_days:
         vrow = store.one("SELECT variant_json FROM pfx_versions WHERE experiment_id = ? AND version = ?", [eid, version])
         variant = Variant.from_dict(json.loads(vrow["variant_json"]))
-        df = md.df
-        col = f"f{variant.horizon}"
-        # The null over the FORWARD window only: every resolved stock-session between the version's
-        # first signal session and the seal, day-blocked to the version's own signal-day shape.
-        inw = (df["d"] >= first_start) & (df["d"] <= md.as_of) & df[col].notna()
-        pool = df.loc[inw, ["d", col]].sort_values("d", kind="mergesort")
-        pv = variant.sign * pool[col].to_numpy(dtype=float) * 100.0
-        counts = np.array([days.count(d) for d in sorted(set(days))])
-        means = block_placebo_means(pool["d"].to_numpy(), pv, counts, draws=xcfg.placebo_draws, seed=xcfg.rng_seed + 7)
-        if means.size:
-            draws = int(means.size)
-            gross_mean = float(np.mean(net)) + rcfg.hurdle_pct      # the pool is gross; the trades are net of the hurdle
-            p = max(float((means >= gross_mean).mean()), 1.0 / draws)
+        counts = {d: days.count(d) for d in set(days)}
+
+        def _means(k: int, s: int) -> np.ndarray:
+            return fixed_day_permutation_means(md, variant, counts, draws=k, seed=s)
+
+        gross_mean = float(np.mean(net)) + rcfg.hurdle_pct      # the pool is gross; the trades are net of the hurdle
+        p, draws, p_se = placebo_p_value(_means, gross_mean, draws=xcfg.placebo_draws, draws_near_bar=xcfg.placebo_draws_near_bar,
+                                         bar=alpha, seed=xcfg.rng_seed + 7)
         ct = cluster_robust_t(np.array(net), np.array(days))
-    return ForwardRecord(tuple(net), tuple(days), total, mdd, p, draws, ct)
+    return ForwardRecord(tuple(net), tuple(days), total, mdd, p, draws, ct, min_signal_days=xcfg.min_forward_signal_days,
+                         placebo_se=p_se)
 
 
 def track_period(prow, *, md: MarketData, cx: Conditioning, w: Windows, store: ExperimentStore, rcfg: ResearchConfig,
@@ -457,7 +546,8 @@ def track_period(prow, *, md: MarketData, cx: Conditioning, w: Windows, store: E
     # the same source evidence, never on a number invented here
     strength = float(next(g["value"] for g in json.loads(erow["gates_json"]) if g["name"] == "source_evidence_strength"))
     lr = learn(verdict=grade.verdict, variant=variant, version=v, run=run, md=md, cx=cx, w=w, rcfg=rcfg, xcfg=xcfg, c=c,
-               evidence_strength=strength, fs=fs, trial_no_start=n_prev + 1)
+               evidence_strength=strength, fs=fs, trial_no_start=n_prev + 1,
+               family_trials_before=store.family_trials(erow["family_id"]), limits=_limits(c))
     if lr.next_action == "revise":
         fs.add("next_version", "the version the learning creates", v + 1, "count")
     stmt, refs = _learning_statement(lr, fs, v, xcfg)
@@ -523,7 +613,7 @@ def track_period(prow, *, md: MarketData, cx: Conditioning, w: Windows, store: E
                                  f"and the trailing window alone) under the same worth-testing gate as v1; forward validation is "
                                  f"the version's own periods — `improved` stays null until they grade"),
                      trials=len(lr.trials), computed_at=computed_at, fact_cfg=fact_cfg, rcfg=rcfg, xcfg=xcfg,
-                     source_facts=_load_facts(_j(src)), backfilled=backfilled)
+                     source_facts=_load_facts(_j(src)), backfilled=backfilled, c=c)
         store.put_period(experiment_id=eid, version=v + 1, period_no=1, start_after=D, sessions=xcfg.period_sessions, opened_edition=D,
                          backfilled=int(backfilled), created_at=computed_at.isoformat())
         rep.revised.append(f"{eid} v{v} -> v{v + 1} ({lr.adopted.signature})")
@@ -534,7 +624,7 @@ def track_period(prow, *, md: MarketData, cx: Conditioning, w: Windows, store: E
     # ── graduation gate on the version's whole forward record ──
     first = store.periods(eid, v)[0]
     first_start = md.session_after(first["start_after"], 1) or start
-    fr = _version_forward(store, eid, v, md=md, xcfg=xcfg, rcfg=rcfg, first_start=first_start)
+    fr = _version_forward(store, eid, v, md=md, xcfg=xcfg, rcfg=rcfg, first_start=first_start, alpha=_alpha(c))
     inc = passive_incumbent(md, start=first_start, end=D, rcfg=rcfg, capital_inr=run.capital_inr)
     g = graduation_gates(fr, incumbent=inc, direction=variant.direction, horizon=variant.horizon, c=c, slippage_pct=rcfg.slippage_pct)
     status = proposal_status(g)
@@ -562,7 +652,11 @@ def narrate_experiment(eid: str, *, md: MarketData, store: ExperimentStore, rcfg
           if any(x.id.endswith(f"_{n}") for x in src_facts)}
     ex = {n: next(x.id for x in exp_facts if x.id.endswith(f"_{n}")) for n in
           ("condition", "horizon", "expectancy_net", "cases", "signal_days", "hit_rate", "edge", "trailing_expectancy", "trailing_cases",
-           "placebo_p", "discovery_end", "trailing_looks")}
+           "placebo_p", "discovery_end", "trailing_looks", "signals_fired", "signals_skipped")}
+    # optional facts (re-audit N1 / N3): present when the book selected and when the window had more than one day
+    ex.update({n: next((x.id for x in exp_facts if x.id.endswith(f"_{n}")), None) for n in
+               ("equal_weighted_expectancy", "equal_weighted_cases", "trailing_expectancy_without_best_day",
+                "trailing_top3_days_share")})
     fs = FactSet(finding_slug=f"{eid}_{D.replace('-', '')}_story", cfg=xcfg.fact_cfg(rcfg), as_of=D, period_start=md.first_session,
                  period_end=D, component="experiment_story", computed_at=computed_at)
     opening = store.trials("finding", erow["source_finding_id"])
@@ -580,8 +674,14 @@ def narrate_experiment(eid: str, *, md: MarketData, store: ExperimentStore, rcfg
         "condition_label": ex["condition"], "horizon": ex["horizon"], "expectancy_net": ex["expectancy_net"], "n": ex["cases"],
         "signal_days": ex["signal_days"], "hit_rate": ex["hit_rate"], "edge": ex["edge"], "trailing_expectancy": ex["trailing_expectancy"],
         "trailing_n": ex["trailing_cases"], "placebo_p": ex["placebo_p"], "discovery_end": ex["discovery_end"],
-        "trailing_looks": ex["trailing_looks"],
+        "trailing_looks": ex["trailing_looks"], "signals_fired": ex["signals_fired"], "signals_skipped": ex["signals_skipped"],
+        "equal_weighted_expectancy": ex["equal_weighted_expectancy"], "equal_weighted_n": ex["equal_weighted_cases"],
+        "trailing_without_best_day": ex["trailing_expectancy_without_best_day"], "trailing_top3_share": ex["trailing_top3_days_share"],
+        "family_trials_all_time": None,
     }
+    fs.add("family_trials_all_time", "every trial this family has ever had as of this edition, across every finding, retry and "
+                                     "revision — the count the family-wise bar divides by", store.family_trials(erow["family_id"], D), "count")
+    story["family_trials_all_time"] = fs.id("family_trials_all_time")
     facts = list(src_facts) + list(exp_facts)
     outs = store.outcomes(eid)
     latest_out = outs[-1] if outs else None

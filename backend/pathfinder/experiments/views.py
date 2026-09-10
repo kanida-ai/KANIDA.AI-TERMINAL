@@ -100,7 +100,8 @@ def card(store: ExperimentStore, eid: str, *, edition: Optional[str] = None) -> 
         versions_count=len(versions), trials_total=len(trials),
         periods_graded=sum(1 for o in outs if o["verdict"] != "void"), score=_score(outs),
         latest_comparison=_latest_comparison(outs), backfilled=backfilled, opened_backfilled=bool(e["backfilled"]),
-        record_label=BACKFILL_LABEL if backfilled else FORWARD_LABEL, llm_provider=n["llm_provider"])
+        record_label=BACKFILL_LABEL if backfilled else FORWARD_LABEL, llm_provider=n["llm_provider"],
+        family_trials_all_time=store.family_trials(e["family_id"], as_of))
 
 
 def _withhold_constituents(facts: list[Fact], constituents: set[str]) -> list[Fact]:
@@ -248,7 +249,8 @@ def rejected(store: ExperimentStore, as_of: Optional[str] = None) -> list[Reject
         out.append(RejectedCandidate(finding_id=r["finding_id"], edition_date=date.fromisoformat(r["edition_date"]),
                                      template_id=r["template_id"], family=r["family_id"], trials_evaluated=int(r["trials_evaluated"]),
                                      reason=r["reason"], best_rule_text=r["best_rule_text"], best_expectancy_net_pct=r["best_expectancy_net"],
-                                     best_failed_gates=json.loads(r["best_failed_gates_json"])))
+                                     best_failed_gates=json.loads(r["best_failed_gates_json"]),
+                                     family_trials_all_time=(int(r["family_trials_all_time"]) if r["family_id"] else None)))
     return out
 
 

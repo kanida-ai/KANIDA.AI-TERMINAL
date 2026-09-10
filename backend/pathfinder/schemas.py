@@ -1199,10 +1199,17 @@ EXPERIMENT_DISCLOSURE = (
 )
 
 #: Spec addendum 6 — words that would turn a public research card into a trade instruction.
-#: Enforced on every public experiment text, whoever wrote it (engine or model).
+#: Enforced on every public experiment text, whoever wrote it (engine or model). Widened by the
+#: S2 re-audit (N6): a side ("go long", "a long position", "short it"), a holding instruction
+#: ("hold for", "exit at", "enter at"), a sizing instruction ("position size", "size at") and a
+#: timing instruction ("at the open") all read as instructions; a public card describes a STUDY —
+#: a theme, a condition, a study window, the evidence — never what to do.
 PUBLIC_CARD_BANNED_RE = re.compile(
-    r"\b(entry|entries|exit price|target|targets|stop[- ]?loss|stoploss|execute|execution|"
-    r"place an order|buy|buying|sell|selling|take profit|book profit)\b", re.IGNORECASE)
+    r"\b(entry|entries|enter at|entered at|exit at|exit price|exit the|target|targets|stop[- ]?loss|stoploss|"
+    r"execute|execution|place an order|buy|buying|bought|sell|selling|sold|take profit|book profit|"
+    r"go(?:es|ing)? (?:long|short)|went (?:long|short)|(?:long|short) (?:position|positions|it|them|the stock|the name|the dip)|"
+    r"hold(?:ing)? for|hold it|hold them|position siz(?:e|es|ing|ed)|siz(?:e|ed|ing) at|at the open|at tomorrow's open|"
+    r"at the next open|at the next session's open|from the next session's open)\b", re.IGNORECASE)
 
 
 class ExperimentState(str, Enum):
@@ -1278,6 +1285,25 @@ class Expectation(BaseModel):
     hurdle_pct: float = Field(..., ge=0)
     computed_by: str
     sample_flag: SampleFlag = SampleFlag.unknown
+    # ── S2 re-audit, additive ──
+    population: str = Field("equal_weighted: every resolved signal, one unit each", description=(
+        "N1: the population the expectation is measured on. The frozen expectation is the BOOK's own — the trades the "
+        "virtual book would have taken under its limits (liquidity rank, per-session cap, concurrency cap, one per symbol); "
+        "the equal-weighted figure over every firing is `equal_weighted_expectancy_net_pct`, context only."))
+    signals_fired: Optional[int] = Field(None, ge=0, description="Every resolved firing of the rule on the window.")
+    signals_skipped: Optional[int] = Field(None, ge=0, description="Firings the book's limits could not take.")
+    equal_weighted_expectancy_net_pct: Optional[float] = Field(None, description=(
+        "CONTEXT, not the expectation: the same rule over every firing equal-weighted (the S1 card's population)."))
+    equal_weighted_n: int = Field(0, ge=0)
+    top3_days_share_pct: Optional[float] = Field(None, description=(
+        "N3: share of the whole window's net P&L carried by its three best signal days (defined when the total is positive)."))
+    expectancy_without_best_day_net_pct: Optional[float] = Field(None, description="N3: expectancy with the best signal day removed.")
+    trailing_top3_days_share_pct: Optional[float] = None
+    trailing_expectancy_without_best_day_net_pct: Optional[float] = Field(None, description=(
+        "N3: the trailing persistence check with its single best day removed."))
+    placebo_convention: Optional[str] = Field(None, description="N8: the statistic the placebo compares (winsorised on both sides).")
+    placebo_se: Optional[float] = Field(None, ge=0, description="N8: binomial standard error of `placebo_p` at `placebo_draws`.")
+    cluster_t_kind: Optional[str] = Field(None, description="N5: CR3 (small-cluster corrected), judged against Student's t(G-1).")
 
     @model_validator(mode="after")
     def _check(self) -> "Expectation":
@@ -1311,6 +1337,9 @@ class ForwardResult(BaseModel):
         "Closed trades excluded from the verdict because a glitch / corporate-action bar sat inside their window "
         "(audit finding 7) — listed, never graded, as the evidence convention treats the same case."))
     sample_flag: SampleFlag = SampleFlag.unknown
+    drawdown_convention: str = Field(
+        "percent decline of the equity curve from its running peak (peak-relative), marked to close every session",
+        description="S2 re-audit N9: the ONE convention every S2 drawdown (period, version, incumbent) is stated in.")
 
     @model_validator(mode="after")
     def _check(self) -> "ForwardResult":
@@ -1464,6 +1493,9 @@ class ExperimentCard(BaseModel):
     record_label: str
     llm_provider: str = "none"
     disclosure: str = EXPERIMENT_DISCLOSURE
+    family_trials_all_time: int = Field(0, ge=0, description=(
+        "S2 re-audit N4: every trial this experiment's FAMILY has ever had as of this card's edition — across every "
+        "finding, retry and revision — the count the family-wise significance bar divides by. Never restarts."))
 
     @model_validator(mode="after")
     def _integrity(self) -> "ExperimentCard":
@@ -1495,6 +1527,9 @@ class GateView(BaseModel):
     bar: Optional[float] = None
     statement: str
     fatal: bool = True
+    insufficient: bool = Field(False, description=(
+        "S2 re-audit N2/N5: the gate's statistic could not be computed on the record it has (too few signal days); "
+        "not passed, not a measured failure."))
 
 
 class TrialView(BaseModel):
@@ -1585,8 +1620,11 @@ class RejectedCandidate(BaseModel):
     trials_evaluated: int = Field(..., ge=0)
     reason: str
     best_rule_text: Optional[str] = Field(None, description="The variant that came closest to clearing (fewest failed gates).")
-    best_expectancy_net_pct: Optional[float] = None
+    best_expectancy_net_pct: Optional[float] = Field(None, description=(
+        "S2 re-audit N1: on the BOOK-selected population (the strategy the book trades), not every firing."))
     best_failed_gates: list[str] = Field(default_factory=list, description="Its failed fatal gates as 'name=value vs bar'.")
+    family_trials_all_time: Optional[int] = Field(None, ge=0, description=(
+        "S2 re-audit N4: the family's trial count after this evaluation, across every finding and retry."))
 
 
 class ExperimentScoreboard(BaseModel):

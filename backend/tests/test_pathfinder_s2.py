@@ -116,10 +116,14 @@ def xcfg_for(tmp_path, constitution: Path = CONSTITUTION, **kw) -> ExperimentCon
 
 
 def write_constitution(tmp_path, *, min_n: int = 12, signed: bool = False) -> Path:
+    from pathfinder.engine.governance import constitution_content_sha256
     doc = yaml.safe_load(CONSTITUTION.read_text(encoding="utf-8"))
     doc["gauntlet"]["min_n_for_promotion"] = min_n
     if signed:
+        # re-audit N7: a signature is signed_by + signed_at + the sha256 of the content signed — never a free-text field
         doc["approved_by"] = "Shyam (test signature — pins the signed path only)"
+        doc["signature"] = {"signed_by": "Shyam (test signature)", "signed_at": "2026-09-10T18:00:00+05:30",
+                            "document_sha256": constitution_content_sha256(doc)}
     p = tmp_path / "constitution.yaml"
     p.write_text(yaml.safe_dump(doc), encoding="utf-8")
     return p

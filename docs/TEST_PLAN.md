@@ -10,7 +10,7 @@ what it built. **Rule: no requirement without a test row.**
 | **Pathfinder P2** (frontend, mock source) | below | `kanida-app/tests/{lib,contract.p0}.test.ts` | superseded by S3 for the Pathfinder surface; P0 contract rows kept for the mock source |
 | **Pathfinder S3** (the swipeable feed) | below | `kanida-app/tests/{lib,feed,contract}.test.ts` | **33 unit + 16 contract passing** |
 | **Pathfinder S1** (research engine + feed) | below | `backend/tests/test_pathfinder_s1.py` + `test_pathfinder_s1_audit.py` + `test_pathfinder_s1_audit2.py` + `test_pathfinder_s1_audit3.py` | **34 + 39 + 28 + 33 passing** |
-| **Pathfinder S2** (experiment loop) | below | `backend/tests/test_pathfinder_s2.py` | **44 passing** (34 + 10 audit pins) |
+| **Pathfinder S2** (experiment loop) | below | `backend/tests/test_pathfinder_s2.py`, `backend/tests/test_pathfinder_s2_audit2.py` | **63 passing** (34 + 10 audit pins + 19 re-audit pins) |
 | Trader slice | *to be appended by session 01/S1.1* | — | not started |
 
 Run:
@@ -444,6 +444,30 @@ the raw warehouse and found sixteen items; every CONFIRMED one is fixed and pinn
 | A12 | the family-wise n during learning was the running trial index. Now the idea's whole trial count after the round | `test_a12_*` |
 | A13 | literal numerals in `why` / `what_we_kept` (engine text fields). Now digit-free; the counts are facts | S2-12/S2-17 |
 | A14 | `signals_seen` missed a signal on the seal day. Now seen, not taken | `test_a14_*` |
+
+### S2 independent re-audit (`backend/tests/test_pathfinder_s2_audit2.py`, rows `test_n*`)
+
+An independent re-audit recomputed every S2 number from the raw warehouse (`docs/handbacks/PF-S2.md` §4.1) and
+found nine items; every one is fixed and pinned. **Every row below fails on `187c488`** (verified in a detached
+worktree: 18 failed + the archived-registry row, which fails there too once `KANIDA_PFX_ARCHIVED_REGISTRY` points at
+the archived file). The three `real_*` rows read the price warehouse and the archived pre-audit registry
+(`var/pathfinder_experiments.db.archived-20260910T115630`) and skip where either is absent.
+
+```bash
+python -m pytest backend/tests/test_pathfinder_s2_audit2.py -q          # 19 rows, ~30 s (16 synthetic + 3 real-data)
+```
+
+| Row | Finding | Pinned |
+|---|---|---|
+| N1 | the frozen expectation was measured over EVERY signal equal-weighted while the book takes at most 5 per session by liquidity, 10 concurrent, one per symbol — a different strategy (on the real warehouse +0.25% vs the book's own −0.29%). Now `hypotheses.book_select` replays the book's own selection over history; the expectation and every gate value are on that population; the equal-weighted figure is a labelled context fact (`Expectation.population`, `signals_fired/skipped`, `equal_weighted_expectancy_net_pct`) | `test_n1_book_select_*` (the walk: rank, caps, one per symbol), `test_n1_replay_*` (selected = top-k liquidity per day; skipped counted), `test_n1_the_loop_freezes_*` (frozen value = independent book-replay; ≠ equal-weighted; both on the card), `test_n1_real_*` (−0.285% on n 1,682 vs +0.2456% on 8,337; the gate closes on expectancy) |
+| N2 | the graduation placebo re-drew DAYS on a forward window where every qualifying day is a signal day (degenerate; p 0.53 conditioned). Now `loop.fixed_day_permutation_means`: the version's own signal days held fixed, random resolved names drawn from each day's pool; `insufficient` below `min_forward_signal_days` (5), never passed | `test_n2_the_forward_null_*` (bounded by the fixed days' pools; deterministic), `test_n2_the_graduation_gate_is_insufficient_*`, `test_n2_the_loop_records_*` (the run crosses the floor), `test_n2_real_*` (the archived 23 trades / 5 days: p ≈ 0.35 at 5,000 draws) |
+| N3 | three days carried the trailing "persistence" (106% of its net P&L; without 2025-04-04 alone 1.15 not 1.93). Now concentration facts on every window and trial (`top3_days_share_pct`, `expectancy_without_best_day`) and an advisory gate `trailing_expectancy_without_best_day` | `test_n3_concentration_*`, `test_n3_the_card_*`, `test_n3_real_*` (best day 2025-04-04, share 105.7%, without it 1.15) |
+| N4 | the family-wise trial count restarted on every retry (0.05/18 on the 60-session retry although the family had 36). Now `store.family_trials` counts the family's trials ALL TIME across findings, retries and revisions; the bar divides by it; `pfx_candidates.family_trials_all_time`, `ExperimentCard.family_trials_all_time`, `RejectedCandidate.family_trials_all_time` | `test_n4_*` (18 then 36; bars 0.05/18 then 0.05/36) |
+| N5 | CR0 cluster statistics on as few as five signal days (cumulative kill, `oos_cluster_significance`). Now CR3 (`cluster_robust_se`) against Student's t with G−1 degrees of freedom (`t_critical`, no SciPy), frozen in the rule spec; grading rule 1.1.0 | `test_n5_*` (2.776 on five days; a record CR0/z would bury survives CR3/t(4); a truly negative one still buries) |
+| N6 | "go long the dip", "a virtual long position …", "hold for … exit at …", "position size …", "short it at the open" passed the public-card lint; beat 3 stated the holding horizon and beat 4 the position fraction. Regex widened; beats 3/4 rewritten as a study (theme, condition, study window, the book's own population); `rule_text` is a measurement definition | `test_n6_the_public_card_rejects_*` (all five probes), `test_n6_the_engines_public_beats_*` |
+| N7 | `is_signed` was a string-prefix check on `approved_by`. Now explicit `signature: {signed_by, signed_at, document_sha256}`; signed only when all three are present AND the hash equals `constitution_content_sha256(document)` (every key but the signature block, canonical JSON) | `test_n7_*` (free-text approver ≠ signed; missing field ≠ signed; a changed gauntlet number un-signs) |
+| N8 | 1,000 placebo draws give ±0.009–0.014 (2 SE) near the bar and the p compared the RAW signal mean while the expectation is winsorised. Now `placebo_p_value` re-draws to 5,000 when |p − bar| < 2 SE (at p̂ or at the bar); draw means and the statistic are both winsorised | `test_n8_the_placebo_redraws_*`, `test_n8_the_replay_records_*` |
+| N9 | `_version_forward` measured drawdown relative to peak; `BookRun.drawdowns()` in additive points of capital; the incumbent gate compared the two. Now ONE convention, `book.DRAWDOWN_CONVENTION` (percent decline from the running peak), on both sides and on `ForwardResult.drawdown_convention` | `test_n9_*` (25% not 30 points; gate bar 25.0; statement names the convention) |
 
 ## Pathfinder P2 — the frontend (`kanida-app`)
 

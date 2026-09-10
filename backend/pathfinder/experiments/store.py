@@ -40,8 +40,10 @@ from ..schemas import (
 from .config import DEFAULT_EXPERIMENTS_DB
 
 #: 2 = after the S2 audit: `pfx_trades.resolved` / `unresolved_reason` (finding 7), `pfx_outcomes.grader_version`
-#: (finding 6), content-only chain hashes (finding 2). A registry under 1 is refused on open — archive and rebuild.
-SCHEMA_VERSION = 2
+#: (finding 6), content-only chain hashes (finding 2). 3 = after the independent re-audit: the book-selected
+#: expectation (N1), the fixed-day forward null (N2), `pfx_candidates.family_trials_all_time` (N4), the CR3
+#: grader (N5). A registry under this version is refused on open — archive and rebuild.
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS pfx_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -78,6 +80,7 @@ CREATE TABLE IF NOT EXISTS pfx_candidates (
     best_rule_text      TEXT,
     best_expectancy_net REAL,
     best_failed_gates_json TEXT NOT NULL,
+    family_trials_all_time INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pfx_trials (
@@ -474,6 +477,19 @@ class ExperimentStore:
     def trials_for_experiment(self, eid: str, source_finding_id: str) -> list[sqlite3.Row]:
         return self.q("SELECT * FROM pfx_trials WHERE (owner_kind = 'finding' AND owner_id = ?) OR "
                       "(owner_kind = 'experiment' AND owner_id = ?) ORDER BY trial_no", [source_finding_id, eid])
+
+    def family_trials(self, family_id: str, as_of: Optional[str] = None) -> int:
+        """
+        Re-audit N4: every trial this FAMILY ever had, across every finding, retry and revision — read
+        from `variant_json.family_id` on the p-hacking ledger, never restarted. This is the count the
+        family-wise bar divides by.
+        """
+        sql = "SELECT COUNT(*) FROM pfx_trials WHERE json_extract(variant_json, '$.family_id') = ?"
+        p: list[Any] = [family_id]
+        if as_of is not None:
+            sql += " AND edition_date <= ?"
+            p.append(as_of)
+        return int(self.one(sql, p)[0])
 
     def post_mortem(self, eid: str) -> Optional[sqlite3.Row]:
         return self.one("SELECT * FROM pfx_post_mortems WHERE experiment_id = ?", [eid])

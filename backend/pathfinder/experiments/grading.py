@@ -35,10 +35,10 @@ import numpy as np
 
 from ..research.facts import FactSet
 from ..schemas import ComparisonCategory, EvidenceLevel, ExperimentGradingRule, Verdict
-from .book import BookRun
-from .hypotheses import Variant
+from .book import DRAWDOWN_CONVENTION, BookRun
+from .hypotheses import Variant, cluster_robust_se, t_critical
 
-GRADING_SEMVER = "1.0.0"
+GRADING_SEMVER = "1.1.0"      # 1.1.0: CR3 cluster t against Student's t(G-1) in the cumulative rule (re-audit N5)
 
 
 def _own_hash() -> str:
@@ -57,14 +57,15 @@ MAX_CONSECUTIVE_VOID = 4            # periods in a row with no closed trade -> t
 
 
 def build_experiment_rule(variant: Variant, *, expected_net_pct: float, hurdle_pct: float, min_trades: int,
-                          frozen_at: datetime, z: float = 1.959964) -> ExperimentGradingRule:
+                          frozen_at: datetime, alpha: float = 0.05, selection: str = "") -> ExperimentGradingRule:
     h = variant.horizon
     return ExperimentGradingRule(
         kind="experiment_edge", horizon_sessions=h, hurdle_pct=hurdle_pct, min_trades=min_trades,
         metric=(f"mean net P&L per closed virtual trade over the period, in percent: "
                 f"{'long' if variant.direction == 'long' else 'short'} from the next session's open to the close "
                 f"{h} session{'s' if h != 1 else ''} later, net of {hurdle_pct:.2f}% costs and slippage both ways; "
-                f"the band is one standard error of that mean — the larger of the plain estimate and the cluster-robust one on signal days"),
+                f"the band is one standard error of that mean — the larger of the plain estimate and the CR3 cluster-robust "
+                f"one on signal days"),
         right="Right if the mean net P&L per trade exceeds one standard error above zero — the edge showed up",
         wrong="Wrong if the mean net P&L per trade lies more than one standard error below zero — the edge failed",
         inconclusive=(f"Inconclusive if the mean lies inside one standard error of zero, or fewer than {min_trades} "
@@ -73,13 +74,20 @@ def build_experiment_rule(variant: Variant, *, expected_net_pct: float, hurdle_p
         frozen_at=frozen_at, rule_version=GRADING_RULES_VERSION,
         spec={"signature": variant.signature, "direction": variant.direction, "horizon": h,
               "min_trades": int(min_trades), "expected_net_pct": round(float(expected_net_pct), 4),
-              "band": "max_of_plain_and_cluster_standard_error",
-              # the cumulative rules (audit finding 4), frozen with the version
-              "cumulative_bury_t": -float(z), "cumulative_min_trades": CUMULATIVE_MIN_TRADES,
+              # re-audit N1: the expectation is the BOOK's own population; the record says so
+              "expected_population": selection or "book-selected",
+              "band": "max_of_plain_and_cr3_cluster_standard_error",
+              # the cumulative rules (audit finding 4), frozen with the version; re-audit N5: the cluster t
+              # is CR3 and its critical value is Student's t with G-1 degrees of freedom at `cumulative_bury_alpha`
+              "cluster_t_kind": "CR3", "cumulative_bury_alpha": float(alpha),
+              "cumulative_bury_t": -float(t_critical(alpha, 10 ** 6)),       # the large-G limit, for the reader
+              "cumulative_min_trades": CUMULATIVE_MIN_TRADES,
               "cumulative_min_signal_days": CUMULATIVE_MIN_SIGNAL_DAYS, "max_consecutive_void": MAX_CONSECUTIVE_VOID,
+              "drawdown_convention": DRAWDOWN_CONVENTION,
               "cumulative": (f"buried if the version's whole forward record — at least {CUMULATIVE_MIN_TRADES} resolved "
-                             f"trades on at least {CUMULATIVE_MIN_SIGNAL_DAYS} signal days — has a cluster-robust t below "
-                             f"-{z:.2f}, or after {MAX_CONSECUTIVE_VOID} consecutive periods with no closed trade")},
+                             f"trades on at least {CUMULATIVE_MIN_SIGNAL_DAYS} signal days — has a CR3 cluster-robust t "
+                             f"below minus Student's t critical value at {alpha:.2f} two-sided with G-1 degrees of freedom "
+                             f"(G the signal days), or after {MAX_CONSECUTIVE_VOID} consecutive periods with no closed trade")},
     )
 
 
@@ -87,19 +95,20 @@ def cumulative_verdict(rule: ExperimentGradingRule, net: np.ndarray, days: np.nd
                        ) -> Optional[str]:
     """
     The FROZEN cumulative rule on the version's whole forward record. Returns the burial cause or None.
-    Read from `rule.spec` only.
+    Read from `rule.spec` only. Re-audit N5: CR3 standard error, Student's t with G−1 degrees of freedom
+    (a rule frozen under the older spec without `cumulative_bury_alpha` cannot reach this grader — A6 refuses).
     """
     spec = rule.spec
     if consecutive_void >= int(spec["max_consecutive_void"]):
         return "rule_stopped_firing"
-    if net.size >= int(spec["cumulative_min_trades"]) and np.unique(days).size >= int(spec["cumulative_min_signal_days"]):
-        mean = float(net.mean())
-        resid = net - mean
-        uniq = np.unique(days)
-        cs = np.array([resid[days == d].sum() for d in uniq], dtype=float)
-        se = float(np.sqrt((cs ** 2).sum())) / net.size
-        if np.isfinite(se) and se > 0 and mean / se < float(spec["cumulative_bury_t"]):
-            return "edge_did_not_persist_oos"
+    G = int(np.unique(days).size)
+    if net.size >= int(spec["cumulative_min_trades"]) and G >= int(spec["cumulative_min_signal_days"]):
+        se = cluster_robust_se(net, days)
+        if se is not None:
+            t = float(net.mean()) / se
+            bar = t_critical(float(spec["cumulative_bury_alpha"]), G - 1)
+            if t < -bar:
+                return "edge_did_not_persist_oos"
     return None
 
 
@@ -116,12 +125,12 @@ class PeriodGrade:
 
 def _band(net: np.ndarray, days: np.ndarray) -> tuple[Optional[float], str]:
     """
-    One standard error of the mean — the LARGER of the plain and the cluster-robust (CR0, on
+    One standard error of the mean — the LARGER of the plain and the cluster-robust (CR3, on
     signal days) estimates. The cluster estimate is the one to believe when trades fire together
-    on a few days; but with a handful of clusters it can collapse toward zero when a day's
-    trades cancel each other, and a band that shrinks below the plain standard error would turn
-    noise into a verdict (S2 test row 06 found exactly that). Taking the larger of the two can
-    only make the period harder to call, never easier.
+    on a few days; but with a handful of clusters the uncorrected CR0 estimate can collapse toward
+    zero when a day's trades cancel each other, and a band that shrinks below the plain standard
+    error would turn noise into a verdict (S2 test row 06 found exactly that; re-audit N5 made the
+    cluster estimate CR3). Taking the larger of the two can only make the period harder to call.
     """
     n = net.size
     if n < 2:
@@ -129,13 +138,11 @@ def _band(net: np.ndarray, days: np.ndarray) -> tuple[Optional[float], str]:
     plain = float(net.std(ddof=1) / np.sqrt(n))
     uniq = np.unique(days)
     if uniq.size >= 2:
-        resid = net - net.mean()
-        cs = np.array([resid[days == d].sum() for d in uniq], dtype=float)
-        cluster = float(np.sqrt((cs ** 2).sum())) / n
-        if np.isfinite(cluster) and cluster > plain:
-            se, kind = cluster, "cluster-robust standard error on signal days (larger than the plain one)"
+        cluster = cluster_robust_se(net, days)
+        if cluster is not None and np.isfinite(cluster) and cluster > plain:
+            se, kind = cluster, "CR3 cluster-robust standard error on signal days (larger than the plain one)"
         else:
-            se, kind = plain, "plain standard error (the cluster-robust one on signal days was no larger)"
+            se, kind = plain, "plain standard error (the CR3 cluster-robust one on signal days was no larger)"
     else:
         se, kind = plain, "plain standard error (one signal day: the trades are not independent)"
     if not np.isfinite(se) or se <= 0:
@@ -181,8 +188,8 @@ def judge(rule: ExperimentGradingRule, run: BookRun, *, fs: FactSet) -> PeriodGr
     if run.total_return_pct is not None:
         fs.add("book_return", "virtual book return over the period, marked to close", run.total_return_pct, "pct",
                sample="observation")
-    fs.add("max_drawdown", "worst peak-to-trough drawdown of the virtual book over the period", mdd, "pct",
-           sample="observation")
+    fs.add("max_drawdown", "worst drawdown of the virtual book over the period (percent decline from the running peak, "
+                           "marked to close)", mdd, "pct", sample="observation")
     fs.add("band_kind", "how the band around zero was measured", kind, "text")
     if band is not None:
         fs.add("band", "one standard error of the realised mean (the band inside which the period is inconclusive)",

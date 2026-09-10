@@ -91,7 +91,10 @@ def main() -> int:
         raise SystemExit("no S1 editions to step over")
     full = MarketData.load(rcfg, as_of=editions[-1])
     print(f"S1 editions {editions[0]} .. {editions[-1]} ({len(editions)}) · data through {full.data_through} · "
-          f"constitution {constitution.version} ({'signed' if constitution.is_signed else 'UNSIGNED'}) · engine {xcfg.engine_version}")
+          f"constitution {constitution.version} ({constitution.signature_status}) · engine {xcfg.engine_version}")
+    print("expectation population: the virtual book's own selection replayed over history (re-audit N1); forward null: "
+          "fixed-day stock permutation (N2); placebo draws "
+          f"{xcfg.placebo_draws} (to {xcfg.placebo_draws_near_bar} near the bar, N8); forward signal-day floor {xcfg.min_forward_signal_days}")
     for d in editions:
         if xstore.has_edition(d):
             continue

@@ -657,6 +657,83 @@ components:
         sample_flag:
           $ref: '#/components/schemas/SampleFlag'
           default: unknown
+        population:
+          type: string
+          title: Population
+          description: 'N1: the population the expectation is measured on. The frozen expectation is the
+            BOOK''s own — the trades the virtual book would have taken under its limits (liquidity rank,
+            per-session cap, concurrency cap, one per symbol); the equal-weighted figure over every firing
+            is `equal_weighted_expectancy_net_pct`, context only.'
+          default: 'equal_weighted: every resolved signal, one unit each'
+        signals_fired:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Signals Fired
+          description: Every resolved firing of the rule on the window.
+        signals_skipped:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Signals Skipped
+          description: Firings the book's limits could not take.
+        equal_weighted_expectancy_net_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Equal Weighted Expectancy Net Pct
+          description: 'CONTEXT, not the expectation: the same rule over every firing equal-weighted (the
+            S1 card''s population).'
+        equal_weighted_n:
+          type: integer
+          minimum: 0.0
+          title: Equal Weighted N
+          default: 0
+        top3_days_share_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Top3 Days Share Pct
+          description: 'N3: share of the whole window''s net P&L carried by its three best signal days
+            (defined when the total is positive).'
+        expectancy_without_best_day_net_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Expectancy Without Best Day Net Pct
+          description: 'N3: expectancy with the best signal day removed.'
+        trailing_top3_days_share_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Trailing Top3 Days Share Pct
+        trailing_expectancy_without_best_day_net_pct:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Trailing Expectancy Without Best Day Net Pct
+          description: 'N3: the trailing persistence check with its single best day removed.'
+        placebo_convention:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Placebo Convention
+          description: 'N8: the statistic the placebo compares (winsorised on both sides).'
+        placebo_se:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Placebo Se
+          description: 'N8: binomial standard error of `placebo_p` at `placebo_draws`.'
+        cluster_t_kind:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cluster T Kind
+          description: 'N5: CR3 (small-cluster corrected), judged against Student''s t(G-1).'
       additionalProperties: false
       type: object
       required:
@@ -803,6 +880,14 @@ components:
             recommendation. Nothing here tells you when to enter, exit, or where to place a stop; constituent
             names appear only inside the app after Research Analyst review. Kanida never places an order
             on your behalf.
+        family_trials_all_time:
+          type: integer
+          minimum: 0.0
+          title: Family Trials All Time
+          description: 'S2 re-audit N4: every trial this experiment''s FAMILY has ever had as of this
+            card''s edition — across every finding, retry and revision — the count the family-wise significance
+            bar divides by. Never restarts.'
+          default: 0
       additionalProperties: false
       type: object
       required:
@@ -1150,6 +1235,14 @@ components:
             recommendation. Nothing here tells you when to enter, exit, or where to place a stop; constituent
             names appear only inside the app after Research Analyst review. Kanida never places an order
             on your behalf.
+        family_trials_all_time:
+          type: integer
+          minimum: 0.0
+          title: Family Trials All Time
+          description: 'S2 re-audit N4: every trial this experiment''s FAMILY has ever had as of this
+            card''s edition — across every finding, retry and revision — the count the family-wise significance
+            bar divides by. Never restarts.'
+          default: 0
         question:
           type: string
           title: Question
@@ -1923,6 +2016,13 @@ components:
         sample_flag:
           $ref: '#/components/schemas/SampleFlag'
           default: unknown
+        drawdown_convention:
+          type: string
+          title: Drawdown Convention
+          description: 'S2 re-audit N9: the ONE convention every S2 drawdown (period, version, incumbent)
+            is stated in.'
+          default: percent decline of the equity curve from its running peak (peak-relative), marked to
+            close every session
       additionalProperties: false
       type: object
       required:
@@ -1962,6 +2062,12 @@ components:
           type: boolean
           title: Fatal
           default: true
+        insufficient:
+          type: boolean
+          title: Insufficient
+          description: 'S2 re-audit N2/N5: the gate''s statistic could not be computed on the record it
+            has (too few signal days); not passed, not a measured failure.'
+          default: false
       additionalProperties: false
       type: object
       required:
@@ -2895,12 +3001,22 @@ components:
           - type: number
           - type: 'null'
           title: Best Expectancy Net Pct
+          description: 'S2 re-audit N1: on the BOOK-selected population (the strategy the book trades),
+            not every firing.'
         best_failed_gates:
           items:
             type: string
           type: array
           title: Best Failed Gates
           description: Its failed fatal gates as 'name=value vs bar'.
+        family_trials_all_time:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Family Trials All Time
+          description: 'S2 re-audit N4: the family''s trial count after this evaluation, across every
+            finding and retry.'
       additionalProperties: false
       type: object
       required:
