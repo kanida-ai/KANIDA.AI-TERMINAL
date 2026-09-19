@@ -105,3 +105,108 @@ export type Status=Envelope&{tables:string[];contracts:Record<string,number>;bac
  metrics_ready:boolean;index_underlyings:string[]};
 /** What the chart is pointed at. A row click anywhere on the tab writes one of these. */
 export type ChartTarget={underlying:string;instrumentToken?:number|null;label:string;detail:string};
+
+// =================================================================================================================
+// The five session blocks (screener · PCR · max pain · IV · futures build-up).
+//
+// These are the shapes the tab is BUILT AGAINST. The routes are owned by the server side and land separately; until
+// they do the reads 404 and every panel degrades exactly as the rest of the tab does — an unavailable widget says
+// so and draws no rows, which is not the same as nothing happening in the market (§5).
+//
+// Two rules run through every shape below and are the reason several fields exist at all:
+//  1. A filter is ACTIVE only when the server says it applied it. `applied` is that statement. A filter the reader
+//     asked for that is not in `applied` is NOT active, whatever the browser thinks it sent.
+//  2. Implied volatility is the one number on this tab the exchange did not say. It carries `computed`, the model,
+//     the rate it used and a sentence, and every null carries the reason it is null.
+// =================================================================================================================
+
+/** GET /api/derivatives/screener — the tab's workhorse list. One row per contract that passed the floors AND
+ *  every filter the server was able to apply. */
+export type ScreenerFilterReport={
+ /** The query parameter, e.g. `min_premium_cr`. This is the key `applied`/`available` are written in. */
+ key:string;
+ /** The server's own words for it, when it sends them. */
+ label?:string|null;
+ /** What the server received. */
+ value?:string|number|null;
+ /** Why a filter the reader asked for was NOT applied — a thin chain, a signal with no baseline, an unknown
+  *  parameter. Shown verbatim; the browser never invents one. */
+ reason?:string|null};
+export type Screener=Envelope&{rows:ContractRow[];total:number;
+ /** The filters the server APPLIED to these rows. Anything not in here did not narrow this list. */
+ applied:string[];
+ /** The filters this server can apply at all. A parameter outside this list is one it does not know. */
+ available:string[];
+ /** Per-filter detail, including the reason an asked-for filter was not applied. */
+ filters?:ScreenerFilterReport[]|null;
+ /** The server's own sentence about what it did not apply, preferred over ours whenever it sends one. */
+ not_applied_text?:string|null;
+ /** How many rows the floors and the applied filters left, before any cap. */
+ matched?:number|null;
+ empty_note:string|null};
+
+/** One 15-minute reading of a per-underlying series. Every block below draws one of these. */
+export type SessionPoint={at:string|null};
+/** GET /api/derivatives/pcr-series?underlying=<SYMBOL> */
+export type PcrPoint=SessionPoint&{pcr_oi:number|null;pcr_volume:number|null;
+ total_ce_oi:number|null;total_pe_oi:number|null};
+export type PcrSeries=Envelope&{underlying:string;expiry:string;days_to_expiry:number|null;
+ points:PcrPoint[];latest_pcr_oi:number|null;latest_pcr_volume:number|null;
+ total_ce_oi:number|null;total_pe_oi:number|null;
+ /** What the ratio DID across the session. Never what it is going to do (§5). */
+ direction:'rising'|'flat'|'falling'|'no baseline'|string;
+ direction_text?:string|null;note?:string|null;
+ /** Set when the chain was too thin to divide honestly; the number is withheld and this says why. */
+ withheld?:boolean;withheld_text?:string|null};
+
+/** GET /api/derivatives/max-pain-series?underlying=<SYMBOL> */
+export type MaxPainPoint=SessionPoint&{max_pain_strike:number|null;spot:number|null;gap:number|null;
+ total_oi:number|null};
+export type MaxPainSeries=Envelope&{underlying:string;expiry:string;days_to_expiry:number|null;
+ points:MaxPainPoint[];latest_max_pain:number|null;latest_spot:number|null;latest_gap:number|null;
+ total_oi:number|null;total_ce_oi:number|null;total_pe_oi:number|null;
+ /** The owner's words: shifting_up · stable · shifting_down. */
+ direction:'shifting_up'|'stable'|'shifting_down'|'no baseline'|string;
+ direction_text?:string|null;note?:string|null;
+ withheld?:boolean;withheld_text?:string|null};
+
+/** Why a solver returned nothing for one reading. The reader is told which of these it was, always. */
+export type IvReason='stale_trade'|'no_time_value'|'below_intrinsic'|'no_convergence'|'expiry_today'|string;
+export type IvPoint=SessionPoint&{iv:number|null;spot:number|null;
+ reason:IvReason|null;reason_text:string|null};
+export type IvStrikeRow={strike:number|null;option_type:'CE'|'PE'|string;atm_offset:number|null;
+ moneyness:string|null;tradingsymbol:string|null;instrument_token:number|null;
+ iv:number|null;reason:IvReason|null;reason_text:string|null;last_price:number|null};
+/** GET /api/derivatives/iv-series?underlying=<SYMBOL> — ATM IV through the session, and the latest per strike.
+ *
+ *  This is the ONE block on the tab whose number the exchange never said. `computed` is always true and the panel
+ *  says so wherever an IV appears — not once in a footnote. */
+export type IvSeries=Envelope&{underlying:string;expiry:string;days_to_expiry:number|null;
+ computed:boolean;
+ /** The pricing model that produced these numbers, e.g. "Black-Scholes-Merton". */
+ model:string|null;
+ /** The risk-free rate it was solved at, as a fraction, plus the server's own label for it. */
+ rate:number|null;rate_label:string|null;
+ /** The server's one sentence saying this is a model output, preferred over ours. */
+ computed_text:string|null;
+ points:IvPoint[];strikes:IvStrikeRow[];
+ latest_iv:number|null;atm_strike:number|null;spot:number|null;
+ /** The owner's words: expanding · stable · cooling. */
+ direction:'expanding'|'stable'|'cooling'|'no baseline'|string;
+ direction_text?:string|null;note?:string|null;
+ withheld?:boolean;withheld_text?:string|null};
+
+/** GET /api/derivatives/futures-buildup?underlying=<SYMBOL> */
+export type FuturesBuildupPoint=SessionPoint&{oi:number|null;oi_vs_avg:number|null;price:number|null;
+ spot:number|null;basis:number|null;basis_pct:number|null};
+export type FuturesBuildup=Envelope&{underlying:string;contract:FuturesContract|null;
+ expiry:string;days_to_expiry:number|null;points:FuturesBuildupPoint[];
+ latest_oi:number|null;previous_oi:number|null;oi_change_day:number|null;
+ /** §3.7: OI as a share of its own 20-day average, and how many sessions that average is built from. */
+ oi_vs_20d_avg:number|null;avg_sessions:number|null;
+ basis:number|null;basis_pct:number|null;price:number|null;spot:number|null;
+ buildup_15m:Buildup|string|null;buildup_day:Buildup|string|null;
+ /** The same three words the ΔOI tiles use: building · flat · unwinding. */
+ direction:'building'|'flat'|'unwinding'|'no baseline'|string;
+ direction_text?:string|null;note?:string|null;
+ withheld?:boolean;withheld_text?:string|null};

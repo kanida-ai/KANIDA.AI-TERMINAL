@@ -8,10 +8,14 @@
 //
 // What is on screen, and the rules it works to:
 //   * 15-minute candles on arrival; a control at the top switches to daily. An interval the server says has
-//     no data is DISABLED with its reason under the control — never hidden, so the reader is told rather
-//     than left wondering where the choice went. The control lives in the frame's toolbar slot, outside the
-//     state switch, so choosing an empty interval never removes the way back.
-//   * The panel is titled with the CONTRACT and its expiry, not just the underlying.
+//     no data is DISABLED and its reason is printed UNDER the chart — never hidden, so the reader is told
+//     rather than left wondering where the choice went. The control lives in the frame's toolbar slot,
+//     outside the state switch, so choosing an empty interval never removes the way back.
+//   * The panel is titled with the CONTRACT; its expiry sits in the subtitle beside it, because a title and
+//     an expiry crammed into one narrow line is a title cut short. Nothing is abbreviated to make it fit.
+//   * The chart is the point of this panel, so it starts directly under the control. What was a stack of
+//     paragraphs above it is now one line under it — the last close and how much of the series is drawn —
+//     one amber line when something is actually wrong, and the definitions in the block's one info panel.
 //   * A candle is drawn only where one was stored. A stored candle missing any of its four prices keeps its
 //     slot and is left blank: nothing is interpolated and nothing is carried forward.
 //   * Every honest state has its own words: no symbol yet, the endpoint not available yet, no candles for
@@ -20,14 +24,15 @@
 // §5 holds here as everywhere else on this tab: the panel describes what was stored. There is no trend call,
 // no level, no lean, and no sentence about what comes next. Candle colour is the ordinary close-against-open
 // colour code and says nothing beyond those two stored numbers.
-import React,{useState} from 'react';
+import React,{useEffect,useState} from 'react';
 import {View,Pressable} from 'react-native';
 import Svg,{Line,Rect,Text as SvgText} from 'react-native-svg';
-import {C,T,s} from '../ui';
+import {C,Icon,T,s} from '../ui';
 import {useDerivativeRead} from './useDerivatives';
-import {WidgetFrame,stateOf} from './frame';
+import {WidgetFrame,bodyText,metaText,stateOf,type InfoLine} from './frame';
 import {DASH,FUTURES_DEFAULT_INTERVAL,FUTURES_DISPLAY_TEXT,FUTURES_GAP_TEXT,FUTURES_NO_CANDLES,FUTURES_NO_SYMBOL,
- candleAxis,candleAxisLabel,candleAxisTimes,candleWindow,candleWindowText,futuresChartName,futuresChartSpoken,futuresChartSubtitle,
+ candleAxis,candleAxisLabel,candleAxisTimes,candleDrawnText,candleWindow,candleWindowShort,candleWindowText,
+ futuresBars,futuresChartName,futuresChartSpoken,futuresChartSubtitle,futuresChartTitle,
  futuresFewText,futuresIntervalChoices,futuresIntervalNote,futuresNote,futuresShortText,price,priceTick,
  scaleCandles,type FuturesInterval} from './logic';
 import type {FuturesChart} from './types';
@@ -38,11 +43,17 @@ const AXIS_W=46,TIME_H=14,PAD=10,MIN_PLOT_H=120;
 const UP=C.green,DOWN=C.red,FLAT=C.muted;
 /** The thin line through a candle is its high-to-low range; the box is open-to-close. */
 const WICK_W=1,BODY_MIN_H=1;
+// Joins the panel's definition lines into one string so the effect that hands them up fires on a real change
+// and not on every render. A control character, so it can never appear inside a sentence.
+const SPLIT='\u0000';
 
-export type FuturesChartPanelProps={underlying:string;seq:number;defaulted?:boolean;defaultLabel?:string;
- filterCount?:number;onCustomize?:()=>void;onExpand?:()=>void;expanded?:boolean;onClose?:()=>void;style?:any};
-export function FuturesChartPanel({underlying,seq,defaulted,defaultLabel,filterCount,onCustomize,onExpand,
- expanded,onClose,style}:FuturesChartPanelProps){
+export type FuturesChartPanelProps={underlying:string;seq:number;onExpand?:()=>void;expanded?:boolean;
+ onClose?:()=>void;
+ // The panel's own definitions, handed UP to the block's single "How to read this" panel rather than
+ // printed over the chart. This is how src/workspace/ChartCentre.tsx moves its drawing notes off the canvas.
+ onInfo?:(lines:InfoLine[])=>void;
+ style?:any};
+export function FuturesChartPanel({underlying,seq,onExpand,expanded,onClose,onInfo,style}:FuturesChartPanelProps){
  const [box,setBox]=useState({w:0,h:0});
  // 15-min is what the block is captured at, so it is what opens; the control below switches to daily.
  const [interval,setInterval]=useState<FuturesInterval>(FUTURES_DEFAULT_INTERVAL);
@@ -61,14 +72,21 @@ export function FuturesChartPanel({underlying,seq,defaulted,defaultLabel,filterC
  const candles=win.candles;
  const windowText=candleWindowText(win);
  const scaled=scaleCandles(candles,plotW,plotH);
- const axis=candleAxis(scaled,plotH),times=candleAxisTimes(candles,interval,3);
+ // the same fact in its short form, for the one line under the chart
+ const countText=candleWindowShort(win)||candleDrawnText(scaled?.drawn,futuresBars(body));
+ // the axis is given the width it is drawn in, so two labels can never be stacked on the same pixels
+ const axis=candleAxis(scaled,plotH),times=candleAxisTimes(candles,interval,5,plotW);
  const last=[...candles].reverse().find(c=>typeof c?.close==='number');
  // the server's own sentence when the series is short, and ours when the panel drew almost nothing at all
  const short=futuresShortText(body);
  const few=futuresFewText(scaled?.drawn);
  const choices=futuresIntervalChoices(body);
  const dead=futuresIntervalNote(choices);
- const subtitle=`${defaulted&&defaultLabel?`${defaultLabel}: `:''}${futuresChartSubtitle(body,interval)}`.trim();
+ // the expiry rides in the subtitle, so the contract in the title is never cut short
+ const subtitle=futuresChartSubtitle(body);
+ // what the panel DESCRIBES goes to the block's one info panel; what is wrong with the data stays on screen
+ const info=[futuresNote(body,interval),windowText,FUTURES_GAP_TEXT,FUTURES_DISPLAY_TEXT].filter(Boolean).join(SPLIT);
+ useEffect(()=>{onInfo?.(info?info.split(SPLIT).map(text=>({text})):[])},[info,onInfo]);
  // the control stays on screen whatever the state is, so an empty interval is never a dead end
  const toolbar=<>
   <View style={[s.row,{gap:6,flexWrap:'wrap'}]}>
@@ -86,32 +104,33 @@ export function FuturesChartPanel({underlying,seq,defaulted,defaultLabel,filterC
     </Pressable>;
    })}
   </View>
-  {/* a dead interval is disabled and SAID, never dropped from the control */}
-  {!!dead&&<T style={{fontSize:10,lineHeight:14,color:C.amber}}>{dead}</T>}
+  {/* a dead interval is disabled here; its reason is SAID under the chart, never dropped from the control */}
  </>;
+ // ONE line under the chart instead of a stack of paragraphs over it: the last close on the left, how much of
+ // the series is drawn on the right.
+ //
+ // Under it, two different things that were being said in the same shout. The reason an interval is DISABLED
+ // explains a control the reader can see is off - it is not a failure and it is not about the candles on
+ // screen, so it reads as quiet small print behind an info mark. A series the store is genuinely short of IS
+ // a caveat on what is drawn, and that keeps the amber. Neither sentence changed a word.
+ const thin=[short,few].filter(Boolean).join(' ');
  const note=<View style={{gap:3}}>
-  {!!futuresNote(body,interval)&&<T style={{fontSize:10,lineHeight:14,color:C.muted}}>{futuresNote(body,interval)}</T>}
-  <T style={{fontSize:10,lineHeight:14,color:C.muted}}>{FUTURES_GAP_TEXT}</T>
-  <T style={{fontSize:10,lineHeight:14,color:C.muted}}>{FUTURES_DISPLAY_TEXT}</T>
+  <View style={[s.row,{gap:10}]}>
+   <T numberOfLines={1} style={[bodyText,{fontVariant:['tabular-nums']}]}>Last close {price(last?.close)}</T>
+   <View style={{flex:1}}/>
+   {/* how much of the series is on screen: the window when it is one, the drawn count when it is all of it */}
+   {!!countText&&<T numberOfLines={1} style={[metaText,{fontVariant:['tabular-nums']}]}>{countText}</T>}
+  </View>
+  {!!dead&&<View style={[s.row,{gap:5,alignItems:'flex-start'}]}>
+   <View style={{paddingTop:2}}><Icon name="info" size={10} color={C.muted}/></View>
+   <T style={[metaText,{flex:1}]}>{dead}</T></View>}
+  {!!thin&&<T style={[metaText,{color:C.amber}]}>{thin}</T>}
  </View>;
- return <WidgetFrame name={futuresChartName(body?.contract,underlying)} subtitle={subtitle} body={body}
-  state={state} onRefresh={read.reload} filterCount={filterCount} onCustomize={onCustomize} onExpand={onExpand}
-  expanded={expanded} onClose={onClose} toolbar={toolbar} note={note} style={style}
+ return <WidgetFrame name={futuresChartTitle(body?.contract,underlying)} subtitle={subtitle} body={body}
+  state={state} onRefresh={read.reload} onExpand={onExpand}
+  expanded={expanded} onClose={onClose} toolbar={toolbar} note={note} inBlock style={style}
   emptyDetail="The panel draws only candles that were stored for this contract; it never fills a gap in the series.">
   <View style={{flex:1,minHeight:0,padding:PAD,gap:6}}>
-   <View style={[s.row,{gap:10,flexWrap:'wrap'}]}>
-    <T numberOfLines={1} style={{fontSize:11,lineHeight:15,color:C.muted,fontVariant:['tabular-nums']}}>
-     Last close {price(last?.close)}</T>
-    <View style={{flex:1}}/>
-    {/* how much of the series is on screen: the window when it is one, the drawn count when it is all of it */}
-    {!windowText&&<T style={{fontSize:10,lineHeight:14,color:C.muted,fontVariant:['tabular-nums']}}>
-     {scaled?.drawn||0} drawn</T>}
-   </View>
-   {/* leaving bars off the left edge is said, never silent */}
-   {!!windowText&&<T style={{fontSize:10,lineHeight:14,color:C.muted}}>{windowText}</T>}
-   {/* the server's own words when it flags a short series, and the panel's own when it drew almost nothing */}
-   {!!short&&<T style={{fontSize:10,lineHeight:14,color:C.amber}}>{short}</T>}
-   {!!few&&<T style={{fontSize:10,lineHeight:14,color:C.amber}}>{few}</T>}
    <View style={{flex:1,minHeight:MIN_PLOT_H}}
     onLayout={e=>{const {width,height}=e.nativeEvent.layout;const w=Math.round(width),h=Math.round(height);
      setBox(v=>Math.abs(v.w-w)<3&&Math.abs(v.h-h)<3?v:{w,h})}}>
@@ -134,11 +153,8 @@ export function FuturesChartPanel({underlying,seq,defaulted,defaultLabel,filterC
       width={box.w} y={box.h-3}/>)}
     </Svg>}
    </View>
-   <View style={[s.row,{gap:8}]}>
-    <T style={{fontSize:10,color:C.muted}}>{candleAxisLabel(candles[0]?.at,interval)}</T>
-    <View style={{flex:1}}/>
-    <T style={{fontSize:10,color:C.muted}}>{candleAxisLabel(candles[candles.length-1]?.at,interval)}</T>
-   </View>
+   {/* The first and last candle drawn are already labelled ON the axis (candleAxisTimes always picks the
+       first and the last), so a second row repeating them under the plot was chrome saying nothing new. */}
   </View>
  </WidgetFrame>;
 }

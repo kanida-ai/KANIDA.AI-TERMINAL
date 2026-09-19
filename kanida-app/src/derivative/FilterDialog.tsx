@@ -10,8 +10,9 @@ import {View,ScrollView,Pressable,TextInput} from 'react-native';
 import {C,T,Icon,Button,Sheet,s} from '../ui';
 import {Popover} from '../layout';
 import {HeaderChip,RadioMenu,webOnly} from '../discover/parts';
-import {DTE_VALUES,FILTER_COLUMNS,OPERATOR_LABELS,PREMIUM_VALUES,RUPEE,dteText,expiriesFor,freeColumns,newRule,
- ruleText,sanitizeRules,stamp,withColumn,type FilterColumn,type FilterRule} from './logic';
+import {BUILDUP_VALUES,DTE_VALUES,FILTER_COLUMNS,MARKET_VALUES,MONEYNESS_VALUES,OI_CHANGE_VALUES,OPERATOR_LABELS,
+ PREMIUM_VALUES,RUPEE,TIMES,VOLUME_RATIO_VALUES,VOLUME_TO_OI_VALUES,buildupLabel,dteText,expiriesFor,freeColumns,
+ newRule,ruleText,sanitizeRules,stamp,withColumn,type FilterColumn,type FilterRule} from './logic';
 import type {FilterData} from './types';
 type Choice={value:string;label:string;detail?:string};
 /** The values each column offers, built from what the store actually holds. */
@@ -27,8 +28,23 @@ export function valueChoices(column:FilterColumn,data:FilterData|null,rules:Filt
  if(column==='dte')return DTE_VALUES.map(v=>({value:String(v),label:`${v} day${v===1?'':'s'}`}));
  if(column==='premium')return PREMIUM_VALUES.map(v=>({value:String(v),label:`${RUPEE}${v} cr`}));
  if(column==='watchlist')return (data?.watchlists||[]).map(w=>({value:w.key,label:w.label}));
+ // the screener's seven. Each one is a §3 signal, so each value carries what the signal is measured against.
+ if(column==='volumeRatio')return VOLUME_RATIO_VALUES.map(v=>({value:String(v),
+  label:`${v}${TIMES} its own median`,detail:'Cumulative volume by this time of day, against the median of the last 10 sessions'}));
+ if(column==='volumeToOi')return VOLUME_TO_OI_VALUES.map(v=>({value:String(v),label:`${v}${TIMES}`,
+  detail:v===1?'Day volume equal to the whole standing position':'Day volume against yesterday\'s closing open interest'}));
+ if(column==='oiChange15m'||column==='oiChangeDay')return OI_CHANGE_VALUES.map(v=>({value:String(v),label:`${v}%`,
+  detail:column==='oiChange15m'?'Open-interest change over the last 15-min reading':'Open-interest change since the previous close'}));
+ if(column==='buildup')return BUILDUP_VALUES.map(v=>({value:v,label:buildupLabel(v),detail:BUILDUP_DETAIL[v]}));
+ if(column==='moneyness')return MONEYNESS_VALUES.map(m=>({value:m.value,label:m.label}));
+ if(column==='market')return MARKET_VALUES.map(m=>({value:m.value,label:m.label,
+  detail:m.value==='index'?'NIFTY, BANKNIFTY and the other index chains':'Single-stock chains'}));
  return [];
 }
+/** §3.1 in one line each, so a reader picking a build-up knows exactly which pair of moves it is. */
+const BUILDUP_DETAIL:Record<string,string>={long_buildup:'Price up, open interest up',
+ short_buildup:'Price down, open interest up',short_covering:'Price up, open interest down',
+ long_unwinding:'Price down, open interest down'};
 /** One rule's value in the words the popup used, so the header line and the screen reader agree with the menus. */
 export function ruleValueLabel(rule:FilterRule,data:FilterData|null,rules:FilterRule[]){
  const found=valueChoices(rule.column,data,rules).find(c=>c.value===rule.value);
@@ -110,6 +126,13 @@ export function FilterDialog({visible,onClose,name,data,rules,onApply}:FilterDia
      {chip('operator',OPERATOR_LABELS[rule.operator],`Operator: ${OPERATOR_LABELS[rule.operator]}. Change the operator`)}
      {chip('value',chosen?.label||rule.value||'Choose a value',
       `Value: ${chosen?.label||rule.value||'not chosen'}. Change the value`,rule.value?undefined:C.amber)}
+     {/* A filter this pilot has no parameter for is still offered and still sent — what it must never do is
+         read as though it worked. The screener's own `applied` list is the only thing that says it did, and
+         this row says so here rather than letting a reader assume it. */}
+     {!!column.pending&&<T style={{width:'100%',fontSize:11,lineHeight:16,color:C.muted}}>
+      Answered by the screener only. It is shown as active there when — and only when — the server says it
+      applied it.
+     </T>}
      <View style={{flex:1,minWidth:8}}/>
      <Pressable accessibilityRole="button" accessibilityLabel={`Remove filter ${i+1}`} onPress={()=>remove(i)}
       style={(st:any)=>[{width:32,height:32,alignItems:'center',justifyContent:'center',borderRadius:8,

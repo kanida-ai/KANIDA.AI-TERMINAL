@@ -7,12 +7,15 @@ import {View,ScrollView} from 'react-native';
 import Svg,{Rect,Line,Text as SvgText} from 'react-native-svg';
 import {C,T,s} from '../ui';
 import {useDerivativeRead} from './useDerivatives';
-import {Section,WidgetFrame,stateOf,tone,buildupColor} from './frame';
+import {IDLE_H,Section,WidgetFrame,stateOf,tone,buildupColor} from './frame';
 import {Table,Cell,type Column,type TableItem} from './Table';
 import {buildupLabel,buildupTone,compact,dteText,maxPainBasis,nearestStrikeIndex,nextSort,oiPeak,price,
  signedUnits,sortRows,strike as strikeText,type SortState} from './logic';
 import type {OiByStrike,StrikeOi,ChartTarget} from './types';
 const CE_COLOR='#F17D87',PE_COLOR='#39E5A3',PAD_BOTTOM=18;
+// Kept as one double-quoted constant so the sentence the panel prints is byte-for-byte the one it printed
+// before it became conditional. Not one word of it changed.
+const OI_CHART_NOTE="Each bar is the open interest standing at this 15-min reading. Max pain is computed from that same standing book (§3.6); neither is a forecast.";
 const VALUE:Record<string,(row:StrikeOi)=>unknown>={strike:r=>r.strike,ce_oi:r=>r.ce_oi,ce_chg:r=>r.ce_oi_change_day,
  ce_buildup:r=>r.ce_buildup_day,pe_oi:r=>r.pe_oi,pe_chg:r=>r.pe_oi_change_day,pe_buildup:r=>r.pe_buildup_day};
 export type OiByStrikeSectionProps={underlying:string;expiry:string;seq:number;onTarget:(t:ChartTarget)=>void;
@@ -43,8 +46,10 @@ export function OiByStrikeSection({underlying,expiry,seq,onTarget,stacked,pinFir
   const list=sort?sortRows(rows,VALUE[sort.key]||(()=>null),sort.dir):rows;
   return list.map(row=>({kind:'row' as const,key:`s-${row.strike}`,row}));
  },[rows,sort]);
- const tableStyle=stacked?{height}:{flex:2,minWidth:0,height};
- const chartStyle=stacked?{height:chartHeight+150}:{flex:1,minWidth:0,height};
+ const idle=!underlying;
+ const tableH=idle?IDLE_H:height;
+ const tableStyle=stacked?{height:tableH}:{flex:2,minWidth:0,height:tableH};
+ const chartStyle=stacked?{height:idle?IDLE_H:chartHeight+150}:{flex:1,minWidth:0,height:tableH};
  // A widget the reader closed stays closed; a widget expanded anywhere on the page is shown alone.
  const shows=(key:string)=>!hidden?.[key]&&(!expanded||expanded===key);
  const table=!shows('oi_table')?null:<WidgetFrame key="oi_table" name="OI by strike" subtitle={subtitle} body={body}
@@ -52,7 +57,7 @@ export function OiByStrikeSection({underlying,expiry,seq,onTarget,stacked,pinFir
   onRefresh={read.reload} filterCount={filterCount} onCustomize={onCustomize}
   onExpand={onExpand?()=>onExpand('oi_table'):undefined} expanded={expanded==='oi_table'}
   onClose={onHide?()=>onHide('oi_table'):undefined} showsSignals={['oi_change_day','buildup_day']}
-  note={maxPainBasis(body?.total_ce_oi,body?.total_pe_oi)} style={tableStyle}>
+  note={idle?undefined:maxPainBasis(body?.total_ce_oi,body?.total_pe_oi)} style={tableStyle}>
   <Table label="Open interest by strike" columns={columns} items={items} sort={sort} pinFirst={pinFirst}
    onSort={key=>setSort(s=>nextSort(s,key))}
    onRowPress={row=>onTarget({underlying,instrumentToken:null,label:underlying,
@@ -62,15 +67,15 @@ export function OiByStrikeSection({underlying,expiry,seq,onTarget,stacked,pinFir
  const chart=!shows('oi_chart')?null:<OiChart key="oi_chart" body={body} state={underlying?state:{phase:'empty',
   text:'Add a "Symbol is …" filter to see open interest by strike.'}} underlying={underlying} subtitle={subtitle}
   onRefresh={read.reload} onExpand={onExpand?()=>onExpand('oi_chart'):undefined} expanded={expanded==='oi_chart'}
-  onClose={onHide?()=>onHide('oi_chart'):undefined} height={chartHeight} style={chartStyle}/>;
+  onClose={onHide?()=>onHide('oi_chart'):undefined} height={chartHeight} idle={idle} style={chartStyle}/>;
  if(!table&&!chart)return null;
  return <Section title="OI by strike" subtitle="Where the open interest actually stands at this 15-min reading, and the strike the standing book pays least at." stacked={stacked}>
   {table}{chart}
  </Section>;
 }
-function OiChart({body,state,underlying,subtitle,onRefresh,onExpand,expanded,onClose,height,style}:{body:OiByStrike|null;
+function OiChart({body,state,underlying,subtitle,onRefresh,onExpand,expanded,onClose,height,idle,style}:{body:OiByStrike|null;
  state:any;underlying:string;subtitle:string;onRefresh:()=>void;onExpand?:()=>void;expanded?:boolean;
- onClose?:()=>void;height:number;style?:any}){
+ onClose?:()=>void;height:number;idle?:boolean;style?:any}){
  const [width,setWidth]=useState(0);
  const rows=body?.rows||[],peak=oiPeak(rows);
  const spotIndex=nearestStrikeIndex(rows,body?.spot),painIndex=nearestStrikeIndex(rows,body?.max_pain_strike);
@@ -80,7 +85,7 @@ function OiChart({body,state,underlying,subtitle,onRefresh,onExpand,expanded,onC
  return <WidgetFrame name={underlying?`${underlying} · call and put open interest by strike`:'OI by strike'}
   subtitle={subtitle} body={body} state={state} onRefresh={onRefresh} onExpand={onExpand} expanded={expanded}
   onClose={onClose} showsSignals={['oi_change_day']} style={style}
-  note="Each bar is the open interest standing at this 15-min reading. Max pain is computed from that same standing book (§3.6); neither is a forecast.">
+  note={idle?undefined:OI_CHART_NOTE}>
   <ScrollView style={{flex:1}} contentContainerStyle={{padding:10,gap:10}}>
    <View style={[s.row,{gap:12,flexWrap:'wrap'}]}>
     <View style={[s.row,{gap:5}]}><View style={{width:9,height:9,borderRadius:2,backgroundColor:CE_COLOR}}/>

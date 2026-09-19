@@ -73,6 +73,7 @@ only after the next web export.
 
 ## 6. Switch from Kite to the data vendor — ⬜ (waiting on vendor details)
 **Done means:** prices come from the vendor by changing settings only; the vendor passes the checks in `market_data/tests/test_conformance.py`; the app shows "15 min delayed" correctly.
+**Storage side of the same decision:** `docs/STORAGE_PLAN.md` — measured plan to stop storing price history (166 GB → 3.2 GB) and keep only a 140-session rolling window; awaiting owner approval before anything is deleted.
 
 ---
 

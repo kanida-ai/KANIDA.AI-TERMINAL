@@ -275,19 +275,38 @@ export function expiriesFor(expiries:{underlying:string;expiry:string;days_to_ex
 // (server/kanida_pilot/app.py::_derivative_query). There is no client-side row filtering on this tab, so the list on
 // screen is always exactly the list the server returned — a screen that quietly filtered further would put one set of
 // rows under another set's as-of line and floors.
-export type FilterColumn='underlying'|'expiry'|'optionType'|'dte'|'premium'|'watchlist';
+export type FilterColumn='underlying'|'expiry'|'optionType'|'dte'|'premium'|'watchlist'
+ |'volumeRatio'|'volumeToOi'|'oiChange15m'|'oiChangeDay'|'buildup'|'moneyness'|'market';
 export type FilterOperator='is'|'is_not'|'gt'|'lt'|'in_watchlist';
 export type FilterRule={column:FilterColumn;operator:FilterOperator;value:string};
 export const OPERATOR_LABELS:Record<FilterOperator,string>={is:'is',is_not:'is not',gt:'greater than',
  lt:'less than',in_watchlist:'is in watch list'};
-/** The columns the popup offers, each with ONLY the operators the server can answer, and the parameter it becomes. */
-export const FILTER_COLUMNS:{key:FilterColumn;label:string;operators:FilterOperator[];param:string;unit?:string}[]=[
+/** The columns the popup offers, each with ONLY the operators the server can answer, and the parameter it becomes.
+ *
+ *  `route` says WHICH list a column can narrow. The six the tab has always had are answered by every derivative
+ *  route; the seven the screener block adds are answered by `/api/derivatives/screener` alone and are never sent
+ *  anywhere else. `pending` marks a column whose parameter the pilot in this tree does not accept yet — it is
+ *  offered, it is sent, and it is rendered as ACTIVE only when the screener's own `applied` list says the server
+ *  applied it. That is the whole point: this browser never decides that a filter worked. */
+export const FILTER_COLUMNS:{key:FilterColumn;label:string;operators:FilterOperator[];param:string;unit?:string;
+ route?:'screener';pending?:boolean}[]=[
  {key:'underlying',label:'Symbol',operators:['is'],param:'underlying'},
  {key:'expiry',label:'Exp. date',operators:['is'],param:'expiry'},
  {key:'optionType',label:'Type',operators:['is','is_not'],param:'option_type'},
  {key:'dte',label:'DTE',operators:['lt'],param:'max_dte',unit:'days'},
  {key:'premium',label:'Premium',operators:['gt'],param:'min_premium_cr',unit:'₹ cr'},
  {key:'watchlist',label:'Watch list',operators:['in_watchlist'],param:'watchlist'},
+ {key:'volumeRatio',label:'Volume vs median',operators:['gt'],param:'min_volume_ratio',unit:'× median',
+  route:'screener',pending:true},
+ {key:'volumeToOi',label:'Volume to OI',operators:['gt'],param:'min_volume_to_oi',unit:'×',
+  route:'screener',pending:true},
+ {key:'oiChange15m',label:'OI change (15 min)',operators:['gt','lt'],param:'oi_change_15m_pct',unit:'%',
+  route:'screener',pending:true},
+ {key:'oiChangeDay',label:'OI change (day)',operators:['gt','lt'],param:'oi_change_day_pct',unit:'%',
+  route:'screener',pending:true},
+ {key:'buildup',label:'Build-up',operators:['is'],param:'buildup',route:'screener',pending:true},
+ {key:'moneyness',label:'Moneyness',operators:['is'],param:'moneyness',route:'screener',pending:true},
+ {key:'market',label:'Index or stock',operators:['is'],param:'market',route:'screener',pending:true},
 ];
 export const filterColumn=(key:unknown)=>FILTER_COLUMNS.find(c=>c.key===key)||null;
 export const columnLabel=(key:unknown)=>filterColumn(key)?.label||String(key||'');
@@ -295,6 +314,20 @@ export const columnLabel=(key:unknown)=>filterColumn(key)?.label||String(key||''
 export const DTE_VALUES=[1,3,7,15,31];
 /** ₹ crore steps offered for "Premium greater than V". The §3 floor always applies underneath. */
 export const PREMIUM_VALUES=[2,5,10,25,50];
+/** §3.2: multiples of a contract's OWN median cumulative volume by this time of day. */
+export const VOLUME_RATIO_VALUES=[1.5,2,3,5,10];
+/** §3.3: day volume ÷ previous-day closing OI. 1.0 is the §3 flag — more traded today than the whole book. */
+export const VOLUME_TO_OI_VALUES=[0.5,1,2,5];
+/** Percentage steps for the two OI-change filters (15-minute and day-on-day). */
+export const OI_CHANGE_VALUES=[1,2,5,10,25];
+/** §3.1's four labels, as filter values. The key is the server's, the label is the reader's. */
+export const BUILDUP_VALUES=['long_buildup','short_buildup','short_covering','long_unwinding'];
+/** Where the strike sits against spot. Three buckets, no fourth. */
+export const MONEYNESS_VALUES=[{value:'itm',label:'In the money'},{value:'atm',label:'At the money'},
+ {value:'otm',label:'Out of the money'}];
+/** An index chain and a single stock's chain behave nothing alike, so the screener can hold them apart. */
+export const MARKET_VALUES=[{value:'index',label:'Index'},{value:'stock',label:'Stock'}];
+const PCT_RULE=(v:string)=>/^\d{1,3}(\.\d{1,2})?$/.test(v)&&Number(v)>=0&&Number(v)<=999;
 const RULE_VALUE:Record<FilterColumn,(v:string)=>boolean>={
  underlying:v=>/^[A-Z0-9&._-]{1,40}$/.test(v),
  expiry:v=>/^\d{4}-\d{2}-\d{2}$/.test(v),
@@ -302,6 +335,13 @@ const RULE_VALUE:Record<FilterColumn,(v:string)=>boolean>={
  dte:v=>/^\d{1,3}$/.test(v)&&Number(v)>=1&&Number(v)<=400,
  premium:v=>/^\d{1,6}(\.\d{1,2})?$/.test(v)&&Number(v)>=0&&Number(v)<=100000,
  watchlist:v=>/^[a-z][a-z0-9_-]{0,19}$/.test(v),
+ volumeRatio:v=>/^\d{1,3}(\.\d{1,2})?$/.test(v)&&Number(v)>0&&Number(v)<=999,
+ volumeToOi:v=>/^\d{1,3}(\.\d{1,2})?$/.test(v)&&Number(v)>0&&Number(v)<=999,
+ oiChange15m:PCT_RULE,
+ oiChangeDay:PCT_RULE,
+ buildup:v=>BUILDUP_VALUES.includes(v),
+ moneyness:v=>MONEYNESS_VALUES.some(m=>m.value===v),
+ market:v=>MARKET_VALUES.some(m=>m.value===v),
 };
 /** A rule set restored from localStorage is re-typed before it can reach a query string: a bad rule is dropped, a
  *  second rule on a column the server can only answer once is dropped, and the list is capped. */
@@ -662,7 +702,10 @@ export function gridBasis(body?:OiGrid|null){
  const spot=body.spot==null?DASH:price(body.spot);
  const marks=(body.marks||[]).length;
  const window=marks?` ${marks} reading${marks===1?'':'s'} captured, ${clock(body.marks[0])} to ${clock(body.marks[marks-1])}.`:'';
- return `At the money: ${at}, from a captured spot of ${spot}${body.expiry?` in the ${body.expiry} expiry`:''}.${window}`;
+ // the expiry is written the way every other date on this tab is written; an unreadable one is left exactly
+ // as it was served rather than dropped, because it is still the expiry the numbers came from
+ const when=body.expiry?(stamp(body.expiry)?.date||body.expiry):'';
+ return `At the money: ${at}, from a captured spot of ${spot}${when?` in the ${when} expiry`:''}.${window}`;
 }
 /** Which table the readings came from, in plain words. Never dressed up as more than it is. */
 export function gridSourceText(source?:string|null){
@@ -757,17 +800,25 @@ export function futuresBars(body?:{bars?:unknown;candles?:Candle[]|null}|null){
  if(served!=null)return Math.max(0,Math.round(served));
  return (body?.candles||[]).filter(c=>!(c as any)?.gap&&storedCandle(c)!=null).length;
 }
-/** "8 days to expiry · 15-min candles · 26 stored" — how far the contract is from expiry, what is drawn, and
- *  how much of it there is. A part that was not served is left out rather than guessed. */
+/** The panel's HEADER title: the contract and nothing else, so it is never cut short in a narrow panel. The
+ *  expiry moved to the subtitle beside it and the interval is named by the control that chose it — the same
+ *  facts, laid out so each one fits. futuresChartName keeps the long form for what a screen reader hears. */
+export function futuresChartTitle(contract?:FuturesContractRef|null,symbol?:string|null){
+ const sym=String(contract?.tradingsymbol||'').trim();
+ if(sym)return sym;
+ const who=String(symbol||'').trim();
+ return who?`${who} futures`:'Futures chart';
+}
+/** "25 Sep 2026 · 8 days to expiry" — when the contract named in the title expires, and how far that is. The
+ *  interval is named by the control that chose it and the candle count sits under the chart, so neither is
+ *  repeated here. A part that was not served is left out rather than guessed. */
 export function futuresChartSubtitle(body?:{contract?:FuturesContractRef|null;bars?:unknown;
- candles?:Candle[]|null}|null,intervalKey:string=FUTURES_DEFAULT_INTERVAL){
+ candles?:Candle[]|null}|null){
  const parts:string[]=[];
+ const when=stamp(body?.contract?.expiry)?.date||'';
+ if(when)parts.push(when);
  const dte=dteText(body?.contract?.days_to_expiry);
  if(dte!==DASH)parts.push(dte);
- const choice=FUTURES_INTERVALS.find(c=>c.key===intervalKey);
- if(choice)parts.push(choice.label);
- const n=futuresBars(body);
- if(n)parts.push(`${n} stored`);
  return parts.join(' · ');
 }
 /** The interval's own sentence: the server's when it sent one, ours when it did not. */
@@ -835,10 +886,23 @@ export function candleWindow(candles?:Candle[]|null,width?:number,minStep=CANDLE
  if(all.length<=fits)return {candles:all,shown:all.length,total:all.length,windowed:false};
  return {candles:all.slice(all.length-fits),shown:fits,total:all.length,windowed:true};
 }
-/** The one sentence that keeps a windowed chart honest, and '' when the whole series is on screen. */
+/** The one sentence that keeps a windowed chart honest, and '' when the whole series is on screen. It is one
+ *  of the lines the block's "How to read this" panel carries; the short form below stands under the chart. */
 export function candleWindowText(window?:CandleWindow|null){
  if(!window?.windowed)return '';
  return `Showing the latest ${window.shown} of ${window.total} candles in this series; the panel is too narrow for all of them.`;
+}
+/** "Latest 88 of 364 candles" — the same fact, as one short line under the chart instead of a paragraph over it. */
+export function candleWindowShort(window?:CandleWindow|null){
+ if(!window?.windowed)return '';
+ return `Latest ${window.shown} of ${window.total} candles`;
+}
+/** "26 of 364 stored candles drawn" — what stands under the chart when the whole series fits on screen. */
+export function candleDrawnText(drawn?:unknown,bars?:unknown){
+ const d=num(drawn),b=num(bars);
+ if(d==null||d<=0)return '';
+ const n=Math.round(d),total=b==null?null:Math.round(b);
+ return total!=null&&total>n?`${n} of ${total} stored candles drawn`:`${n} stored candle${n===1?'':'s'} drawn`;
 }
 /** Three rupee labels down the candle box: the high, the midpoint and the low, dropped where they collide. */
 export function candleAxis(scaled?:ScaledCandles|null,height?:number){
@@ -863,16 +927,60 @@ export function candleAxisLabel(at?:string|null,intervalKey:string=FUTURES_DEFAU
  if(intervalKey==='1d')return shortDate(at)||DASH;
  return clock(at);
 }
-/** A few x labels taken from candles that were actually stored, evenly spaced across the ones there are. */
-export function candleAxisTimes(candles?:Candle[]|null,intervalKey:string=FUTURES_DEFAULT_INTERVAL,want=4){
- const marks=(candles||[]).map((c,i)=>({i,label:candleAxisLabel(c?.at,intervalKey)}))
-  .filter(m=>m.label!==DASH&&m.label!=='');
- if(marks.length<=want)return marks;
- const step=(marks.length-1)/(want-1);
- const out:{i:number;label:string}[]=[];
- for(let k=0;k<want;k++){
-  const mark=marks[Math.round(k*step)];
-  if(mark&&!out.some(m=>m.i===mark.i))out.push(mark);
+/** The sessions a stored series covers, oldest first: the index and the ISO date of the FIRST candle of each.
+ *  Read off the stamps that were stored, so a session with no candles simply is not one. */
+export function candleSessions(candles?:Candle[]|null){
+ const out:{i:number;iso:string}[]=[];
+ let last='';
+ (candles||[]).forEach((c,i)=>{
+  const iso=stamp(c?.at)?.iso;
+  if(!iso||iso===last)return;
+  last=iso;out.push({i,iso});
+ });
+ return out;
+}
+/** A few x labels taken from candles that were actually stored, evenly spaced across the ones there are.
+ *
+ *  A 15-minute series is labelled by the CLOCK only while it is one session. The moment it crosses a day the
+ *  clock is the wrong label: 15:30 comes round again every session, so evenly spaced clock labels across
+ *  four days read "13:15 … 11:15 … 15:30" — three times that are not in order and do not describe the span
+ *  at all. A series that crosses days is therefore labelled by the DAY, at the first candle of each, which
+ *  is the only label on a multi-session axis that is both distinct and in order. Nothing about the candles
+ *  changes; this is which of their own stamps is printed under them. */
+export function candleAxisTimes(candles?:Candle[]|null,intervalKey:string=FUTURES_DEFAULT_INTERVAL,want=4,
+ plotWidth?:number){
+ const list=(candles||[]) as Candle[];
+ const sessions=candleSessions(list);
+ const byDay=intervalKey!=='1d'&&sessions.length>1;
+ const marks=byDay
+  ?sessions.map(s=>({i:s.i,label:shortDate(list[s.i]?.at)})).filter(m=>!!m.label&&m.label!==DASH)
+  :list.map((c,i)=>({i,label:candleAxisLabel(c?.at,intervalKey)})).filter(m=>m.label!==DASH&&m.label!=='');
+ let picked=marks;
+ if(marks.length>want){
+  const step=(marks.length-1)/(want-1);
+  picked=[];
+  for(let k=0;k<want;k++){
+   const mark=marks[Math.round(k*step)];
+   if(mark&&!picked.some(m=>m.i===mark.i))picked.push(mark);
+  }
+ }
+ return thinAxisLabels(picked,list.length,plotWidth);
+}
+/** How much room one x label needs before the next one may be drawn beside it. */
+export const CANDLE_LABEL_PX=46;
+/** Sessions are not the same length — a window can open three candles before a day ends — so two day labels
+ *  can land on the same few pixels. A label that would be drawn on top of the one before it is DROPPED, never
+ *  stacked, exactly as the rupee axis already drops a tick that would collide. Without a measured width
+ *  nothing is dropped: there is no claim to make about pixels we have not been given. */
+export function thinAxisLabels<T extends {i:number}>(picked:T[],count:number,plotWidth?:number,
+ pitch=CANDLE_LABEL_PX){
+ const width=num(plotWidth);
+ if(width==null||width<=0||!count)return picked;
+ const step=width/count;
+ const out:T[]=[];
+ for(const mark of picked){
+  const prev=out[out.length-1];
+  if(!prev||(mark.i-prev.i)*step>=pitch)out.push(mark);
  }
  return out;
 }
@@ -885,7 +993,15 @@ export function futuresChartSpoken(body?:{contract?:FuturesContractRef|null;cand
  const choice=FUTURES_INTERVALS.find(c=>c.key===intervalKey);
  const what=`${futuresChartName(body?.contract,symbol)}, ${(choice?.label||'candles').toLowerCase()}.`;
  if(!drawn)return `${what} ${FUTURES_NO_CANDLES}.`;
- const first=candleAxisLabel(candles[0]?.at,intervalKey),last=candleAxisLabel(candles[candles.length-1]?.at,intervalKey);
+ // the same rule as the axis: a range read out as two clock times is only true inside one session
+ const multi=intervalKey!=='1d'&&candleSessions(candles).length>1;
+ const edge=(c?:Candle|null)=>{
+  const s=stamp(c?.at);
+  if(!s)return DASH;
+  if(intervalKey==='1d')return shortDate(c?.at)||DASH;
+  return multi?(s.time?`${shortDate(c?.at)} ${s.time}`:shortDate(c?.at)):(s.time||DASH);
+ };
+ const first=edge(candles[0]),last=edge(candles[candles.length-1]);
  const window=first!==DASH&&last!==DASH?` from ${first} to ${last}`:'';
  return `${what} ${drawn} candle${drawn===1?'':'s'} stored${window}.`;
 }
@@ -907,4 +1023,480 @@ export function resolveBlockSymbol(chosen?:string|null,byPremium?:string|null,by
  const index=String(byIndex||'').trim();
  if(index)return {symbol:index,defaulted:true,label:BLOCK_DEFAULT_INDEX};
  return {symbol:'',defaulted:false,label:''};
+}
+
+// =================================================================================================================
+// THE FIVE SESSION BLOCKS
+//
+// Screener · PCR · max pain · IV · futures build-up. Everything below is pure: it formats what the server sent and
+// it decides nothing the server did not say. Three rules run through all of it.
+//
+//  1. A FILTER IS ACTIVE ONLY WHEN THE SERVER SAYS IT APPLIED IT. Not when the browser sent it, not when it is in
+//     the reader's rule list, not when the parameter looks right. `applied` is the statement and nothing else is.
+//     This cost a day: a sample-size filter rendered as active while it silently deleted every row.
+//  2. A NUMBER THAT IS NOT THERE KEEPS ITS REASON. A null with a reason is that reason in words, never a blank and
+//     never a drawn point.
+//  3. NOTHING DESCRIBES WHAT COMES NEXT. Every direction below says what a number DID across the readings behind
+//     it. There is no lean, no level and no call (§5).
+// =================================================================================================================
+
+// --- the screener's query -------------------------------------------------------------------------------------
+/** The screener route. It is its own endpoint because seven of its filters are signals the older lists never
+ *  took - volume against a contract's own median, volume to OI, the two OI changes, the build-up kind, the
+ *  moneyness bucket and index-against-stock. */
+export const SCREENER_PATH='/api/derivatives/screener';
+/** One rule turned into the parameter the screener route takes, or null when the rule carries nothing to send.
+ *  The translations are the SAME inclusive ones the tab already uses for the shared columns, so a rule means the
+ *  same thing whichever list answers it. */
+export function screenerParam(rule:FilterRule):{key:string;value:string}|null{
+ const column=filterColumn(rule?.column);
+ if(!column)return null;
+ const value=String(rule?.value||'').trim();
+ if(!value)return null;
+ switch(rule.column){
+  case 'underlying':return {key:'underlying',value};
+  case 'expiry':return {key:'expiry',value};
+  // "is not CE" is the other type outright: the server serves exactly two option types, so the complement is exact.
+  case 'optionType':return {key:'option_type',value:rule.operator==='is_not'?(value==='CE'?'PE':'CE'):value};
+  // "less than N days" is the server's inclusive max_dte = N-1; days-to-expiry is served as a whole number.
+  case 'dte':return {key:'max_dte',value:String(Math.max(0,Math.round(Number(value))-1))};
+  // "greater than V" is the server's inclusive min_premium_cr = V + 0.01; premium is served rounded to paise.
+  case 'premium':return {key:'min_premium_cr',value:String(Math.round((Number(value)+0.01)*100)/100)};
+  // "all underlyings" is not a narrowing, so nothing is sent and the server's own default stands.
+  case 'watchlist':return value==='all'?null:{key:'watchlist',value};
+  case 'volumeRatio':return {key:'min_volume_ratio',value};
+  case 'volumeToOi':return {key:'min_volume_to_oi',value};
+  // the two OI changes read either way round, so the direction picks which bound is sent
+  case 'oiChange15m':return {key:rule.operator==='lt'?'max_oi_change_15m_pct':'min_oi_change_15m_pct',value};
+  case 'oiChangeDay':return {key:rule.operator==='lt'?'max_oi_change_day_pct':'min_oi_change_day_pct',value};
+  case 'buildup':return {key:'buildup',value};
+  case 'moneyness':return {key:'moneyness',value};
+  case 'market':return {key:'market',value};
+  default:return null;
+ }
+}
+/** The query string for the screener. Only rules that survived sanitising are sent, so a junk rule restored from
+ *  localStorage never reaches the wire. */
+export function screenerQuery(rules:FilterRule[]){
+ const parts:string[]=[];
+ for(const rule of sanitizeRules(rules)){
+  const param=screenerParam(rule);
+  if(param)parts.push(`${param.key}=${encodeURIComponent(param.value)}`);
+ }
+ return parts.length?`?${parts.join('&')}`:'';
+}
+
+// --- the filter-applied invariant ---------------------------------------------------------------------------
+// This is the guard the owner paid a day for. Four states, and only ONE of them renders as an active filter.
+/** `applied` - the server said it applied this filter, so the rows on screen are narrowed by it.
+ *  `pending` - the server has not answered yet, or answered without saying. Nothing is claimed either way.
+ *  `not_applied` - the server knows this filter and did NOT apply it. The rows are not narrowed by it.
+ *  `unsupported` - the server does not know this parameter at all. */
+export type FilterState='applied'|'pending'|'not_applied'|'unsupported';
+export type FilterStatus={rule:FilterRule;key:string;label:string;text:string;state:FilterState;reason:string};
+export const FILTER_PENDING_REASON='The server has not said whether it applied this filter, so it is not shown as active.';
+export const FILTER_NOT_APPLIED_REASON='The server did not apply this filter, so the rows below are not narrowed by it.';
+export const FILTER_UNSUPPORTED_REASON='This server has no parameter for this filter, so it was not applied.';
+/** "a, b and c" - one list in plain words, so a sentence about three filters reads as a sentence. */
+export function joinWords(items:string[]){
+ const list=(items||[]).filter(Boolean);
+ if(!list.length)return '';
+ if(list.length===1)return list[0];
+ return `${list.slice(0,-1).join(', ')} and ${list[list.length-1]}`;
+}
+/** The one place a filter's state is decided. `body` is the screener's response; a null body (loading, error, a
+ *  route that is not there yet) leaves EVERY rule pending - never active. An `applied` list the server did not
+ *  send is not an empty list, it is silence, and silence is pending. */
+export function filterStatuses(rules:FilterRule[],
+ body?:{applied?:string[]|null;available?:string[]|null;
+  filters?:{key?:string;label?:string|null;reason?:string|null}[]|null}|null,
+ labels?:(rule:FilterRule)=>string):FilterStatus[]{
+ const clean=sanitizeRules(rules);
+ const said=Array.isArray(body?.applied);
+ const applied=new Set((body?.applied||[]).map(String));
+ const knows=Array.isArray(body?.available);
+ const available=new Set((body?.available||[]).map(String));
+ const served=new Map<string,{label?:string|null;reason?:string|null}>();
+ for(const row of body?.filters||[])if(row&&row.key)served.set(String(row.key),row);
+ return clean.map(rule=>{
+  const param=screenerParam(rule);
+  const key=param?param.key:(filterColumn(rule.column)?.param||String(rule.column));
+  const detail=served.get(key);
+  const label=detail?.label||columnLabel(rule.column);
+  const text=ruleText(rule,labels?.(rule));
+  let state:FilterState='pending';
+  if(!said)state='pending';
+  else if(applied.has(key))state='applied';
+  else if(knows&&!available.has(key))state='unsupported';
+  else state='not_applied';
+  // the server's own reason always wins over ours; ours is only there so a state is never left unexplained
+  const reason=detail?.reason||(state==='applied'?'':state==='pending'?FILTER_PENDING_REASON
+   :state==='unsupported'?FILTER_UNSUPPORTED_REASON:FILTER_NOT_APPLIED_REASON);
+  return {rule,key,label,text,state,reason};
+ });
+}
+/** How many filters are genuinely narrowing the rows on screen. This is the ONLY number the header may call a
+ *  filter count for the screener: a rule the server did not apply is not a filter in force. */
+export function appliedCount(statuses:FilterStatus[]){return (statuses||[]).filter(s=>s.state==='applied').length;}
+/** The sentence that goes where the reader is looking when a filter did not run. It names the filters, plainly,
+ *  and says the rows are not narrowed by them. Empty when every filter applied. */
+export function notAppliedText(statuses:FilterStatus[],served?:string|null){
+ const list=(statuses||[]).filter(s=>s.state!=='applied');
+ if(!list.length)return '';
+ if(served&&String(served).trim())return String(served).trim();
+ const name=(s:FilterStatus)=>s.label.toLowerCase();
+ const off=list.filter(s=>s.state==='not_applied'),out=list.filter(s=>s.state==='unsupported'),
+  wait=list.filter(s=>s.state==='pending');
+ const said:string[]=[];
+ if(off.length)said.push(`The server did not apply ${joinWords(off.map(name))}.`);
+ if(out.length)said.push(`The server has no parameter for ${joinWords(out.map(name))}.`);
+ if(wait.length)said.push(`The server has not said whether it applied ${joinWords(wait.map(name))}.`);
+ return `${said.join(' ')} The rows below are NOT narrowed by ${list.length===1?'it':'them'}.`;
+}
+/** The screener's subtitle: what is actually in force, never what was asked for. */
+export function appliedText(statuses:FilterStatus[]){
+ const on=(statuses||[]).filter(s=>s.state==='applied');
+ if(on.length)return on.map(s=>s.text).join(' · ');
+ return (statuses||[]).length?'No filter applied by the server':'No filters — every contract over the liquidity floors';
+}
+
+// --- one symbol for the WHOLE tab -------------------------------------------------------------------------------
+/** The tab resolves its symbol ONCE and every block is pointed at that one answer: the chain, the strikes, the ΔOI
+ *  tiles, the futures chart, PCR, max pain, IV and the futures build-up. A symbol chosen in Customize wins; failing
+ *  that the last row the reader clicked anywhere on the tab; failing that the defaults `resolveBlockSymbol` already
+ *  applies, still flagged as defaults. No block resolves its own - that is how two panels end up describing two
+ *  different underlyings under one as-of line. */
+export function resolveTabSymbol(chosen?:string|null,clicked?:string|null,byPremium?:string|null,
+ byIndex?:string|null):BlockSymbol{
+ const picked=String(chosen||'').trim()||String(clicked||'').trim();
+ return resolveBlockSymbol(picked,byPremium,byIndex);
+}
+/** What the badge says. A defaulted symbol always says it is a default; a chosen one is just itself. */
+export function symbolBadge(choice?:BlockSymbol|null){
+ if(!choice?.symbol)return '';
+ return choice.defaulted&&choice.label?`${choice.label}: ${choice.symbol}`:choice.symbol;
+}
+/** The one sentence a block prints when the tab has no symbol at all. */
+export const NO_SYMBOL_TEXT='Choose a symbol in Customize, or click any row on this tab, to point every block at it.';
+
+// --- directions: what a number DID across the readings behind it -------------------------------------------------
+// Four vocabularies, all the owner's own words, all past tense. None of them is a call.
+/** PCR: what the ratio did. */
+export const PCR_CHIPS:Record<string,string>={rising:'↑ RISING',flat:'→ STABLE',falling:'↓ FALLING'};
+/** Max pain, in the owner's exact words: Shifting Up · Stable · Shifting Down. */
+export const MAX_PAIN_CHIPS:Record<string,string>={shifting_up:'↑ SHIFTING UP',stable:'→ STABLE',
+ shifting_down:'↓ SHIFTING DOWN'};
+/** IV, in the owner's exact words: Expanding · Stable · Cooling. */
+export const IV_CHIPS:Record<string,string>={expanding:'↑ EXPANDING',stable:'→ STABLE',cooling:'↓ COOLING'};
+/** Futures OI, the same three words the ΔOI tiles already use. */
+export const FUTURES_CHIPS:Record<string,string>={building:'↑ BUILDING',flat:'→ FLAT',unwinding:'↓ UNWINDING'};
+/** A direction the server did not send, or could not compute, gets NO chip - it is a state, not a fourth word. */
+export const NO_SESSION_DIRECTION='no baseline';
+/** The chip for one of the four vocabularies. An unknown key gets no chip at all rather than a guessed one. */
+export function sessionChip(chips:Record<string,string>,direction:unknown){
+ return chips[String(direction||'')]||'';
+}
+/** Green for the first word, red for the third, neutral for the middle. Colour repeats the word, never adds to it. */
+export function sessionTone(chips:Record<string,string>,direction:unknown):'up'|'down'|'flat'{
+ const keys=Object.keys(chips),key=String(direction||'');
+ if(key===keys[0])return 'up';
+ if(key===keys[2])return 'down';
+ return 'flat';
+}
+/** How many readings back a session direction is read over: four, one hour, the window the ΔOI tiles already use. */
+export const SESSION_LOOKBACK=4;
+/** Inside this fraction of the series' own span the number is called stable rather than moved. */
+export const SESSION_FLAT_FRACTION=0.05;
+export const PCR_KEYS=['rising','flat','falling'],MAX_PAIN_KEYS=['shifting_up','stable','shifting_down'];
+export const IV_KEYS=['expanding','stable','cooling'],FUTURES_KEYS=['building','flat','unwinding'];
+/** Reads a direction off the very values a panel drew, so a chip can never disagree with its own chart. The
+ *  server computes the same reading and serves it; neither is trusted over the other, because both are the same
+ *  rule over the same points. Under two captured values there is no baseline and no chip. */
+export function sessionDirection(values:(number|null|undefined)[]|null|undefined,keys:string[],
+ lookback=SESSION_LOOKBACK,flat=SESSION_FLAT_FRACTION){
+ const list=(values||[]).map(v=>num(v));
+ const real=list.map((v,i)=>({v,i})).filter((p):p is {v:number;i:number}=>p.v!=null);
+ if(real.length<2)return NO_SESSION_DIRECTION;
+ const last=real[real.length-1];
+ // the reading `lookback` captured values back, or the oldest there is when the session is younger than that
+ const earlier=real[Math.max(0,real.length-1-lookback)];
+ const change=last.v-earlier.v;
+ const span=Math.max(...real.map(p=>Math.abs(p.v-earlier.v)),Math.abs(change))||Math.abs(last.v)||1;
+ if(Math.abs(change)<=span*flat)return keys[1];
+ return change>0?keys[0]:keys[2];
+}
+/** The direction the SERVER sent when it sent one, and the one read off the drawn points when it did not. The
+ *  server's word wins, because it saw every reading and a panel may be drawing a window of them. */
+export function servedDirection(served:unknown,values:(number|null|undefined)[]|null|undefined,keys:string[]){
+ const key=String(served||'').trim();
+ if(keys.includes(key))return key;
+ return sessionDirection(values,keys);
+}
+
+// --- PCR through the session --------------------------------------------------------------------------------
+export const PCR_OI_LABEL='PCR by open interest',PCR_VOLUME_LABEL='PCR by volume';
+export const PCR_DEFINITION='PCR by open interest is put open interest divided by call open interest across every strike of this expiry, at each 15-min reading. PCR by volume is the same division over the day\'s volume (§3.5).';
+export const PCR_READING_TEXT='Both lines are the ratios as captured. The chip says what the open-interest ratio did over the last hour of readings, and nothing about what it does after that.';
+export const PCR_NO_POINTS='No put-call ratio has been captured for this symbol yet';
+export const PCR_THIN_CHAIN='Withheld: the chain was too thin at this reading to divide honestly.';
+/** One PCR reading in words. A ratio that is not there is a dash, never a zero. */
+export function pcrLine(label:string,value:unknown){return `${label} ${pcrText(value)}`;}
+/** The one line under the PCR panel: where the ratio stands and how much of the session is behind it. */
+export function pcrSummary(body?:{latest_pcr_oi?:unknown;latest_pcr_volume?:unknown;
+ points?:{at?:string|null}[]|null}|null){
+ if(!body)return '';
+ const points=body.points||[];
+ const window=points.length?` ${points.length} reading${points.length===1?'':'s'} captured, ${clock(points[0]?.at)} to ${clock(points[points.length-1]?.at)}.`:'';
+ return `${pcrLine(PCR_OI_LABEL,body.latest_pcr_oi)} · ${pcrLine(PCR_VOLUME_LABEL,body.latest_pcr_volume)}.${window}`;
+}
+
+// --- max pain through the session ----------------------------------------------------------------------------
+export const MAX_PAIN_DEFINITION='Max pain is the strike where the total payout to option buyers at expiry would be smallest, worked out from the open interest standing at that 15-min reading (§3.6).';
+export const MAX_PAIN_GAP_TEXT='The second line is the captured spot at the same readings, on the same scale, so the gap between the two is the gap you can see.';
+export const MAX_PAIN_READING_TEXT='The chip says which way the max-pain strike moved over the last hour of readings. It describes the standing book, and says nothing about where either number goes.';
+export const MAX_PAIN_NO_POINTS='No max-pain strike has been computed for this symbol yet';
+export const MAX_PAIN_THIN_CHAIN='Withheld: too few strikes cleared the liquidity floors to compute max pain at this reading.';
+/** "820 above spot" / "at spot" - the gap, said the way a reader reads it. Not captured is a dash. */
+export function maxPainGapText(gap:unknown){
+ const n=num(gap);
+ if(n==null)return DASH;
+ if(n===0)return 'at spot';
+ return `${strike(Math.abs(n))} ${n>0?'above':'below'} spot`;
+}
+/** The one line under the max-pain panel: the strike, the spot and the gap between them, as captured. */
+export function maxPainSummary(body?:{latest_max_pain?:unknown;latest_spot?:unknown;latest_gap?:unknown;
+ total_oi?:unknown}|null){
+ if(!body)return '';
+ const oi=num(body.total_oi);
+ return `Max pain ${strike(body.latest_max_pain)} · spot ${price(body.latest_spot)} · ${maxPainGapText(body.latest_gap)}.`
+  +(oi==null?' Total OI behind it: not captured.':` From ${compact(oi)} contracts of open interest.`);
+}
+
+// --- IV through the session ------------------------------------------------------------------------------------
+// The ONE number on this tab the exchange never said. Every other figure here is something a venue reported; this
+// one is what a model returned when it was asked which volatility reproduces a traded price. It is labelled as
+// computed wherever it appears - beside the block title, on the chart, over the strike list and in what a screen
+// reader hears - not once in a footnote at the bottom.
+/** The short label that rides beside every implied volatility on screen. */
+export const IV_COMPUTED_TAG='COMPUTED';
+/** The long form, for a screen reader and for the block's definitions. */
+export const IV_COMPUTED_TEXT='Implied volatility is COMPUTED here, not reported by the exchange: it is what a pricing model returns when it is asked which volatility reproduces the traded price. Every other number on this tab is something the exchange said.';
+export const IV_ATM_LABEL='ATM implied volatility';
+export const IV_DEFINITION='The line is the at-the-money implied volatility of this underlying at each 15-min reading; the list beside it is the latest solved volatility per strike.';
+export const IV_READING_TEXT='The chip says what the at-the-money volatility did over the last hour of readings. It describes what the model solved from captured prices, and nothing after them.';
+export const IV_NO_POINTS='No implied volatility has been computed for this symbol yet';
+export const IV_THIN_CHAIN='Withheld: the chain was too thin at this reading for an at-the-money volatility.';
+/** Why a solver returned nothing. The server's own `reason_text` always wins; these are here so a null is never
+ *  left unexplained when it arrives with a bare reason code. */
+export const IV_REASONS:Record<string,string>={
+ stale_trade:'No volatility: the last trade in this contract is older than the reading it would be solved at.',
+ no_time_value:'No volatility: at this price the contract has no time value left to solve.',
+ below_intrinsic:'No volatility: the traded price is under the contract\'s intrinsic value, so no volatility reproduces it.',
+ no_convergence:'No volatility: the solver did not settle on an answer for this price.',
+ expiry_today:'No volatility: this contract expires today, so there is no time left to price.',
+};
+/** The words for one null. An unknown reason code is said as itself rather than swallowed - a reason we cannot
+ *  translate is still a reason, and the reader is owed it. */
+export function ivReasonText(reason?:string|null,served?:string|null){
+ const text=String(served||'').trim();
+ if(text)return text;
+ const key=String(reason||'').trim();
+ if(!key)return '';
+ return IV_REASONS[key]||`No volatility: the server gave the reason "${key}".`;
+}
+/** An implied volatility in words. Served as a fraction (0.184) or as a percentage (18.4); both read as "18.4%".
+ *  A null is the reason it is null, never a blank and never a zero. */
+export function ivText(v:unknown){
+ const n=num(v);
+ if(n==null)return DASH;
+ const pct=Math.abs(n)<=3?n*100:n;
+ return `${pct.toFixed(1)}%`;
+}
+/** The same number with the computed label welded on, for anywhere it appears away from the block's own label. */
+export function ivTagged(v:unknown){const text=ivText(v);return text===DASH?text:`${text} ${IV_COMPUTED_TAG}`;}
+/** The model and the rate it solved at, in one line. A model the server did not name is said to be unnamed
+ *  rather than guessed at. */
+export function ivModelText(body?:{model?:string|null;rate?:unknown;rate_label?:string|null}|null){
+ const model=String(body?.model||'').trim();
+ const rate=num(body?.rate);
+ const rateText=String(body?.rate_label||'').trim()
+  ||(rate==null?'':`${(Math.abs(rate)<=1?rate*100:rate).toFixed(2)}% risk-free rate`);
+ if(!model&&!rateText)return 'The server did not name the model or the rate these were solved at.';
+ return `Model: ${model||'not named by the server'}${rateText?` · solved at ${rateText}`:''}.`;
+}
+/** The block's one computed sentence: the server's when it sends one, ours when it does not. */
+export function ivComputedText(body?:{computed_text?:string|null}|null){
+ return String(body?.computed_text||'').trim()||IV_COMPUTED_TEXT;
+}
+/** How many of the readings carried a volatility, and how many were nulls with a reason. Both counted, because a
+ *  line drawn through four points out of twenty is not the same picture as one drawn through twenty. */
+export function ivCoverage(points?:{iv?:unknown;reason?:string|null}[]|null){
+ const list=points||[];
+ let solved=0,withReason=0;
+ for(const p of list){if(num(p?.iv)!=null)solved++;else if(String(p?.reason||'').trim())withReason++;}
+ return {total:list.length,solved,withReason};
+}
+/** "14 of 20 readings solved; 6 carry a reason." Empty when there is nothing captured to count. */
+export function ivCoverageText(points?:{iv?:unknown;reason?:string|null}[]|null){
+ const {total,solved,withReason}=ivCoverage(points);
+ if(!total)return '';
+ return `${solved} of ${total} reading${total===1?'':'s'} solved`
+  +(withReason?`; ${withReason} carr${withReason===1?'ies':'y'} a reason instead of a number.`:'.');
+}
+/** What a screen reader hears about one strike's volatility - the number and that it was computed, or the reason
+ *  there is none. */
+export function ivStrikeSpoken(row?:{strike?:unknown;option_type?:unknown;moneyness?:string|null;iv?:unknown;
+ reason?:string|null;reason_text?:string|null}|null){
+ const what=`${strike(row?.strike)} ${String(row?.option_type||'').toUpperCase()}`.trim();
+ const where=String(row?.moneyness||'').trim();
+ const value=num(row?.iv)!=null?`computed implied volatility ${ivText(row?.iv)}`
+  :(ivReasonText(row?.reason,row?.reason_text)||'no computed implied volatility');
+ return `${what}${where?`, ${where}`:''}. ${value}.`;
+}
+
+// --- futures build-up -------------------------------------------------------------------------------------------
+export const FUTURES_BUILDUP_DEFINITION='Open interest on the front futures contract at each 15-min reading, against its own 20-day average, with the basis - the futures price less spot - beside it (§3.7).';
+export const FUTURES_BUILDUP_READING_TEXT='The chip says what open interest on this contract did over the last hour of readings. It describes the standing position and stops there.';
+export const FUTURES_BUILDUP_NO_POINTS='No futures readings have been captured for this contract yet';
+export const FUTURES_BUILDUP_THIN='Withheld: this contract did not clear the liquidity floors at this reading.';
+/** "+₹30.00 (+0.12%)" - the basis and its share of spot together, because one without the other says little.
+ *  Either half missing keeps the other; both missing is a dash. */
+export function basisPair(basis:unknown,pct:unknown){
+ const b=num(basis),p=num(pct);
+ if(b==null&&p==null)return DASH;
+ if(b==null)return signed(p,2);
+ if(p==null)return basisText(b);
+ return `${basisText(b)} (${signed(p,2)})`;
+}
+/** "1.24× its 20-day average, from 20 sessions" - the share and what it was built from. Fewer sessions than the
+ *  average claims is said outright rather than rounded over. */
+export function oiVsAvgText(share:unknown,sessions?:unknown){
+ const n=num(share);
+ if(n==null)return NO_BASELINE;
+ const s=num(sessions);
+ const whole=s==null?null:Math.round(s);
+ return `${n.toFixed(2)}${TIMES} its 20-day average`
+  +(whole==null?'':`, from ${whole} session${whole===1?'':'s'}`);
+}
+/** The one line under the futures build-up panel. */
+export function futuresBuildupSummary(body?:{latest_oi?:unknown;oi_change_day?:unknown;oi_vs_20d_avg?:unknown;
+ avg_sessions?:unknown;basis?:unknown;basis_pct?:unknown}|null){
+ if(!body)return '';
+ return `OI ${compact(body.latest_oi)} (${signedUnits(body.oi_change_day)} on the day) · `
+  +`${oiVsAvgText(body.oi_vs_20d_avg,body.avg_sessions)} · basis ${basisPair(body.basis,body.basis_pct)}.`;
+}
+
+// --- one line chart, one set of axis rules ----------------------------------------------------------------------
+// Every one of the four session blocks draws the same picture: one or two series of 15-min readings across one
+// session. They share this scaling and these axes so a rule fixed once is fixed everywhere - and because the axis
+// bug that shipped (labels running backwards) is exactly the kind a second copy reintroduces.
+/** Maps a list of values onto a box. A reading with no value stays null, so a gap is drawn as a gap. Two or more
+ *  real values are needed before there is a line at all. */
+export function scaleValues(values:(number|null|undefined)[]|null|undefined,width:number,height:number,
+ includeZero=false):Scaled|null{
+ const list=(values||[]).map(v=>num(v));
+ const real=list.filter((v):v is number=>v!=null);
+ if(real.length<2||width<=0||height<=0)return null;
+ const lo=includeZero?Math.min(0,...real):Math.min(...real);
+ const hi=includeZero?Math.max(0,...real):Math.max(...real);
+ const span=(hi-lo)||Math.abs(hi)||1;
+ const step=list.length>1?width/(list.length-1):0;
+ return {lo,hi,points:list.map((v,i)=>v==null?null:{x:i*step,y:height-((v-lo)/span)*height,i})};
+}
+/** Maps TWO series onto ONE box and one scale, for the only case where that is honest: two numbers in the same
+ *  unit that are read against each other (max pain against spot - both rupee strikes). Anything measured in a
+ *  different unit gets its own scale, exactly as the ΔOI tiles do. */
+export function scaleTogether(a:(number|null|undefined)[]|null|undefined,b:(number|null|undefined)[]|null|undefined,
+ width:number,height:number):{lo:number;hi:number;a:Scaled|null;b:Scaled|null}|null{
+ const first=(a||[]).map(v=>num(v)),second=(b||[]).map(v=>num(v));
+ const real=[...first,...second].filter((v):v is number=>v!=null);
+ if(real.length<2||width<=0||height<=0)return null;
+ const lo=Math.min(...real),hi=Math.max(...real),span=(hi-lo)||Math.abs(hi)||1;
+ const map=(list:(number|null)[]):Scaled|null=>{
+  if(!list.some(v=>v!=null))return null;
+  const step=list.length>1?width/(list.length-1):0;
+  return {lo,hi,points:list.map((v,i)=>v==null?null:{x:i*step,y:height-((v-lo)/span)*height,i})};
+ };
+ return {lo,hi,a:map(first),b:map(second)};
+}
+/** How much vertical room one y label needs before the next may be drawn under it. */
+export const VALUE_LABEL_PX=11;
+/** The y labels down a line chart: `want` values evenly spaced from the low to the high, dropped where they would
+ *  collide. They are returned HIGH FIRST, which is also top-to-bottom on screen - so the values run strictly
+ *  DOWNWARD through the list and strictly UPWARD up the box. An axis that runs the other way is the bug that
+ *  shipped once; it is built in one place here so it can be checked in one place. */
+export function valueAxis(scaled:Scaled|null,height:number,want=3,pitch=VALUE_LABEL_PX){
+ if(!scaled||!(height>0))return [] as {v:number;y:number}[];
+ const span=(scaled.hi-scaled.lo)||1;
+ const steps=Math.max(2,Math.round(want));
+ const out:{v:number;y:number}[]=[];
+ for(let k=steps-1;k>=0;k--){
+  const v=scaled.lo+span*(k/(steps-1));
+  const y=height-((v-scaled.lo)/span)*height;
+  // a label that would sit on the one before it is DROPPED, never stacked
+  if(out.some(t=>Math.abs(t.y-y)<pitch))continue;
+  // and a value equal to one already taken is dropped too: two ticks reading the same thing is not an axis
+  if(out.some(t=>t.v===v))continue;
+  out.push({v,y});
+ }
+ return out;
+}
+/** The same axis, already formatted, with any tick whose LABEL repeats the one before it dropped. Two ticks that
+ *  both print "0.88" tell a reader the axis is broken, whatever the underlying values were. */
+export function valueAxisLabels(scaled:Scaled|null,height:number,format:(v:number)=>string,want=3){
+ const out:{v:number;y:number;label:string}[]=[];
+ for(const tick of valueAxis(scaled,height,want)){
+  const label=format(tick.v);
+  if(!label||label===DASH)continue;
+  if(out.some(t=>t.label===label))continue;
+  out.push({...tick,label});
+ }
+ return out;
+}
+/** The x labels under a line chart: clock times taken from readings that were actually captured, evenly spaced,
+ *  each one DISTINCT and each one LATER than the one before it. A stamp that cannot be read is not a label, a
+ *  repeated clock is dropped, and a stamp that does not advance on the one before it is dropped - which is what
+ *  a series crossing a day does to a clock axis. Nothing about the readings changes; this is only which of their
+ *  own stamps is printed under them. */
+export function sessionAxisTimes(times:(string|null|undefined)[]|null|undefined,want=4,plotWidth?:number,
+ pitch=CANDLE_LABEL_PX){
+ const list=times||[];
+ const marks:{i:number;label:string}[]=[];
+ let last='';
+ list.forEach((t,i)=>{
+  const s=stamp(t);
+  if(!s||!s.time)return;
+  // Strictly increasing IN THE LABEL, not in the stamp behind it. A stamp that is genuinely later can still
+  // PRINT an earlier clock — 15:30 on Thursday, then 09:30 on Friday — and an axis reading "13:15 15:30 09:30"
+  // is the bug that shipped. The label is what the reader has, so the label is what must run forward: a clock
+  // that does not advance on the last one printed is dropped, never drawn out of order and never stacked.
+  if(last&&s.time<=last)return;
+  last=s.time;
+  marks.push({i,label:s.time});
+ });
+ if(!marks.length)return [] as {i:number;label:string}[];
+ let picked=marks;
+ if(marks.length>want){
+  const step=(marks.length-1)/(Math.max(2,want)-1);
+  picked=[];
+  for(let k=0;k<want;k++){
+   const at=marks[Math.round(k*step)];
+   if(at&&!picked.some(m=>m.i===at.i))picked.push(at);
+  }
+ }
+ // distinct labels: two readings a day apart can both read "09:30", and only one of them may be printed
+ const seen=new Set<string>();
+ const unique=picked.filter(m=>{if(seen.has(m.label))return false;seen.add(m.label);return true});
+ return thinAxisLabels(unique,list.length,plotWidth,pitch);
+}
+/** What a screen reader hears about a session line: what it is, how many readings carried a value, and over what
+ *  window. It describes the captured series and stops there. */
+export function sessionSpoken(what:string,values:(number|null|undefined)[]|null|undefined,
+ times:(string|null|undefined)[]|null|undefined){
+ const drawn=(values||[]).filter(v=>num(v)!=null).length;
+ const list=times||[];
+ if(!drawn)return `${what}. Nothing captured yet.`;
+ const from=clock(list[0]),to=clock(list[list.length-1]);
+ const window=from!==DASH&&to!==DASH?` from ${from} to ${to}`:'';
+ return `${what}. ${drawn} captured reading${drawn===1?'':'s'}${window}.`;
 }

@@ -14,33 +14,40 @@ import {C,T,Icon,s} from '../ui';
 import {IconButton,readStore,writeStore} from '../layout';
 import {HeaderChip} from '../discover/parts';
 import {useDerivativeRead} from './useDerivatives';
-import {Section} from './frame';
+import {IDLE_H,Section} from './frame';
 import {FilterDialog,ruleLabeller} from './FilterDialog';
-import {UnusualWidget} from './UnusualWidget';
+import {ScreenerSection} from './ScreenerSection';
 import {ChainWidget} from './ChainWidget';
 import {OiByStrikeSection} from './OiByStrikeSection';
 import {OiGridSection} from './OiGridSection';
+import {PcrSection,MaxPainSection,IvSection,FuturesBuildupSection} from './SessionBlocks';
 import {IndexWidget} from './IndexWidget';
 import {FuturesWidget} from './FuturesWidget';
 import {ChartTile} from './ChartTile';
-import {EMPTY_TEXT,asOfText,rulesText,rulesToFilters,sanitizeRules,sourceText,type FilterRule} from './logic';
+import {EMPTY_TEXT,asOfText,resolveTabSymbol,rulesText,rulesToFilters,sanitizeRules,sourceText,symbolBadge,
+ type FilterRule} from './logic';
 import {stateOf} from './frame';
-import type {ChartTarget,FilterData,Series,Status} from './types';
+import type {ChartTarget,FilterData,Series,Status,Unusual} from './types';
 export {EMPTY_TEXT} from './logic';
 /** Below this the chart tile drops under its table; below the tablet break the page is one pinned-column table. */
 export const CHART_BESIDE=1100,PIN_COLUMN=760;
 /** The ΔOI block carries THREE panels side by side — screener, futures chart, 2 x 5 grid — so it needs more
  *  room than a table-and-chart row does. Below this the grid would fall under five columns across; the block
  *  stacks into one full-width column instead, which costs scrolling rather than content. */
-export const GRID_BESIDE=1320;
+export const GRID_BESIDE=1340;
 const ROW_H=560,STACK_TABLE_H=460,EXPANDED_H=720,CHART_H=210;
-// The ΔOI block is the one section whose content sets its own height: two bands of tiles, each tile
-// carrying a chart, a direction chip and the two sentences under it, over a note that spells out every
-// rule on screen. At ROW_H the puts band was cut off mid-chart, so this block gets its own figure.
-const GRID_ROW_H=780,GRID_STACK_H=980;
+// The ΔOI block is the one section whose content sets its own height: two bands of tiles, each tile carrying
+// a chart, a direction chip and the two lines under it. At ROW_H the puts band was cut off mid-chart, so this
+// block still gets its own figure — but every tile is now a fixed height and the rules that used to be
+// printed under the panels moved into the block's one info panel, so the figure is smaller than it was.
+const GRID_ROW_H=576,GRID_STACK_H=640;
+/** The four session blocks all draw one line chart across one session, so they all take one height. */
+const SESSION_ROW_H=384,SESSION_STACK_H=360;
 /** Every widget the page can show, in the order the sections run. */
 export const WIDGET_KEYS=['unusual','unusual_chart','chain','chain_chart','oi_table','oi_chart',
- 'oi_grid_screener','oi_grid_futures','oi_grid','indices','indices_chart','futures','futures_chart'] as const;
+ 'oi_grid_screener','oi_grid_futures','oi_grid','pcr_chart','pcr_readings','max_pain_chart','max_pain_readings',
+ 'iv_chart','iv_strikes','fut_oi','fut_basis','fut_readings','indices','indices_chart','futures',
+ 'futures_chart'] as const;
 export type WidgetKey=(typeof WIDGET_KEYS)[number];
 const hiddenFrom=(stored:unknown)=>{
  const raw=(stored||{}) as Record<string,unknown>,out:Record<string,boolean>={};
@@ -69,8 +76,32 @@ export function DerivativeTab(){
  const page=width||winW;
  const stacked=page<CHART_BESIDE,pinFirst=page<PIN_COLUMN,phone=pinFirst;
  const filters=useMemo(()=>rulesToFilters(rules),[rules]);
- const rulesLine=useMemo(()=>rulesText(rules,ruleLabeller(filterData.data,rules)),[rules,filterData.data]);
- const chainUnderlying=filters.underlying||target?.underlying||'';
+ const ruleLabel=useMemo(()=>ruleLabeller(filterData.data,rules),[filterData.data,rules]);
+ const rulesLine=useMemo(()=>rulesText(rules,ruleLabel),[rules,ruleLabel]);
+ // ================================================================================================================
+ // ONE SYMBOL ACROSS THE TAB.
+ //
+ // The owner: "If i select nifty on the screener all the charts should show." So the symbol is resolved HERE,
+ // exactly once, and handed to every block — the chain, the strikes, the ΔOI tiles and their futures chart, PCR,
+ // max pain, IV and the futures build-up. No block resolves its own; that is how two panels end up describing two
+ // different underlyings under one as-of line.
+ //
+ // The order is the owner's: a symbol chosen in Customize wins, then the last row clicked ANYWHERE on the tab,
+ // then the busiest underlying by premium traded at this 15-min reading, then the first index — which rests only
+ // on OI, and is the fallback because the premium list is empty whenever the newest reading was rebuilt from
+ // candles, which carry no VWAP. A symbol nobody chose is FLAGGED as a default in every block's header badge.
+ // ================================================================================================================
+ const chosen=filters.underlying||target?.underlying||'';
+ const busiest=useDerivativeRead<Unusual>(chosen?null:'/api/derivatives/unusual?limit=1',seq);
+ const indexList=useDerivativeRead<{rows?:{underlying?:string}[]}>(chosen?null:'/api/derivatives/indices',seq);
+ const choice=useMemo(()=>resolveTabSymbol(filters.underlying,target?.underlying,
+  (busiest.data?.rows||[])[0]?.underlying,(indexList.data?.rows||[])[0]?.underlying),
+  [filters.underlying,target?.underlying,busiest.data,indexList.data]);
+ const symbol=choice.symbol,badge=symbolBadge(choice);
+ // an expiry filter only means anything once a symbol was CHOSEN: a default symbol has its own front expiry
+ const symbolExpiry=filters.underlying?filters.expiry:'';
+ // no symbol at all means no chain AND no series for the tile beside it: the whole section is idle
+ const chainIdle=!symbol;
  const refresh=()=>setSeq(x=>x+1);
  // One target, one series read: clicking a row in ANY section re-points the same chart, and the tiles beside each
  // table draw that one series rather than each asking the pilot for the same marks again.
@@ -81,14 +112,26 @@ export function DerivativeTab(){
  const hiddenCount=WIDGET_KEYS.filter(k=>hidden[k]).length;
  const shows=(key:WidgetKey)=>!hidden[key]&&(!expanded||expanded===key);
  const frame=(key:WidgetKey)=>({onExpand:()=>toggleExpand(key),expanded:expanded===key,onClose:()=>hide(key)});
- const tableStyle=(key:WidgetKey)=>expanded===key?{height:EXPANDED_H}
-  :stacked?{height:STACK_TABLE_H}:{flex:2,minWidth:0,height:ROW_H};
- const chartStyle=(key:WidgetKey)=>expanded===key?{height:EXPANDED_H}
-  :stacked?{height:CHART_H+200}:{flex:1,minWidth:0,height:ROW_H};
- const chart=(key:WidgetKey)=>shows(key)?<ChartTile key={key} target={target} body={series.data} state={seriesState}
-  onRefresh={series.reload} height={expanded===key?EXPANDED_H-190:CHART_H} style={chartStyle(key)} {...frame(key)}/>:null;
+ // `idle` = this section has no symbol yet, so BOTH its panels are showing one sentence. They collapse
+ // together, which keeps the row square: a section where one panel shrank and the other did not would read
+ // worse than the hole it was meant to close.
+ const paneStyle=(key:WidgetKey,grow:number,tall:number,idle?:boolean)=>{
+  if(expanded===key)return {height:EXPANDED_H};
+  const h=idle?IDLE_H:stacked?tall:ROW_H;
+  return stacked?{height:h}:{flex:grow,minWidth:0,height:h};
+ };
+ const tableStyle=(key:WidgetKey,idle?:boolean)=>paneStyle(key,2,STACK_TABLE_H,idle);
+ const chartStyle=(key:WidgetKey,idle?:boolean)=>paneStyle(key,1,CHART_H+200,idle);
+ const chart=(key:WidgetKey,idle?:boolean)=>shows(key)?<ChartTile key={key} target={target} body={series.data}
+  state={seriesState} onRefresh={series.reload} height={expanded===key?EXPANDED_H-190:idle?IDLE_H-90:CHART_H}
+  style={chartStyle(key,idle)} {...frame(key)}/>:null;
  const section=(title:string,subtitle:string,keys:WidgetKey[],children:React.ReactNode)=>
   keys.some(shows)?<Section key={title} title={title} subtitle={subtitle} stacked={stacked||!!expanded}>{children}</Section>:null;
+ // Everything the four session blocks need, built once so they cannot drift apart: the same symbol, the same
+ // badge for it, the same expiry, the same height and the same show/hide state as every other block on the tab.
+ const sessionProps={symbol,choice,badge,expiry:symbolExpiry,seq,target,onTarget,
+  stacked:stacked||!!expanded,height:expanded?EXPANDED_H:stacked?SESSION_STACK_H:SESSION_ROW_H,
+  hidden,onHide:hide,expanded:expanded||undefined,onExpand:toggleExpand};
  let body:React.ReactNode;
  if(status.phase==='loading')body=<View style={{padding:28,alignItems:'center'}}>
   <T style={{fontSize:13,color:C.muted}}>Reading the F&amp;O store…</T></View>;
@@ -118,32 +161,37 @@ export function DerivativeTab(){
   <HeaderChip label="Check again" a11y="Check the F&O store again" icon="refresh-cw" onPress={refresh}/>
  </View>;
  else body=<View style={{gap:20}}>
-  {section('Unusual activity','Every contract that cleared the liquidity floors at this 15-min reading, largest premium traded first.',
-   ['unusual','unusual_chart'],<>
-   {shows('unusual')&&<UnusualWidget rules={rules} rulesLine={rulesLine} seq={seq} target={target} onTarget={onTarget}
-    onCustomize={()=>setDialog(true)} pinFirst={pinFirst} style={tableStyle('unusual')} {...frame('unusual')}/>}
-   {chart('unusual_chart')}
-  </>)}
-  {section('Option chain',chainUnderlying?`${chainUnderlying} — calls on the left, puts on the right, at the latest 15-min reading.`
+  {/* Section 1, the tab's workhorse: the screener and the linked chart of the row it points at. */}
+  <ScreenerSection title='Unusual activity' rules={rules} rulesLine={rulesLine} ruleLabel={ruleLabel} seq={seq}
+   badge={badge} target={target} onTarget={onTarget} onCustomize={()=>setDialog(true)}
+   stacked={stacked||!!expanded} pinFirst={pinFirst} showTable={shows('unusual')}
+   height={expanded==='unusual'?EXPANDED_H:stacked?STACK_TABLE_H:ROW_H}
+   chart={idle=>chart('unusual_chart',idle)} {...frame('unusual')}/>
+  {section('Option chain',symbol?`${symbol} — calls on the left, puts on the right, at the latest 15-min reading.`
    :'Choose a symbol in Customize, or click any row above, to see its chain.',['chain','chain_chart'],<>
-   {shows('chain')&&<ChainWidget underlying={chainUnderlying} expiry={filters.expiry} seq={seq} target={target}
-    onTarget={onTarget} filterCount={rules.length} onCustomize={()=>setDialog(true)} style={tableStyle('chain')}
-    {...frame('chain')}/>}
-   {chart('chain_chart')}
+   {shows('chain')&&<ChainWidget underlying={symbol} expiry={symbolExpiry} seq={seq} target={target}
+    onTarget={onTarget} filterCount={rules.length} onCustomize={()=>setDialog(true)}
+    style={tableStyle('chain',chainIdle)} {...frame('chain')}/>}
+   {chart('chain_chart',chainIdle)}
   </>)}
-  {(shows('oi_table')||shows('oi_chart'))&&<OiByStrikeSection underlying={chainUnderlying} expiry={filters.expiry}
+  {(shows('oi_table')||shows('oi_chart'))&&<OiByStrikeSection underlying={symbol} expiry={symbolExpiry}
    seq={seq} onTarget={onTarget} stacked={stacked||!!expanded} pinFirst={pinFirst} filterCount={rules.length}
    onCustomize={()=>setDialog(true)} height={expanded?EXPANDED_H:stacked?STACK_TABLE_H:ROW_H}
    chartHeight={expanded?EXPANDED_H-260:CHART_H} hidden={hidden} onHide={hide} expanded={expanded||undefined}
    onExpand={toggleExpand}/>}
-  {/* The owner's ΔOI block, left to right: the screener, the futures chart of the block's own symbol, and the
-      2 x 5 grid of ΔOI tiles. ONE resolved symbol drives all three, and clicking a screener row or a tile
-      re-points the same chart target the rest of the tab uses. */}
-  {(shows('oi_grid_screener')||shows('oi_grid_futures')||shows('oi_grid'))&&<OiGridSection underlying={chainUnderlying}
-   expiry={filters.expiry} seq={seq} rules={rules} rulesLine={rulesLine} target={target} onTarget={onTarget}
-   onCustomize={()=>setDialog(true)} stacked={stacked||page<GRID_BESIDE||!!expanded}
+  {/* The owner's ΔOI block, left to right: the screener, the futures chart of the tab's symbol, and the
+      2 x 5 grid of ΔOI tiles. Clicking a screener row or a tile re-points the whole tab. */}
+  {(shows('oi_grid_screener')||shows('oi_grid_futures')||shows('oi_grid'))&&<OiGridSection symbol={symbol}
+   badge={badge} expiry={symbolExpiry} seq={seq} rules={rules} rulesLine={rulesLine} target={target}
+   onTarget={onTarget} onCustomize={()=>setDialog(true)} stacked={stacked||page<GRID_BESIDE||!!expanded}
    height={expanded?EXPANDED_H:stacked?GRID_STACK_H:GRID_ROW_H} hidden={hidden} onHide={hide}
    expanded={expanded||undefined} onExpand={toggleExpand}/>}
+  {/* The four session blocks. Each one is pointed at the SAME symbol every block above is pointed at. */}
+  <PcrSection {...sessionProps}/>
+  <MaxPainSection {...sessionProps}/>
+  <IvSection {...sessionProps}/>
+  {/* Three panels, not two, so it needs the room the ΔOI block needs before they sit side by side. */}
+  <FuturesBuildupSection {...sessionProps} stacked={stacked||page<GRID_BESIDE||!!expanded}/>
   {section('Index dashboard','NIFTY, BANKNIFTY and FINNIFTY as captured at this 15-min reading.',['indices','indices_chart'],<>
    {shows('indices')&&<IndexWidget seq={seq} target={target} onTarget={onTarget} pinFirst={pinFirst}
     style={tableStyle('indices')} {...frame('indices')}/>}

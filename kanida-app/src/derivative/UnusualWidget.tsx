@@ -1,37 +1,69 @@
-// Section 1 — Unusual activity (docs/DERIVATIVES_SPEC.md §3.2–§3.4, §4 card 1) as the benchmark's wide dense table:
-// one row per strike that cleared the liquidity floors, the §3 roll-up kept as a band over each underlying's rows.
+// The screener: the Derivative tab's workhorse list, and the widget the "Unusual activity" card grew into. One row
+// per contract that cleared the liquidity floors AND every filter the server was able to apply, with the §3 signals
+// on the row — premium traded, volume against the contract's own median, volume to open interest, both open-interest
+// changes and both build-up labels.
 //
-// Every honesty rule of the card it replaces still holds: the floors are the server's and are printed underneath, a
-// volume reading without three sessions behind it is the words "no baseline" (§3.2), the 15-minute and day-on-day
-// build-up labels are shown separately and never merged (§3.1), and a number that was not captured is a dash.
+// THE ONE RULE THIS FILE EXISTS TO HOLD: a filter is rendered as ACTIVE only when the server's own `applied` list
+// says it applied it. Not when the browser sent it. Not when it is in the reader's rule list. Not when the parameter
+// looks right. That exact mistake cost a day here — a sample-size filter shown as active while it silently deleted
+// every row — so the state of every rule comes from logic.filterStatuses and from nowhere else, the header counts
+// only the applied ones, the strip above the rows shows each rule's real state, and a filter the server did NOT
+// apply is said in plain words in amber under the rows, which is a genuine caveat on the data in front of the reader.
+//
+// Every honesty rule the card had still holds: the floors are the server's, a volume reading without enough sessions
+// behind it is the words "no baseline" (§3.2), the 15-minute and day-on-day build-up labels are never merged (§3.1),
+// a number that was not captured is a dash, and nothing here is filtered in the browser.
 import React,{useMemo,useState} from 'react';
 import {View} from 'react-native';
-import {C,Icon,s} from '../ui';
-import {useDerivativeRead} from './useDerivatives';
-import {WidgetFrame,stateOf,tone,buildupColor,typeColor} from './frame';
+import {C,Icon,T,s} from '../ui';
+import type {Read} from './useDerivatives';
+import {WidgetFrame,metaText,stateOf,tone,buildupColor,typeColor} from './frame';
 import {Table,Cell,type Column,type TableItem} from './Table';
-import {buildupLabel,buildupTone,clock,compact,contractSummary,crore,dteText,flattenUnusual,groupSummary,
- nextSort,optionTone,price,ratio,rowKey,rulesToFilters,shortDate,signedUnits,sortRows,strike as strikeText,
- units,unusualQuery,volumeRatioShort,volumeToOi,volumeToOiHot,type FilterRule,type SortState} from './logic';
-import type {ContractRow,Unusual,ChartTarget} from './types';
+import {appliedCount,appliedText,buildupLabel,buildupTone,clock,compact,contractSummary,crore,dteText,
+ nextSort,notAppliedText,optionTone,price,ratio,rowKey,shortDate,signed,signedUnits,sortRows,
+ strike as strikeText,units,volumeRatioShort,volumeToOi,volumeToOiHot,type FilterStatus,type SortState} from './logic';
+import type {ContractRow,Screener,ChartTarget} from './types';
 /** The captured value behind each column, used by the header sort (and nothing else). */
 const VALUE:Record<string,(row:ContractRow)=>unknown>={
  time:r=>r.captured_at,symbol:r=>r.underlying,summary:r=>r.tradingsymbol,expiry:r=>r.expiry,
  dte:r=>r.days_to_expiry,strike:r=>r.strike,spot:r=>r.spot,oi:r=>r.oi,oi_chg:r=>r.oi_change_day,
- volume:r=>r.volume,vol_oi:r=>r.volume_to_oi,premium:r=>r.premium_cr,buildup:r=>r.buildup_day,
+ oi_chg_15m:r=>r.oi_change_15m_pct,volume:r=>r.volume,vol_ratio:r=>r.volume_ratio,vol_oi:r=>r.volume_to_oi,
+ premium:r=>r.premium_cr,buildup:r=>r.buildup_day,
 };
-export type UnusualWidgetProps={rules:FilterRule[];rulesLine:string;seq:number;target:ChartTarget|null;
+/** How a rule's state is drawn. ONLY `applied` gets the live treatment; everything else reads as off, because
+ *  everything else IS off as far as the rows underneath are concerned. */
+const STATE_STYLE:Record<string,{color:string;border:string;suffix:string}>={
+ applied:{color:C.green,border:C.green,suffix:''},
+ pending:{color:C.muted,border:C.line,suffix:' · not confirmed'},
+ not_applied:{color:C.amber,border:'#4A3E1E',suffix:' · NOT applied'},
+ unsupported:{color:C.muted,border:C.line,suffix:' · not supported'},
+};
+/** The strip over the rows: every rule the reader set, each wearing the state the SERVER gave it. */
+export function FilterStrip({statuses}:{statuses:FilterStatus[]}){
+ if(!statuses.length)return null;
+ return <View style={[s.row,{gap:6,flexWrap:'wrap'}]}>
+  {statuses.map(status=>{
+   const style=STATE_STYLE[status.state]||STATE_STYLE.pending;
+   return <View key={status.key} accessibilityRole="text"
+    accessibilityLabel={`${status.text}. ${status.state==='applied'?'Applied by the server.':status.reason}`}
+    style={[s.row,{gap:4,paddingHorizontal:7,paddingVertical:2,borderRadius:6,borderWidth:1,
+     borderColor:style.border}]}>
+    <Icon name={status.state==='applied'?'check':'alert-circle'} size={10} color={style.color}/>
+    <T numberOfLines={1} style={{fontSize:10,lineHeight:14,color:style.color}}>{status.text}{style.suffix}</T>
+   </View>;
+  })}
+ </View>;
+}
+export type UnusualWidgetProps={read:Read<Screener>;statuses:FilterStatus[];seq:number;target:ChartTarget|null;
  onTarget:(t:ChartTarget)=>void;onCustomize:()=>void;onExpand?:()=>void;expanded?:boolean;onClose?:()=>void;
  pinFirst?:boolean;style?:any};
-export function UnusualWidget({rules,rulesLine,seq,target,onTarget,onCustomize,onExpand,expanded,onClose,
+export function UnusualWidget({read,statuses,target,onTarget,onCustomize,onExpand,expanded,onClose,
  pinFirst,style}:UnusualWidgetProps){
- const read=useDerivativeRead<Unusual>(`/api/derivatives/unusual${unusualQuery(rulesToFilters(rules||[]))}`,seq);
  const body=read.data;
- const state=stateOf(read,'No contract clears the liquidity floors at this 15-min reading.');
+ const state=stateOf(read,'No contract clears the liquidity floors and the applied filters at this 15-min reading.');
  const [sort,setSort]=useState<SortState>(null);
  const required=body?.baseline_sessions_required??3;
- const groups=body?.rows||[];
- const flat=useMemo(()=>flattenUnusual(groups),[groups]);
+ const rows=body?.rows||[];
  const pick=(row:ContractRow)=>onTarget({underlying:row.underlying,instrumentToken:row.instrument_token,
   label:row.tradingsymbol||row.underlying,
   detail:`${strikeText(row.strike)} ${row.instrument_type} · ${dteText(row.days_to_expiry)}`});
@@ -48,43 +80,60 @@ export function UnusualWidget({rules,rulesLine,seq,target,onTarget,onCustomize,o
   {key:'strike',label:'Strike',width:72,align:'right',value:VALUE.strike,render:r=><Cell text={strikeText(r.strike)}/>},
   {key:'spot',label:'Spot',width:76,align:'right',value:VALUE.spot,render:r=><Cell text={price(r.spot)} color={C.muted}/>},
   {key:'oi',label:'OI',width:62,align:'right',value:VALUE.oi,render:r=><Cell text={compact(r.oi)}/>},
-  {key:'oi_chg',label:'OI chg',width:72,align:'right',value:VALUE.oi_chg,
-   render:r=><Cell text={signedUnits(r.oi_change_day)} color={tone(r.oi_change_day)}/>},
-  {key:'volume',label:'Volume',width:78,align:'right',value:VALUE.volume,
+  {key:'oi_chg',label:'OI chg (day)',width:80,align:'right',value:VALUE.oi_chg,filter:onCustomize,
    render:r=><View style={{alignItems:'flex-end'}}>
-    <Cell text={compact(r.volume)}/><Cell text={volumeRatioShort(r,required)} color={C.muted} size={9}/></View>},
-  {key:'vol_oi',label:'Vol/OI',width:60,align:'right',value:VALUE.vol_oi,
+    <Cell text={signedUnits(r.oi_change_day)} color={tone(r.oi_change_day)}/>
+    <Cell text={signed(r.oi_change_day_pct)} color={C.muted} size={9}/></View>},
+  {key:'oi_chg_15m',label:'OI chg (15m)',width:80,align:'right',value:VALUE.oi_chg_15m,filter:onCustomize,
+   render:r=><View style={{alignItems:'flex-end'}}>
+    <Cell text={signedUnits(r.oi_change_15m)} color={tone(r.oi_change_15m)}/>
+    <Cell text={signed(r.oi_change_15m_pct)} color={C.muted} size={9}/></View>},
+  {key:'volume',label:'Volume',width:78,align:'right',value:VALUE.volume,
+   render:r=><Cell text={compact(r.volume)}/>},
+  {key:'vol_ratio',label:'Vol vs median',width:86,align:'right',value:VALUE.vol_ratio,filter:onCustomize,
+   render:r=><Cell text={volumeRatioShort(r,required)}
+    color={r.volume_baseline==='ok'&&r.volume_ratio!=null?C.ink:C.muted}/>},
+  {key:'vol_oi',label:'Vol/OI',width:60,align:'right',value:VALUE.vol_oi,filter:onCustomize,
    render:r=><View style={[s.row,{gap:3}]}>
     {volumeToOiHot(r)&&<Icon name="alert-circle" size={11} color={C.amber}/>}
     <Cell text={ratio(r.volume_to_oi)} color={volumeToOiHot(r)?C.amber:C.ink}/></View>},
   {key:'premium',label:'Premium ₹cr',width:76,align:'right',value:VALUE.premium,filter:onCustomize,
    render:r=><Cell text={crore(r.premium_cr)} bold/>},
-  {key:'buildup',label:'Build-up',width:104,value:VALUE.buildup,render:r=><View>
+  {key:'buildup',label:'Build-up',width:104,value:VALUE.buildup,filter:onCustomize,render:r=><View>
    <Cell text={buildupLabel(r.buildup_day)} color={buildupColor(buildupTone(r.buildup_day))}/>
    <Cell text={`15m ${buildupLabel(r.buildup_15m)}`} color={C.muted} size={9}/></View>},
  ],[onCustomize,required]);
- // Unsorted, the table keeps the §3 roll-up as a band over each underlying's strikes. A sort runs across every row,
- // so the bands come off and the note says so rather than leaving a roll-up the order no longer matches.
+ // Nothing is dropped here: the rows the server returned are the rows on screen, in its order or in one the
+ // header sort re-arranged. A sort re-orders that list and never re-queries it, so the as-of line and the
+ // floors printed for this block still describe exactly these rows.
  const items=useMemo(():TableItem<ContractRow>[]=>{
-  if(sort){
-   const get=VALUE[sort.key]||(()=>null);
-   return sortRows(flat,get,sort.dir).map((row,i)=>({kind:'row' as const,key:rowKey(row,i),row}));
-  }
-  const out:TableItem<ContractRow>[]=[];
-  for(const group of groups){
-   out.push({kind:'group',key:`g-${group.underlying}`,label:group.underlying,detail:groupSummary(group)});
-   for(const row of group.strikes||[])out.push({kind:'row',key:rowKey(row,group.underlying),row});
-  }
-  return out;
- },[sort,flat,groups]);
- const note=sort
-  ?`${flat.length} strikes, sorted by ${columns.find(c=>c.key===sort.key)?.label||sort.key}. Sorting re-orders the rows the pilot returned at this 15-min reading, it does not ask for different ones, so the roll-up bands are off.`
-  :`${flat.length} strikes across ${groups.length} underlying${groups.length===1?'':'s'} clear the floors, largest premium traded first.`;
- return <WidgetFrame name="Unusual activity" subtitle={rulesLine} body={body} state={state} onRefresh={read.reload}
-  filterCount={(rules||[]).length} onCustomize={onCustomize} onExpand={onExpand} expanded={expanded} onClose={onClose}
-  showsSignals={['premium_cr','volume_ratio','volume_to_oi','buildup_day','buildup_15m','oi_change_day','spot']}
-  note={note} style={style} emptyDetail="A contract is listed only when it clears all three floors below.">
-  <Table label="Unusual activity" columns={columns} items={items} sort={sort} pinFirst={pinFirst} rowHeight={36}
+  const list=sort?sortRows(rows,VALUE[sort.key]||(()=>null),sort.dir):rows;
+  return list.map((row,i)=>({kind:'row' as const,key:rowKey(row,i),row}));
+ },[sort,rows]);
+ const on=appliedCount(statuses);
+ const off=notAppliedText(statuses,body?.not_applied_text);
+ // A count is a claim about an answer, so it is printed only when there IS an answer. While the screener is
+ // loading, or unavailable, "0 contracts over the floors" would be a number we do not have — and the whole
+ // point of this panel is that it never shows one of those.
+ const note=<View style={{gap:2}}>
+  {state.phase==='ready'&&<T style={metaText}>
+   {rows.length} contract{rows.length===1?'':'s'} over the floors
+   {on?`, narrowed by ${on} applied filter${on===1?'':'s'}`:', with no filter applied by the server'}
+   {sort?`, sorted by ${columns.find(c=>c.key===sort.key)?.label||sort.key}.`:', largest premium traded first.'}
+  </T>}
+  {/* the amber on this panel is spent here and nowhere else: a filter the reader set that did NOT narrow these
+      rows is a caveat on the data itself, and it is said where the rows are */}
+  {!!off&&<T style={[metaText,{color:C.amber}]}>{off}</T>}
+ </View>;
+ return <WidgetFrame name="Screener" subtitle={appliedText(statuses)} body={body} state={state}
+  onRefresh={read.reload}
+  filterCount={on} onCustomize={onCustomize} onExpand={onExpand} expanded={expanded} onClose={onClose}
+  showsSignals={['premium_cr','volume_ratio','volume_to_oi','buildup_day','buildup_15m','oi_change_day',
+   'oi_change_15m','spot']}
+  toolbar={statuses.length?<FilterStrip statuses={statuses}/>:undefined}
+  note={note} inBlock style={style}
+  emptyDetail="A contract is listed only when it clears all three liquidity floors, which are named in How to read this.">
+  <Table label="Screener" columns={columns} items={items} sort={sort} pinFirst={pinFirst} rowHeight={38}
    onSort={key=>setSort(s=>nextSort(s,key))} onRowPress={pick}
    selected={row=>row.instrument_token!=null&&target?.instrumentToken===row.instrument_token}
    rowLabel={row=>`${row.tradingsymbol||row.underlying}. ${contractSummary(row)}. ${crore(row.premium_cr)} traded. ${buildupLabel(row.buildup_day)} on the day, ${buildupLabel(row.buildup_15m)} over the last 15 minutes. Volume ${volumeRatioShort(row,required)} of its own median, ${units(row.volume)} traded. Volume to open interest ${volumeToOi(row)}`}/>
