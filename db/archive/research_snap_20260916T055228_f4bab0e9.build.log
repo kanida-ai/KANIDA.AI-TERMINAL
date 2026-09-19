@@ -1,0 +1,33 @@
+[    0.0s] free space before: 391.87 GB (420769214464 bytes)
+[    0.0s] attached market15 + kanida read-only (mode=ro)
+[    0.0s] database_list: [[0, "main", "C:\\Users\\SPS\\Documents\\Kanida_Falcon\\db\\archive\\research_snap_20260916T055228_f4bab0e9.db"], [2, "src", "C:\\Users\\SPS\\Documents\\Kanida_Falcon\\db\\market15.db"], [3, "lab", "C:\\Users\\SPS\\Documents\\Kanida_Falcon\\db\\kanida.db"]]
+[    0.0s] read-only proof: write to src refused -> attempt to write a readonly database
+[    0.0s] read-only proof: write to lab refused -> attempt to write a readonly database
+[    0.0s] created table definitions (verbatim source DDL)
+[    0.0s] copied corrections              2336 rows
+[    0.1s] copied quality_findings       108783 rows
+[    0.1s] copied quarantine                  7 rows
+[    0.1s] copied raw_archive              6344 rows
+[    0.1s] copied ingest_runs               155 rows
+[    0.1s] copied session_regimes           208 rows
+[    0.1s] copied seed_progress             501 rows
+[    0.1s] copied meta                        6 rows
+[    1.0s] copied daily_bars             576276 rows
+[    1.0s] copied snapshots                   1 rows
+[    1.0s] copied snapshot_exclusions          4 rows
+[   20.7s] copied snapshot_members     27867377 rows
+[   21.5s] copying candles_15m the snapshot points at ...
+[  248.2s] copied candles_15m          27867377 rows
+[  268.9s] index: idx_candles15_sym_bar
+[  269.4s] index: idx_daily_sym_day
+[  269.4s] index: idx_raw_archive_sym
+[  269.4s] index: idx_corrections_sym
+[  269.5s] index: idx_findings_sym
+[  269.5s] copied instrument_labels        1567 rows  (from db/kanida.db)
+[  269.5s] copied corp_actions             4296 rows  (from db/kanida.db)
+[  281.1s] embedded 6344 raw vendor payloads (182.2 MB); sha256 mismatches: 0
+[  294.9s] embedded 495 frozen histories (287.9 MB); hash mismatches: 0
+[  295.0s] embedded 15 research input files; missing: none
+[  295.0s] embedded 47 frozen code files; manifest hash mismatches: 0
+[  295.1s] build complete; archive = 9.00 GB
+[  295.1s] free space after build: 381.10 GB

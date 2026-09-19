@@ -1,0 +1,28 @@
+[    0.1s] unpacked 15 research input files from the archive
+[    6.6s] unpacked 6344 raw vendor payloads from the archive
+[    6.9s] exclusion labels loaded: {"vendor_zero_print": 4299, "unresolved": 2380, "vendor_bad_print": 4}
+[    6.9s] cas symbols from archive session_regimes: 208
+[    7.1s] wrong_instrument usable_start drift vs the recorded rule: none
+[    7.1s] rebuilding 495 symbols from the archive alone ...
+[   60.8s] 25/495  match=25 mismatch=0 error=0
+[  123.8s] 50/495  match=50 mismatch=0 error=0
+[  198.8s] 75/495  match=75 mismatch=0 error=0
+[  277.1s] 100/495  match=100 mismatch=0 error=0
+[  355.8s] 125/495  match=125 mismatch=0 error=0
+[  440.2s] 150/495  match=150 mismatch=0 error=0
+[  508.2s] 175/495  match=175 mismatch=0 error=0
+[  584.1s] 200/495  match=200 mismatch=0 error=0
+[  659.7s] 225/495  match=225 mismatch=0 error=0
+[  740.3s] 250/495  match=250 mismatch=0 error=0
+[  816.4s] 275/495  match=275 mismatch=0 error=0
+[  887.1s] 300/495  match=300 mismatch=0 error=0
+[  969.6s] 325/495  match=325 mismatch=0 error=0
+[ 1041.3s] 350/495  match=350 mismatch=0 error=0
+[ 1098.2s] 375/495  match=375 mismatch=0 error=0
+[ 1140.2s] 400/495  match=400 mismatch=0 error=0
+[ 1190.6s] 425/495  match=425 mismatch=0 error=0
+[ 1248.4s] 450/495  match=450 mismatch=0 error=0
+[ 1323.7s] 475/495  match=475 mismatch=0 error=0
+[ 1382.7s] 495/495  match=495 mismatch=0 error=0
+[ 1382.7s] matched 495 / 495 ; mismatched 0 ; errors 0
+[ 1382.7s] wrote C:\Users\SPS\AppData\Local\Temp\claude\C--Users-SPS-Documents-Kanida-Falcon\d7fac778-e9f2-4fa1-a0c4-245dc5062d07\scratchpad\reproduction.json

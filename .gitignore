@@ -99,3 +99,16 @@ docs/kanida_workers.html
 # Every exported web bundle, not just dist-pilot (dist-drawing-*, dist-history-*).
 kanida-app/dist-*/
 dist-*/
+
+# --- The research archive: the 9 GB file stays out, its PROOF goes in. --------
+# db/archive/*.db is the standalone copy of the 27,867,377 candles the 107-pattern
+# study was run on. The file itself is far too large for git and is excluded by the
+# db/ rule above. Its manifest, verification and reproduction records are small and
+# are exactly what makes a later deletion of the raw stores defensible — those are
+# tracked. Same precedent as the sibling repo, which tracks a manifest while keeping
+# the database out.
+!db/archive/
+db/archive/*
+!db/archive/*.json
+!db/archive/*.sha256
+!db/archive/*.log

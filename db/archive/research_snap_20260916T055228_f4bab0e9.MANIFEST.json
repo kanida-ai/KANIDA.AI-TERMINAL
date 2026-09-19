@@ -1,0 +1,173 @@
+[
+ {
+  "table": "candles_15m",
+  "rows": 27867377,
+  "sha256": "05976af22c4e69e44bd4c29f1ac22acaef438ba2d406946d090b3e280ed8a52c",
+  "order_by": "instrument_id, bar_start, revision",
+  "columns": "instrument_id,symbol,exchange,bar_start,bar_end,open,high,low,close,volume,candle_complete,quality_flags,adjustment_basis_id,vendor_id,vendor_revision,fetched_at,snapshot_id,revision,source_request_id,run_id",
+  "source_file": "db/market15.db",
+  "purpose": "the 15-minute candles the snapshot pins - the study's raw price input"
+ },
+ {
+  "table": "corp_actions",
+  "rows": 4296,
+  "sha256": "847124195b218911a7a09f97d016c7cc3d4d1514f41995c4dc97bac8f56550aa",
+  "order_by": "all columns",
+  "columns": "symbol,ex_date,action_type,subject,series,face_value,source",
+  "source_file": "db/kanida.db",
+  "purpose": "ex-dates the repair's adjustment_basis classification consulted"
+ },
+ {
+  "table": "corrections",
+  "rows": 2336,
+  "sha256": "14d3179f166f44348621036d989379c9cc3bf9eb163c9754f9a9b44f5b5574c3",
+  "order_by": "id",
+  "columns": "id,symbol,timeframe,bar_start,field,old_value,new_value,reason,evidence_request_id,run_id,old_revision,new_revision,created_at",
+  "source_file": "db/market15.db",
+  "purpose": "every value ever changed, with its reason"
+ },
+ {
+  "table": "daily_bars",
+  "rows": 576276,
+  "sha256": "ae2b976a3c213cc6ff1ae84a5ebe72157b093d7bf65dce7f731b33b6fc326fed",
+  "order_by": "instrument_id, session_date, revision",
+  "columns": "instrument_id,symbol,exchange,session_date,bar_start,bar_end,open,high,low,close,volume,quality_flags,adjustment_basis_id,vendor_id,fetched_at,run_id,revision",
+  "source_file": "db/market15.db",
+  "purpose": "provider daily series - the ONLY source of 1D/1W (never the intraday close)"
+ },
+ {
+  "table": "frozen_code",
+  "rows": 47,
+  "sha256": "ac00877d33cf580cc273f6f66398094b22377ecb1de2e520ba6d39240a7760fd",
+  "order_by": "research_run, relpath",
+  "columns": "research_run,relpath,bytes,sha256,manifest_sha256,content",
+  "source_file": "market_scanner/output/expanded_research/4b33a5249562631524d6/code/market_scanner/",
+  "purpose": "the detector code the pinned run executed, hash-verified"
+ },
+ {
+  "table": "frozen_histories",
+  "rows": 495,
+  "sha256": "e57ac3dce6f242ed868c34e8182ce173c413da46ee1eeaaccb9920b3439e5b96",
+  "order_by": "source_run, symbol",
+  "columns": "source_run,symbol,filename,sha256,gz_bytes,payload",
+  "source_file": "market_scanner/output/expanded_research/4b33a5249562631524d6/history/*.json.gz",
+  "purpose": "the exact aggregated bars the pinned run read, byte for byte"
+ },
+ {
+  "table": "ingest_runs",
+  "rows": 155,
+  "sha256": "3cb64f484fed47a48464e356e82438e3638b93e8f01b531ac0186c7da11f5c8f",
+  "order_by": "all columns",
+  "columns": "run_id,started_at,finished_at,provider,plan,requests,rows,errors,status",
+  "source_file": "db/market15.db",
+  "purpose": "which run wrote which rows"
+ },
+ {
+  "table": "instrument_labels",
+  "rows": 1567,
+  "sha256": "44065a18ee539fc0ecfba148544a90bb8a09aaabc1555235ed68521b949ed72b",
+  "order_by": "all columns",
+  "columns": "symbol,exchange,instrument_type,kite_token,sector,sub_sector,company,in_nifty50,in_nifty100,in_nifty200,in_nifty500,is_fno,is_active,updated_at,company_name,lot_size,tick_size,is_ipo,listing_date",
+  "source_file": "db/kanida.db",
+  "purpose": "sector / index membership used for the outcome run's grouping columns"
+ },
+ {
+  "table": "meta",
+  "rows": 6,
+  "sha256": "4d18d02b4f84393f05ccb2cde18d0959f81c984692f4f75e7783dc461c766551",
+  "order_by": "all columns",
+  "columns": "key,value",
+  "source_file": "db/market15.db",
+  "purpose": "store metadata"
+ },
+ {
+  "table": "quality_findings",
+  "rows": 108783,
+  "sha256": "5da07f294b7efaf23db51aee23298742a93903f6bc02cfe92d2c3d3251dd5d13",
+  "order_by": "id",
+  "columns": "id,run_id,symbol,timeframe,bar_start,code,severity,message,evidence,created_at",
+  "source_file": "db/market15.db",
+  "purpose": "repair evidence"
+ },
+ {
+  "table": "quarantine",
+  "rows": 7,
+  "sha256": "c72b6a7f00e6498bf241f189929fa08c0398099b49e23c2e7daaf05d141c0427",
+  "order_by": "all columns",
+  "columns": "symbol,reason,detail,status,first_seen,last_checked,checks,last_error,released_at,provider,run_id",
+  "source_file": "db/market15.db",
+  "purpose": "the 7 symbols excluded from the 495-symbol universe"
+ },
+ {
+  "table": "raw_archive",
+  "rows": 6344,
+  "sha256": "b08539264c32dd1d95f2a7ea8bf5da5d433fc82eafa0a6a2a25f274f087ea070",
+  "order_by": "request_id",
+  "columns": "request_id,provider,symbol,timeframe,start,end,fetched_at,sha256,payload_path,run_id,rows",
+  "source_file": "db/market15.db",
+  "purpose": "index of sha256-verified vendor payloads"
+ },
+ {
+  "table": "raw_archive_payloads",
+  "rows": 6344,
+  "sha256": "2021a47934e1715d194a8c18f4e7055ee4878a07a7f3ee5df5a4e8ca12248361",
+  "order_by": "request_id",
+  "columns": "request_id,payload_path,sha256,gz_sha256,gz_bytes,payload",
+  "source_file": "db/raw_archive/*.gz",
+  "purpose": "the vendor payload BYTES, embedded; 1D/1W before 2021-07-05 comes from these"
+ },
+ {
+  "table": "research_files",
+  "rows": 15,
+  "sha256": "876afdd15f0f7137dcb33af1ee75a7919edfce558226ae147f407ef259fc625c",
+  "order_by": "source_path",
+  "columns": "role,source_path,bytes,sha256,content",
+  "source_file": "various",
+  "purpose": "the non-database inputs: exclusion labels, calendars, manifests, contracts"
+ },
+ {
+  "table": "seed_progress",
+  "rows": 501,
+  "sha256": "0ae305434666e5363fd5bad699ec72b81a1553782e012ed38572b614df953a0b",
+  "order_by": "all columns",
+  "columns": "symbol,run_id,status,rows,first_bar,last_bar,source_mix,findings,error,updated_at",
+  "source_file": "db/market15.db",
+  "purpose": "per-symbol seeding record"
+ },
+ {
+  "table": "session_regimes",
+  "rows": 208,
+  "sha256": "c198786af80e3507ff4a7b911766d23ea8676c69eac73680424afe01d7f0d998",
+  "order_by": "all columns",
+  "columns": "symbol,effective_from,regime,source,evidence,run_id,updated_at",
+  "source_file": "db/market15.db",
+  "purpose": "CAS regime per symbol - sets the session end used for 1H/4H bucketing"
+ },
+ {
+  "table": "snapshot_exclusions",
+  "rows": 4,
+  "sha256": "cc64bdeaa047ea5de89dd919581feddd9d49b9b3b998ecb38b2c1afb137cb1b0",
+  "order_by": "all columns",
+  "columns": "snapshot_id,label,rows,symbols,source,note,created_at",
+  "source_file": "db/market15.db",
+  "purpose": "rows the repair labelled unusable and the snapshot left out"
+ },
+ {
+  "table": "snapshot_members",
+  "rows": 27867377,
+  "sha256": "29ea6d8a445f3b822e465dffad17dc48c8df5abdb9e048207d3caf226eee0bec",
+  "order_by": "snapshot_id, instrument_id, bar_start",
+  "columns": "snapshot_id,instrument_id,symbol,bar_start,revision",
+  "source_file": "db/market15.db",
+  "purpose": "the pointer list that defines the snapshot"
+ },
+ {
+  "table": "snapshots",
+  "rows": 1,
+  "sha256": "1d6c5e317030e52039cb6bb9473dba9308d671aeb57c99a831573ae530330c72",
+  "order_by": "all columns",
+  "columns": "snapshot_id,created_at,universe,adjustment_basis_id,provider,first_bar,last_bar,symbol_count,row_count,checksum,status,frozen_at,notes",
+  "source_file": "db/market15.db",
+  "purpose": "the frozen snapshot header, incl. its recorded checksum"
+ }
+]

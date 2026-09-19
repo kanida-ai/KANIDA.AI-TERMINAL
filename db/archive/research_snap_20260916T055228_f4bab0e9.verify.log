@@ -1,0 +1,17 @@
+[    0.0s] PRAGMA quick_check ...
+[  108.0s] quick_check = ok
+[  111.9s] row counts: {"candles_15m": 27867377, "snapshot_members": 27867377, "snapshot_exclusions": 4, "daily_bars": 576276, "corrections": 2336, "quality_findings": 108783, "quarantine": 7, "raw_archive": 6344, "raw_archive_payloads": 6344, "ingest_runs": 155, "session_regimes": 208, "seed_progress": 501, "meta": 6, "instrument_labels": 1567, "corp_actions": 4296, "frozen_histories": 495, "research_files": 15, "frozen_code": 47, "snapshots": 1}
+[  119.5s] candles: {"rows": 27867377, "symbols": 495, "instruments": 495, "first_bar": "2015-02-02 09:15:00", "last_bar": "2026-09-15 15:15:00"}
+[  991.3s] dangling members=0, extra candles=0
+[ 1036.0s] basis=[('kite-eod-adjusted', 6198699), ('legacy_unknown', 21668678)] vendor=[('kite', 6198699), ('legacy_kanida_db', 21668678)]
+[ 1036.0s] recomputing the snapshot checksum from the ARCHIVE alone ...
+[ 1333.4s] recomputed = 580af23f585159081c62760eaf1265a2a7afd498c34652df59e6c3b894dd7b19
+[ 1333.4s] recorded   = 580af23f585159081c62760eaf1265a2a7afd498c34652df59e6c3b894dd7b19
+[ 1333.4s] MATCH
+[ 1333.4s] stats: {"row_count": 27867377, "symbol_count": 495, "first_bar": "2015-02-02 09:15:00", "last_bar": "2026-09-15 15:15:00"}
+[ 1333.4s] spot-checking individual candles against db/market15.db ...
+[ 1354.5s] spot check: sampled=3960 identical=3960 differing=0 absent=0
+[ 1435.5s] source members count = 27867377
+[ 1455.0s] blobs: histories 495/495, payloads 6344/6344, files 15/15, code 47/47
+[ 1455.0s] history hash agreement: {"manifest_symbols": 495, "archive_symbols": 495, "agree": 495, "disagree": []}
+[ 1455.0s] wrote C:\Users\SPS\AppData\Local\Temp\claude\C--Users-SPS-Documents-Kanida-Falcon\d7fac778-e9f2-4fa1-a0c4-245dc5062d07\scratchpad\verification.json

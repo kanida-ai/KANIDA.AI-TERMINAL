@@ -1,0 +1,5 @@
+source recomputed : 580af23f585159081c62760eaf1265a2a7afd498c34652df59e6c3b894dd7b19
+source recorded   : 580af23f585159081c62760eaf1265a2a7afd498c34652df59e6c3b894dd7b19
+match             : True
+stats             : {'row_count': 27867377, 'symbol_count': 495, 'first_bar': '2015-02-02 09:15:00', 'last_bar': '2026-09-15 15:15:00'}
+seconds           : 570.4
