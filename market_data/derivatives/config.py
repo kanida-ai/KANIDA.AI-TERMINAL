@@ -104,11 +104,41 @@ MIN_LAST_PRICE = 1.0
 BACKFILL_MIN_OI_LOTS = 1
 BACKFILL_MIN_PRICE = 1.0
 
-# ── retention (spec §2) ──────────────────────────────────────────────────────
+# ── retention (spec §2, revised by kanida-app/docs/STORAGE_PLAN.md §5.5) ─────
+#
+# Measured on the first full-scope day (18 Sep 2026), table plus its indexes:
+# snapshots 73.9 MB, metrics 112.8 MB, candles_15m 36.6 MB -- 223.3 MB per
+# trading day.  Under the windows as they were (90 / 365 / never) that reaches
+# about 55 GB in a year, not the 20 GB the backlog assumed: the 90-day rule
+# only ever covered `snapshots`, `metrics` was kept for a *year* and was the
+# single largest item at 40 GB, and `candles_15m` was never pruned at all.
+#
+# These windows settle the store at roughly 12.8 GB.  Nothing enforces them by
+# itself -- `DerivativesCapture.maybe_prune` runs the pass once a day from the
+# capture loop; before that the code existed and nothing called it.
 
-RAW_SNAPSHOT_DAYS = 90
-METRICS_DAYS = 365
-#: daily roll-ups and contracts are kept for good.
+#: Raw quote marks.  The tab never reads them again once the day is rolled up;
+#: a month is re-computation head-room, not a retention promise.
+RAW_SNAPSHOT_DAYS = 30
+#: What the tab actually serves.
+METRICS_DAYS = 90
+#: The exchange's own 15-minute bars.  Previously unbounded, which was the real
+#: long-term risk: ~8.9 GB a year, growing for ever.
+CANDLE_DAYS = 180
+#: 2,013 rows in six months.  Left where it was.
+UNDERLYING_SNAPSHOT_DAYS = 90
+#: daily roll-ups, contracts and captures are kept for good.
+
+#: A retention window shorter than this is refused outright.  A prune is the one
+#: operation in this package that cannot be undone, so a typo in a window must
+#: fail loudly instead of emptying the store.
+MIN_RETENTION_DAYS = 14
+
+#: The capture loop runs the retention pass at most once a calendar day, and
+#: only once the day has no mark left to capture.  This is the floor under that
+#: rule rather than the trigger for it: never before the post-close mark, so a
+#: prune can never compete with a due mark for the single writer.
+PRUNE_AFTER = POST_CLOSE_MARK
 
 # ── writing ──────────────────────────────────────────────────────────────────
 

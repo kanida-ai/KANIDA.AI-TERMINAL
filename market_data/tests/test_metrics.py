@@ -896,14 +896,24 @@ class TestAppAliases:
             assert key in row, key
 
     def test_a_percentage_column_is_never_a_rupee_change(self, db):
-        """`price_change_15m_pct` must be the percentage, not the absolute move:
-        the app labels it as a percentage and would print a wrong number."""
+        """`price_change_15m_pct` must be the percentage, not the absolute move.
+
+        The app labels it as a percentage and would print a wrong number if the
+        rupee move ever arrived under that name.  Since 2026-09-19 the rupee
+        columns (`price_change_15m`, `price_change_day`) are not stored at all —
+        the Derivative tab refuses rupee moves outright, and they were 12.4 of
+        the metric record's 322 measured bytes.  That makes the confusion
+        impossible rather than merely wrong, so the guard is now: the percentage
+        is the percentage, and the rupee column is absent, not NULL.
+        """
         M.compute_for_mark(db, MARK)
         row = M.unusual_activity(conn=db)[0]
         # CE 2500 went 35 -> 40 in the 15 minutes: +5 rupees, +14.3%
-        assert row["price_change_15m"] == pytest.approx(5.0)
         assert row["price_change_15m_pct"] == pytest.approx(100.0 * 5.0 / 35.0)
-        assert row["price_change_15m_pct"] != row["price_change_15m"]
+        assert "price_change_15m" not in row
+        assert "price_change_day" not in row
+        stored = {r[1] for r in db.execute("PRAGMA table_info(metrics)")}
+        assert stored & M.RETIRED_METRIC_COLUMNS == set()
 
     def test_aliases_open_their_own_store_when_given_no_connection(self, db, tmp_path,
                                                                    monkeypatch):

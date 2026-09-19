@@ -1,0 +1,233 @@
+# ============================================================================
+# Falcon CI — the fast, deterministic suites, on every push to `falcon`
+#
+# WHY THIS EXISTS: on 2026-09-19 hours were lost to drift that these suites
+# would have caught on the day it happened. One of them (`market_data/tests`)
+# was already red in this working tree before this workflow was written — a
+# test that quietly rotted 24 hours after it was authored. Nobody knew,
+# because nothing ran it.
+#
+# ── SAFETY: THIS WORKFLOW CANNOT DEPLOY ANYTHING ────────────────────────────
+# This repository also carries the owner's LIVE product (the Terminal), whose
+# workflows live on `main`: `.github/workflows/deploy-cloud.yml` and
+# `nightly-eod.yml`. This file must never become a way to reach them.
+#   * `permissions:` is `contents: read` only. There is no `id-token: write`,
+#     so no OIDC token can be minted and no AWS role can be assumed.
+#   * No `secrets.*` is referenced anywhere below.
+#   * It runs only on `falcon` (push) and on PRs whose BASE is `falcon`, and
+#     only when Falcon source paths changed.
+#   * It never calls another workflow (`uses: ./.github/workflows/...`) and
+#     never dispatches one.
+# Checked on 2026-09-19: neither Terminal workflow can fire on a Falcon push —
+# both are `workflow_dispatch:` only (deploy-cloud's `push:` trigger is
+# commented out, nightly-eod's `schedule:` is disabled). See the CI report for
+# the exact path filter to add to deploy-cloud.yml *before* it is ever armed.
+#
+# WHAT IS DELIBERATELY NOT HERE: the browser suites,
+# `scripts/check-phase0.cjs` and `scripts/check-discover.e2e.cjs`. They need a
+# running pilot server, an exported web bundle and a live scanner with a
+# populated market15 store. They belong in a nightly job with real data, not
+# in a per-push gate — they would be slow and flaky here.
+# ============================================================================
+name: falcon-ci
+
+on:
+  push:
+    branches: [falcon]
+    paths:
+      - 'kanida-app/**'
+      - 'market_scanner/**'
+      - 'market_data/**'
+      - '.github/workflows/falcon-ci.yml'
+  pull_request:
+    branches: [falcon]
+    paths:
+      - 'kanida-app/**'
+      - 'market_scanner/**'
+      - 'market_data/**'
+      - '.github/workflows/falcon-ci.yml'
+
+# Read-only. Nothing below needs more, and anything that did would be a deploy.
+permissions:
+  contents: read
+
+concurrency:
+  group: falcon-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Kept in one place so a version bump is one edit and shows up in the diff.
+  PYTHON_VERSION: '3.12'
+  NODE_VERSION: '24'
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # TypeScript + the three pure logic suites.
+  #
+  # All three `check-*.cjs` scripts transpile a `src/**/*.ts` module in-process
+  # and assert on it. They need no server, no bundle and no database — verified
+  # on 2026-09-19 against a checkout containing only git-tracked files (no
+  # `db/`, no `var/`, no `.env`).
+  # ──────────────────────────────────────────────────────────────────────────
+  node:
+    name: types + pure logic suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: kanida-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: kanida-app/package-lock.json
+
+      - name: Install (locked)
+        run: npm ci --no-audit --no-fund
+
+      # BASELINE 2026-09-19: clean.
+      - name: "Types: tsc --noEmit"
+        run: npx tsc --noEmit
+
+      # BASELINE 2026-09-19: "derivative logic: 293 checks passed"
+      # (script sha 91986fdf327d — it was 234 at sha a438c752bb5c earlier the
+      # same day, so quote the sha with the count, as docs/BACKLOG.md asks).
+      # Prints "bundle unknown" in CI because dist-pilot is not built here;
+      # that is a label on the run, not a check, and the checks still run.
+      - name: Derivative tab logic
+        run: node scripts/check-derivative.cjs
+
+      # BASELINE 2026-09-19: "134 evidence-card logic checks passed."
+      - name: Evidence-card logic
+        run: node scripts/check-card-logic.cjs
+
+      # BASELINE 2026-09-19: "60 Data status logic checks passed."
+      - name: Data-status logic
+        run: node scripts/check-data-status.cjs
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # The pilot server suite.
+  #
+  # BASELINE 2026-09-19: 288 passed. (docs/BACKLOG.md still records 270, taken
+  # 18 Sep; the suite has grown by 18 since. 270 is the floor asserted below so
+  # the recorded number and the gate agree — raise both together.)
+  #
+  # Needs no database: verified on a tracked-files-only checkout.
+  # ──────────────────────────────────────────────────────────────────────────
+  pilot-server:
+    name: pilot server (pytest server/tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: kanida-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: kanida-app/server/requirements.txt
+
+      - name: Install (locked)
+        run: python -m pip install -q -r server/requirements.txt
+
+      - name: pytest server/tests
+        env:
+          PYTHONPATH: server
+        run: python -m pytest server/tests -q | tee /tmp/pilot.txt
+
+      - name: Baseline guard — 270 passed is the floor
+        run: |
+          set -euo pipefail
+          n=$(grep -oE '[0-9]+ passed' /tmp/pilot.txt | tail -1 | grep -oE '[0-9]+')
+          echo "pilot server: $n passed (recorded baseline 288, floor 270)"
+          if [ "$n" -lt 270 ]; then
+            echo "::error::pilot server suite dropped to $n passed; docs/BACKLOG.md records 270+"
+            exit 1
+          fi
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # The scanner and market-data suites. One job, one dependency set.
+  #
+  # Dependencies were derived by building an empty venv and adding only what
+  # the suites actually import (2026-09-19): numpy, TA-Lib, numba, requests,
+  # pytest. `kiteconnect` is imported lazily inside the live provider and is
+  # never reached by these tests. TA-Lib is PINNED because
+  # market_scanner/pattern_research/candlesticks.py declares
+  # EXPECTED_TALIB_VERSION = "0.6.8" and the detectors are version-sensitive;
+  # cp312 manylinux_2_17_x86_64 wheels exist for 0.6.8, so no C build is needed.
+  #
+  # BASELINE 2026-09-19, on a tracked-files-only checkout with no databases:
+  #   market_scanner/tests ............ 410 passed, 16 skipped, 6 deselected,
+  #                                     186 subtests passed
+  #   market_data + derivatives ....... 366 passed, 11 skipped
+  # With db/ present on the dev box the same suites report 432 passed /
+  # 186 subtests and 371 passed / 6 skipped — the difference is entirely
+  # tests that skip or are deselected for want of a database, never a failure.
+  # (market_data was 352/357 before the derivatives retention work of the same
+  # day added 14 tests; the floor below moved with it.)
+  #
+  # THE SIX DESELECTED TESTS need `db/kanida.db`, which is 147 GB, gitignored
+  # and cannot be a CI fixture. They open it read-only for `instrument_labels`
+  # and for the observed-session list; with no file they raise
+  # `sqlite3.OperationalError: unable to open database file`. They are named
+  # one by one rather than skipped by file so that nothing else hides behind
+  # them. Removing that dependency (inject the labels source, as risk R1 of
+  # kanida-app/docs/STORAGE_PLAN.md already proposes) would bring all six back.
+  # ──────────────────────────────────────────────────────────────────────────
+  scanner-and-data:
+    name: scanner + market data (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install
+        run: |
+          python -m pip install -q \
+            "numpy>=2.0,<3" \
+            "TA-Lib==0.6.8" \
+            "numba>=0.61" \
+            "requests>=2.32,<3" \
+            "pytest>=8.3,<10"
+
+      - name: pytest market_scanner/tests
+        run: |
+          python -m pytest market_scanner/tests -q \
+            --deselect market_scanner/tests/test_candle_source_parity.py::test_a_cas_session_is_complete_under_its_own_regime \
+            --deselect market_scanner/tests/test_candle_source_parity.py::test_without_the_regime_a_cas_4h_closing_bucket_is_wrongly_dropped \
+            --deselect market_scanner/tests/test_candle_source_parity.py::test_1d_comes_from_the_provider_daily_bar_not_the_intraday_close \
+            --deselect market_scanner/tests/test_pattern_live.py::test_matches_endpoint_exposes_pattern_variant_side_and_state \
+            --deselect market_scanner/tests/test_pattern_live.py::test_matches_endpoint_never_attaches_legacy_evidence_to_a_research_match \
+            --deselect market_scanner/tests/test_pattern_live.py::test_matches_limit_is_bounded_and_reports_the_true_total \
+            | tee /tmp/scanner.txt
+
+      - name: pytest market_data/tests market_data/derivatives/tests
+        run: python -m pytest market_data/tests market_data/derivatives/tests -q | tee /tmp/mdata.txt
+
+      - name: Baseline guard — 410 and 366 passed are the floors
+        run: |
+          set -euo pipefail
+          s=$(grep -oE '[0-9]+ passed' /tmp/scanner.txt | head -1 | grep -oE '[0-9]+')
+          sub=$(grep -oE '[0-9]+ subtests passed' /tmp/scanner.txt | tail -1 | grep -oE '^[0-9]+' || echo 0)
+          m=$(grep -oE '[0-9]+ passed' /tmp/mdata.txt | head -1 | grep -oE '[0-9]+')
+          echo "scanner: $s passed, $sub subtests (baseline 410 / 186)"
+          echo "market data: $m passed (baseline 366)"
+          fail=0
+          if [ "$s"   -lt 410 ]; then echo "::error::scanner dropped to $s passed (baseline 410)";        fail=1; fi
+          if [ "$sub" -lt 186 ]; then echo "::error::scanner subtests dropped to $sub (baseline 186)";    fail=1; fi
+          if [ "$m"   -lt 366 ]; then echo "::error::market data dropped to $m passed (baseline 366)";    fail=1; fi
+          exit $fail

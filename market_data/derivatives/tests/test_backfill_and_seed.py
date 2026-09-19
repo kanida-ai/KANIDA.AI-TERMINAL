@@ -118,8 +118,10 @@ def test_seeded_marks_are_labelled_as_candles_not_quotes(cap):
     sources = {r[0] for r in cap.store.con.execute("SELECT DISTINCT source FROM snapshots")}
     assert sources == {SOURCE}
     row = cap.store.read_snapshots()[0]
-    # a candle carries no book and no average price — and we do not invent them
-    assert row["average_price"] is None and row["bid"] is None and row["ask"] is None
+    # a candle carries no vendor average price -- and we do not invent one.
+    # (`bid`/`ask` were asserted here too until they were retired on 2026-09-19;
+    # the store no longer has a book at all, so there is nothing left to fake.)
+    assert row["average_price"] is None
     assert row["last_price"] is not None and row["oi"] is not None
 
 

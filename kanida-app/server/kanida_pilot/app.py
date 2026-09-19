@@ -24,7 +24,8 @@ from .pattern_history import PatternHistoryService
 from .detections import LiveDetections,SCOPES as DETECTION_SCOPES,ROW_LIMIT_MAX as DETECTION_LIMIT_MAX
 from .derivatives import (Derivatives,OPTION_TYPES as DERIVATIVE_TYPES,ROW_LIMIT_MAX as DERIVATIVE_LIMIT_MAX,
  SERIES_LIMIT_MAX as DERIVATIVE_POINTS_MAX,CHART_INTERVALS as DERIVATIVE_INTERVALS,
- DEFAULT_CHART_INTERVAL as DERIVATIVE_INTERVAL_DEFAULT,clean_expiry,clean_symbol)
+ DEFAULT_CHART_INTERVAL as DERIVATIVE_INTERVAL_DEFAULT,SCREENER_LIMIT_MAX as DERIVATIVE_SCREENER_LIMIT_MAX,
+ clean_expiry,clean_symbol)
 from .errors import PilotError
 
 COOKIE='kanida_session';BINDING='kanida_flow'
@@ -603,6 +604,71 @@ def create_app(settings=None,http=None,evidence=None):
   name,_date,_kind=_derivative_query(underlying,points=points)
   if instrument_token and not 0<instrument_token<10**12:raise PilotError(400,'FIELD_INVALID','instrument_token is not a valid token.')
   return derivatives.series(name,instrument_token or None,points=points or None)
+
+ # --- the session series: PCR, max pain, implied volatility, the screener, futures build-up ------------------
+ # Each of these reads PRECOMPUTED rows off the metrics table's own primary key, so a whole session of one
+ # series is one index seek. Display only: nothing here forecasts, nothing here feeds a trading gate (§5).
+ @app.get('/api/derivatives/pcr-series')
+ def derivative_pcr_series(request:Request,underlying:str='',expiry:str=''):
+  """§3.5 through the session: OI PCR and volume PCR at every 15-min reading, oldest first, plus a direction.
+
+  A chain too thin to carry a meaningful ratio has that reading WITHHELD with a named reason rather than
+  printed - the floors and the reasons travel with the response.
+  """
+  member(request)
+  name,date,_kind=_derivative_query(underlying,expiry)
+  if not name:raise PilotError(400,'FIELD_INVALID','underlying is required for the PCR series.')
+  return derivatives.pcr_series(name,date)
+ @app.get('/api/derivatives/maxpain-series')
+ def derivative_maxpain_series(request:Request,underlying:str='',expiry:str=''):
+  """§3.6 through the session: the max-pain strike, the spot beside it, the distance and the OI it rests on."""
+  member(request)
+  name,date,_kind=_derivative_query(underlying,expiry)
+  if not name:raise PilotError(400,'FIELD_INVALID','underlying is required for the max pain series.')
+  return derivatives.maxpain_series(name,date)
+ @app.get('/api/derivatives/iv-series')
+ def derivative_iv_series(request:Request,underlying:str='',expiry:str='',strike:float=0.0,option_type:str=''):
+  """Implied volatility through the session. THE ONE COMPUTED NUMBER ON THIS TAB.
+
+  Kite does not supply implied volatility, so this is solved from each option's own last traded price with a
+  Black-Scholes model. The response says so in `computed`, `model`, `risk_free_rate`, `risk_free_rate_source`
+  and `computed_text`, and every reading the maths cannot be trusted on is null WITH the reason. Nothing
+  computed here is written to the store.
+  """
+  member(request)
+  name,date,kind=_derivative_query(underlying,expiry,option_type)
+  if not name:raise PilotError(400,'FIELD_INVALID','underlying is required for the implied volatility series.')
+  if strike and not 0<strike<10**9:raise PilotError(400,'FIELD_INVALID','strike is not a listed strike.')
+  if bool(strike)!=bool(kind):
+   raise PilotError(400,'FIELD_INVALID','strike and option_type go together: give both for one strike, or '
+    'neither for the at-the-money reading.')
+  return derivatives.iv_series(name,date,strike or None,kind)
+ @app.get('/api/derivatives/futures-buildup')
+ def derivative_futures_buildup(request:Request,underlying:str=''):
+  """§3.7 through the session: the front futures contract's OI against its own average, and its basis."""
+  member(request)
+  name,_date,_kind=_derivative_query(underlying)
+  if not name:raise PilotError(400,'FIELD_INVALID','underlying is required for the futures build-up series.')
+  return derivatives.futures_buildup(name)
+ @app.get('/api/derivatives/screener')
+ def derivative_screener(request:Request):
+  """§3.2-§3.4 as a real screen, with every filter optional and combinable.
+
+  The query string is read WHOLE rather than through named parameters, so a filter this screener does not
+  offer is a 400 that names it - never a parameter FastAPI drops on the floor while the panel goes on showing
+  it as active. `applied` is built from what the query actually did; `available` from the columns this store
+  actually carries.
+  """
+  member(request)
+  asked={k:v for k,v in request.query_params.items() if v not in (None,'')}
+  limit=asked.pop('limit',None)
+  if limit is not None:
+   try:limit=int(limit)
+   except (TypeError,ValueError):raise PilotError(400,'FIELD_INVALID','limit must be a whole number.')
+   if not 1<=limit<=DERIVATIVE_SCREENER_LIMIT_MAX:
+    raise PilotError(400,'FIELD_INVALID',f'limit must be 1-{DERIVATIVE_SCREENER_LIMIT_MAX}.')
+  try:return derivatives.screener(asked,limit=limit)
+  except ValueError as error:raise PilotError(400,'FILTER_REFUSED',str(error))
 
  @app.get('/api/matches')
  def matches(request:Request):

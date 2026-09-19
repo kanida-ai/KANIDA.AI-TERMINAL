@@ -1,7 +1,12 @@
 -- db/derivatives.db — the F&O capture store (docs/DERIVATIVES_SPEC.md §2).
 --
 -- Rules this schema exists to enforce:
---   * every row carries provenance: vendor_id, fetched_at, snapshot_id;
+--   * every row carries provenance.  On `contracts`, `candles_15m`,
+--     `candles_day` and `underlying_snapshots` that is vendor_id + fetched_at +
+--     snapshot_id on the row itself.  On `snapshots` — 27,238 rows per mark, the
+--     one table where 38 bytes of provenance per row is 27 MB a day — it is
+--     vendor_id on the row and the rest in `captures`, one row per mark, joined
+--     on captured_at = mark_at.  Provenance is never absent, only normalised;
 --   * a snapshot is keyed by the 15-minute **mark** it belongs to, so a rerun
 --     of the same mark replaces like with like and can never double-count;
 --   * raw stays raw — derived numbers live in `metrics`, never written over a
@@ -35,8 +40,33 @@ CREATE INDEX IF NOT EXISTS ix_contracts_symbol     ON contracts(tradingsymbol);
 
 -- ── 15-minute quote snapshots (raw) ─────────────────────────────────────────
 -- captured_at is the MARK (09:30, 09:45 … 15:30, plus the post-close mark),
--- naive IST.  fetched_at is the real wall clock of the request, so the lag
--- between the two is always visible.
+-- naive IST.
+--
+-- Eleven columns were retired on 2026-09-19.  Each one was traced to its
+-- readers first; the list and the evidence are in `store.RETIRED_SNAPSHOT_COLUMNS`.
+-- Measured over the 265,601 rows on disk at the time, they cost 90.99 of the
+-- record's 214.86 bytes and bought nothing.
+--
+--   never read anywhere : exchange_time, oi_day_high, oi_day_low, ask_quantity
+--   loaded, never used  : bid, ask, buy_quantity, sell_quantity (they reach
+--                         `metrics.Snapshot` and are not consumed), bid_quantity
+--   moved to `captures` : fetched_at, snapshot_id
+--
+-- Provenance is NOT lost by that last pair: `captures` is one row per mark and
+-- holds `snapshot_id` (its primary key), `mark_at`, `vendor_id`, `started_at`,
+-- `finished_at` and `lag_seconds`.  A snapshot row's provenance is
+--     SELECT * FROM captures WHERE mark_at = snapshots.captured_at
+-- which is exact, because a mark has exactly one capture.  `vendor_id` stays on
+-- the row: 5 bytes, and it is the one field that must be true per row if a
+-- second vendor is ever mixed in.
+--
+-- NOTE FOR AN EXISTING DATABASE: `CREATE TABLE IF NOT EXISTS` does not alter a
+-- table that already exists, and nothing here rewrites one.  A store created
+-- before this date keeps all 26 columns and all its rows untouched; the capture
+-- path simply stops filling the retired ones (`store.write_snapshots` writes
+-- only the columns the live table has, and still fills any the live table
+-- declares NOT NULL).  Reclaiming the bytes already on disk is a table rebuild,
+-- which is a separate, owner-gated step.
 CREATE TABLE IF NOT EXISTS snapshots (
     instrument_token INTEGER NOT NULL,
     captured_at      TEXT    NOT NULL,
@@ -47,31 +77,28 @@ CREATE TABLE IF NOT EXISTS snapshots (
                                 -- volume-weighted (high+low+close)/3 of the
                                 -- session's bars so far.  NEVER the vendor's
                                 -- number; anything shown from it must say
-                                -- "estimated".
+                                -- "estimated".  Kept although nothing reads it
+                                -- yet: it costs 1 byte on a captured row and it
+                                -- is the only thing keeping a seeded estimate
+                                -- out of `average_price`.
     volume           INTEGER,
     oi               INTEGER,
-    oi_day_high      INTEGER,
-    oi_day_low       INTEGER,
-    buy_quantity     INTEGER,
-    sell_quantity    INTEGER,
-    bid              REAL,
-    ask              REAL,
-    bid_quantity     INTEGER,
-    ask_quantity     INTEGER,
     day_open         REAL,
     day_high         REAL,
     day_low          REAL,
     prev_close       REAL,      -- quote.ohlc.close = previous session's close
-    last_trade_time  TEXT,
-    exchange_time    TEXT,      -- quote.timestamp as the exchange stamped it
+    last_trade_time  TEXT,      -- KEPT: the Derivative tab's IV staleness gate
+                                -- reads it (kanida_pilot/derivatives.py
+                                -- `_last_trade_times`).  STORAGE_PLAN.md §5.3
+                                -- lists it as droppable; that is wrong.
     source           TEXT    NOT NULL DEFAULT 'kite.quote',
     vendor_id        TEXT    NOT NULL,
-    fetched_at       TEXT    NOT NULL,
-    snapshot_id      TEXT    NOT NULL,
     PRIMARY KEY (instrument_token, captured_at)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS ix_snapshots_time ON snapshots(captured_at);
-CREATE INDEX IF NOT EXISTS ix_snapshots_snap ON snapshots(snapshot_id);
+-- `ix_snapshots_snap` is gone with the column it indexed.  An existing database
+-- still carries it (14.07 MB, measured); dropping it there is part of the same
+-- owner-gated reclaim as the table rebuild.
 
 -- ── 15-minute candles with OI (backfill + daily top-up) ─────────────────────
 CREATE TABLE IF NOT EXISTS candles_15m (
@@ -146,7 +173,39 @@ CREATE INDEX IF NOT EXISTS ix_underlying_time ON underlying_snapshots(captured_a
 -- ── computed signals (spec §3) — written by the metrics worker, not by me ─
 -- Column list owned jointly: the DDL below is D2's PROVISIONAL_METRICS_DDL,
 -- adopted verbatim so its writer (which introspects this table and writes
--- only the intersection) can never silently drop a signal.  Retention: 1 year.
+-- only the intersection) can never silently drop a signal.
+-- Retention: config.METRICS_DAYS (90 days since 2026-09-19; it was 365).
+--
+-- Twelve columns were retired on 2026-09-19 after every reader was traced:
+--   price_change_15m, price_change_day  the tab refuses rupee moves outright
+--                                       (kanida_pilot/derivatives.py:335, 339)
+--   premium_status, floors_failed       written, never read
+--   vol_tod_median, vol_oi_spike, oi_change_day_status, oi_change_pct_day_agg,
+--   unusual_ce_strikes, unusual_pe_strikes, total_ce_volume, total_pe_volume
+--                                       reach a `SELECT *` envelope and are
+--                                       never subscripted out of it
+-- They are still computed; they are simply not stored.  `headline`, `pcr_trend`
+-- and `pcr_trend_change` were on that list and were put back: they cost 1.94,
+-- 1.10 and 1.11 bytes a row and `market_data/tests/test_metrics.py` asserts
+-- their values, so retiring them would have bought ~4 bytes for a contract
+-- the suite says is real.
+-- The list, and the reason each one qualified, is `metrics.RETIRED_METRIC_COLUMNS`.
+--
+-- What was NOT retired, against STORAGE_PLAN.md §5.4, because the readers are
+-- there and the plan missed them:
+--   tradingsymbol, underlying, instrument_type, strike, expiry, lot_size — the
+--     plan calls these duplicates of `contracts` that the tab joins for.  The
+--     join is only one of three query paths; the screener and the per-contract
+--     session reader take all six straight from `metrics`.
+--   vol_oi_status, vol_tod_status, unusual_reasons — served on every screener row.
+--   floors_passed, unusual, basis_status, fut_oi_vs_avg_status, max_pain_status —
+--     read; `floors_passed` is a WHERE clause, so dropping it would change a
+--     result set rather than shrink a row.
+--   pcr_*, total_ce_oi, total_pe_oi, max_pain_* — the plan calls these
+--     "structurally unreachable".  They are reached, on the underlying-scope
+--     rows, by the chain query that does no join at all.  Measured, they also
+--     cost ~1.1 bytes a row because they are NULL on every contract row, so
+--     dropping them would have saved almost nothing even if it were safe.
 CREATE TABLE IF NOT EXISTS metrics (
     scope                 TEXT    NOT NULL,   -- 'contract' | 'underlying'
     metric_key            TEXT    NOT NULL,   -- tradingsymbol, or 'UNDERLYING|expiry'
@@ -164,41 +223,32 @@ CREATE TABLE IF NOT EXISTS metrics (
     volume                REAL,
     oi                    REAL,
     spot                  REAL,
-    price_change_15m      REAL,
     price_change_pct_15m  REAL,
     oi_change_15m         REAL,
     oi_change_pct_15m     REAL,
     buildup_15m           TEXT,
-    price_change_day      REAL,
     price_change_pct_day  REAL,
     oi_change_day         REAL,
     oi_change_pct_day     REAL,
     buildup_day           TEXT,
     vol_tod_ratio         REAL,
-    vol_tod_median        REAL,
     vol_tod_sessions      INTEGER,
     vol_tod_status        TEXT,
     vol_oi_ratio          REAL,
     vol_oi_prev_oi        REAL,
-    vol_oi_spike          INTEGER,
     vol_oi_status         TEXT,
     premium_rs            REAL,
     premium_cr            REAL,
-    premium_status        TEXT,
     pcr_oi                REAL,
     pcr_volume            REAL,
     pcr_trend             TEXT,
     pcr_trend_change      REAL,
     total_ce_oi           REAL,
     total_pe_oi           REAL,
-    total_ce_volume       REAL,
-    total_pe_volume       REAL,
     max_pain_strike       REAL,
     max_pain_distance     REAL,
     max_pain_total_oi     REAL,
     max_pain_status       TEXT,
-    oi_change_pct_day_agg REAL,
-    oi_change_day_status  TEXT,
     fut_oi_avg            REAL,
     fut_oi_vs_avg         REAL,
     fut_oi_vs_avg_status  TEXT,
@@ -206,10 +256,7 @@ CREATE TABLE IF NOT EXISTS metrics (
     basis_pct             REAL,
     basis_status          TEXT,
     contracts             INTEGER,
-    unusual_ce_strikes    INTEGER,
-    unusual_pe_strikes    INTEGER,
     floors_passed         INTEGER,
-    floors_failed         TEXT,
     unusual               INTEGER NOT NULL DEFAULT 0,
     unusual_reasons       TEXT,
     headline              TEXT,

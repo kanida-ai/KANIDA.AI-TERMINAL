@@ -1178,41 +1178,32 @@ CREATE TABLE IF NOT EXISTS metrics (
     volume                REAL,
     oi                    REAL,
     spot                  REAL,
-    price_change_15m      REAL,
     price_change_pct_15m  REAL,
     oi_change_15m         REAL,
     oi_change_pct_15m     REAL,
     buildup_15m           TEXT,
-    price_change_day      REAL,
     price_change_pct_day  REAL,
     oi_change_day         REAL,
     oi_change_pct_day     REAL,
     buildup_day           TEXT,
     vol_tod_ratio         REAL,
-    vol_tod_median        REAL,
     vol_tod_sessions      INTEGER,
     vol_tod_status        TEXT,
     vol_oi_ratio          REAL,
     vol_oi_prev_oi        REAL,
-    vol_oi_spike          INTEGER,
     vol_oi_status         TEXT,
     premium_rs            REAL,
     premium_cr            REAL,
-    premium_status        TEXT,
     pcr_oi                REAL,
     pcr_volume            REAL,
     pcr_trend             TEXT,
     pcr_trend_change      REAL,
     total_ce_oi           REAL,
     total_pe_oi           REAL,
-    total_ce_volume       REAL,
-    total_pe_volume       REAL,
     max_pain_strike       REAL,
     max_pain_distance     REAL,
     max_pain_total_oi     REAL,
     max_pain_status       TEXT,
-    oi_change_pct_day_agg REAL,
-    oi_change_day_status  TEXT,
     fut_oi_avg            REAL,
     fut_oi_vs_avg         REAL,
     fut_oi_vs_avg_status  TEXT,
@@ -1220,10 +1211,7 @@ CREATE TABLE IF NOT EXISTS metrics (
     basis_pct             REAL,
     basis_status          TEXT,
     contracts             INTEGER,
-    unusual_ce_strikes    INTEGER,
-    unusual_pe_strikes    INTEGER,
     floors_passed         INTEGER,
-    floors_failed         TEXT,
     unusual               INTEGER NOT NULL DEFAULT 0,
     unusual_reasons       TEXT,
     headline              TEXT,
@@ -1265,6 +1253,32 @@ MAX_INLINE_TOKENS = 800
 # The capture worker writes to the same file every 15 minutes; a cycle takes well under a minute.
 WRITE_LOCK_RETRIES = 6
 WRITE_LOCK_WAIT_SECONDS = 15.0
+
+#: Retired from `schema.sql` on 2026-09-19 after every reader was traced.  They
+#: are still COMPUTED — the analysis is unchanged and the CLI still prints them
+#: — they are simply no longer stored, because nothing ever read them back.
+#:
+#:   price_change_15m / price_change_day
+#:       the Derivative tab refuses rupee moves and says so in a comment at both
+#:       of the places it builds its field list.
+#:   premium_status / floors_failed / headline
+#:       pre-rendered text.  Written, never read by anything.
+#:   vol_tod_median / vol_oi_spike / oi_change_day_status / oi_change_pct_day_agg
+#:   / unusual_ce_strikes / unusual_pe_strikes / pcr_trend / pcr_trend_change
+#:   / total_ce_volume / total_pe_volume
+#:       reach a `SELECT *` envelope and are never subscripted out of it.
+#:
+#: Naming them here is what keeps `write_metric_rows`' drift warning meaningful:
+#: a column that vanishes from the live table WITHOUT being on this list is real
+#: drift and must still shout.
+RETIRED_METRIC_COLUMNS = frozenset({
+    "price_change_15m", "price_change_day",
+    "premium_status", "floors_failed",
+    "vol_tod_median", "vol_oi_spike",
+    "oi_change_day_status", "oi_change_pct_day_agg",
+    "unusual_ce_strikes", "unusual_pe_strikes",
+    "total_ce_volume", "total_pe_volume",
+})
 _TOKEN_TABLE = "_metrics_token_filter"
 
 
@@ -1322,7 +1336,8 @@ def write_metric_rows(
     """
     if not rows:
         return 0
-    # The loads above left a read transaction open. In WAL a read snapshot cannot be upgraded to a
+    # The loads above left a read transaction open.
+    # (retired columns are filtered further down, once the live shape is known) In WAL a read snapshot cannot be upgraded to a
     # write while the capture worker holds the writer -- SQLite answers BUSY at once and
     # busy_timeout never gets a chance. Every row is already in memory, so end the read first and
     # take the write lock cleanly, waiting out one capture cycle if it is mid-write.
@@ -1345,7 +1360,9 @@ def write_metric_rows(
     dropped: set[str] = set()
     for row in rows:
         payload = {**dict(row), **{k: v for k, v in prov.items() if v is not None}}
-        dropped |= set(payload) - have
+        # A retired column is expected to be missing: it is not schema drift and
+        # must not be reported as a lost signal every fifteen minutes.
+        dropped |= set(payload) - have - RETIRED_METRIC_COLUMNS
         payload = {k: v for k, v in payload.items() if k in have}
         if not payload:
             continue

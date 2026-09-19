@@ -212,7 +212,12 @@ def test_oi_by_strike_carries_max_pain_spot_and_the_total_it_came_from(tmp_path,
  try:
   body=client.get('/api/derivatives/oi-by-strike?underlying=NIFTY').json()
   assert body['max_pain_strike']==25000.0 and body['spot']==25120.0
-  assert body['max_pain_distance']==120.0
+  # Distance is the max-pain STRIKE MINUS spot: 25000 - 25120 = -120, so a positive distance means the strike
+  # sits above spot. That is the convention `metrics.max_pain_distance` is written with and the one
+  # /api/derivatives/maxpain-series serves, and this card used to return the opposite sign - two contradictory
+  # readings of one number on one tab. The definition now travels with the response.
+  assert body['max_pain_distance']==-120.0
+  assert 'MINUS spot' in body['max_pain_distance_definition']
   assert body['total_ce_oi']==3_750_000+900_000 and body['total_pe_oi']==2_400_000
   assert body['as_of']==MARK
  finally:app.state.db.close()

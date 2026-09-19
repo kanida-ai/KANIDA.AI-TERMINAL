@@ -1,4 +1,6 @@
 """The 15-minute snapshot cycle: what is written, what is refused, and resume."""
+import logging
+import sqlite3
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -88,27 +90,67 @@ def test_a_non_session_day_has_no_cycle(cap):
 # ── one cycle ────────────────────────────────────────────────────────────────
 
 def test_a_cycle_writes_one_row_per_contract_with_provenance(cap):
+    """Provenance survived being normalised out of the row (2026-09-19).
+
+    `snapshot_id` and `fetched_at` left `snapshots` -- 38 bytes on 27,238 rows a
+    mark -- and live in `captures`, one row per mark.  The claim being tested is
+    that this is a move and not a loss: every stored mark must still resolve to
+    exactly one capture, and `vendor_id` must still be true on the row itself.
+    """
     res = cap.run_once(MARK, now=MARK + timedelta(seconds=30))
     assert res.status == "ok"
     rows = cap.store.read_snapshots(captured_at="2026-09-18 09:45:00")
     assert len(rows) == res.rows_written == len(cap.scope.contracts)
     row = rows[0]
     assert row["vendor_id"] == "kite"
-    assert row["snapshot_id"] == snapshot_id_for(MARK) == "cap_20260918T0945"
-    assert row["fetched_at"]
     assert row["source"] == "kite.quote"
     assert row["mark_kind"] == "bar_close"
+    assert row.keys() and "snapshot_id" not in row.keys()
+    assert "fetched_at" not in row.keys()
+
+    capture = cap.store.con.execute(
+        "SELECT * FROM captures WHERE mark_at=?", (row["captured_at"],)).fetchone()
+    assert capture is not None, "a stored mark with no capture row has no provenance"
+    assert capture["snapshot_id"] == snapshot_id_for(MARK) == "cap_20260918T0945"
+    assert capture["vendor_id"] == "kite"
+    assert capture["started_at"] and capture["finished_at"]
 
 
-def test_depth_and_ohlc_land_in_the_right_columns(cap):
+def test_the_retired_columns_are_not_written_and_not_faked(cap):
+    """The eleven columns retired on 2026-09-19 are gone from a new store.
+
+    Gone, not NULL-filled: a column that still exists costs a byte a row, and
+    the point of the exercise was the bytes.  Everything the Derivative tab and
+    the metrics worker actually read is still here -- `last_trade_time` in
+    particular, which STORAGE_PLAN.md listed as droppable and which the tab's IV
+    staleness gate reads.
+    """
+    from market_data.derivatives.store import RETIRED_SNAPSHOT_COLUMNS
+
+    cap.run_once(MARK, now=MARK + timedelta(seconds=30))
+    have = {r[1] for r in cap.store.con.execute("PRAGMA table_info(snapshots)")}
+    assert have & RETIRED_SNAPSHOT_COLUMNS == set()
+    assert have >= {"instrument_token", "captured_at", "mark_kind", "last_price",
+                    "average_price", "volume", "oi", "day_open", "day_high",
+                    "day_low", "prev_close", "last_trade_time", "source",
+                    "vendor_id"}
+    assert set(cap.store.snapshot_write_columns()) == have
+
+
+def test_ohlc_lands_in_the_right_columns(cap):
+    """The session OHLC fields, which the daily roll-up and the backfill read.
+
+    This test used to assert the book columns too (`bid`, `ask`,
+    `bid_quantity`).  They were retired on 2026-09-19: the capture only ever
+    kept level zero of the depth, and no calculation anywhere consumed it.
+    """
     cap.run_once(MARK, now=MARK + timedelta(seconds=30))
     row = cap.store.read_snapshots(captured_at="2026-09-18 09:45:00")[0]
     quote = cap.provider.kite.quote([row["instrument_token"]])[str(row["instrument_token"])]
-    assert row["bid"] == pytest.approx(quote["depth"]["buy"][0]["price"])
-    assert row["ask"] == pytest.approx(quote["depth"]["sell"][0]["price"])
-    assert row["bid_quantity"] == quote["depth"]["buy"][0]["quantity"]
     assert row["prev_close"] == pytest.approx(quote["ohlc"]["close"])
     assert row["day_open"] == pytest.approx(quote["ohlc"]["open"])
+    assert row["day_high"] == pytest.approx(quote["ohlc"]["high"])
+    assert row["day_low"] == pytest.approx(quote["ohlc"]["low"])
 
 
 def test_volume_is_the_cumulative_day_volume_from_the_quote(cap):
@@ -241,3 +283,148 @@ def test_the_loop_captures_every_mark_of_a_session(cap):
     assert len(caps) == len(real_marks)
     assert all(r["status"] == "ok" for r in caps.values())
     assert cap.store.snapshot_count() == len(real_marks) * len(cap.scope.contracts)
+
+
+# ── retention runs from the loop ─────────────────────────────────────────────
+#
+# The gap this closes: `store.prune()` has existed since the store did, and
+# nothing anywhere called it.  No scheduler, no task, no service — so the
+# retention windows in `config` were a document, not a behaviour, and
+# `candles_15m` grew without any bound at all.  Everything below runs against a
+# throwaway store in tmp_path; nothing here opens db/derivatives.db.
+
+
+def _old_and_new(cap, old_day, today):
+    """A session far outside every window, plus one inside all of them."""
+    from market_data.derivatives.store import SNAPSHOT_COLUMNS, CANDLE_COLUMNS
+
+    def snap(token, at):
+        v = dict(zip(SNAPSHOT_COLUMNS, [None] * len(SNAPSHOT_COLUMNS)))
+        v.update(instrument_token=token, captured_at=at, mark_kind="bar_close",
+                 last_price=10.0, volume=100, oi=200, source="kite.quote",
+                 vendor_id="kite", fetched_at="x", snapshot_id="y")
+        return tuple(v[c] for c in SNAPSHOT_COLUMNS)
+
+    def candle(token, at):
+        v = dict(zip(CANDLE_COLUMNS, [None] * len(CANDLE_COLUMNS)))
+        v.update(instrument_token=token, bar_start=at, open=1.0, high=2.0, low=1.0,
+                 close=2.0, volume=10, oi=20, vendor_id="kite", fetched_at="x")
+        return tuple(v[c] for c in CANDLE_COLUMNS)
+
+    cap.store.write_snapshots([snap(4242, f"{old_day} 09:30:00")])
+    cap.store.write_candles([candle(4242, f"{old_day} 09:15:00")])
+    cap.store.write_snapshots([snap(4242, f"{today} 09:30:00")])
+
+
+def test_the_loop_prunes_once_the_day_has_no_mark_left(cap):
+    """The whole point: nobody has to remember to run retention.
+
+    A session from January is outside every window; today's mark is inside all
+    of them.  The loop runs a full session and, when the day is finished, prunes
+    of its own accord: the old day goes, today does not, and the day survives as
+    a roll-up rather than vanishing.
+    """
+    old_day = "2026-01-02"
+    _old_and_new(cap, old_day, TODAY.isoformat())
+    assert cap.store.snapshot_count() == 2 and cap.store.candle_count(4242) == 1
+
+    clock = _Clock(datetime(2026, 9, 18, 9, 29))
+    run_loop(cap, clock, until=datetime(2026, 9, 18, 16, 30))
+
+    assert cap._pruned_on == TODAY
+    left = {r[0] for r in cap.store.con.execute(
+        "SELECT DISTINCT substr(captured_at,1,10) FROM snapshots")}
+    assert old_day not in left, "the January mark should have been pruned"
+    assert TODAY.isoformat() in left, "today's marks must survive"
+    assert cap.store.candle_count(4242) == 0
+    rolled = cap.store.con.execute(
+        "SELECT * FROM daily_rollups WHERE session_date=?", (old_day,)).fetchone()
+    assert rolled is not None, "pruning must cost resolution, never the day"
+
+
+def test_the_loop_prunes_once_a_day_and_not_once_a_cycle(cap):
+    """26 marks a day must not mean 26 prunes a day."""
+    calls = []
+    real = cap.store.prune
+    cap.store.prune = lambda **kw: (calls.append(kw), real(**kw))[1]
+
+    _old_and_new(cap, "2026-01-02", TODAY.isoformat())
+    clock = _Clock(datetime(2026, 9, 18, 9, 29))
+    run_loop(cap, clock, until=datetime(2026, 9, 18, 18, 0))
+    assert len(calls) == 1
+
+
+def test_retention_can_be_switched_off(cap):
+    cap.prune_enabled = False
+    _old_and_new(cap, "2026-01-02", TODAY.isoformat())
+    clock = _Clock(datetime(2026, 9, 18, 9, 29))
+    run_loop(cap, clock, until=datetime(2026, 9, 18, 16, 30))
+    assert cap.store.snapshot_count() == 2 + len(marks_for(TODAY)) * len(
+        cap.scope.contracts)
+    assert cap.store.candle_count(4242) == 1
+
+
+def test_a_prune_that_raises_does_not_stop_the_capture_loop(cap):
+    """Retention is housekeeping.  It must never be why capturing stops."""
+    def boom(**_kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    cap.store.prune = boom
+    clock = _Clock(datetime(2026, 9, 18, 9, 29))
+    results = run_loop(cap, clock, until=datetime(2026, 9, 18, 16, 30))
+    assert len(results) == len(marks_for(TODAY))
+    assert all(r.status == "ok" for r in results)
+
+
+def test_a_prune_waits_for_the_writer_instead_of_failing(cap):
+    """`store.transaction()` is BEGIN IMMEDIATE behind `retry_while_busy`.
+
+    A capture mid-write means the prune's first BEGIN IMMEDIATE comes back BUSY.
+    It must wait that out — a retention pass that dies on a busy store would
+    silently stop pruning for the rest of the store's life, which is exactly how
+    the windows came to be a document in the first place.
+    """
+    _old_and_new(cap, "2026-01-02", TODAY.isoformat())
+    real = cap.store.con
+    state = {"busy": 2}
+
+    class BusyWriter:
+        """The real connection, but the first two BEGIN IMMEDIATE come back BUSY."""
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def execute(self, sql, *a, **kw):
+            if sql.startswith("BEGIN IMMEDIATE") and state["busy"] > 0:
+                state["busy"] -= 1
+                raise sqlite3.OperationalError("database is locked")
+            return real.execute(sql, *a, **kw)
+
+    cap.store.con = BusyWriter()
+    try:
+        out = cap.maybe_prune(datetime(2026, 9, 18, 16, 0), force=True)
+    finally:
+        cap.store.con = real
+
+    assert state["busy"] == 0, "the writer lock was never actually contended"
+    assert out is not None and out["snapshots_deleted"] == 1
+    assert cap.store.snapshot_count() == 1
+
+
+def test_the_prune_says_what_it_removed(cap, caplog):
+    """Never silent: a removed session is logged with its row count."""
+    _old_and_new(cap, "2026-01-02", TODAY.isoformat())
+    with caplog.at_level(logging.INFO, logger="market_data.derivatives.store"):
+        cap.maybe_prune(datetime(2026, 9, 18, 16, 0), force=True)
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "2026-01-02" in text
+    assert "snapshots" in text and "candles_15m" in text
+
+
+def test_a_pass_that_removed_nothing_says_so_too(cap, caplog):
+    """"Nothing to do" has to be visible, or a broken prune looks like a quiet one."""
+    _old_and_new(cap, (TODAY - timedelta(days=3)).isoformat(), TODAY.isoformat())
+    with caplog.at_level(logging.INFO, logger="market_data.derivatives.store"):
+        out = cap.maybe_prune(datetime(2026, 9, 18, 16, 0), force=True)
+    assert out["snapshots_deleted"] == 0 and out["candles_deleted"] == 0
+    assert "store unchanged" in "\n".join(r.getMessage() for r in caplog.records)

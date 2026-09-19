@@ -43,6 +43,26 @@ SNAPSHOT_COLUMNS = (
     "fetched_at", "snapshot_id", "average_price_est",
 )
 
+#: Retired 2026-09-19: written every mark, read by nothing that survives.  Each
+#: one was traced to its readers before it qualified (the evidence is in the
+#: `snapshots` comment in `schema.sql`); measured over the 265,601 rows then on
+#: disk they were 90.99 of the record's 214.86 bytes.
+#:
+#: `bid`, `ask`, `buy_quantity` and `sell_quantity` do have a SELECT: they are
+#: loaded into `metrics.Snapshot` and no field of that dataclass is ever read.
+#: `fetched_at` and `snapshot_id` are not lost — they move to `captures`, one
+#: row per mark, joined on `captured_at = mark_at`.
+#:
+#: This changes what is WRITTEN from now on.  Nothing drops a column and nothing
+#: rewrites a row: an older database keeps its 26 columns and its history, and
+#: `write_snapshots` keeps filling any of these that the live table declares
+#: NOT NULL, because a legacy table would otherwise reject the insert.
+RETIRED_SNAPSHOT_COLUMNS = frozenset({
+    "exchange_time", "oi_day_high", "oi_day_low", "ask_quantity",
+    "bid", "ask", "bid_quantity", "buy_quantity", "sell_quantity",
+    "fetched_at", "snapshot_id",
+})
+
 #: Columns added after the first database was created, as (table, column, type).
 #: `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that exists, so
 #: they are applied explicitly and idempotently on every open.
@@ -93,6 +113,9 @@ class DerivativesStore:
         self.read_only = read_only
         self.write_deadline = write_deadline
         self.busy_retries = 0
+        #: resolved once per open by `snapshot_write_columns`; a schema change
+        #: goes through `init_schema`, which clears it.
+        self._snapshot_columns: tuple[str, ...] | None = None
         if read_only:
             uri = f"file:{self.path.as_posix()}?mode=ro"
         else:
@@ -126,6 +149,7 @@ class DerivativesStore:
         return self.retrying(lambda: self.con.execute(sql, params))
 
     def init_schema(self) -> None:
+        self._snapshot_columns = None
         self.retrying(lambda: self.con.executescript(
             SCHEMA_PATH.read_text(encoding="utf-8")))
         for table, column, coltype in MIGRATIONS:
@@ -272,13 +296,59 @@ class DerivativesStore:
 
     # ── rows ────────────────────────────────────────────────────────────────
 
+    def snapshot_write_columns(self) -> tuple[str, ...]:
+        """Which of ``SNAPSHOT_COLUMNS`` this database will actually be given.
+
+        Two shapes have to work at once and neither may be guessed at:
+
+        * a store created from today's ``schema.sql`` has no retired column, so
+          they are simply absent from the INSERT;
+        * a store created before 2026-09-19 still has all 26, and three of the
+          retired ones (``fetched_at``, ``snapshot_id``) are declared NOT NULL
+          there — omitting them would make every insert fail.  Those keep being
+          written, and the fact is logged once so the gap between "retired" and
+          "still costing bytes on this file" is never invisible.
+        """
+        if self._snapshot_columns is not None:
+            return self._snapshot_columns
+        info = list(self.con.execute("PRAGMA table_info(snapshots)"))
+        live = {r[1] for r in info}
+        required = {r[1] for r in info if r[3] and r[4] is None}
+        keep, still_required = [], []
+        for c in SNAPSHOT_COLUMNS:
+            if c not in live:
+                continue
+            if c in RETIRED_SNAPSHOT_COLUMNS:
+                if c not in required:
+                    continue
+                still_required.append(c)
+            keep.append(c)
+        if still_required:
+            LOG.info("snapshots: %s are retired but this database declares them "
+                     "NOT NULL, so they are still written; reclaiming them needs a "
+                     "table rebuild (%s)", ", ".join(still_required), self.path.name)
+        self._snapshot_columns = tuple(keep)
+        return self._snapshot_columns
+
     def write_snapshots(self, rows: Sequence[Sequence]) -> int:
+        """Write mark rows given in ``SNAPSHOT_COLUMNS`` order.
+
+        Callers keep building the full tuple; this decides what of it the
+        database gets.  A retired column that still exists on an older file is
+        left alone on conflict rather than being overwritten with a NULL —
+        re-capturing a mark must not rewrite history it no longer maintains.
+        """
         if not rows:
             return 0
-        sql = (f"INSERT INTO snapshots ({', '.join(SNAPSHOT_COLUMNS)}) "
-               f"VALUES ({_placeholders(SNAPSHOT_COLUMNS)}) "
+        cols = self.snapshot_write_columns()
+        if cols != SNAPSHOT_COLUMNS:
+            take = [SNAPSHOT_COLUMNS.index(c) for c in cols]
+            rows = [tuple(r[i] for i in take) for r in rows]
+        updatable = [c for c in cols if c not in ("instrument_token", "captured_at")]
+        sql = (f"INSERT INTO snapshots ({', '.join(cols)}) "
+               f"VALUES ({_placeholders(cols)}) "
                "ON CONFLICT(instrument_token, captured_at) DO UPDATE SET "
-               + ", ".join(f"{c}=excluded.{c}" for c in SNAPSHOT_COLUMNS[2:]))
+               + ", ".join(f"{c}=excluded.{c}" for c in updatable))
         with self.transaction() as con:
             con.executemany(sql, rows)
         return len(rows)
@@ -526,38 +596,160 @@ class DerivativesStore:
                 (session_date, session_date, session_date))
         return from_candles + from_snaps
 
+    # ── retention ───────────────────────────────────────────────────────────
+
+    def serving_session(self) -> str | None:
+        """The session the Derivative tab is reading right now, or None.
+
+        The tab's "as of" is ``latest_trading_mark()``; every screen it draws is
+        built from that mark's session.  Retention uses it as a floor: a cutoff
+        that reaches this day would delete the readings under the tab's feet.
+        """
+        mark = self.latest_trading_mark()
+        return mark[:10] if mark else None
+
+    def _days_before(self, table: str, column: str, cutoff: str) -> list[str]:
+        """The distinct session days in `table` strictly older than `cutoff`."""
+        return [r[0] for r in self.con.execute(
+            f"SELECT DISTINCT substr({column},1,10) d FROM {table} "
+            f"WHERE {column} < ? ORDER BY d", (cutoff,))]
+
+    def _delete_day(self, table: str, column: str, day: str) -> int:
+        """Delete one session day, in its own write transaction.
+
+        One day at a time on purpose.  ``market_data/store.py`` records how the
+        live ingest loop died on 2026-09-16: a maintenance pass held the single
+        write lock for minutes.  A day is one range scan on the table's own time
+        index, and the writer is handed back between days, so a capture mark
+        that falls due mid-prune waits seconds rather than minutes.
+        """
+        nxt = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+        # End any read transaction the scan above left open before asking for
+        # the writer: in WAL a read snapshot cannot be upgraded, SQLite answers
+        # BUSY at once and busy_timeout never gets its chance.  Same order as
+        # `metrics.write_metric_rows`.  `transaction()` then takes BEGIN
+        # IMMEDIATE through `retry_while_busy`, which waits out a capture cycle.
+        self.con.rollback()
+        with self.transaction() as con:
+            cur = con.execute(
+                f"DELETE FROM {table} WHERE {column} >= ? AND {column} < ?", (day, nxt))
+            n = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        if n:
+            LOG.info("retention: %s %s -- %d rows removed", table, day, n)
+        return n
+
     def prune(self, *, today: date | None = None,
               raw_days: int = config.RAW_SNAPSHOT_DAYS,
               metric_days: int = config.METRICS_DAYS,
-              rollup_first: bool = True) -> dict:
-        """Retention, spec §2: raw snapshots 90 days, metrics 1 year, roll-ups kept.
+              candle_days: int | None = config.CANDLE_DAYS,
+              underlying_days: int | None = None,
+              rollup_first: bool = True,
+              dry_run: bool = False) -> dict:
+        """Retention (spec §2, revised by ``kanida-app/docs/STORAGE_PLAN.md`` §5.5).
 
-        Every session about to lose its raw rows is rolled up first, so pruning
-        can only ever cost resolution, never the day itself.
+        Windows, in days, all of them named constants in ``config``::
+
+            snapshots            RAW_SNAPSHOT_DAYS         the raw input
+            metrics              METRICS_DAYS              what the tab serves
+            candles_15m          CANDLE_DAYS               was never pruned at all
+            underlying_snapshots UNDERLYING_SNAPSHOT_DAYS  2,013 rows; barely matters
+            daily_rollups        kept for good             expired contracts never come back
+            contracts            kept for good             needed to read expiries back
+            captures             kept for good             the only record of a quiet mark
+
+        Three things this will not do.
+
+        1. **It never rolls resolution away without keeping the day.** Every
+           session about to lose raw rows or candles is rolled up into
+           ``daily_rollups`` first, so pruning costs resolution, never the day.
+        2. **It never touches what the tab is serving.** Each cutoff is checked
+           against :meth:`serving_session`; a window that would reach the live
+           session raises rather than running.  A window shorter than
+           ``config.MIN_RETENTION_DAYS`` raises too, so a typo cannot empty the
+           store.
+        3. **It is never silent.** Every day removed is logged with its row
+           count, and a pass that removed nothing says so.
+
+        ``dry_run=True`` counts and logs without deleting.
         """
         today = today or date.today()
-        raw_cut = (today - timedelta(days=raw_days)).isoformat()
-        metric_cut = (today - timedelta(days=metric_days)).isoformat()
-        out = {"raw_cutoff": raw_cut, "metrics_cutoff": metric_cut,
-               "rolled_up_sessions": 0, "snapshots_deleted": 0,
-               "underlying_deleted": 0, "metrics_deleted": 0}
+        windows = {
+            "snapshots": raw_days,
+            "metrics": metric_days,
+            "candles_15m": candle_days,
+            "underlying_snapshots": (underlying_days
+                                     if underlying_days is not None
+                                     else config.UNDERLYING_SNAPSHOT_DAYS),
+        }
+        column = {"snapshots": "captured_at", "metrics": "captured_at",
+                  "candles_15m": "bar_start", "underlying_snapshots": "captured_at"}
+        cutoff: dict[str, str] = {}
+        serving = self.serving_session()
+        for table, days in windows.items():
+            if days is None:
+                continue
+            if days < config.MIN_RETENTION_DAYS:
+                raise ValueError(
+                    f"retention window for {table} is {days} days; the floor is "
+                    f"{config.MIN_RETENTION_DAYS} (config.MIN_RETENTION_DAYS)")
+            cut = (today - timedelta(days=days)).isoformat()
+            if serving is not None and cut > serving:
+                raise ValueError(
+                    f"retention cutoff for {table} is {cut}, which is not older than "
+                    f"the session the Derivative tab is serving ({serving}); refusing")
+            cutoff[table] = cut
 
-        if rollup_first:
-            days = [r[0] for r in self.con.execute(
-                "SELECT DISTINCT substr(captured_at,1,10) d FROM snapshots "
-                "WHERE substr(captured_at,1,10) < ? ORDER BY d", (raw_cut,))]
-            for d in days:
+        out: dict = {"today": today.isoformat(), "serving_session": serving,
+                     "dry_run": bool(dry_run), "cutoffs": cutoff,
+                     # the two the caller had before candles joined the pass
+                     "raw_cutoff": cutoff.get("snapshots"),
+                     "metrics_cutoff": cutoff.get("metrics"),
+                     "candles_cutoff": cutoff.get("candles_15m"),
+                     "rolled_up_sessions": 0, "snapshots_deleted": 0,
+                     "underlying_deleted": 0, "metrics_deleted": 0,
+                     "candles_deleted": 0}
+
+        # Roll up every session that is about to lose detail, from either source.
+        if rollup_first and not dry_run:
+            days_to_roll = set()
+            if "snapshots" in cutoff:
+                days_to_roll |= set(self._days_before(
+                    "snapshots", "captured_at", cutoff["snapshots"]))
+            if "candles_15m" in cutoff:
+                days_to_roll |= set(self._days_before(
+                    "candles_15m", "bar_start", cutoff["candles_15m"]))
+            for d in sorted(days_to_roll):
                 self.rollup_day(d)
-            out["rolled_up_sessions"] = len(days)
+            out["rolled_up_sessions"] = len(days_to_roll)
+            if days_to_roll:
+                LOG.info("retention: rolled up %d session(s) before deleting anything",
+                         len(days_to_roll))
 
-        with self.transaction() as con:
-            cur = con.execute("DELETE FROM snapshots WHERE captured_at < ?", (raw_cut,))
-            out["snapshots_deleted"] = cur.rowcount if cur.rowcount > 0 else 0
-            cur = con.execute("DELETE FROM underlying_snapshots WHERE captured_at < ?",
-                              (raw_cut,))
-            out["underlying_deleted"] = cur.rowcount if cur.rowcount > 0 else 0
-            cur = con.execute("DELETE FROM metrics WHERE captured_at < ?", (metric_cut,))
-            out["metrics_deleted"] = cur.rowcount if cur.rowcount > 0 else 0
+        key = {"snapshots": "snapshots_deleted", "metrics": "metrics_deleted",
+               "candles_15m": "candles_deleted",
+               "underlying_snapshots": "underlying_deleted"}
+        for table, cut in cutoff.items():
+            days = self._days_before(table, column[table], cut)
+            if not days:
+                continue
+            total = 0
+            for d in days:
+                if dry_run:
+                    nxt = (date.fromisoformat(d) + timedelta(days=1)).isoformat()
+                    total += int(self.con.execute(
+                        f"SELECT COUNT(*) FROM {table} "
+                        f"WHERE {column[table]} >= ? AND {column[table]} < ?",
+                        (d, nxt)).fetchone()[0])
+                else:
+                    total += self._delete_day(table, column[table], d)
+            out[key[table]] = total
+            LOG.info("retention: %s %s %d row(s) across %d session(s) older than %s",
+                     "would remove" if dry_run else "removed", table, total, len(days), cut)
+
+        removed = sum(out[k] for k in key.values())
+        if not removed:
+            LOG.info("retention: nothing older than %s; store unchanged",
+                     ", ".join(f"{t} {c}" for t, c in sorted(cutoff.items())))
         return out
 
     # ── status ──────────────────────────────────────────────────────────────
@@ -600,5 +792,6 @@ def open_readonly(path: str | os.PathLike = config.DEFAULT_DB_PATH) -> Derivativ
 
 
 __all__ = ["DerivativesStore", "open_readonly", "SNAPSHOT_COLUMNS",
+           "RETIRED_SNAPSHOT_COLUMNS",
            "UNDERLYING_COLUMNS", "CANDLE_COLUMNS", "DAILY_CANDLE_COLUMNS",
            "CONTRACT_COLUMNS", "utcnow"]

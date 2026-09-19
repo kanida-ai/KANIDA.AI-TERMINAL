@@ -9,7 +9,7 @@ are still missing.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -34,6 +34,24 @@ from market_data.store import MarketStore
 
 SYMBOLS = ("RELIANCE", "TCS")
 BAR = timedelta(minutes=15)
+
+
+
+def quarantined_stamp(hours_ago: float = 1.0) -> str:
+    """A `last_checked` stamp that is genuinely `hours_ago` old.
+
+    `store.quarantine()` stamps in **UTC** and `quarantine.due_for_recheck()`
+    compares against UTC wall time, so a quarantine's age is the one thing in
+    this module that is not a pure function of the fixture's fake `now`.
+    Deriving the stamp from the fake clock made
+    `test_a_quarantined_symbol_is_skipped...` pass on the day it was written and
+    fail every day after: by 2026-09-19 the 2026-09-16 stamp was three days old,
+    past `DEFAULT_RECHECK_HOURS = 24`, so the symbol came back as due-for-recheck
+    instead of being skipped.  Anchor the stamp to real UTC instead, which is
+    what the code under test actually reads.
+    """
+    return (datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+            - timedelta(hours=hours_ago)).isoformat(sep=" ")
 
 
 def build_calendar(first=date(2026, 9, 1), last=date(2026, 9, 16)) -> SessionCalendar:
@@ -303,7 +321,7 @@ def test_a_quarantined_symbol_is_skipped_and_the_cycle_reports_zero_errors(rig_w
     ingest, now = rig_with_gone
     ingest.store.quarantine("LTIM", reason=qmod.NOT_IN_INSTRUMENT_LIST,
                             detail="not in the provider's instrument list",
-                            when=(now - timedelta(hours=1)).isoformat(sep=" "))
+                            when=quarantined_stamp(1))
     result = ingest.run_cycle(now)
     assert result.errors == 0
     assert result.quarantined_skipped == 1
@@ -315,7 +333,7 @@ def test_the_skip_does_not_change_coverage_of_the_other_symbols(rig_with_gone):
     """Same bars as a universe that never had the bad symbol in it."""
     ingest, now = rig_with_gone
     ingest.store.quarantine("LTIM", reason=qmod.NOT_IN_INSTRUMENT_LIST,
-                            when=(now - timedelta(hours=1)).isoformat(sep=" "))
+                            when=quarantined_stamp(1))
     result = ingest.run_cycle(now)
     counts = dict(ingest.store.con.execute(
         "SELECT symbol, COUNT(*) FROM candles_15m GROUP BY symbol"))
@@ -326,7 +344,7 @@ def test_the_skip_does_not_change_coverage_of_the_other_symbols(rig_with_gone):
 def test_include_quarantined_puts_it_back_in(rig_with_gone):
     ingest, now = rig_with_gone
     ingest.store.quarantine("LTIM", reason=qmod.NOT_IN_INSTRUMENT_LIST,
-                            when=(now - timedelta(hours=1)).isoformat(sep=" "))
+                            when=quarantined_stamp(1))
     ingest.include_quarantined = True
     result = ingest.run_cycle(now)
     assert result.quarantined_skipped == 0 and result.errors == 1

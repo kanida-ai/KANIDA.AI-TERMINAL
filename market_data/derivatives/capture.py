@@ -198,7 +198,8 @@ class DerivativesCapture:
                  grace_seconds: float = config.MARK_GRACE_SECONDS,
                  lag_seconds: float = config.MARK_LAG_SECONDS,
                  sessions: SessionDays | None = None,
-                 capture_spot: bool = True, cache_dir=None, use_cache: bool = True):
+                 capture_spot: bool = True, cache_dir=None, use_cache: bool = True,
+                 prune: bool = True, prune_after: time | None = None):
         self.store = store
         self.provider = provider
         self.skip_empty = skip_empty
@@ -215,6 +216,12 @@ class DerivativesCapture:
         self._scope_day: date | None = scope.on if scope else None
         self._spot: dict[str, tuple[str, int]] = {}
         self._spot_day: date | None = None
+        #: retention runs from this loop, once a calendar day.  Before this the
+        #: prune existed in `store.py` and nothing anywhere called it, so the
+        #: 90/365/never windows were a document, not a behaviour.
+        self.prune_enabled = bool(prune)
+        self.prune_after = prune_after or config.PRUNE_AFTER
+        self._pruned_on: date | None = None
 
     # -- scope ---------------------------------------------------------------
 
@@ -435,6 +442,45 @@ class DerivativesCapture:
 
     # -- the loop -------------------------------------------------------------
 
+    # -- retention -----------------------------------------------------------
+    def maybe_prune(self, now: datetime | None = None, *, force: bool = False) -> dict | None:
+        """Run the retention pass if it is due, and return what it removed.
+
+        Due means: retention is on, the day's capturing is finished (the caller
+        reaches this only when no mark is left today, and ``prune_after`` is a
+        second floor under that), and this calendar day has not already had its
+        pass.  Returns ``None`` when it was not due, so "did not run" and "ran
+        and removed nothing" stay distinguishable.
+
+        The pass takes the single writer one session-day at a time through
+        ``store.transaction()``, which is ``BEGIN IMMEDIATE`` behind
+        ``retry_while_busy`` — so if a mark is mid-write the prune waits for it
+        rather than failing, and hands the writer back between days.
+
+        A failure here is logged and swallowed: retention is housekeeping and
+        must never be the reason a capture loop stops capturing.
+        """
+        now = now or now_ist()
+        if not force:
+            if not self.prune_enabled:
+                return None
+            if now.time() < self.prune_after:
+                return None
+            if self._pruned_on == now.date():
+                return None
+        self._pruned_on = now.date()
+        try:
+            out = self.store.prune(today=now.date())
+        except Exception:
+            LOG.exception("retention pass failed; the capture loop continues")
+            return None
+        LOG.info("retention: snapshots -%d, metrics -%d, candles -%d, underlying -%d "
+                 "(rolled up %d session(s); serving %s)",
+                 out["snapshots_deleted"], out["metrics_deleted"],
+                 out["candles_deleted"], out["underlying_deleted"],
+                 out["rolled_up_sessions"], out["serving_session"])
+        return out
+
     def run_forever(self, *, days: int | None = None, until: datetime | None = None,
                     poll_seconds: float = 5.0, sleep=_time.sleep) -> list[CycleResult]:
         """Capture every mark, session after session, until ``until``/``days``.
@@ -479,6 +525,11 @@ class DerivativesCapture:
 
             nxt = self._next_mark_after(now)
             if nxt is None:
+                # The day's last mark is captured and nothing else is due today.
+                # That is when retention runs: it cannot delay a mark, because
+                # there is no mark left to delay, and the loop is about to sleep
+                # to tomorrow's open anyway.
+                self.maybe_prune(now)
                 nxt_day = self.sessions.next_session(today + timedelta(days=1))
                 nxt = datetime.combine(nxt_day, config.FIRST_MARK)
             wake = nxt + timedelta(seconds=self.lag_seconds)

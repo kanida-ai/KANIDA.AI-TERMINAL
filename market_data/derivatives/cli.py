@@ -6,7 +6,7 @@
     python -m market_data.derivatives.cli run   [--days 1] [--until 15:50]
     python -m market_data.derivatives.cli backfill [--workers 4] [--max-contracts N]
     python -m market_data.derivatives.cli backfill-daily [--workers 4]
-    python -m market_data.derivatives.cli prune [--dry-run]
+    python -m market_data.derivatives.cli prune [--dry-run]   # also runs daily inside `run`
     python -m market_data.derivatives.cli rollup [--date YYYY-MM-DD]
 
 Run from the repo root with ``market_scanner/.venv/Scripts/python.exe``.
@@ -17,7 +17,7 @@ import argparse
 import json
 import logging
 import sys
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 
 from . import config
 from .capture import (
@@ -110,7 +110,7 @@ def cmd_once(args) -> int:
 
 
 def cmd_run(args) -> int:
-    cap = build(db_path=args.db)
+    cap = build(db_path=args.db, prune=not args.no_prune)
     until = _parse_mark(args.until, now_ist().date()) if args.until else None
     with cap.store.writer_lock():
         results = cap.run_forever(days=args.days, until=until)
@@ -191,14 +191,10 @@ def cmd_oi_series(args) -> int:
 
 
 def cmd_prune(args) -> int:
+    """Retention by hand.  The capture loop runs the same pass once a day."""
     store = DerivativesStore(args.db)
-    if args.dry_run:
-        cut = (now_ist().date() - timedelta(days=args.raw_days)).isoformat()
-        n = store.con.execute("SELECT COUNT(*) FROM snapshots WHERE captured_at < ?",
-                              (cut,)).fetchone()[0]
-        print(f"would roll up and delete {n} snapshot rows before {cut}")
-        return 0
-    out = store.prune(raw_days=args.raw_days, metric_days=args.metric_days)
+    out = store.prune(raw_days=args.raw_days, metric_days=args.metric_days,
+                      candle_days=args.candle_days, dry_run=args.dry_run)
     print(json.dumps(out, indent=2))
     return 0
 
@@ -235,9 +231,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="re-capture a mark already stored")
     s.set_defaults(func=cmd_once)
 
-    s = sub.add_parser("run", help="the capture loop")
+    s = sub.add_parser("run", help="the capture loop (retention runs daily inside it)")
     s.add_argument("--days", type=int, default=None, help="stop after N days")
     s.add_argument("--until", help="HH:MM today")
+    s.add_argument("--no-prune", action="store_true",
+                   help="do not run the daily retention pass inside the loop")
     s.set_defaults(func=cmd_run)
 
     s = sub.add_parser("backfill", help="10 sessions of 15-minute candles with OI")
@@ -278,10 +276,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--compact", action="store_true")
     s.set_defaults(func=cmd_oi_series)
 
-    s = sub.add_parser("prune", help="retention: raw 90 days, metrics 1 year")
+    s = sub.add_parser(
+        "prune",
+        help=(f"retention: snapshots {config.RAW_SNAPSHOT_DAYS}d, metrics "
+              f"{config.METRICS_DAYS}d, candles {config.CANDLE_DAYS}d "
+              "(the capture loop runs this daily on its own)"))
     s.add_argument("--raw-days", type=int, default=config.RAW_SNAPSHOT_DAYS)
     s.add_argument("--metric-days", type=int, default=config.METRICS_DAYS)
-    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--candle-days", type=int, default=config.CANDLE_DAYS,
+                   help="candles_15m retention; this table used to be unbounded")
+    s.add_argument("--dry-run", action="store_true",
+                   help="count and log what would go; delete nothing")
     s.set_defaults(func=cmd_prune)
 
     s = sub.add_parser("rollup", help="build the keep-for-good daily rows")
