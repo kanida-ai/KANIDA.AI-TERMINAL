@@ -6,14 +6,15 @@
 // block's one as-of, its floors are the block's one set of floors, and its `applied`/`available` lists are what
 // decides whether a filter is shown as active at all. Reading it in two places would let the header and the rows
 // describe two different answers to the same question.
-import React,{useMemo} from 'react';
+import React,{useMemo,useState} from 'react';
 import {LinkText} from '../discover/parts';
 import {useDerivativeRead} from './useDerivatives';
 import {IDLE_H,InfoDisclosure,Section,type InfoGroup} from './frame';
 import {UnusualWidget} from './UnusualWidget';
 import {oneSentence} from './SessionBlocks';
-import {SCREENER_PATH,appliedCount,asOfText,customizeLabel,filterStatuses,floorsText,notAppliedText,
- screenerQuery,type FilterRule,type FilterStatus} from './logic';
+import {BUILDUP_WINDOWS,BUILDUP_WINDOW_DEFAULT,SCREENER_PATH,alwaysApplied,appliedCount,asOfText,coverageText,
+ customizeLabel,filterStatuses,floorsText,notAppliedText,readingChoices,screenerEmptyDetail,screenerQuery,
+ type FilterRule,type FilterStatus} from './logic';
 import type {ChartTarget,Screener} from './types';
 
 /** What the screener measures, said once, behind the block's one control. */
@@ -33,13 +34,25 @@ export type ScreenerSectionProps={title:string;rules:FilterRule[];rulesLine:stri
  onExpand?:()=>void;expanded?:boolean;onClose?:()=>void;style?:any};
 export function ScreenerSection({title,rules,rulesLine,ruleLabel,seq,badge,target,onTarget,onCustomize,stacked,
  pinFirst,height,chart,showTable,onExpand,expanded,onClose,style}:ScreenerSectionProps){
- const read=useDerivativeRead<Screener>(`${SCREENER_PATH}${screenerQuery(rules||[])}`,seq);
+ // Which 15-minute reading the block is on. Omitted, the server reads its newest — and the reader is NEVER
+ // moved off it silently. The newest reading of a session can hold far less than an earlier one (a reading
+ // rebuilt from candles carries no VWAP, so no premium, so nothing clears the §3 floors), and an empty list
+ // that quietly showed older rows under a newer as-of would be the worst of both. So the reading is a control:
+ // the block says what this one held, lists the ones the store has, and moves only when the reader says so.
+ const [at,setAt]=useState('');
+ // Which build-up window a "Build-up is …" rule reads. §3.1's two labels are never mixed in one answer, so the
+ // window travels with the rule rather than being assumed.
+ const [window,setWindow]=useState(BUILDUP_WINDOW_DEFAULT);
+ const query=useMemo(()=>screenerQuery(rules||[],{buildupWindow:window,at}),[rules,window,at]);
+ const read=useDerivativeRead<Screener>(`${SCREENER_PATH}${query}`,seq);
  const body=read.data;
- // The ONE place the tab decides whether a filter is in force. A null body — loading, an error, a route that is
- // not there yet — leaves every rule pending, which is not active.
+ // The ONE place the tab decides whether a filter is in force. A null body — loading, an error, a refusal —
+ // leaves every rule pending, which is not active.
  const statuses:FilterStatus[]=useMemo(()=>filterStatuses(rules||[],body,ruleLabel),[rules,body,ruleLabel]);
  const on=appliedCount(statuses);
- const off=notAppliedText(statuses,body?.not_applied_text);
+ const off=notAppliedText(statuses);
+ const readings=useMemo(()=>readingChoices(body),[body]);
+ const hasBuildupRule=(rules||[]).some(r=>r.column==='buildup');
  // A block showing one sentence takes the height of one sentence, not the height of a table (frame.IDLE_H).
  // The screener route not being there yet is exactly that case; a reading that returned no rows is not, and
  // keeps its full height, because rows will be there at the next one.
@@ -47,6 +60,8 @@ export function ScreenerSection({title,rules,rulesLine,ruleLabel,seq,badge,targe
  const tall=idle?IDLE_H:height;
  const table=showTable?<UnusualWidget key="unusual" read={read} statuses={statuses} seq={seq} target={target}
   onTarget={onTarget} onCustomize={onCustomize} pinFirst={pinFirst}
+  readings={readings} at={body?.coverage?.at||body?.as_of||''} onAt={setAt}
+  buildupWindow={hasBuildupRule?window:''} onBuildupWindow={setWindow}
   onExpand={onExpand} expanded={expanded} onClose={onClose}
   style={stacked?{height:tall}:{flex:2,minWidth:0,height:tall}}/>:null;
  const tile=chart?chart(idle):null;
@@ -54,12 +69,15 @@ export function ScreenerSection({title,rules,rulesLine,ruleLabel,seq,badge,targe
  const groups:InfoGroup[]=[
   {heading:title,lines:[SCREENER_WHAT,floorsText(body?.floors,body?.floors_text),SCREENER_SIGNALS_TEXT,
    SCREENER_PICK_TEXT]},
+  // What this reading actually held, and what was on for every query whether the reader asked or not.
+  {heading:'This 15-min reading',lines:[coverageText(body),body?.scanned_text||'',...alwaysApplied(body)]},
   {heading:'Filters',lines:[SCREENER_FILTER_TEXT,rulesLine,
    off?{text:off,tone:'amber' as const}:null]},
+  {heading:'Moneyness',lines:[body?.moneyness_text||'']},
  ];
  return <Section title={title}
   subtitle="Every contract over the liquidity floors, with the §3 signals on the row."
-  asOf={asOfText(body?.as_of)} badge={badge}
+  asOf={asOfText(body?.coverage?.at||body?.as_of)} badge={badge}
   info={<InfoDisclosure title={title} groups={groups}/>}
   actions={<LinkText label={customizeLabel(on)}
    a11y={`Customize the screener: ${on} filter${on===1?'':'s'} applied by the server. Open the filter builder`}

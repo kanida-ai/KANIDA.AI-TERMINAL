@@ -7,7 +7,7 @@
 //     never a number (§3.2) - and the UI never has to remember that, because the server already sends
 //     volume_ratio: null with volume_baseline: 'none' and this file re-checks both.
 //  3. Nothing is phrased as a prediction. Every line describes a state and says when it was captured (§5).
-import type {ChainRow,ContractRow,Envelope,Floors,GridDirection,GridPoint,GridPriceDirection,GridSlot,IndexRow,
+import type {ChainRow,ContractRow,DirectionLabels,DirectionWords,Envelope,Floors,GridDirection,GridPoint,GridPriceDirection,GridSlot,IndexRow,
  OiGrid,SeriesPoint,StrikeOi,UnusualGroup} from './types';
 export const DASH='—',MINUS='−',RUPEE='₹',TIMES='×';
 /** The one empty-state sentence for the whole tab. Matches derivatives.EMPTY_TEXT on the server. */
@@ -285,28 +285,33 @@ export const OPERATOR_LABELS:Record<FilterOperator,string>={is:'is',is_not:'is n
  *
  *  `route` says WHICH list a column can narrow. The six the tab has always had are answered by every derivative
  *  route; the seven the screener block adds are answered by `/api/derivatives/screener` alone and are never sent
- *  anywhere else. `pending` marks a column whose parameter the pilot in this tree does not accept yet — it is
- *  offered, it is sent, and it is rendered as ACTIVE only when the screener's own `applied` list says the server
- *  applied it. That is the whole point: this browser never decides that a filter worked. */
+ *  anywhere else. `noScreener` marks a column the screener route has NO parameter for — it is never sent there,
+ *  because that route answers an unknown parameter with a 400 that names it rather than dropping it.
+ *
+ *  Whatever the route says it takes, a rule is rendered as ACTIVE only when the screener's own `applied` list
+ *  says it applied it. That is the whole point: this browser never decides that a filter worked. */
 export const FILTER_COLUMNS:{key:FilterColumn;label:string;operators:FilterOperator[];param:string;unit?:string;
- route?:'screener';pending?:boolean}[]=[
+ route?:'screener';noScreener?:boolean;twin?:string}[]=[
  {key:'underlying',label:'Symbol',operators:['is'],param:'underlying'},
  {key:'expiry',label:'Exp. date',operators:['is'],param:'expiry'},
  {key:'optionType',label:'Type',operators:['is','is_not'],param:'option_type'},
  {key:'dte',label:'DTE',operators:['lt'],param:'max_dte',unit:'days'},
  {key:'premium',label:'Premium',operators:['gt'],param:'min_premium_cr',unit:'₹ cr'},
- {key:'watchlist',label:'Watch list',operators:['in_watchlist'],param:'watchlist'},
+ // The screener has no watch-list parameter, so this rule narrows the other lists and is NEVER sent there.
+ {key:'watchlist',label:'Watch list',operators:['in_watchlist'],param:'watchlist',noScreener:true},
  {key:'volumeRatio',label:'Volume vs median',operators:['gt'],param:'min_volume_ratio',unit:'× median',
-  route:'screener',pending:true},
+  route:'screener'},
  {key:'volumeToOi',label:'Volume to OI',operators:['gt'],param:'min_volume_to_oi',unit:'×',
-  route:'screener',pending:true},
- {key:'oiChange15m',label:'OI change (15 min)',operators:['gt','lt'],param:'oi_change_15m_pct',unit:'%',
-  route:'screener',pending:true},
- {key:'oiChangeDay',label:'OI change (day)',operators:['gt','lt'],param:'oi_change_day_pct',unit:'%',
-  route:'screener',pending:true},
- {key:'buildup',label:'Build-up',operators:['is'],param:'buildup',route:'screener',pending:true},
- {key:'moneyness',label:'Moneyness',operators:['is'],param:'moneyness',route:'screener',pending:true},
- {key:'market',label:'Index or stock',operators:['is'],param:'market',route:'screener',pending:true},
+  route:'screener'},
+ // Two-sided: "greater than" sends the min_ bound, "less than" the max_ twin. `param` is the bound a rule
+ // sends by default and `twin` the other; screenerParam picks whichever the operator asks for.
+ {key:'oiChange15m',label:'OI change (15 min)',operators:['gt','lt'],param:'min_oi_change_15m_pct',
+  twin:'max_oi_change_15m_pct',unit:'%',route:'screener'},
+ {key:'oiChangeDay',label:'OI change (day)',operators:['gt','lt'],param:'min_oi_change_day_pct',
+  twin:'max_oi_change_day_pct',unit:'%',route:'screener'},
+ {key:'buildup',label:'Build-up',operators:['is'],param:'buildup',route:'screener'},
+ {key:'moneyness',label:'Moneyness',operators:['is'],param:'moneyness',route:'screener'},
+ {key:'market',label:'Index or stock',operators:['is'],param:'underlying_kind',route:'screener'},
 ];
 export const filterColumn=(key:unknown)=>FILTER_COLUMNS.find(c=>c.key===key)||null;
 export const columnLabel=(key:unknown)=>filterColumn(key)?.label||String(key||'');
@@ -320,8 +325,15 @@ export const VOLUME_RATIO_VALUES=[1.5,2,3,5,10];
 export const VOLUME_TO_OI_VALUES=[0.5,1,2,5];
 /** Percentage steps for the two OI-change filters (15-minute and day-on-day). */
 export const OI_CHANGE_VALUES=[1,2,5,10,25];
-/** §3.1's four labels, as filter values. The key is the server's, the label is the reader's. */
-export const BUILDUP_VALUES=['long_buildup','short_buildup','short_covering','long_unwinding'];
+/** The build-up values the SCREENER takes. They are the reader-facing labels, not the snake keys §3.1 uses on the
+ *  other routes — the screener's rows carry the label and it filters on that. Two of them have no §3.1 equivalent:
+ *  "Flat" is a contract that moved neither way, and "no data" is one the metrics worker could not label at all.
+ *  A contract the store cannot label is still a contract, and the reader is allowed to look for those. */
+export const BUILDUP_VALUES=['Long build-up','Short build-up','Short covering','Long unwinding','Flat','no data'];
+/** Which window `buildup` reads. The 15-minute and the day-on-day label are never mixed in one answer (§3.1). */
+export const BUILDUP_WINDOWS=[{value:'15m',label:'Over the last 15 minutes'},
+ {value:'day',label:'Since the previous close'}];
+export const BUILDUP_WINDOW_DEFAULT='15m';
 /** Where the strike sits against spot. Three buckets, no fourth. */
 export const MONEYNESS_VALUES=[{value:'itm',label:'In the money'},{value:'atm',label:'At the money'},
  {value:'otm',label:'Out of the money'}];
@@ -1051,6 +1063,8 @@ export const SCREENER_PATH='/api/derivatives/screener';
 export function screenerParam(rule:FilterRule):{key:string;value:string}|null{
  const column=filterColumn(rule?.column);
  if(!column)return null;
+ // A parameter this route has none of is a 400 that NAMES it, not a silent drop, so it is never sent at all.
+ if(column.noScreener)return null;
  const value=String(rule?.value||'').trim();
  if(!value)return null;
  switch(rule.column){
@@ -1064,6 +1078,7 @@ export function screenerParam(rule:FilterRule):{key:string;value:string}|null{
   case 'premium':return {key:'min_premium_cr',value:String(Math.round((Number(value)+0.01)*100)/100)};
   // "all underlyings" is not a narrowing, so nothing is sent and the server's own default stands.
   case 'watchlist':return value==='all'?null:{key:'watchlist',value};
+  case 'market':return {key:'underlying_kind',value};
   case 'volumeRatio':return {key:'min_volume_ratio',value};
   case 'volumeToOi':return {key:'min_volume_to_oi',value};
   // the two OI changes read either way round, so the direction picks which bound is sent
@@ -1071,18 +1086,29 @@ export function screenerParam(rule:FilterRule):{key:string;value:string}|null{
   case 'oiChangeDay':return {key:rule.operator==='lt'?'max_oi_change_day_pct':'min_oi_change_day_pct',value};
   case 'buildup':return {key:'buildup',value};
   case 'moneyness':return {key:'moneyness',value};
-  case 'market':return {key:'market',value};
   default:return null;
  }
 }
 /** The query string for the screener. Only rules that survived sanitising are sent, so a junk rule restored from
- *  localStorage never reaches the wire. */
-export function screenerQuery(rules:FilterRule[]){
+ *  localStorage never reaches the wire.
+ *
+ *  Two extras ride alongside the rules. `buildup_window` says which of the two build-up labels the `buildup` rule
+ *  reads, and is sent ONLY with that rule — §3.1's two windows are never mixed in one answer. `at` pins the
+ *  15-minute reading: omitted, the server reads its newest, and a reader who steps back to an earlier one is
+ *  choosing it explicitly rather than being quietly moved there. */
+export function screenerQuery(rules:FilterRule[],options?:{buildupWindow?:string;at?:string}){
  const parts:string[]=[];
+ let wantsBuildup=false;
  for(const rule of sanitizeRules(rules)){
   const param=screenerParam(rule);
-  if(param)parts.push(`${param.key}=${encodeURIComponent(param.value)}`);
+  if(!param)continue;
+  if(param.key==='buildup')wantsBuildup=true;
+  parts.push(`${param.key}=${encodeURIComponent(param.value)}`);
  }
+ const window=String(options?.buildupWindow||'').trim();
+ if(wantsBuildup&&BUILDUP_WINDOWS.some(w=>w.value===window))parts.push(`buildup_window=${window}`);
+ const at=String(options?.at||'').trim();
+ if(at)parts.push(`at=${encodeURIComponent(at)}`);
  return parts.length?`?${parts.join('&')}`:'';
 }
 
@@ -1107,33 +1133,73 @@ export function joinWords(items:string[]){
 /** The one place a filter's state is decided. `body` is the screener's response; a null body (loading, error, a
  *  route that is not there yet) leaves EVERY rule pending - never active. An `applied` list the server did not
  *  send is not an empty list, it is silence, and silence is pending. */
+/** Pulls a key out of an entry of `applied` / `available_filters`. Both are lists of OBJECTS carrying `key`; a
+ *  bare string is accepted too so a leaner server never reads as silence. */
+export function filterKey(entry:unknown){
+ if(typeof entry==='string')return entry;
+ const row=(entry||{}) as Record<string,unknown>;
+ return typeof row.key==='string'?row.key:'';
+}
+/** The filter list the SERVER offers. It is `available_filters`, or `filters.available` — NEVER `available`, which
+ *  on this route, as on all eight others, is the envelope's boolean for "is the F&O store readable". Reading a
+ *  boolean as a list would silently make every filter unsupported. */
+export function servedFilters(body?:{available_filters?:unknown;filters?:{available?:unknown}|null}|null){
+ const list=Array.isArray(body?.available_filters)?body?.available_filters
+  :Array.isArray(body?.filters?.available)?body?.filters?.available:null;
+ return (list||null) as {key?:string;ready?:boolean;text?:string;missing_columns?:string[]}[]|null;
+}
+/** The filters the query ACTUALLY applied, likewise from `applied` or `filters.applied`. */
+export function servedApplied(body?:{applied?:unknown;filters?:{applied?:unknown}|null}|null){
+ const list=Array.isArray(body?.applied)?body?.applied
+  :Array.isArray(body?.filters?.applied)?body?.filters?.applied:null;
+ return (list||null) as {key?:string;value?:unknown;always?:boolean;text?:string}[]|null;
+}
 export function filterStatuses(rules:FilterRule[],
- body?:{applied?:string[]|null;available?:string[]|null;
-  filters?:{key?:string;label?:string|null;reason?:string|null}[]|null}|null,
+ body?:{applied?:unknown;available_filters?:unknown;filters?:{applied?:unknown;available?:unknown}|null}|null,
  labels?:(rule:FilterRule)=>string):FilterStatus[]{
  const clean=sanitizeRules(rules);
- const said=Array.isArray(body?.applied);
- const applied=new Set((body?.applied||[]).map(String));
- const knows=Array.isArray(body?.available);
- const available=new Set((body?.available||[]).map(String));
- const served=new Map<string,{label?:string|null;reason?:string|null}>();
- for(const row of body?.filters||[])if(row&&row.key)served.set(String(row.key),row);
+ const appliedList=servedApplied(body);
+ const said=Array.isArray(appliedList);
+ const applied=new Map<string,{value?:unknown;always?:boolean;text?:string}>();
+ for(const row of appliedList||[]){const key=filterKey(row);if(key)applied.set(key,row as any);}
+ const offered=servedFilters(body);
+ const knows=Array.isArray(offered);
+ const available=new Map<string,{ready?:boolean;text?:string;missing_columns?:string[]}>();
+ for(const row of offered||[]){const key=filterKey(row);if(key)available.set(key,row as any);}
  return clean.map(rule=>{
   const param=screenerParam(rule);
-  const key=param?param.key:(filterColumn(rule.column)?.param||String(rule.column));
-  const detail=served.get(key);
-  const label=detail?.label||columnLabel(rule.column);
+  const column=filterColumn(rule.column);
+  const key=param?param.key:(column?.param||String(rule.column));
+  const offer=available.get(key);
+  const label=columnLabel(rule.column);
   const text=ruleText(rule,labels?.(rule));
   let state:FilterState='pending';
   if(!said)state='pending';
   else if(applied.has(key))state='applied';
+  // a rule this route has no parameter for was never sent, and a rule the store cannot answer is not one either
+  else if(column?.noScreener)state='unsupported';
   else if(knows&&!available.has(key))state='unsupported';
+  else if(offer&&offer.ready===false)state='unsupported';
   else state='not_applied';
-  // the server's own reason always wins over ours; ours is only there so a state is never left unexplained
-  const reason=detail?.reason||(state==='applied'?'':state==='pending'?FILTER_PENDING_REASON
-   :state==='unsupported'?FILTER_UNSUPPORTED_REASON:FILTER_NOT_APPLIED_REASON);
+  // The server's own words always win over ours. For an unsupported filter that is the columns it is missing;
+  // ours is only there so a state is never left unexplained.
+  const missing=(offer?.missing_columns||[]).filter(Boolean);
+  const reason=state==='applied'?''
+   :state==='pending'?FILTER_PENDING_REASON
+   :state==='unsupported'?(column?.noScreener
+     ?'The screener has no parameter for this filter, so it was not sent. It still narrows the other lists on this tab.'
+     :missing.length?`This store does not carry ${joinWords(missing)}, so this filter could not be applied.`
+     :FILTER_UNSUPPORTED_REASON)
+   :FILTER_NOT_APPLIED_REASON;
   return {rule,key,label,text,state,reason};
  });
+}
+/** The §3 floors and the reading the screener applies to EVERY query, in the server's own words. They are not the
+ *  reader's filters and never appear in the reader's strip, but they are the reason a row is on screen, so they
+ *  belong in what the block explains. */
+export function alwaysApplied(body?:{applied?:unknown;filters?:{applied?:unknown}|null}|null){
+ return (servedApplied(body)||[]).filter(row=>row&&row.always)
+  .map(row=>String(row.text||'').trim()).filter(Boolean);
 }
 /** How many filters are genuinely narrowing the rows on screen. This is the ONLY number the header may call a
  *  filter count for the screener: a rule the server did not apply is not a filter in force. */
@@ -1239,39 +1305,12 @@ export const PCR_DEFINITION='PCR by open interest is put open interest divided b
 export const PCR_READING_TEXT='Both lines are the ratios as captured. The chip says what the open-interest ratio did over the last hour of readings, and nothing about what it does after that.';
 export const PCR_NO_POINTS='No put-call ratio has been captured for this symbol yet';
 export const PCR_THIN_CHAIN='Withheld: the chain was too thin at this reading to divide honestly.';
-/** One PCR reading in words. A ratio that is not there is a dash, never a zero. */
-export function pcrLine(label:string,value:unknown){return `${label} ${pcrText(value)}`;}
-/** The one line under the PCR panel: where the ratio stands and how much of the session is behind it. */
-export function pcrSummary(body?:{latest_pcr_oi?:unknown;latest_pcr_volume?:unknown;
- points?:{at?:string|null}[]|null}|null){
- if(!body)return '';
- const points=body.points||[];
- const window=points.length?` ${points.length} reading${points.length===1?'':'s'} captured, ${clock(points[0]?.at)} to ${clock(points[points.length-1]?.at)}.`:'';
- return `${pcrLine(PCR_OI_LABEL,body.latest_pcr_oi)} · ${pcrLine(PCR_VOLUME_LABEL,body.latest_pcr_volume)}.${window}`;
-}
-
 // --- max pain through the session ----------------------------------------------------------------------------
 export const MAX_PAIN_DEFINITION='Max pain is the strike where the total payout to option buyers at expiry would be smallest, worked out from the open interest standing at that 15-min reading (§3.6).';
 export const MAX_PAIN_GAP_TEXT='The second line is the captured spot at the same readings, on the same scale, so the gap between the two is the gap you can see.';
 export const MAX_PAIN_READING_TEXT='The chip says which way the max-pain strike moved over the last hour of readings. It describes the standing book, and says nothing about where either number goes.';
 export const MAX_PAIN_NO_POINTS='No max-pain strike has been computed for this symbol yet';
 export const MAX_PAIN_THIN_CHAIN='Withheld: too few strikes cleared the liquidity floors to compute max pain at this reading.';
-/** "820 above spot" / "at spot" - the gap, said the way a reader reads it. Not captured is a dash. */
-export function maxPainGapText(gap:unknown){
- const n=num(gap);
- if(n==null)return DASH;
- if(n===0)return 'at spot';
- return `${strike(Math.abs(n))} ${n>0?'above':'below'} spot`;
-}
-/** The one line under the max-pain panel: the strike, the spot and the gap between them, as captured. */
-export function maxPainSummary(body?:{latest_max_pain?:unknown;latest_spot?:unknown;latest_gap?:unknown;
- total_oi?:unknown}|null){
- if(!body)return '';
- const oi=num(body.total_oi);
- return `Max pain ${strike(body.latest_max_pain)} · spot ${price(body.latest_spot)} · ${maxPainGapText(body.latest_gap)}.`
-  +(oi==null?' Total OI behind it: not captured.':` From ${compact(oi)} contracts of open interest.`);
-}
-
 // --- IV through the session ------------------------------------------------------------------------------------
 // The ONE number on this tab the exchange never said. Every other figure here is something a venue reported; this
 // one is what a model returned when it was asked which volatility reproduces a traded price. It is labelled as
@@ -1378,14 +1417,6 @@ export function oiVsAvgText(share:unknown,sessions?:unknown){
  return `${n.toFixed(2)}${TIMES} its 20-day average`
   +(whole==null?'':`, from ${whole} session${whole===1?'':'s'}`);
 }
-/** The one line under the futures build-up panel. */
-export function futuresBuildupSummary(body?:{latest_oi?:unknown;oi_change_day?:unknown;oi_vs_20d_avg?:unknown;
- avg_sessions?:unknown;basis?:unknown;basis_pct?:unknown}|null){
- if(!body)return '';
- return `OI ${compact(body.latest_oi)} (${signedUnits(body.oi_change_day)} on the day) · `
-  +`${oiVsAvgText(body.oi_vs_20d_avg,body.avg_sessions)} · basis ${basisPair(body.basis,body.basis_pct)}.`;
-}
-
 // --- one line chart, one set of axis rules ----------------------------------------------------------------------
 // Every one of the four session blocks draws the same picture: one or two series of 15-min readings across one
 // session. They share this scaling and these axes so a rule fixed once is fixed everywhere - and because the axis
@@ -1500,3 +1531,305 @@ export function sessionSpoken(what:string,values:(number|null|undefined)[]|null|
  const window=from!==DASH&&to!==DASH?` from ${from} to ${to}`:'';
  return `${what}. ${drawn} captured reading${drawn===1?'':'s'}${window}.`;
 }
+
+// =================================================================================================================
+// ALIGNED TO THE SERVED RESPONSES
+//
+// Everything below reads what server/kanida_pilot/derivatives.py actually sends. Three of its choices shape this
+// whole section, and each one removes a way for the tab to be wrong:
+//   * The DIRECTION WORDS are served. `direction_words` maps up/down/flat/none onto this series' own vocabulary
+//     and `direction_labels` gives each key its reader-facing word, so the tab stops hardcoding "Shifting Up".
+//   * Max-pain DISTANCE is strike minus spot. Positive means the strike sits above spot, and the wording below
+//     names the subject so the sign can never be read the other way round.
+//   * The risk-free rate behind every implied volatility is a CODE CONSTANT with no feed behind it. The server
+//     says so, and every solved reading carries what the answer would be a percentage point higher.
+// =================================================================================================================
+
+/** The vocabulary for ONE series. Most routes serve a single flat map. The futures route serves TWO, named for
+ *  the two readings it carries - `oi` (building / unwinding) and `basis` (widening / narrowing) - because a
+ *  contract's open interest and its basis do not move in the same words.
+ *
+ *  Handing the whole object to a chip that wanted one of them is a QUIET failure: `up` comes back undefined, so
+ *  the chip keeps its word but loses its arrow and its colour, and still looks like a chip. This resolves the
+ *  vocabulary explicitly and returns nothing when it cannot, so the failure has something to be caught by. */
+export function directionWords(served:unknown,which?:string):DirectionWords|null{
+ const raw=(served||{}) as Record<string,any>;
+ const pick=which?raw[which]:raw;
+ return pick&&typeof pick==='object'&&typeof pick.up==='string'&&typeof pick.down==='string'
+  ?pick as DirectionWords:null;
+}
+/** True when there IS a direction to draw and no vocabulary that contains it - the state where a chip would
+ *  silently lose its arrow and its colour while still reading as a chip. */
+export function directionMissing(direction:unknown,words?:DirectionWords|null){
+ const key=String(direction||'').trim();
+ if(!key||key===NO_SESSION_DIRECTION)return false;
+ if(!words)return true;
+ return key!==words.up&&key!==words.down&&key!==words.flat;
+}
+/** The chip for a served direction: the arrow this tab already uses, over the SERVER's own word for it. A series
+ *  that sent no direction, or one whose word we were not given, gets no chip at all rather than a guessed one. */
+export function servedChip(direction:unknown,words?:DirectionWords|null,labels?:DirectionLabels|null){
+ const key=String(direction||'').trim();
+ if(!key||key===NO_SESSION_DIRECTION)return '';
+ const label=String(labels?.[key]||'').trim()||key.replace(/_/g,' ');
+ const arrow=key===words?.up?'↑':key===words?.down?'↓':key===words?.flat?'→':'';
+ return `${arrow?`${arrow} `:''}${label.toUpperCase()}`;
+}
+/** Green for the series' own "up" word, red for its "down", neutral otherwise. Colour repeats the served word and
+ *  adds nothing to it. */
+export function servedTone(direction:unknown,words?:DirectionWords|null):'up'|'down'|'flat'{
+ const key=String(direction||'').trim();
+ if(key&&key===words?.up)return 'up';
+ if(key&&key===words?.down)return 'down';
+ return 'flat';
+}
+/** The server's own sentence for what a direction is, or ours when it sent none. */
+export function directionRule(body?:{direction_text?:string|null}|null){
+ return String(body?.direction_text||'').trim();
+}
+
+// --- gaps ---------------------------------------------------------------------------------------------------
+/** Every series sits on the store's own reading grid, so a reading an underlying has no row for is a SLOT with no
+ *  value and `gap:true`. Pulling one value out of a series therefore has to leave the gap null rather than reach
+ *  past it — this is the one place that happens, for every block. */
+export function seriesValues<P>(points:P[]|null|undefined,pick:(p:P)=>unknown){
+ return (points||[]).map(p=>{
+  const row=(p||{}) as Record<string,unknown>;
+  if(row.gap===true)return null;
+  return num(pick(p));
+ });
+}
+/** The stamps of a series, in order, for the time axis. A gap keeps its stamp: the hole holds its place. */
+export function seriesTimes<P extends {at?:string|null}>(points:P[]|null|undefined){
+ return (points||[]).map(p=>p?.at??null);
+}
+/** How much of the session actually carried a value, and why the rest did not — counted from the server's own
+ *  tally when it sent one, and off the points when it did not. Never presented as a whole session. */
+export function readingsText(body?:{total_readings?:unknown;readings_with_value?:unknown}|null){
+ const total=num(body?.total_readings),withValue=num(body?.readings_with_value);
+ if(total==null||withValue==null)return '';
+ return `${Math.round(withValue)} of ${Math.round(total)} reading${Math.round(total)===1?'':'s'} carried a value`;
+}
+/** The reasons the rest did not, in the server's own sentences, commonest first. This is what stands where a
+ *  thinner symbol would otherwise show an unexplained hole. */
+export function withheldLines(body?:{withheld_reasons?:Record<string,number>|null;
+ reason_text?:Record<string,string>|null}|null){
+ const counts=body?.withheld_reasons||{};
+ const text=body?.reason_text||{};
+ return Object.entries(counts).filter(([,n])=>num(n)!=null&&Number(n)>0)
+  .sort((a,b)=>Number(b[1])-Number(a[1]))
+  .map(([key,n])=>`${Math.round(Number(n))} reading${Math.round(Number(n))===1?'':'s'}: ${text[key]||key}`);
+}
+/** The one line a panel prints when part of its session is missing, and '' when none of it is. */
+export function withheldText(body?:{total_readings?:unknown;readings_with_value?:unknown;
+ withheld_reasons?:Record<string,number>|null;reason_text?:Record<string,string>|null}|null){
+ const lines=withheldLines(body);
+ if(!lines.length)return '';
+ const counted=readingsText(body);
+ return `${counted?`${counted}. `:''}${lines.join(' ')}`;
+}
+
+// --- max pain, with the store's own sign ------------------------------------------------------------------------
+/** The distance, said with its SUBJECT named so the sign cannot be read backwards. The store's convention is
+ *  strike minus spot, so a positive number is the strike sitting above spot, and that is what this says. */
+export function maxPainDistanceText(distance:unknown){
+ const n=num(distance);
+ if(n==null)return DASH;
+ if(n===0)return 'strike at spot';
+ return `strike ${strike(Math.abs(n))} ${n>0?'above':'below'} spot`;
+}
+/** The server's own sentence for the convention. Printed, never paraphrased. */
+export function maxPainDistanceRule(body?:{distance_definition?:string|null}|null){
+ return String(body?.distance_definition||'').trim();
+}
+/** The one line under the max-pain panel. A spot the store did not capture is a dash and says so, rather than
+ *  letting a distance be computed against nothing. */
+export function maxPainLine(body?:{latest_max_pain_strike?:unknown;latest_spot?:unknown;latest_distance?:unknown;
+ latest_total_oi?:unknown}|null){
+ if(!body)return '';
+ const oi=num(body.latest_total_oi);
+ const spot=num(body.latest_spot);
+ // A distance is a strike measured against a spot, so with no spot there is no distance to dash out — the
+ // sentence says that once instead of printing two dashes in a row and leaving the reader to join them up.
+ const against=spot==null
+  ?'no spot was captured at this reading, so there is no distance to it'
+  :`spot ${price(spot)} · ${maxPainDistanceText(body.latest_distance)}`;
+ return `Max pain ${strike(body.latest_max_pain_strike)} · ${against}.`
+  +(oi==null?' Total OI behind it: not captured.':` From ${compact(oi)} contracts of open interest.`);
+}
+
+// --- PCR, aligned ------------------------------------------------------------------------------------------------
+/** The one line under the PCR panel. */
+export function pcrLine(body?:{latest_pcr_oi?:unknown;latest_pcr_volume?:unknown}|null){
+ if(!body)return '';
+ return `${PCR_OI_LABEL} ${pcrText(body.latest_pcr_oi)} · ${PCR_VOLUME_LABEL} ${pcrText(body.latest_pcr_volume)}.`;
+}
+
+// --- implied volatility: what the number rests on -----------------------------------------------------------------
+// The COMPUTED label says a model produced it. That is necessary and it is not sufficient: the reader also has to
+// be able to find out WHAT it was produced from. The weakest of those inputs is the risk-free rate, which is a
+// constant in the server's code with no feed behind it — so it is named on screen, with its own weight beside it,
+// rather than left in a footnote.
+/** "6.50% a year" — the rate itself, from `risk_free_rate`. */
+export function ivRateText(body?:{risk_free_rate?:unknown}|null){
+ const rate=num(body?.risk_free_rate);
+ if(rate==null)return '';
+ return `${(Math.abs(rate)<=1?rate*100:rate).toFixed(2)}% a year`;
+}
+/** The rate AND where it came from, in one line the reader meets beside the number — not in a footnote. The
+ *  server's `risk_free_rate_source.text` is the full sentence; this is the short form that stands on screen. */
+export function ivRateSourceShort(body?:{risk_free_rate?:unknown;
+ risk_free_rate_source?:{kind?:string;live_feed?:boolean}|null}|null){
+ const rate=ivRateText(body);
+ const source=body?.risk_free_rate_source;
+ if(!rate&&!source)return '';
+ const kind=String(source?.kind||'').trim();
+ // `live_feed:false` is the fact that matters, so it is said outright rather than implied by the word "constant"
+ const feed=source?.live_feed===false?'no live feed behind it'
+  :source?.live_feed===true?'from a live feed':'';
+ const how=[kind,feed].filter(Boolean).join(', ');
+ return `Solved at a risk-free rate of ${rate||'a rate the server did not name'}${how?` — ${how}`:''}.`;
+}
+/** The server's full sentence about the rate. Shown in the block's one disclosure, word for word. */
+export function ivRateSourceText(body?:{risk_free_rate_source?:{text?:string|null;where?:string|null}|null}|null){
+ const source=body?.risk_free_rate_source;
+ const text=String(source?.text||'').trim();
+ const where=String(source?.where||'').trim();
+ if(!text)return '';
+ return where?`${text} It lives in ${where}.`:text;
+}
+/** True when the rate is a constant with nothing feeding it — the one caveat on this block worth amber. */
+export function ivRateIsAssumed(body?:{risk_free_rate_source?:{live_feed?:boolean}|null}|null){
+ return body?.risk_free_rate_source?.live_feed===false;
+}
+/** "±0.12 points if the rate were 1 point higher" — the weight of that assumption, from the reading itself.
+ *  This is the figure that turns "trust the rate" into "here is what it is worth". */
+export function ivRateSensitivityText(shift:unknown){
+ const n=num(shift);
+ if(n==null)return '';
+ const size=Math.abs(n);
+ if(size<0.005)return 'A rate one percentage point higher would not move this reading at all.';
+ return `A rate one percentage point higher would move this reading by ${size.toFixed(2)} percentage `
+  +`point${size===1?'':'s'}${n<0?' down':' up'}.`;
+}
+/** The largest rate shift across the readings drawn, so the block can state the assumption's weight once rather
+ *  than per point. Reads the legs, because that is where the server puts it. */
+export function ivRateSensitivity(legs:({points?:{rate_sensitivity_pct_points?:unknown}[]|null}|null|undefined)[]){
+ let worst:number|null=null;
+ for(const leg of legs||[]){
+  for(const point of leg?.points||[]){
+   const n=num(point?.rate_sensitivity_pct_points);
+   if(n==null)continue;
+   if(worst==null||Math.abs(n)>Math.abs(worst))worst=n;
+  }
+ }
+ return worst;
+}
+/** How many readings the solver refused, and why, in the server's own sentences. A refusal is not a blank. */
+export function ivRejectionLines(body?:{rejections?:Record<string,number>|null;
+ reason_text?:Record<string,string>|null}|null){
+ const counts=body?.rejections||{};
+ const text=body?.reason_text||{};
+ return Object.entries(counts).filter(([,n])=>num(n)!=null&&Number(n)>0)
+  .sort((a,b)=>Number(b[1])-Number(a[1]))
+  .map(([key,n])=>`${Math.round(Number(n))} reading${Math.round(Number(n))===1?'':'s'}: ${text[key]||key}`);
+}
+/** The model line: what solved it, how, and over what day count. */
+export function ivMethodText(body?:{model?:string|null;method?:string|null;day_count?:string|null;
+ expiry_time_ist?:string|null}|null){
+ const model=String(body?.model||'').trim();
+ if(!model)return 'The server did not name the model these were solved with.';
+ const method=String(body?.method||'').trim();
+ const days=String(body?.day_count||'').trim();
+ const at=String(body?.expiry_time_ist||'').trim();
+ return `Model: ${model}${method?` · ${method}`:''}${days?` · ${days}${at?` to ${at} IST on the expiry date`:''}`:''}.`;
+}
+/** The reason one reading carried no volatility. The server's sentence always wins; the map is only a floor for a
+ *  bare code, and an unknown code is said as itself rather than swallowed. */
+export function ivPointReason(point?:{reason?:string|null;reason_text?:string|null}|null,
+ served?:Record<string,string>|null){
+ const own=String(point?.reason_text||'').trim();
+ if(own)return own;
+ const key=String(point?.reason||'').trim();
+ if(!key)return '';
+ return String(served?.[key]||'').trim()||IV_REASONS[key]||`No volatility: the server gave the reason "${key}".`;
+}
+/** The latest reading that carried no volatility, so a dash on screen can print WHY it is a dash. */
+export function ivLatestRefusal(points?:{iv?:unknown;reason?:string|null;reason_text?:string|null}[]|null,
+ served?:Record<string,string>|null){
+ const last=[...(points||[])].reverse().find(p=>num(p?.iv)==null&&(p?.reason||p?.reason_text));
+ return last?ivPointReason(last,served):'';
+}
+
+// --- futures build-up, aligned -------------------------------------------------------------------------------------
+/** The one line under the futures panel. Every figure is the server's `latest_*`, which is read off the last
+ *  reading that carried one — never off a gap. */
+export function futuresLine(body?:{latest_oi_vs_avg?:unknown;latest_basis?:unknown;latest_basis_pct?:unknown;
+ latest_buildup_day?:string|null}|null){
+ if(!body)return '';
+ const buildup=servedBuildup(body.latest_buildup_day);
+ const basis=basisPair(body.latest_basis,body.latest_basis_pct);
+ // A basis is a futures price measured against a spot, so with no spot there is no basis to dash out — the
+ // same rule the max-pain line works to, for the same reason: a bare dash in a sentence explains nothing.
+ return `${oiVsAvgText(body.latest_oi_vs_avg)} · ${basis===DASH?BASIS_NO_SPOT:`basis ${basis}`}`
+  +`${buildup===DASH?'':` · ${buildup} on the day`}.`;
+}
+/** Why a basis is missing. It is always the same reason: the store captured the contract but not the spot. */
+export const BASIS_NO_SPOT='no spot was captured at this reading, so there is no basis';
+export const BASIS_NO_SPOT_ROW='A basis needs a futures price and a spot at the same reading.';
+/** A build-up label the server already wrote for the reader. "no data" is a state, not a label, and reads as one. */
+export function servedBuildup(label?:string|null){
+ const text=String(label||'').trim();
+ if(!text||text==='no data')return DASH;
+ return text;
+}
+
+// --- the screener, aligned -------------------------------------------------------------------------------------------
+/** How wide the reading on screen was. This is what stands in place of a blank when nothing cleared the floors:
+ *  a reading that scanned 255 rows across 216 underlyings and passed none of them is a very different thing from
+ *  a reading that was never taken, and the reader is owed the difference. */
+export function coverageText(body?:{scanned?:unknown;total?:unknown;returned?:unknown;
+ coverage?:{underlyings?:unknown;rows?:unknown}|null}|null){
+ if(!body)return '';
+ const scanned=num(body.scanned),total=num(body.total),returned=num(body.returned);
+ if(scanned==null&&total==null)return '';
+ const names=num(body.coverage?.underlyings);
+ const across=names==null?'':` across ${Math.round(names)} underlying${Math.round(names)===1?'':'s'}`;
+ const kept=total==null?'':`${Math.round(total)} cleared the floors and the applied filters`;
+ const shown=returned!=null&&total!=null&&returned<total?`, and this list carries ${Math.round(returned)} of them`:'';
+ return `${scanned==null?'':`${Math.round(scanned).toLocaleString('en-IN')} row${Math.round(scanned)===1?'':'s'} at this 15-min reading${across}`}`
+  +`${scanned!=null&&kept?'; ':''}${kept}${shown}.`;
+}
+/** The readings the store holds, newest first, as choices for the `at` control. Each says how wide it was, so a
+ *  reader stepping back knows what they are stepping to. */
+export type ReadingChoice={value:string;label:string;short:string;detail:string};
+/** THIS SESSION's readings, newest first — not the newest N of them. The list the server sends runs back over
+ *  several sessions, and a window of the newest dozen can miss the very readings that have rows: a session
+ *  whose afternoon was rebuilt from candles carries almost nothing while its morning carries everything. A
+ *  control that cannot reach the morning is a control that cannot answer the question the empty list raises. */
+export function readingChoices(body?:{readings?:{at?:string;rows?:unknown;underlyings?:unknown}[]|null}|null,
+ want=40):ReadingChoice[]{
+ const all=body?.readings||[];
+ const session=stamp(all[0]?.at)?.iso||'';
+ const ofSession=session?all.filter(row=>stamp(row?.at)?.iso===session):all;
+ return (ofSession.length?ofSession:all).slice(0,want).map(row=>{
+  const at=String(row?.at||'');
+  const s=stamp(at);
+  const names=num(row?.underlyings);
+  // BOTH forms are built here, from the stamp itself. The short one used to be the long one with its date
+  // cut off by a regex at render time, which is a transform on copy standing between the words and the
+  // reader — and a transform on copy is exactly where a sentence can be mangled with every check still green.
+  return {value:at,label:s?`${s.date} · ${s.time}`:at,short:s&&s.time?s.time:at,
+   detail:names==null?'':`${Math.round(names)} underlying${Math.round(names)===1?'':'s'} covered`};
+ }).filter(c=>!!c.value);
+}
+/** The sentence under an empty screener. The server's own empty note first; then what the reading actually held,
+ *  because "nothing cleared the floors" and "this reading holds almost nothing" are different facts. */
+export function screenerEmptyDetail(body?:{empty_note?:string|null;scanned?:unknown;total?:unknown;
+ coverage?:{underlyings?:unknown}|null;readings?:unknown}|null){
+ const coverage=coverageText(body);
+ const more=Array.isArray(body?.readings)&&(body?.readings as unknown[]).length>1
+  ?' Earlier readings of this session are listed above; choosing one moves this whole block to it.':'';
+ return `${coverage}${more}`.trim();
+}
+

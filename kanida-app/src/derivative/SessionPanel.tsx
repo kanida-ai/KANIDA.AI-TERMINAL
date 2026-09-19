@@ -120,20 +120,25 @@ export function SessionPanel({name,subtitle,body,state,onRefresh,onExpand,expand
      })}
     </Svg>}
    </View>
-   {/* the window the lines cover, read off the very stamps that were drawn */}
+   {/* How many readings the axis covers. The first and last are already ON the axis — sessionAxisTimes always
+       keeps both ends — so printing them again under the plot was chrome saying nothing new, which is the same
+       cut the futures candle panel already made. */}
    <View style={[s.row,{gap:8}]}>
-    <T style={metaText}>{clock(times[0])}</T><View style={{flex:1}}/>
+    <View style={{flex:1}}/>
     <T style={[metaText,{fontVariant:['tabular-nums']}]}>
-     {times.length} captured reading{times.length===1?'':'s'}</T><View style={{flex:1}}/>
-    <T style={metaText}>{clock(times[times.length-1])}</T>
+     {times.length} captured reading{times.length===1?'':'s'}</T>
+    <View style={{flex:1}}/>
    </View>
   </View>
  </WidgetFrame>;
 }
 
 /** The small stacked readings panel that sits beside every session chart: a label and a number on each line, with
- *  the number's own tag when it has one. A number that is not there is a dash and the reason beneath it. */
-export type ReadingRow={label:string;value:string;tag?:string;reason?:string;tone?:string};
+ *  the number's own tag and its own direction chip when it has them. A number that is not there is a dash, and
+ *  the reason it is a dash stands underneath it. A row that is a dash NEVER carries a chip: a direction is a
+ *  reading of a number, and there is no number here to have read. */
+export type ReadingRow={label:string;value:string;tag?:string;reason?:string;tone?:string;
+ chip?:string;chipTone?:'up'|'down'|'flat'};
 export function ReadingsPanel({name,subtitle,body,state,rows,onRefresh,onExpand,expanded,onClose,note,caveat,
  emptyDetail,children,style}:{name:string;subtitle?:string;body?:Envelope|null;state:CardState;rows:ReadingRow[];
  onRefresh?:()=>void;onExpand?:()=>void;expanded?:boolean;onClose?:()=>void;note?:React.ReactNode;caveat?:string;
@@ -145,16 +150,21 @@ export function ReadingsPanel({name,subtitle,body,state,rows,onRefresh,onExpand,
    {!!caveat&&<T style={[metaText,{color:C.amber}]}>{caveat}</T>}
   </View>}>
   <View style={{flex:1,minHeight:0,padding:PAD,gap:8}}>
-   {rows.map(row=><View key={row.label} style={{gap:2}}>
-    <T numberOfLines={1} style={metaText}>{row.label}</T>
-    <View style={[s.row,{gap:6}]}>
-     <T numberOfLines={1} style={[bodyText,{fontSize:13,lineHeight:18,color:row.tone||C.ink,
-      fontFamily:'InterSemi',fontVariant:['tabular-nums']}]}>{row.value}</T>
-     {!!row.tag&&<Tag label={row.tag}/>}
-    </View>
-    {/* a dash never stands alone: when the server said why there is no number, that is what is printed */}
-    {!!row.reason&&row.value===DASH&&<T style={metaText}>{row.reason}</T>}
-   </View>)}
+   {rows.map(row=>{
+    const missing=row.value===DASH;
+    return <View key={row.label} style={{gap:2}}>
+     <T numberOfLines={1} style={metaText}>{row.label}</T>
+     <View style={[s.row,{gap:6,flexWrap:'wrap'}]}>
+      <T numberOfLines={1} style={[bodyText,{fontSize:13,lineHeight:18,color:row.tone||C.ink,
+       fontFamily:'InterSemi',fontVariant:['tabular-nums']}]}>{row.value}</T>
+      {!!row.tag&&!missing&&<Tag label={row.tag}/>}
+      {/* no number, no direction: a chip beside a dash would be a reading of nothing */}
+      {!!row.chip&&!missing&&<DirectionChip label={row.chip} tone={row.chipTone}/>}
+     </View>
+     {/* a dash never stands alone: when the server said why there is no number, that is what is printed */}
+     {!!row.reason&&missing&&<T style={metaText}>{row.reason}</T>}
+    </View>;
+   })}
    {children}
   </View>
  </WidgetFrame>;

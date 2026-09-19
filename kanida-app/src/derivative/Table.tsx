@@ -59,8 +59,13 @@ export function Table<R>({label,columns,items,sort,onSort,onRowPress,selected,ro
     {columns.map((column,i)=>{
      const on=sort?.key===column.key;
      const sortable=!!column.value&&!!onSort;
-     const inner=<View style={[s.row,{gap:3,justifyContent:justify(column.align)}]}>
-      <T numberOfLines={1} style={[head,{color:on?C.ink:C.muted}]}>{column.label}</T>
+     // A header label that outgrows its column must CLIP inside it, never run over its neighbour: two labels
+     // printed on the same pixels is a table that cannot be read at all. `minWidth:0` is what lets the text
+     // shrink inside the row on web, and `overflow:hidden` is what makes numberOfLines actually bite there.
+     // The widths are chosen to fit the labels (check-derivative.cjs holds them to it); this is the floor
+     // under that, so a longer label added later degrades to a clipped word instead of a collision.
+     const inner=<View style={[s.row,{gap:3,minWidth:0,overflow:'hidden',justifyContent:justify(column.align)}]}>
+      <T numberOfLines={1} style={[head,{flexShrink:1,minWidth:0,color:on?C.ink:C.muted}]}>{column.label}</T>
       {on&&<Icon name={sort?.dir==='asc'?'arrow-up':'arrow-down'} size={11} color={C.green}/>}
       {!!column.filter&&<Icon name="filter" size={10} color={C.muted}/>}
      </View>;

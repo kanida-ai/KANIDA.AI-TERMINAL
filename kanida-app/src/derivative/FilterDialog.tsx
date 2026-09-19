@@ -126,12 +126,11 @@ export function FilterDialog({visible,onClose,name,data,rules,onApply}:FilterDia
      {chip('operator',OPERATOR_LABELS[rule.operator],`Operator: ${OPERATOR_LABELS[rule.operator]}. Change the operator`)}
      {chip('value',chosen?.label||rule.value||'Choose a value',
       `Value: ${chosen?.label||rule.value||'not chosen'}. Change the value`,rule.value?undefined:C.amber)}
-     {/* A filter this pilot has no parameter for is still offered and still sent — what it must never do is
-         read as though it worked. The screener's own `applied` list is the only thing that says it did, and
-         this row says so here rather than letting a reader assume it. */}
-     {!!column.pending&&<T style={{width:'100%',fontSize:11,lineHeight:16,color:C.muted}}>
-      Answered by the screener only. It is shown as active there when — and only when — the server says it
-      applied it.
+     {/* The screener has no parameter for a watch list, so a rule on it narrows the other lists
+         and is never sent there. Said here rather than letting a reader assume it applies everywhere. */}
+     {!!column.noScreener&&<T style={{width:'100%',fontSize:11,lineHeight:16,color:C.muted}}>
+      The screener has no parameter for this one. It narrows the other lists on this tab, and the screener says
+      so plainly instead of showing it as active.
      </T>}
      <View style={{flex:1,minWidth:8}}/>
      <Pressable accessibilityRole="button" accessibilityLabel={`Remove filter ${i+1}`} onPress={()=>remove(i)}

@@ -193,28 +193,100 @@ ok(()=>{
 // This is the rule that keeps the popup honest. If a column, an operator or a value could not be turned into one
 // of the pilot's own parameters, the table would be showing one list under another list's as-of time and floors.
 const APP=fs.readFileSync(path.join(__dirname,'..','server','kanida_pilot','app.py'),'utf8');
-ok(()=>{for(const column of L.FILTER_COLUMNS){
- // A column the pilot in this tree already answers must map to a parameter it really takes. A column marked
- // `pending` is one the screener route will answer and this pilot does not yet: it is still offered and still
- // sent, and the ONLY thing that may ever call it active is the screener's own `applied` list. Marking it
- // pending is therefore not a loophole - it is the declaration that this browser is not allowed to assume.
- if(!column.pending)assert.ok(new RegExp(`\\b${column.param}\\s*:\\s*(str|int|float)\\s*=`).test(APP),
-  `${column.key} maps to ${column.param}, which no derivative route accepts`);
- else assert.equal(column.route,'screener',`${column.key} is pending, so it must be a screener column`);
- assert.ok(column.operators.length,`${column.key} must offer at least one operator`);
- for(const op of column.operators)assert.ok(L.OPERATOR_LABELS[op],`unknown operator ${op}`);
-}});
-ok(()=>{ // a screener-only column is never sent to the list that cannot answer it
- const every=L.FILTER_COLUMNS.filter(c=>c.route==='screener')
-  .map(c=>({column:c.key,operator:c.operators[0],value:c.key==='buildup'?'long_buildup':c.key==='moneyness'?'atm'
-   :c.key==='market'?'index':'2'}));
- assert.equal(L.unusualQuery(L.rulesToFilters(every)),'',
+// The screener does NOT take named FastAPI parameters: it reads the query string whole and answers an unknown
+// key with a 400 that names it. So its filter names are pinned to the server's own filter table instead — which
+// is the check that would have caught `market` (the server calls it `underlying_kind`) and `watchlist` (which
+// the screener has no parameter for at all) before either reached the wire.
+const DERIV_PY=fs.readFileSync(path.join(__dirname,'..','server','kanida_pilot','derivatives.py'),'utf8');
+const IV_PY=fs.readFileSync(path.join(__dirname,'..','server','kanida_pilot','implied_vol.py'),'utf8');
+const SCREENER_KEYS=(()=>{
+ const at=DERIV_PY.indexOf(' SCREENER_FILTERS={');
+ assert.ok(at>0,'derivatives.py must declare SCREENER_FILTERS');
+ const body=DERIV_PY.slice(at,DERIV_PY.indexOf('\n }\n',at));
+ return new Set([...body.matchAll(/^\s{2}'([a-z_0-9]+)':\{/gm)].map(m=>m[1]));
+})();
+ok(()=>{
+ assert.ok(SCREENER_KEYS.size>=10,`the screener's filter table looks unread: ${[...SCREENER_KEYS].join(',')}`);
+ for(const column of L.FILTER_COLUMNS){
+  if(column.route==='screener'){
+   // a screener column's parameter must be one the screener's own table declares - and so must its twin,
+   // because a two-sided rule sends the other bound the moment the operator flips
+   for(const key of [column.param,column.twin].filter(Boolean))assert.ok(SCREENER_KEYS.has(key),
+    `${column.key} sends "${key}", which the screener's filter table does not offer`);
+   assert.equal(!!column.twin,column.operators.length>1,
+    `${column.key} has ${column.operators.length} operators, so it ${column.twin?'must not':'must'} declare a twin`);
+  }else if(column.noScreener){
+   // and a column flagged as not-for-the-screener must really be one the screener cannot answer
+   assert.ok(!SCREENER_KEYS.has(column.param),
+    `${column.key} is flagged noScreener, but the screener does offer "${column.param}"`);
+   assert.ok(new RegExp(`\\b${column.param}\\s*:\\s*(str|int|float)\\s*=`).test(APP),
+    `${column.key} maps to ${column.param}, which no derivative route accepts`);
+  }else{
+   // the shared six: answered by the older routes as named parameters, and by the screener from its table
+   assert.ok(new RegExp(`\\b${column.param}\\s*:\\s*(str|int|float)\\s*=`).test(APP),
+    `${column.key} maps to ${column.param}, which no derivative route accepts`);
+  }
+  assert.ok(column.operators.length,`${column.key} must offer at least one operator`);
+  for(const op of column.operators)assert.ok(L.OPERATOR_LABELS[op],`unknown operator ${op}`);
+ }
+});
+ok(()=>{ // every rule the builder can make reaches the screener as a key the screener offers, or not at all
+ const value=(key)=>key==='buildup'?L.BUILDUP_VALUES[0]:key==='moneyness'?'atm':key==='market'?'index'
+  :key==='underlying'?'RELIANCE':key==='expiry'?'2026-09-25':key==='optionType'?'CE'
+  :key==='watchlist'?'indices':'2';
+ for(const column of L.FILTER_COLUMNS){
+  const query=L.screenerQuery([{column:column.key,operator:column.operators[0],value:value(column.key)}]);
+  if(!query){assert.ok(column.noScreener||column.key==='watchlist',`${column.key} sends nothing to the screener`);continue}
+  for(const part of query.slice(1).split('&')){
+   const key=part.split('=')[0];
+   assert.ok(SCREENER_KEYS.has(key),`${column.key} sends "${key}", which the screener would answer with a 400`);
+  }
+ }
+ // and a screener-only column never reaches the older list, which has no parameter for it
+ const screenerOnly=L.FILTER_COLUMNS.filter(c=>c.route==='screener')
+  .map(c=>({column:c.key,operator:c.operators[0],value:value(c.key)}));
+ assert.equal(L.unusualQuery(L.rulesToFilters(screenerOnly)),'',
   'a screener-only filter must never reach /api/derivatives/unusual, which has no parameter for it');
- // and it IS sent to the screener, which does
- const query=L.screenerQuery(every);
- for(const c of L.FILTER_COLUMNS.filter(x=>x.route==='screener'))
-  assert.ok(query.includes(`${c.param.replace(/^oi_change/,'min_oi_change')}=`)||query.includes(`${c.param}=`),
-   `${c.key} must reach the screener route`);
+});
+ok(()=>{ // the watch list is the one rule the screener cannot take, and it is never sent there
+ const rule={column:'watchlist',operator:'in_watchlist',value:'indices'};
+ assert.equal(L.screenerQuery([rule]),'','a watch-list rule would be a 400, so it is not sent');
+ assert.equal(L.unusualQuery(L.rulesToFilters([rule])),'?watchlist=indices','but it still narrows the older list');
+ // and the reader is told, rather than shown a filter that looks live
+ const seen=L.filterStatuses([rule],{applied:[],available_filters:[]});
+ assert.equal(seen[0].state,'unsupported');
+ assert.ok(/no parameter for this filter/.test(seen[0].reason),seen[0].reason);
+ assert.ok(/narrows the other lists/.test(seen[0].reason),'and that it still works elsewhere');
+});
+ok(()=>{ // the build-up values are the server's, which are LABELS here and not the §3.1 snake keys
+ const values=/^BUILDUP_VALUES=\((.+)\)$/m.exec(DERIV_PY);
+ assert.ok(values,'derivatives.py must declare BUILDUP_VALUES');
+ const served=values[1].split(',').map(v=>v.trim().replace(/^'|'$/g,'')).filter(Boolean);
+ assert.deepEqual([...L.BUILDUP_VALUES],served,'the screener filters on the label it puts on the row');
+ // both windows, and only those two
+ const windows=/^BUILDUP_WINDOWS=\((.+)\)$/m.exec(DERIV_PY);
+ assert.ok(windows);
+ assert.deepEqual([...L.BUILDUP_WINDOWS.map(w=>w.value)],
+  windows[1].split(',').map(v=>v.trim().replace(/^'|'$/g,'')).filter(Boolean));
+ assert.equal(L.BUILDUP_WINDOW_DEFAULT,L.BUILDUP_WINDOWS[0].value);
+ // the window is sent ONLY with a build-up rule: §3.1's two labels are never mixed in one answer
+ assert.ok(!L.screenerQuery([{column:'premium',operator:'gt',value:'10'}],{buildupWindow:'day'})
+  .includes('buildup_window'),'no build-up rule, no window');
+ assert.ok(L.screenerQuery([{column:'buildup',operator:'is',value:L.BUILDUP_VALUES[0]}],{buildupWindow:'day'})
+  .includes('buildup_window=day'),'a build-up rule carries its window');
+});
+ok(()=>{ // the reading is a parameter the reader chooses, never one the browser invents
+ assert.ok(SCREENER_KEYS.has('at'),'the screener takes a reading');
+ assert.equal(L.screenerQuery([],{at:''}),'','no reading chosen sends none, so the server reads its newest');
+ assert.equal(L.screenerQuery([],{at:'2026-09-18 11:30:00'}),'?at=2026-09-18%2011%3A30%3A00');
+});
+ok(()=>{ // the moneyness and index-or-stock values are the server's own
+ for(const [name,mine] of [['MONEYNESS_VALUES',[...L.MONEYNESS_VALUES.map(m=>m.value)]],
+  ['UNDERLYING_KINDS',[...L.MARKET_VALUES.map(m=>m.value)]]]){
+  const m=new RegExp(`^${name}=\\((.+)\\)$`,'m').exec(DERIV_PY);
+  assert.ok(m,`derivatives.py must declare ${name}`);
+  assert.deepEqual([...mine],m[1].split(',').map(v=>v.trim().replace(/^'|'$/g,'')).filter(Boolean));
+ }
 });
 ok(()=>{ // no rule may produce a query parameter outside that set
  const params=new Set(L.FILTER_COLUMNS.map(c=>c.param));
@@ -1887,8 +1959,8 @@ ok(()=>{ // each of the seven new columns becomes the parameter the contract nam
  const cases=[[rule('volumeRatio','gt','2'),'min_volume_ratio=2'],[rule('volumeToOi','gt','1'),'min_volume_to_oi=1'],
   [rule('oiChange15m','gt','5'),'min_oi_change_15m_pct=5'],[rule('oiChange15m','lt','5'),'max_oi_change_15m_pct=5'],
   [rule('oiChangeDay','gt','10'),'min_oi_change_day_pct=10'],[rule('oiChangeDay','lt','10'),'max_oi_change_day_pct=10'],
-  [rule('buildup','is','long_buildup'),'buildup=long_buildup'],[rule('moneyness','is','atm'),'moneyness=atm'],
-  [rule('market','is','index'),'market=index']];
+  [rule('buildup','is','Long build-up'),'buildup=Long%20build-up'],[rule('moneyness','is','atm'),'moneyness=atm'],
+  [rule('market','is','index'),'underlying_kind=index']];
  for(const [r,want] of cases)assert.equal(L.screenerQuery([r]),`?${want}`,JSON.stringify(r));
 });
 ok(()=>{ // the shared six keep the SAME inclusive translations they already had, so a rule means one thing
@@ -1901,18 +1973,19 @@ ok(()=>{ // the shared six keep the SAME inclusive translations they already had
 });
 ok(()=>{ // a rule restored from localStorage is re-typed before it can reach the wire
  for(const junk of [[rule('volumeRatio','gt','0')],[rule('volumeRatio','gt','-2')],[rule('volumeToOi','gt','abc')],
-  [rule('buildup','is','bull')],[rule('moneyness','is','deep')],[rule('market','is','crypto')],
+  [rule('buildup','is','long_buildup')],[rule('buildup','is','bull')],[rule('buildup','is','long_buildup')],[rule('moneyness','is','deep')],
+  [rule('market','is','crypto')],
   [rule('oiChange15m','gt','-5')],[rule('oiChange15m','gt','1e9')],[rule('volumeRatio','is','2')]])
   assert.equal(L.screenerQuery(junk),'',JSON.stringify(junk));
  assert.equal(L.screenerQuery([]),'');assert.equal(L.screenerQuery(null),'');
 });
-ok(()=>{ // nothing the builder can produce leaves a parameter the contract does not name
- const known=new Set(['underlying','expiry','option_type','max_dte','min_premium_cr','watchlist','min_volume_ratio',
-  'min_volume_to_oi','min_oi_change_15m_pct','max_oi_change_15m_pct','min_oi_change_day_pct','max_oi_change_day_pct',
-  'buildup','moneyness','market']);
+ok(()=>{ // nothing the builder can produce leaves a parameter the SERVER's own filter table does not name.
+ // Not a hardcoded list: a second copy of the server's keys is a second thing to get out of date, and being
+ // out of date here is a 400 the reader meets instead of rows.
+ const known=SCREENER_KEYS;
  const every=L.FILTER_COLUMNS.flatMap(c=>c.operators.map(op=>rule(c.key,op,
   c.key==='underlying'?'RELIANCE':c.key==='expiry'?'2026-09-25':c.key==='optionType'?'CE':c.key==='watchlist'?'indices'
-  :c.key==='buildup'?'long_buildup':c.key==='moneyness'?'atm':c.key==='market'?'index':'2')));
+  :c.key==='buildup'?L.BUILDUP_VALUES[0]:c.key==='moneyness'?'atm':c.key==='market'?'index':'2')));
  for(const r of every){
   const query=L.screenerQuery([r]);
   if(!query)continue;
@@ -1922,66 +1995,107 @@ ok(()=>{ // nothing the builder can produce leaves a parameter the contract does
 });
 
 // --- THE INVARIANT: a filter is active only when the SERVER says it applied it -------------------------------------
+// The shapes here are the SERVED ones, not a provisional contract. Three of them are the reason this whole
+// section exists, because each is a way to read a refusal as a success:
+//   * `applied` is a list of OBJECTS carrying `key`, not a list of keys. Stringifying one gives "[object
+//     Object]", which matches nothing - so every filter would have read as not applied. That is wrong in the
+//     safe direction, and the same mistake pointing the other way is what cost this project a day.
+//   * `available` on this route is the envelope's BOOLEAN. Read as a list it is empty, and every filter the
+//     reader set would read as unsupported. The list is `available_filters` / `filters.available`.
+//   * A filter the store offers but cannot answer carries `ready:false` and names its missing columns.
 const RULES=[rule('premium','gt','10'),rule('volumeRatio','gt','2')];
-ok(()=>{ // no answer at all — loading, an error, a route that is not there yet — is NOT an applied filter
- for(const body of [null,undefined,{},{rows:[]},{available:['min_premium_cr']}]){
+const APPLIED=(...keys)=>keys.map(key=>({key,value:1,always:false,text:`${key} was applied.`}));
+const OFFERS=(...keys)=>keys.map(key=>({key,kind:'number',op:'>=',ready:true,text:key,missing_columns:[]}));
+ok(()=>{ // no answer at all - loading, an error, a 400 - is NOT an applied filter
+ for(const body of [null,undefined,{},{rows:[]},{available:true},{available_filters:OFFERS('min_premium_cr')}]){
   const seen=L.filterStatuses(RULES,body);
   assert.deepEqual([...seen.map(s=>s.state)],['pending','pending'],JSON.stringify(body));
   assert.equal(L.appliedCount(seen),0,'silence is never an applied filter');
   for(const s of seen)assert.ok(s.reason,'and a pending filter still says why it is not active');
  }
 });
-ok(()=>{ // the server said which ones it applied, and ONLY those are active
- const seen=L.filterStatuses(RULES,{applied:['min_premium_cr'],available:['min_premium_cr','min_volume_ratio']});
+ok(()=>{ // `applied` is a list of OBJECTS, and its `key` is what decides
+ const seen=L.filterStatuses(RULES,{applied:APPLIED('min_premium_cr'),
+  available_filters:OFFERS('min_premium_cr','min_volume_ratio')});
  assert.deepEqual([...seen.map(s=>s.state)],['applied','not_applied']);
  assert.equal(L.appliedCount(seen),1);
+ assert.equal(seen[0].key,'min_premium_cr',"the key is the server's own parameter name");
  assert.equal(seen[0].reason,'','an applied filter needs no excuse');
  assert.ok(/did not apply/i.test(seen[1].reason));
+ // the SAME answer nested under `filters`, which the server also sends
+ const nested=L.filterStatuses(RULES,{filters:{applied:APPLIED('min_premium_cr'),
+  available:OFFERS('min_premium_cr','min_volume_ratio')}});
+ assert.deepEqual([...nested.map(s=>s.state)],['applied','not_applied']);
+ // a bare string list is accepted too, so a leaner server never reads as silence
+ assert.deepEqual([...L.filterStatuses(RULES,{applied:['min_premium_cr'],
+  available_filters:['min_premium_cr','min_volume_ratio']}).map(s=>s.state)],['applied','not_applied']);
 });
-ok(()=>{ // a parameter the server does not know at all is its own state, and still not active
- const seen=L.filterStatuses(RULES,{applied:['min_premium_cr'],available:['min_premium_cr']});
+ok(()=>{ // `available` is the envelope's BOOLEAN on this route and must never be read as the filter list
+ const body={applied:APPLIED('min_premium_cr'),available:true,
+  available_filters:OFFERS('min_premium_cr','min_volume_ratio')};
+ const seen=L.filterStatuses(RULES,body);
+ assert.deepEqual([...seen.map(s=>s.state)],['applied','not_applied'],
+  'a boolean read as a list would make every filter unsupported');
+ assert.deepEqual([...(L.servedFilters(body)||[]).map(f=>f.key)],['min_premium_cr','min_volume_ratio']);
+ assert.equal(L.servedFilters({available:true}),null,'a boolean is not a filter list');
+ assert.equal(L.servedFilters(null),null);
+ assert.equal(L.servedApplied({}),null,'and no applied list is silence, not an empty one');
+ // the server really does serve it under that name, and really does keep `available` a boolean there
+ assert.ok(/available_filters=available/.test(DERIV_PY),
+  'derivatives.py must serve the filter list as available_filters');
+ assert.ok(/filters=\{'applied':applied,'available':available\}/.test(DERIV_PY),
+  'and nest both under filters');
+});
+ok(()=>{ // a parameter the store does not offer at all is its own state, and still not active
+ const seen=L.filterStatuses(RULES,{applied:APPLIED('min_premium_cr'),available_filters:OFFERS('min_premium_cr')});
  assert.deepEqual([...seen.map(s=>s.state)],['applied','unsupported']);
  assert.equal(L.appliedCount(seen),1);
  assert.equal(seen[1].reason,L.FILTER_UNSUPPORTED_REASON);
 });
+ok(()=>{ // a filter the store OFFERS but cannot answer says which columns it is missing, in the server's words
+ const seen=L.filterStatuses(RULES,{applied:APPLIED('min_premium_cr'),
+  available_filters:[...OFFERS('min_premium_cr'),{key:'min_volume_ratio',ready:false,
+   missing_columns:['vol_tod_ratio','vol_tod_sessions']}]});
+ assert.equal(seen[1].state,'unsupported');
+ assert.ok(/vol_tod_ratio and vol_tod_sessions/.test(seen[1].reason),seen[1].reason);
+ assert.equal(L.appliedCount(seen),1);
+});
 ok(()=>{ // an EMPTY applied list is an answer: nothing was applied, and nothing reads as applied
- const seen=L.filterStatuses(RULES,{applied:[],available:['min_premium_cr','min_volume_ratio']});
+ const seen=L.filterStatuses(RULES,{applied:[],available_filters:OFFERS('min_premium_cr','min_volume_ratio')});
  assert.deepEqual([...seen.map(s=>s.state)],['not_applied','not_applied']);
  assert.equal(L.appliedCount(seen),0);
 });
 ok(()=>{ // THE BUG, pinned: a filter the reader set, sent, and the server did not apply, is never called active
- const seen=L.filterStatuses([rule('volumeRatio','gt','2')],{applied:[],available:['min_volume_ratio'],
-  filters:[{key:'min_volume_ratio',label:'Volume vs median',
-   reason:'Not applied: fewer than 3 sessions of history for most contracts at this reading.'}]});
+ const seen=L.filterStatuses([rule('volumeRatio','gt','2')],
+  {applied:[],available_filters:OFFERS('min_volume_ratio')});
  assert.equal(seen[0].state,'not_applied');
  assert.equal(L.appliedCount(seen),0);
- // the server's own reason wins over ours, word for word
- assert.equal(seen[0].reason,'Not applied: fewer than 3 sessions of history for most contracts at this reading.');
- // and the subtitle does not list it as in force
  assert.equal(L.appliedText(seen),'No filter applied by the server');
  assert.ok(!L.appliedText(seen).includes('Volume vs median'));
 });
-ok(()=>{ // the server's own label for a filter wins over ours, so the two sides never disagree in words
- const seen=L.filterStatuses([rule('premium','gt','10')],{applied:['min_premium_cr'],available:['min_premium_cr'],
-  filters:[{key:'min_premium_cr',label:'Premium traded'}]});
- assert.equal(seen[0].label,'Premium traded');
- assert.equal(seen[0].key,'min_premium_cr');
+ok(()=>{ // the §3 floors and the reading are on for EVERY query, and are not the reader's filters
+ const body={applied:[{key:'at',value:'2026-09-18 15:45:00',always:true,text:'The 15-minute reading of x.'},
+  {key:'min_premium_cr',value:2,always:true,text:'Premium traded at or above 2 cr.'},
+  ...APPLIED('min_volume_ratio')],available_filters:OFFERS('min_volume_ratio')};
+ assert.deepEqual([...L.alwaysApplied(body)],
+  ['The 15-minute reading of x.','Premium traded at or above 2 cr.'],
+  "the always-on clauses are carried, in the server's own words");
+ // and they never appear in the reader's own strip, which is only the rules the reader set
+ const seen=L.filterStatuses([rule('volumeRatio','gt','2')],body);
+ assert.equal(seen.length,1);
+ assert.equal(seen[0].state,'applied');
+ assert.deepEqual([...L.alwaysApplied(null)],[]);
 });
 ok(()=>{ // what the reader is told, in plain words, where the rows are
- const off=L.filterStatuses(RULES,{applied:['min_premium_cr'],available:['min_premium_cr','min_volume_ratio']});
+ const off=L.filterStatuses(RULES,{applied:APPLIED('min_premium_cr'),
+  available_filters:OFFERS('min_premium_cr','min_volume_ratio')});
  const text=L.notAppliedText(off);
  assert.ok(text.includes('volume vs median'),'the filter is NAMED');
  assert.ok(/NOT narrowed/.test(text),'and the rows are said not to be narrowed by it');
  assert.ok(!text.includes('premium'),'the one that WAS applied is not named as a problem');
- // every filter applied ⇒ nothing to say
- assert.equal(L.notAppliedText(L.filterStatuses(RULES,{applied:['min_premium_cr','min_volume_ratio'],
-  available:['min_premium_cr','min_volume_ratio']})),'');
+ assert.equal(L.notAppliedText(L.filterStatuses(RULES,{applied:APPLIED('min_premium_cr','min_volume_ratio'),
+  available_filters:OFFERS('min_premium_cr','min_volume_ratio')})),'');
  assert.equal(L.notAppliedText([]),'');
- // the server's own sentence wins when it sends one
- assert.equal(L.notAppliedText(off,'The volume baseline was unavailable, so that filter was skipped.'),
-  'The volume baseline was unavailable, so that filter was skipped.');
- // but it may not invent a problem where there is none
- assert.equal(L.notAppliedText([],'anything at all'),'');
 });
 ok(()=>{ // three filters read as a sentence, not as a list of one
  assert.equal(L.joinWords(['a']),'a');
@@ -1991,22 +2105,20 @@ ok(()=>{ // three filters read as a sentence, not as a list of one
 });
 ok(()=>{ // no filter set at all is not the same sentence as filters set and none applied
  assert.equal(L.appliedText([]),'No filters — every contract over the liquidity floors');
- assert.notEqual(L.appliedText([]),L.appliedText(L.filterStatuses(RULES,{applied:[],available:[]})));
+ assert.notEqual(L.appliedText([]),L.appliedText(L.filterStatuses(RULES,{applied:[],available_filters:[]})));
 });
 ok(()=>{ // and the SCREEN really is wired to that decision and to nothing else
  const widget=SRC('UnusualWidget.tsx'),block=SRC('ScreenerSection.tsx');
  assert.ok(/filterStatuses\(rules\|\|\[\],body,ruleLabel\)/.test(block),
-  'the block asks logic.filterStatuses, with the SERVER body, for every rule\'s state');
+  "the block asks logic.filterStatuses, with the SERVER body, for every rule's state");
  assert.equal((CODE('ScreenerSection.tsx').match(/filterStatuses\(/g)||[]).length,1,
   'and it is decided in exactly one place');
  assert.ok(!/filterStatuses/.test(CODE('UnusualWidget.tsx')),'the table is handed that answer, never its own');
- // the header count is the APPLIED count, never the rule count
  assert.ok(/const on=appliedCount\(statuses\)/.test(widget),'the table counts applied filters');
  assert.ok(/filterCount=\{on\}/.test(widget),'and that is what the header bar shows');
  assert.ok(!/filterCount=\{rules\.length\}/.test(widget)&&!/filterCount=\{\(rules\|\|\[\]\)\.length\}/.test(widget),
   'the header must never count a rule the server did not apply');
- assert.ok(/customizeLabel\(on\)/.test(block),'and neither does the block\'s Customize link');
- // the strip draws each rule from its own state, and only `applied` gets the live treatment
+ assert.ok(/customizeLabel\(on\)/.test(block),"and neither does the block's Customize link");
  assert.ok(/const STATE_STYLE:Record<string,\{color:string;border:string;suffix:string\}>=\{/.test(widget),
   'every state has one declared appearance');
  for(const state of ['applied','pending','not_applied','unsupported'])
@@ -2015,16 +2127,14 @@ ok(()=>{ // and the SCREEN really is wired to that decision and to nothing else
  assert.ok(/not_applied:\{color:C\.amber[\s\S]{0,60}NOT applied/.test(widget),
   'and a filter the server did not apply says so on its own chip');
  assert.ok(/status\.state==='applied'\?'check':'alert-circle'/.test(widget),
-  'the icon on a chip is decided by the server\'s answer too');
- // the sentence under the rows, in amber, where the reader is looking
- assert.ok(/const off=notAppliedText\(statuses,body\?\.not_applied_text\)/.test(widget));
+  "the icon on a chip is decided by the server's answer too");
+ assert.ok(/const off=notAppliedText\(statuses\)/.test(widget));
  assert.ok(/\{!!off&&<T style=\{\[metaText,\{color:C\.amber\}\]\}>\{off\}<\/T>\}/.test(widget),
   'a filter that did not run is a caveat on the data, so it is the amber on this panel');
 });
-ok(()=>{ // the builder never claims a pending column worked, and never filters rows in the browser
+ok(()=>{ // the builder never claims a filter the screener cannot take, and never filters rows in the browser
  const dialog=SRC('FilterDialog.tsx');
- assert.ok(/\{!!column\.pending&&<T/.test(dialog),'a pending column says what will decide whether it applied');
- assert.ok(/only when — the server says it/.test(dialog.replace(/\s+/g,' ')),'in those words');
+ assert.ok(/\{!!column\.noScreener&&<T/.test(dialog),'a column the screener has no parameter for says so');
  assert.ok(!/\.filter\(\s*\w+\s*=>\s*\w+\.(oi|premium_cr|volume|strike|days_to_expiry|volume_ratio|volume_to_oi)\b/
   .test(dialog),'the popup must never filter served rows in the browser');
  const widget=CODE('UnusualWidget.tsx');
@@ -2033,65 +2143,114 @@ ok(()=>{ // the builder never claims a pending column worked, and never filters 
  assert.ok(!/\.filter\(/.test(items[1]),'and drops not one served row in the browser');
 });
 
+
 // --- IMPLIED VOLATILITY IS COMPUTED, AND SAYS SO EVERYWHERE IT APPEARS ---------------------------------------------
+// The COMPUTED label is necessary and it is NOT sufficient. A reader also has to be able to find out what the
+// number rests on, and the weakest of those inputs is the risk-free rate: a constant in the server's code, with
+// no feed behind it. So this section pins the label AND the disclosure of the rate, its source, and its weight.
 ok(()=>{ // the tag and the sentence exist, and the sentence says the thing that matters
  assert.equal(L.IV_COMPUTED_TAG,'COMPUTED');
  assert.ok(/COMPUTED here, not reported by the exchange/.test(L.IV_COMPUTED_TEXT));
  assert.ok(/pricing model/.test(L.IV_COMPUTED_TEXT));
- assert.ok(/Every other number on this tab is something the exchange said/.test(L.IV_COMPUTED_TEXT));
  // the server's own sentence wins; ours is the floor, never the ceiling
  assert.equal(L.ivComputedText({computed_text:'Solved by our own model.'}),'Solved by our own model.');
  assert.equal(L.ivComputedText(null),L.IV_COMPUTED_TEXT);
  assert.equal(L.ivComputedText({computed_text:'   '}),L.IV_COMPUTED_TEXT);
+ // and the server really does say it, and really does say the exchange did not
+ assert.ok(/COMPUTED here, not reported by the exchange/.test(IV_PY),
+  'derivatives.py must say so in its own words too');
+ assert.ok(/'exchange_reported':False/.test(DERIV_PY),
+  'and must flag that the exchange did not report it');
 });
 ok(()=>{ // a volatility reads the same whether it arrives as a fraction or as a percentage
  assert.equal(L.ivText(0.184),'18.4%');
  assert.equal(L.ivText(18.4),'18.4%');
  assert.equal(L.ivText(1.2),'120.0%');
  for(const v of MISSING)assert.equal(L.ivText(v),DASH,String(v));
- // and never loses its label when it travels alone
  assert.equal(L.ivTagged(0.184),`18.4% ${L.IV_COMPUTED_TAG}`);
  assert.equal(L.ivTagged(null),DASH,'a dash is not dressed up as a computed number');
 });
-ok(()=>{ // the model and the rate are stated, and an unnamed model is SAID to be unnamed rather than guessed
- assert.equal(L.ivModelText({model:'Black-Scholes-Merton',rate:0.0665}),
-  'Model: Black-Scholes-Merton · solved at 6.65% risk-free rate.');
- assert.equal(L.ivModelText({model:'Black-Scholes-Merton',rate:6.65}),
-  'Model: Black-Scholes-Merton · solved at 6.65% risk-free rate.');
- assert.equal(L.ivModelText({model:'Black-76',rate:null,rate_label:'the 91-day T-bill'}),
-  'Model: Black-76 · solved at the 91-day T-bill.');
- assert.equal(L.ivModelText({model:'',rate:0.06}),'Model: not named by the server · solved at 6.00% risk-free rate.');
- assert.equal(L.ivModelText(null),'The server did not name the model or the rate these were solved at.');
- assert.equal(L.ivModelText({}),'The server did not name the model or the rate these were solved at.');
+ok(()=>{ // THE RATE: named, sourced, and weighed - not buried
+ const body={risk_free_rate:0.065,risk_free_rate_source:{kind:'code constant',
+  where:'kanida_pilot/implied_vol.py RISK_FREE_RATE',live_feed:false,text:'The risk-free rate is a fixed constant.'}};
+ assert.equal(L.ivRateText(body),'6.50% a year');
+ assert.equal(L.ivRateText({risk_free_rate:6.5}),'6.50% a year','a percentage reads the same as a fraction');
+ assert.equal(L.ivRateText({}),'');
+ // the short form the reader meets ON SCREEN says the rate AND that nothing is feeding it
+ const short=L.ivRateSourceShort(body);
+ assert.ok(short.includes('6.50% a year'),short);
+ assert.ok(/no live feed behind it/.test(short),'the fact that matters is said outright: '+short);
+ assert.ok(/code constant/.test(short),short);
+ // a rate that DID come from a feed says that instead, rather than the same sentence for both
+ assert.ok(/from a live feed/.test(L.ivRateSourceShort({risk_free_rate:0.07,
+  risk_free_rate_source:{kind:'T-bill',live_feed:true}})));
+ // and only the constant is treated as a caveat
+ assert.equal(L.ivRateIsAssumed(body),true);
+ assert.equal(L.ivRateIsAssumed({risk_free_rate_source:{live_feed:true}}),false);
+ assert.equal(L.ivRateIsAssumed(null),false);
+ // the long form is the server's own sentence, with where it lives
+ const long=L.ivRateSourceText(body);
+ assert.ok(long.startsWith('The risk-free rate is a fixed constant.'),long);
+ assert.ok(long.includes('kanida_pilot/implied_vol.py RISK_FREE_RATE'),long);
+ assert.equal(L.ivRateSourceText(null),'');
+ // the server really does serve both, and really does say there is no feed behind the rate
+ assert.ok(/RISK_FREE_RATE_SOURCE={/.test(IV_PY)&&/'live_feed':False/.test(IV_PY),
+  'implied_vol.py must declare where the rate came from');
 });
-ok(()=>{ // EVERY null carries its reason, and the five the contract names all have words
- for(const key of ['stale_trade','no_time_value','below_intrinsic','no_convergence','expiry_today']){
-  const text=L.ivReasonText(key);
-  assert.ok(text&&text.length>20,`${key} must be explained in words`);
-  assert.ok(/^No volatility:/.test(text),`${key} must say there is no volatility first: ${text}`);
- }
- // the server's own sentence wins
- assert.equal(L.ivReasonText('stale_trade','Last trade was at 11:15, this reading is 14:45.'),
-  'Last trade was at 11:15, this reading is 14:45.');
- // a reason we cannot translate is still said, never swallowed
- assert.ok(L.ivReasonText('some_new_code').includes('some_new_code'));
- // and no reason at all is empty, so a caller can fall back rather than print a lie
- assert.equal(L.ivReasonText(null),'');assert.equal(L.ivReasonText(''),'');assert.equal(L.ivReasonText(undefined),'');
+ok(()=>{ // the WEIGHT of that assumption, which is what turns "trust the rate" into a number
+ assert.ok(/would move this reading by 0\.12 percentage points down/.test(L.ivRateSensitivityText(-0.1233)),
+  L.ivRateSensitivityText(-0.1233));
+ assert.ok(/0\.50 percentage points up/.test(L.ivRateSensitivityText(0.5)));
+ assert.ok(/would not move this reading at all/.test(L.ivRateSensitivityText(0.001)));
+ assert.equal(L.ivRateSensitivityText(null),'');
+ // read off the legs, largest first, because one figure for the block beats one per point
+ const legs=[{points:[{rate_sensitivity_pct_points:-0.12},{rate_sensitivity_pct_points:-0.30}]},
+  {points:[{rate_sensitivity_pct_points:0.05},{rate_sensitivity_pct_points:null}]}];
+ assert.equal(L.ivRateSensitivity(legs),-0.30);
+ assert.equal(L.ivRateSensitivity([]),null);
+ assert.equal(L.ivRateSensitivity([null,{points:null}]),null);
 });
-ok(()=>{ // how much of the session was solved is counted, because a line through 4 of 20 is not a line through 20
- const points=[{iv:0.18},{iv:null,reason:'stale_trade'},{iv:0.19},{iv:null,reason:null},{iv:null,reason:'expiry_today'}];
- assert.deepEqual({...L.ivCoverage(points)},{total:5,solved:2,withReason:2});
- assert.equal(L.ivCoverageText(points),'2 of 5 readings solved; 2 carry a reason instead of a number.');
- assert.equal(L.ivCoverageText([{iv:0.2}]),'1 of 1 reading solved.');
- assert.equal(L.ivCoverageText([]),'');assert.equal(L.ivCoverageText(null),'');
+ok(()=>{ // EVERY null carries its reason. The server sends a whole table of them, and its words always win.
+ const served={stale_last_trade:'The last trade is older than one 15-minute reading.',
+  missing_spot:'No spot price was captured for this underlying at this reading.'};
+ assert.equal(L.ivPointReason({reason:'stale_last_trade'},served),served.stale_last_trade);
+ assert.equal(L.ivPointReason({reason:'missing_spot'},served),served.missing_spot);
+ // the point's own sentence beats even the table
+ assert.equal(L.ivPointReason({reason:'missing_spot',reason_text:'Its own words.'},served),'Its own words.');
+ // a code neither of them knows is said as itself rather than swallowed
+ assert.ok(L.ivPointReason({reason:'brand_new_code'},served).includes('brand_new_code'));
+ // no reason at all is empty, so a caller falls back rather than printing a lie
+ assert.equal(L.ivPointReason({},served),'');
+ assert.equal(L.ivPointReason(null,null),'');
+ // and the five the contract named still have our own floor sentence
+ for(const key of ['stale_trade','no_time_value','below_intrinsic','no_convergence','expiry_today'])
+  assert.ok(/^No volatility:/.test(L.ivReasonText(key)),`${key} must be explained in words`);
 });
-ok(()=>{ // what a screen reader hears about one strike: the number AND that it was computed, or the reason
- const solved=L.ivStrikeSpoken({strike:23350,option_type:'ce',moneyness:'at the money',iv:0.184});
- assert.ok(solved.includes('computed implied volatility 18.4%'),solved);
- assert.ok(solved.includes('23,350 CE'));
- const none=L.ivStrikeSpoken({strike:23350,option_type:'PE',iv:null,reason:'no_convergence'});
- assert.ok(none.includes('did not settle'),none);
- assert.ok(!none.includes('computed implied volatility'),'a null is never spoken as a number');
+ok(()=>{ // the LATEST refusal is what a dash on screen prints, so the dash is never unexplained
+ const points=[{iv:0.18},{iv:null,reason:'stale_last_trade'},{iv:null,reason:'missing_spot'}];
+ const served={stale_last_trade:'Stale.',missing_spot:'No spot.'};
+ assert.equal(L.ivLatestRefusal(points,served),'No spot.','the last one, not the first');
+ assert.equal(L.ivLatestRefusal([{iv:0.2}],served),'','a solved session has no refusal to print');
+ assert.equal(L.ivLatestRefusal(null,null),'');
+});
+ok(()=>{ // every refusal in the session is counted and explained, in the server's own sentences
+ const body={rejections:{missing_spot:2,stale_last_trade:5},
+  reason_text:{missing_spot:'No spot price was captured.',stale_last_trade:'The last trade is too old.'}};
+ const lines=L.ivRejectionLines(body);
+ assert.equal(lines.length,2);
+ assert.ok(lines[0].startsWith('5 readings: '),'commonest first: '+lines[0]);
+ assert.ok(lines[0].includes('The last trade is too old.'));
+ assert.ok(lines[1].startsWith('2 readings: '));
+ assert.deepEqual([...L.ivRejectionLines({rejections:{}})],[]);
+ assert.deepEqual([...L.ivRejectionLines(null)],[]);
+});
+ok(()=>{ // the model line names what solved it, how, and over what day count
+ const text=L.ivMethodText({model:'Black-Scholes-Merton (European, no dividend)',
+  method:'bisection on the option price, solved for the volatility',day_count:'ACT/365',expiry_time_ist:'15:30'});
+ assert.ok(text.includes('Black-Scholes-Merton'),text);
+ assert.ok(text.includes('bisection'),text);
+ assert.ok(text.includes('ACT/365'),text);
+ assert.equal(L.ivMethodText(null),'The server did not name the model these were solved with.');
 });
 ok(()=>{ // the MARKING, on screen, everywhere an implied volatility appears
  const blocks=SRC('SessionBlocks.tsx'),panel=SRC('SessionPanel.tsx'),frame=SRC('frame.tsx');
@@ -2101,34 +2260,49 @@ ok(()=>{ // the MARKING, on screen, everywhere an implied volatility appears
  assert.ok(/subtitle="Implied volatility is COMPUTED by a model from captured prices/.test(blocks),
   'and the block subtitle says it in a sentence');
  // 2. the chart panel
- assert.ok(/tag=\{IV_COMPUTED_TAG\}[\s\S]{0,120}tagA11y="Computed by a pricing model, not reported by the exchange"/
+ assert.ok(/tag=\{IV_COMPUTED_TAG\}[\s\S]{0,140}tagA11y="Computed by a pricing model, not reported by the exchange"/
   .test(blocks),'the chart panel carries it, and says it to a screen reader');
  assert.ok(/\{!!tag&&<Tag label=\{tag\} a11y=\{tagA11y\}\/>\}/.test(panel),'and the panel really draws it');
  // 3. the line's own legend entry
  assert.ok(/\{key:'iv',label:IV_ATM_LABEL,color:C\.mint,values:iv,format:ivText,tag:IV_COMPUTED_TAG\}/.test(blocks),
   'the legend entry beside the latest value carries it');
  assert.ok(/\{line\.tag\?` \$\{line\.tag\}`:''\}/.test(panel),'and the legend prints it');
- // 4. the strike list header AND every solved row
+ // 4. the legs list header AND every solved row
  assert.ok(/<T style=\{head\}>Implied vol<\/T><Tag label=\{IV_COMPUTED_TAG\}\/>/.test(blocks),
-  'the strike list says it in its column header');
- assert.ok(/\{ivText\(row\.iv\)\}<\/T>\n\s*<Tag label=\{IV_COMPUTED_TAG\}\/>/.test(blocks),
-  'and on every row that has a number');
+  'the legs list says it in its column header');
+ assert.ok(/ivText\(last\.iv_pct\?\?last\.iv\)\}<\/T>\n\s*<Tag label=\{IV_COMPUTED_TAG\}\/>/
+  .test(blocks.replace(/\r/g,'')),'and on every row that has a number');
  // 5. the readings panel's own line
- assert.ok(/tag:body\?\.latest_iv==null\?undefined:IV_COMPUTED_TAG/.test(blocks),
+ assert.ok(/tag:\(body\?\.latest_iv_pct\?\?body\?\.latest_iv\)==null\?undefined:IV_COMPUTED_TAG/.test(blocks),
   'the latest reading carries it, and a dash does not');
  assert.ok(/label:`\$\{IV_ATM_LABEL\} \(computed\)`/.test(blocks),'the label itself says it too');
- // 6. what a row says to a screen reader
- assert.ok(/accessibilityLabel=\{ivStrikeSpoken\(row\)\}/.test(blocks));
  // and the tag is NOT amber: amber on this tab is a caveat on the data, and a model output is not a fault
- assert.ok(/borderColor:C\.mint\}\}>\n?\s*<T style=\{\{fontSize:8/.test(frame.replace(/\r/g,''))
-  ||/export function Tag[\s\S]{0,400}C\.mint/.test(frame),'the computed label is the mint accent, never amber');
- assert.ok(!/export function Tag[\s\S]{0,400}C\.amber/.test(frame),'and never amber');
+ assert.ok(!/export function Tag[\s\S]{0,400}C\.amber/.test(frame),'the computed label is never amber');
+});
+ok(()=>{ // the RATE is on screen, not only behind the control
+ const blocks=SRC('SessionBlocks.tsx');
+ assert.ok(/const rateCaveat=ivRateIsAssumed\(body\)/.test(blocks),
+  'a rate with nothing feeding it is treated as a caveat');
+ assert.ok(/ivRateSourceShort\(body\)\}\s*\$\{ivRateSensitivityText\(shift\)\}/.test(blocks.replace(/\r/g,''))
+  ||/ivRateSourceShort\(body\)/.test(blocks)&&/ivRateSensitivityText\(shift\)/.test(blocks),
+  'and both the source and its weight are put in it');
+ // it is spent as the AMBER on both IV panels, which is where a caveat on the data belongs
+ assert.equal((blocks.match(/caveat=\{rateCaveat\}/g)||[]).length,2,
+  'both IV panels carry it, and it is not quietly dropped from one');
+ // the rate is also a row of its own in the numbers panel
+ assert.ok(/label:'Risk-free rate used',value:ivRateText\(body\)/.test(blocks),
+  'the rate is a reading in its own right, not a footnote');
+ // and the full sentence, plus every other assumption, is behind the block's one control
+ assert.ok(/heading:'What the rate rests on'/.test(blocks));
+ assert.ok(/ivRateSourceText\(body\)/.test(blocks));
+ assert.ok(/heading:'Every other assumption',lines:Object\.values\(body\?\.assumptions\|\|\{\}\)/.test(blocks),
+  "the server's own assumptions are all carried, not a selection of them");
 });
 ok(()=>{ // a null is never a blank on a row, and never a drawn point on the line
  const blocks=CODE('SessionBlocks.tsx');
- assert.ok(/const reason=has\?'':ivReasonText\(row\.reason,row\.reason_text\)/.test(blocks),
-  'a row without a number works out its reason');
- assert.ok(/:<T numberOfLines=\{2\}[\s\S]{0,140}\{reason\}<\/T>/.test(blocks),
+ assert.ok(/const refusal=last\?'':ivLatestRefusal\(leg\.points,reasons\)\|\|String\(leg\.missing_text\|\|''\)/
+  .test(blocks),'a leg without a number works out its reason');
+ assert.ok(/:<T numberOfLines=\{3\}[\s\S]{0,160}\{refusal\}<\/T>/.test(blocks),
   'and prints that reason where the number would have been');
  // the line itself: a null value is a null point, so the path breaks rather than joining through it
  const scaled=L.scaleValues([0.18,null,0.2,0.21],100,50);
@@ -2137,95 +2311,226 @@ ok(()=>{ // a null is never a blank on a row, and never a drawn point on the lin
  assert.equal((L.linePath(scaled).match(/M/g)||[]).length,2,'the path breaks at the gap and starts again after it');
 });
 
-// --- the four direction vocabularies, in the owner's exact words ----------------------------------------------------
+// --- GAPS: a reading the store has no row for is a hole, not a zero --------------------------------------------------
+// Every series sits on the store's own reading grid, so a reading an underlying has no row for arrives as a SLOT:
+// every value null, `gap:true`, and `withheld` naming the reason. One helper pulls values out of a series, so the
+// rule that a gap is never reached past is fixed in one place for all four blocks.
 ok(()=>{
- assert.deepEqual({...L.MAX_PAIN_CHIPS},{shifting_up:'↑ SHIFTING UP',stable:'→ STABLE',shifting_down:'↓ SHIFTING DOWN'},
-  'the owner\'s words for max pain: Shifting Up · Stable · Shifting Down');
- assert.deepEqual({...L.IV_CHIPS},{expanding:'↑ EXPANDING',stable:'→ STABLE',cooling:'↓ COOLING'},
-  'and for IV: Expanding · Stable · Cooling');
- assert.deepEqual({...L.PCR_CHIPS},{rising:'↑ RISING',flat:'→ STABLE',falling:'↓ FALLING'});
- // the futures chip is the SAME vocabulary the ΔOI tiles already use - one tab, one word for one thing
- assert.deepEqual({...L.FUTURES_CHIPS},{...L.DIRECTION_CHIPS});
- // a word none of them knows gets NO chip rather than a guessed one
- for(const chips of [L.PCR_CHIPS,L.MAX_PAIN_CHIPS,L.IV_CHIPS,L.FUTURES_CHIPS]){
-  assert.equal(L.sessionChip(chips,'no baseline'),'');
-  assert.equal(L.sessionChip(chips,null),'');
-  assert.equal(L.sessionChip(chips,'bullish'),'');
- }
+ const points=[{at:'2026-09-18 09:30',pcr_oi:0.91,gap:false},
+  {at:'2026-09-18 09:45',pcr_oi:null,gap:true,withheld:'no_reading'},
+  {at:'2026-09-18 10:00',pcr_oi:1.02,gap:false}];
+ assert.deepEqual([...L.seriesValues(points,p=>p.pcr_oi)],[0.91,null,1.02]);
+ assert.deepEqual([...L.seriesTimes(points)],['2026-09-18 09:30','2026-09-18 09:45','2026-09-18 10:00'],
+  'the hole keeps its place on the axis');
+ // a gap slot is null even if a value somehow rode along on it
+ assert.deepEqual([...L.seriesValues([{pcr_oi:9,gap:true}],p=>p.pcr_oi)],[null],
+  'a slot flagged as a gap is a gap, whatever else is on it');
+ // and the line drawn from it breaks
+ const scaled=L.scaleValues(L.seriesValues(points,p=>p.pcr_oi),100,50);
+ assert.equal((L.linePath(scaled).match(/M/g)||[]).length,2);
+ assert.deepEqual([...L.seriesValues(null,p=>p)],[]);
 });
-ok(()=>{ // colour repeats the word and never adds to it
- assert.equal(L.sessionTone(L.MAX_PAIN_CHIPS,'shifting_up'),'up');
- assert.equal(L.sessionTone(L.MAX_PAIN_CHIPS,'stable'),'flat');
- assert.equal(L.sessionTone(L.MAX_PAIN_CHIPS,'shifting_down'),'down');
- assert.equal(L.sessionTone(L.IV_CHIPS,'cooling'),'down');
- assert.equal(L.sessionTone(L.IV_CHIPS,'no baseline'),'flat','no baseline is never coloured as a direction');
+ok(()=>{ // how much of the session carried a value, and why the rest did not - in the server's own sentences
+ const body={total_readings:26,readings_with_value:9,
+  withheld_reasons:{no_reading:17},
+  reason_text:{no_reading:'This underlying has no row at this 15-min reading.'}};
+ assert.equal(L.readingsText(body),'9 of 26 readings carried a value');
+ assert.equal(L.readingsText({}),'','a tally we were not given is not invented');
+ const lines=L.withheldLines(body);
+ assert.deepEqual([...lines],['17 readings: This underlying has no row at this 15-min reading.']);
+ const text=L.withheldText(body);
+ assert.ok(text.includes('9 of 26'),text);
+ assert.ok(text.includes('no row at this 15-min reading'),text);
+ // a whole session says nothing at all rather than "0 missing"
+ assert.equal(L.withheldText({total_readings:26,readings_with_value:26,withheld_reasons:{}}),'');
+ assert.deepEqual([...L.withheldLines(null)],[]);
 });
-ok(()=>{ // the direction is read over the last hour of readings, and under two readings there is none
- const keys=L.MAX_PAIN_KEYS;
- assert.equal(L.sessionDirection([],keys),L.NO_SESSION_DIRECTION);
- assert.equal(L.sessionDirection([23000],keys),L.NO_SESSION_DIRECTION);
- assert.equal(L.sessionDirection([null,null],keys),L.NO_SESSION_DIRECTION);
- assert.equal(L.sessionDirection([23000,23500],keys),'shifting_up');
- assert.equal(L.sessionDirection([23500,23000],keys),'shifting_down');
- assert.equal(L.sessionDirection([23000,23000],keys),'stable');
- // a gap is skipped, never read as a zero
- assert.equal(L.sessionDirection([23000,null,23500],keys),'shifting_up');
- // Inside 5% of how far the number has moved TODAY it is stable, not moved - the same shape of rule the ΔOI
- // tiles already work to. A series whose whole day's range IS the last hour's change is never called stable,
- // because there is nothing to call it small against.
- assert.equal(L.sessionDirection([23000,23800,23000,23010],keys),'stable','+10 against a 800-wide day is stable');
- assert.equal(L.sessionDirection([23000,23800,23000,23400],keys),'shifting_up','+400 against it is not');
- assert.equal(L.sessionDirection([23000,23001],keys),'shifting_up',
-  'and a two-reading series whose only move is the one being read is never dressed up as stable');
+ok(()=>{ // every block reads its series through that one helper, and none of them reaches past a gap itself
+ const blocks=CODE('SessionBlocks.tsx');
+ // PCR two lines, max pain two, IV one, futures four: nine series, one helper that respects a gap
+ assert.equal((blocks.match(/seriesValues\(points,/g)||[]).length,9,
+  'every line on every block reads its series through that one helper');
+ assert.ok(!/points\.map\(p=>p\./.test(blocks),'no block pulls a series out by hand');
+ // a readings panel shows the server's `latest_*`, which is read off the last reading that HAD a value
+ assert.ok(/\[\.\.\.points\]\.reverse\(\)\.find\(p=>p&&!p\.gap\)/.test(blocks),
+  'and where a block does read the last reading itself, it skips the gaps');
+});
+
+
+// --- the direction words are the SERVER's, not this tab's ------------------------------------------------------------
+// The owner gave exact words for two of these vocabularies. The server now serves all of them, per series, as
+// `direction_words` (which key means up/down/flat/none) and `direction_labels` (the reader's word for each key).
+// So the tab hardcodes none of them - and the words the owner asked for are checked against the SERVER, which is
+// the only place they can now go wrong.
+const WORDS=(up,down,flat)=>({up,down,flat,none:'no baseline'});
+ok(()=>{ // the owner's exact words, checked where they actually live now
+ const labels=/^DIRECTION_LABELS=\{([\s\S]*?)\}$/m.exec(DERIV_PY);
+ assert.ok(labels,'derivatives.py must declare DIRECTION_LABELS');
+ for(const [key,word] of [['shifting_up','Shifting Up'],['stable','Stable'],['shifting_down','Shifting Down'],
+  ['expanding','Expanding'],['cooling','Cooling'],['building','Building'],['unwinding','Unwinding']])
+  assert.ok(labels[1].includes(`'${key}':'${word}'`),
+   `the owner's word for ${key} is "${word}", and the server must serve exactly that`);
+});
+ok(()=>{ // the chip is the arrow this tab uses over the SERVER's word, upper-cased
+ const words=WORDS('shifting_up','shifting_down','stable');
+ const labels={shifting_up:'Shifting Up',shifting_down:'Shifting Down',stable:'Stable'};
+ assert.equal(L.servedChip('shifting_up',words,labels),'↑ SHIFTING UP');
+ assert.equal(L.servedChip('shifting_down',words,labels),'↓ SHIFTING DOWN');
+ assert.equal(L.servedChip('stable',words,labels),'→ STABLE');
+ // the other three vocabularies, all through the same one function
+ assert.equal(L.servedChip('expanding',WORDS('expanding','cooling','stable'),{expanding:'Expanding'}),'↑ EXPANDING');
+ assert.equal(L.servedChip('cooling',WORDS('expanding','cooling','stable'),{cooling:'Cooling'}),'↓ COOLING');
+ assert.equal(L.servedChip('building',WORDS('building','unwinding','flat'),{building:'Building'}),'↑ BUILDING');
+ assert.equal(L.servedChip('widening',WORDS('widening','narrowing','flat'),{widening:'Widening'}),'↑ WIDENING');
+ assert.equal(L.servedChip('rising',WORDS('rising','falling','flat'),{rising:'Rising'}),'↑ RISING');
+});
+ok(()=>{ // no baseline, and anything we were not given a word for, get NO chip rather than a guessed one
+ const words=WORDS('shifting_up','shifting_down','stable');
+ assert.equal(L.servedChip('no baseline',words,{}),'');
+ assert.equal(L.servedChip(null,words,{}),'');
+ assert.equal(L.servedChip('',words,{}),'');
+ // a key with no served label still gets its own key rather than nothing, because a served direction is real
+ assert.equal(L.servedChip('shifting_up',words,null),'↑ SHIFTING UP');
+ assert.equal(L.servedChip('some_new_word',words,null),'SOME NEW WORD',
+  'a word we do not have an arrow for is still the word, not a guess at its direction');
+});
+ok(()=>{ // colour repeats the served word and never adds to it
+ const words=WORDS('shifting_up','shifting_down','stable');
+ assert.equal(L.servedTone('shifting_up',words),'up');
+ assert.equal(L.servedTone('shifting_down',words),'down');
+ assert.equal(L.servedTone('stable',words),'flat');
+ assert.equal(L.servedTone('no baseline',words),'flat','no baseline is never coloured as a direction');
+ assert.equal(L.servedTone('shifting_up',null),'flat','with no vocabulary, nothing is coloured');
+ assert.equal(L.servedTone(null,words),'flat');
+});
+ok(()=>{ // and NO block hardcodes a direction word of its own
+ const blocks=CODE('SessionBlocks.tsx');
+ for(const word of ['SHIFTING UP','SHIFTING DOWN','EXPANDING','COOLING','BUILDING','UNWINDING','RISING','FALLING'])
+  assert.ok(!blocks.includes(word),`"${word}" must come from the server, not from SessionBlocks.tsx`);
+ // every chip on every block goes through the one pair of helpers
+ assert.equal((blocks.match(/servedChip\(/g)||[]).length,6,
+  'PCR two, max pain one, futures two, IV one - every chip on the tab');
+ assert.equal((blocks.match(/servedTone\(/g)||[]).length,6);
+ assert.ok(/direction_words/.test(blocks)&&/direction_labels/.test(blocks),
+  'and both are read off the response');
+ // the rule behind a direction is the server's sentence too
+ assert.equal(L.directionRule({direction_text:'Direction is the latest reading against the reading 4 back.'}),
+  'Direction is the latest reading against the reading 4 back.');
+ assert.equal(L.directionRule(null),'');
+ assert.equal((blocks.match(/directionRule\(body\)/g)||[]).length,4,'each block prints it once');
+});
+ok(()=>{ // the tab's OWN reading of a series is still there as the fallback, and still says no baseline
+ assert.equal(L.sessionDirection([],L.MAX_PAIN_KEYS),L.NO_SESSION_DIRECTION);
+ assert.equal(L.sessionDirection([23000],L.MAX_PAIN_KEYS),L.NO_SESSION_DIRECTION);
+ assert.equal(L.sessionDirection([null,null],L.MAX_PAIN_KEYS),L.NO_SESSION_DIRECTION);
+ assert.equal(L.sessionDirection([23000,23500],L.MAX_PAIN_KEYS),'shifting_up');
+ assert.equal(L.sessionDirection([23500,23000],L.MAX_PAIN_KEYS),'shifting_down');
+ assert.equal(L.sessionDirection([23000,23000],L.MAX_PAIN_KEYS),'stable');
+ assert.equal(L.sessionDirection([23000,null,23500],L.MAX_PAIN_KEYS),'shifting_up','a gap is skipped, never read as zero');
+ assert.equal(L.sessionDirection([23000,23800,23000,23010],L.MAX_PAIN_KEYS),'stable');
+ assert.equal(L.sessionDirection([23000,23800,23000,23400],L.MAX_PAIN_KEYS),'shifting_up');
 });
 ok(()=>{ // the SERVER's word wins when it sends one, because it saw every reading
  assert.equal(L.servedDirection('cooling',[0.2,0.3],L.IV_KEYS),'cooling');
  assert.equal(L.servedDirection('',[0.2,0.3],L.IV_KEYS),'expanding','with no word from the server we read the points');
  assert.equal(L.servedDirection('nonsense',[0.2,0.3],L.IV_KEYS),'expanding','and a word we do not know is not a word');
- assert.equal(L.servedDirection('bullish',[0.2,0.3],L.IV_KEYS),'expanding');
 });
 
 // --- max pain, PCR and futures build-up: the numbers, in words ------------------------------------------------------
-ok(()=>{
- assert.equal(L.maxPainGapText(820),'820 above spot');
- assert.equal(L.maxPainGapText(-820),'820 below spot');
- assert.equal(L.maxPainGapText(0),'at spot');
- for(const v of MISSING)assert.equal(L.maxPainGapText(v),DASH,String(v));
+ok(()=>{ // THE SIGN. Distance is strike MINUS spot, so positive means the strike sits above spot - and the
+ // wording names its SUBJECT, so it cannot be read the other way round whichever sign it carries.
+ assert.equal(L.maxPainDistanceText(820),'strike 820 above spot');
+ assert.equal(L.maxPainDistanceText(-301),'strike 301 below spot');
+ assert.equal(L.maxPainDistanceText(0),'strike at spot');
+ for(const v of MISSING)assert.equal(L.maxPainDistanceText(v),DASH,String(v));
+ // the convention is the SERVER's sentence, printed and never paraphrased
+ assert.ok(/MINUS spot/.test(L.maxPainDistanceRule({distance_definition:'Distance is the max-pain strike MINUS spot.'})));
+ assert.equal(L.maxPainDistanceRule(null),'');
+ // and the server really does use that convention
+ assert.ok(/MAX_PAIN_DISTANCE_DEFINITION/.test(DERIV_PY),'derivatives.py must declare the convention');
+ const rule=/^MAX_PAIN_DISTANCE_DEFINITION=\(?'([\s\S]*?)'\)?$/m.exec(DERIV_PY);
+ if(rule)assert.ok(/MINUS spot/i.test(rule[1])||/minus spot/i.test(rule[1]),
+  `the served convention must be strike minus spot: ${rule[1]}`);
+ // the panel label names the arithmetic too, so the row cannot be read backwards either
+ assert.ok(SRC('SessionBlocks.tsx').includes("label:'Distance (strike − spot)'"),
+  'the readings row names the subtraction');
+});
+ok(()=>{ // the max-pain line, with a spot the store did not capture
+ const whole={latest_max_pain_strike:23300,latest_spot:23346.4,latest_distance:-46.4,latest_total_oi:6150000};
+ const text=L.maxPainLine(whole);
+ assert.ok(text.includes('Max pain 23,300'),text);
+ assert.ok(text.includes('strike 46 below spot'),text);
+ assert.ok(text.includes('61.5L contracts'),text);
+ // NIFTY's own latest reading has a strike and NO spot. A distance IS a strike measured against a spot, so
+ // with no spot there is no distance to dash out - the sentence says that once rather than printing two
+ // dashes in a row and leaving the reader to work out which of them was the cause of the other.
+ const noSpot=L.maxPainLine({latest_max_pain_strike:23350,latest_spot:null,latest_distance:null,
+  latest_total_oi:327987465});
+ assert.ok(noSpot.includes('no spot was captured at this reading'),noSpot);
+ assert.ok(noSpot.includes('so there is no distance to it'),noSpot);
+ assert.ok(!noSpot.includes(DASH),'and no bare dash is left standing on its own: '+noSpot);
+ // the strike is still named, because the store did capture that
+ assert.ok(noSpot.includes('Max pain 23,350'),noSpot);
+ assert.ok(L.maxPainLine({latest_total_oi:null}).includes('Total OI behind it: not captured'));
+ assert.equal(L.maxPainLine(null),'');
 });
 ok(()=>{
- assert.equal(L.maxPainSummary({latest_max_pain:23300,latest_spot:23346.4,latest_gap:-46.4,total_oi:6150000}),
-  `Max pain 23,300 · spot ${RUPEE}23,346.40 · 46 below spot. From 61.5L contracts of open interest.`);
- assert.ok(L.maxPainSummary({latest_max_pain:null,latest_spot:null,latest_gap:null,total_oi:null})
-  .includes('Total OI behind it: not captured'),'a missing total is said, never zeroed');
- assert.equal(L.maxPainSummary(null),'');
-});
-ok(()=>{
- assert.equal(L.pcrSummary({latest_pcr_oi:0.876,latest_pcr_volume:1.02,points:[{at:'2026-09-18 09:30'},{at:'2026-09-18 15:30'}]}),
-  'PCR by open interest 0.88 · PCR by volume 1.02. 2 readings captured, 09:30 to 15:30.');
- assert.ok(L.pcrSummary({latest_pcr_oi:null,latest_pcr_volume:null,points:[]}).includes(DASH),
+ assert.equal(L.pcrLine({latest_pcr_oi:1.1839,latest_pcr_volume:1.0037}),
+  'PCR by open interest 1.18 · PCR by volume 1.00.');
+ assert.ok(L.pcrLine({latest_pcr_oi:null,latest_pcr_volume:null}).includes(DASH),
   'a ratio that is not there is a dash, never a zero');
- assert.equal(L.pcrSummary(null),'');
+ assert.equal(L.pcrLine(null),'');
 });
 ok(()=>{
- assert.equal(L.basisPair(30,0.12),`+${RUPEE}30.00 (+0.12%)`);
+ assert.equal(L.basisPair(30.3,0.13),`+${RUPEE}30.30 (+0.13%)`);
  assert.equal(L.basisPair(-12.5,-0.05),`${MINUS}${RUPEE}12.50 (${MINUS}0.05%)`);
  assert.equal(L.basisPair(30,null),`+${RUPEE}30.00`,'half a pair is still the half we have');
  assert.equal(L.basisPair(null,0.12),'+0.12%');
  assert.equal(L.basisPair(null,null),DASH);
 });
 ok(()=>{
+ assert.equal(L.oiVsAvgText(1.010862),`1.01${TIMES} its 20-day average`);
  assert.equal(L.oiVsAvgText(1.24,20),`1.24${TIMES} its 20-day average, from 20 sessions`);
- assert.equal(L.oiVsAvgText(1.24,1),`1.24${TIMES} its 20-day average, from 1 session`);
- assert.equal(L.oiVsAvgText(1.24),`1.24${TIMES} its 20-day average`);
- assert.equal(L.oiVsAvgText(null,20),'no baseline','§3.7 without a baseline is words, never a ratio');
- assert.equal(L.oiVsAvgText(undefined),'no baseline');
+ assert.equal(L.oiVsAvgText(null),'no baseline','§3.7 without a baseline is words, never a ratio');
 });
-ok(()=>{
- assert.ok(L.futuresBuildupSummary({latest_oi:3750000,oi_change_day:420000,oi_vs_20d_avg:1.24,avg_sessions:20,
-  basis:30,basis_pct:0.12}).startsWith('OI 37.5L (+4,20,000 on the day) · 1.24'));
- assert.ok(L.futuresBuildupSummary({}).includes(DASH),'nothing captured is dashes, never zeros');
- assert.equal(L.futuresBuildupSummary(null),'');
+ok(()=>{ // the futures line, off the server's own latest_* figures
+ const text=L.futuresLine({latest_oi_vs_avg:0.965582,latest_basis:3.7,latest_basis_pct:0.2981,
+  latest_buildup_day:'Long unwinding'});
+ assert.ok(text.includes(`0.97${TIMES} its 20-day average`),text);
+ assert.ok(text.includes('Long unwinding on the day'),text);
+ assert.equal(L.futuresLine(null),'');
+ // the build-up label is the SERVER's, already written for the reader - and "no data" is a state, not a label
+ assert.equal(L.servedBuildup('Long build-up'),'Long build-up');
+ assert.equal(L.servedBuildup('Short covering'),'Short covering');
+ assert.equal(L.servedBuildup('no data'),DASH,'"no data" is a dash, not a label read out to the reader');
+ assert.equal(L.servedBuildup(null),DASH);
+ assert.equal(L.servedBuildup(''),DASH);
 });
+ok(()=>{ // the screener's coverage line: the difference between a quiet market and a thin reading
+ const body={scanned:27671,total:491,returned:100,coverage:{at:'x',rows:27671,underlyings:216}};
+ const text=L.coverageText(body);
+ assert.ok(text.includes('27,671 rows'),text);
+ assert.ok(text.includes('216 underlyings'),text);
+ assert.ok(text.includes('491 cleared the floors'),text);
+ assert.ok(text.includes('carries 100 of them'),text);
+ // the reading that passes none of them says exactly that, which is NOT the same as an empty market
+ const none=L.coverageText({scanned:255,total:0,returned:0,coverage:{underlyings:216}});
+ assert.ok(none.includes('255 rows'),none);
+ assert.ok(none.includes('0 cleared the floors'),none);
+ assert.equal(L.coverageText(null),'');
+ assert.equal(L.coverageText({}),'');
+});
+ok(()=>{ // the readings the store holds are choices, and each says how wide it was
+ const choices=L.readingChoices({readings:[{at:'2026-09-18 15:45:00',underlyings:216},
+  {at:'2026-09-18 11:30:00',underlyings:216}]});
+ assert.equal(choices.length,2);
+ assert.equal(choices[0].value,'2026-09-18 15:45:00');
+ assert.equal(choices[0].label,'18 Sep 2026 · 15:45');
+ assert.equal(choices[0].detail,'216 underlyings covered');
+ assert.deepEqual([...L.readingChoices(null)],[]);
+ assert.deepEqual([...L.readingChoices({readings:[{at:''}]})],[],'a reading with no stamp is not a choice');
+});
+
 
 // --- AXIS LABELS: distinct, parseable, and strictly increasing -------------------------------------------------------
 // A chart shipped here once with its time labels running backwards. Both axes are built in ONE place now
@@ -2309,11 +2614,22 @@ ok(()=>{ // the panel really uses those two, and builds neither of its own
  assert.equal((CODE('SessionBlocks.tsx').match(/<Svg/g)||[]).length,0,'the blocks draw no SVG of their own');
  assert.ok(/<SessionPanel /.test(SRC('SessionBlocks.tsx')),'they all use the one panel');
 });
-ok(()=>{ // two series share a scale only when they are the same unit and are read against each other
+ok(()=>{ // two series share a scale only when they are the same unit and are read AGAINST each other
  const blocks=SRC('SessionBlocks.tsx');
- assert.equal((blocks.match(/\bshared\b/g)||[]).length,1,'exactly one block shares a scale');
+ // Two of them qualify, and only two. Max pain against spot: both rupee levels of the same underlying, and
+ // the panel exists to show the distance between them. PCR by open interest against PCR by volume: both
+ // put/call ratios, both read against each other and against 1.0 - on two scales the one visible axis would
+ // belong to one line while the other floated free of it, which is the opposite of what the panel is for.
+ assert.equal((blocks.match(/\bshared\b/g)||[]).length,2,'exactly two blocks share a scale');
  assert.ok(/name="Max pain against spot"[\s\S]{0,300}\bshared\b/.test(blocks),
-  'and it is max pain against spot - both rupee levels of the same underlying');
+  'max pain against spot - both rupee levels of the same underlying');
+ assert.ok(/name="PCR through the session"[\s\S]{0,300}\bshared\b/.test(blocks),
+  'and PCR against PCR - both ratios of the same chain');
+ // everything measured in a DIFFERENT unit keeps its own scale, as the ΔOI tiles already do
+ assert.ok(!/name="Futures open interest"[\s\S]{0,300}\bshared\b/.test(blocks),
+  'open interest and a 20-day share are different units and never share an axis');
+ assert.ok(!/name="Basis through the session"[\s\S]{0,300}\bshared\b/.test(blocks),
+  'nor do rupees of basis and a percentage of spot');
  const pair=L.scaleTogether([23300,23350],[23346,23352],200,100);
  assert.equal(pair.a.lo,pair.b.lo);assert.equal(pair.a.hi,pair.b.hi);
  // and a gap on either line is still a gap
@@ -2383,9 +2699,14 @@ ok(()=>{ // NO block resolves a symbol of its own, by any route
  const blocks=CODE('SessionBlocks.tsx');
  assert.equal((blocks.match(/useDerivativeRead</g)||[]).length,4,
   'one read per session block - PCR, max pain, IV, futures build-up, and no fifth');
- for(const route of ['pcr-series','max-pain-series','iv-series','futures-buildup'])
-  assert.ok(new RegExp(`api/derivatives/${route}\\?underlying=\\$\\{encodeURIComponent\\(symbol\\)\\}`).test(blocks),
-   `${route} must be read for the tab's symbol`);
+ // the routes the SERVER serves, spelled the way it spells them: `maxpain-series` is one word, and a tab
+ // that guessed `max-pain-series` would read as an endpoint that does not exist rather than as a typo.
+ for(const route of ['pcr-series','maxpain-series','iv-series','futures-buildup']){
+  assert.ok(blocks.includes('api/derivatives/'+route+'?underlying=${encodeURIComponent(symbol)}'),
+   route+" must be read for the tab's symbol");
+  assert.ok(APP.includes("@app.get('/api/derivatives/"+route+"')"),
+   route+' must be a route the pilot actually serves');
+ }
 });
 ok(()=>{ // clicking a row ANYWHERE re-points the whole tab: every list writes the same one target
  const page=CODE('index.tsx');
@@ -2395,8 +2716,8 @@ ok(()=>{ // clicking a row ANYWHERE re-points the whole tab: every list writes t
  for(const file of ['UnusualWidget.tsx','SessionBlocks.tsx','OiGridSection.tsx','IndexWidget.tsx'])
   assert.ok(/onTarget\(/.test(CODE(file)),`${file} must write the tab's one target rather than keep its own`);
  // the IV strike list re-points it too, so a strike is a symbol choice like any other row
- assert.ok(/onPick=\{onTarget\?row=>onTarget\(\{underlying:body\?\.underlying\|\|symbol/.test(SRC('SessionBlocks.tsx')),
-  'a strike in the IV list points the tab at its underlying');
+ assert.ok(SRC('SessionBlocks.tsx').includes("onPick={onTarget?(leg,last)=>onTarget({underlying:body?.underlying||symbol,"),
+  'a leg of the at-the-money strike points the tab at its underlying');
 });
 
 // --- the block rhythm: one as-of, one "How to read this", and no chart-sized voids --------------------------------------
@@ -2489,19 +2810,19 @@ ok(()=>{
  }
 });
 ok(()=>{ // every sentence the new logic can produce, whatever the data does
- const sentences=[L.PCR_DEFINITION,L.PCR_READING_TEXT,L.PCR_NO_POINTS,L.PCR_THIN_CHAIN,L.PCR_OI_LABEL,L.PCR_VOLUME_LABEL,
-  L.MAX_PAIN_DEFINITION,L.MAX_PAIN_GAP_TEXT,L.MAX_PAIN_READING_TEXT,L.MAX_PAIN_NO_POINTS,L.MAX_PAIN_THIN_CHAIN,
-  L.IV_COMPUTED_TEXT,L.IV_ATM_LABEL,L.IV_DEFINITION,L.IV_READING_TEXT,L.IV_NO_POINTS,L.IV_THIN_CHAIN,
-  ...Object.values(L.IV_REASONS),L.ivReasonText('anything_new'),L.ivModelText(null),
-  L.FUTURES_BUILDUP_DEFINITION,L.FUTURES_BUILDUP_READING_TEXT,L.FUTURES_BUILDUP_NO_POINTS,L.FUTURES_BUILDUP_THIN,
+ const sentences=[L.PCR_DEFINITION,L.PCR_READING_TEXT,L.PCR_NO_POINTS,L.PCR_OI_LABEL,L.PCR_VOLUME_LABEL,
+  L.MAX_PAIN_DEFINITION,L.MAX_PAIN_GAP_TEXT,L.MAX_PAIN_READING_TEXT,L.MAX_PAIN_NO_POINTS,L.maxPainDistanceText(-301),
+  L.IV_COMPUTED_TEXT,L.IV_ATM_LABEL,L.IV_DEFINITION,L.IV_READING_TEXT,L.IV_NO_POINTS,
+  ...Object.values(L.IV_REASONS),L.ivReasonText('anything_new'),L.ivMethodText(null),L.ivRateSensitivityText(-0.12),
+  L.FUTURES_BUILDUP_DEFINITION,L.FUTURES_BUILDUP_READING_TEXT,L.FUTURES_BUILDUP_NO_POINTS,
   L.NO_SYMBOL_TEXT,L.FILTER_PENDING_REASON,L.FILTER_NOT_APPLIED_REASON,L.FILTER_UNSUPPORTED_REASON,
   L.appliedText([]),L.notAppliedText(L.filterStatuses(RULES,{applied:[],available:[]})),
-  ...Object.values(L.PCR_CHIPS),...Object.values(L.MAX_PAIN_CHIPS),...Object.values(L.IV_CHIPS),
-  ...Object.values(L.FUTURES_CHIPS),L.NO_SESSION_DIRECTION,
-  L.maxPainSummary({latest_max_pain:1,latest_spot:2,latest_gap:1,total_oi:3}),
-  L.pcrSummary({latest_pcr_oi:1,latest_pcr_volume:1,points:[]}),
-  L.futuresBuildupSummary({latest_oi:1,oi_vs_20d_avg:1,avg_sessions:20,basis:1,basis_pct:1}),
-  L.ivCoverageText([{iv:1}]),L.ivStrikeSpoken({strike:1,option_type:'CE',iv:0.2}),
+  
+  L.NO_SESSION_DIRECTION,L.servedChip('shifting_up',{up:'shifting_up',down:'shifting_down',flat:'stable',none:'no baseline'},{shifting_up:'Shifting Up'}),
+  L.maxPainLine({latest_max_pain_strike:1,latest_spot:2,latest_distance:1,latest_total_oi:3}),
+  L.pcrLine({latest_pcr_oi:1,latest_pcr_volume:1}),
+  L.futuresLine({latest_oi_vs_avg:1,latest_basis:1,latest_basis_pct:1,latest_buildup_day:"Long build-up"}),
+  L.ivRateSourceShort({risk_free_rate:0.065,risk_free_rate_source:{kind:"code constant",live_feed:false}}),
   L.sessionSpoken('PCR by open interest',[1,2],['2026-09-18 09:30','2026-09-18 09:45'])];
  const banned=/\b(will|expect|expected|forecast|predict|prediction|likely|should rise|should fall|target price|support level|resistance level|breakout|momentum|overbought|oversold|bullish|bearish|buy signal|sell signal|uptrend|downtrend|rally|reversal)\b/i;
  for(const text of sentences){
@@ -2515,12 +2836,12 @@ ok(()=>{ // the owner's word for a 15-minute timestamp, on every new file and ev
   const left=marky(SRC(file));
   assert.deepEqual(left,[],`${file}: say "15-min reading(s)", not "mark": ${left.join(' | ')}`);
  }
- const sentences=[L.PCR_DEFINITION,L.PCR_READING_TEXT,L.PCR_NO_POINTS,L.PCR_THIN_CHAIN,L.MAX_PAIN_DEFINITION,
-  L.MAX_PAIN_GAP_TEXT,L.MAX_PAIN_READING_TEXT,L.MAX_PAIN_NO_POINTS,L.MAX_PAIN_THIN_CHAIN,L.IV_COMPUTED_TEXT,
-  L.IV_DEFINITION,L.IV_READING_TEXT,L.IV_NO_POINTS,L.IV_THIN_CHAIN,...Object.values(L.IV_REASONS),
-  L.FUTURES_BUILDUP_DEFINITION,L.FUTURES_BUILDUP_READING_TEXT,L.FUTURES_BUILDUP_NO_POINTS,L.FUTURES_BUILDUP_THIN,
+ const sentences=[L.PCR_DEFINITION,L.PCR_READING_TEXT,L.PCR_NO_POINTS,L.MAX_PAIN_DEFINITION,
+  L.MAX_PAIN_GAP_TEXT,L.MAX_PAIN_READING_TEXT,L.MAX_PAIN_NO_POINTS,L.maxPainDistanceText(-301),L.IV_COMPUTED_TEXT,
+  L.IV_DEFINITION,L.IV_READING_TEXT,L.IV_NO_POINTS,...Object.values(L.IV_REASONS),
+  L.FUTURES_BUILDUP_DEFINITION,L.FUTURES_BUILDUP_READING_TEXT,L.FUTURES_BUILDUP_NO_POINTS,
   L.NO_SYMBOL_TEXT,L.FILTER_PENDING_REASON,L.FILTER_NOT_APPLIED_REASON,L.FILTER_UNSUPPORTED_REASON,
-  L.ivCoverageText([{iv:1}]),L.pcrSummary({latest_pcr_oi:1,latest_pcr_volume:1,points:[{at:'2026-09-18 09:30'}]}),
+  L.pcrLine({latest_pcr_oi:1,latest_pcr_volume:1}),
   L.sessionSpoken('x',[1,2],['2026-09-18 09:30','2026-09-18 09:45'])];
  for(const text of sentences)assert.ok(!MARK_WORD.test(String(text)),`a session-block sentence says "mark": ${text}`);
  // and the owner's replacement really is the words used
@@ -2542,13 +2863,379 @@ ok(()=>{ // amber is a caveat on the DATA, and is not spent on anything else in 
  assert.ok(/unsupported:\{color:C\.muted/.test(widget),'an unsupported filter is muted, not amber');
  assert.ok(/pending:\{color:C\.muted/.test(widget),'and so is one the server has not answered on');
 });
-ok(()=>{ // a value the server withheld is the SERVER's sentence, never a blank and never a number
+ok(()=>{ // a value the server withheld is the SERVER's own sentence, never a blank and never a number
  const blocks=SRC('SessionBlocks.tsx');
- assert.equal((blocks.match(/const caveat=body\?\.withheld\?\(body\.withheld_text\|\|''\)\.trim\(\):''/g)||[]).length,4,
-  'every block carries the server\'s own withheld sentence');
- assert.equal((blocks.match(/caveat=\{caveat\}/g)||[]).length,9,'and every panel of every block prints it');
- // it goes into the block's definitions too, marked as the caveat it is
- assert.equal((blocks.match(/caveat\?\{text:caveat,tone:'amber' as const\}:null/g)||[]).length,4);
+ // three of the four carry a withheld tally; IV carries its refusals and its rate caveat instead
+ assert.equal((blocks.match(/const caveat=withheldText\(body\)/g)||[]).length,3,
+  'PCR, max pain and futures build-up each carry the reasons their session is short');
+ assert.ok(/const rateCaveat=ivRateIsAssumed\(body\)/.test(blocks),'and IV carries its own, about the rate');
+ assert.equal((blocks.match(/caveat=\{caveat\}/g)||[]).length,7,'and every panel of those three prints it');
+ assert.equal((blocks.match(/caveat=\{rateCaveat\}/g)||[]).length,2,'as do both IV panels');
+ // the tally and the sentences behind it go into the block's one disclosure, marked as what is missing
+ assert.equal((blocks.match(/gapGroup\(body\)/g)||[]).length,3);
+ assert.ok(/heading:'What is missing, and why'/.test(blocks));
+});
+
+
+// =================================================================================================================
+// RENDER-TIME TRANSFORMS ON USER-FACING COPY
+//
+// 293 checks passed over a sentence that reached the screen as:
+//   "A contract i li ted only when it clear all three liquidity floor , which are named in How to read thi ."
+// The cause was `.replace(/s+/g,' ')` where `.replace(/\s+/g,' ')` was meant — one missing backslash, so every
+// run of the letter "s" became a space. Every one of those 293 checks asserted either on the SOURCE text or on
+// a pure function's RETURN VALUE. Not one of them asserted on the string a component actually hands the screen,
+// and a sentence can be destroyed in the gap between those two.
+//
+// So this section works on the gap itself, in two ways:
+//   1. A shape rule over every transform on copy: a `.replace` that collapses text to whitespace or deletes it
+//      must match on an ESCAPE or a character class. `/s+/` is a run of letters; `/\s+/` is whitespace. A
+//      pattern of bare letters that replaces them with a space is the bug, whatever the letters are.
+//   2. A render-path spot check: the expression that builds the screener's empty sentence is pulled out of the
+//      component, evaluated exactly as written, and the words the source promises are asserted in the result.
+// Reverting the fix fails both.
+// =================================================================================================================
+const TSX=['UnusualWidget.tsx','ScreenerSection.tsx','SessionBlocks.tsx','SessionPanel.tsx','OiGridSection.tsx',
+ 'FuturesChartPanel.tsx','frame.tsx','ChartTile.tsx','ChainWidget.tsx','IndexWidget.tsx','FuturesWidget.tsx',
+ 'OiByStrikeSection.tsx','FilterDialog.tsx','Table.tsx','index.tsx'];
+/** The {...} expression starting at `open`, with its braces balanced (template holes included). */
+const balanced=(text,open)=>{
+ let depth=0;
+ for(let i=open;i<text.length;i++){
+  if(text[i]==='{')depth++;
+  else if(text[i]==='}'){depth--;if(!depth)return text.slice(open,i+1);}
+ }
+ throw new Error('unbalanced expression');
+};
+ok(()=>{ // 1. no transform that collapses copy may match on a bare run of letters
+ let seen=0;
+ for(const file of TSX){
+  const code=CODE(file);
+  for(const m of code.matchAll(/\.replace\(\/((?:[^/\\\n]|\\.)+)\/(\w*)\s*,\s*(['"`])([^'"`]*)\3\s*\)/g)){
+   const [,pattern,flags,,to]=m;
+   // only the collapsing kind: replacing with whitespace or with nothing is a formatting transform, and a
+   // formatting transform is about whitespace, so its pattern must say so
+   if(!/^\s*$/.test(to))continue;
+   seen++;
+   assert.ok(/\\[a-zA-Z]|\[/.test(pattern),
+    `${file}: .replace(/${pattern}/${flags},'${to}') collapses copy with a pattern of plain letters. `+
+    `That is what a lost backslash looks like — write \\s, \\n or a character class.`);
+  }
+ }
+ assert.ok(seen>0,'this guard must actually be looking at something');
+});
+ok(()=>{ // and the same rule over the whole file, for a transform written any other way round
+ for(const file of TSX){
+  const code=CODE(file);
+  for(const m of code.matchAll(/\.replace\(\/([a-zA-Z][a-zA-Z0-9]*)([+*]?)\/g\s*,/g))
+   assert.fail(`${file}: .replace(/${m[1]}${m[2]}/g, …) matches LETTERS, not whitespace — a lost backslash`);
+ }
+});
+ok(()=>{ // 2. the screener's empty sentence survives the path it actually travels to the screen
+ const code=CODE('UnusualWidget.tsx');
+ const at=code.indexOf('emptyDetail=');
+ assert.ok(at>0,'the screener must build an empty-state sentence');
+ const expr=balanced(code,code.indexOf('{',at));
+ // evaluated exactly as written, with the served hole stubbed: what comes out is what the reader gets
+ const rendered=new Function('screenerEmptyDetail','body',`return ${expr.slice(1,-1)};`)(()=>'',null);
+ for(const phrase of ['A contract is listed only when it clears all three liquidity floors',
+  'which are named in How to read this'])
+  assert.ok(rendered.includes(phrase),
+   `the screener's empty sentence is mangled on the way to the screen: "${rendered}"`);
+ // and it really is collapsed onto one line, which is what the transform is there for
+ assert.ok(!/\n|\s{2,}/.test(rendered),`the sentence should be one line: "${rendered}"`);
+ // every word of the source survives: a transform that eats one letter everywhere would pass a phrase check
+ // that happened to miss it, and would not pass this
+ const source=expr.replace(/\$\{[^{}]*\}/g,' ').replace(/[`{}]/g,' ');
+ for(const word of new Set(source.match(/[A-Za-z]{4,}/g)||[])){
+  if(['replace','trim','emptyDetail'].includes(word))continue;
+  assert.ok(rendered.includes(word),`"${word}" is in the source and not in what renders: "${rendered}"`);
+ }
+});
+ok(()=>{ // the same words really are the ones the reader is promised, and are not a copy that has drifted
+ const code=CODE('UnusualWidget.tsx');
+ assert.ok(/liquidity floors, which are named in How to\s+read this/.test(code),
+  'the screener names where the floors are written down');
+ // the served detail rides along rather than replacing it, so the two facts are never one or the other
+ assert.ok(/\$\{screenerEmptyDetail\(body\)\}/.test(code));
+});
+ok(()=>{ // no OTHER user-facing copy is cut down at render time either: the short forms are built in logic
+ const widget=CODE('UnusualWidget.tsx');
+ assert.ok(!/\.label\.replace\(/.test(widget),
+  'a label is built in logic, never cut out of a longer one at render time');
+ assert.ok(/options=\{list\.map\(r=>\(\{value:r\.value,label:r\.short,detail:r\.detail\}\)\)\}/.test(widget),
+  'the compact reading label is served by logic.readingChoices');
+ const choice=L.readingChoices({readings:[{at:'2026-09-18 15:45:00',underlyings:216}]})[0];
+ assert.equal(choice.label,'18 Sep 2026 · 15:45');
+ assert.equal(choice.short,'15:45','both forms come out of the one builder');
+ // an unreadable stamp keeps whatever it had rather than being cut to nothing
+ assert.equal(L.readingChoices({readings:[{at:'nonsense'}]})[0].short,'nonsense');
+});
+ok(()=>{ // every remaining transform on copy in these files is one of the harmless kinds, and is listed
+ const allowed=/\.(trim|toLowerCase|toUpperCase|toFixed|toLocaleString|padStart|padEnd|join|slice|split|includes|startsWith|endsWith|match|test|repeat|map|filter|find|reverse|sort|some|every|replace)\(/;
+ for(const file of TSX){
+  const code=CODE(file);
+  // `.substr`/`.substring` truncate silently and have no place in copy on this tab
+  assert.ok(!/\.substr\(|\.substring\(/.test(code),
+   `${file}: substr/substring truncates copy silently - clamp with numberOfLines or build the short form in logic`);
+  // a slice on a STRING literal is a truncation of copy; on an array it is a window of rows, which is fine
+  for(const m of code.matchAll(/(['"`][^'"`\n]{8,}['"`])\s*\.slice\(/g))
+   assert.fail(`${file}: ${m[1]}.slice( truncates copy - say the short thing instead of cutting the long one`);
+  assert.ok(allowed,'');
+ }
+});
+ok(()=>{ // the one place a control character is used to join sentences really is a control character
+ const panel=CODE('FuturesChartPanel.tsx');
+ const split=/const SPLIT='\\u0000'/.test(panel);
+ assert.ok(split,'the futures panel joins its notes on a character that cannot occur inside one');
+ assert.ok(/info\.split\(SPLIT\)/.test(panel),'and splits on the same one');
+ // a printable separator here would cut a sentence in half the first time one contained it
+ assert.ok(!/const SPLIT='[^\\]/.test(panel),'never a printable separator');
+});
+
+
+// --- a column header FITS its column ----------------------------------------------------------------------------
+// Two of the screener's headers printed on the same pixels the first time it was looked at with real rows:
+// "ODI CHG (DAY)" and "VOLUMEL VS MEDIAN". Wider labels had been added to columns sized for shorter ones, and
+// nothing in the suite was measuring that. This does, in the same arithmetic the block titles are already held
+// to - and Table.tsx now clips as well, so a future miss degrades to a clipped word instead of a collision.
+/** Every column of a table, split on its own entry rather than matched by a regex that stops at the first
+ *  closing brace - a render function full of JSX has plenty of those. */
+const tableColumns=(file)=>{
+ const src=SRC(file);
+ const at=src.indexOf('Column<');
+ assert.ok(at>0,file+' must declare its columns');
+ const body=src.slice(src.indexOf('[',at),src.indexOf("\n ],[",at));
+ return body.split(/\n  \{key:'/).slice(1).map(chunk=>{
+  const key=chunk.slice(0,chunk.indexOf("'"));
+  const label=/label:'([^']+)'/.exec(chunk);
+  const width=/width:(\d+)/.exec(chunk);
+  return {key,label:label?label[1]:'',width:width?Number(width[1]):0,
+   sortable:/value:VALUE\./.test(chunk),funnel:/filter:onCustomize/.test(chunk)};
+ });
+};
+ok(()=>{
+ // the header's own type: 10px, InterMedium, uppercase, 0.6 letter-spacing. 7.0px a character is a deliberate
+ // over-estimate, so a label that passes here has room to spare in the browser.
+ const CHAR=7.0,PAD=12,SORT=11,FUNNEL=10,GAP=3;
+ const cols=tableColumns('UnusualWidget.tsx');
+ assert.ok(cols.length>=14,`the screener's columns look unread: found ${cols.length}`);
+ for(const col of cols){
+  assert.ok(col.label&&col.width,`the ${col.key} column needs a label and a width`);
+  const needs=col.label.length*CHAR+PAD+(col.sortable?SORT+GAP:0)+(col.funnel?FUNNEL+GAP:0);
+  assert.ok(needs<=col.width,
+   `the "${col.label}" header needs ${Math.round(needs)}px and its column is ${col.width}px - it would print over its neighbour`);
+ }
+});
+ok(()=>{ // and the table clips a header that outgrows its column, whatever the widths say
+ const table=SRC('Table.tsx');
+ assert.ok(/gap:3,minWidth:0,overflow:'hidden',justifyContent:justify\(column\.align\)/.test(table),
+  'the header cell must clip its contents');
+ assert.ok(/<T numberOfLines=\{1\} style=\{\[head,\{flexShrink:1,minWidth:0,/.test(table),
+  'and the label itself must be allowed to shrink inside it');
+});
+ok(()=>{ // every column showing a funnel really is one the Customize builder can make a rule for
+ const onto={symbol:'underlying',summary:'underlying',expiry:'expiry',dte:'dte',oi_chg:'oiChangeDay',
+  oi_chg_15m:'oiChange15m',vol_ratio:'volumeRatio',vol_oi:'volumeToOi',premium:'premium',buildup:'buildup'};
+ const columns=new Set(L.FILTER_COLUMNS.map(c=>c.key));
+ const funnels=tableColumns('UnusualWidget.tsx').filter(c=>c.funnel);
+ assert.ok(funnels.length>=8,`a funnel says "you can filter on this": found ${funnels.length}`);
+ for(const col of funnels){
+  assert.ok(onto[col.key],`the "${col.key}" column shows a funnel but nothing says which rule it opens`);
+  assert.ok(columns.has(onto[col.key]),`the "${col.key}" funnel opens ${onto[col.key]}, which is not a rule`);
+ }
+});
+
+// --- a chip that loses its vocabulary is a chip that lost its direction -------------------------------------------
+// The futures route serves TWO vocabularies, named for its two readings (`oi` and `basis`), where every other
+// route serves one flat map. Handing a chip the whole object instead of the one it wanted is a QUIET failure:
+// `up` is undefined, so the chip keeps its word and loses its arrow AND its colour — and still reads as a chip.
+// It shipped that way for one screenshot. These hold the resolution explicit and the failure findable.
+ok(()=>{ // a flat vocabulary resolves; a named one resolves by name; anything else resolves to nothing
+ const flat={up:'rising',down:'falling',flat:'flat',none:'no baseline'};
+ const named={oi:{up:'building',down:'unwinding',flat:'flat',none:'no baseline'},
+  basis:{up:'widening',down:'narrowing',flat:'flat',none:'no baseline'}};
+ assert.deepEqual({...L.directionWords(flat)},flat);
+ assert.deepEqual({...L.directionWords(named,'oi')},named.oi);
+ assert.deepEqual({...L.directionWords(named,'basis')},named.basis);
+ // the whole object where ONE of its vocabularies was wanted is not a vocabulary
+ assert.equal(L.directionWords(named),null,'a map of vocabularies is not itself one');
+ assert.equal(L.directionWords(flat,'oi'),null,'and a name that is not there resolves to nothing');
+ assert.equal(L.directionWords(null),null);
+ assert.equal(L.directionWords({up:'rising'}),null,'half a vocabulary is not one either');
+});
+ok(()=>{ // and the state that used to pass silently is now something that can be asked about
+ const named={oi:{up:'building',down:'unwinding',flat:'flat',none:'no baseline'}};
+ assert.equal(L.directionMissing('unwinding',L.directionWords(named,'oi')),false);
+ assert.equal(L.directionMissing('unwinding',L.directionWords(named)),true,
+  'a direction with no vocabulary containing it is the quiet failure');
+ assert.equal(L.directionMissing('unwinding',null),true);
+ // no direction at all is not a failure, it is a state
+ assert.equal(L.directionMissing('',null),false);
+ assert.equal(L.directionMissing(L.NO_SESSION_DIRECTION,null),false);
+ assert.equal(L.directionMissing(null,null),false);
+});
+ok(()=>{ // every chip on the tab resolves its vocabulary through that one helper
+ const blocks=CODE('SessionBlocks.tsx');
+ assert.equal((blocks.match(/directionWords\(body\?\.direction_words/g)||[]).length,5,
+  'PCR, max pain, IV, and the futures block twice - one resolution each');
+ assert.ok(/directionWords\(body\?\.direction_words,'oi'\)/.test(blocks)
+  &&/directionWords\(body\?\.direction_words,'basis'\)/.test(blocks),
+  'the futures block asks for its two by name');
+ // and NO chip is handed the raw response field any more
+ assert.ok(!/servedChip\([^)]*body\?\.direction_words/.test(blocks),
+  'a chip is never handed the raw field: on the futures route that is a map of vocabularies, not one');
+ assert.ok(!/servedTone\([^)]*body\?\.direction_words/.test(blocks));
+});
+ok(()=>{ // the futures route really does serve two, and the others really do serve one
+ assert.ok(/'direction_words':\{'oi':/.test(DERIV_PY)||/direction_words.{0,40}'oi'/.test(DERIV_PY),
+  'derivatives.py serves the futures vocabularies by name');
+ // the two sets of words are the ones the chips are built from
+ for(const word of ['building','unwinding','widening','narrowing','rising','falling','expanding','cooling',
+  'shifting_up','shifting_down','stable'])
+  assert.ok(DERIV_PY.includes(`'${word}'`),`the server must know the word "${word}"`);
+});
+
+
+// --- a bare dash never stands inside a SENTENCE ------------------------------------------------------------------
+// A dash in a column of numbers is fine: the label beside it says what is missing. A dash dropped into the
+// middle of a sentence is not - "basis — · Short covering on the day" makes the reader work out which of two
+// numbers was the cause of the other. Both places this happens are a derived figure whose input was not
+// captured, and both now say so instead.
+ok(()=>{
+ // the futures line, with a spot the store did not capture (NIFTY's own latest reading, 18 Sep)
+ const noSpot=L.futuresLine({latest_oi_vs_avg:1.0082,latest_basis:null,latest_basis_pct:null,
+  latest_buildup_day:'Short covering'});
+ assert.ok(noSpot.includes('no spot was captured at this reading, so there is no basis'),noSpot);
+ assert.ok(!noSpot.includes(DASH),'no bare dash is left in the sentence: '+noSpot);
+ assert.ok(noSpot.includes('1.01'),'the figure that WAS captured is still there');
+ assert.ok(noSpot.includes('Short covering on the day'),noSpot);
+ // with both, it reads as a basis
+ const whole=L.futuresLine({latest_oi_vs_avg:0.9656,latest_basis:3.7,latest_basis_pct:0.2981,
+  latest_buildup_day:'Long unwinding'});
+ assert.ok(whole.includes('basis +'),whole);
+ assert.ok(!whole.includes(DASH),whole);
+ // a build-up the store could not label is left out of the sentence rather than dashed into it
+ const noLabel=L.futuresLine({latest_oi_vs_avg:1,latest_basis:1,latest_basis_pct:1,latest_buildup_day:'no data'});
+ assert.ok(!noLabel.includes(DASH),noLabel);
+ assert.ok(!/on the day/.test(noLabel),'an unlabelled build-up is not announced: '+noLabel);
+});
+ok(()=>{ // and the ROW keeps its dash, because there the label beside it says what is missing
+ const blocks=SRC('SessionBlocks.tsx');
+ assert.ok(/label:'Basis \(futures less spot\)',value:basisPair\(body\?\.latest_basis,body\?\.latest_basis_pct\),/
+  .test(blocks));
+ assert.ok(/reason:BASIS_NO_SPOT_ROW/.test(blocks),'and the reason stands under it');
+ assert.ok(/A basis needs a futures price and a spot at the same reading\./.test(CODE('logic.ts')));
+ // the same shape as max pain's, which is the other derived figure with a missing input
+ assert.ok(/reason:'Distance needs both a strike and a spot at the same reading\.'/.test(blocks));
+ // every readings row whose value can be a dash carries a reason for it
+ const rows=[...blocks.matchAll(/{label:'[^']+',value:[^}]*?}/g)].map(m=>m[0]);
+ assert.ok(rows.length>=14,`the readings rows look unread: ${rows.length}`);
+});
+
+
+// =================================================================================================================
+// SUPPORT AND RESISTANCE: AN OBSERVATION IS ALLOWED, A LEVEL IS NOT
+//
+// The owner wrote the ΔOI flow table himself and asked for it VERBATIM. Two of its sentences are
+//
+//     "Sellers are building resistance"        and        "Sellers are building support"
+//
+// and they are ALLOWED. They are allowed for a reason, and the reason is written down here rather than left to
+// be rediscovered, because the obvious thing to do about them is to reword them and the obvious thing is wrong:
+//
+//     Describing where open interest is sitting RIGHT NOW is an OBSERVATION.
+//     Naming a level the price will respect is a FORECAST.
+//
+// "Sellers are building resistance" is the first kind. It says what the book did at this 15-min reading — puts or
+// calls were written, and by whom — and it is the owner's own word for that. "NIFTY will struggle at 23,500" is
+// the second kind, and it stays forbidden, as does every form that turns the word into a price.
+//
+// So this does not ban the two words. It bans the LEVEL FORMS: the word tied to "level", to "at" / "near" /
+// "around", to a zone, a band or a line, or to a number anywhere in the same sentence. Every OTHER use is
+// refused too, so the allowance is exactly two sentences and not a doorway.
+//
+// IF YOU ARE HERE BECAUSE A SWEEP FLAGGED THE OWNER'S SENTENCES: do not reword them. Add them to the allow list.
+// =================================================================================================================
+const OWNER_FLOW_PHRASES=['Sellers are building resistance','Sellers are building support'];
+const LEVEL_WORD=/\b(support|resistance)\b/i;
+/** '' when a string is clean; otherwise the offending sentence.
+ *
+ *  The allowance is the WHOLE SENTENCE, not a substring of one. Striking the owner's phrase out of a longer
+ *  line and judging what is left was the first thing tried here, and it is a doorway: it clears "Sellers are
+ *  building resistance at 23,500", which is precisely the forecast this exists to refuse. So a sentence is
+ *  clean only when, with its trailing punctuation off, it IS one of his two sentences and nothing more. */
+const levelForm=(text)=>{
+ const whole=String(text||'');
+ if(!LEVEL_WORD.test(whole))return '';
+ for(const sentence of whole.split(/(?<=[.!?])\s+/)){
+  if(!LEVEL_WORD.test(sentence))continue;
+  const bare=sentence.replace(/^[\s"'“”‘’]+|[\s.!?,;:"'“”‘’]+$/g,'');
+  if(OWNER_FLOW_PHRASES.includes(bare))continue;   // his sentence, whole and on its own
+  return sentence;                                  // anything else naming support or resistance is a level
+ }
+ return '';
+};
+ok(()=>{ // the owner's two sentences pass, alone and inside a line of their own block
+ for(const phrase of OWNER_FLOW_PHRASES){
+  assert.equal(levelForm(phrase),'',`the owner's own words must pass: ${phrase}`);
+  assert.equal(levelForm(`Put writing increasing. ${phrase}.`),'');
+ }
+});
+ok(()=>{ // and every level form is refused, including the owner's words turned into a price
+ const banned=['Resistance level at 23,500','A support level is forming','Resistance at 23,500',
+  'Support near 23,300','Watch the resistance zone','Strong support around 23,000',
+  'Sellers are building resistance at 23,500','Sellers are building support around 23,300',
+  '23,500 is resistance','The book shows resistance here','Buyers are defending support'];
+ for(const text of banned)assert.ok(levelForm(text),`this must be refused: ${text}`);
+});
+ok(()=>{ // NOTHING the reader can reach on this tab is a level form - on either side
+ const files=fs.readdirSync(path.join(__dirname,'..','src','derivative')).filter(f=>/\.tsx?$/.test(f));
+ assert.ok(files.length>=15,`the tab's files look unread: ${files.length}`);
+ for(const file of files){
+  for(const text of VISIBLE(SRC(file))){
+   const bad=levelForm(text);
+   assert.equal(bad,'',`${file}: a string the reader can reach names a level: "${bad}"`);
+  }
+ }
+ // the server's own flow table, which is where the two allowed sentences live
+ const at=DERIV_PY.indexOf('FLOW_LABELS={');
+ assert.ok(at>0,'derivatives.py must declare FLOW_LABELS');
+ const table=DERIV_PY.slice(at,DERIV_PY.indexOf('\n}',at));
+ for(const m of table.matchAll(/'([^']{12,})'/g)){
+  const bad=levelForm(m[1]);
+  assert.equal(bad,'',`derivatives.py FLOW_LABELS names a level: "${bad}"`);
+ }
+});
+ok(()=>{ // the two sentences are still there, VERBATIM, on both sides
+ // This is the guard against the well-meaning fix. If someone "cleans up" the owner's wording, this fails and
+ // points at the paragraph above rather than letting the table drift away from what he wrote.
+ const client=SRC('logic.ts');
+ for(const phrase of OWNER_FLOW_PHRASES){
+  assert.ok(client.includes(phrase),
+   `"${phrase}" is the owner's own wording and must not be reworded - see the note above this check`);
+  assert.ok(DERIV_PY.includes(phrase),`derivatives.py must serve "${phrase}" verbatim`);
+ }
+ // and they really are the pair the flow table puts on a written-option reading
+ assert.ok(/'CE\|down\|building':\('Call writing increasing','Sellers are building resistance'\)/.test(DERIV_PY));
+ assert.ok(/'PE\|down\|building':\('Put writing increasing','Sellers are building support'\)/.test(DERIV_PY));
+ const labels=Object.values(L.FLOW_LABELS).flat();
+ for(const phrase of OWNER_FLOW_PHRASES)assert.ok(labels.includes(phrase),
+  `the browser's flow table must carry "${phrase}" too, so both sides say the same thing`);
+});
+ok(()=>{ // every OTHER §5 sweep on this tab must leave the owner's two sentences alone
+ // A future tightening that outlaws them would be a real regression, and this is where it gets caught: the
+ // answer is to allow-list them here, not to change what he wrote.
+ const sweeps=[
+  /\b(will|expect|forecast|predict|likely|should rise|should fall|target price|bullish signal|bearish signal)\b/i,
+  /\b(will|expect|forecast|predict|likely|should rise|should fall|target price|target|support level|resistance level|bullish|bearish|buy signal|sell signal)\b/i,
+  /\b(will|expect|expected|forecast|predict|prediction|likely|should rise|should fall|target price|support level|resistance level|breakout|momentum|overbought|oversold|bullish|bearish|buy signal|sell signal|uptrend|downtrend|rally|reversal)\b/i,
+ ];
+ for(const phrase of OWNER_FLOW_PHRASES)for(const sweep of sweeps)
+  assert.ok(!sweep.test(phrase),`a §5 sweep now bans the owner's own wording: ${phrase}`);
+ // the level FORMS of the same words are still caught by those sweeps as well as by levelForm above
+ for(const text of ['A resistance level at 23,500','A support level is forming'])
+  assert.ok(sweeps[1].test(text)&&sweeps[2].test(text),`a level form must still be swept: ${text}`);
 });
 
 
@@ -2560,4 +3247,24 @@ const WEB_DIR=process.env.QA_WEB_DIRECTORY||path.join(__dirname,'..','dist-pilot
 const BUNDLE=(()=>{try{return fs.statSync(path.join(WEB_DIR,'index.html')).mtime.toISOString();}catch{return 'unknown';}})();
 console.log(`derivative logic: ${checks} checks passed`);
 console.log(`Ran against: script ${SCRIPT_SHA} · bundle ${BUNDLE} (${path.relative(path.join(__dirname,'..'),WEB_DIR)||WEB_DIR})`);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
