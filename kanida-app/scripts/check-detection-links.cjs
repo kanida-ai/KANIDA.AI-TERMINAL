@@ -1,0 +1,48 @@
+// Exact research episode links and legacy URL compatibility. No server required.
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),ts=require('typescript'),assert=require('node:assert/strict');
+const load=(rel,dependencies={})=>{const code=ts.transpileModule(fs.readFileSync(path.join(__dirname,'..',rel),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText;const ctx={exports:{},require:n=>n in dependencies?dependencies[n]:n==='react'?{createContext:()=>({}),memo:v=>v}:n==='react-native'?{Platform:{OS:'web'}}:n==='expo-router'?{}:(()=>{throw Error(n)})()};vm.runInNewContext(code,ctx);return ctx.exports;};
+const A=load('src/activeSymbol.tsx'),D=load('src/discover/deeplink.ts');
+const match='GESHIP:1D:CH16:canonical:long';
+const href=D.chartHref('geship','1d',match,'evidence','abc123');
+const active=A.parseActiveParams(Object.fromEntries(new URL(href,'http://localhost').searchParams));
+assert.equal(active.matchId,match);assert.equal(active.detectionId,'abc123');assert.equal(active.side,'long');
+assert.equal(A.parseMatchId(match).variant,'canonical');
+assert.equal(A.parseActiveParams(A.serializeActiveParams(active)).detectionId,'abc123');
+assert.notEqual(A.paramsSignature(A.serializeActiveParams(active)),A.paramsSignature(A.serializeActiveParams({...active,detectionId:'def456'})));
+assert.equal(A.sameActive(active,{...active,detectionId:'def456'}),false);
+const history=A.applyActive(A.applyActive(A.emptyHistory,active),{...active,detectionId:'def456'});
+assert.equal(history.entries.length,2);assert.equal(history.entries[A.stepHistory(history,-1).index].detectionId,'abc123');
+for(const mismatch of [{symbol:'OTHER',timeframe:'1D'},{symbol:'GESHIP',timeframe:'1W'}]){const value=A.normalizeActive({...active,...mismatch});assert.equal(value.matchId,undefined);assert.equal(value.detectionId,undefined);}
+assert.equal(A.normalizeActive({...active,detectionId:'bad/id'}).detectionId,undefined);
+assert.equal(A.normalizeActive({symbol:'GESHIP',source:'search'},active).detectionId,undefined);
+assert.equal(A.normalizeActive({...active,matchId:'GESHIP:1D:CH16:canonical:short',side:'long'}).side,'short');
+assert.equal(D.chartHref('geship','1d','GESHIP:1D:falling_wedge','evidence'),'/chart?s=GESHIP&tf=1D&m=GESHIP%3A1D%3Afalling_wedge&tab=evidence');
+assert.equal(A.parseActiveParams({s:'geship',tf:'1d',m:'GESHIP:1D:falling_wedge'}).matchId,'GESHIP:1D:falling_wedge');
+assert.equal(A.serializeActiveParams(A.parseActiveParams({s:'geship',tf:'1d'})).d,undefined);
+const geometry=load('src/patternGeometry.ts',{'./researchDrawing':load('src/researchDrawing.ts')}),legend=load('src/ChartLegend.tsx',{'./ui':{C:{}},'./model':{},'./patternGeometry':geometry,'./layout/shared':{},'./decision':{sampleSize:()=>({label:'Small sample'})},'./constants':{ROUND_TRIP_COST_PCT:.4}});
+const historyRow={side:'long',reference:{n:2,display_return_pct:1}},episode=id=>({id:match,detection_id:id,symbol:'GESHIP',timeframe:'1D',pattern:'CH16',history:[historyRow],candle_end:'2026-09-17',end_index:1,lines:[{role:'boundary',label:'Neckline',points:[{index:0,value:id==='abc123'?20:30},{index:1,value:id==='abc123'?20:30}]}]});
+const episodes=[episode('def456'),episode('abc123')],snapshot={symbol:'GESHIP',timeframe:'1D',last_candle:'2026-09-17',bars:[{},{}],matches:episodes};
+assert.equal(A.selectedActiveMatch(active,episodes).detection_id,'abc123');
+assert.equal(A.selectedActiveMatch({...active,detectionId:'missing'},episodes),undefined);
+const selected=A.selectedActiveMatch(active,episodes),rows=legend.legendRowsFromChart(snapshot,selected);
+assert.equal(rows[0].key,'abc123');assert.equal(rows[0].boundaries[0].value,20);assert.equal(new Set(rows.map(r=>r.key)).size,2);
+const args={match:selected,history:historyRow,chartData:snapshot,legendKey:{symbol:'GESHIP',timeframe:'1D',selectedKey:'abc123'},age:0,stale:false};
+assert.equal(legend.evidenceFromWorkspace({...args,exit:{data:{side:'long',detection_id:'def456'}}}).keyMatches,false);
+assert.equal(legend.evidenceFromWorkspace({...args,exit:{data:{side:'long'}}}).keyMatches,false);
+assert.equal(legend.evidenceFromWorkspace({...args,exit:{data:{side:'long',detection_id:'abc123'}}}).keyMatches,true);
+assert.equal(legend.evidenceFromWorkspace({...args,chartData:{...snapshot,matches:[episodes[0]]}}).keyMatches,false);
+// Actual KPITTECH deep link: the broad cached list can contain Belthold while the live chart has CH16.
+const kpit=A.parseActiveParams({s:'KPITTECH',tf:'1D',m:'KPITTECH:1D:CH16:canonical:long',d:'13a80128d5ce477d7103'});
+const neighbour={id:'KPITTECH:1D:CDLBELTHOLD:canonical:long',detection_id:'neighbour',symbol:'KPITTECH',timeframe:'1D',pattern:'CDLBELTHOLD',history:[historyRow]};
+const exact={...neighbour,id:kpit.matchId,detection_id:kpit.detectionId,pattern:'CH16',state:'forming',start_index:214,end_index:259};
+const kpitChart={symbol:'KPITTECH',timeframe:'1D',bars:[{},{}],matches:[neighbour,exact]};
+assert.equal(A.selectedActiveMatch(kpit,[neighbour]),undefined,'Capped match list is not authoritative for a live chart link');
+const resolved=A.selectedChartDetection(kpit,kpitChart);
+assert.equal(resolved.pattern,'CH16');assert.equal(resolved.detection_id,'13a80128d5ce477d7103');assert.equal(resolved.start_index,214);assert.equal(resolved.end_index,259);assert.equal(resolved.history.length,0,'Live chart must not inherit legacy history');
+assert.equal(A.selectedChartDetection(kpit,{...kpitChart,matches:[neighbour]}),undefined,'Absent CH16 never opens Belthold');
+assert.equal(A.selectedChartDetection({...kpit,detectionId:'expired'},kpitChart),undefined,'Another occurrence cannot replace the selected occurrence');
+assert.equal(A.selectedChartDetection(kpit,{...kpitChart,symbol:'OTHER'}),undefined);
+assert.equal(legend.evidenceFromWorkspace({match:resolved,history:historyRow,chartData:kpitChart,age:0,stale:false}).keyMatches,false);
+assert.equal(legend.evidenceFromWorkspace({match:resolved,chartData:kpitChart,age:0,stale:false}),null,'No-history live episode shows Evidence n/a, never perpetual loading');
+assert.equal(legend.evidenceFromWorkspace({...args,exit:{data:null}}).keyMatches,false,'A real outstanding evidence request remains pending');
+console.log('PASS: exact episode selection, legend/evidence guards, navigation history, cell guards, and legacy chart URLs');

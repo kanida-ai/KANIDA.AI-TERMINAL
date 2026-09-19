@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "KANIDA",
+    "slug": "kanida",
+    "version": "1.0.0",
+    "scheme": "kanida",
+    "orientation": "default",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "ai.kanida.mobile"
+    },
+    "android": {
+      "package": "ai.kanida.mobile"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "name": "KANIDA · Trading intelligence"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      "expo-secure-store",
+      "expo-web-browser"
+    ],
+    "experiments": {
+      "typedRoutes": false
+    }
+  }
+}

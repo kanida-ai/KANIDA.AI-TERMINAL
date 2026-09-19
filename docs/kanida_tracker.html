@@ -1,0 +1,514 @@
+<title>KANIDA.AI — Build Tracker</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{
+  --paper:#f5f7f8; --panel:#ffffff; --ink:#0d1b24; --muted:#5a6b76; --line:#e2e8ec;
+  --accent:#0c8f89; --accent-soft:#d6efed; --accent-ink:#075a56;
+  --done:#15854a; --done-bg:#dcf1e4; --prog:#b7791f; --prog-bg:#f8ecd2;
+  --wait:#647581; --wait-bg:#e8edf0; --risk:#c0344a; --risk-bg:#f7dbe0;
+  --mono:ui-monospace,"SF Mono","Cascadia Code","Consolas",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  --r:12px; --sh:0 1px 2px rgba(13,27,36,.06),0 4px 14px rgba(13,27,36,.05);
+}
+@media (prefers-color-scheme:dark){:root{
+  --paper:#0a141b; --panel:#0f1d26; --ink:#e7eef2; --muted:#8ba0ac; --line:#1e313c;
+  --accent:#22c3ba; --accent-soft:#0f2e2c; --accent-ink:#7fe4dd;
+  --done:#3ecf7f; --done-bg:#0f2a1d; --prog:#e0a53a; --prog-bg:#2b2211;
+  --wait:#8ba0ac; --wait-bg:#16242d; --risk:#f0637a; --risk-bg:#2c141a;
+  --sh:0 1px 2px rgba(0,0,0,.4),0 6px 18px rgba(0,0,0,.35);
+}}
+:root[data-theme="light"]{--paper:#f5f7f8;--panel:#fff;--ink:#0d1b24;--muted:#5a6b76;--line:#e2e8ec;--accent:#0c8f89;--accent-soft:#d6efed;--accent-ink:#075a56;--done:#15854a;--done-bg:#dcf1e4;--prog:#b7791f;--prog-bg:#f8ecd2;--wait:#647581;--wait-bg:#e8edf0;--risk:#c0344a;--risk-bg:#f7dbe0;--sh:0 1px 2px rgba(13,27,36,.06),0 4px 14px rgba(13,27,36,.05)}
+:root[data-theme="dark"]{--paper:#0a141b;--panel:#0f1d26;--ink:#e7eef2;--muted:#8ba0ac;--line:#1e313c;--accent:#22c3ba;--accent-soft:#0f2e2c;--accent-ink:#7fe4dd;--done:#3ecf7f;--done-bg:#0f2a1d;--prog:#e0a53a;--prog-bg:#2b2211;--wait:#8ba0ac;--wait-bg:#16242d;--risk:#f0637a;--risk-bg:#2c141a;--sh:0 1px 2px rgba(0,0,0,.4),0 6px 18px rgba(0,0,0,.35)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1120px;margin:0 auto;padding:28px 20px 80px}
+header.top{display:flex;flex-wrap:wrap;align-items:flex-end;gap:16px;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:22px}
+.brand{display:flex;flex-direction:column;gap:6px}
+.kicker{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--accent-ink)}
+h1{font-size:30px;margin:0;letter-spacing:-.02em;text-wrap:balance}
+.goal{color:var(--muted);max-width:62ch;font-size:14.5px;margin-top:2px}
+.stamp{font-family:var(--mono);font-size:11px;color:var(--muted);text-align:right;white-space:nowrap}
+.stamp b{color:var(--accent-ink)}
+/* KPI strip */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:24px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;box-shadow:var(--sh)}
+.kpi .v{font-family:var(--mono);font-size:22px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:11.5px;color:var(--muted);margin-top:3px;text-transform:uppercase;letter-spacing:.04em}
+.kpi .s{font-size:11.5px;color:var(--accent-ink);margin-top:2px}
+/* tabs */
+nav.tabs{display:flex;flex-wrap:wrap;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:5px;margin-bottom:22px;box-shadow:var(--sh)}
+nav.tabs button{flex:1;min-width:110px;font:inherit;font-size:13.5px;font-weight:500;color:var(--muted);background:none;border:0;border-radius:10px;padding:9px 10px;cursor:pointer;transition:.15s}
+nav.tabs button:hover{color:var(--ink)}
+nav.tabs button[aria-selected="true"]{background:var(--accent);color:#fff;box-shadow:var(--sh)}
+:root[data-theme="dark"] nav.tabs button[aria-selected="true"]{color:#04231f}
+nav.tabs a.tablink{flex:1;min-width:110px;font:inherit;font-size:13.5px;font-weight:600;color:var(--accent);text-decoration:none;border-radius:10px;padding:9px 10px;text-align:center;transition:.15s;display:flex;align-items:center;justify-content:center;gap:4px}
+nav.tabs a.tablink:hover{background:var(--accent);color:#fff}
+:root[data-theme="dark"] nav.tabs a.tablink:hover{color:#04231f}
+.view{display:none;animation:fade .25s ease}
+.view.on{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){.view,*{animation:none!important}}
+h2.sec{font-size:13px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:26px 0 12px;font-weight:600}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--sh);padding:18px 20px;margin-bottom:14px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+/* pills */
+.pill{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;padding:3px 9px;border-radius:100px;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.done{color:var(--done);background:var(--done-bg)} .prog{color:var(--prog);background:var(--prog-bg)}
+.wait{color:var(--wait);background:var(--wait-bg)} .risk{color:var(--risk);background:var(--risk-bg)}
+/* milestone rows */
+.mrow{display:grid;grid-template-columns:56px 1fr auto;gap:14px;align-items:center;padding:12px 0;border-top:1px solid var(--line)}
+.mrow:first-child{border-top:0}
+.mid{font-family:var(--mono);font-size:12px;color:var(--muted);font-weight:600}
+.mrow .t{font-size:14.5px;font-weight:550}
+.mrow .d{font-size:12.5px;color:var(--muted);margin-top:2px}
+.phase{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent-ink);margin:20px 0 6px}
+/* progress */
+.bar{height:8px;border-radius:100px;background:var(--line);overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--accent);border-radius:100px}
+.frow{display:flex;align-items:center;gap:12px;margin:9px 0}
+.flab{width:126px;font-size:13px;flex-shrink:0}
+.ftrack{flex:1;height:26px;background:var(--line);border-radius:6px;overflow:hidden}
+.ftrack>i{display:flex;align-items:center;height:100%;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.4);font-family:var(--mono);font-size:11.5px;font-weight:700;padding-left:10px;border-radius:6px;white-space:nowrap;min-width:34px}
+.mermaid{min-width:640px}
+.ihead{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.ihead b{font-size:15.5px}
+.igrid{display:grid;grid-template-columns:0.9fr 1.1fr 1.1fr;gap:18px}
+@media(max-width:720px){.igrid{grid-template-columns:1fr}}
+.ilab{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent-ink);display:block;margin-bottom:4px}
+.igrid p{margin:0;font-size:13px}
+.icur{border-left:3px solid var(--accent)}
+.wsub{font-size:13px;color:var(--muted);margin:3px 0 0;padding-left:16px;position:relative}
+.wsub::before{content:"";position:absolute;left:2px;top:9px;width:5px;height:5px;border-radius:50%;background:var(--accent)}
+/* table */
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--sh)}
+th,td{padding:10px 14px;text-align:right;font-variant-numeric:tabular-nums;font-family:var(--mono)}
+th:first-child,td:first-child{text-align:left;font-family:var(--sans)}
+thead th{background:var(--accent-soft);color:var(--accent-ink);font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:600;position:sticky;top:0}
+tbody tr{border-top:1px solid var(--line)}
+tbody tr:hover{background:var(--accent-soft)}
+.pos{color:var(--done)} .neg{color:var(--risk)}
+/* gate */
+.gate{display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:start;padding:14px 0;border-top:1px solid var(--line)}
+.gate:first-child{border-top:0}
+.gate .g{font-family:var(--mono);font-weight:700;font-size:13px;color:var(--muted)}
+.gate .gt{font-weight:600;font-size:14px}
+.gate .gd{font-size:12.5px;color:var(--muted);margin-top:2px}
+ul.clean{margin:8px 0 0;padding-left:18px;font-size:13.5px;color:var(--muted)}
+ul.clean li{margin:4px 0}
+.note{font-size:12.5px;color:var(--muted);margin-top:10px;padding:10px 12px;background:var(--accent-soft);border-radius:10px}
+footer{margin-top:30px;padding-top:16px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);font-family:var(--mono)}
+</style>
+
+<div class="wrap">
+<header class="top">
+  <div class="brand">
+    <span class="kicker">KANIDA.AI · Build &amp; Business Tracker</span>
+    <h1>One arena. One trader per stock. Learning every day.</h1>
+    <p class="goal">A self-evolving arena of autonomous per-stock AI traders that maximize risk-adjusted <b>Expected Trade Value</b> toward ~1%/day — on a leak-free micro+macro prediction engine, an ultra-fast execution core, and sellable per-stock agents.</p>
+  </div>
+  <div class="stamp">SEALED-YEAR TRUTH: <b>2026</b><br>STAGE: RIGOROUS STRESS-TEST<br>REAL MONEY — HUMAN-GATED</div>
+</header>
+
+<div class="kpis">
+  <div class="kpi"><div class="v">473.7M</div><div class="l">1-min bars</div><div class="s">2015 → 2026, 441 stocks</div></div>
+  <div class="kpi"><div class="v">206,458</div><div class="l">patterns mined</div><div class="s">leak-free · 99 features</div></div>
+  <div class="kpi"><div class="v">+2.66%</div><div class="l">forward edge (OOS)</div><div class="s">micro+macro holds</div></div>
+  <div class="kpi"><div class="v pos">63 / 441</div><div class="l">sellable workers</div><div class="s">net expectancy ≥ +1%/trade</div></div>
+  <div class="kpi"><div class="v pos">+1.53%</div><div class="l">median net expectancy / trade</div><div class="s">worst of 2025 &amp; 2026</div></div>
+  <div class="kpi"><div class="v">123</div><div class="l">sustained positive expectancy</div><div class="s">both years, after costs</div></div>
+  <div class="kpi"><div class="v">seconds</div><div class="l">full-universe run</div><div class="s">frame cache · ultrafast</div></div>
+</div>
+
+<nav class="tabs" role="tablist">
+  <button role="tab" aria-selected="true" data-v="overview">Overview</button>
+  <button role="tab" aria-selected="false" data-v="workers">Workers</button>
+  <button role="tab" aria-selected="false" data-v="impact">Impact Log</button>
+  <button role="tab" aria-selected="false" data-v="architecture">Architecture</button>
+  <button role="tab" aria-selected="false" data-v="data">Data &amp; DBs</button>
+  <button role="tab" aria-selected="false" data-v="milestones">Milestones</button>
+  <button role="tab" aria-selected="false" data-v="workstreams">Workstreams</button>
+  <button role="tab" aria-selected="false" data-v="results">Results</button>
+  <button role="tab" aria-selected="false" data-v="gonogo">Go / No-Go</button>
+  <button role="tab" aria-selected="false" data-v="roadmap">Roadmap</button>
+  <a class="tablink" href="https://claude.ai/code/artifact/67594cb7-182f-4e32-b04c-ea32b73b4c63" target="_blank" rel="noopener">Worker Performance ↗</a>
+</nav>
+
+<!-- OVERVIEW -->
+<section class="view on" id="overview">
+  <h2 class="sec">The waterfall — where we are</h2>
+  <div class="card">
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-family:var(--mono);font-size:12.5px">
+      <span class="pill done">Data</span>→<span class="pill done">Engine</span>→<span class="pill done">Mine</span>→<span class="pill done">Validate</span>→<span class="pill done">Select (a-priori)</span>→<span class="pill prog">Stress-test</span>→<span class="pill wait">GTM / sellable</span>→<span class="pill wait">Live</span>
+    </div>
+    <p class="note">A <b>real, forward-validated edge</b> exists (+2.66% OOS). The lever that banks it is <b>a-priori selection</b> — trade only what each stock's own ≤2024 evidence earned (sealed-2026 ret/DD 0.26 → up to 0.99). We are now in the <b>rigorous stress-test</b> stage: a worker is only "ready" once it clears all 6 tests and is genuinely sellable. <b>54 / 441 clear the bar today</b> — that number is the honest truth, and raising it is the job.</p>
+  </div>
+  <h2 class="sec">Objective &amp; north star</h2>
+  <div class="grid2">
+    <div class="card"><b>Goal</b><p class="goal" style="margin-top:6px">Every stock develops its own better trader every day. Maximize long-term ETV per stock, net of costs, under a Constitutional risk framework — target ≈ <b>1% / trading day risk-adjusted</b> (or 5% / 5 days).</p></div>
+    <div class="card"><b>The two systems</b>
+      <p class="wsub" style="margin-top:8px">Prediction Engine — the micro+macro signal library (done)</p>
+      <p class="wsub">Autonomous Learning Layer — improves <i>how</i> signals are used, never replaces them (in progress)</p></div>
+  </div>
+  <h2 class="sec">Additional directives — captured &amp; tracked</h2>
+  <div class="card"><div style="display:flex;flex-wrap:wrap;gap:8px">
+    <span class="pill done">Fast execution engine</span><span class="pill done">Ultrafast / frame cache</span>
+    <span class="pill done">Trader-language views</span><span class="pill done">Leak-free / sealed-vault</span>
+    <span class="pill done">Order-type × direction × hold</span><span class="pill prog">IPO track</span>
+    <span class="pill wait">Full payload / SoA live</span><span class="pill wait">Per-user broker, 1000s users</span>
+    <span class="pill wait">Sellable per-stock agents</span>
+  </div></div>
+</section>
+
+<!-- WORKERS -->
+<section class="view" id="workers">
+  <h2 class="sec">Net Expectancy — the one metric that decides "sellable"</h2>
+  <p class="goal" style="margin-bottom:12px">A worker is sellable if it makes money <b>per trade, on average, after costs — sustained across years</b>. Not precision, not win-rate. The single number:</p>
+  <div class="card" style="margin-bottom:16px;text-align:center">
+    <div style="font-family:var(--mono);font-size:15px;padding:6px 0"><b>Net Expectancy = (P<sub>win</sub> × Avg Win) − (P<sub>loss</sub> × Avg Loss)</b> &nbsp;— after costs, per trade</div>
+    <p class="note" style="margin-top:8px">It counts the <b>full return distribution</b>: predict +1%, get +0.7% → booked as a <b>+0.7% win</b>, not a miss. A −3% loss hurts 30× more than a −0.1% loss. We measure it on <b>2025 and 2026</b> (clean out-of-sample — patterns were discovered on ≤2024), and "sellable" means expectancy stays positive in <b>both</b> years, ≥ <b>+1%/trade</b> in the worse year. Source of truth: <b>reports/expectancy_scorecard.csv</b>.</p>
+  </div>
+  <div class="kpis" style="margin-bottom:16px">
+    <div class="kpi"><div class="v pos">63</div><div class="l">sellable core</div><div class="s">≥ +1%/trade, sustained</div></div>
+    <div class="kpi"><div class="v">123</div><div class="l">sustained &gt; 0 both years</div><div class="s">incl. 60 below the +1% bar</div></div>
+    <div class="kpi"><div class="v pos">+1.53%</div><div class="l">median net expectancy</div><div class="s">worst year, sellable core</div></div>
+  </div>
+  <div class="card">
+    <div class="frow"><span class="flab">Elite ≥ +3%/trade</span><div class="ftrack"><i style="width:13%;background:var(--done)">8</i></div></div>
+    <div class="frow"><span class="flab">Strong +2 to 3%</span><div class="ftrack"><i style="width:16%;background:var(--done)">10</i></div></div>
+    <div class="frow"><span class="flab">Solid +1 to 2%</span><div class="ftrack"><i style="width:41%;background:var(--accent)">45</i></div></div>
+    <div class="frow"><span class="flab">Below bar (0 to +1%)</span><div class="ftrack"><i style="width:27%;background:var(--prog)">60</i></div></div>
+    <div class="frow"><span class="flab">Not sustained</span><div class="ftrack"><i style="width:72%;background:var(--risk)">318</i></div></div>
+    <p class="note"><b>63 workers clear the +1%/trade bar</b> (8 elite, 10 strong, 45 solid). Another 60 sustain positive expectancy but below +1% (watch-list). This replaced the old binary "pass/fail" gauntlet, which the 5-seed test proved was <b>~95% random-seed luck</b> (only 2 of 64 survived all seeds). Expectancy is continuous — it ranks, it doesn't flip on a coin-toss — which also fixes the false-negative problem (no worker rejected at an arbitrary cliff).</p>
+  </div>
+  <h2 class="sec">Top sellable workers — net expectancy per trade (clean OOS, after costs)</h2>
+  <div class="tw"><table>
+    <thead><tr><th>Worker</th><th>NetExp 2025</th><th>NetExp 2026</th><th>Win rate</th><th>Avg win</th><th>Avg loss</th><th>Trades '25</th></tr></thead>
+    <tbody>
+      <tr><td>TTML</td><td class="pos">+5.34%</td><td class="pos">+4.80%</td><td>68%</td><td>+16.3%</td><td class="neg">−17.7%</td><td>59</td></tr>
+      <tr><td>DEVYANI</td><td class="pos">+4.95%</td><td class="pos">+4.75%</td><td>67%</td><td>+17.9%</td><td class="neg">−21.0%</td><td>54</td></tr>
+      <tr><td>COHANCE</td><td class="pos">+6.19%</td><td class="pos">+4.28%</td><td>68%</td><td>+18.2%</td><td class="neg">−19.1%</td><td>56</td></tr>
+      <tr><td>IRFC</td><td class="pos">+3.72%</td><td class="pos">+4.81%</td><td>67%</td><td>+14.8%</td><td class="neg">−18.5%</td><td>54</td></tr>
+      <tr><td>PATANJALI</td><td class="pos">+2.98%</td><td class="pos">+7.88%</td><td>63%</td><td>+12.2%</td><td class="neg">−12.6%</td><td>51</td></tr>
+      <tr><td>BATAINDIA</td><td class="pos">+2.60%</td><td class="pos">+6.30%</td><td>70%</td><td>+8.7%</td><td class="neg">−11.8%</td><td>74</td></tr>
+      <tr><td>KAYNES</td><td class="pos">+4.82%</td><td class="pos">+3.48%</td><td>77%</td><td>+11.6%</td><td class="neg">−17.6%</td><td>69</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">These win ~65–77% of the time; the wins are a touch smaller than the losses, but winning more <i>often</i> makes the net expectancy strongly positive. Full 63-agent catalogue: <b>reports/sellable_agents_catalog.csv</b>; serialized agents in <b>agents/*.json</b>. Honest caveat: this cohort overlaps the old binary-54 by only 10 — the disagreement is driven by both the metric change and the selection change, so it is a genuine reframing, not a relabel.</p>
+</section>
+
+<!-- IMPACT LOG -->
+<section class="view" id="impact">
+  <h2 class="sec">Impact log — every work item, its effect on workers &amp; the goal</h2>
+  <p class="goal" style="margin-bottom:14px">The rule we work by: <b>nothing gets built without stating, upfront, how it moves the workers up the funnel and the platform toward the goal.</b> Updated with the realized result after each is done.</p>
+
+  <div class="phase">In progress</div>
+  <div class="card icur">
+    <div class="ihead"><span class="pill prog">Now · M14</span><b>Net Expectancy as the sellable metric (your reframe)</b></div>
+    <div class="igrid">
+      <div><span class="ilab">What</span><p>Replace binary pass/fail gates with the one honest number: <b>Net Expectancy = (Pwin·AvgWin) − (Ploss·AvgLoss)</b>, after costs, sustained across years. Re-judges the <i>already-mined</i> patterns on expectancy (no re-mine). Clean OOS on 2025+2026; a clean 2024 needs one extra mine.</p></div>
+      <div><span class="ilab">Impact → Workers</span><p>Interim: <b>123 workers sustain positive expectancy both years</b> (63 at ≥+1%/trade). Continuous ranking <b>fixes the false-negative problem</b> — no worker rejected at an arbitrary cliff.</p></div>
+      <div><span class="ilab">Impact → Goal</span><p>The Constitutional objective becomes sustainable expectancy across regimes — not precision. Pending: adopt formally, add clean 2024, reshape this dashboard around it.</p></div>
+    </div>
+  </div>
+  <div class="card icur">
+    <div class="ihead"><span class="pill done">v2 done · M13</span><b>63 sellable agents — net-expectancy defined</b></div>
+    <div class="igrid">
+      <div><span class="ilab">What</span><p><b>63 self-contained agents shipped</b> (<code>agents/&lt;SYMBOL&gt;.json</code>): expectancy-selected patterns (reproducible signals), routing/leverage rules, and the per-year <b>net-expectancy track record</b> a buyer inspects (Pwin, AvgWin, AvgLoss). Catalogue: <code>reports/sellable_agents_catalog.csv</code>.</p></div>
+      <div><span class="ilab">Realized → Workers</span><p>Each of the 63 is a <b>shippable product</b> with an auditable, expectancy-based track record — median worst-year net expectancy <b>+1.53%/trade</b>, sustained across 2025 &amp; 2026.</p></div>
+      <div><span class="ilab">Next → Goal</span><p>v3 = runtime loader (agent JSON → live signal) + continuous validation record. First revenue-ready artifact, now on the honest metric.</p></div>
+    </div>
+  </div>
+
+  <div class="phase">Queued — expected impact stated before we start</div>
+  <div class="card">
+    <div class="ihead"><span class="pill wait">M11</span><b>2015→ full walk-forward replay</b></div>
+    <div class="igrid">
+      <div><span class="ilab">What</span><p>Replay a decade of leak-proof learning &amp; evolution from 2015.</p></div>
+      <div><span class="ilab">Impact → Workers</span><p>Proves each worker's edge <b>persists</b> across regimes — the confidence to trust a worker live.</p></div>
+      <div><span class="ilab">Impact → Goal</span><p><b>Clears gate G4 (persistence)</b> — the last research gate before a worker is GTM-ready.</p></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="ihead"><span class="pill wait">M13</span><b>Continuous validation &amp; auditable track-record</b></div>
+    <div class="igrid">
+      <div><span class="ilab">What</span><p>validation_events · sim_fills · roster_state · track_record + multi-dim analytics — the ongoing out-of-sample proof that keeps a sold worker honest.</p></div>
+      <div><span class="ilab">Impact → Workers</span><p>Each READY worker carries a <b>durable, auditable track record</b> a buyer can inspect — the credibility a sellable agent needs.</p></div>
+      <div><span class="ilab">Impact → Goal</span><p>Turns the stress-test into a <b>live, continuously-verified quality loop</b>; feeds G6 (live-ready).</p></div>
+    </div>
+  </div>
+
+  <div class="phase">Done — realized impact</div>
+  <div class="card">
+    <div class="ihead"><span class="pill risk">M12c</span><b>Seed-stability ensemble — binary "READY" was ~95% luck</b></div>
+    <div class="igrid">
+      <div><span class="ilab">What</span><p>Mined the same engine under 5 independent random seeds, graded each on the binary 6-test gauntlet, and scored every worker by how many seeds it stayed READY in.</p></div>
+      <div><span class="ilab">Realized → Workers</span><p>Only <b>2 of ~64</b> READY workers survive all 5 seeds (ACC, GICRE); each seed's ~60 READY are mostly <i>different</i> stocks. The binary "sellable" set was overwhelmingly seed-noise.</p></div>
+      <div><span class="ilab">Realized → Goal</span><p>Decisive reason to drop binary gates for a <b>continuous</b> metric → motivated the Net-Expectancy reframe (M14).</p></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="ihead"><span class="pill risk">M12b</span><b>Event features as miner inputs — no real gain (variance)</b></div>
+    <div class="igrid">
+      <div><span class="ilab">What</span><p>Added 6 leak-free event features to the engine and re-mined all 505 symbols in parallel (8 workers, identical per-stock quality) into a separate table. Graded on the same 6-test gauntlet.</p></div>
+      <div><span class="ilab">Realized → Workers</span><p>READY "rose" 54→64, but a same-features different-seed control rose 54→63 — the gain is <b>re-mine variance</b>, and events appear in only <b>3.8%</b> of patterns. Not adopted. Exposed that READY is seed-fragile → led to the stability ensemble (M12c).</p></div>
+      <div><span class="ilab">Realized → Goal</span><p>Saved us from swapping proven agents (DABUR, INDIGO, M&amp;MFIN) for noise. The honest lever isn't events — it's <b>robustness</b>.</p></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="ihead"><span class="pill risk">M12</span><b>Event overlays + stricter bar — tested, don't grow READY</b></div>
+    <div class="igrid">
+      <div><span class="ilab">What</span><p>Two cheap levers to grow the 54: (a) event/calendar timing regimes, (b) a stricter a-priori ETV bar. Both graded on the full 6-test gauntlet, leak-free.</p></div>
+      <div><span class="ilab">Realized → Workers</span><p><b>Neither grows READY.</b> Event timing: leak-free gain ≈ +2 (per-worker selection overfits, −8). Stricter bar: survivors' ret/DD rises (2.12→2.52) but the count <b>falls</b> (54→41) as workers lose the trade-sample gate. <b>54 is the honest ceiling of the current pattern pool.</b></p></div>
+      <div><span class="ilab">Realized → Goal</span><p>Saved us from shipping an overfit "win". Confirms the real lever is <b>richer signals</b> (M12b re-mine), not post-hoc timing.</p></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="ihead"><span class="pill done">M10b</span><b>A-priori point-in-time selection — the real risk lever</b></div>
+    <div class="igrid">
+      <div><span class="ilab">What</span><p>Keep a segment for the book only if its ETV on <b>≤2024 signals</b> cleared a bar; trade kept segments at full breadth (no stops, no reactive weighting). Filter is leak-free vs the eval year.</p></div>
+      <div><span class="ilab">Realized → Workers</span><p>On sealed <b>2026</b>: zero-parameter rule (ETV&gt;0) lifts ret/DD <b>0.26 → 0.61</b>, and turns <b>more</b> workers positive (230 → <b>255</b>). Strict bar (ETV&gt;0.5%) → ret/DD <b>0.99</b> on 203 durable workers.</p></div>
+      <div><span class="ilab">Realized → Goal</span><p><b>Clears gate G5.</b> Profit +76% and drawdown −25% at zero free parameters (up to +134% / −38% tuned) — selection beats reaction. This is the Arena's policy now.</p></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="ihead"><span class="pill risk">M10</span><b>Score-conditional leverage + ETV stops — tested, did not pass</b></div>
+    <div class="igrid">
+      <div><span class="ilab">What</span><p>Full 441-worker sweep isolating each risk overlay (scoring, wick/close stops, leverage) on true portfolio drawdown, 2025–26.</p></div>
+      <div><span class="ilab">Realized → Workers</span><p><b>Every overlay lowered ret/DD.</b> Scoring alone halved trades (46k→21k) &amp; kept only 41% of profit for 28% less DD; wick-stops kept just 19% with <b>no</b> DD benefit. The raw promoted book (ret/DD <b>0.73</b>) beat all six variants.</p></div>
+      <div><span class="ilab">Realized → Goal</span><p><b>Gate G5 not cleared</b> — reactive risk control trades against this edge. Honest correction below. Lever moves to a-priori selection (M10b).</p></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="ihead"><span class="pill done">M8–M9</span><b>Arena core + consolidation</b></div>
+    <div class="igrid">
+      <div><span class="ilab">What</span><p>ETV + Constitutional Score + tail-control; folded to one Arena.</p></div>
+      <div><span class="ilab">Realized → Workers</span><p><b>Correction:</b> the earlier "−74–87% drawdown" came from a 5-stock test with a <b>negative</b> baseline — an artifact. On the full 441-book (M10) the layer does <b>not</b> improve risk-adjusted return. The Arena <i>plumbing</i> (per-worker roster, ETV, cache) stands; the <i>reactive policy</i> was disproven.</p></div>
+      <div><span class="ilab">Realized → Goal</span><p>Value is in the <b>infrastructure</b>, not the reactive policy. Gate G3 re-scoped to "Arena engine works," not "learning beats raw."</p></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="ihead"><span class="pill done">M5</span><b>Full traded book (441 stocks)</b></div>
+    <div class="igrid">
+      <div><span class="ilab">What</span><p>Traded the promoted patterns on sealed 2026.</p></div>
+      <div><span class="ilab">Realized → Workers</span><p>Established the traded book the readiness gauntlet now grades. Honest current count: <b>255/441 profitable</b> on sealed 2026 under selection; <b>54 pass all 6 stress tests</b>.</p></div>
+      <div><span class="ilab">Realized → Goal</span><p>Raw universe book <b>+93.3%</b> proved a tradeable edge exists (gate G2). The <i>durable, sellable</i> slice is what we ship.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ARCHITECTURE -->
+<section class="view" id="architecture">
+  <h2 class="sec">How it flows — data to live</h2>
+  <div class="card"><div class="tw"><pre class="mermaid">
+flowchart LR
+  API["Kite / Rupeezy<br/>APIs"] --> KDB[("kanida.db · 158GB<br/>OHLC 2015-2026")]
+  KDB --> ENG["Atoms + 93 features<br/>+ frame cache"]
+  ENG --> MINE["Miner<br/>outcome-first"]
+  MINE --> SNR[("KANIDA_SNR.db<br/>206k patterns")]
+  SNR --> BOOK["Traded Book<br/>+93% raw · sealed 2026"]
+  SNR --> ARENA["Arena<br/>a-priori selection"]
+  ARENA --> GATE["Stress gauntlet<br/>6 tests"]
+  GATE --> ROSTER["READY 54 · NEAR 161<br/>NOT READY 226"]
+  ROSTER -.roadmap.-> TRACK["Continuous validation<br/>auditable track-record"]
+  TRACK -.roadmap.-> LIVE["Live · per-user broker<br/>ultrafast fan-out"]
+</pre></div></div>
+  <h2 class="sec">Engine speeds</h2>
+  <div class="tw"><table><thead><tr><th>Step</th><th>Speed</th><th>Note</th></tr></thead><tbody>
+    <tr><td>Atom update (live tick)</td><td class="pos">~0.65 ms</td><td>500 stocks / 1-min tick, 1 core</td></tr>
+    <tr><td>Frame build (cached)</td><td class="pos">instant</td><td>one-time 12 min build, then reused</td></tr>
+    <tr><td>Mining</td><td>~15 s / stock</td><td>parallel; 441 stocks overnight</td></tr>
+    <tr><td>Full traded book (441)</td><td class="pos">seconds</td><td>vectorised firing + cache</td></tr>
+    <tr><td>Arena run (441)</td><td class="pos">seconds</td><td>off cache</td></tr>
+  </tbody></table></div>
+  <h2 class="sec">Module health — good / improving / to build</h2>
+  <div class="tw"><table><thead><tr><th>Module</th><th>Role</th><th>Status</th></tr></thead><tbody>
+    <tr><td>Data foundation</td><td>deep OHLC, ATP, corp-actions, IPO</td><td><span class="pill done">Good</span></td></tr>
+    <tr><td>atoms.py / features.py</td><td>micro+macro engine, frame cache</td><td><span class="pill done">Good</span></td></tr>
+    <tr><td>Miner (mine_universe)</td><td>outcome-first pattern discovery</td><td><span class="pill done">Good</span></td></tr>
+    <tr><td>engine_trade (book)</td><td>traded P&amp;L, trader views</td><td><span class="pill done">Good · fast</span></td></tr>
+    <tr><td>arena/arena.py</td><td>a-priori point-in-time selection (canonical)</td><td><span class="pill done">Good · M10b locked in</span></td></tr>
+    <tr><td>worker_readiness.py</td><td>6-test stress gauntlet · source of truth</td><td><span class="pill done">Good</span></td></tr>
+    <tr><td>EVENT features</td><td>expiry/Monday/results — raise the edge</td><td><span class="pill prog">Next · M12</span></td></tr>
+    <tr><td>Validation + track-record tables</td><td>validation_events, sim_fills, roster_state</td><td><span class="pill risk">To build · M13</span></td></tr>
+    <tr><td>IPO lifecycle model</td><td>new-listing edge</td><td><span class="pill risk">To build · M16</span></td></tr>
+    <tr><td>Live payload / SoA / fan-out</td><td>per-user, 1000s users, ultrafast</td><td><span class="pill risk">To build · M17</span></td></tr>
+  </tbody></table></div>
+  <p class="note"><b>Backtest = live parity:</b> the same atoms run over cached history (research) and the live 1-min stream (production) — what we backtest is what fires live.</p>
+</section>
+
+<!-- DATA & DBs -->
+<section class="view" id="data">
+  <h2 class="sec">Where everything lives</h2>
+  <div class="grid2">
+    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><b>kanida.db</b><span class="pill done">158 GB · the data lake</span></div>
+      <p class="wsub" style="margin-top:8px">ohlc_1min (473.7M · 2015→2026) · ohlc_5min · ohlc_daily (→2013)</p>
+      <p class="wsub">ohlc_futures_* · instrument_labels · event_markers · corp_actions</p>
+      <p class="wsub">+ live-product tables: signals · positions · orders · virtual_portfolios</p></div>
+    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><b>KANIDA_SNR.db</b><span class="pill done">0.2 GB · the brain</span></div>
+      <p class="wsub" style="margin-top:8px"><b>unified_patterns</b> — 206,458 micro+macro patterns (THE engine output)</p>
+      <p class="wsub">stock_verdict · walkforward · ipo_cohort (1,296 IPOs)</p>
+      <p class="wsub">trade_log_rev / journal_rev · mined_patterns (earlier reversion work)</p></div>
+  </div>
+  <h2 class="sec">Key tables — what each holds</h2>
+  <div class="tw"><table><thead><tr><th>Table</th><th>DB</th><th>Holds</th></tr></thead><tbody>
+    <tr><td>ohlc_1min</td><td>kanida</td><td>473.7M 1-min bars, 2015→2026, 441+ stocks</td></tr>
+    <tr><td>instrument_labels</td><td>kanida</td><td>sector, F&amp;O flag, Nifty membership, is_ipo, listing_date</td></tr>
+    <tr><td>corp_actions</td><td>kanida</td><td>NSE dividends / splits / bonuses / lock-ins</td></tr>
+    <tr><td>unified_patterns</td><td>SNR</td><td>206k patterns: rule, direction, occurrences, precision, edge, false-pos, status</td></tr>
+    <tr><td>ipo_cohort</td><td>SNR</td><td>1,296 IPOs + listing dates + lock-in windows</td></tr>
+    <tr><td>(roadmap) roster_state / track_record</td><td>SNR</td><td>per-worker roster + auditable validation record — to build (M13)</td></tr>
+  </tbody></table></div>
+  <p class="note">Frame cache: <b>db/frame_cache/*.pkl</b> — 441 pre-built daily feature frames (the speed layer).</p>
+</section>
+
+<!-- MILESTONES -->
+<section class="view" id="milestones">
+  <h2 class="sec">Progress · 9 of 17 milestones complete</h2>
+  <div class="card"><div class="bar"><i style="width:53%"></i></div>
+    <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:8px"><span>Foundation → Validation: DONE</span><span>53%</span></div></div>
+
+  <div class="phase">Phase 1 · Foundation &amp; Engine — complete</div>
+  <div class="card">
+    <div class="mrow"><span class="mid">M1</span><div><div class="t">Deepest history fetched</div><div class="d">1-min → Feb 2015, daily → 2013; 473.7M 1-min rows; ATP, sector, corp-actions</div></div><span class="pill done">Done</span></div>
+    <div class="mrow"><span class="mid">M2</span><div><div class="t">Unified micro+macro engine</div><div class="d">Incremental atoms + 93 features (iceberg / absorption / CVD / vol-compression / POC / ATP + CMF/MFI/OBV/WTD/MTD)</div></div><span class="pill done">Done</span></div>
+    <div class="mrow"><span class="mid">M3</span><div><div class="t">Nifty-500 mined</div><div class="d">441 stocks · 206,458 patterns · 45,849 Keep (outcome-first)</div></div><span class="pill done">Done</span></div>
+    <div class="mrow"><span class="mid">M4</span><div><div class="t">Forward edge validated</div><div class="d">Promoted patterns, sealed 2026 = pure OOS: +2.66% mean lift; micro+macro is the workhorse</div></div><span class="pill done">Done</span></div>
+    <div class="mrow"><span class="mid">M5</span><div><div class="t">Full traded book</div><div class="d">441 stocks, sealed 2026: +93.3% return, ₹3.79 cr, 21,081 trades, green every month</div></div><span class="pill done">Done</span></div>
+    <div class="mrow"><span class="mid">M6</span><div><div class="t">Ultra-fast execution core</div><div class="d">Frame cache + vectorised firing → full-universe run in seconds; backtest/live parity</div></div><span class="pill done">Done</span></div>
+    <div class="mrow"><span class="mid">M7</span><div><div class="t">IPO backfill</div><div class="d">Cohort of 1,296 IPOs; daily / 5-min / 1-min from listing — complete</div></div><span class="pill done">Done</span></div>
+  </div>
+
+  <div class="phase">Phase 2 · Autonomous Arena — in progress</div>
+  <div class="card">
+    <div class="mrow"><span class="mid">M8</span><div><div class="t">Arena core (ETV + Constitutional Score + tail-control)</div><div class="d">Proven: cuts drawdown ~74–87%, improves P&amp;L ~73% vs static</div></div><span class="pill done">Done</span></div>
+    <div class="mrow"><span class="mid">M9</span><div><div class="t">Consolidated to ONE Arena</div><div class="d">Single package on v2 base + fast cache; v1/v3 archived</div></div><span class="pill done">Done</span></div>
+    <div class="mrow"><span class="mid">M10</span><div><div class="t">Reactive stops + Constitutional scoring</div><div class="d">Tested on 441 workers — lowered ret/DD; disproven &amp; dropped</div></div><span class="pill risk">Closed · no</span></div>
+    <div class="mrow"><span class="mid">M10b</span><div><div class="t">A-priori point-in-time selection</div><div class="d">Trade only ≤2024-proven segments; sealed-2026 ret/DD 0.26→0.99. Locked into arena.py</div></div><span class="pill done">Done</span></div>
+    <div class="mrow"><span class="mid">M11</span><div><div class="t">Worker readiness gauntlet (6 stress tests)</div><div class="d">Single source of truth: 54 READY · 161 NEAR · 226 NOT READY</div></div><span class="pill done">Done</span></div>
+    <div class="mrow"><span class="mid">M11</span><div><div class="t">2015 → full walk-forward replay</div><div class="d">Simulate a decade of learning &amp; evolution (leak-proof)</div></div><span class="pill wait">Planned</span></div>
+    <div class="mrow"><span class="mid">M12</span><div><div class="t">EVENT module</div><div class="d">Expiry-week · Monday-volatility · results-day · corp-actions — raises the actual edge</div></div><span class="pill wait">Planned</span></div>
+    <div class="mrow"><span class="mid">M13</span><div><div class="t">Continuous validation &amp; auditable track-record</div><div class="d">validation_events · sim_fills · roster_state · track_record; multi-dim analytics</div></div><span class="pill wait">Planned</span></div>
+    <div class="mrow"><span class="mid">M14</span><div><div class="t">Cross-learning + Global Discovery Pool</div><div class="d">A marketplace of reusable intelligence, validated per-stock</div></div><span class="pill wait">Planned</span></div>
+    <div class="mrow"><span class="mid">M15</span><div><div class="t">Sellable per-stock agents</div><div class="d">Serializable worker = roster + constitution + track record</div></div><span class="pill wait">Planned</span></div>
+    <div class="mrow"><span class="mid">M16</span><div><div class="t">IPO lifecycle model</div><div class="d">Event-time Outcome→Behavior→Opportunity on fresh listings</div></div><span class="pill wait">Planned</span></div>
+  </div>
+
+  <div class="phase">Phase 3 · Live &amp; Productization</div>
+  <div class="card">
+    <div class="mrow"><span class="mid">M17</span><div><div class="t">Live / cloud / per-user broker</div><div class="d">SoA payload, ultrafast fan-out (compute-once, route-many), OMS integration, scale to 1000s</div></div><span class="pill wait">Planned</span></div>
+  </div>
+</section>
+
+<!-- WORKSTREAMS -->
+<section class="view" id="workstreams">
+  <h2 class="sec">Six workstreams</h2>
+  <div class="grid2">
+    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><b>1 · Data Foundation</b><span class="pill done">Done</span></div>
+      <div class="bar" style="margin:10px 0"><i style="width:100%"></i></div>
+      <p class="wsub">Deep OHLCV 2015/2013 · ATP · sector · NSE corp-actions</p><p class="wsub">IPO cohort + backfill</p></div>
+    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><b>2 · Prediction Engine</b><span class="pill done">Done</span></div>
+      <div class="bar" style="margin:10px 0"><i style="width:100%"></i></div>
+      <p class="wsub">Atoms + 93 micro/macro features</p><p class="wsub">Mining · validation · traded book</p></div>
+    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><b>3 · Fast Execution Engine</b><span class="pill prog">Core done</span></div>
+      <div class="bar" style="margin:10px 0"><i style="width:70%"></i></div>
+      <p class="wsub">Frame cache · vectorised firing (seconds)</p><p class="wsub">Live SoA payload · ultrafast fan-out — pending</p></div>
+    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><b>4 · IPO Track</b><span class="pill prog">Data done</span></div>
+      <div class="bar" style="margin:10px 0"><i style="width:60%"></i></div>
+      <p class="wsub">Cohort + full backfill ✓</p><p class="wsub">Lifecycle model — pending</p></div>
+    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><b>5 · Arena / net-expectancy selection</b><span class="pill prog">In progress</span></div>
+      <div class="bar" style="margin:10px 0"><i style="width:60%"></i></div>
+      <p class="wsub">A-priori selection ✓ · net-expectancy metric ✓ · 63 sellable + 63 agents ✓</p><p class="wsub">3rd/bear years · track-record infra · cross-learn — pending</p></div>
+    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><b>6 · Live / Cloud / Product</b><span class="pill wait">Planned</span></div>
+      <div class="bar" style="margin:10px 0"><i style="width:8%"></i></div>
+      <p class="wsub">Per-user broker · OMS plug-in · 1000s users</p></div>
+  </div>
+</section>
+
+<!-- RESULTS -->
+<section class="view" id="results">
+  <h2 class="sec">What we ship — the net-expectancy sellable core (2025+2026, leak-free)</h2>
+  <div class="kpis" style="margin-bottom:14px">
+    <div class="kpi"><div class="v pos">63</div><div class="l">sellable workers</div><div class="s">net expectancy ≥ +1%/trade</div></div>
+    <div class="kpi"><div class="v pos">+1.53%</div><div class="l">median net expectancy/trade</div><div class="s">worst of the two years</div></div>
+    <div class="kpi"><div class="v pos">123</div><div class="l">sustained &gt; 0 both years</div><div class="s">full expectancy-positive set</div></div>
+    <div class="kpi"><div class="v">~60</div><div class="l">median trades / worker · 2025</div><div class="s">enough to trust</div></div>
+  </div>
+  <h2 class="sec">For context — the raw universe book (all 441, every promoted segment)</h2>
+  <p class="note" style="margin-bottom:14px">This is the <b>un-selected</b> book: trade every promoted pattern, no readiness filter. It proves a tradeable edge exists (+93.3%, ₹3.79cr, 21,081 trades, 7/7 green months) but its drawdown is large — which is exactly why the a-priori selection + 6-test gauntlet above exist. The segment view below is this raw book.</p>
+  <h2 class="sec">Best Trader View — order · direction · hold (raw book)</h2>
+  <div class="tw"><table>
+    <thead><tr><th>Segment</th><th>Trades</th><th>Profit (₹)</th><th>Return</th><th>Avg / Trade</th><th>Win Rate</th></tr></thead>
+    <tbody>
+      <tr><td>NRML Short 5D</td><td>1,875</td><td class="pos">1,57,00,000</td><td class="pos">165.2%</td><td>8,371</td><td>69.8%</td></tr>
+      <tr><td>NRML Short 2D</td><td>3,674</td><td class="pos">1,11,00,000</td><td class="pos">136.7%</td><td>3,013</td><td>71.5%</td></tr>
+      <tr><td>MIS Short 1D</td><td>4,000</td><td class="pos">50,80,000</td><td class="pos">52.9%</td><td>1,270</td><td>74.4%</td></tr>
+      <tr><td>CNC Long 5D</td><td>2,913</td><td class="pos">32,80,000</td><td class="pos">20.5%</td><td>1,125</td><td>61.2%</td></tr>
+      <tr><td>MIS Long 1D</td><td>4,259</td><td class="pos">14,00,000</td><td class="pos">17.5%</td><td>329</td><td>65.2%</td></tr>
+      <tr><td>CNC Long 2D</td><td>4,360</td><td class="pos">13,50,000</td><td class="pos">14.9%</td><td>310</td><td>64.6%</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Shorts (5× NRML/MIS) carry the book; longs run CNC 1×. This is the <b>raw</b> book (trade every promoted segment). <b>Update (M10b):</b> keeping only segments whose ≤2024 ETV was positive — a leak-free, point-in-time filter — lifts risk-adjusted return sharply (sealed-2026 ret/DD 0.26 → 0.61, up to 0.99 with a stricter bar), raising profit <i>and</i> cutting drawdown at once. Reactive stops/scoring (M10) did the opposite and were dropped.</p>
+
+  <h2 class="sec">KPIs &amp; targets we track</h2>
+  <div class="tw"><table>
+    <thead><tr><th>KPI</th><th>Now</th><th>Target / gate</th></tr></thead>
+    <tbody>
+      <tr><td>Forward edge (sealed OOS)</td><td class="pos">+2.66%</td><td>&gt; 0, stable across folds</td></tr>
+      <tr><td>GTM-ready workers (all 6 tests)</td><td class="pos">54 / 441</td><td>maximise — the shippable book</td></tr>
+      <tr><td>Selected-book ret/DD (sealed 2026)</td><td class="pos">0.61 → 0.99</td><td>&gt; raw 0.26; push higher</td></tr>
+      <tr><td>READY-cohort median ret/DD</td><td class="pos">2.12</td><td>keep ≥ 2 as cohort grows</td></tr>
+      <tr><td>Raw universe book (context)</td><td class="pos">+93.3%</td><td>edge exists; DD too large raw</td></tr>
+      <tr><td>Per-stock ~1%/day risk-adjusted</td><td>in progress</td><td>north star</td></tr>
+      <tr><td>Full-universe run time</td><td class="pos">seconds</td><td>live-latency ready</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- GO / NO-GO -->
+<section class="view" id="gonogo">
+  <h2 class="sec">Go / No-Go gates</h2>
+  <div class="card">
+    <div class="gate"><span class="g">G1</span><div><div class="gt">Does a real edge exist?</div><div class="gd">Forward, out-of-sample edge &gt; 0 on the sealed year that was never used to build or select.</div></div><span class="pill done">Pass · +2.66%</span></div>
+    <div class="gate"><span class="g">G2</span><div><div class="gt">Is it tradeable after costs?</div><div class="gd">Full book positive net-of-costs on sealed 2026.</div></div><span class="pill done">Pass · +93.3% raw</span></div>
+    <div class="gate"><span class="g">G3</span><div><div class="gt">Does <i>reactive</i> learning beat raw?</div><div class="gd">Adaptive scoring/stops beat the raw promoted book on ret/DD (441 workers, true portfolio DD).</div></div><span class="pill risk">No · raw 0.73 wins</span></div>
+    <div class="gate"><span class="g">G4</span><div><div class="gt">Does the edge persist forward?</div><div class="gd">Holds on the rolling 2015→ walk-forward, not just one snapshot.</div></div><span class="pill prog">Pending · M11</span></div>
+    <div class="gate"><span class="g">G5</span><div><div class="gt">Risk-managed &amp; positive?</div><div class="gd">A book that beats raw ret/DD out-of-sample. A-priori ≤2024 selection: sealed-2026 ret/DD 0.26 → 0.61 (zero-param) to 0.99 (tuned).</div></div><span class="pill done">Pass · M10b</span></div>
+    <div class="gate"><span class="g">G6</span><div><div class="gt">Live-ready?</div><div class="gd">Latency, SoA payload, per-user fan-out, OMS integration validated; continuous live-shadow track-record.</div></div><span class="pill wait">Pending · M13/M17</span></div>
+    <div class="gate"><span class="g">G7</span><div><div class="gt">Real money?</div><div class="gd">Human-gated by design. Only after G1–G6 are green and the live-shadow track-record confirms the stress-test results hold.</div></div><span class="pill risk">Not yet</span></div>
+  </div>
+  <p class="note"><b>Constitution:</b> risk limits always win over the return target. No real-money order is ever placed autonomously — it stays human-gated, and no result is ever reported as a pass unless the sealed year truly supports it.</p>
+</section>
+
+<!-- ROADMAP -->
+<section class="view" id="roadmap">
+  <h2 class="sec">What's next — bridges &amp; sequence</h2>
+  <div class="card">
+    <div class="mrow"><span class="mid">→ M12</span><div><div class="t">EVENT module — raise the edge ceiling</div><div class="d">Bridge: event features (expiry/Monday/results) lift more workers past the G3/G4 gates → grow the 54 READY cohort. Needs: selection ✓, gauntlet ✓.</div></div><span class="pill prog">Now</span></div>
+    <div class="mrow"><span class="mid">→ M11</span><div><div class="t">2015 → walk-forward replay</div><div class="d">Bridge: proves the edge &amp; the learning persist over a decade → unlocks G4. Needs: frame cache ✓.</div></div><span class="pill wait">Then</span></div>
+    <div class="mrow"><span class="mid">→ M12</span><div><div class="t">EVENT module</div><div class="d">Bridge: raises the pre-behavior precision (the real ceiling). Needs: corp-actions ✓, calendar.</div></div><span class="pill wait">Then</span></div>
+    <div class="mrow"><span class="mid">→ M13</span><div><div class="t">Continuous validation &amp; auditable track-record</div><div class="d">Bridge: turns the stress-test into a durable, auditable, continuously-verified record → feeds live.</div></div><span class="pill wait">Then</span></div>
+    <div class="mrow"><span class="mid">→ M14–15</span><div><div class="t">Cross-learning · Global Discovery · sellable agents</div><div class="d">Bridge: the syndicate compounds; each per-stock worker becomes a portable product.</div></div><span class="pill wait">Then</span></div>
+    <div class="mrow"><span class="mid">→ M16–17</span><div><div class="t">IPO lifecycle · Live / cloud</div><div class="d">Bridge: new-listing edge + the live, per-user, ultrafast execution plane.</div></div><span class="pill wait">Later</span></div>
+  </div>
+  <h2 class="sec">Reference</h2>
+  <ul class="clean">
+    <li>Vision: <b>KANIDA.AI Pivot — New unified Vision.docx</b> (Outcome → Behavior → Opportunity)</li>
+    <li>Engine spec: <b>kanida_engine/SPEC.md</b> · Arena spec: <b>kanida_engine/ARENA_SPEC.md</b></li>
+    <li>Consolidated Arena: <b>arena/arena.py</b> · Constitutional framework: ETV → Constitutional Score</li>
+    <li>Patterns: <b>KANIDA_SNR.db.unified_patterns</b> · Book: <b>reports/engine_book.xlsx</b></li>
+  </ul>
+</section>
+
+<footer>KANIDA.AI — paper / research only · sealed-year truth is the judge · real-money human-gated</footer>
+</div>
+
+<script>
+const tabs=[...document.querySelectorAll('nav.tabs button')],views=[...document.querySelectorAll('.view')];
+tabs.forEach(b=>b.addEventListener('click',()=>{
+  tabs.forEach(x=>x.setAttribute('aria-selected',x===b));
+  views.forEach(v=>v.classList.toggle('on',v.id===b.dataset.v));
+  window.scrollTo({top:0,behavior:'smooth'});
+}));
+</script>

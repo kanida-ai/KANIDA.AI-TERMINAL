@@ -1,0 +1,170 @@
+PATHFINDER — AFTER-CLOSE RESEARCH EDITION
+As of 2026-07-29 · regime range/normal_vol
+Scanned 497 stocks · computed 8 candidates · published 8 · suppressed 0 below the usefulness gate
+No minimum card count. Nothing is published to fill space.
+
+PRIMARY OUTPUT
+
+STOCK RESEARCH RECOMMENDATIONS — INTERNAL RA REVIEW QUEUE
+Research classifications only. No entry price, target, stop, position size, or user execution instruction.
+
+LONG — 10 stocks
+HDFCBANK · n=56 · historical net edge +1.31% · p=0.002 · 5 sessions · PENDING RA REVIEW
+KALYANKJIL · n=56 · historical net edge +1.31% · p=0.002 · 5 sessions · PENDING RA REVIEW
+ICICIBANK · n=56 · historical net edge +1.31% · p=0.002 · 5 sessions · PENDING RA REVIEW
+RELIANCE · n=56 · historical net edge +1.31% · p=0.002 · 5 sessions · PENDING RA REVIEW
+INFY · n=56 · historical net edge +1.31% · p=0.002 · 5 sessions · PENDING RA REVIEW
+ETERNAL · n=56 · historical net edge +1.31% · p=0.002 · 5 sessions · PENDING RA REVIEW
+BHARTIARTL · n=56 · historical net edge +1.31% · p=0.002 · 5 sessions · PENDING RA REVIEW
+SBIN · n=56 · historical net edge +1.31% · p=0.002 · 5 sessions · PENDING RA REVIEW
+TCS · n=56 · historical net edge +1.31% · p=0.002 · 5 sessions · PENDING RA REVIEW
+BSE · n=56 · historical net edge +1.31% · p=0.002 · 5 sessions · PENDING RA REVIEW
+
+SHORT — 10 stocks
+PARADEEP · n=8096 · historical net edge +0.27% · p=0.035 · 5 sessions · PENDING RA REVIEW
+FSL · n=8096 · historical net edge +0.27% · p=0.035 · 5 sessions · PENDING RA REVIEW
+PCBL · n=8096 · historical net edge +0.27% · p=0.035 · 5 sessions · PENDING RA REVIEW
+DEVYANI · n=8096 · historical net edge +0.27% · p=0.035 · 5 sessions · PENDING RA REVIEW
+JWL · n=8096 · historical net edge +0.27% · p=0.035 · 5 sessions · PENDING RA REVIEW
+CRAFTSMAN · n=8096 · historical net edge +0.27% · p=0.035 · 5 sessions · PENDING RA REVIEW
+HONAUT · n=8096 · historical net edge +0.27% · p=0.035 · 5 sessions · PENDING RA REVIEW
+KAYNES · n=8096 · historical net edge +0.27% · p=0.035 · 5 sessions · PENDING RA REVIEW
+KPITTECH · n=8096 · historical net edge +0.27% · p=0.035 · 5 sessions · PENDING RA REVIEW
+NEWGEN · n=8096 · historical net edge +0.27% · p=0.035 · 5 sessions · PENDING RA REVIEW
+
+WATCHLIST — 20 stocks
+DCMSHRIRAM · Diversified volume anomaly · Heavy volume arrived without a decisive price move · n=215 · p=0.155 · reason for watch-only: NO EDGE — HIGH VOLUME DID NOT LEAD TO EXPANSION · PENDING RA REVIEW
+J&KBANK · Nifty 500 downside-shock basket · A cross-stock downside-shock basket has formed · n=1522 · p=1.000 · reason for watch-only: WATCHLIST ONLY — HISTORICAL EDGE DID NOT CLEAR COSTS · PENDING RA REVIEW
+PHOENIXLTD · Nifty 500 downside-shock basket · A cross-stock downside-shock basket has formed · n=1522 · p=1.000 · reason for watch-only: WATCHLIST ONLY — HISTORICAL EDGE DID NOT CLEAR COSTS · PENDING RA REVIEW
+PARADEEP · Chemicals stock anomaly · A stock move has broken far outside its normal range · n=991 · p=0.127 · reason for watch-only: NO VIRTUAL DEPLOYMENT — NULL CALIBRATION DID NOT CLEAR THE 10% GATE · PENDING RA REVIEW
+PCBL · Nifty 500 upside-shock basket · A cross-stock upside-shock basket has formed · n=2486 · p=0.249 · reason for watch-only: NO VIRTUAL DEPLOYMENT — NULL CALIBRATION DID NOT CLEAR THE 10% GATE · PENDING RA REVIEW
+CROMPTON · Nifty 500 upside-shock basket · A cross-stock upside-shock basket has formed · n=2486 · p=0.249 · reason for watch-only: NO VIRTUAL DEPLOYMENT — NULL CALIBRATION DID NOT CLEAR THE 10% GATE · PENDING RA REVIEW
+DIVISLAB · Nifty 500 upside-shock basket · A cross-stock upside-shock basket has formed · n=2486 · p=0.249 · reason for watch-only: NO VIRTUAL DEPLOYMENT — NULL CALIBRATION DID NOT CLEAR THE 10% GATE · PENDING RA REVIEW
+KAYNES · Nifty 500 upside-shock basket · A cross-stock upside-shock basket has formed · n=2486 · p=0.249 · reason for watch-only: NO VIRTUAL DEPLOYMENT — NULL CALIBRATION DID NOT CLEAR THE 10% GATE · PENDING RA REVIEW
+HINDUNILVR · Nifty 500 upside-shock basket · A cross-stock upside-shock basket has formed · n=2486 · p=0.249 · reason for watch-only: NO VIRTUAL DEPLOYMENT — NULL CALIBRATION DID NOT CLEAR THE 10% GATE · PENDING RA REVIEW
+FSL · Nifty 500 upside-shock basket · A cross-stock upside-shock basket has formed · n=2486 · p=0.249 · reason for watch-only: NO VIRTUAL DEPLOYMENT — NULL CALIBRATION DID NOT CLEAR THE 10% GATE · PENDING RA REVIEW
+JIOFIN · Nifty 500 upside-shock basket · A cross-stock upside-shock basket has formed · n=2486 · p=0.249 · reason for watch-only: NO VIRTUAL DEPLOYMENT — NULL CALIBRATION DID NOT CLEAR THE 10% GATE · PENDING RA REVIEW
+CRAFTSMAN · Nifty 500 upside-shock basket · A cross-stock upside-shock basket has formed · n=2486 · p=0.249 · reason for watch-only: NO VIRTUAL DEPLOYMENT — NULL CALIBRATION DID NOT CLEAR THE 10% GATE · PENDING RA REVIEW
+SUNTV · Nifty 500 upside-shock basket · A cross-stock upside-shock basket has formed · n=2486 · p=0.249 · reason for watch-only: NO VIRTUAL DEPLOYMENT — NULL CALIBRATION DID NOT CLEAR THE 10% GATE · PENDING RA REVIEW
+INFY · Information Technology · Information Technology has the strongest one-week sector trend · n=375 · p=1.000 · reason for watch-only: NO TRADE — LEADERSHIP IS ALREADY PRICED · PENDING RA REVIEW
+TCS · Information Technology · Information Technology has the strongest one-week sector trend · n=375 · p=1.000 · reason for watch-only: NO TRADE — LEADERSHIP IS ALREADY PRICED · PENDING RA REVIEW
+HCLTECH · Information Technology · Information Technology has the strongest one-week sector trend · n=375 · p=1.000 · reason for watch-only: NO TRADE — LEADERSHIP IS ALREADY PRICED · PENDING RA REVIEW
+COFORGE · Information Technology · Information Technology has the strongest one-week sector trend · n=375 · p=1.000 · reason for watch-only: NO TRADE — LEADERSHIP IS ALREADY PRICED · PENDING RA REVIEW
+TECHM · Information Technology · Information Technology has the strongest one-week sector trend · n=375 · p=1.000 · reason for watch-only: NO TRADE — LEADERSHIP IS ALREADY PRICED · PENDING RA REVIEW
+NETWEB · Information Technology · Information Technology has the strongest one-week sector trend · n=375 · p=1.000 · reason for watch-only: NO TRADE — LEADERSHIP IS ALREADY PRICED · PENDING RA REVIEW
+OFSS · Information Technology · Information Technology has the strongest one-week sector trend · n=375 · p=1.000 · reason for watch-only: NO TRADE — LEADERSHIP IS ALREADY PRICED · PENDING RA REVIEW
+
+RESEARCH FINDINGS AND EVIDENCE
+
+[NOW 1] A high-volume upside-reversal basket has formed
+I noticed: 10 stocks entered the basket after rising at least 2% on at least 2.0× prior median volume.
+I asked: After a stock rises at least 2% on twice-normal volume, does the move reverse over the next week?
+History showed: Across 8,096 same-regime events, short-side five-session return had a median of +0.57% before the +0.30% cost hurdle.
+Decision: VIRTUAL SHORT RESEARCH BASKET
+Evidence: similar_stocks · n=8096 · period 2018-01-25 to 2026-07-22 · regime range/normal_vol
+Comparison: All Nifty 500 stock/session observations in range/normal_vol · cost hurdle 0.30% · null-calibrated p=0.035
+Frozen grade: Direction-adjusted net return is above +0.30%. Outcome: PENDING
+Publication score: 85.4/100 · RA_REVIEW_REQUIRED
+
+[NOW 2] Breadth has moved into a historical tail
+I noticed: Fully 75% of the Nifty 500 universe closed higher; this sits in the top 15% of observed breadth.
+I asked: When market breadth is this extreme in the current regime, what usually happens over the next week?
+History showed: In the same range/normal_vol regime, 56 comparable breadth sessions had a median next-week market return of +1.61%.
+Decision: VIRTUAL LONG TEST
+Evidence: whole_market · n=56 · period 2018-04-05 to 2026-06-12 · regime range/normal_vol
+Comparison: All other Nifty 500 breadth observations in range/normal_vol · cost hurdle 0.30% · null-calibrated p=0.002
+Frozen grade: Direction-adjusted net return is above +0.30%. Outcome: PENDING
+Publication score: 83.4/100 · RESEARCH_EXPERIMENT_NOT_RECOMMENDATION
+
+[NOW 3] Heavy volume arrived without a decisive price move
+I noticed: A Diversified constituent traded at 64.4× its prior 20-session median volume while closing +0.12%.
+I asked: When volume surges but price barely moves, does a larger move follow?
+History showed: Across 215 same-sector quiet-volume events, the median absolute five-session move was +3.21% versus +2.72% normally.
+Decision: NO EDGE — HIGH VOLUME DID NOT LEAD TO EXPANSION
+Evidence: similar_stocks · n=215 · period 2018-01-24 to 2026-07-06 · regime range/normal_vol
+Comparison: All Diversified stock/session observations · cost hurdle 0.30% · null-calibrated p=0.155
+Frozen grade: Absolute basket move exceeds the frozen 3.41% threshold. Outcome: PENDING
+Publication score: 82.4/100 · RA_REVIEW_REQUIRED
+
+[DISCOVER 4] A cross-stock downside-shock basket has formed
+I noticed: 2 stocks closed beyond the reviewed 2.5σ downside threshold; the basket contains only stocks that independently met the frozen rule.
+I asked: Do stocks experiencing a downside move beyond 2.5σ rebound over the next three sessions?
+History showed: Across 1,522 same-regime stock shocks, the direction-adjusted median three-session return was -0.18% before the +0.30% cost hurdle.
+Decision: WATCHLIST ONLY — HISTORICAL EDGE DID NOT CLEAR COSTS
+Evidence: similar_stocks · n=1522 · period 2018-03-08 to 2026-07-24 · regime range/normal_vol
+Comparison: All Nifty 500 stock/session observations in range/normal_vol · cost hurdle 0.30% · null-calibrated p=1.000
+Frozen grade: The rejected trade loses by more than 0.30% after costs. Outcome: PENDING
+Publication score: 78.2/100 · RA_REVIEW_REQUIRED
+
+[DISCOVER 5] A stock move has broken far outside its normal range
+I noticed: A Chemicals constituent moved +12.45% today, a +6.3σ event versus its own prior 60-session distribution.
+I asked: After a stock moves this far from its own normal range, does it reverse or continue?
+History showed: Across same-sector stocks, 991 comparable upside shocks had a median three-session reversal return of +0.46% before costs.
+Decision: NO VIRTUAL DEPLOYMENT — NULL CALIBRATION DID NOT CLEAR THE 10% GATE
+Evidence: similar_stocks · n=991 · period 2018-03-15 to 2026-07-24 · regime range/normal_vol
+Comparison: All Chemicals stocks with a same-direction ≥2.5σ shock · cost hurdle 0.30% · null-calibrated p=0.127
+Frozen grade: The rejected trade loses by more than 0.30% after costs. Outcome: PENDING
+Publication score: 77.4/100 · RA_REVIEW_REQUIRED
+
+[DISCOVER 6] A cross-stock upside-shock basket has formed
+I noticed: 10 stocks closed beyond the reviewed 2.5σ upside threshold; the basket contains only stocks that independently met the frozen rule.
+I asked: Do stocks experiencing an upside move beyond 2.5σ reverse over the next three sessions?
+History showed: Across 2,486 same-regime stock shocks, the direction-adjusted median three-session return was +0.34% before the +0.30% cost hurdle.
+Decision: NO VIRTUAL DEPLOYMENT — NULL CALIBRATION DID NOT CLEAR THE 10% GATE
+Evidence: similar_stocks · n=2486 · period 2018-03-08 to 2026-07-24 · regime range/normal_vol
+Comparison: All Nifty 500 stock/session observations in range/normal_vol · cost hurdle 0.30% · null-calibrated p=0.249
+Frozen grade: The rejected trade loses by more than 0.30% after costs. Outcome: PENDING
+Publication score: 75.9/100 · RA_REVIEW_REQUIRED
+
+[DISCOVER 7] Information Technology has the strongest one-week sector trend
+I noticed: The sector's equal-weight basket gained +3.28% over the prior five sessions, the best current sector trend.
+I asked: Does the strongest sector trend continue for another week after costs?
+History showed: Prior five-session sector leaders produced a median next-week excess return of -0.17% across 375 same-regime cases.
+Decision: NO TRADE — LEADERSHIP IS ALREADY PRICED
+Evidence: sector · n=375 · period 2018-01-25 to 2026-07-22 · regime range/normal_vol
+Comparison: All sector/session observations in the same regime, benchmarked to equal-weight Nifty 500 · cost hurdle 0.30% · null-calibrated p=1.000
+Frozen grade: The rejected trade loses by more than 0.30% after costs. Outcome: PENDING
+Publication score: 74.6/100 · RESEARCH_EXPERIMENT_NOT_RECOMMENDATION
+
+[DISCOVER 8] A recent laggard has flipped into sector leadership
+I noticed: Telecommunication ranked among today's top 2 sectors after sitting in the bottom quartile over the previous month.
+I asked: When a recent sector laggard suddenly leads the market, does the rotation persist?
+History showed: Across sectors, 189 comparable flips delivered median five-session excess return of +0.21% versus the equal-weight Nifty 500.
+Decision: WATCH — ROTATION DOES NOT CLEAR COSTS
+Evidence: sector · n=189 · period 2018-01-30 to 2026-06-10 · regime range/normal_vol
+Comparison: All liquid sectors in the same market regime, benchmarked to equal-weight Nifty 500 · cost hurdle 0.30% · null-calibrated p=1.000
+Frozen grade: The rejected trade loses by more than 0.30% after costs. Outcome: PENDING
+Publication score: 64.7/100 · RESEARCH_EXPERIMENT_NOT_RECOMMENDATION
+
+PUBLIC SCOREBOARD
+Right 56 · Wrong 43 · Inconclusive 9 · n=108 · Pending 8
+
+EXPERIMENT MEMORY
+HYP-0960809F2C1A · Nifty 500 upside-shock basket · v2 · versions registered 2/3 · variants tried 2 · forward trials 6 · status ACTIVE
+  Last trial v2: historical expectation +0.27% · forward result +1.32% · RIGHT
+  Learned and changed: Added breadth-direction confirmation. The prior forward trial failed; the next version may launch only when market breadth agrees with the direction.
+  Promotion gate: HOLD · OOS trials 6/20 · positive edge=True · beats incumbent=True · lower drawdown=True
+  Retirement rule: Retire after 3 rule versions without a supported OOS result.
+HYP-EB4236DA4CEB · Nifty 500 market breadth · v3 · versions registered 3/3 · variants tried 3 · forward trials 3 · status RETIRED
+  Last trial v3: historical expectation +0.68% · forward result -1.85% · WRONG
+  Learned and changed: Added breadth-direction confirmation. The prior forward trial failed; the next version may launch only when market breadth agrees with the direction.
+  Promotion gate: HOLD · OOS trials 3/20 · positive edge=False · beats incumbent=False · lower drawdown=True
+  Retirement rule: Retire after 3 rule versions without a supported OOS result.
+HYP-0B6A56577B58 · Nifty 500 downside-shock basket · v2 · versions registered 2/3 · variants tried 2 · forward trials 2 · status ACTIVE
+  Last trial v2: historical expectation +1.22% · forward result +2.16% · RIGHT
+  Learned and changed: Added breadth-direction confirmation. The prior forward trial failed; the next version may launch only when market breadth agrees with the direction.
+  Promotion gate: HOLD · OOS trials 2/20 · positive edge=False · beats incumbent=False · lower drawdown=True
+  Retirement rule: Retire after 3 rule versions without a supported OOS result.
+HYP-11A64C711F99 · Nifty 500 high-volume upside basket · v3 · versions registered 3/3 · variants tried 3 · forward trials 8 · status RETIRED
+  Last trial v3: historical expectation +0.29% · forward result -1.21% · WRONG
+  Learned and changed: Added breadth-direction confirmation. The prior forward trial failed; the next version may launch only when market breadth agrees with the direction.
+  Promotion gate: HOLD · OOS trials 8/20 · positive edge=True · beats incumbent=True · lower drawdown=True
+  Retirement rule: Retire after 3 rule versions without a supported OOS result.
+HYP-6E8269DCCB9C · Capital Goods stock anomaly · v2 · versions registered 2/3 · variants tried 1 · forward trials 1 · status ACTIVE
+  Last trial v1: historical expectation +0.19% · forward result -0.44% · WRONG
+  Learned and changed: Added breadth-direction confirmation. The prior forward trial failed; the next version may launch only when market breadth agrees with the direction.
+  Promotion gate: HOLD · OOS trials 1/20 · positive edge=False · beats incumbent=False · lower drawdown=True
+  Retirement rule: Retire after 3 rule versions without a supported OOS result.
+
+Research recommendations are internal classifications, not personalized investment advice or execution instructions.
+No user entry, target, stop, or position-size instruction is produced. Public constituents remain withheld until RA review.

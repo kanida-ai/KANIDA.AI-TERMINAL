@@ -1,0 +1,176 @@
+
+TWO-STOCK PILOT   ADANIENT, CARTRADE   2022-01-01 -> 2025-12-31   Rs 25,000/stock
+  2026 is deliberately excluded and stays untouched as holdout.
+  148,077 bars, 992 sessions, 2 symbols (2022-01-03 -> 2025-12-31)
+
+========================================================================================================
+PHASE 1  INTRADAY BASELINE   enter 09:15, exit at a fixed time, Rs 25,000 notional
+========================================================================================================
+  symbol  side exit_time   n  mean_pct  median_pct  win_rate  p_over_1pct  mean_mfe  mean_mae  worst_pct  best_pct   total_rs  payoff
+ADANIENT  long     09:30 992    -0.208      -0.176     0.382        0.086     1.555    -1.833    -22.624    10.847 -51620.801   0.848
+ADANIENT  long     10:00 992    -0.217      -0.201     0.400        0.118     1.555    -1.833    -18.622     7.737 -53876.935   0.848
+ADANIENT  long     10:30 992    -0.218      -0.181     0.414        0.138     1.555    -1.833    -26.569    15.010 -54098.888   0.848
+ADANIENT  long     11:00 992    -0.210      -0.226     0.408        0.156     1.555    -1.833    -20.422    14.466 -52069.307   0.848
+ADANIENT  long     12:00 992    -0.222      -0.302     0.400        0.168     1.555    -1.833    -16.837    17.466 -55018.332   0.848
+ADANIENT  long     13:00 990    -0.262      -0.253     0.400        0.172     1.557    -1.836    -26.528    18.132 -64734.993   0.848
+ADANIENT  long     14:00 990    -0.232      -0.247     0.417        0.193     1.557    -1.836    -31.925    17.699 -57337.932   0.848
+ADANIENT  long     15:00 989    -0.282      -0.279     0.413        0.198     1.559    -1.837    -31.675    19.222 -69713.019   0.848
+ADANIENT  long     close 992    -0.321      -0.336     0.406        0.205     1.555    -1.833    -33.471    19.708 -79533.618   0.848
+ADANIENT short     09:30 992    -0.012      -0.044     0.465        0.096     1.833    -1.555    -11.067    22.404  -2939.199   1.179
+ADANIENT short     10:00 992    -0.003      -0.019     0.489        0.146     1.833    -1.555     -7.957    18.402   -683.065   1.179
+ADANIENT short     10:30 992    -0.002      -0.039     0.475        0.167     1.833    -1.555    -15.230    26.349   -461.112   1.179
+ADANIENT short     11:00 992    -0.010       0.006     0.507        0.176     1.833    -1.555    -14.686    20.202  -2490.693   1.179
+ADANIENT short     12:00 992     0.002       0.082     0.519        0.203     1.833    -1.555    -17.686    16.617    458.332   1.179
+ADANIENT short     13:00 990     0.042       0.033     0.517        0.212     1.836    -1.557    -18.352    26.308  10284.993   1.179
+ADANIENT short     14:00 990     0.012       0.027     0.510        0.228     1.836    -1.557    -17.919    31.705   2887.932   1.179
+ADANIENT short     15:00 989     0.062       0.059     0.522        0.266     1.837    -1.559    -19.442    31.455  15318.019   1.179
+ADANIENT short     close 992     0.101       0.116     0.539        0.280     1.833    -1.555    -19.928    33.251  24973.618   1.179
+CARTRADE  long     09:30 992    -0.027      -0.084     0.481        0.212     2.317    -2.001     -8.937     6.926  -6674.758   1.158
+CARTRADE  long     10:00 992    -0.030      -0.126     0.467        0.237     2.317    -2.001     -9.355    11.574  -7435.237   1.158
+CARTRADE  long     10:30 992    -0.025      -0.170     0.458        0.264     2.317    -2.001     -9.673    10.858  -6140.006   1.158
+CARTRADE  long     11:00 992    -0.050      -0.291     0.432        0.273     2.317    -2.001    -13.951    11.452 -12463.955   1.158
+CARTRADE  long     12:00 992    -0.027      -0.219     0.458        0.274     2.317    -2.001     -8.021    13.141  -6808.804   1.158
+CARTRADE  long     13:00 990    -0.055      -0.271     0.435        0.272     2.320    -2.001     -9.422    15.028 -13672.591   1.160
+CARTRADE  long     14:00 990    -0.076      -0.329     0.434        0.282     2.320    -2.001     -9.995    14.299 -18779.272   1.160
+CARTRADE  long     15:00 989    -0.062      -0.319     0.436        0.292     2.320    -2.003     -9.367    15.853 -15321.206   1.158
+CARTRADE  long     close 992    -0.201      -0.589     0.409        0.283     2.317    -2.001    -13.056    19.014 -49739.619   1.158
+CARTRADE short     09:30 992    -0.193      -0.136     0.448        0.182     2.001    -2.317     -7.146     8.717 -47885.242   0.864
+CARTRADE short     10:00 992    -0.190      -0.094     0.488        0.228     2.001    -2.317    -11.794     9.135 -47124.763   0.864
+CARTRADE short     10:30 992    -0.195      -0.050     0.485        0.251     2.001    -2.317    -11.078     9.453 -48419.994   0.864
+CARTRADE short     11:00 992    -0.170       0.071     0.511        0.267     2.001    -2.317    -11.672    13.731 -42096.045   0.864
+CARTRADE short     12:00 992    -0.193      -0.001     0.499        0.283     2.001    -2.317    -13.361     7.801 -47751.196   0.864
+CARTRADE short     13:00 990    -0.165       0.051     0.512        0.302     2.001    -2.320    -15.248     9.202 -40777.409   0.862
+CARTRADE short     14:00 990    -0.144       0.109     0.525        0.313     2.001    -2.320    -14.519     9.775 -35670.728   0.862
+CARTRADE short     15:00 989    -0.158       0.099     0.516        0.329     2.003    -2.320    -16.073     9.147 -39073.794   0.863
+CARTRADE short     close 992    -0.019       0.369     0.567        0.365     2.001    -2.317    -19.234    12.836  -4820.381   0.864
+
+  This is UNCONDITIONAL -- every single session, no filter.
+  Any state or signal must beat the row for its own stock, side
+  and exit time. Nothing else counts as an improvement.
+
+========================================================================================================
+PHASE 2  THRESHOLD SEQUENCING   which came first, the gain or the loss?
+========================================================================================================
+  symbol  side  threshold_%   n  P_touch_up  P_touch_dn  P_up_first  P_dn_first  P_same_bar  P_neither  med_min_to_up
+ADANIENT  long         0.25 992       0.856       0.913       0.274       0.381       0.345      0.000            0.0
+ADANIENT  long         0.50 992       0.705       0.808       0.393       0.523       0.083      0.001            5.0
+ADANIENT  long         0.75 992       0.581       0.686       0.393       0.533       0.036      0.037           15.0
+ADANIENT  long         1.00 992       0.482       0.581       0.374       0.488       0.024      0.114           40.0
+ADANIENT  long         1.50 992       0.349       0.404       0.303       0.368       0.007      0.322           75.0
+ADANIENT  long         2.00 992       0.242       0.271       0.220       0.251       0.003      0.526           92.5
+ADANIENT short         0.25 992       0.913       0.856       0.381       0.274       0.345      0.000            0.0
+ADANIENT short         0.50 992       0.808       0.705       0.523       0.393       0.083      0.001            0.0
+ADANIENT short         0.75 992       0.686       0.581       0.533       0.393       0.036      0.037           15.0
+ADANIENT short         1.00 992       0.581       0.482       0.488       0.374       0.024      0.114           25.0
+ADANIENT short         1.50 992       0.404       0.349       0.368       0.303       0.007      0.322           55.0
+ADANIENT short         2.00 992       0.271       0.242       0.251       0.220       0.003      0.526           75.0
+CARTRADE  long         0.25 992       0.866       0.885       0.297       0.301       0.401      0.000            0.0
+CARTRADE  long         0.50 992       0.794       0.828       0.406       0.400       0.194      0.000            0.0
+CARTRADE  long         0.75 992       0.714       0.756       0.456       0.459       0.079      0.007            0.0
+CARTRADE  long         1.00 992       0.655       0.677       0.479       0.472       0.028      0.021            0.0
+CARTRADE  long         1.50 992       0.521       0.528       0.441       0.439       0.004      0.117           10.0
+CARTRADE  long         2.00 992       0.427       0.396       0.389       0.353       0.002      0.256           25.0
+CARTRADE short         0.25 992       0.885       0.866       0.301       0.297       0.401      0.000            0.0
+CARTRADE short         0.50 992       0.828       0.794       0.400       0.406       0.194      0.000            0.0
+CARTRADE short         0.75 992       0.756       0.714       0.459       0.456       0.079      0.007            0.0
+CARTRADE short         1.00 992       0.677       0.655       0.472       0.479       0.028      0.021            5.0
+CARTRADE short         1.50 992       0.528       0.521       0.439       0.441       0.004      0.117           25.0
+CARTRADE short         2.00 992       0.396       0.427       0.353       0.389       0.002      0.256           50.0
+
+  P_up_first is the number a target-and-stop pair depends on.
+  P_same_bar is honest ignorance: both touched inside one bar, so
+  the order cannot be known at this resolution. If it is large,
+  re-run at 1-minute before trusting any bracket.
+
+================================================================================================================
+PHASE 3  DIRECTIONAL SCORECARD   09:15 to close, unconditional
+================================================================================================================
+  symbol  side   n  mean_pct  median_pct  win_rate  P_plus1pct  mean_mfe_%  mean_mae_%  reward_to_adverse  worst_trade_%  max_dd_% pos_months pos_years   total_rs
+ADANIENT  long 992    -0.321      -0.336     0.406       0.482       1.555      -1.833              0.848        -33.471   -97.642      11/48       0/4 -79533.618
+ADANIENT short 992     0.101       0.116     0.539       0.581       1.833      -1.555              1.179        -19.928   -48.327      27/48       3/4  24973.618
+CARTRADE  long 992    -0.201      -0.589     0.409       0.655       2.317      -2.001              1.158        -13.056   -93.666      21/48       1/4 -49739.619
+CARTRADE short 992    -0.019       0.369     0.567       0.677       2.001      -2.317              0.864        -19.234   -84.211      22/48       1/4  -4820.381
+
+  symbol long_wins_on verdict  best_side_mean_%             tradable
+ADANIENT          0/5   short             0.101                  yes
+CARTRADE          1/5   short            -0.019 NO - both sides lose
+
+  'tradable = NO' means neither direction has an unconditional
+  edge on this stock. That is a legitimate and useful result: it
+  says any profit must come from CONDITIONAL selection, and sets
+  the bar that conditioning has to clear.
+
+==============================================================================================================
+PHASE 1b  MULTI-SESSION   enter at the open, exit H sessions later
+==============================================================================================================
+  symbol  side  hold_sessions    schedule   n  mean_pct  median_pct  win_rate  p_over_1pct  worst_pct  max_dd_%  capital_rs    total_rs  ret_on_capital_%
+ADANIENT  long              1 overlapping 990    -0.310      -0.305     0.403        0.201    -33.471   -97.527     25000.0  -76714.160          -306.857
+ADANIENT  long              1    rollover 990    -0.310      -0.305     0.403        0.201    -33.471   -97.527     25000.0  -76714.160          -306.857
+ADANIENT short              1 overlapping 990     0.090       0.085     0.527        0.281    -19.216   -50.219     25000.0   22264.160            89.057
+ADANIENT short              1    rollover 990     0.090       0.085     0.527        0.281    -19.216   -50.219     25000.0   22264.160            89.057
+ADANIENT  long              2 overlapping 989    -0.218      -0.352     0.441        0.304    -47.847   -98.524     50000.0  -53964.586          -107.929
+ADANIENT  long              2    rollover 495    -0.162      -0.366     0.438        0.295    -47.847   -85.590     25000.0  -20050.213           -80.201
+ADANIENT short              2 overlapping 989    -0.002       0.132     0.523        0.339    -37.869   -86.423     50000.0    -430.414            -0.861
+ADANIENT short              2    rollover 495    -0.058       0.146     0.527        0.333    -37.869   -67.059     25000.0   -7174.787           -28.699
+ADANIENT  long              3 overlapping 988    -0.132      -0.282     0.464        0.342    -47.585   -99.132     75000.0  -32487.209           -43.316
+ADANIENT  long              3    rollover 330    -0.181      -0.337     0.433        0.318    -47.585   -82.384     25000.0  -14962.665           -59.851
+ADANIENT short              3 overlapping 988    -0.088       0.062     0.509        0.376    -40.476   -97.524     75000.0  -21852.791           -29.137
+ADANIENT short              3    rollover 330    -0.039       0.117     0.536        0.376    -39.604   -63.254     25000.0   -3187.335           -12.749
+ADANIENT  long              4 overlapping 987    -0.041      -0.156     0.483        0.377    -47.599   -99.506    100000.0  -10048.041           -10.048
+ADANIENT  long              4    rollover 247     0.014      -0.411     0.470        0.381    -47.599   -70.864     25000.0     878.097             3.512
+ADANIENT short              4 overlapping 987    -0.179      -0.064     0.487        0.389    -64.248   -99.623    100000.0  -44236.959           -44.237
+ADANIENT short              4    rollover 247    -0.234       0.191     0.506        0.393    -39.364   -74.954     25000.0  -14463.097           -57.852
+ADANIENT  long              6 overlapping 985     0.117      -0.172     0.482        0.388    -54.369   -99.869    150000.0   28691.349            19.128
+ADANIENT  long              6    rollover 165     0.246      -0.305     0.461        0.370    -54.369   -65.950     25000.0   10165.489            40.662
+ADANIENT short              6 overlapping 985    -0.337      -0.048     0.494        0.398    -78.238   -99.984    150000.0  -82866.349           -55.244
+ADANIENT short              6    rollover 165    -0.466       0.085     0.509        0.418    -37.278   -77.836     25000.0  -19240.489           -76.962
+ADANIENT  long              8 overlapping 983     0.267      -0.204     0.489        0.419    -54.649   -99.980    200000.0   65713.191            32.857
+ADANIENT  long              8    rollover 123     0.352      -0.243     0.480        0.398    -54.152   -66.970     25000.0   10830.097            43.320
+ADANIENT short              8 overlapping 983    -0.487      -0.016     0.498        0.419    -65.708   -99.999    200000.0 -119778.191           -59.889
+ADANIENT short              8    rollover 123    -0.572       0.023     0.504        0.382    -31.788   -76.379     25000.0  -17595.097           -70.380
+CARTRADE  long              1 overlapping 990    -0.130      -0.489     0.412        0.286    -10.457   -90.379     25000.0  -32191.187          -128.765
+CARTRADE  long              1    rollover 990    -0.130      -0.489     0.412        0.286    -10.457   -90.379     25000.0  -32191.187          -128.765
+CARTRADE short              1 overlapping 990    -0.090       0.269     0.548        0.349    -17.803   -89.065     25000.0  -22258.813           -89.035
+CARTRADE short              1    rollover 990    -0.090       0.269     0.548        0.349    -17.803   -89.065     25000.0  -22258.813           -89.035
+CARTRADE  long              2 overlapping 989     0.037      -0.338     0.469        0.358    -16.291   -91.793     50000.0    9162.713            18.325
+CARTRADE  long              2    rollover 495     0.077      -0.418     0.455        0.358    -12.753   -69.765     25000.0    9483.382            37.934
+CARTRADE short              2 overlapping 989    -0.257       0.118     0.509        0.384    -22.454   -99.382     50000.0  -63557.713          -127.115
+CARTRADE short              2    rollover 495    -0.297       0.198     0.523        0.386    -22.454   -93.060     25000.0  -36708.382          -146.834
+CARTRADE  long              3 overlapping 988     0.201      -0.315     0.471        0.391    -17.077   -96.386     75000.0   49663.486            66.218
+CARTRADE  long              3    rollover 330     0.132      -0.401     0.464        0.370    -15.040   -69.103     25000.0   10905.373            43.621
+CARTRADE short              3 overlapping 988    -0.421       0.095     0.507        0.415    -24.848   -99.963     75000.0 -104003.486          -138.671
+CARTRADE short              3    rollover 330    -0.352       0.181     0.515        0.433    -20.835   -91.948     25000.0  -29055.373          -116.221
+CARTRADE  long              4 overlapping 987     0.373      -0.141     0.480        0.400    -19.735   -98.348    100000.0   92143.190            92.143
+CARTRADE  long              4    rollover 247     0.474      -0.227     0.482        0.421    -13.676   -60.441     25000.0   29285.212           117.141
+CARTRADE short              4 overlapping 987    -0.593      -0.079     0.488        0.409    -29.261   -99.998    100000.0 -146428.190          -146.428
+CARTRADE short              4    rollover 247    -0.694       0.007     0.502        0.417    -27.792   -94.518     25000.0  -42870.212          -171.481
+CARTRADE  long              6 overlapping 985     0.713       0.159     0.514        0.441    -25.094   -99.636    150000.0  175698.633           117.132
+CARTRADE  long              6    rollover 165     0.745      -0.189     0.491        0.412    -21.825   -62.809     25000.0   30730.823           122.923
+CARTRADE short              6 overlapping 985    -0.933      -0.379     0.471        0.407    -33.246  -100.000    150000.0 -229873.633          -153.249
+CARTRADE short              6    rollover 165    -0.965      -0.031     0.497        0.424    -29.482   -94.773     25000.0  -39805.823          -159.223
+CARTRADE  long              8 overlapping 983     1.044       0.537     0.534        0.474    -24.585   -99.919    200000.0  256474.360           128.237
+CARTRADE  long              8    rollover 123     1.129      -0.191     0.496        0.455    -14.979   -57.383     25000.0   34724.422           138.898
+CARTRADE short              8 overlapping 983    -1.264      -0.757     0.454        0.396    -32.741  -100.000    200000.0 -310539.360          -155.270
+CARTRADE short              8    rollover 123    -1.349      -0.029     0.496        0.447    -31.924   -94.663     25000.0  -41489.422          -165.958
+
+  ret_on_capital_% divides by the capital the schedule actually
+  ties up. Overlapping looks better per trade and needs H times the
+  money; rollover needs one unit and trades far less often.
+
+================================================================================================
+CAPITAL AND LEVERAGE   same trades, different capital base
+================================================================================================
+  symbol  side exit_time  leverage  margin_rs  mean_pct  ret_on_margin_%  worst_pct  worst_on_margin_%
+ADANIENT  long     close       1.0    25000.0    -0.321           -0.321    -33.471            -33.471
+ADANIENT short     close       1.0    25000.0     0.101            0.101    -19.928            -19.928
+CARTRADE  long     close       1.0    25000.0    -0.201           -0.201    -13.056            -13.056
+CARTRADE short     close       1.0    25000.0    -0.019           -0.019    -19.234            -19.234
+ADANIENT  long     close       5.0     5000.0    -0.321           -1.604    -33.471           -167.356
+ADANIENT short     close       5.0     5000.0     0.101            0.504    -19.928            -99.640
+CARTRADE  long     close       5.0     5000.0    -0.201           -1.003    -13.056            -65.278
+CARTRADE short     close       5.0     5000.0    -0.019           -0.097    -19.234            -96.169
+
+  Leverage multiplies the loss identically. worst_on_margin_% is
+  the number that decides whether 5x is survivable, not the return.
+
+  wrote 6 CSVs to outputs/

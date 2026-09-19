@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($py = \\(Get-Command python -ErrorAction SilentlyContinue\\); if\\($py\\){ python --version } else { \"no python\" }; \"---\"; $py3 = \\(Get-Command python3 -ErrorAction SilentlyContinue\\); if\\($py3\\){ python3 --version } else { \"no python3\" }; \"---sqlite3---\"; $s = \\(Get-Command sqlite3 -ErrorAction SilentlyContinue\\); if\\($s\\){ $s.Source } else { \"no sqlite3 CLI\" })"
+    ]
+  }
+}

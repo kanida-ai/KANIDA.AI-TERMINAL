@@ -1,0 +1,22 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true
+  },
+  "include": [
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "qa/**/*.ts",
+    "*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    ".pilot-venv",
+    "dist",
+    "dist-*",
+    "var",
+    "_archive"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+ "status": "ok",
+ "data": [
+  {
+   "id": "V-RELIANCE",
+   "symbol": "RELIANCE",
+   "exchange": "NSE",
+   "name": "Reliance Industries",
+   "isin": "INE002A01018"
+  },
+  {
+   "id": "V-TCS",
+   "symbol": "TCS",
+   "exchange": "NSE",
+   "name": "Tata Consultancy Services",
+   "isin": "INE467B01029"
+  }
+ ]
+}

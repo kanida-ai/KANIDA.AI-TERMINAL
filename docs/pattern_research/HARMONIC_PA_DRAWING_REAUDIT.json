@@ -1,0 +1,2999 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-09-18T03:05:10.757645+00:00",
+  "scope": "All 26 harmonic and 26 price-action directional variants, one exact frozen example each; not every historical occurrence or timeframe.",
+  "run": "4b33a5249562631524d6",
+  "artifact_sha256": "c7d6d96c60abc1bc0ab480ecbb2d8ecf0c8780f6196d149fcf03abdf20212f48",
+  "coverage": {
+    "pattern_ids": 18,
+    "variants": 52,
+    "harmonic_variants": 26,
+    "price_action_variants": 26,
+    "visually_inspected": 52,
+    "post_fix_harmonic_rechecks": 26,
+    "semantic_check_failures": 0
+  },
+  "source_integrity": "No detector, specification, source OHLCV or frozen research event changed. Backend change is addition of the previously omitted published harmonic failure level.",
+  "limitations": [
+    "Frozen occurrences only; no certification of profitability, statistical validity, all occurrences or every timeframe.",
+    "Small grid charts inspected at the actual desktop viewport, with all candle geometry visible.",
+    "HA07 bullish time asymmetry is permitted by the recorded detector rule; correct rendering does not validate that rule.",
+    "PA contextual trend metadata was checked for expected direction, not independently refitted from source history."
+  ],
+  "tests": "53 focused tests passed; 89 passed combined with test_pattern_drawing_accuracy.py",
+  "findings": [
+    {
+      "id": "HA_FAILURE_LEVEL_OMITTED",
+      "patterns": [
+        "HA01",
+        "HA02",
+        "HA03",
+        "HA04",
+        "HA05",
+        "HA06",
+        "HA07",
+        "HA08",
+        "HA09",
+        "HA10"
+      ],
+      "status": "resolved_all_26_variants_visually_rechecked",
+      "detail": "Published confirmation.failure_level was omitted. Rendered verbatim as Failure level and checked against each terminal pivot; no detector or event changed."
+    },
+    {
+      "id": "HA_PROJECTED_PRZ_MEANING",
+      "patterns": [
+        "HA01",
+        "HA02",
+        "HA03",
+        "HA04",
+        "HA05",
+        "HA06",
+        "HA07",
+        "HA08",
+        "HA09",
+        "HA10"
+      ],
+      "status": "resolved_all_26_variants_visually_rechecked",
+      "detail": "Blue levels now explicitly described as projected potential reversal zone (PRZ), rather than leaving their meaning implicit."
+    },
+    {
+      "id": "HA_SETUP_STATE_VISIBILITY",
+      "patterns": [
+        "HA01",
+        "HA02",
+        "HA03",
+        "HA04",
+        "HA05",
+        "HA06",
+        "HA07",
+        "HA08",
+        "HA09",
+        "HA10"
+      ],
+      "status": "resolved_all_26_variants_visually_rechecked",
+      "detail": "Grid headers now distinguish Forming / setup from Confirmed; drawing animation completion does not imply confirmation."
+    },
+    {
+      "id": "HA10_SIGNED_AUXILIARY_RATIO",
+      "patterns": [
+        "HA10"
+      ],
+      "status": "resolved_both_variants_visually_rechecked",
+      "detail": "AD/XA can be negative because it is a signed displacement. HA10 constraints do not use AD/XA; omitted from HA10 display only. Both final frontend variants visually rechecked, with exact geometry unchanged."
+    }
+  ],
+  "examples": [
+    {
+      "pattern_id": "HA01",
+      "variant": "canonical",
+      "side": "long",
+      "family": "harmonic",
+      "name": "Bullish AB=CD",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "HA01",
+        "variant": "canonical",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 2101,
+        "formation_at": "2025-07-30 09:15:00",
+        "detected_at": "2025-08-07 12:15:00",
+        "signal_at": "2025-08-07 14:15:00"
+      },
+      "event_sha256": "332b3a455637a31c2c9f9e7385197fa6a78e3edeb2a7eb86853e8c235d4c0b7a",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p1-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p1-r1.png",
+        "screenshot_sha256": "601adeaf2dc4fa741b3c3e448d092dd711083e80da8aead43a64260eebc55cc9",
+        "page": 1,
+        "row": 1,
+        "column": 1,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "A-B-C-D orientation and actual wick anchors are coherent; measured equality tolerance is visible in the ratio readout."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA01",
+      "variant": "canonical",
+      "side": "short",
+      "family": "harmonic",
+      "name": "Bearish AB=CD",
+      "symbol": "AADHARHFC",
+      "timeframe": "1W",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1W",
+        "pattern_id": "HA01",
+        "variant": "canonical",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 36,
+        "formation_at": "2025-01-27 09:15:00",
+        "detected_at": "2025-10-13 09:15:00",
+        "signal_at": "2025-11-03 09:15:00"
+      },
+      "event_sha256": "4bb03bf390fc9f347ac6df6b83d9f2e6805a0918911ce7535bd88ddb6e6c096b",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p1-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p1-r1.png",
+        "screenshot_sha256": "601adeaf2dc4fa741b3c3e448d092dd711083e80da8aead43a64260eebc55cc9",
+        "page": 1,
+        "row": 1,
+        "column": 2,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "A-B-C-D orientation and actual wick anchors are coherent; measured equality tolerance is visible in the ratio readout."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA02",
+      "variant": "ext_1_27",
+      "side": "long",
+      "family": "harmonic",
+      "name": "Bullish Alternate AB=CD 1.27",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "HA02",
+        "variant": "ext_1_27",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 1598,
+        "formation_at": "2025-04-17 10:15:00",
+        "detected_at": "2025-04-25 14:15:00",
+        "signal_at": "2025-04-28 09:15:00"
+      },
+      "event_sha256": "e76d8fed4da730e722c011160d3e05b34f8a2796ecca093d988df27f65e87bfd",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p1-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p1-r1.png",
+        "screenshot_sha256": "601adeaf2dc4fa741b3c3e448d092dd711083e80da8aead43a64260eebc55cc9",
+        "page": 1,
+        "row": 1,
+        "column": 3,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Alternate AB=CD extension and side orientation match the frozen pivots; no synthetic terminal point."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA02",
+      "variant": "ext_1_27",
+      "side": "short",
+      "family": "harmonic",
+      "name": "Bearish Alternate AB=CD 1.27",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "HA02",
+        "variant": "ext_1_27",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 1051,
+        "formation_at": "2024-12-23 09:15:00",
+        "detected_at": "2024-12-31 10:15:00",
+        "signal_at": "2024-12-31 12:15:00"
+      },
+      "event_sha256": "5966a83c925d0ac63f7256bad7322adea81d0bd77cd8205a65384c4c09c5530a",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p1-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p1-r2.png",
+        "screenshot_sha256": "6fea2fd06a87b2ade07b9b9844109611d3fb4614a936a505cc8f37f2cbc4e9b7",
+        "page": 1,
+        "row": 2,
+        "column": 1,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Alternate AB=CD extension and side orientation match the frozen pivots; no synthetic terminal point."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA02",
+      "variant": "ext_1_618",
+      "side": "long",
+      "family": "harmonic",
+      "name": "Bullish Alternate AB=CD 1.618",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "HA02",
+        "variant": "ext_1_618",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 3772,
+        "formation_at": "2026-07-21 13:15:00",
+        "detected_at": "2026-07-24 15:15:00",
+        "signal_at": "2026-07-27 09:15:00"
+      },
+      "event_sha256": "0bb1a25bcea65891d794d5d85f32f29cb9b879170c140fc72c9a37cda1d82a6b",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p1-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p1-r2.png",
+        "screenshot_sha256": "6fea2fd06a87b2ade07b9b9844109611d3fb4614a936a505cc8f37f2cbc4e9b7",
+        "page": 1,
+        "row": 2,
+        "column": 2,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Alternate AB=CD extension and side orientation match the frozen pivots; no synthetic terminal point."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA02",
+      "variant": "ext_1_618",
+      "side": "short",
+      "family": "harmonic",
+      "name": "Bearish Alternate AB=CD 1.618",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "HA02",
+        "variant": "ext_1_618",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 1267,
+        "formation_at": "2025-02-03 15:15:00",
+        "detected_at": "2025-02-07 14:15:00",
+        "signal_at": "2025-02-10 09:15:00"
+      },
+      "event_sha256": "4f6d26dca7be0b51a36dd63910293e62a17f1e984068984cceff745cd0220939",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p1-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p1-r2.png",
+        "screenshot_sha256": "6fea2fd06a87b2ade07b9b9844109611d3fb4614a936a505cc8f37f2cbc4e9b7",
+        "page": 1,
+        "row": 2,
+        "column": 3,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Alternate AB=CD extension and side orientation match the frozen pivots; no synthetic terminal point."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA03",
+      "variant": "canonical",
+      "side": "long",
+      "family": "harmonic",
+      "name": "Bullish Gartley",
+      "symbol": "ABSLAMC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "ABSLAMC",
+        "timeframe": "1H",
+        "pattern_id": "HA03",
+        "variant": "canonical",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 3335,
+        "formation_at": "2023-09-13 10:15:00",
+        "detected_at": "2023-09-18 13:15:00",
+        "signal_at": "2023-09-18 14:15:00"
+      },
+      "event_sha256": "78ba5b964a687b4c2613c0a06b731d6c44e21282b054f2bcc5c952a9d79fcef2",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p1-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p1-r3.png",
+        "screenshot_sha256": "048a475c43fad03b3e494b58ef3c09dbcf476f0db67cc19d9e82705890073327",
+        "page": 1,
+        "row": 3,
+        "column": 1,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Gartley X-A-B-C-D labels match alternating wick pivots; setup is distinguished from confirmation."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA03",
+      "variant": "canonical",
+      "side": "short",
+      "family": "harmonic",
+      "name": "Bearish Gartley",
+      "symbol": "ABSLAMC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "ABSLAMC",
+        "timeframe": "1H",
+        "pattern_id": "HA03",
+        "variant": "canonical",
+        "side": "short",
+        "state": "setup",
+        "episode": 6705,
+        "formation_at": "2025-08-28 11:15:00",
+        "detected_at": "2025-09-04 12:15:00",
+        "signal_at": "2025-09-04 12:15:00"
+      },
+      "event_sha256": "11df3093b7f38d1616bd0d7b061653bdf14825d00e78725c3c628ae3a2a52531",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p1-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p1-r3.png",
+        "screenshot_sha256": "048a475c43fad03b3e494b58ef3c09dbcf476f0db67cc19d9e82705890073327",
+        "page": 1,
+        "row": 3,
+        "column": 2,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Gartley X-A-B-C-D labels match alternating wick pivots; setup is distinguished from confirmation."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA04",
+      "variant": "b_0_382",
+      "side": "long",
+      "family": "harmonic",
+      "name": "Bullish Bat (B 0.382 subtype)",
+      "symbol": "TATAPOWER",
+      "timeframe": "4H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "TATAPOWER",
+        "timeframe": "4H",
+        "pattern_id": "HA04",
+        "variant": "b_0_382",
+        "side": "long",
+        "state": "setup",
+        "episode": 2095,
+        "formation_at": "2019-05-08 13:15:00",
+        "detected_at": "2019-06-10 13:15:00",
+        "signal_at": "2019-06-10 13:15:00"
+      },
+      "event_sha256": "4b0c64616d6688ae6f632dab0bf3f363ada50fe6a5edbc3bd3f8ad9c02345e00",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p1-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p1-r3.png",
+        "screenshot_sha256": "048a475c43fad03b3e494b58ef3c09dbcf476f0db67cc19d9e82705890073327",
+        "page": 1,
+        "row": 3,
+        "column": 3,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Both B-depth subtypes and directions retain their exact pivots, ratio-derived PRZ and terminal failure level."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA04",
+      "variant": "b_0_382",
+      "side": "short",
+      "family": "harmonic",
+      "name": "Bearish Bat (B 0.382 subtype)",
+      "symbol": "ABSLAMC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "ABSLAMC",
+        "timeframe": "1H",
+        "pattern_id": "HA04",
+        "variant": "b_0_382",
+        "side": "short",
+        "state": "setup",
+        "episode": 6836,
+        "formation_at": "2025-09-24 09:15:00",
+        "detected_at": "2025-10-03 12:15:00",
+        "signal_at": "2025-10-03 12:15:00"
+      },
+      "event_sha256": "bdfb5e5109c299d5e00f74493e763848f1456d11a402245ecfae45d5c88112d2",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p2-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p2-r1.png",
+        "screenshot_sha256": "dc85057176647c95ec9ef3b0a1c224bc864698f162edab547cc7d013cbb440bf",
+        "page": 2,
+        "row": 1,
+        "column": 1,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Both B-depth subtypes and directions retain their exact pivots, ratio-derived PRZ and terminal failure level."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA04",
+      "variant": "b_0_50",
+      "side": "long",
+      "family": "harmonic",
+      "name": "Bullish Bat (B 0.50 subtype)",
+      "symbol": "ITCHOTELS",
+      "timeframe": "1W",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "ITCHOTELS",
+        "timeframe": "1W",
+        "pattern_id": "HA04",
+        "variant": "b_0_50",
+        "side": "long",
+        "state": "setup",
+        "episode": 13,
+        "formation_at": "2025-05-05 09:15:00",
+        "detected_at": "2026-01-05 09:15:00",
+        "signal_at": "2026-01-05 09:15:00"
+      },
+      "event_sha256": "889cccd6d5a233cf981fae1eaff1afbd493473853b6b1543bd2d11a653768f10",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p2-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p2-r1.png",
+        "screenshot_sha256": "dc85057176647c95ec9ef3b0a1c224bc864698f162edab547cc7d013cbb440bf",
+        "page": 2,
+        "row": 1,
+        "column": 2,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Both B-depth subtypes and directions retain their exact pivots, ratio-derived PRZ and terminal failure level."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA04",
+      "variant": "b_0_50",
+      "side": "short",
+      "family": "harmonic",
+      "name": "Bearish Bat (B 0.50 subtype)",
+      "symbol": "ABDL",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "ABDL",
+        "timeframe": "1H",
+        "pattern_id": "HA04",
+        "variant": "b_0_50",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 2347,
+        "formation_at": "2025-11-10 09:15:00",
+        "detected_at": "2025-11-13 12:15:00",
+        "signal_at": "2025-11-14 09:15:00"
+      },
+      "event_sha256": "bf79c1f96ec2550f5f87faacd74e65ae54d1dff529546318c69d6485bdc71757",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p2-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p2-r1.png",
+        "screenshot_sha256": "dc85057176647c95ec9ef3b0a1c224bc864698f162edab547cc7d013cbb440bf",
+        "page": 2,
+        "row": 1,
+        "column": 3,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Both B-depth subtypes and directions retain their exact pivots, ratio-derived PRZ and terminal failure level."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA05",
+      "variant": "canonical",
+      "side": "long",
+      "family": "harmonic",
+      "name": "Bullish Alternate Bat",
+      "symbol": "DCMSHRIRAM",
+      "timeframe": "1D",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "DCMSHRIRAM",
+        "timeframe": "1D",
+        "pattern_id": "HA05",
+        "variant": "canonical",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 143,
+        "formation_at": "2013-07-26 09:15:00",
+        "detected_at": "2013-09-03 09:15:00",
+        "signal_at": "2013-09-12 09:15:00"
+      },
+      "event_sha256": "0818cc3cc57a56af63ff655a1f128c62a4933286a0973907a38809c42f4019b3",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p2-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p2-r2.png",
+        "screenshot_sha256": "8dd214d413e66920808e0760e6a49064da1b140308073ca76324141922d12d3b",
+        "page": 2,
+        "row": 2,
+        "column": 1,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Alternate Bat terminal D extends beyond X; failure is now drawn beyond D, including BEL bearish sample."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA05",
+      "variant": "canonical",
+      "side": "short",
+      "family": "harmonic",
+      "name": "Bearish Alternate Bat",
+      "symbol": "BEL",
+      "timeframe": "1D",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "BEL",
+        "timeframe": "1D",
+        "pattern_id": "HA05",
+        "variant": "canonical",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 2987,
+        "formation_at": "2025-02-01 09:15:00",
+        "detected_at": "2025-04-03 09:15:00",
+        "signal_at": "2025-04-07 09:15:00"
+      },
+      "event_sha256": "1e366e710946f3f6bacb0d86ff8d528ff292a317663344d27e4aee1681f5b4da",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p2-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p2-r2.png",
+        "screenshot_sha256": "8dd214d413e66920808e0760e6a49064da1b140308073ca76324141922d12d3b",
+        "page": 2,
+        "row": 2,
+        "column": 2,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Alternate Bat terminal D extends beyond X; failure is now drawn beyond D, including BEL bearish sample."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA06",
+      "variant": "ext_1_27",
+      "side": "long",
+      "family": "harmonic",
+      "name": "Bullish Butterfly 1.27",
+      "symbol": "ABSLAMC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "ABSLAMC",
+        "timeframe": "1H",
+        "pattern_id": "HA06",
+        "variant": "ext_1_27",
+        "side": "long",
+        "state": "setup",
+        "episode": 4194,
+        "formation_at": "2024-03-13 14:15:00",
+        "detected_at": "2024-03-19 13:15:00",
+        "signal_at": "2024-03-19 13:15:00"
+      },
+      "event_sha256": "725842c1408c17c41ce8d95eaa7eed57bc40139199c19eab9bc668c7ec977a81",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p2-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p2-r2.png",
+        "screenshot_sha256": "8dd214d413e66920808e0760e6a49064da1b140308073ca76324141922d12d3b",
+        "page": 2,
+        "row": 2,
+        "column": 3,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Both 1.27 and 1.618 Butterfly variants show the published terminal extension; projected zone is named explicitly."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA06",
+      "variant": "ext_1_27",
+      "side": "short",
+      "family": "harmonic",
+      "name": "Bearish Butterfly 1.27",
+      "symbol": "MMTC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "MMTC",
+        "timeframe": "1H",
+        "pattern_id": "HA06",
+        "variant": "ext_1_27",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 13776,
+        "formation_at": "2023-01-25 13:15:00",
+        "detected_at": "2023-02-01 12:15:00",
+        "signal_at": "2023-02-01 13:15:00"
+      },
+      "event_sha256": "de12f3349c56a3029a908e4866bc295f52ba2bcf7a18fec4cf78108951edc4a6",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p2-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p2-r3.png",
+        "screenshot_sha256": "ec480b42b0b137b4a8adcbe91c68ef9631f9de808af25ad48032c00c5c58c694",
+        "page": 2,
+        "row": 3,
+        "column": 1,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Both 1.27 and 1.618 Butterfly variants show the published terminal extension; projected zone is named explicitly."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA06",
+      "variant": "ext_1_618",
+      "side": "long",
+      "family": "harmonic",
+      "name": "Bullish Butterfly 1.618",
+      "symbol": "ABSLAMC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "ABSLAMC",
+        "timeframe": "1H",
+        "pattern_id": "HA06",
+        "variant": "ext_1_618",
+        "side": "long",
+        "state": "setup",
+        "episode": 2123,
+        "formation_at": "2023-01-02 09:15:00",
+        "detected_at": "2023-01-06 11:15:00",
+        "signal_at": "2023-01-06 11:15:00"
+      },
+      "event_sha256": "5d04f47970b0b0bfb8e14e8198c1d66f6134cb716cca4b634f92bee3b6401038",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p2-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p2-r3.png",
+        "screenshot_sha256": "ec480b42b0b137b4a8adcbe91c68ef9631f9de808af25ad48032c00c5c58c694",
+        "page": 2,
+        "row": 3,
+        "column": 2,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Both 1.27 and 1.618 Butterfly variants show the published terminal extension; projected zone is named explicitly."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA06",
+      "variant": "ext_1_618",
+      "side": "short",
+      "family": "harmonic",
+      "name": "Bearish Butterfly 1.618",
+      "symbol": "DCMSHRIRAM",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "DCMSHRIRAM",
+        "timeframe": "1H",
+        "pattern_id": "HA06",
+        "variant": "ext_1_618",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 6716,
+        "formation_at": "2019-01-02 09:15:00",
+        "detected_at": "2019-01-10 10:15:00",
+        "signal_at": "2019-01-10 11:15:00"
+      },
+      "event_sha256": "08fedcfe780ad8475d5e2c3a871610d0f10cf87bfd1748aeb00041db50e615e6",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p2-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p2-r3.png",
+        "screenshot_sha256": "ec480b42b0b137b4a8adcbe91c68ef9631f9de808af25ad48032c00c5c58c694",
+        "page": 2,
+        "row": 3,
+        "column": 3,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Both 1.27 and 1.618 Butterfly variants show the published terminal extension; projected zone is named explicitly."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA07",
+      "variant": "canonical",
+      "side": "long",
+      "family": "harmonic",
+      "name": "Bullish Crab",
+      "symbol": "DCMSHRIRAM",
+      "timeframe": "1D",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "DCMSHRIRAM",
+        "timeframe": "1D",
+        "pattern_id": "HA07",
+        "variant": "canonical",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 2800,
+        "formation_at": "2024-05-07 09:15:00",
+        "detected_at": "2024-06-07 09:15:00",
+        "signal_at": "2024-06-13 09:15:00"
+      },
+      "event_sha256": "ab6e8d17ad8ea842675f1797699e175ed052f20ca3c4934c2bb78caaea360a0b",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p3-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p3-r1.png",
+        "screenshot_sha256": "6e56da5d31e16cac4ee661bcb43e033256c81d8a18c937df1100ee8f6262959f",
+        "page": 3,
+        "row": 1,
+        "column": 1,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Crab legs and extrema are correct. Bullish sample has one-bar CD versus eleven-bar AB; time symmetry is descriptive, not gated. This visual peculiarity is not a mapping error or detector-validity certification."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA07",
+      "variant": "canonical",
+      "side": "short",
+      "family": "harmonic",
+      "name": "Bearish Crab",
+      "symbol": "LTTS",
+      "timeframe": "1D",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "LTTS",
+        "timeframe": "1D",
+        "pattern_id": "HA07",
+        "variant": "canonical",
+        "side": "short",
+        "state": "setup",
+        "episode": 1498,
+        "formation_at": "2022-10-14 09:15:00",
+        "detected_at": "2022-11-21 09:15:00",
+        "signal_at": "2022-11-21 09:15:00"
+      },
+      "event_sha256": "d2bae92ee7371241bacfd37eba58bd31a540dbf56d775ed18bf37db27bef0889",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p3-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p3-r1.png",
+        "screenshot_sha256": "6e56da5d31e16cac4ee661bcb43e033256c81d8a18c937df1100ee8f6262959f",
+        "page": 3,
+        "row": 1,
+        "column": 2,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Crab legs and extrema are correct. Bullish sample has one-bar CD versus eleven-bar AB; time symmetry is descriptive, not gated. This visual peculiarity is not a mapping error or detector-validity certification."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA08",
+      "variant": "canonical",
+      "side": "long",
+      "family": "harmonic",
+      "name": "Bullish Deep Crab",
+      "symbol": "ICICIBANK",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "ICICIBANK",
+        "timeframe": "1H",
+        "pattern_id": "HA08",
+        "variant": "canonical",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 6485,
+        "formation_at": "2018-11-27 11:15:00",
+        "detected_at": "2018-12-06 12:15:00",
+        "signal_at": "2018-12-07 09:15:00"
+      },
+      "event_sha256": "ae3842bd56f149706e75f1ecac822555bc9ef890e66e34883da8900d8b4d3d5e",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p3-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p3-r1.png",
+        "screenshot_sha256": "6e56da5d31e16cac4ee661bcb43e033256c81d8a18c937df1100ee8f6262959f",
+        "page": 3,
+        "row": 1,
+        "column": 3,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Deep Crab deep B and terminal extension map to actual alternating wick extrema."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA08",
+      "variant": "canonical",
+      "side": "short",
+      "family": "harmonic",
+      "name": "Bearish Deep Crab",
+      "symbol": "ICICIBANK",
+      "timeframe": "1D",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "ICICIBANK",
+        "timeframe": "1D",
+        "pattern_id": "HA08",
+        "variant": "canonical",
+        "side": "short",
+        "state": "setup",
+        "episode": 2513,
+        "formation_at": "2023-03-06 09:15:00",
+        "detected_at": "2023-04-20 09:15:00",
+        "signal_at": "2023-04-20 09:15:00"
+      },
+      "event_sha256": "ba12f5e6212a2995533475d9b3976b63fc1651adea625104de435b3eb00afac0",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p3-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p3-r2.png",
+        "screenshot_sha256": "d36dfb62dab9d003db8acfc28c03ae9880602ffcf05556612a1304b97c76a95a",
+        "page": 3,
+        "row": 2,
+        "column": 1,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Deep Crab deep B and terminal extension map to actual alternating wick extrema."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA09",
+      "variant": "canonical",
+      "side": "long",
+      "family": "harmonic",
+      "name": "Bullish Shark",
+      "symbol": "ABSLAMC",
+      "timeframe": "4H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "ABSLAMC",
+        "timeframe": "4H",
+        "pattern_id": "HA09",
+        "variant": "canonical",
+        "side": "long",
+        "state": "setup",
+        "episode": 535,
+        "formation_at": "2022-11-10 13:15:00",
+        "detected_at": "2022-11-28 13:15:00",
+        "signal_at": "2022-11-28 13:15:00"
+      },
+      "event_sha256": "54d0f25e0eb67a82c6017c521fef41f0ae4cf284f0ace8be486effbe7dd13779",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p3-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p3-r2.png",
+        "screenshot_sha256": "d36dfb62dab9d003db8acfc28c03ae9880602ffcf05556612a1304b97c76a95a",
+        "page": 3,
+        "row": 2,
+        "column": 2,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_XA/OX": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_BC/XA": true,
+        "ratio_XC/OX": true,
+        "ratio_time_BC/XA": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Shark uses O-X-A-B-C notation, with terminal C correctly drawn. Bullish example is a setup, not a triggered signal."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA09",
+      "variant": "canonical",
+      "side": "short",
+      "family": "harmonic",
+      "name": "Bearish Shark",
+      "symbol": "ITCHOTELS",
+      "timeframe": "4H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "ITCHOTELS",
+        "timeframe": "4H",
+        "pattern_id": "HA09",
+        "variant": "canonical",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 18,
+        "formation_at": "2025-02-10 09:15:00",
+        "detected_at": "2025-03-07 13:15:00",
+        "signal_at": "2025-03-10 13:15:00"
+      },
+      "event_sha256": "deccd61eda59d05b006307aeef407973d17eb1bc296e3f35f07af4bcbb102ecf",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p3-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p3-r2.png",
+        "screenshot_sha256": "d36dfb62dab9d003db8acfc28c03ae9880602ffcf05556612a1304b97c76a95a",
+        "page": 3,
+        "row": 2,
+        "column": 3,
+        "post_fix_reviewed": true
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_XA/OX": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_BC/XA": true,
+        "ratio_XC/OX": true,
+        "ratio_time_BC/XA": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "Shark uses O-X-A-B-C notation, with terminal C correctly drawn. Bullish example is a setup, not a triggered signal."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY"
+      ]
+    },
+    {
+      "pattern_id": "HA10",
+      "variant": "canonical",
+      "side": "long",
+      "family": "harmonic",
+      "name": "Bullish 5-0",
+      "symbol": "ABSLAMC",
+      "timeframe": "1D",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "ABSLAMC",
+        "timeframe": "1D",
+        "pattern_id": "HA10",
+        "variant": "canonical",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 1063,
+        "formation_at": "2026-01-22 09:15:00",
+        "detected_at": "2026-03-09 09:15:00",
+        "signal_at": "2026-03-10 09:15:00"
+      },
+      "event_sha256": "e8931483d1d8744b5e600b60431018ac81cb488dbaf53dafed339891b575c1fb",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p3-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-ha10-ratios.png",
+        "screenshot_sha256": "c8f29bf6a74230e34617f4f568ad2ff6ebccb1a873eb70c8662bc6ca0a366846",
+        "page": 3,
+        "row": 3,
+        "column": 1,
+        "post_fix_reviewed": true,
+        "geometry_recheck_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p3-r3.png",
+        "frontend_bundle": "entry-5a1b536cad529ff98dcad7e807461e09.js"
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "5-0 X-A-B-C-D geometry is coherent. Only gated leg ratios and descriptive time ratio remain in the visible readout; signed auxiliary AD/XA is preserved in frozen metadata and omitted from display. Both directions visually rechecked after deployment."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY",
+        "HA10_SIGNED_AUXILIARY_RATIO"
+      ]
+    },
+    {
+      "pattern_id": "HA10",
+      "variant": "canonical",
+      "side": "short",
+      "family": "harmonic",
+      "name": "Bearish 5-0",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "HA10",
+        "variant": "canonical",
+        "side": "short",
+        "state": "setup",
+        "episode": 722,
+        "formation_at": "2024-10-14 10:15:00",
+        "detected_at": "2024-10-21 12:15:00",
+        "signal_at": "2024-10-21 12:15:00"
+      },
+      "event_sha256": "682bb2b794ee0338af2cc9361d35b2acf0b853a73afe33190996a59656b1b19a",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-p3-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-ha10-ratios.png",
+        "screenshot_sha256": "c8f29bf6a74230e34617f4f568ad2ff6ebccb1a873eb70c8662bc6ca0a366846",
+        "page": 3,
+        "row": 3,
+        "column": 2,
+        "post_fix_reviewed": true,
+        "geometry_recheck_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/harmonic-final-p3-r3.png",
+        "frontend_bundle": "entry-5a1b536cad529ff98dcad7e807461e09.js"
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "pivots_are_named_ohlc_extrema": true,
+        "causal_pivot_availability": true,
+        "alternating_pivots_and_side": true,
+        "exact_pivot_labels": true,
+        "ratio_AB/XA": true,
+        "ratio_BC/AB": true,
+        "ratio_CD/BC": true,
+        "ratio_CD/AB": true,
+        "ratio_AD/XA": true,
+        "ratio_time_CD/AB": true,
+        "exact_projected_prz": true,
+        "published_trigger": true,
+        "published_failure": true,
+        "failure_outside_terminal_extreme": true
+      },
+      "observations": [
+        "5-0 X-A-B-C-D geometry is coherent. Only gated leg ratios and descriptive time ratio remain in the visible readout; signed auxiliary AD/XA is preserved in frozen metadata and omitted from display. Both directions visually rechecked after deployment."
+      ],
+      "findings": [
+        "HA_FAILURE_LEVEL_OMITTED",
+        "HA_PROJECTED_PRZ_MEANING",
+        "HA_SETUP_STATE_VISIBILITY",
+        "HA10_SIGNED_AUXILIARY_RATIO"
+      ]
+    },
+    {
+      "pattern_id": "PA01",
+      "variant": "bottom",
+      "side": "long",
+      "family": "price_action",
+      "name": "Tweezer bottom",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA01",
+        "variant": "bottom",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 3216,
+        "formation_at": "2026-03-23 10:15:00",
+        "detected_at": "2026-03-23 11:15:00",
+        "signal_at": "2026-03-23 14:15:00"
+      },
+      "event_sha256": "2458b08e681dc9e4359cf45f0633fd2c7395a4dcf56537ced5aadac9859da988",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r1.png",
+        "screenshot_sha256": "cb94a677b06c3d2b9ad03f78bb141e86c28bc0be56ff937afd7dcb9f632365d7",
+        "page": 1,
+        "row": 1,
+        "column": 1,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "tweezer_equal_extremes": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Tweezer box covers only the equal-extreme pair, while later confirmation is separately marked."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA01",
+      "variant": "top",
+      "side": "short",
+      "family": "price_action",
+      "name": "Tweezer top",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA01",
+        "variant": "top",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 3834,
+        "formation_at": "2026-08-03 12:15:00",
+        "detected_at": "2026-08-03 13:15:00",
+        "signal_at": "2026-08-04 09:15:00"
+      },
+      "event_sha256": "67e16e5dc33551e019987918cce99fd12450ab1a6a4277bfa45ee70f02846be0",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r1.png",
+        "screenshot_sha256": "cb94a677b06c3d2b9ad03f78bb141e86c28bc0be56ff937afd7dcb9f632365d7",
+        "page": 1,
+        "row": 1,
+        "column": 2,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "tweezer_equal_extremes": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Tweezer box covers only the equal-extreme pair, while later confirmation is separately marked."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA02",
+      "variant": "cluster_break_down",
+      "side": "short",
+      "family": "price_action",
+      "name": "Inside bar (cluster), break down",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA02",
+        "variant": "cluster_break_down",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 3924,
+        "formation_at": "2026-08-20 11:15:00",
+        "detected_at": "2026-08-20 13:15:00",
+        "signal_at": "2026-08-21 09:15:00"
+      },
+      "event_sha256": "2cd7cea43e498d98062ac640174558cba858f726ffd35d03121b73cb004319dc",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r1.png",
+        "screenshot_sha256": "cb94a677b06c3d2b9ad03f78bb141e86c28bc0be56ff937afd7dcb9f632365d7",
+        "page": 1,
+        "row": 1,
+        "column": 3,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "mother_levels_exact": true,
+        "inside_bars_within_mother": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Mother-bar reference and inside-range recognition are separated from subsequent breakout confirmation; all six directional variants inspected."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA02",
+      "variant": "cluster_break_up",
+      "side": "long",
+      "family": "price_action",
+      "name": "Inside bar (cluster), break up",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA02",
+        "variant": "cluster_break_up",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 3530,
+        "formation_at": "2026-06-02 09:15:00",
+        "detected_at": "2026-06-02 11:15:00",
+        "signal_at": "2026-06-02 14:15:00"
+      },
+      "event_sha256": "a81c5e1e7672c808a52ec98d15fa89d6c4b9c683f73e2ff3b37d15008b728f5a",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r2.png",
+        "screenshot_sha256": "ac082437abf4e64d6321e8eda5e4bc61e4058939d95d70b499c10cfff3456bbc",
+        "page": 1,
+        "row": 2,
+        "column": 1,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "mother_levels_exact": true,
+        "inside_bars_within_mother": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Mother-bar reference and inside-range recognition are separated from subsequent breakout confirmation; all six directional variants inspected."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA02",
+      "variant": "first_break_down",
+      "side": "short",
+      "family": "price_action",
+      "name": "Inside bar (first), break down",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA02",
+        "variant": "first_break_down",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 4002,
+        "formation_at": "2026-09-04 12:15:00",
+        "detected_at": "2026-09-04 13:15:00",
+        "signal_at": "2026-09-07 09:15:00"
+      },
+      "event_sha256": "8a9ab9d593c543a16c1ecce8c436e69c30b55f26263dd3723a06c22fc5d4c25f",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r2.png",
+        "screenshot_sha256": "ac082437abf4e64d6321e8eda5e4bc61e4058939d95d70b499c10cfff3456bbc",
+        "page": 1,
+        "row": 2,
+        "column": 2,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "mother_levels_exact": true,
+        "inside_bars_within_mother": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Mother-bar reference and inside-range recognition are separated from subsequent breakout confirmation; all six directional variants inspected."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA02",
+      "variant": "first_break_up",
+      "side": "long",
+      "family": "price_action",
+      "name": "Inside bar (first), break up",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA02",
+        "variant": "first_break_up",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 3622,
+        "formation_at": "2026-06-19 10:15:00",
+        "detected_at": "2026-06-19 11:15:00",
+        "signal_at": "2026-06-19 14:15:00"
+      },
+      "event_sha256": "663b0312e338511f6aee7faec912111835554f1ea404a6612f9f209c5160ebe0",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r2.png",
+        "screenshot_sha256": "ac082437abf4e64d6321e8eda5e4bc61e4058939d95d70b499c10cfff3456bbc",
+        "page": 1,
+        "row": 2,
+        "column": 3,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "mother_levels_exact": true,
+        "inside_bars_within_mother": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Mother-bar reference and inside-range recognition are separated from subsequent breakout confirmation; all six directional variants inspected."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA02",
+      "variant": "nested_break_down",
+      "side": "short",
+      "family": "price_action",
+      "name": "Inside bar (nested), break down",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA02",
+        "variant": "nested_break_down",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 4034,
+        "formation_at": "2026-09-11 09:15:00",
+        "detected_at": "2026-09-11 13:15:00",
+        "signal_at": "2026-09-15 09:15:00"
+      },
+      "event_sha256": "d71ad69a76f6a27b51bca8bba9aa1bc33c0089127296fb77041fc4966feb9cec",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r3.png",
+        "screenshot_sha256": "004ee876f0068f73ee5f5b6ea8da6c70c5d5820695df18bc5334ea0cfc2e0ab7",
+        "page": 1,
+        "row": 3,
+        "column": 1,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "mother_levels_exact": true,
+        "inside_bars_within_mother": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Mother-bar reference and inside-range recognition are separated from subsequent breakout confirmation; all six directional variants inspected."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA02",
+      "variant": "nested_break_up",
+      "side": "long",
+      "family": "price_action",
+      "name": "Inside bar (nested), break up",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA02",
+        "variant": "nested_break_up",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 1660,
+        "formation_at": "2025-05-02 09:15:00",
+        "detected_at": "2025-05-02 15:15:00",
+        "signal_at": "2025-05-05 10:15:00"
+      },
+      "event_sha256": "e61ec73e5e5507fb7ff9d2fbcf2078c9ab180ed6e4e99c800eddb241da4e0656",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r3.png",
+        "screenshot_sha256": "004ee876f0068f73ee5f5b6ea8da6c70c5d5820695df18bc5334ea0cfc2e0ab7",
+        "page": 1,
+        "row": 3,
+        "column": 2,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "mother_levels_exact": true,
+        "inside_bars_within_mother": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Mother-bar reference and inside-range recognition are separated from subsequent breakout confirmation; all six directional variants inspected."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA03",
+      "variant": "bearish_close",
+      "side": "short",
+      "family": "price_action",
+      "name": "Outside bar, bearish close",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA03",
+        "variant": "bearish_close",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 3435,
+        "formation_at": "2026-05-12 12:15:00",
+        "detected_at": "2026-05-12 13:15:00",
+        "signal_at": "2026-05-13 09:15:00"
+      },
+      "event_sha256": "9b9ef3757a4b16aacba15ca8bb09af1023ff425393f307252f0847964ebc99ef",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p1-r3.png",
+        "screenshot_sha256": "004ee876f0068f73ee5f5b6ea8da6c70c5d5820695df18bc5334ea0cfc2e0ab7",
+        "page": 1,
+        "row": 3,
+        "column": 3,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "outside_both_prior_extremes": true,
+        "outside_close_quarter": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Outside bar spans both prior extremes and closes in the specified outer quarter; later confirmation is excluded from the shape box."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA03",
+      "variant": "bullish_close",
+      "side": "long",
+      "family": "price_action",
+      "name": "Outside bar, bullish close",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA03",
+        "variant": "bullish_close",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 3963,
+        "formation_at": "2026-08-27 15:15:00",
+        "detected_at": "2026-08-28 09:15:00",
+        "signal_at": "2026-08-28 12:15:00"
+      },
+      "event_sha256": "17d00a43ddab171ead372a8c8b870af635b6787f2bcc1e7625891ca298ecedd3",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r1.png",
+        "screenshot_sha256": "39c1c6497943c4ecaa20a691bc3f85688a2bc45228abb05ca47e9082c10d1346",
+        "page": 2,
+        "row": 1,
+        "column": 1,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "outside_both_prior_extremes": true,
+        "outside_close_quarter": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Outside bar spans both prior extremes and closes in the specified outer quarter; later confirmation is excluded from the shape box."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA04",
+      "variant": "lower_shadow",
+      "side": "long",
+      "family": "price_action",
+      "name": "Pin bar, lower shadow",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA04",
+        "variant": "lower_shadow",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 3357,
+        "formation_at": "2026-04-24 11:15:00",
+        "detected_at": "2026-04-24 11:15:00",
+        "signal_at": "2026-04-24 14:15:00"
+      },
+      "event_sha256": "b6cfcd41e09f94f0eb74013e5b1dca173c2cf3cb9077955686aedbd0ed419298",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r1.png",
+        "screenshot_sha256": "39c1c6497943c4ecaa20a691bc3f85688a2bc45228abb05ca47e9082c10d1346",
+        "page": 2,
+        "row": 1,
+        "column": 2,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "pin_shadow_proportions": true,
+        "pin_published_fractions": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Single pin-bar box, dominant wick orientation, and following confirmation are correct in plain and contextual variants. Context requirements verified against published metadata, not independently refitted trend."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA04",
+      "variant": "lower_shadow_context",
+      "side": "long",
+      "family": "price_action",
+      "name": "Pin bar, lower shadow after decline",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA04",
+        "variant": "lower_shadow_context",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 3357,
+        "formation_at": "2026-04-24 11:15:00",
+        "detected_at": "2026-04-24 11:15:00",
+        "signal_at": "2026-04-24 14:15:00"
+      },
+      "event_sha256": "b6cfcd41e09f94f0eb74013e5b1dca173c2cf3cb9077955686aedbd0ed419298",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r1.png",
+        "screenshot_sha256": "39c1c6497943c4ecaa20a691bc3f85688a2bc45228abb05ca47e9082c10d1346",
+        "page": 2,
+        "row": 1,
+        "column": 3,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "pin_shadow_proportions": true,
+        "pin_published_fractions": true,
+        "published_context_direction": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Single pin-bar box, dominant wick orientation, and following confirmation are correct in plain and contextual variants. Context requirements verified against published metadata, not independently refitted trend."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA04",
+      "variant": "upper_shadow",
+      "side": "short",
+      "family": "price_action",
+      "name": "Pin bar, upper shadow",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA04",
+        "variant": "upper_shadow",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 4003,
+        "formation_at": "2026-09-04 13:15:00",
+        "detected_at": "2026-09-04 13:15:00",
+        "signal_at": "2026-09-07 09:15:00"
+      },
+      "event_sha256": "87300c0c8f6a136883fca4b1e30d4f95f6e3f397684b597358ef2f701f6fef91",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r2.png",
+        "screenshot_sha256": "52047e1d59c924236dff2e38cbbf597893751c911b88540e0e0e602bc768e3bf",
+        "page": 2,
+        "row": 2,
+        "column": 1,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "pin_shadow_proportions": true,
+        "pin_published_fractions": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Single pin-bar box, dominant wick orientation, and following confirmation are correct in plain and contextual variants. Context requirements verified against published metadata, not independently refitted trend."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA04",
+      "variant": "upper_shadow_context",
+      "side": "short",
+      "family": "price_action",
+      "name": "Pin bar, upper shadow after advance",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA04",
+        "variant": "upper_shadow_context",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 4003,
+        "formation_at": "2026-09-04 13:15:00",
+        "detected_at": "2026-09-04 13:15:00",
+        "signal_at": "2026-09-07 09:15:00"
+      },
+      "event_sha256": "87300c0c8f6a136883fca4b1e30d4f95f6e3f397684b597358ef2f701f6fef91",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r2.png",
+        "screenshot_sha256": "52047e1d59c924236dff2e38cbbf597893751c911b88540e0e0e602bc768e3bf",
+        "page": 2,
+        "row": 2,
+        "column": 2,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "pin_shadow_proportions": true,
+        "pin_published_fractions": true,
+        "published_context_direction": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Single pin-bar box, dominant wick orientation, and following confirmation are correct in plain and contextual variants. Context requirements verified against published metadata, not independently refitted trend."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA05",
+      "variant": "inside_nr4_break_down",
+      "side": "short",
+      "family": "price_action",
+      "name": "Inside NR4, break down",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA05",
+        "variant": "inside_nr4_break_down",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 3992,
+        "formation_at": "2026-09-03 09:15:00",
+        "detected_at": "2026-09-03 12:15:00",
+        "signal_at": "2026-09-03 15:15:00"
+      },
+      "event_sha256": "f8e2cb083f3c0e0b7193eb92f7286d8888cae65938b5b1607725b253c5016ab1",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r2.png",
+        "screenshot_sha256": "52047e1d59c924236dff2e38cbbf597893751c911b88540e0e0e602bc768e3bf",
+        "page": 2,
+        "row": 2,
+        "column": 3,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "narrowest_of_comparison_window": true,
+        "nr_levels_exact": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Range-comparison box covers the NR4/NR7 lookback; narrowest bar and later confirmation are separately identified."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA05",
+      "variant": "inside_nr4_break_up",
+      "side": "long",
+      "family": "price_action",
+      "name": "Inside NR4, break up",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA05",
+        "variant": "inside_nr4_break_up",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 3986,
+        "formation_at": "2026-09-02 10:15:00",
+        "detected_at": "2026-09-02 13:15:00",
+        "signal_at": "2026-09-03 09:15:00"
+      },
+      "event_sha256": "1f7fc1b24e88dd2688a94673c8b46feb31a5f45637ba9202feca903f1caef0a9",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r3.png",
+        "screenshot_sha256": "7f7fb892f0f7de3c956accc7e41cba71c0247bfc556d6d4052abf9fa1fc5770d",
+        "page": 2,
+        "row": 3,
+        "column": 1,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "narrowest_of_comparison_window": true,
+        "nr_levels_exact": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Range-comparison box covers the NR4/NR7 lookback; narrowest bar and later confirmation are separately identified."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA05",
+      "variant": "nr4_break_down",
+      "side": "short",
+      "family": "price_action",
+      "name": "NR4 narrow range, break down",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA05",
+        "variant": "nr4_break_down",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 3992,
+        "formation_at": "2026-09-03 09:15:00",
+        "detected_at": "2026-09-03 12:15:00",
+        "signal_at": "2026-09-03 15:15:00"
+      },
+      "event_sha256": "8797e27cd02cb5ea25a9ccdef577bcd60eeae499fa724bf4f07ea25f18eb1821",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r3.png",
+        "screenshot_sha256": "7f7fb892f0f7de3c956accc7e41cba71c0247bfc556d6d4052abf9fa1fc5770d",
+        "page": 2,
+        "row": 3,
+        "column": 2,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "narrowest_of_comparison_window": true,
+        "nr_levels_exact": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Range-comparison box covers the NR4/NR7 lookback; narrowest bar and later confirmation are separately identified."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA05",
+      "variant": "nr4_break_up",
+      "side": "long",
+      "family": "price_action",
+      "name": "NR4 narrow range, break up",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA05",
+        "variant": "nr4_break_up",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 4033,
+        "formation_at": "2026-09-10 15:15:00",
+        "detected_at": "2026-09-11 11:15:00",
+        "signal_at": "2026-09-11 14:15:00"
+      },
+      "event_sha256": "41cb81a45cf5a5ea084d3f16e4b3dccb471f0776934eeef405f2d7cd88ee61d4",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p2-r3.png",
+        "screenshot_sha256": "7f7fb892f0f7de3c956accc7e41cba71c0247bfc556d6d4052abf9fa1fc5770d",
+        "page": 2,
+        "row": 3,
+        "column": 3,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "narrowest_of_comparison_window": true,
+        "nr_levels_exact": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Range-comparison box covers the NR4/NR7 lookback; narrowest bar and later confirmation are separately identified."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA05",
+      "variant": "nr7_break_down",
+      "side": "short",
+      "family": "price_action",
+      "name": "NR7 narrow range, break down",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA05",
+        "variant": "nr7_break_down",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 3989,
+        "formation_at": "2026-09-02 13:15:00",
+        "detected_at": "2026-09-03 12:15:00",
+        "signal_at": "2026-09-03 15:15:00"
+      },
+      "event_sha256": "7cbf7e7a1aafa605b3aedf4696ac07233381c803e5fbf9aa49f2643f74ca11b6",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r1.png",
+        "screenshot_sha256": "398ed0de5b8500775b944185289954158ffa6fdb334e0d22a33a3806938ed30a",
+        "page": 3,
+        "row": 1,
+        "column": 1,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "narrowest_of_comparison_window": true,
+        "nr_levels_exact": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Range-comparison box covers the NR4/NR7 lookback; narrowest bar and later confirmation are separately identified."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA05",
+      "variant": "nr7_break_up",
+      "side": "long",
+      "family": "price_action",
+      "name": "NR7 narrow range, break up",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA05",
+        "variant": "nr7_break_up",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 4030,
+        "formation_at": "2026-09-10 12:15:00",
+        "detected_at": "2026-09-11 11:15:00",
+        "signal_at": "2026-09-11 14:15:00"
+      },
+      "event_sha256": "8265e92917db8608114565d17cf49ff7ea428a10107a968c34b66a69ed95fd0c",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r1.png",
+        "screenshot_sha256": "398ed0de5b8500775b944185289954158ffa6fdb334e0d22a33a3806938ed30a",
+        "page": 3,
+        "row": 1,
+        "column": 2,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "narrowest_of_comparison_window": true,
+        "nr_levels_exact": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Range-comparison box covers the NR4/NR7 lookback; narrowest bar and later confirmation are separately identified."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA06",
+      "variant": "bear",
+      "side": "short",
+      "family": "price_action",
+      "name": "Bearish fakey",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA06",
+        "variant": "bear",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 905,
+        "formation_at": "2024-11-22 10:15:00",
+        "detected_at": "2024-11-25 09:15:00",
+        "signal_at": "2024-11-25 12:15:00"
+      },
+      "event_sha256": "ea4bcfb85ff44468cd441389aec0aa14cfe3bfd4f715d5ed85d3e0e5915a4b15",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r1.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r1.png",
+        "screenshot_sha256": "398ed0de5b8500775b944185289954158ffa6fdb334e0d22a33a3806938ed30a",
+        "page": 3,
+        "row": 1,
+        "column": 3,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "mother_levels_exact": true,
+        "inside_bars_within_mother": true,
+        "false_break_extreme": true,
+        "failure_close_back_inside": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Mother range, false-break bar, return-inside failure close and later directional confirmation are all visible; labels refer to bars rather than arbitrary inferred pivot highs/lows."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA06",
+      "variant": "bull",
+      "side": "long",
+      "family": "price_action",
+      "name": "Bullish fakey",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA06",
+        "variant": "bull",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 1793,
+        "formation_at": "2025-05-29 09:15:00",
+        "detected_at": "2025-05-30 09:15:00",
+        "signal_at": "2025-05-30 12:15:00"
+      },
+      "event_sha256": "f8ede0cb994a48279f3904689273a25be38e1c75fe0ef5a48538a80f2c80fc7d",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r2.png",
+        "screenshot_sha256": "0eaa30257863b1a1b0b9aba1f092a4c74b841e90dcac65e8dc1764cafb3e35b0",
+        "page": 3,
+        "row": 2,
+        "column": 1,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "mother_levels_exact": true,
+        "inside_bars_within_mother": true,
+        "false_break_extreme": true,
+        "failure_close_back_inside": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Mother range, false-break bar, return-inside failure close and later directional confirmation are all visible; labels refer to bars rather than arbitrary inferred pivot highs/lows."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA07",
+      "variant": "falling",
+      "side": "short",
+      "family": "price_action",
+      "name": "Falling window",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA07",
+        "variant": "falling",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 3200,
+        "formation_at": "2026-03-18 15:15:00",
+        "detected_at": "2026-03-19 09:15:00",
+        "signal_at": "2026-03-19 12:15:00"
+      },
+      "event_sha256": "61dbdfdf6c0608d9d984e34ee6e256753fffa366e12fbfcd0e6ac37f5ca6324f",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r2.png",
+        "screenshot_sha256": "0eaa30257863b1a1b0b9aba1f092a4c74b841e90dcac65e8dc1764cafb3e35b0",
+        "page": 3,
+        "row": 2,
+        "column": 2,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "gap_is_actual_positive_ohlc_distance": true,
+        "gap_box_exact": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Full-range candle gap uses the actual prior/current wick edges in both directions; it is distinct from an opening gap."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA07",
+      "variant": "rising",
+      "side": "long",
+      "family": "price_action",
+      "name": "Rising window",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA07",
+        "variant": "rising",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 2836,
+        "formation_at": "2026-01-01 15:15:00",
+        "detected_at": "2026-01-02 09:15:00",
+        "signal_at": "2026-01-02 11:15:00"
+      },
+      "event_sha256": "ab76859482e4a994687b7d5d5ab3cf75865ff557924b57552291cf60c12aa5e4",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r2.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r2.png",
+        "screenshot_sha256": "0eaa30257863b1a1b0b9aba1f092a4c74b841e90dcac65e8dc1764cafb3e35b0",
+        "page": 3,
+        "row": 2,
+        "column": 3,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "gap_is_actual_positive_ohlc_distance": true,
+        "gap_box_exact": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Full-range candle gap uses the actual prior/current wick edges in both directions; it is distinct from an opening gap."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA08",
+      "variant": "bearish",
+      "side": "short",
+      "family": "price_action",
+      "name": "Gap-and-reversal, bearish",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA08",
+        "variant": "bearish",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 3480,
+        "formation_at": "2026-05-20 15:15:00",
+        "detected_at": "2026-05-21 09:15:00",
+        "signal_at": "2026-05-21 12:15:00"
+      },
+      "event_sha256": "449fb8ac393cc77e9577c4fce7b9450abac55ed0393b5b2f9b680a1084e67c13",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r3.png",
+        "screenshot_sha256": "2c9c2539da984aeecd650431f32bd2aaf32770c030514cb328ed4944e1fe2f9f",
+        "page": 3,
+        "row": 3,
+        "column": 1,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "reversal_fills_opening_gap": true,
+        "gap_is_actual_positive_ohlc_distance": true,
+        "gap_box_exact": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Opening-gap region is explicitly labelled filled intrabar; gapped open is positioned at the actual open, reversal close and later confirmation remain distinct."
+      ],
+      "findings": []
+    },
+    {
+      "pattern_id": "PA08",
+      "variant": "bullish",
+      "side": "long",
+      "family": "price_action",
+      "name": "Gap-and-reversal, bullish",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "PA08",
+        "variant": "bullish",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 1141,
+        "formation_at": "2025-01-09 15:15:00",
+        "detected_at": "2025-01-10 09:15:00",
+        "signal_at": "2025-01-10 12:15:00"
+      },
+      "event_sha256": "76dd2f3a002471b67153cf9b967356b111610b41a0c97e74d238791774e83240",
+      "status": "visually_inspected_semantics_pass",
+      "detector_validity": "not_certified",
+      "visual_review": {
+        "reviewed": true,
+        "method": "Actual authenticated browser gallery, three cards per screenshot; every variant inspected by model vision.",
+        "baseline_screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r3.png",
+        "screenshot": "docs/pattern_research/reaudit_harmonic_pa_images/price-action-p3-r3.png",
+        "screenshot_sha256": "2c9c2539da984aeecd650431f32bd2aaf32770c030514cb328ed4944e1fe2f9f",
+        "page": 3,
+        "row": 3,
+        "column": 2,
+        "post_fix_reviewed": false
+      },
+      "semantic_checks": {
+        "chronological_lifecycle": true,
+        "drawable_finite_bounded": true,
+        "recognition_box_exact_ohlc_and_timing": true,
+        "confirmation_not_in_shape": true,
+        "reversal_fills_opening_gap": true,
+        "gap_is_actual_positive_ohlc_distance": true,
+        "gap_box_exact": true,
+        "published_trigger": true,
+        "signal_close_crosses_trigger": true
+      },
+      "observations": [
+        "Opening-gap region is explicitly labelled filled intrabar; gapped open is positioned at the actual open, reversal close and later confirmation remain distinct."
+      ],
+      "findings": []
+    }
+  ]
+}

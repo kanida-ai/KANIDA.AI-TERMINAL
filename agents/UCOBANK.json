@@ -1,0 +1,5738 @@
+{
+  "schema": "kanida-agent-2.0 (net-expectancy, sustained 2025-26)",
+  "symbol": "UCOBANK",
+  "is_fno": false,
+  "exported_utc": "2026-08-03 05:27:04",
+  "sellable_metric": "net expectancy = (Pwin*AvgWin) - (Ploss*AvgLoss), after costs, per trade",
+  "worst_year_net_expectancy_pct": 2.091,
+  "how_it_trades": {
+    "entry": "next session OPEN after a kept pattern fires at close",
+    "exit": "target touch within hold window (daily H/L) else time-exit at close",
+    "selection": "trade only patterns with positive <=2024 net expectancy",
+    "routing": "1D->MIS 5x; multiday long->CNC 1x; multiday short->NRML 5x"
+  },
+  "segments": {
+    "MIS LONG 1D": {
+      "order": "MIS",
+      "direction": "LONG",
+      "hold_days": 1,
+      "pct_target": 1,
+      "leverage": 5.0,
+      "cost_pct": 0.08,
+      "patterns": [
+        {
+          "target": "up_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.0714
+            ],
+            [
+              "eod_buy_sell_imbalance_T4",
+              "<=",
+              0.3168
+            ],
+            [
+              "eod_dist_poc",
+              ">",
+              -0.1082
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.308,
+          "pre2025_trades": 91
+        },
+        {
+          "target": "up_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback_T2",
+              ">",
+              -1.6778
+            ],
+            [
+              "eod_ret",
+              ">",
+              0.1232
+            ],
+            [
+              "m_slope_sma20",
+              ">",
+              -0.3528
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.01,
+          "pre2025_trades": 103
+        }
+      ]
+    },
+    "CNC LONG 2D": {
+      "order": "CNC",
+      "direction": "LONG",
+      "hold_days": 2,
+      "pct_target": 2,
+      "leverage": 1.0,
+      "cost_pct": 0.15,
+      "patterns": [
+        {
+          "target": "up_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              3.8412
+            ],
+            [
+              "m_dist_sma_20",
+              "<=",
+              3.17
+            ],
+            [
+              "m_mfi14",
+              "<=",
+              21.4297
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.496,
+          "pre2025_trades": 64
+        },
+        {
+          "target": "up_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              3.8412
+            ],
+            [
+              "m_dist_sma_20",
+              ">",
+              3.17
+            ],
+            [
+              "eod_ret_T1",
+              ">",
+              0.5028
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.254,
+          "pre2025_trades": 92
+        },
+        {
+          "target": "up_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              3.8417
+            ],
+            [
+              "m_mfi14",
+              "<=",
+              22.048
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.473,
+          "pre2025_trades": 68
+        },
+        {
+          "target": "up_2pct_2d",
+          "conds": [
+            [
+              "m_obv_slope20",
+              ">",
+              6.3335
+            ],
+            [
+              "m_vol_vs_20",
+              "<=",
+              1.0012
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              3.7036
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.233,
+          "pre2025_trades": 86
+        },
+        {
+          "target": "up_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              5.7182
+            ],
+            [
+              "m_rsi14",
+              "<=",
+              54.7294
+            ],
+            [
+              "m_mfi14",
+              "<=",
+              21.4297
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.625,
+          "pre2025_trades": 80
+        },
+        {
+          "target": "up_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -3.603
+            ],
+            [
+              "m_dist_sma_20",
+              ">",
+              3.0197
+            ],
+            [
+              "eod_vol_compression_T1",
+              "<=",
+              0.695
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.137,
+          "pre2025_trades": 107
+        },
+        {
+          "target": "up_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              3.8488
+            ],
+            [
+              "eod_max_vol_z",
+              "<=",
+              17.8403
+            ],
+            [
+              "eod_buy_sell_imbalance_T4",
+              "<=",
+              0.1204
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.68,
+          "pre2025_trades": 53
+        },
+        {
+          "target": "up_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              3.4775
+            ],
+            [
+              "eod_deepest_pullback_T4",
+              "<=",
+              -2.2947
+            ],
+            [
+              "m_vol_vs_20",
+              ">",
+              0.9109
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.059,
+          "pre2025_trades": 102
+        },
+        {
+          "target": "up_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              3.4775
+            ],
+            [
+              "m_dist_sma_20",
+              ">",
+              3.0088
+            ],
+            [
+              "eod_n_hivol_T4",
+              ">",
+              44.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.015,
+          "pre2025_trades": 151
+        },
+        {
+          "target": "up_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.259
+            ],
+            [
+              "eod_range_pct_T1",
+              ">",
+              2.2654
+            ],
+            [
+              "eod_n_hivol_T5",
+              "<=",
+              41.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.063,
+          "pre2025_trades": 59
+        },
+        {
+          "target": "up_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              3.7683
+            ],
+            [
+              "eod_max_vol_z_T2",
+              "<=",
+              11.7698
+            ],
+            [
+              "eod_deepest_pullback_T5",
+              "<=",
+              -2.3907
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.229,
+          "pre2025_trades": 80
+        },
+        {
+          "target": "up_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              3.7683
+            ],
+            [
+              "eod_max_vol_z_T2",
+              ">",
+              11.7698
+            ],
+            [
+              "m_mfi14",
+              "<=",
+              22.048
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.453,
+          "pre2025_trades": 67
+        }
+      ]
+    },
+    "CNC LONG 5D": {
+      "order": "CNC",
+      "direction": "LONG",
+      "hold_days": 5,
+      "pct_target": 5,
+      "leverage": 1.0,
+      "cost_pct": 0.15,
+      "patterns": [
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_atr20_pct",
+              "<=",
+              5.6482
+            ],
+            [
+              "m_vol_vs_20",
+              ">",
+              0.6757
+            ],
+            [
+              "eod_deepest_pullback_T2",
+              "<=",
+              -3.2215
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.061,
+          "pre2025_trades": 325
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_rsi14",
+              ">",
+              64.7667
+            ],
+            [
+              "eod_range_pct_T1",
+              "<=",
+              2.8389
+            ],
+            [
+              "eod_vol_compression_T4",
+              "<=",
+              0.8071
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.508,
+          "pre2025_trades": 41
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_vol_vs_20",
+              "<=",
+              1.0452
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.3947
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              3.6067
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.903,
+          "pre2025_trades": 145
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.4561
+            ],
+            [
+              "eod_max_vol_z",
+              "<=",
+              18.1316
+            ],
+            [
+              "eod_cvd_norm_T4",
+              "<=",
+              -0.0129
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.876,
+          "pre2025_trades": 90
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "eod_max_vol_z_T2",
+              "<=",
+              11.5616
+            ],
+            [
+              "m_dist_high_20",
+              ">",
+              -15.927
+            ],
+            [
+              "eod_max_vol_z_T4",
+              ">",
+              14.887
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.48,
+          "pre2025_trades": 116
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "eod_range_pct_T2",
+              ">",
+              2.1228
+            ],
+            [
+              "eod_n_iceberg_T1",
+              "<=",
+              0.5
+            ],
+            [
+              "eod_max_vol_z_T2",
+              "<=",
+              24.5951
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.25,
+          "pre2025_trades": 433
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_slope_sma20",
+              "<=",
+              0.2122
+            ],
+            [
+              "m_slope_sma20",
+              ">",
+              -4.8939
+            ],
+            [
+              "m_mtd_ret",
+              "<=",
+              -9.7635
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.445,
+          "pre2025_trades": 192
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_slope_sma20",
+              ">",
+              0.2122
+            ],
+            [
+              "m_mtd_ret",
+              ">",
+              5.2517
+            ],
+            [
+              "m_wtd_ret",
+              ">",
+              -1.9597
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.323,
+          "pre2025_trades": 279
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_roc_20",
+              "<=",
+              10.9959
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              8.9418
+            ],
+            [
+              "eod_ret_T3",
+              "<=",
+              -2.356
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.786,
+          "pre2025_trades": 82
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_mtd_ret",
+              ">",
+              2.3792
+            ],
+            [
+              "m_rsi14",
+              ">",
+              60.284
+            ],
+            [
+              "eod_range_pct_T1",
+              ">",
+              2.7384
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.62,
+          "pre2025_trades": 320
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_atr20_pct",
+              "<=",
+              3.344
+            ],
+            [
+              "eod_max_vol_z_T2",
+              "<=",
+              21.1969
+            ],
+            [
+              "eod_cvd_norm_T3",
+              ">",
+              0.1116
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.727,
+          "pre2025_trades": 63
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "eod_deepest_pullback_T4",
+              ">",
+              -2.4784
+            ],
+            [
+              "eod_n_hivol",
+              ">",
+              42.5
+            ],
+            [
+              "eod_n_hivol_T3",
+              "<=",
+              46.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.412,
+          "pre2025_trades": 368
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_mtd_ret",
+              ">",
+              5.0008
+            ],
+            [
+              "eod_dist_poc_T5",
+              ">",
+              -0.7507
+            ],
+            [
+              "m_vol_vs_20",
+              "<=",
+              2.3334
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.661,
+          "pre2025_trades": 209
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_mtd_ret",
+              ">",
+              5.0967
+            ],
+            [
+              "eod_max_vol_z",
+              "<=",
+              32.4136
+            ],
+            [
+              "eod_cvd_norm_T5",
+              "<=",
+              0.1448
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.662,
+          "pre2025_trades": 266
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              "<=",
+              17.5914
+            ],
+            [
+              "m_rsi14",
+              "<=",
+              65.1014
+            ],
+            [
+              "m_slope_sma20",
+              "<=",
+              -3.7402
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.069,
+          "pre2025_trades": 196
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_mtd_ret",
+              ">",
+              5.229
+            ],
+            [
+              "m_wtd_ret",
+              ">",
+              -0.5808
+            ],
+            [
+              "eod_vol_compression",
+              "<=",
+              1.2615
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.466,
+          "pre2025_trades": 219
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_obv_slope20",
+              "<=",
+              6.2989
+            ],
+            [
+              "eod_cvd_norm_T1",
+              ">",
+              -0.252
+            ],
+            [
+              "m_slope_sma20",
+              "<=",
+              -3.8377
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.149,
+          "pre2025_trades": 195
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_mfi14",
+              ">",
+              74.0245
+            ],
+            [
+              "m_mtd_ret",
+              "<=",
+              8.2933
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              2.806
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.128,
+          "pre2025_trades": 47
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "eod_range_pct_T1",
+              "<=",
+              2.1031
+            ],
+            [
+              "m_rs_20d",
+              "<=",
+              0.0161
+            ],
+            [
+              "m_rsi14",
+              ">",
+              46.5565
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.973,
+          "pre2025_trades": 175
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_mtd_ret",
+              ">",
+              5.0967
+            ],
+            [
+              "eod_vol_compression_T5",
+              "<=",
+              1.3832
+            ],
+            [
+              "m_wtd_ret",
+              ">",
+              -0.3135
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.06,
+          "pre2025_trades": 232
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_dist_sma_20",
+              "<=",
+              3.4148
+            ],
+            [
+              "m_dist_high_60",
+              "<=",
+              -24.6905
+            ],
+            [
+              "m_mtd_ret",
+              "<=",
+              -5.6273
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.099,
+          "pre2025_trades": 189
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              "<=",
+              8.9418
+            ],
+            [
+              "m_mtd_ret",
+              ">",
+              5.8328
+            ],
+            [
+              "m_roc_5",
+              "<=",
+              7.6427
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.061,
+          "pre2025_trades": 130
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_mtd_ret",
+              "<=",
+              5.0008
+            ],
+            [
+              "m_wtd_ret",
+              ">",
+              -6.9386
+            ],
+            [
+              "eod_atp_crossings_T5",
+              "<=",
+              4.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.762,
+          "pre2025_trades": 110
+        },
+        {
+          "target": "up_5pct_5d",
+          "conds": [
+            [
+              "m_mtd_ret",
+              ">",
+              5.0008
+            ],
+            [
+              "eod_vol_compression_T1",
+              "<=",
+              1.1036
+            ],
+            [
+              "eod_cvd_norm",
+              "<=",
+              0.0641
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.52,
+          "pre2025_trades": 159
+        }
+      ]
+    },
+    "MIS SHORT 1D": {
+      "order": "MIS",
+      "direction": "SHORT",
+      "hold_days": 1,
+      "pct_target": 1,
+      "leverage": 5.0,
+      "cost_pct": 0.08,
+      "patterns": [
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.5445
+            ],
+            [
+              "eod_range_pct_T4",
+              ">",
+              1.4085
+            ],
+            [
+              "eod_deepest_pullback_T1",
+              "<=",
+              -1.9685
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.022,
+          "pre2025_trades": 1073
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "m_atr20_pct",
+              ">",
+              2.4675
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              2.5169
+            ],
+            [
+              "eod_vol_compression_T4",
+              "<=",
+              0.9152
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.472,
+          "pre2025_trades": 686
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.524
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.1149
+            ],
+            [
+              "eod_cvd_norm",
+              "<=",
+              0.1502
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.927,
+          "pre2025_trades": 1116
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.3952
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.8039
+            ],
+            [
+              "eod_dist_poc",
+              ">",
+              -0.2012
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.86,
+          "pre2025_trades": 120
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.3952
+            ],
+            [
+              "eod_deepest_pullback_T1",
+              "<=",
+              -1.6947
+            ],
+            [
+              "eod_vol_compression_T4",
+              "<=",
+              1.5051
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.867,
+          "pre2025_trades": 1158
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.3952
+            ],
+            [
+              "eod_deepest_pullback_T1",
+              ">",
+              -1.6947
+            ],
+            [
+              "m_dist_high_20",
+              "<=",
+              -10.4209
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.252,
+          "pre2025_trades": 92
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.748
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              2.5495
+            ],
+            [
+              "eod_cvd_norm",
+              "<=",
+              0.1067
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.142,
+          "pre2025_trades": 1044
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              4.6485
+            ],
+            [
+              "eod_atp_crossings_T4",
+              "<=",
+              37.5
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              6.542
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.865,
+          "pre2025_trades": 895
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.7486
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              2.7517
+            ],
+            [
+              "eod_cvd_norm_T4",
+              ">",
+              -0.1653
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.073,
+          "pre2025_trades": 1134
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.748
+            ],
+            [
+              "eod_max_vol_z_T5",
+              "<=",
+              16.4063
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.7346
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.283,
+          "pre2025_trades": 152
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.748
+            ],
+            [
+              "eod_deepest_pullback_T5",
+              "<=",
+              -1.6402
+            ],
+            [
+              "eod_buy_sell_imbalance_T1",
+              "<=",
+              0.3057
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.476,
+          "pre2025_trades": 502
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              4.37
+            ],
+            [
+              "eod_cvd_norm",
+              "<=",
+              0.0439
+            ],
+            [
+              "eod_range_pct_T4",
+              ">",
+              3.6548
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.503,
+          "pre2025_trades": 396
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.2018
+            ],
+            [
+              "eod_range_pct_T2",
+              "<=",
+              6.8284
+            ],
+            [
+              "eod_deepest_pullback_T3",
+              "<=",
+              -2.2299
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.46,
+          "pre2025_trades": 918
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.5138
+            ],
+            [
+              "eod_range_pct_T5",
+              "<=",
+              3.1523
+            ],
+            [
+              "eod_max_vol_z_T2",
+              "<=",
+              17.1248
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.261,
+          "pre2025_trades": 250
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.5138
+            ],
+            [
+              "eod_range_pct_T5",
+              ">",
+              3.1523
+            ],
+            [
+              "m_dist_high_20",
+              "<=",
+              -6.8975
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.786,
+          "pre2025_trades": 541
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.7634
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.3073
+            ],
+            [
+              "eod_vol_compression_T4",
+              "<=",
+              1.2675
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.794,
+          "pre2025_trades": 532
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct_T3",
+              ">",
+              2.5692
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.6298
+            ],
+            [
+              "eod_deepest_pullback_T1",
+              "<=",
+              -3.1744
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.851,
+          "pre2025_trades": 216
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.5445
+            ],
+            [
+              "eod_range_pct_T1",
+              "<=",
+              2.7469
+            ],
+            [
+              "m_mtd_ret",
+              "<=",
+              -4.9368
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.046,
+          "pre2025_trades": 112
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.5445
+            ],
+            [
+              "eod_range_pct_T1",
+              ">",
+              2.7469
+            ],
+            [
+              "m_mfi14",
+              ">",
+              26.0631
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.215,
+          "pre2025_trades": 994
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.5211
+            ],
+            [
+              "eod_deepest_pullback_T4",
+              "<=",
+              -2.3635
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              6.5128
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.62,
+          "pre2025_trades": 751
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.5211
+            ],
+            [
+              "eod_deepest_pullback_T4",
+              ">",
+              -2.3635
+            ],
+            [
+              "eod_dist_poc_T5",
+              ">",
+              0.0549
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.328,
+          "pre2025_trades": 234
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.7476
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              38.452
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              2.5521
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.69,
+          "pre2025_trades": 1091
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct_T4",
+              "<=",
+              3.6548
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              3.021
+            ],
+            [
+              "eod_dist_poc_T1",
+              "<=",
+              0.1728
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.601,
+          "pre2025_trades": 444
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct_T4",
+              ">",
+              3.6548
+            ],
+            [
+              "eod_ret",
+              ">",
+              -3.1629
+            ],
+            [
+              "eod_n_absorb_T5",
+              "<=",
+              4.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.036,
+          "pre2025_trades": 689
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.7651
+            ],
+            [
+              "m_dist_sma_20",
+              "<=",
+              1.5243
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              8.4845
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.171,
+          "pre2025_trades": 238
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.7651
+            ],
+            [
+              "m_dist_sma_20",
+              ">",
+              1.5243
+            ],
+            [
+              "m_dist_high_60",
+              "<=",
+              -5.2934
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.508,
+          "pre2025_trades": 460
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              4.5623
+            ],
+            [
+              "eod_atp_crossings_T3",
+              "<=",
+              47.5
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              2.5211
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.815,
+          "pre2025_trades": 941
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback_T3",
+              "<=",
+              -3.4766
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.9745
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.6634
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.638,
+          "pre2025_trades": 379
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback_T3",
+              ">",
+              -3.4766
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              2.7482
+            ],
+            [
+              "m_dist_high_20",
+              "<=",
+              -2.0017
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.044,
+          "pre2025_trades": 845
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -2.4027
+            ],
+            [
+              "eod_deepest_pullback_T1",
+              ">",
+              -5.2197
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              43.3518
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.761,
+          "pre2025_trades": 893
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "m_wtd_range",
+              "<=",
+              4.5674
+            ],
+            [
+              "eod_n_absorb_T3",
+              ">",
+              2.5
+            ],
+            [
+              "eod_buy_sell_imbalance_T4",
+              ">",
+              0.2802
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.665,
+          "pre2025_trades": 97
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              4.5674
+            ],
+            [
+              "eod_atp_crossings_T4",
+              "<=",
+              81.5
+            ],
+            [
+              "eod_dist_poc_T2",
+              ">",
+              -0.1769
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.048,
+          "pre2025_trades": 704
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.5211
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              7.9304
+            ],
+            [
+              "eod_cvd_norm_T1",
+              "<=",
+              0.0578
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.104,
+          "pre2025_trades": 338
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.748
+            ],
+            [
+              "m_cmf20",
+              "<=",
+              -0.0064
+            ],
+            [
+              "m_mfi14",
+              ">",
+              75.0569
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.815,
+          "pre2025_trades": 61
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.748
+            ],
+            [
+              "m_dist_high_20",
+              "<=",
+              -7.2945
+            ],
+            [
+              "eod_deepest_pullback_T2",
+              ">",
+              -6.3687
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.148,
+          "pre2025_trades": 725
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.748
+            ],
+            [
+              "m_dist_high_20",
+              ">",
+              -7.2945
+            ],
+            [
+              "eod_max_vol_z_T2",
+              "<=",
+              22.482
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.936,
+          "pre2025_trades": 324
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.5215
+            ],
+            [
+              "eod_deepest_pullback_T5",
+              "<=",
+              -2.2566
+            ],
+            [
+              "m_dist_high_20",
+              "<=",
+              -4.3179
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.749,
+          "pre2025_trades": 747
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.5211
+            ],
+            [
+              "eod_vol_compression_T2",
+              "<=",
+              0.7543
+            ],
+            [
+              "m_mfi14",
+              ">",
+              59.8588
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.561,
+          "pre2025_trades": 77
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.5211
+            ],
+            [
+              "eod_deepest_pullback_T1",
+              "<=",
+              -2.4576
+            ],
+            [
+              "eod_cvd_norm",
+              "<=",
+              0.0498
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.311,
+          "pre2025_trades": 570
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "m_atr20_pct",
+              "<=",
+              2.9435
+            ],
+            [
+              "eod_dist_poc_T1",
+              "<=",
+              0.3826
+            ],
+            [
+              "eod_vol_compression_T5",
+              "<=",
+              0.4641
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.688,
+          "pre2025_trades": 41
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "m_atr20_pct",
+              ">",
+              2.9435
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              2.5912
+            ],
+            [
+              "eod_deepest_pullback_T5",
+              "<=",
+              -1.6817
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.932,
+          "pre2025_trades": 1380
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.7914
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.0237
+            ],
+            [
+              "eod_deepest_pullback_T1",
+              ">",
+              -5.2229
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.759,
+          "pre2025_trades": 1168
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -1.7914
+            ],
+            [
+              "eod_max_vol_z_T1",
+              "<=",
+              16.9863
+            ],
+            [
+              "eod_n_absorb_T5",
+              ">",
+              3.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.284,
+          "pre2025_trades": 64
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.6561
+            ],
+            [
+              "m_wtd_range",
+              "<=",
+              7.938
+            ],
+            [
+              "eod_vol_compression_T5",
+              "<=",
+              0.6178
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.241,
+          "pre2025_trades": 307
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.6561
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              7.938
+            ],
+            [
+              "eod_buy_sell_imbalance_T4",
+              "<=",
+              0.3551
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.355,
+          "pre2025_trades": 332
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -1.6561
+            ],
+            [
+              "eod_vol_compression_T2",
+              "<=",
+              0.5413
+            ],
+            [
+              "eod_deepest_pullback_T3",
+              "<=",
+              -2.2506
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.84,
+          "pre2025_trades": 41
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.5211
+            ],
+            [
+              "eod_range_pct_T2",
+              "<=",
+              6.8307
+            ],
+            [
+              "eod_cvd_norm",
+              ">",
+              -0.2103
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.531,
+          "pre2025_trades": 1276
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.2866
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              2.337
+            ],
+            [
+              "eod_vol_compression_T5",
+              "<=",
+              0.4228
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.722,
+          "pre2025_trades": 58
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.2866
+            ],
+            [
+              "eod_range_pct_T4",
+              ">",
+              2.4924
+            ],
+            [
+              "eod_range_pct_T5",
+              ">",
+              4.0634
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.949,
+          "pre2025_trades": 522
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -2.1167
+            ],
+            [
+              "eod_ret",
+              ">",
+              -4.089
+            ],
+            [
+              "m_dist_high_20",
+              "<=",
+              -14.4635
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.959,
+          "pre2025_trades": 362
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -2.1167
+            ],
+            [
+              "eod_dist_poc_T2",
+              ">",
+              -0.1761
+            ],
+            [
+              "eod_max_vol_z_T2",
+              "<=",
+              13.4746
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.078,
+          "pre2025_trades": 88
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.3885
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              5.7536
+            ],
+            [
+              "eod_n_hivol_T5",
+              "<=",
+              39.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.449,
+          "pre2025_trades": 178
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              3.1314
+            ],
+            [
+              "m_mfi14",
+              ">",
+              25.5281
+            ],
+            [
+              "m_dist_high_60",
+              "<=",
+              -2.9899
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.259,
+          "pre2025_trades": 984
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              4.6485
+            ],
+            [
+              "eod_dist_poc_T2",
+              ">",
+              -0.0377
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              2.5464
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.96,
+          "pre2025_trades": 471
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.7482
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.2795
+            ],
+            [
+              "eod_cvd_norm",
+              "<=",
+              0.0285
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.45,
+          "pre2025_trades": 578
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.7482
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.2795
+            ],
+            [
+              "eod_cvd_norm",
+              ">",
+              0.0285
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.215,
+          "pre2025_trades": 454
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.7727
+            ],
+            [
+              "eod_atp_crossings_T4",
+              "<=",
+              62.5
+            ],
+            [
+              "eod_max_vol_z_T5",
+              "<=",
+              21.6993
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.972,
+          "pre2025_trades": 856
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -1.7727
+            ],
+            [
+              "eod_ret",
+              ">",
+              1.2423
+            ],
+            [
+              "eod_deepest_pullback_T1",
+              "<=",
+              -2.0006
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.223,
+          "pre2025_trades": 86
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.5558
+            ],
+            [
+              "m_mfi14",
+              ">",
+              68.2073
+            ],
+            [
+              "eod_buy_sell_imbalance_T3",
+              "<=",
+              0.2642
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.565,
+          "pre2025_trades": 41
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.5558
+            ],
+            [
+              "eod_vol_compression_T4",
+              "<=",
+              1.2526
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.2124
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.91,
+          "pre2025_trades": 901
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.6334
+            ],
+            [
+              "eod_range_pct_T2",
+              "<=",
+              6.8307
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              44.1881
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.051,
+          "pre2025_trades": 381
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct_T1",
+              "<=",
+              2.6057
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.7595
+            ],
+            [
+              "eod_max_vol_z_T5",
+              "<=",
+              22.8243
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.66,
+          "pre2025_trades": 266
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct_T1",
+              ">",
+              2.6057
+            ],
+            [
+              "eod_dist_poc_T5",
+              "<=",
+              0.2132
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              2.7482
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.14,
+          "pre2025_trades": 742
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct_T1",
+              ">",
+              2.6057
+            ],
+            [
+              "eod_dist_poc_T5",
+              ">",
+              0.2132
+            ],
+            [
+              "eod_n_hivol_T3",
+              ">",
+              40.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.236,
+          "pre2025_trades": 306
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.6334
+            ],
+            [
+              "eod_buy_sell_imbalance_T5",
+              "<=",
+              0.305
+            ],
+            [
+              "m_rs_20d",
+              "<=",
+              1.1781
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.921,
+          "pre2025_trades": 134
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              2.445
+            ],
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2545
+            ],
+            [
+              "eod_buy_sell_imbalance_T4",
+              ">",
+              -0.0361
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.137,
+          "pre2025_trades": 659
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.11
+            ],
+            [
+              "eod_atp_crossings_T4",
+              "<=",
+              49.5
+            ],
+            [
+              "eod_deepest_pullback",
+              ">",
+              -5.4763
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.838,
+          "pre2025_trades": 1286
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.5052
+            ],
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.1949
+            ],
+            [
+              "m_mfi14",
+              ">",
+              54.4988
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.664,
+          "pre2025_trades": 42
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.5052
+            ],
+            [
+              "eod_ret",
+              ">",
+              -3.3062
+            ],
+            [
+              "eod_vol_compression_T4",
+              "<=",
+              1.288
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.64,
+          "pre2025_trades": 1059
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.6334
+            ],
+            [
+              "eod_vol_compression_T4",
+              "<=",
+              0.9128
+            ],
+            [
+              "eod_deepest_pullback_T5",
+              "<=",
+              -1.9868
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.736,
+          "pre2025_trades": 196
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -3.6334
+            ],
+            [
+              "eod_dist_poc",
+              ">",
+              0.474
+            ],
+            [
+              "eod_max_vol_z_T3",
+              "<=",
+              15.559
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.528,
+          "pre2025_trades": 80
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.6743
+            ],
+            [
+              "eod_deepest_pullback_T4",
+              ">",
+              -2.3644
+            ],
+            [
+              "eod_deepest_pullback_T3",
+              "<=",
+              -3.5502
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.255,
+          "pre2025_trades": 133
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -1.6743
+            ],
+            [
+              "eod_dist_poc",
+              ">",
+              0.3889
+            ],
+            [
+              "eod_n_hivol_T1",
+              ">",
+              45.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.743,
+          "pre2025_trades": 72
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.6741
+            ],
+            [
+              "eod_deepest_pullback_T3",
+              "<=",
+              -2.7333
+            ],
+            [
+              "eod_deepest_pullback_T2",
+              ">",
+              -5.9986
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.465,
+          "pre2025_trades": 710
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.6741
+            ],
+            [
+              "eod_deepest_pullback_T3",
+              ">",
+              -2.7333
+            ],
+            [
+              "eod_buy_sell_imbalance_T1",
+              "<=",
+              0.2046
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.046,
+          "pre2025_trades": 204
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct_T1",
+              "<=",
+              2.7275
+            ],
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.4245
+            ],
+            [
+              "eod_vol_compression_T4",
+              "<=",
+              0.3263
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.71,
+          "pre2025_trades": 55
+        },
+        {
+          "target": "dn_1pct_1d",
+          "conds": [
+            [
+              "eod_range_pct_T1",
+              ">",
+              2.7275
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              2.5445
+            ],
+            [
+              "m_dist_high_20",
+              "<=",
+              -6.9509
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.561,
+          "pre2025_trades": 670
+        }
+      ]
+    },
+    "MIS-Daily SHORT 2D": {
+      "order": "MIS-Daily",
+      "direction": "SHORT",
+      "hold_days": 2,
+      "pct_target": 2,
+      "leverage": 5.0,
+      "cost_pct": 0.08,
+      "patterns": [
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.7305
+            ],
+            [
+              "m_slope_sma20",
+              "<=",
+              7.5419
+            ],
+            [
+              "eod_ret_T5",
+              "<=",
+              3.8634
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.457,
+          "pre2025_trades": 1215
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_atr20_pct",
+              "<=",
+              3.9184
+            ],
+            [
+              "m_roc_20",
+              "<=",
+              -9.49
+            ],
+            [
+              "eod_max_vol_z_T5",
+              ">",
+              18.6371
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.616,
+          "pre2025_trades": 127
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              4.5995
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              3.925
+            ],
+            [
+              "eod_max_vol_z_T3",
+              "<=",
+              22.0258
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.135,
+          "pre2025_trades": 364
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              4.5995
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.925
+            ],
+            [
+              "eod_atp_crossings_T2",
+              "<=",
+              56.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.739,
+          "pre2025_trades": 627
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.748
+            ],
+            [
+              "eod_buy_sell_imbalance_T5",
+              "<=",
+              0.3551
+            ],
+            [
+              "eod_cvd_norm",
+              "<=",
+              0.0378
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 5.993,
+          "pre2025_trades": 423
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.748
+            ],
+            [
+              "eod_buy_sell_imbalance_T5",
+              "<=",
+              0.3551
+            ],
+            [
+              "eod_cvd_norm",
+              ">",
+              0.0378
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.446,
+          "pre2025_trades": 322
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.9963
+            ],
+            [
+              "eod_deepest_pullback_T2",
+              ">",
+              -5.5736
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              29.2289
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.956,
+          "pre2025_trades": 266
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -2.3167
+            ],
+            [
+              "eod_atp_crossings_T1",
+              "<=",
+              6.5
+            ],
+            [
+              "eod_atp_crossings_T4",
+              "<=",
+              29.0
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.291,
+          "pre2025_trades": 112
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -2.3167
+            ],
+            [
+              "eod_buy_sell_imbalance_T2",
+              "<=",
+              0.1341
+            ],
+            [
+              "eod_max_vol_z",
+              "<=",
+              22.4252
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 5.104,
+          "pre2025_trades": 87
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.748
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.1017
+            ],
+            [
+              "eod_cvd_norm_T2",
+              "<=",
+              0.0915
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 4.073,
+          "pre2025_trades": 848
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.6483
+            ],
+            [
+              "eod_atp_crossings_T4",
+              "<=",
+              48.5
+            ],
+            [
+              "m_dist_high_60",
+              ">",
+              -26.7392
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.06,
+          "pre2025_trades": 333
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.7498
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.6443
+            ],
+            [
+              "eod_cvd_norm_T4",
+              ">",
+              0.091
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.115,
+          "pre2025_trades": 140
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.84
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              33.7349
+            ],
+            [
+              "eod_range_pct_T5",
+              "<=",
+              3.7792
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.466,
+          "pre2025_trades": 195
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -3.6334
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              3.4665
+            ],
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2736
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.565,
+          "pre2025_trades": 362
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -4.041
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              6.5987
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              32.9154
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 4.151,
+          "pre2025_trades": 290
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.6472
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              5.3076
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              14.5258
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 4.316,
+          "pre2025_trades": 96
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.6472
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              5.3076
+            ],
+            [
+              "eod_max_vol_z_T4",
+              ">",
+              14.5258
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.19,
+          "pre2025_trades": 282
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -3.6472
+            ],
+            [
+              "eod_range_pct_T2",
+              ">",
+              2.5897
+            ],
+            [
+              "eod_buy_sell_imbalance_T5",
+              "<=",
+              0.1807
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.227,
+          "pre2025_trades": 205
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_wtd_range",
+              "<=",
+              6.7731
+            ],
+            [
+              "eod_max_vol_z",
+              "<=",
+              23.9831
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.6847
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.117,
+          "pre2025_trades": 562
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              4.6566
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.8339
+            ],
+            [
+              "eod_range_pct_T2",
+              ">",
+              4.0204
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 4.267,
+          "pre2025_trades": 263
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              4.6566
+            ],
+            [
+              "eod_deepest_pullback_T5",
+              ">",
+              -2.474
+            ],
+            [
+              "eod_atp_crossings_T2",
+              "<=",
+              46.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.206,
+          "pre2025_trades": 169
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.748
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              3.9782
+            ],
+            [
+              "m_slope_sma20",
+              "<=",
+              -1.1778
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.123,
+          "pre2025_trades": 210
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.748
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.9782
+            ],
+            [
+              "eod_n_iceberg_T5",
+              "<=",
+              10.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.881,
+          "pre2025_trades": 601
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              6.3446
+            ],
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2958
+            ],
+            [
+              "eod_max_vol_z_T3",
+              "<=",
+              15.6851
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.838,
+          "pre2025_trades": 204
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              6.3446
+            ],
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2958
+            ],
+            [
+              "eod_max_vol_z_T3",
+              ">",
+              15.6851
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 5.015,
+          "pre2025_trades": 245
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_slope_sma20",
+              "<=",
+              4.5684
+            ],
+            [
+              "m_roc_20",
+              "<=",
+              -10.6765
+            ],
+            [
+              "eod_max_vol_z_T1",
+              "<=",
+              16.5565
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.361,
+          "pre2025_trades": 137
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.7315
+            ],
+            [
+              "eod_buy_sell_imbalance_T2",
+              "<=",
+              0.1342
+            ],
+            [
+              "eod_max_vol_z_T2",
+              "<=",
+              20.1547
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.452,
+          "pre2025_trades": 54
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.7315
+            ],
+            [
+              "m_dist_high_20",
+              "<=",
+              -12.8459
+            ],
+            [
+              "m_cmf20",
+              "<=",
+              0.0502
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.364,
+          "pre2025_trades": 361
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              3.2386
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.5747
+            ],
+            [
+              "eod_deepest_pullback_T5",
+              ">",
+              -1.2658
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 4.182,
+          "pre2025_trades": 93
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              3.2386
+            ],
+            [
+              "m_mfi14",
+              ">",
+              25.7189
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              22.2291
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.301,
+          "pre2025_trades": 596
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2736
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.4381
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              5.5493
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.168,
+          "pre2025_trades": 644
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct_T4",
+              "<=",
+              2.7698
+            ],
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2587
+            ],
+            [
+              "eod_cvd_norm_T1",
+              ">",
+              -0.0542
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.725,
+          "pre2025_trades": 214
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct_T4",
+              ">",
+              2.7698
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.7517
+            ],
+            [
+              "eod_deepest_pullback_T2",
+              ">",
+              -6.2731
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.882,
+          "pre2025_trades": 972
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.5
+            ],
+            [
+              "eod_range_pct_T5",
+              "<=",
+              5.5803
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              5.1268
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.912,
+          "pre2025_trades": 342
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -3.5
+            ],
+            [
+              "m_dist_sma_20",
+              ">",
+              3.0826
+            ],
+            [
+              "eod_max_vol_z_T4",
+              ">",
+              11.5152
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.323,
+          "pre2025_trades": 296
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.9963
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              5.2997
+            ],
+            [
+              "eod_n_hivol",
+              "<=",
+              58.0
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.824,
+          "pre2025_trades": 260
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct_T1",
+              ">",
+              2.383
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.6082
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              2.5064
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.052,
+          "pre2025_trades": 822
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.4386
+            ],
+            [
+              "eod_atp_crossings_T3",
+              "<=",
+              47.5
+            ],
+            [
+              "eod_cvd_norm_T3",
+              ">",
+              -0.1442
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.472,
+          "pre2025_trades": 452
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -3.4386
+            ],
+            [
+              "eod_dist_poc_T5",
+              "<=",
+              0.1457
+            ],
+            [
+              "eod_buy_sell_imbalance_T5",
+              "<=",
+              0.1935
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.349,
+          "pre2025_trades": 265
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -3.4386
+            ],
+            [
+              "eod_dist_poc_T5",
+              ">",
+              0.1457
+            ],
+            [
+              "eod_vol_compression_T4",
+              "<=",
+              1.0915
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.065,
+          "pre2025_trades": 331
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              3.2599
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              5.6906
+            ],
+            [
+              "eod_vol_compression_T1",
+              "<=",
+              0.3365
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.234,
+          "pre2025_trades": 85
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              3.2599
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              5.6906
+            ],
+            [
+              "eod_vol_compression_T1",
+              ">",
+              0.3365
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.532,
+          "pre2025_trades": 765
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              3.1608
+            ],
+            [
+              "m_wtd_range",
+              "<=",
+              9.9055
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              2.9609
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.576,
+          "pre2025_trades": 639
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              5.392
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -4.0067
+            ],
+            [
+              "eod_buy_sell_imbalance_T4",
+              "<=",
+              0.5254
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.175,
+          "pre2025_trades": 343
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.748
+            ],
+            [
+              "eod_deepest_pullback_T1",
+              "<=",
+              -2.4757
+            ],
+            [
+              "eod_cvd_norm",
+              "<=",
+              0.0498
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 5.073,
+          "pre2025_trades": 507
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.748
+            ],
+            [
+              "eod_deepest_pullback_T1",
+              ">",
+              -2.4757
+            ],
+            [
+              "eod_atp_crossings",
+              "<=",
+              10.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 4.62,
+          "pre2025_trades": 150
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_atr20_pct",
+              "<=",
+              3.9849
+            ],
+            [
+              "m_cmf20",
+              "<=",
+              0.0594
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              4.392
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.762,
+          "pre2025_trades": 206
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_atr20_pct",
+              ">",
+              3.9849
+            ],
+            [
+              "eod_deepest_pullback_T3",
+              "<=",
+              -3.6477
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              33.6188
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.975,
+          "pre2025_trades": 299
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_atr20_pct",
+              ">",
+              3.9849
+            ],
+            [
+              "eod_deepest_pullback_T3",
+              ">",
+              -3.6477
+            ],
+            [
+              "eod_vol_compression_T4",
+              "<=",
+              0.4385
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 7.275,
+          "pre2025_trades": 90
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.6472
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              41.8673
+            ],
+            [
+              "eod_cvd_norm_T5",
+              ">",
+              -0.1326
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.755,
+          "pre2025_trades": 412
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -3.6472
+            ],
+            [
+              "m_roc_5",
+              "<=",
+              10.2995
+            ],
+            [
+              "eod_atp_crossings",
+              "<=",
+              9.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.243,
+          "pre2025_trades": 199
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -2.3279
+            ],
+            [
+              "eod_range_pct_T5",
+              ">",
+              2.6563
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -4.0432
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.557,
+          "pre2025_trades": 310
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -2.3279
+            ],
+            [
+              "eod_range_pct_T5",
+              ">",
+              2.6563
+            ],
+            [
+              "eod_deepest_pullback",
+              ">",
+              -4.0432
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.31,
+          "pre2025_trades": 517
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -2.3279
+            ],
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2108
+            ],
+            [
+              "eod_vol_compression",
+              ">",
+              0.522
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.018,
+          "pre2025_trades": 94
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              5.658
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -2.3626
+            ],
+            [
+              "m_rs_20d",
+              "<=",
+              23.5114
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.1,
+          "pre2025_trades": 683
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -2.4027
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              5.2083
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              15.0569
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.463,
+          "pre2025_trades": 259
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.7874
+            ],
+            [
+              "m_rs_20d",
+              ">",
+              0.267
+            ],
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2756
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 4.734,
+          "pre2025_trades": 81
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.7874
+            ],
+            [
+              "m_slope_sma20",
+              "<=",
+              5.0005
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.1291
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.075,
+          "pre2025_trades": 936
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.7834
+            ],
+            [
+              "eod_range_pct_T4",
+              "<=",
+              2.5108
+            ],
+            [
+              "eod_n_absorb_T1",
+              ">",
+              4.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.999,
+          "pre2025_trades": 50
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.7834
+            ],
+            [
+              "eod_range_pct_T4",
+              ">",
+              2.5108
+            ],
+            [
+              "eod_ret_T5",
+              "<=",
+              3.8144
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.553,
+          "pre2025_trades": 1070
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -1.7834
+            ],
+            [
+              "m_rs_20d",
+              "<=",
+              -8.9566
+            ],
+            [
+              "eod_buy_sell_imbalance_T2",
+              "<=",
+              0.3916
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.226,
+          "pre2025_trades": 66
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.8283
+            ],
+            [
+              "eod_range_pct_T5",
+              ">",
+              2.654
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              41.8566
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.502,
+          "pre2025_trades": 316
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              5.658
+            ],
+            [
+              "eod_deepest_pullback",
+              ">",
+              -6.1053
+            ],
+            [
+              "eod_max_vol_z_T2",
+              "<=",
+              18.071
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.116,
+          "pre2025_trades": 441
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              3.1518
+            ],
+            [
+              "eod_vol_compression_T4",
+              "<=",
+              0.3974
+            ],
+            [
+              "eod_vol_compression_T5",
+              ">",
+              1.0227
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.923,
+          "pre2025_trades": 56
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              3.1518
+            ],
+            [
+              "m_mfi14",
+              ">",
+              25.7301
+            ],
+            [
+              "eod_atp_crossings_T4",
+              "<=",
+              48.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.612,
+          "pre2025_trades": 848
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_wtd_range",
+              "<=",
+              3.8163
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -1.9324
+            ],
+            [
+              "eod_atp_crossings_T2",
+              "<=",
+              48.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.871,
+          "pre2025_trades": 207
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              3.8163
+            ],
+            [
+              "eod_deepest_pullback",
+              ">",
+              -5.583
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              2.8526
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.699,
+          "pre2025_trades": 961
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.768
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              17.1724
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              3.1127
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.319,
+          "pre2025_trades": 499
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.768
+            ],
+            [
+              "eod_max_vol_z_T4",
+              ">",
+              17.1724
+            ],
+            [
+              "eod_n_hivol_T2",
+              ">",
+              49.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.95,
+          "pre2025_trades": 334
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_atr20_pct",
+              "<=",
+              4.0441
+            ],
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2569
+            ],
+            [
+              "eod_cvd_norm_T1",
+              "<=",
+              0.0245
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.921,
+          "pre2025_trades": 221
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_atr20_pct",
+              ">",
+              4.0441
+            ],
+            [
+              "m_mfi14",
+              ">",
+              25.7189
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              3.2974
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.051,
+          "pre2025_trades": 496
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_max_vol_z_T2",
+              "<=",
+              21.1863
+            ],
+            [
+              "eod_ret_T5",
+              ">",
+              -0.8916
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              3.529
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.711,
+          "pre2025_trades": 303
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_max_vol_z_T2",
+              ">",
+              21.1863
+            ],
+            [
+              "m_cmf20",
+              "<=",
+              0.0164
+            ],
+            [
+              "m_wtd_ret",
+              "<=",
+              -2.1841
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.521,
+          "pre2025_trades": 164
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              3.1947
+            ],
+            [
+              "m_dist_sma_20",
+              "<=",
+              -3.7995
+            ],
+            [
+              "eod_ret_T1",
+              ">",
+              -0.9945
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.615,
+          "pre2025_trades": 170
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              3.1947
+            ],
+            [
+              "m_dist_sma_20",
+              ">",
+              -3.7995
+            ],
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2595
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.879,
+          "pre2025_trades": 243
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              3.1947
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              2.9879
+            ],
+            [
+              "eod_cvd_norm",
+              "<=",
+              0.0436
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 4.975,
+          "pre2025_trades": 561
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              3.5274
+            ],
+            [
+              "m_dist_high_20",
+              "<=",
+              -6.6254
+            ],
+            [
+              "eod_buy_sell_imbalance_T5",
+              "<=",
+              0.3551
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 4.916,
+          "pre2025_trades": 355
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              5.9755
+            ],
+            [
+              "eod_deepest_pullback",
+              ">",
+              -4.0221
+            ],
+            [
+              "eod_max_vol_z_T2",
+              "<=",
+              21.0801
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.075,
+          "pre2025_trades": 365
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.84
+            ],
+            [
+              "eod_buy_sell_imbalance_T5",
+              "<=",
+              0.3979
+            ],
+            [
+              "eod_range_pct_T5",
+              ">",
+              3.3461
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.195,
+          "pre2025_trades": 206
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              4.5424
+            ],
+            [
+              "eod_buy_sell_imbalance_T5",
+              "<=",
+              0.3941
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              5.5508
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.654,
+          "pre2025_trades": 271
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2736
+            ],
+            [
+              "m_wtd_range",
+              "<=",
+              6.2143
+            ],
+            [
+              "eod_dist_poc_T3",
+              ">",
+              0.0993
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.869,
+          "pre2025_trades": 144
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2736
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              6.2143
+            ],
+            [
+              "eod_cvd_norm_T2",
+              "<=",
+              0.0425
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.417,
+          "pre2025_trades": 252
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2736
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              6.2143
+            ],
+            [
+              "eod_cvd_norm_T2",
+              ">",
+              0.0425
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.008,
+          "pre2025_trades": 155
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -2.3324
+            ],
+            [
+              "eod_range_pct",
+              "<=",
+              4.6814
+            ],
+            [
+              "eod_vol_compression_T4",
+              "<=",
+              0.3255
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 5.367,
+          "pre2025_trades": 63
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -2.3324
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              4.6814
+            ],
+            [
+              "eod_buy_sell_imbalance_T5",
+              "<=",
+              0.3941
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.469,
+          "pre2025_trades": 310
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2797
+            ],
+            [
+              "eod_deepest_pullback_T1",
+              ">",
+              -4.704
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              1.5227
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.884,
+          "pre2025_trades": 665
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.8286
+            ],
+            [
+              "eod_range_pct_T5",
+              ">",
+              2.654
+            ],
+            [
+              "eod_n_iceberg_T1",
+              ">",
+              0.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.081,
+          "pre2025_trades": 206
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -2.7201
+            ],
+            [
+              "m_rs_20d",
+              "<=",
+              23.5114
+            ],
+            [
+              "m_wtd_ret",
+              "<=",
+              -2.1319
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.947,
+          "pre2025_trades": 257
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct_T1",
+              "<=",
+              3.1729
+            ],
+            [
+              "eod_range_pct_T2",
+              ">",
+              1.5926
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.2852
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.419,
+          "pre2025_trades": 189
+        },
+        {
+          "target": "dn_2pct_2d",
+          "conds": [
+            [
+              "eod_range_pct_T1",
+              ">",
+              3.1729
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              2.5296
+            ],
+            [
+              "eod_range_pct_T4",
+              "<=",
+              7.6095
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.365,
+          "pre2025_trades": 942
+        }
+      ]
+    },
+    "MIS-Daily SHORT 5D": {
+      "order": "MIS-Daily",
+      "direction": "SHORT",
+      "hold_days": 5,
+      "pct_target": 5,
+      "leverage": 5.0,
+      "cost_pct": 0.08,
+      "patterns": [
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              5.1349
+            ],
+            [
+              "m_wtd_ret",
+              "<=",
+              -2.3762
+            ],
+            [
+              "eod_cvd_norm_T4",
+              ">",
+              -0.0495
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 12.176,
+          "pre2025_trades": 187
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              "<=",
+              5.9963
+            ],
+            [
+              "eod_atp_crossings_T2",
+              "<=",
+              46.5
+            ],
+            [
+              "m_obv_slope20",
+              ">",
+              5.1555
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 5.747,
+          "pre2025_trades": 220
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              5.9963
+            ],
+            [
+              "m_dist_sma_20",
+              "<=",
+              -6.8112
+            ],
+            [
+              "m_mtd_ret",
+              ">",
+              -10.3317
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.472,
+          "pre2025_trades": 82
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -3.6477
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              3.0488
+            ],
+            [
+              "eod_max_vol_z",
+              "<=",
+              14.5889
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 10.388,
+          "pre2025_trades": 75
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_cmf20",
+              "<=",
+              0.1498
+            ],
+            [
+              "eod_deepest_pullback",
+              ">",
+              -5.2188
+            ],
+            [
+              "m_dist_sma_20",
+              "<=",
+              -7.2584
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 8.526,
+          "pre2025_trades": 190
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              5.7107
+            ],
+            [
+              "eod_range_pct",
+              "<=",
+              5.4467
+            ],
+            [
+              "m_rsi14",
+              "<=",
+              33.4119
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 9.118,
+          "pre2025_trades": 150
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              5.7107
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              5.4467
+            ],
+            [
+              "eod_atp_crossings",
+              ">",
+              7.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 0.926,
+          "pre2025_trades": 252
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.2808
+            ],
+            [
+              "eod_deepest_pullback_T3",
+              ">",
+              -3.6837
+            ],
+            [
+              "eod_n_hivol",
+              "<=",
+              57.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 4.63,
+          "pre2025_trades": 395
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -3.2808
+            ],
+            [
+              "eod_n_iceberg_T2",
+              "<=",
+              2.5
+            ],
+            [
+              "eod_buy_sell_imbalance_T1",
+              "<=",
+              0.1474
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 8.997,
+          "pre2025_trades": 185
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.4386
+            ],
+            [
+              "m_cmf20",
+              "<=",
+              0.1166
+            ],
+            [
+              "m_slope_sma20",
+              ">",
+              -4.9445
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.483,
+          "pre2025_trades": 449
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              3.6585
+            ],
+            [
+              "m_roc_5",
+              "<=",
+              13.8429
+            ],
+            [
+              "eod_buy_sell_imbalance_T5",
+              "<=",
+              0.2799
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.826,
+          "pre2025_trades": 324
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_cmf20",
+              "<=",
+              0.1151
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              6.1294
+            ],
+            [
+              "eod_dist_poc_T4",
+              "<=",
+              0.6792
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 7.771,
+          "pre2025_trades": 713
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -2.3643
+            ],
+            [
+              "m_cmf20",
+              "<=",
+              0.1607
+            ],
+            [
+              "eod_cvd_norm",
+              "<=",
+              0.0576
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 7.217,
+          "pre2025_trades": 802
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.4396
+            ],
+            [
+              "m_mfi14",
+              "<=",
+              83.912
+            ],
+            [
+              "eod_deepest_pullback_T3",
+              "<=",
+              -3.129
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 8.878,
+          "pre2025_trades": 246
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.4396
+            ],
+            [
+              "m_mfi14",
+              "<=",
+              83.912
+            ],
+            [
+              "eod_deepest_pullback_T3",
+              ">",
+              -3.129
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 4.328,
+          "pre2025_trades": 301
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.6466
+            ],
+            [
+              "eod_range_pct_T2",
+              ">",
+              2.7529
+            ],
+            [
+              "m_dist_sma_20",
+              "<=",
+              17.3333
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 8.776,
+          "pre2025_trades": 341
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_cmf20",
+              "<=",
+              0.1329
+            ],
+            [
+              "eod_range_pct_T2",
+              ">",
+              2.881
+            ],
+            [
+              "eod_vol_compression",
+              "<=",
+              0.8159
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 7.014,
+          "pre2025_trades": 439
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.7291
+            ],
+            [
+              "eod_atp_crossings",
+              "<=",
+              46.5
+            ],
+            [
+              "m_obv_slope20",
+              ">",
+              5.7038
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 10.635,
+          "pre2025_trades": 92
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_rs_20d",
+              "<=",
+              21.7413
+            ],
+            [
+              "eod_buy_sell_imbalance",
+              "<=",
+              0.2168
+            ],
+            [
+              "m_wtd_ret",
+              "<=",
+              -3.998
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 4.471,
+          "pre2025_trades": 75
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_rs_20d",
+              "<=",
+              21.7413
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              2.748
+            ],
+            [
+              "m_atr20_pct",
+              ">",
+              2.6143
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.77,
+          "pre2025_trades": 1146
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_roc_20",
+              "<=",
+              8.9142
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              4.6891
+            ],
+            [
+              "eod_deepest_pullback_T4",
+              "<=",
+              -1.6292
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 11.299,
+          "pre2025_trades": 301
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_cmf20",
+              "<=",
+              0.1538
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              2.4127
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              5.394
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.839,
+          "pre2025_trades": 869
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -2.4073
+            ],
+            [
+              "m_roc_20",
+              "<=",
+              16.1955
+            ],
+            [
+              "m_cmf20",
+              ">",
+              -0.3979
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.451,
+          "pre2025_trades": 948
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -2.4073
+            ],
+            [
+              "eod_dist_poc",
+              ">",
+              0.6682
+            ],
+            [
+              "eod_max_vol_z_T4",
+              "<=",
+              21.7312
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 9.593,
+          "pre2025_trades": 72
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              5.6503
+            ],
+            [
+              "eod_deepest_pullback",
+              ">",
+              -5.5808
+            ],
+            [
+              "eod_max_vol_z_T5",
+              "<=",
+              11.4803
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 2.557,
+          "pre2025_trades": 129
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              "<=",
+              5.7003
+            ],
+            [
+              "m_obv_slope20",
+              ">",
+              6.5952
+            ],
+            [
+              "m_vol_vs_20",
+              "<=",
+              0.824
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 4.019,
+          "pre2025_trades": 105
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              5.7003
+            ],
+            [
+              "m_roc_5",
+              "<=",
+              14.627
+            ],
+            [
+              "m_dist_sma_20",
+              "<=",
+              -7.0523
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 8.144,
+          "pre2025_trades": 180
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_range_pct",
+              "<=",
+              2.4156
+            ],
+            [
+              "m_roc_5",
+              "<=",
+              -1.8292
+            ],
+            [
+              "eod_max_vol_z",
+              "<=",
+              17.2526
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 5.448,
+          "pre2025_trades": 60
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.4156
+            ],
+            [
+              "m_rs_20d",
+              "<=",
+              22.0891
+            ],
+            [
+              "eod_vol_compression_T4",
+              "<=",
+              0.7724
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 8.086,
+          "pre2025_trades": 502
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.3952
+            ],
+            [
+              "eod_max_vol_z_T5",
+              "<=",
+              11.2855
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              6.5346
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.54,
+          "pre2025_trades": 185
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.6472
+            ],
+            [
+              "m_roc_5",
+              "<=",
+              12.5352
+            ],
+            [
+              "eod_cvd_norm_T3",
+              ">",
+              -0.1347
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 8.928,
+          "pre2025_trades": 423
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_rs_20d",
+              "<=",
+              22.7889
+            ],
+            [
+              "eod_range_pct",
+              "<=",
+              2.7181
+            ],
+            [
+              "eod_ret_T2",
+              "<=",
+              -2.2451
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 8.778,
+          "pre2025_trades": 114
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_rs_20d",
+              "<=",
+              22.7889
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              2.7181
+            ],
+            [
+              "eod_range_pct_T2",
+              ">",
+              4.2491
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 8.622,
+          "pre2025_trades": 412
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_roc_20",
+              "<=",
+              22.4524
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -2.4073
+            ],
+            [
+              "eod_deepest_pullback_T1",
+              "<=",
+              -1.2632
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.656,
+          "pre2025_trades": 998
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_cmf20",
+              "<=",
+              0.1154
+            ],
+            [
+              "eod_range_pct_T4",
+              "<=",
+              3.0579
+            ],
+            [
+              "eod_max_vol_z_T5",
+              "<=",
+              10.187
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 1.354,
+          "pre2025_trades": 52
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              "<=",
+              4.9157
+            ],
+            [
+              "eod_buy_sell_imbalance_T4",
+              "<=",
+              0.2496
+            ],
+            [
+              "eod_vol_compression_T5",
+              ">",
+              1.3109
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 10.014,
+          "pre2025_trades": 63
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              ">",
+              4.9157
+            ],
+            [
+              "eod_range_pct",
+              "<=",
+              8.133
+            ],
+            [
+              "eod_cvd_norm_T1",
+              ">",
+              -0.2365
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 7.084,
+          "pre2025_trades": 1186
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              "<=",
+              11.1318
+            ],
+            [
+              "eod_buy_sell_imbalance_T5",
+              "<=",
+              0.3171
+            ],
+            [
+              "eod_n_hivol_T5",
+              ">",
+              54.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 8.858,
+          "pre2025_trades": 178
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_roc_20",
+              "<=",
+              21.2225
+            ],
+            [
+              "eod_range_pct",
+              ">",
+              2.3952
+            ],
+            [
+              "eod_range_pct_T1",
+              ">",
+              3.8315
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 8.827,
+          "pre2025_trades": 590
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              "<=",
+              10.3981
+            ],
+            [
+              "m_cmf20",
+              "<=",
+              0.1124
+            ],
+            [
+              "m_dist_sma_20",
+              "<=",
+              -7.7722
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 9.533,
+          "pre2025_trades": 135
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              "<=",
+              10.7721
+            ],
+            [
+              "m_dist_sma_20",
+              "<=",
+              -6.5865
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              5.5399
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 7.885,
+          "pre2025_trades": 183
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_roc_20",
+              "<=",
+              31.7464
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              5.3632
+            ],
+            [
+              "eod_max_vol_z_T1",
+              "<=",
+              26.184
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 7.073,
+          "pre2025_trades": 732
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_cmf20",
+              "<=",
+              0.1504
+            ],
+            [
+              "m_wtd_range",
+              "<=",
+              6.2121
+            ],
+            [
+              "eod_n_absorb_T1",
+              ">",
+              4.5
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 5.325,
+          "pre2025_trades": 125
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_cmf20",
+              "<=",
+              0.1504
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              6.2121
+            ],
+            [
+              "m_cmf20",
+              "<=",
+              0.0434
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 7.501,
+          "pre2025_trades": 679
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_deepest_pullback",
+              ">",
+              -3.6472
+            ],
+            [
+              "m_cmf20",
+              "<=",
+              0.1129
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              9.4677
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 10.708,
+          "pre2025_trades": 147
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_obv_slope20",
+              "<=",
+              6.2679
+            ],
+            [
+              "m_dist_high_20",
+              "<=",
+              -14.9656
+            ],
+            [
+              "eod_deepest_pullback",
+              "<=",
+              -3.5644
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 11.173,
+          "pre2025_trades": 145
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_obv_slope20",
+              "<=",
+              6.2679
+            ],
+            [
+              "m_dist_high_20",
+              ">",
+              -14.9656
+            ],
+            [
+              "eod_max_vol_z_T1",
+              "<=",
+              15.3338
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 8.689,
+          "pre2025_trades": 341
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_obv_slope20",
+              ">",
+              6.2679
+            ],
+            [
+              "m_dist_sma_20",
+              "<=",
+              20.2042
+            ],
+            [
+              "eod_ret_T5",
+              "<=",
+              -0.2569
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 3.939,
+          "pre2025_trades": 219
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_roc_5",
+              "<=",
+              12.2839
+            ],
+            [
+              "m_wtd_range",
+              ">",
+              5.658
+            ],
+            [
+              "m_cmf20",
+              "<=",
+              0.1919
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.832,
+          "pre2025_trades": 964
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "eod_range_pct",
+              ">",
+              2.3952
+            ],
+            [
+              "eod_range_pct",
+              "<=",
+              11.1251
+            ],
+            [
+              "eod_deepest_pullback_T1",
+              "<=",
+              -1.395
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 6.337,
+          "pre2025_trades": 1419
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              "<=",
+              11.2239
+            ],
+            [
+              "m_atr20_pct",
+              "<=",
+              6.2744
+            ],
+            [
+              "m_mtd_ret",
+              "<=",
+              -7.9948
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 5.905,
+          "pre2025_trades": 266
+        },
+        {
+          "target": "dn_5pct_5d",
+          "conds": [
+            [
+              "m_wtd_range",
+              "<=",
+              6.7151
+            ],
+            [
+              "m_roc_5",
+              ">",
+              7.7927
+            ]
+          ],
+          "pre2025_net_expectancy_pct": 13.157,
+          "pre2025_trades": 49
+        }
+      ]
+    }
+  },
+  "track_record_net_expectancy": {
+    "2025": {
+      "net_expectancy_pct": 6.703,
+      "win_rate": 0.63,
+      "avg_win_pct": 20.15,
+      "avg_loss_pct": -15.94,
+      "trades": 51
+    },
+    "2026": {
+      "net_expectancy_pct": 2.091,
+      "win_rate": 0.61,
+      "avg_win_pct": 12.8,
+      "avg_loss_pct": -14.46,
+      "trades": 28
+    }
+  },
+  "sustained_positive_both_years": true,
+  "agent_id": "8f7dae697223"
+}

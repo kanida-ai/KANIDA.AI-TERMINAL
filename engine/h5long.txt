@@ -1,0 +1,49 @@
+loading daily panel from C:\Users\SPS\Documents\Kanida_Falcon\db\kanida.db
+  dropping 3 symbols with a broken feed: NIFTY GS 8 13YR, NIFTY GS COMPSITE, NIFTY50 DIV POINT
+  dropping 16 malformed bars
+  universe split    : 497 stocks, 131 indices
+    indices excluded from trading: BHARATBOND-APR30, BHARATBOND-APR31, BHARATBOND-APR32, BHARATBOND-APR33, INDIA VIX, NIFTY 100...
+
+####################################################################
+# SIDE: LONG
+####################################################################
+  feature factory   : 322 candidates  (127.3s)
+  panel             : 511,338 rows, 497 symbols, 2022-01-03 -> 2026-07-29
+
+LAYERED ATTRIBUTION  (side=long)
+--------------------------------------------------------------------
+  322 non-graph features, 0 graph features
+  fold   6 | L0 0.529 -> L1 0.513 -> L2 nan
+  fold  12 | L0 0.520 -> L1 0.537 -> L2 nan
+  fold  18 | L0 0.558 -> L1 0.603 -> L2 nan
+  fold  24 | L0 0.389 -> L1 0.392 -> L2 nan
+  fold  30 | L0 0.484 -> L1 0.482 -> L2 nan
+  fold  36 | L0 0.465 -> L1 0.451 -> L2 nan
+  fold  42 | L0 0.494 -> L1 0.473 -> L2 nan
+
+====================================================================
+LAYER ATTRIBUTION, OUT OF SAMPLE   (side=long)
+====================================================================
+  L0  base rate, no state        : 0.440
+  L1  + state fires              : 0.451   (+0.011)
+  L2  + graph confirms           : nan   (+nan on top)
+  signals: 68,747 at L1, 0 at L2
+  promoted states per fold (median): 16
+
+  EXPECTANCY PER TRADE, net of cost   <- this is the number
+    L0  no state   :    +7.3 bps
+    L1  + state    :    +8.4 bps   (+1.1)
+    folds where the state beat the null: 21/42
+
+  NOISE CHECK
+    the shuffle test promotes states at the audit's false-positive
+    rate. If promoted-per-fold is near that rate, these states are
+    indistinguishable from luck regardless of their lift.
+Traceback (most recent call last):
+  File "C:\Users\SPS\Documents\Kanida_Falcon\engine\run_engine.py", line 445, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "C:\Users\SPS\Documents\Kanida_Falcon\engine\run_engine.py", line 371, in main
+    conc = attr.state_concentration(panel, feats, c)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'state_engine.attribution' has no attribute 'state_concentration'

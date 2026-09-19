@@ -1,0 +1,5 @@
+__pycache__/
+output/
+server.pid
+.venv/
+backtest.pid

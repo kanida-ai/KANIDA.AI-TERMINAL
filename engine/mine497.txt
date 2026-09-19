@@ -1,0 +1,145 @@
+loading daily panel from C:\Users\SPS\Documents\Kanida_Falcon\db\kanida.db
+  dropping 3 symbols with a broken feed: NIFTY GS 8 13YR, NIFTY GS COMPSITE, NIFTY50 DIV POINT
+  dropping 16 malformed bars
+  universe split    : 497 stocks, 131 indices
+    indices excluded from trading: BHARATBOND-APR30, BHARATBOND-APR31, BHARATBOND-APR32, BHARATBOND-APR33, INDIA VIX, NIFTY 100...
+
+####################################################################
+# SIDE: LONG
+####################################################################
+  feature factory   : 322 candidates  (53.4s)
+  panel             : 511,338 rows, 497 symbols, 2022-01-03 -> 2026-07-29
+
+LAYERED ATTRIBUTION  (side=long)
+--------------------------------------------------------------------
+  322 non-graph features, 0 graph features
+  fold   6 | L0 0.208 -> L1 0.238 -> L2 nan
+  fold  12 | L0 0.161 -> L1 0.190 -> L2 nan
+  fold  18 | L0 0.178 -> L1 0.203 -> L2 nan
+  fold  24 | L0 0.182 -> L1 0.192 -> L2 nan
+  fold  30 | L0 0.207 -> L1 0.221 -> L2 nan
+  fold  36 | L0 0.175 -> L1 0.182 -> L2 nan
+  fold  42 | L0 0.195 -> L1 0.194 -> L2 nan
+
+====================================================================
+LAYER ATTRIBUTION, OUT OF SAMPLE   (side=long)
+====================================================================
+  L0  base rate, no state        : 0.179
+  L1  + state fires              : 0.196   (+0.017)
+  L2  + graph confirms           : nan   (+nan on top)
+  signals: 41,863 at L1, 0 at L2
+  promoted states per fold (median): 9
+
+  EXPECTANCY PER TRADE, net of cost   <- this is the number
+    L0  no state   :   -32.6 bps
+    L1  + state    :   -28.4 bps   (+4.1)
+    folds where the state beat the null: 37/42
+
+  NOISE CHECK
+    the shuffle test promotes states at the audit's false-positive
+    rate. If promoted-per-fold is near that rate, these states are
+    indistinguishable from luck regardless of their lift.
+
+====================================================================================================
+STATE SCORECARD   (ranked on the composite, not on lift)
+====================================================================================================
+                                         state  occurrences  folds  folds_positive  win_rate  base_rate   lift  expectancy  exp_lift  t_stat  composite grade
+f_rel_str_sec__raw=0|f_close__ratio5=1|f_close          608      4               4    0.2589     0.1823 0.0766     -0.0018    0.0011  2.7494     0.0444     A
+f_rel_str_sec__raw=1|f_close__ratio5=1|f_close         1118      4               4    0.2460     0.1843 0.0617     -0.0019    0.0010  2.8912     0.0365     A
+f_rel_str_sec__raw=0|f_close__ratio5=0|f_close         1517      4               4    0.2278     0.1808 0.0471     -0.0026    0.0004  5.4330     0.0344     A
+f_rel_str_sec__raw=1|f_close__ratio5=0|f_close          621      4               4    0.2397     0.1829 0.0569     -0.0022    0.0008  2.7324     0.0328     A
+f_rel_str_sec__raw=1|f_close__ratio5=1|f_close          840      4               4    0.2353     0.1851 0.0502     -0.0022    0.0007  3.6900     0.0326     A
+f_rel_str_sec__raw=1|f_close__ratio5=1|f_close          416      4               4    0.2295     0.1865 0.0430     -0.0024    0.0005  4.0668     0.0288     A
+f_rel_str_sec__raw=1|f_close__ratio5=2|f_close         1129      4               4    0.2353     0.1863 0.0490     -0.0020    0.0009  2.6867     0.0281     A
+f_rel_str_sec__raw=0|f_close__distmin10=1|f_cl          231      4               4    0.2269     0.1781 0.0488     -0.0026    0.0010  3.7462     0.0245     A
+f_rel_str_sec__raw=1|f_close__ratio5=0|f_close          138      4               4    0.2682     0.1804 0.0878     -0.0019    0.0011  2.8865     0.0239     A
+f_rel_str_sec__raw=2|f_close__ratio5=1|f_close          658      4               4    0.2222     0.1854 0.0368     -0.0024    0.0005  3.3982     0.0232     A
+f_rel_str_sec__raw=1|f_close__ratio5=2|f_close          367      4               3    0.2466     0.1850 0.0617     -0.0021    0.0008  1.9992     0.0231     B
+f_close__ratio3=1|f_close__distmin10=1|f_rel_s          313      2               2    0.2191     0.1795 0.0397     -0.0025    0.0009  1.8105     0.0223     C
+f_close__ratio3=1|f_close__distmin10=2|f_rel_s          157      2               2    0.2364     0.1778 0.0586     -0.0023    0.0011  3.3027     0.0215     C
+f_rel_str_sec__raw=2|f_close__ratio5=1|f_close          236      4               3    0.2458     0.1868 0.0590     -0.0023    0.0006  2.5375     0.0195     B
+f_rel_str_sec__raw=3|f_close__distmin10=2|f_cl          622      4               4    0.2135     0.1795 0.0341     -0.0028    0.0008  2.5298     0.0190     B
+
+  grades: A = trustworthy, B = promising, C = weak, reject = no money
+  A:10  B:20  C:231  reject:356
+
+  top states by OOS lift over the SYMBOL base rate:
+                                                         state  n_test  sym_base  L1_test  L2_test  state_lift_oos  graph_lift_oos
+f_close__ratio3=3|f_close__distmin10=1|f_range_pct__distmin3=3      67  0.175426 0.388060      NaN        0.212634             NaN
+f_close__ratio3=4|f_close__distmin10=2|f_range_pct__distmin3=2      27  0.181644 0.370370      NaN        0.188726             NaN
+ f_rel_str_sec__raw=4|f_close__distmin3=0|f_close__distmin10=0     129  0.172721 0.343229      NaN        0.170508             NaN
+    f_close__ratio3=2|f_close__distmin10=4|f_rel_str__slope3=0      41  0.166297 0.317073      NaN        0.150776             NaN
+f_close__ratio3=1|f_close__distmin10=0|f_range_pct__distmin3=4      34  0.178275 0.323529      NaN        0.145254             NaN
+f_close__ratio3=0|f_close__distmin10=2|f_range_pct__distmin3=4      25  0.176462 0.320000      NaN        0.143538             NaN
+    f_close__ratio3=2|f_close__distmin10=1|f_rel_str__slope3=0      66  0.184519 0.318182      NaN        0.133663             NaN
+f_close__ratio3=1|f_close__distmin10=2|f_range_pct__distmin3=2      58  0.185806 0.310345      NaN        0.124539             NaN
+
+####################################################################
+# SIDE: SHORT
+####################################################################
+  feature factory   : 322 candidates  (50.6s)
+  panel             : 511,338 rows, 497 symbols, 2022-01-03 -> 2026-07-29
+
+LAYERED ATTRIBUTION  (side=short)
+--------------------------------------------------------------------
+  322 non-graph features, 0 graph features
+  fold   6 | L0 0.240 -> L1 0.278 -> L2 nan
+  fold  12 | L0 0.242 -> L1 0.274 -> L2 nan
+  fold  18 | L0 0.230 -> L1 0.279 -> L2 nan
+  fold  24 | L0 0.241 -> L1 0.270 -> L2 nan
+  fold  30 | L0 0.227 -> L1 0.248 -> L2 nan
+  fold  36 | L0 0.282 -> L1 0.314 -> L2 nan
+  fold  42 | L0 0.226 -> L1 0.234 -> L2 nan
+
+====================================================================
+LAYER ATTRIBUTION, OUT OF SAMPLE   (side=short)
+====================================================================
+  L0  base rate, no state        : 0.245
+  L1  + state fires              : 0.274   (+0.029)
+  L2  + graph confirms           : nan   (+nan on top)
+  signals: 51,069 at L1, 0 at L2
+  promoted states per fold (median): 8
+
+  EXPECTANCY PER TRADE, net of cost   <- this is the number
+    L0  no state   :   -22.1 bps
+    L1  + state    :   -16.6 bps   (+5.5)
+    folds where the state beat the null: 42/42
+
+  NOISE CHECK
+    the shuffle test promotes states at the audit's false-positive
+    rate. If promoted-per-fold is near that rate, these states are
+    indistinguishable from luck regardless of their lift.
+
+====================================================================================================
+STATE SCORECARD   (ranked on the composite, not on lift)
+====================================================================================================
+                                         state  occurrences  folds  folds_positive  win_rate  base_rate   lift  expectancy  exp_lift   t_stat  composite grade
+f_close__distmax3=3|f_close__distmax10=4|f_clo          424      2               2    0.3637     0.2368 0.1269     -0.0002    0.0017  15.6047     0.1164     C
+f_close__distmax5=4|f_ret1__slope5=2|f_tr_pct_          329      2               2    0.3198     0.2383 0.0815     -0.0008    0.0014   7.7469     0.0689     C
+f_close__distmax5=4|f_ret1__slope5=4|f_tr_pct_          300      2               2    0.3036     0.2341 0.0695     -0.0013    0.0009  48.2333     0.0675     C
+f_close__distmax3=3|f_close__distmax10=1|f_clo          152      2               2    0.3426     0.2296 0.1130     -0.0004    0.0015 119.2717     0.0566     C
+f_close__distmax3=3|f_close__distmax10=2|f_clo          165      2               2    0.3353     0.2313 0.1040     -0.0006    0.0013  13.0614     0.0516     C
+f_close__distmax3=4|f_close__accel3=2|f_ret1__          953      6               6    0.3242     0.2474 0.0768     -0.0009    0.0014   3.7269     0.0464     A
+f_close__distmax3=1|f_close__distmax10=0|f_clo           93      2               2    0.3859     0.2270 0.1589     -0.0003    0.0016  12.6549     0.0443     C
+f_close__distmax3=3|f_ret1__slope5=1|f_close__          206      3               3    0.3054     0.2297 0.0758     -0.0012    0.0009   6.8964     0.0416     A
+f_close__distmax3=4|f_close__distmax10=2|f_clo          256      2               2    0.3123     0.2421 0.0702     -0.0012    0.0007   2.7652     0.0396     C
+f_close__distmax3=2|f_close__distmax10=2|f_clo          365      2               2    0.2847     0.2402 0.0445     -0.0013    0.0006  10.0776     0.0390     C
+f_close__distmax3=4|f_close__accel3=2|f_ret1__          550      6               6    0.3036     0.2359 0.0677     -0.0014    0.0009   3.2804     0.0387     A
+f_close__distmax3=3|f_close__distmax10=4|f_clo          228      2               2    0.3138     0.2335 0.0803     -0.0006    0.0013   2.2927     0.0378     C
+f_close__distmax3=4|f_ret1__slope5=1|f_close__          241      3               3    0.3024     0.2369 0.0655     -0.0008    0.0014   3.7415     0.0360     A
+f_close__distmax3=4|f_ret1__slope5=4|f_close__          236      3               3    0.3129     0.2316 0.0813     -0.0012    0.0010   2.2186     0.0359     A
+f_close__distmax5=4|f_ret1__slope5=4|f_tr_pct_          178      2               2    0.2966     0.2163 0.0803     -0.0017    0.0005   3.4509     0.0338     C
+
+  grades: A = trustworthy, B = promising, C = weak, reject = no money
+  A:15  B:18  C:523  reject:568
+
+  top states by OOS lift over the SYMBOL base rate:
+                                                       state  n_test  sym_base  L1_test  L2_test  state_lift_oos  graph_lift_oos
+ f_close__distmax5=0|f_ret1__slope5=4|f_range_pct__slope10=4      27  0.227377 0.444444      NaN        0.217067             NaN
+  f_close__distmax5=1|f_tr_pct__distmin3=1|f_close__accel3=0      99  0.206055 0.404040      NaN        0.197985             NaN
+   f_ret1__slope5=2|f_close__distmax5=4|f_tr_pct__distmax3=4      29  0.216056 0.413793      NaN        0.197737             NaN
+  f_close__distmax5=2|f_tr_pct__distmin3=2|f_close__accel3=3      93  0.213100 0.408602      NaN        0.195502             NaN
+f_close__distmax5=4|f_range_pct__distmax3=4|f_ret1__slope5=2      39  0.218931 0.410256      NaN        0.191325             NaN
+ f_close__distmax5=2|f_ret1__slope5=2|f_range_pct__slope10=4      49  0.218939 0.408163      NaN        0.189224             NaN
+f_close__distmax3=4|f_ret1__slope5=1|f_range_pct__distmax3=1      31  0.230827 0.419355      NaN        0.188528             NaN
+  f_close__distmax5=4|f_tr_pct__distmin3=1|f_close__accel3=3      42  0.219470 0.404762      NaN        0.185292             NaN

@@ -1,0 +1,46 @@
+#!/bin/sh
+# Refuse a commit that carries a large file, a database, or a credential.
+#
+# The sibling repo KANIDA.AI-TERMINAL records a 680 GiB git-bloat incident
+# caused by stray database blobs. This repository sits beside ~168 GB of
+# SQLite files (db/kanida.db alone is 148 GB), so .gitignore is the first
+# guard and this hook is the one that catches what slips past it.
+#
+# Installed by: git config core.hooksPath .githooks
+# Bypass (only with a reason you can defend): git commit --no-verify
+
+MAX_BYTES=5242880   # 5 MiB
+fail=0
+
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$staged" ] && exit 0
+
+# 1. Anything that is a database, a key, or an environment file.
+echo "$staged" | grep -Ei '\.(db|db-wal|db-shm|sqlite3?|key|pem|p12|pfx)$|(^|/)\.env($|\.)|OWNER_INVITATION' | grep -v '\.example$' > /tmp/gitguard_secret.$$
+if [ -s /tmp/gitguard_secret.$$ ]; then
+  echo "BLOCKED: these look like data or credentials and must never be committed:"
+  sed 's/^/  /' /tmp/gitguard_secret.$$
+  fail=1
+fi
+rm -f /tmp/gitguard_secret.$$
+
+# 2. Anything larger than the limit, whatever it is called.
+echo "$staged" | while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  size=$(wc -c < "$f" 2>/dev/null || echo 0)
+  if [ "$size" -gt "$MAX_BYTES" ]; then
+    printf 'BLOCKED: %s is %s MB, over the %s MB limit\n' \
+      "$f" "$(expr $size / 1048576)" "$(expr $MAX_BYTES / 1048576)"
+    echo BIG >> /tmp/gitguard_big.$$
+  fi
+done
+if [ -f /tmp/gitguard_big.$$ ]; then fail=1; rm -f /tmp/gitguard_big.$$; fi
+
+if [ "$fail" -ne 0 ]; then
+  echo
+  echo "Nothing was committed. Add it to .gitignore, or keep it outside the repo."
+  echo "Generated results belong on disk or in object storage, not in history:"
+  echo "history is forever and cannot be made smaller later without rewriting it."
+  exit 1
+fi
+exit 0

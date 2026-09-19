@@ -1,0 +1,2 @@
+export const agents=[{id:'chart',name:'Chart Agent',audience:'Intraday & swing traders',description:'Finds geometric patterns on completed 1H, 4H, daily and weekly candles. Open any result to inspect its drawing and stock-specific history.',status:'available'}];
+export type AgentSignal={agent:string;agentVersion:string;symbol:string;timeframe:string;availableAt:string;side:string;pattern:string;run:string;id:string};

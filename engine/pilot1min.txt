@@ -1,0 +1,202 @@
+
+TWO-STOCK PILOT   ADANIENT, CARTRADE   2022-01-01 -> 2025-12-31   Rs 25,000/stock
+  2026 is deliberately excluded and stays untouched as holdout.
+  740,068 bars, 992 sessions, 2 symbols (2022-01-03 -> 2025-12-31)
+  ~373 bars/session -> native resolution ~1 minutes, from table 'ohlc_1min'
+
+========================================================================================================
+PHASE 1  INTRADAY BASELINE   enter 09:15, exit at a fixed time, Rs 25,000 notional
+========================================================================================================
+EXECUTION CONVENTION
+  signal      : known before the session opens
+  order       : placed pre-open
+  fill        : the OPEN of the 09:15 bar
+  exit fill   : the CLOSE of the bar at or after the stated time
+  costs       : 0.110% round trip (brokerage + STT 0.025% sell side + exchange + GST + stamp)
+  slippage    : 0.050% round trip
+  ALL RETURNS BELOW ARE NET of 0.160%
+  Filling at the opening print assumes the order existed before the
+  auction. If you decide after seeing the open, this is optimistic.
+
+  symbol  side exit_time   n  mean_pct  median_pct  win_rate  p_over_1pct  mean_mfe  mean_mae  worst_pct  best_pct   total_rs  payoff
+ADANIENT  long     09:30 992    -0.274      -0.243     0.357        0.073     0.655    -0.807    -18.340     6.423 -67842.952   0.812
+ADANIENT  long     10:00 992    -0.273      -0.278     0.375        0.099     0.848    -1.032    -16.117     8.414 -67758.021   0.822
+ADANIENT  long     10:30 992    -0.278      -0.243     0.381        0.128     0.965    -1.161    -26.619    14.960 -69002.024   0.831
+ADANIENT  long     11:00 992    -0.255      -0.276     0.389        0.144     1.069    -1.257    -21.925    13.634 -63135.867   0.850
+ADANIENT  long     12:00 992    -0.279      -0.323     0.394        0.158     1.200    -1.389    -16.895    15.650 -69162.414   0.864
+ADANIENT  long     13:00 990    -0.298      -0.320     0.391        0.165     1.299    -1.518    -21.726    18.415 -73817.853   0.856
+ADANIENT  long     14:00 990    -0.278      -0.333     0.410        0.184     1.388    -1.644    -31.975    17.983 -68795.702   0.844
+ADANIENT  long     15:00 989    -0.307      -0.320     0.406        0.195     1.506    -1.772    -30.790    19.739 -75956.196   0.850
+ADANIENT  long     close 992    -0.371      -0.386     0.395        0.196     1.555    -1.833    -33.521    19.658 -91933.618   0.848
+ADANIENT short     09:30 992    -0.046      -0.077     0.451        0.081     0.807    -0.655     -6.743    18.020 -11517.048   1.232
+ADANIENT short     10:00 992    -0.047      -0.042     0.477        0.133     1.032    -0.848     -8.734    15.797 -11601.979   1.216
+ADANIENT short     10:30 992    -0.042      -0.077     0.462        0.157     1.161    -0.965    -15.280    26.299 -10357.976   1.203
+ADANIENT short     11:00 992    -0.065      -0.044     0.478        0.162     1.257    -1.069    -13.954    21.605 -16224.133   1.177
+ADANIENT short     12:00 992    -0.041       0.003     0.500        0.196     1.389    -1.200    -15.970    16.575 -10197.586   1.157
+ADANIENT short     13:00 990    -0.022      -0.000     0.499        0.203     1.518    -1.299    -18.735    21.406  -5382.147   1.168
+ADANIENT short     14:00 990    -0.042       0.013     0.505        0.219     1.644    -1.388    -18.303    31.655 -10404.298   1.185
+ADANIENT short     15:00 989    -0.013      -0.000     0.499        0.246     1.772    -1.506    -20.059    30.470  -3163.804   1.177
+ADANIENT short     close 992     0.051       0.066     0.521        0.271     1.833    -1.555    -19.978    33.201  12573.618   1.179
+CARTRADE  long     09:30 992    -0.099      -0.170     0.452        0.184     1.126    -0.952     -8.877     8.771 -24551.544   1.182
+CARTRADE  long     10:00 992    -0.085      -0.209     0.443        0.231     1.427    -1.197    -10.995     9.800 -20959.388   1.192
+CARTRADE  long     10:30 992    -0.069      -0.254     0.443        0.254     1.585    -1.319    -10.740    10.516 -17002.389   1.202
+CARTRADE  long     11:00 992    -0.093      -0.331     0.431        0.261     1.664    -1.400    -15.849    11.066 -22987.524   1.188
+CARTRADE  long     12:00 992    -0.072      -0.294     0.447        0.259     1.855    -1.522     -8.189    13.097 -17903.431   1.218
+CARTRADE  long     13:00 990    -0.093      -0.314     0.430        0.263     1.986    -1.627     -9.501    15.496 -22986.429   1.221
+CARTRADE  long     14:00 990    -0.133      -0.382     0.419        0.274     2.090    -1.725    -10.988    14.344 -32834.517   1.212
+CARTRADE  long     15:00 989    -0.085      -0.354     0.438        0.292     2.217    -1.838     -9.406    16.477 -21020.932   1.206
+CARTRADE  long     close 992    -0.251      -0.639     0.404        0.274     2.317    -2.001    -13.106    18.964 -62139.619   1.158
+CARTRADE short     09:30 992    -0.221      -0.150     0.449        0.165     0.952    -1.126     -9.091     8.557 -54808.456   0.846
+CARTRADE short     10:00 992    -0.235      -0.111     0.462        0.205     1.197    -1.427    -10.120    10.675 -58400.612   0.839
+CARTRADE short     10:30 992    -0.251      -0.066     0.473        0.230     1.319    -1.585    -10.836    10.420 -62357.611   0.832
+CARTRADE short     11:00 992    -0.227       0.011     0.504        0.253     1.400    -1.664    -11.386    15.529 -56372.476   0.841
+CARTRADE short     12:00 992    -0.248      -0.026     0.488        0.270     1.522    -1.855    -13.417     7.869 -61456.569   0.821
+CARTRADE short     13:00 990    -0.227      -0.006     0.500        0.294     1.627    -1.986    -15.816     9.181 -56213.571   0.819
+CARTRADE short     14:00 990    -0.187       0.062     0.518        0.307     1.725    -2.090    -14.664    10.668 -46365.483   0.825
+CARTRADE short     15:00 989    -0.235       0.034     0.509        0.314     1.838    -2.217    -16.797     9.086 -58099.068   0.829
+CARTRADE short     close 992    -0.069       0.319     0.564        0.351     2.001    -2.317    -19.284    12.786 -17220.381   0.864
+
+  This is UNCONDITIONAL -- every single session, no filter.
+  Any state or signal must beat the row for its own stock, side
+  and exit time. Nothing else counts as an improvement.
+
+========================================================================================================
+PHASE 2  THRESHOLD SEQUENCING   which came first, the gain or the loss?
+========================================================================================================
+  symbol  side  threshold_%   n  P_touch_up  P_touch_dn  P_up_first  P_dn_first  P_same_bar  P_neither  med_min_to_up
+ADANIENT  long         0.25 992       0.856       0.913       0.330       0.498       0.172      0.000            0.0
+ADANIENT  long         0.50 992       0.705       0.808       0.408       0.550       0.040      0.001            6.0
+ADANIENT  long         0.75 992       0.581       0.686       0.397       0.547       0.018      0.037           18.0
+ADANIENT  long         1.00 992       0.482       0.581       0.380       0.498       0.008      0.114           40.0
+ADANIENT  long         1.50 992       0.349       0.404       0.306       0.372       0.000      0.322           75.0
+ADANIENT  long         2.00 992       0.242       0.271       0.221       0.253       0.000      0.526           95.5
+ADANIENT short         0.25 992       0.913       0.856       0.498       0.330       0.172      0.000            0.0
+ADANIENT short         0.50 992       0.808       0.705       0.550       0.408       0.040      0.001            3.0
+ADANIENT short         0.75 992       0.686       0.581       0.547       0.397       0.018      0.037           15.0
+ADANIENT short         1.00 992       0.581       0.482       0.498       0.380       0.008      0.114           28.0
+ADANIENT short         1.50 992       0.404       0.349       0.372       0.306       0.000      0.322           56.0
+ADANIENT short         2.00 992       0.271       0.242       0.253       0.221       0.000      0.526           77.0
+CARTRADE  long         0.25 992       0.866       0.885       0.370       0.391       0.239      0.000            0.0
+CARTRADE  long         0.50 992       0.794       0.828       0.453       0.455       0.093      0.000            0.0
+CARTRADE  long         0.75 992       0.714       0.756       0.477       0.489       0.027      0.007            1.0
+CARTRADE  long         1.00 992       0.655       0.677       0.488       0.488       0.003      0.021            4.0
+CARTRADE  long         1.50 992       0.521       0.528       0.444       0.440       0.000      0.117           12.0
+CARTRADE  long         2.00 992       0.427       0.396       0.390       0.353       0.001      0.256           29.0
+CARTRADE short         0.25 992       0.885       0.866       0.391       0.370       0.239      0.000            0.0
+CARTRADE short         0.50 992       0.828       0.794       0.455       0.453       0.093      0.000            0.0
+CARTRADE short         0.75 992       0.756       0.714       0.489       0.477       0.027      0.007            2.0
+CARTRADE short         1.00 992       0.677       0.655       0.488       0.488       0.003      0.021            7.0
+CARTRADE short         1.50 992       0.528       0.521       0.440       0.444       0.000      0.117           29.0
+CARTRADE short         2.00 992       0.396       0.427       0.353       0.390       0.001      0.256           51.0
+
+  P_up_first is the number a target-and-stop pair depends on.
+  P_same_bar is honest ignorance: both touched inside one bar, so
+  the order cannot be known at this resolution. If it is large,
+  re-run at 1-minute before trusting any bracket.
+
+  VERDICT: same-bar ambiguity reaches 24%. Do NOT
+  optimise any bracket at or below 0.25% on these bars.
+
+================================================================================================================
+PHASE 3  DIRECTIONAL SCORECARD   09:15 to close, unconditional
+================================================================================================================
+  symbol  side   n  mean_pct  median_pct  win_rate  P_plus1pct  mean_mfe_%  mean_mae_%  reward_to_adverse  worst_trade_%  max_dd_% pos_months pos_years   total_rs
+ADANIENT  long 992    -0.371      -0.386     0.395       0.482       1.555      -1.833              0.848        -33.521   -98.527      11/48       0/4 -91933.618
+ADANIENT short 992     0.051       0.066     0.521       0.581       1.833      -1.555              1.179        -19.978   -52.339      25/48       3/4  12573.618
+CARTRADE  long 992    -0.251      -0.639     0.404       0.655       2.317      -2.001              1.158        -13.106   -95.561      20/48       0/4 -62139.619
+CARTRADE short 992    -0.069       0.319     0.564       0.677       2.001      -2.317              0.864        -19.284   -88.622      19/48       1/4 -17220.381
+
+  symbol long_wins_on verdict  best_side_mean_%             tradable
+ADANIENT          0/5   short             0.051                  yes
+CARTRADE          1/5   short            -0.069 NO - both sides lose
+
+  'tradable = NO' means neither direction has an unconditional
+  edge on this stock. That is a legitimate and useful result: it
+  says any profit must come from CONDITIONAL selection, and sets
+  the bar that conditioning has to clear.
+
+==============================================================================================================
+PHASE 1b  MULTI-SESSION   enter at the open, exit H sessions later
+==============================================================================================================
+  symbol  side  hold_sessions    schedule   n  mean_pct  median_pct  win_rate  p_over_1pct  worst_pct  max_dd_%                                                                 note  capital_rs    total_rs  ret_on_capital_%  cagr_%  buyhold_cagr_%  beats_buyhold
+ADANIENT  long              1 overlapping 990    -0.360      -0.355     0.393        0.196    -33.521   -98.389                                                                          25000.0  -89089.160          -356.357     NaN           7.533          False
+ADANIENT  long              1    rollover 990    -0.360      -0.355     0.393        0.196    -33.521   -98.389                                                                          25000.0  -89089.160          -356.357     NaN           7.533          False
+ADANIENT short              1 overlapping 990     0.040       0.035     0.512        0.274    -19.266   -55.756                                                                          25000.0    9889.160            39.557   8.781           7.533           True
+ADANIENT short              1    rollover 990     0.040       0.035     0.512        0.274    -19.266   -55.756                                                                          25000.0    9889.160            39.557   8.781           7.533           True
+ADANIENT  long              2 overlapping 989    -0.268      -0.402     0.436        0.298    -47.897   -87.093                                                                          50000.0  -66327.086          -132.654     NaN           7.533          False
+ADANIENT  long              2    rollover 495    -0.212      -0.416     0.432        0.291    -47.897   -88.146                                                                          25000.0  -26237.713          -104.951     NaN           7.533          False
+ADANIENT short              2 overlapping 989    -0.052       0.082     0.518        0.333    -37.919   -59.968 THEORETICAL short - cash equity cannot hold overnight; needs futures     50000.0  -12792.914           -25.586  -7.198           7.533          False
+ADANIENT short              2    rollover 495    -0.108       0.096     0.523        0.325    -37.919   -70.690 THEORETICAL short - cash equity cannot hold overnight; needs futures     25000.0  -13362.287           -53.449 -17.575           7.533          False
+ADANIENT  long              3 overlapping 988    -0.182      -0.332     0.450        0.332    -47.635   -74.596                                                                          75000.0  -44837.209           -59.783 -20.585           7.533          False
+ADANIENT  long              3    rollover 330    -0.231      -0.387     0.421        0.309    -47.635   -84.634                                                                          25000.0  -19087.665           -76.351 -30.569           7.533          False
+ADANIENT short              3 overlapping 988    -0.138       0.012     0.502        0.369    -40.526   -63.666 THEORETICAL short - cash equity cannot hold overnight; needs futures     75000.0  -34202.791           -45.604 -14.279           7.533          False
+ADANIENT short              3    rollover 330    -0.089       0.067     0.524        0.370    -39.654   -66.677 THEORETICAL short - cash equity cannot hold overnight; needs futures     25000.0   -7312.335           -29.249  -8.383           7.533          False
+ADANIENT  long              4 overlapping 987    -0.091      -0.206     0.477        0.371    -47.649   -64.644                                                                         100000.0  -22385.541           -22.386  -6.217           7.533          False
+ADANIENT  long              4    rollover 247    -0.036      -0.461     0.466        0.377    -47.649   -73.516                                                                          25000.0   -2209.403            -8.838  -2.316           7.533          False
+ADANIENT short              4 overlapping 987    -0.229      -0.114     0.485        0.385    -64.298   -65.453 THEORETICAL short - cash equity cannot hold overnight; needs futures    100000.0  -56574.459           -56.574 -19.045           7.533          False
+ADANIENT short              4    rollover 247    -0.284       0.141     0.506        0.385    -39.414   -76.679 THEORETICAL short - cash equity cannot hold overnight; needs futures     25000.0  -17550.597           -70.202 -26.411           7.533          False
+ADANIENT  long              6 overlapping 985     0.067      -0.222     0.477        0.386    -54.419   -60.766                                                                         150000.0   16378.849            10.919   2.665           7.533          False
+ADANIENT  long              6    rollover 165     0.196      -0.355     0.461        0.370    -54.419   -66.129                                                                          25000.0    8102.989            32.412   7.386           7.533          False
+ADANIENT short              6 overlapping 985    -0.387      -0.098     0.488        0.392    -78.288   -65.431 THEORETICAL short - cash equity cannot hold overnight; needs futures    150000.0  -95178.849           -63.453 -22.545           7.533          False
+ADANIENT short              6    rollover 165    -0.516       0.035     0.503        0.412    -37.328   -79.429 THEORETICAL short - cash equity cannot hold overnight; needs futures     25000.0  -21302.989           -85.212 -38.437           7.533          False
+ADANIENT  long              8 overlapping 983     0.217      -0.254     0.486        0.417    -54.699   -58.450                                                                         200000.0   53425.691            26.713   6.206           7.533          False
+ADANIENT  long              8    rollover 123     0.302      -0.293     0.472        0.390    -54.202   -67.144                                                                          25000.0    9292.597            37.170   8.370           7.533           True
+ADANIENT short              8 overlapping 983    -0.537      -0.066     0.493        0.415    -65.758   -66.412 THEORETICAL short - cash equity cannot hold overnight; needs futures    200000.0 -132065.691           -66.033 -24.013           7.533          False
+ADANIENT short              8    rollover 123    -0.622      -0.027     0.496        0.382    -31.838   -77.201 THEORETICAL short - cash equity cannot hold overnight; needs futures     25000.0  -19132.597           -76.530 -30.832           7.533          False
+CARTRADE  long              1 overlapping 990    -0.180      -0.539     0.400        0.281    -10.507   -93.170                                                                          25000.0  -44566.187          -178.265     NaN          34.841          False
+CARTRADE  long              1    rollover 990    -0.180      -0.539     0.400        0.281    -10.507   -93.170                                                                          25000.0  -44566.187          -178.265     NaN          34.841          False
+CARTRADE short              1 overlapping 990    -0.140       0.219     0.544        0.341    -17.853   -92.122                                                                          25000.0  -34633.813          -138.535     NaN          34.841          False
+CARTRADE short              1    rollover 990    -0.140       0.219     0.544        0.341    -17.853   -92.122                                                                          25000.0  -34633.813          -138.535     NaN          34.841          False
+CARTRADE  long              2 overlapping 989    -0.013      -0.388     0.464        0.352    -16.341   -71.683                                                                          50000.0   -3199.787            -6.400  -1.658          34.841          False
+CARTRADE  long              2    rollover 495     0.027      -0.468     0.451        0.354    -12.803   -74.141                                                                          25000.0    3295.882            13.184   3.180          34.841          False
+CARTRADE short              2 overlapping 989    -0.307       0.068     0.506        0.376    -22.504   -92.080 THEORETICAL short - cash equity cannot hold overnight; needs futures     50000.0  -75920.213          -151.840     NaN          34.841          False
+CARTRADE short              2    rollover 495    -0.347       0.148     0.519        0.382    -22.504   -94.116 THEORETICAL short - cash equity cannot hold overnight; needs futures     25000.0  -42895.882          -171.584     NaN          34.841          False
+CARTRADE  long              3 overlapping 988     0.151      -0.365     0.469        0.388    -17.127   -65.763                                                                          75000.0   37313.486            49.751  10.758          34.841          False
+CARTRADE  long              3    rollover 330     0.082      -0.451     0.461        0.367    -15.090   -70.615                                                                          25000.0    6780.373            27.121   6.260          34.841          False
+CARTRADE short              3 overlapping 988    -0.471       0.045     0.504        0.407    -24.898   -91.841 THEORETICAL short - cash equity cannot hold overnight; needs futures     75000.0 -116353.486          -155.138     NaN          34.841          False
+CARTRADE short              3    rollover 330    -0.402       0.131     0.512        0.424    -20.885   -92.790 THEORETICAL short - cash equity cannot hold overnight; needs futures     25000.0  -33180.373          -132.721     NaN          34.841          False
+CARTRADE  long              4 overlapping 987     0.323      -0.191     0.474        0.398    -19.785   -62.060                                                                         100000.0   79805.690            79.806  16.022          34.841          False
+CARTRADE  long              4    rollover 247     0.424      -0.277     0.482        0.421    -13.726   -61.937                                                                          25000.0   26197.712           104.791  19.909          34.841          False
+CARTRADE short              4 overlapping 987    -0.643      -0.129     0.485        0.407    -29.311   -91.841 THEORETICAL short - cash equity cannot hold overnight; needs futures    100000.0 -158765.690          -158.766     NaN          34.841          False
+CARTRADE short              4    rollover 247    -0.744      -0.043     0.494        0.413    -27.842   -94.956 THEORETICAL short - cash equity cannot hold overnight; needs futures     25000.0  -45957.712          -183.831     NaN          34.841          False
+CARTRADE  long              6 overlapping 985     0.663       0.109     0.509        0.439    -25.144   -57.699                                                                         150000.0  163386.133           108.924  20.563          34.841          False
+CARTRADE  long              6    rollover 165     0.695      -0.239     0.491        0.412    -21.875   -63.730                                                                          25000.0   28668.323           114.673  21.397          34.841          False
+CARTRADE short              6 overlapping 985    -0.983      -0.429     0.467        0.403    -33.296   -91.591 THEORETICAL short - cash equity cannot hold overnight; needs futures    150000.0 -242186.133          -161.457     NaN          34.841          False
+CARTRADE short              6    rollover 165    -1.015      -0.081     0.491        0.424    -29.532   -95.059 THEORETICAL short - cash equity cannot hold overnight; needs futures     25000.0  -41868.323          -167.473     NaN          34.841          False
+CARTRADE  long              8 overlapping 983     0.994       0.487     0.534        0.472    -24.635   -55.102                                                                         200000.0  244186.860           122.093  22.499          34.841          False
+CARTRADE  long              8    rollover 123     1.079      -0.241     0.496        0.455    -15.029   -58.184                                                                          25000.0   33186.922           132.748  23.967          34.841          False
+CARTRADE short              8 overlapping 983    -1.314      -0.807     0.451        0.395    -32.791   -91.286 THEORETICAL short - cash equity cannot hold overnight; needs futures    200000.0 -322826.860          -161.413     NaN          34.841          False
+CARTRADE short              8    rollover 123    -1.399      -0.079     0.496        0.447    -31.974   -94.886 THEORETICAL short - cash equity cannot hold overnight; needs futures     25000.0  -43026.922          -172.108     NaN          34.841          False
+
+  ret_on_capital_% divides by the capital the schedule actually
+  ties up. Overlapping looks better per trade and needs H times the
+  money; rollover needs one unit and trades far less often.
+
+  buyhold_cagr_% is the benchmark that matters for multi-day LONGS.
+  A stock that tripled makes any long-biased schedule look brilliant.
+  If beats_buyhold is False you have found the stock's drift, not an
+  edge -- and you took drawdown risk to underperform simply holding.
+
+================================================================================================
+CAPITAL AND LEVERAGE   same trades, different capital base
+================================================================================================
+  symbol  side exit_time  leverage  margin_rs  mean_pct  ret_on_margin_%  worst_pct  worst_on_margin_%
+ADANIENT  long     close       1.0    25000.0    -0.371           -0.371    -33.521            -33.521
+ADANIENT short     close       1.0    25000.0     0.051            0.051    -19.978            -19.978
+CARTRADE  long     close       1.0    25000.0    -0.251           -0.251    -13.106            -13.106
+CARTRADE short     close       1.0    25000.0    -0.069           -0.069    -19.284            -19.284
+ADANIENT  long     close       5.0     5000.0    -0.371           -1.854    -33.521           -167.606
+ADANIENT short     close       5.0     5000.0     0.051            0.254    -19.978            -99.890
+CARTRADE  long     close       5.0     5000.0    -0.251           -1.253    -13.106            -65.528
+CARTRADE short     close       5.0     5000.0    -0.069           -0.347    -19.284            -96.419
+
+  Leverage multiplies the loss identically. worst_on_margin_% is
+  the number that decides whether 5x is survivable, not the return.
+Traceback (most recent call last):
+  File "C:\Users\SPS\Documents\Kanida_Falcon\engine\run_engine.py", line 521, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "C:\Users\SPS\Documents\Kanida_Falcon\engine\run_engine.py", line 283, in main
+    pl.overnight_split(daily, pcfg).to_csv(
+    ^^^^^^^^^^^^^^^^^^
+AttributeError: module 'state_engine.pilot' has no attribute 'overnight_split'

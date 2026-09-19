@@ -1,0 +1,100 @@
+<style>
+:root{
+  --bg:#f4f7f7; --card:#ffffff; --ink:#0f1e1c; --mut:#596b68; --line:#e3ebe9;
+  --accent:#0e8f83; --accentbg:#e4f4f1; --pos:#0a8a4f; --neg:#c8412c; --amber:#a9791f; --chip:#eef3f2;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0b1312; --card:#121d1b; --ink:#e7efed; --mut:#8ba09c; --line:#223230;
+  --accent:#3ccdbc; --accentbg:#12332f; --pos:#40cf80; --neg:#f0745a; --amber:#d8b968; --chip:#182422;}}
+:root[data-theme=dark]{
+  --bg:#0b1312; --card:#121d1b; --ink:#e7efed; --mut:#8ba09c; --line:#223230;
+  --accent:#3ccdbc; --accentbg:#12332f; --pos:#40cf80; --neg:#f0745a; --amber:#d8b968; --chip:#182422;}
+:root[data-theme=light]{
+  --bg:#f4f7f7; --card:#ffffff; --ink:#0f1e1c; --mut:#596b68; --line:#e3ebe9;
+  --accent:#0e8f83; --accentbg:#e4f4f1; --pos:#0a8a4f; --neg:#c8412c; --amber:#a9791f; --chip:#eef3f2;}
+*{box-sizing:border-box}body{margin:0}
+.sheet{font:15px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:var(--ink);
+  background:var(--bg);min-height:100vh;padding:26px;max-width:960px;margin:0 auto}
+.mono{font-family:'SF Mono',ui-monospace,'Cascadia Code',Menlo,monospace;font-variant-numeric:tabular-nums}
+.pos{color:var(--pos)}.neg{color:var(--neg)}.amber{color:var(--amber)}
+.hdr{border:1px solid var(--line);background:var(--card);border-radius:16px;padding:20px 22px;margin-bottom:14px}
+.eyebrow{font-family:'SF Mono',ui-monospace,monospace;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)}
+.tick{font-size:34px;font-weight:800;letter-spacing:-.01em;margin:2px 0}
+.badges{display:flex;flex-wrap:wrap;gap:7px;margin-top:6px}
+.badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px;text-transform:uppercase;letter-spacing:.04em}
+.b-el{background:var(--accent);color:#fff}.b-tag{background:var(--accentbg);color:var(--accent)}
+.b-warn{background:#f4ecda;color:#8a6a1e}:root[data-theme=dark] .b-warn{background:#2a2413;color:#dcbf72}
+.lead{color:var(--mut);font-size:13.5px;margin:12px 0 0}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-top:16px}
+.kpi{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:11px 13px}
+.kpi .l{font-size:11px;color:var(--mut)}.kpi .v{font-size:22px;font-weight:800;margin-top:2px}
+h2{font-size:12.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);margin:22px 0 9px;font-weight:700}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+p{margin:0 0 10px}.rule{font-family:'SF Mono',ui-monospace,monospace;font-size:12.5px;background:var(--chip);
+  border-left:3px solid var(--accent);border-radius:6px;padding:9px 11px;margin:8px 0;overflow-x:auto}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th,td{text-align:right;padding:8px 10px;border-bottom:1px solid var(--line)}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.k td:first-child{color:var(--mut)}
+.step{display:flex;gap:11px;margin:9px 0}.num{flex:none;width:22px;height:22px;border-radius:50%;
+  background:var(--accent);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.note{color:var(--mut);font-size:12px;line-height:1.55}
+.flag{border:1px solid var(--amber);background:#fbf6ea;border-radius:12px;padding:12px 14px;margin:12px 0;font-size:13px}
+:root[data-theme=dark] .flag{background:#211d10}
+.foot{color:var(--mut);font-size:11.5px;margin-top:20px;text-align:center;border-top:1px solid var(--line);padding-top:14px}
+</style>
+<div class="sheet">
+  <div class="hdr">
+    <div class="eyebrow">Kanida.AI · Worker Spec Sheet</div>
+    <div class="tick">AUROPHARMA</div>
+    <div class="badges">
+      <span class="badge b-el">Solid</span><span class="badge b-tag">MIS 5× intraday Short</span>
+      <span class="badge b-tag">Non-F&amp;O · daily recycle</span>
+      <span class="badge b-tag">Trail: none</span>
+    </div>
+    <p class="lead">Autonomous per-stock trader: <b>shorts AUROPHARMA intraday on 5× MIS</b> when the signal fires, managed by a <b>walk-forward-validated none trail</b>, squared off by 15:20. Slippage-stressed (0.5%). Leak-free signal; 2026 sealed.</p>
+    <div class="kpis">
+      <div class="kpi"><div class="l">Return (trailed, 15%-sized)</div><div class="v pos mono">+88%</div></div>
+      <div class="kpi"><div class="l">Max drawdown</div><div class="v neg mono">-173.0%</div></div>
+      <div class="kpi"><div class="l">Net expectancy/trade</div><div class="v mono">+0.5%</div></div>
+      <div class="kpi"><div class="l">Win rate</div><div class="v mono">62%</div></div>
+      <div class="kpi"><div class="l">Leverage</div><div class="v mono">5× MIS</div></div>
+    </div>
+  </div>
+  <h2>1 · The signal — when to short</h2>
+  <div class="card"><p><b>Direction: SHORT</b> (fade an over-extended move). Representative promoted rule
+    (2026 sealed hit-rate 100.0% vs 34.0% base):</p>
+    <div class="rule">SHORT if&nbsp; m_atr20_pct>3.0801 AND eod_cvd_norm_T2<=-0.0374 AND m_vol_vs_20>0.5714</div>
+    <p class="note">Evaluated at the prior day's close (point-in-time features); entered next morning — no look-ahead.</p></div>
+  <h2>2 · Execution — 5× MIS + validated trail</h2>
+  <div class="card scroll"><table><tbody class="k">
+    <tr><td>Product</td><td>MIS intraday — <b>5× leverage, fixed</b>, squared off same day</td></tr>
+    <tr><td>Entry</td><td>09:15 open (optional 50/50 split with 09:16)</td></tr>
+    <tr><td>Trail (walk-forward validated)</td><td><b>no intraday trail — hold to 15:20 square-off</b> · armed 09:16 on capital basis</td></tr>
+    <tr><td>Square-off</td><td>15:20 — no overnight carry</td></tr>
+  </tbody></table></div>
+  <h2>3 · Position sizing &amp; capital</h2>
+  <div class="card scroll"><table><tbody class="k">
+    <tr><td>Invested capital</td><td>a fixed cash/day you choose — the drawdown acts on this</td></tr>
+    <tr><td>Exposure</td><td>cash/day × 5 (MIS); recycles daily → max active capital = one day</td></tr>
+    <tr><td>Scaling</td><td>linear — 2× cash/day → 2× rupee P&amp;L</td></tr>
+    <tr><td>Risk control</td><td>the intraday trail (5× is fixed for MIS shorts)</td></tr>
+  </tbody></table></div>
+  <h2>4 · Trailed results (walk-forward + 0.5% slippage)</h2>
+  <div class="card scroll"><table><tbody class="k">
+    <tr><td>Total return (15%-sized book)</td><td class="mono pos">+88%</td></tr>
+    <tr><td>Max drawdown</td><td class="mono neg">-173.0%</td></tr>
+    <tr><td>Return ÷ drawdown</td><td class="mono">0.5</td></tr>
+    <tr><td>Net expectancy / trade · win rate</td><td class="mono">+0.5% · 62%</td></tr>
+    <tr><td>Constitutional status</td><td>Watch</td></tr>
+  </tbody></table></div>
+  <h2>5 · Data &amp; leak-free provenance</h2>
+  <div class="card"><table><tbody class="k">
+    <tr><td>Features</td><td>point-in-time (trailing windows, T-1…T-5) — no forward shift/centering</td></tr>
+    <tr><td>Train / seal</td><td>mine ≤2024 · promote 2025 · <b>2026 sealed</b></td></tr>
+    <tr><td>Trail</td><td>tuned on 2025, <b>confirmed out-of-sample on 2026</b>, slippage-stressed</td></tr>
+  </tbody></table></div>
+  <div class="foot">Kanida.AI · research / paper figures · real-money human-gated · trailed source of truth</div>
+</div>

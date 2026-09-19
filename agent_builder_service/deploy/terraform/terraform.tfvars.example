@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars and fill the two ALB values (not exposed by the main stack's outputs).
+# Find them once:
+#   ALB_ARN=$(aws elbv2 describe-load-balancers --names kanida-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+#   aws elbv2 describe-listeners --load-balancer-arn $ALB_ARN --query "Listeners[?Port==\`443\`].ListenerArn" --output text
+#   aws elbv2 describe-load-balancers --load-balancer-arns $ALB_ARN --query 'LoadBalancers[0].SecurityGroups' --output text
+
+alb_https_listener_arn = "arn:aws:elasticloadbalancing:ap-south-1:389642461326:listener/app/kanida-alb/xxxx/yyyy"
+alb_security_group_id  = "sg-xxxxxxxxxxxx"
+
+# Optional overrides:
+# image_tag              = "2026-08-24"
+# task_cpu               = "2048"
+# task_memory            = "4096"
+# desired_count          = 2
+# listener_rule_priority = 500

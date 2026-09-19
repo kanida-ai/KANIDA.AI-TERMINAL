@@ -1,0 +1,111 @@
+23:11:09 | === EXPLORER START · budget 6.81h · optimizing DEV(2023-25), sealed 2026 honest ===
+23:11:19 | [CARTRADE] NEW DEV-BEST h=10 conf0 d3 nf26 :: DEV -0.376%/tr t=-0.86 n=497 -> SEALED-2026 -1.062%/tr t=-0.94 n=131  (sealed: no)
+23:11:20 | [CARTRADE] NEW DEV-BEST h=20 conf0 d2 nf25 :: DEV +0.672%/tr t=1.09 n=497 -> SEALED-2026 -1.402%/tr t=-0.71 n=121  (sealed: no)
+23:11:21 | [ADANIENT] NEW DEV-BEST h=3 conf0 d4 nf24 :: DEV -0.310%/tr t=-1.81 n=497 -> SEALED-2026 +0.307%/tr t=0.83 n=138  (sealed: no)
+23:11:21 | [ADANIENT] NEW DEV-BEST h=20 conf40 d2 nf22 :: DEV +0.240%/tr t=0.67 n=298 -> SEALED-2026 -3.375%/tr t=-1.90 n=73  (sealed: no)
+23:11:27 | [CARTRADE] NEW DEV-BEST h=20 conf40 d3 nf26 :: DEV +1.244%/tr t=1.45 n=298 -> SEALED-2026 -2.377%/tr t=-1.16 n=79  (sealed: no)
+23:11:29 | [CARTRADE] NEW DEV-BEST h=3 conf40 d2 nf13 :: DEV +0.822%/tr t=2.64 n=297 -> SEALED-2026 +0.030%/tr t=0.05 n=84  (sealed: no)
+23:11:31 | [ADANIENT] NEW DEV-BEST h=3 conf0 d4 nf27 :: DEV +0.199%/tr t=1.16 n=497 -> SEALED-2026 +0.874%/tr t=2.41 n=138  *** HOLDS ***
+23:11:32 | ...heartbeat: 40 configs tried, 0.01h elapsed
+23:11:47 | ...heartbeat: 80 configs tried, 0.01h elapsed
+23:11:52 | [CARTRADE] NEW DEV-BEST h=20 conf0 d4 nf20 :: DEV +2.119%/tr t=3.49 n=497 -> SEALED-2026 -0.519%/tr t=-0.26 n=121  (sealed: no)
+23:12:01 | ...heartbeat: 120 configs tried, 0.01h elapsed
+23:12:07 | [ADANIENT] NEW DEV-BEST h=20 conf40 d4 nf14 :: DEV +0.709%/tr t=1.86 n=298 -> SEALED-2026 +1.860%/tr t=1.11 n=73  *** HOLDS ***
+23:12:13 | [ADANIENT] NEW DEV-BEST h=20 conf40 d2 nf19 :: DEV +0.719%/tr t=2.11 n=298 -> SEALED-2026 -3.976%/tr t=-2.79 n=71  (sealed: no)
+23:12:16 | ...heartbeat: 160 configs tried, 0.02h elapsed
+23:12:30 | ...heartbeat: 200 configs tried, 0.02h elapsed
+23:12:43 | ...heartbeat: 240 configs tried, 0.03h elapsed
+23:12:56 | ...heartbeat: 280 configs tried, 0.03h elapsed
+23:13:10 | ...heartbeat: 320 configs tried, 0.03h elapsed
+23:13:23 | ...heartbeat: 360 configs tried, 0.04h elapsed
+23:13:35 | ...heartbeat: 400 configs tried, 0.04h elapsed
+23:13:49 | ...heartbeat: 440 configs tried, 0.04h elapsed
+23:14:03 | ...heartbeat: 480 configs tried, 0.05h elapsed
+23:14:14 | [ADANIENT] NEW DEV-BEST h=10 conf60 d3 nf19 :: DEV +0.994%/tr t=2.49 n=200 -> SEALED-2026 -4.110%/tr t=-3.18 n=52  (sealed: no)
+23:14:17 | ...heartbeat: 520 configs tried, 0.05h elapsed
+23:14:30 | ...heartbeat: 560 configs tried, 0.06h elapsed
+23:14:44 | ...heartbeat: 600 configs tried, 0.06h elapsed
+23:14:58 | ...heartbeat: 640 configs tried, 0.06h elapsed
+23:15:12 | [CARTRADE] NEW DEV-BEST h=20 conf40 d4 nf16 :: DEV +3.201%/tr t=4.02 n=297 -> SEALED-2026 +4.926%/tr t=1.95 n=66  *** HOLDS ***
+23:15:15 | ...heartbeat: 680 configs tried, 0.07h elapsed
+23:15:17 | [ADANIENT] NEW DEV-BEST h=20 conf0 d3 nf14 :: DEV +0.952%/tr t=3.02 n=497 -> SEALED-2026 -4.255%/tr t=-3.23 n=121  (sealed: no)
+23:15:26 | ...heartbeat: 720 configs tried, 0.07h elapsed
+23:15:37 | ...heartbeat: 760 configs tried, 0.07h elapsed
+23:15:49 | ...heartbeat: 800 configs tried, 0.08h elapsed
+23:16:01 | ...heartbeat: 840 configs tried, 0.08h elapsed
+23:16:13 | [ADANIENT] NEW DEV-BEST h=20 conf0 d4 nf17 :: DEV +1.057%/tr t=3.36 n=497 -> SEALED-2026 +1.836%/tr t=1.35 n=121  *** HOLDS ***
+23:16:14 | ...heartbeat: 880 configs tried, 0.08h elapsed
+23:16:26 | ...heartbeat: 920 configs tried, 0.09h elapsed
+23:16:38 | ...heartbeat: 960 configs tried, 0.09h elapsed
+23:16:50 | ...heartbeat: 1000 configs tried, 0.09h elapsed
+23:17:02 | ...heartbeat: 1040 configs tried, 0.10h elapsed
+23:17:14 | ...heartbeat: 1080 configs tried, 0.10h elapsed
+23:17:26 | ...heartbeat: 1120 configs tried, 0.10h elapsed
+23:17:39 | ...heartbeat: 1160 configs tried, 0.11h elapsed
+23:17:50 | ...heartbeat: 1200 configs tried, 0.11h elapsed
+23:18:03 | ...heartbeat: 1240 configs tried, 0.12h elapsed
+23:18:17 | ...heartbeat: 1280 configs tried, 0.12h elapsed
+23:18:29 | ...heartbeat: 1320 configs tried, 0.12h elapsed
+23:18:42 | ...heartbeat: 1360 configs tried, 0.13h elapsed
+23:18:55 | ...heartbeat: 1400 configs tried, 0.13h elapsed
+23:19:08 | ...heartbeat: 1440 configs tried, 0.13h elapsed
+23:19:21 | ...heartbeat: 1480 configs tried, 0.14h elapsed
+23:19:35 | ...heartbeat: 1520 configs tried, 0.14h elapsed
+23:19:48 | ...heartbeat: 1560 configs tried, 0.14h elapsed
+23:20:02 | ...heartbeat: 1600 configs tried, 0.15h elapsed
+23:20:16 | ...heartbeat: 1640 configs tried, 0.15h elapsed
+23:20:31 | ...heartbeat: 1680 configs tried, 0.16h elapsed
+23:20:44 | ...heartbeat: 1720 configs tried, 0.16h elapsed
+23:20:56 | ...heartbeat: 1760 configs tried, 0.16h elapsed
+23:21:08 | ...heartbeat: 1800 configs tried, 0.17h elapsed
+23:21:21 | ...heartbeat: 1840 configs tried, 0.17h elapsed
+23:21:32 | ...heartbeat: 1880 configs tried, 0.17h elapsed
+23:21:44 | ...heartbeat: 1920 configs tried, 0.18h elapsed
+23:21:56 | ...heartbeat: 1960 configs tried, 0.18h elapsed
+23:22:08 | ...heartbeat: 2000 configs tried, 0.18h elapsed
+23:22:22 | ...heartbeat: 2040 configs tried, 0.19h elapsed
+23:22:34 | ...heartbeat: 2080 configs tried, 0.19h elapsed
+23:22:46 | ...heartbeat: 2120 configs tried, 0.19h elapsed
+23:22:59 | ...heartbeat: 2160 configs tried, 0.20h elapsed
+23:23:16 | ...heartbeat: 2200 configs tried, 0.20h elapsed
+23:23:30 | ...heartbeat: 2240 configs tried, 0.21h elapsed
+23:23:44 | ...heartbeat: 2280 configs tried, 0.21h elapsed
+23:23:58 | ...heartbeat: 2320 configs tried, 0.21h elapsed
+23:24:12 | ...heartbeat: 2360 configs tried, 0.22h elapsed
+23:24:21 | [CARTRADE] NEW DEV-BEST h=20 conf40 d2 nf16 :: DEV +3.530%/tr t=4.17 n=298 -> SEALED-2026 +3.806%/tr t=1.75 n=73  *** HOLDS ***
+23:24:26 | ...heartbeat: 2400 configs tried, 0.22h elapsed
+23:24:39 | ...heartbeat: 2440 configs tried, 0.23h elapsed
+23:24:51 | ...heartbeat: 2480 configs tried, 0.23h elapsed
+23:25:04 | ...heartbeat: 2520 configs tried, 0.23h elapsed
+23:25:16 | ...heartbeat: 2560 configs tried, 0.24h elapsed
+23:25:28 | ...heartbeat: 2600 configs tried, 0.24h elapsed
+23:25:40 | ...heartbeat: 2640 configs tried, 0.24h elapsed
+23:25:51 | ...heartbeat: 2680 configs tried, 0.25h elapsed
+23:26:02 | ...heartbeat: 2720 configs tried, 0.25h elapsed
+23:26:15 | ...heartbeat: 2760 configs tried, 0.25h elapsed
+23:26:27 | ...heartbeat: 2800 configs tried, 0.26h elapsed
+23:26:39 | ...heartbeat: 2840 configs tried, 0.26h elapsed
+23:26:51 | ...heartbeat: 2880 configs tried, 0.26h elapsed
+23:27:02 | ...heartbeat: 2920 configs tried, 0.26h elapsed
+23:27:15 | ...heartbeat: 2960 configs tried, 0.27h elapsed
+23:27:27 | ...heartbeat: 3000 configs tried, 0.27h elapsed
+23:27:40 | ...heartbeat: 3040 configs tried, 0.28h elapsed
+23:27:53 | ...heartbeat: 3080 configs tried, 0.28h elapsed
+23:27:57 | [ADANIENT] NEW DEV-BEST h=10 conf60 d4 nf24 :: DEV +1.337%/tr t=3.54 n=200 -> SEALED-2026 -2.226%/tr t=-1.69 n=53  (sealed: no)
+23:28:06 | ...heartbeat: 3120 configs tried, 0.28h elapsed
+23:28:19 | ...heartbeat: 3160 configs tried, 0.29h elapsed
+23:28:33 | ...heartbeat: 3200 configs tried, 0.29h elapsed
+23:28:45 | ...heartbeat: 3240 configs tried, 0.29h elapsed
+23:28:59 | ...heartbeat: 3280 configs tried, 0.30h elapsed
+23:29:13 | ...heartbeat: 3320 configs tried, 0.30h elapsed
+23:29:26 | ...heartbeat: 3360 configs tried, 0.30h elapsed
+23:29:41 | ...heartbeat: 3400 configs tried, 0.31h elapsed
+23:29:54 | ...heartbeat: 3440 configs tried, 0.31h elapsed
+23:30:12 | ...heartbeat: 3480 configs tried, 0.32h elapsed
+23:30:27 | ...heartbeat: 3520 configs tried, 0.32h elapsed
+23:30:43 | ...heartbeat: 3560 configs tried, 0.33h elapsed
+23:30:58 | ...heartbeat: 3600 configs tried, 0.33h elapsed
+23:31:14 | ...heartbeat: 3640 configs tried, 0.33h elapsed
+23:31:28 | ...heartbeat: 3680 configs tried, 0.34h elapsed
+23:31:43 | ...heartbeat: 3720 configs tried, 0.34h elapsed
+23:32:00 | ...heartbeat: 3760 configs tried, 0.35h elapsed

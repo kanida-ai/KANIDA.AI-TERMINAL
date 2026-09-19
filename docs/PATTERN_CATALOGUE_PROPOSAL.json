@@ -1,0 +1,605 @@
+{
+  "proposal_version": "0.1",
+  "date": "2026-09-15",
+  "status": "proposed_not_registered",
+  "market": "NSE equities",
+  "timeframes": [
+    "1H",
+    "4H",
+    "1D",
+    "1W"
+  ],
+  "source_database": "db/kanida.db",
+  "reference_research_run": "0e15f954dc432754",
+  "reference_research_cells": 74412,
+  "counts": {
+    "CH": 28,
+    "CDL": 61,
+    "PA": 8,
+    "HA": 10
+  },
+  "entry_count": 107,
+  "entries": [
+    {
+      "id": "CH01",
+      "name_and_variants": "Cup & handle; later inverse variant separately",
+      "definition": "Rounded bottom between comparable rims after an advance, followed by a smaller handle. Confirm above the rim/handle resistance. Keep current bowl-fit, depth and handle gates.",
+      "coverage_or_priority": "Existing `cup_handle`; bullish."
+    },
+    {
+      "id": "CH02",
+      "name_and_variants": "Horizontal breakout",
+      "definition": "Repeated tests of a flat resistance level followed by a fresh qualifying close above it. Unlike a rectangle, this does not require flat support.",
+      "coverage_or_priority": "Existing `horizontal_breakout`; confirmed bullish only."
+    },
+    {
+      "id": "CH03",
+      "name_and_variants": "Flag & pole; bull and bear",
+      "definition": "Efficient directional impulse followed by a smaller counter-trend parallel consolidation with contracting volume. Confirm out of the flag in the pole direction.",
+      "coverage_or_priority": "Existing `flag_pole`; both directions."
+    },
+    {
+      "id": "CH04",
+      "name_and_variants": "Symmetrical triangle; upside/downside break",
+      "definition": "Lower swing highs and higher swing lows form converging boundaries. The completed shape is neutral; the observed breakout supplies direction.",
+      "coverage_or_priority": "Existing `symmetrical_triangle`; both breakout directions."
+    },
+    {
+      "id": "CH05",
+      "name_and_variants": "Falling wedge; reversal/continuation context",
+      "definition": "Both boundaries fall and narrow; upper boundary descends faster. Bullish confirmation crosses the upper line. Label preceding decline versus a pullback within an advance separately.",
+      "coverage_or_priority": "Existing `falling_wedge`; proposed context tags need new research."
+    },
+    {
+      "id": "CH06",
+      "name_and_variants": "Rising wedge; reversal/continuation context",
+      "definition": "Both boundaries rise and narrow; lower boundary rises faster. Bearish confirmation crosses the lower line. Keep context separate from shape.",
+      "coverage_or_priority": "Existing `rising_wedge`; proposed context tags need new research."
+    },
+    {
+      "id": "CH07",
+      "name_and_variants": "Price channel; rising, falling, horizontal",
+      "definition": "Approximately parallel boundaries with repeated alternating touches. Separate trading a contained channel from a breakout/retest of its boundary.",
+      "coverage_or_priority": "Existing `channel`; current implementation excludes confirmed breaks."
+    },
+    {
+      "id": "CH08",
+      "name_and_variants": "Descending triangle; downside/upside resolution",
+      "definition": "Flat support and falling resistance converge. Preserve the current bearish definition; an upside resolution would be a new variant, not an existing bearish success.",
+      "coverage_or_priority": "Existing `descending_triangle`; downside only."
+    },
+    {
+      "id": "CH09",
+      "name_and_variants": "Head & shoulders top; flat/sloped neckline",
+      "definition": "Three peaks, with the middle highest, following an advance. The intervening troughs form a neckline. Confirm with a close below it.",
+      "coverage_or_priority": "Existing `head_shoulders`."
+    },
+    {
+      "id": "CH10",
+      "name_and_variants": "Inverse head & shoulders; flat/sloped neckline",
+      "definition": "Three troughs, with the middle lowest, following a decline. Intervening peaks form the neckline. Confirm with a close above it.",
+      "coverage_or_priority": "Existing `inverse_head_shoulders`."
+    },
+    {
+      "id": "CH11",
+      "name_and_variants": "Ascending triangle; upside/downside resolution",
+      "definition": "Flat resistance and rising support converge. Primary variant confirms above resistance; opposite-side failure/resolution is recorded separately. [Reference](https://chartschool.stockcharts.com/table-of-contents/chart-analysis/chart-patterns/ascending-triangle).",
+      "coverage_or_priority": "1"
+    },
+    {
+      "id": "CH12",
+      "name_and_variants": "Horizontal breakdown",
+      "definition": "Mirror of CH02: repeated flat support tests followed by a fresh qualifying close below support. Retain distinct support/resistance event IDs.",
+      "coverage_or_priority": "1"
+    },
+    {
+      "id": "CH13",
+      "name_and_variants": "Rectangle / trading range; top/bottom, upside/downside",
+      "definition": "Repeated approximately equal highs and lows form two horizontal boundaries. Neutral while contained; confirm on a close outside. A channel with negligible slope is the same geometric family, so link aliases. [Reference](https://chartschool.stockcharts.com/table-of-contents/chart-analysis/chart-patterns/rectangle).",
+      "coverage_or_priority": "1"
+    },
+    {
+      "id": "CH14",
+      "name_and_variants": "Pennant; bull/bear",
+      "definition": "A directional pole followed by a short converging consolidation; unlike a flag, boundaries are not parallel. Confirm in the pole direction. [Reference](https://chartschool.stockcharts.com/table-of-contents/chart-analysis/chart-patterns/flag-pennant).",
+      "coverage_or_priority": "1"
+    },
+    {
+      "id": "CH15",
+      "name_and_variants": "Double top; Adam/Adam, Adam/Eve, Eve/Adam, Eve/Eve",
+      "definition": "Two separated comparable peaks following an advance; require an intervening trough. Confirm below that trough. Adam means a sharp peak, Eve a rounded peak; these subtype classifiers need independent shape rules. [Reference](https://chartschool.stockcharts.com/table-of-contents/chart-analysis/chart-patterns/double-top-reversal).",
+      "coverage_or_priority": "1; subtype work 2"
+    },
+    {
+      "id": "CH16",
+      "name_and_variants": "Double bottom; the same four shape combinations",
+      "definition": "Two separated comparable troughs following a decline. Confirm above the intervening peak. Reject pairs without sufficient separation or intervening recovery.",
+      "coverage_or_priority": "1; subtype work 2"
+    },
+    {
+      "id": "CH17",
+      "name_and_variants": "Triple top",
+      "definition": "Three separated comparable peaks after an advance. Confirm below the support defined by intervening troughs. Link the earlier double-top candidate rather than rewriting its history.",
+      "coverage_or_priority": "1"
+    },
+    {
+      "id": "CH18",
+      "name_and_variants": "Triple bottom",
+      "definition": "Three separated comparable troughs after a decline. Confirm above intervening resistance. Earlier two-trough events retain their original timestamps. [Reference](https://chartschool.stockcharts.com/table-of-contents/chart-analysis/chart-patterns/triple-bottom-reversal).",
+      "coverage_or_priority": "1"
+    },
+    {
+      "id": "CH19",
+      "name_and_variants": "Rounding bottom / saucer",
+      "definition": "A sustained transition from falling to flat to rising prices, fitted as a bowl, without requiring a handle. Confirm above the prior rim resistance. [Reference](https://chartschool.stockcharts.com/table-of-contents/chart-analysis/chart-patterns/rounding-bottom).",
+      "coverage_or_priority": "2"
+    },
+    {
+      "id": "CH20",
+      "name_and_variants": "Rounding top / dome",
+      "definition": "Proposed geometric mirror of CH19: rising to flat to falling prices. Confirm below rim support. Keep mirror assumptions explicit.",
+      "coverage_or_priority": "2"
+    },
+    {
+      "id": "CH21",
+      "name_and_variants": "Inverted cup & handle",
+      "definition": "Proposed bearish mirror of CH01: rounded dome, shallow upward handle after a decline, then confirmation below support. Not a relabeling of any ordinary rounded top.",
+      "coverage_or_priority": "2"
+    },
+    {
+      "id": "CH22",
+      "name_and_variants": "Broadening / megaphone; top, bottom, ascending, descending",
+      "definition": "Alternating swings diverge so the range expands. Tag slope and prior trend; confirm beyond the relevant outer boundary. A broadening wedge is a sloped subtype, not a converging wedge.",
+      "coverage_or_priority": "2"
+    },
+    {
+      "id": "CH23",
+      "name_and_variants": "Diamond; top, bottom, continuation",
+      "definition": "Broadening swings transition to contraction, with a distinct widest middle. Confirm through the final converging boundary. Prior trend and resolution determine the context label.",
+      "coverage_or_priority": "3"
+    },
+    {
+      "id": "CH24",
+      "name_and_variants": "Island reversal; top/bottom, single/multi-bar island",
+      "definition": "A full-range gap isolates one or more bars, followed by a full-range gap in the opposite direction. Confirmation exists only after the second gap; no missing-data gap may stand in for a price gap.",
+      "coverage_or_priority": "2"
+    },
+    {
+      "id": "CH25",
+      "name_and_variants": "V bottom / inverted V top",
+      "definition": "Proposed short, steep decline followed by rapid recovery, or its mirror; deliberately excludes a rounded bowl. Confirm only after recovery crosses a predeclared level, never at the extreme in retrospect.",
+      "coverage_or_priority": "3"
+    },
+    {
+      "id": "CH26",
+      "name_and_variants": "Measured move; bullish/bearish",
+      "definition": "Directional leg, corrective consolidation, then a second leg in the original direction. Detect at the second-leg breakout; an equal-leg projection is a reference target, not a prerequisite learned from future price. [Reference](https://chartschool.stockcharts.com/table-of-contents/chart-analysis/chart-patterns/measured-move-bullish).",
+      "coverage_or_priority": "2"
+    },
+    {
+      "id": "CH27",
+      "name_and_variants": "Bump-and-run reversal; top/bottom",
+      "definition": "A moderate trend accelerates into a steeper extension, then breaks its prior trend support/resistance. Measure acceleration in normalized price per bar, not screen angles. The bottom version is a proposed mirror. [Reference](https://chartschool.stockcharts.com/table-of-contents/chart-analysis/chart-patterns/bump-and-run-reversal).",
+      "coverage_or_priority": "3"
+    },
+    {
+      "id": "CH28",
+      "name_and_variants": "Volatility-contraction base; bullish/bearish research variants",
+      "definition": "KANIDA proposal: at least three successive smaller pullbacks within a base, decreasing normalized ranges and contracting volume. Confirm beyond the base boundary. This is a geometric contraction model, not a claim to reproduce a complete named discretionary trading system.",
+      "coverage_or_priority": "2"
+    },
+    {
+      "id": "CDLDOJI",
+      "name_and_variants": "[Doji](https://ta-lib.org/functions/cdldoji.html)",
+      "definition": "Body is at or below the configured doji threshold. Neutral shape; trade direction requires a separate rule."
+    },
+    {
+      "id": "CDLLONGLEGGEDDOJI",
+      "name_and_variants": "[Long-legged doji](https://ta-lib.org/functions/cdllongleggeddoji.html)",
+      "definition": "Doji with at least one long shadow under the reference implementation. A stricter both-shadows definition would be a separate variant. Neutral."
+    },
+    {
+      "id": "CDLDRAGONFLYDOJI",
+      "name_and_variants": "[Dragonfly doji](https://ta-lib.org/functions/cdldragonflydoji.html)",
+      "definition": "Doji near the range high, negligible upper shadow and a nontrivial lower shadow. Direction depends on context and confirmation."
+    },
+    {
+      "id": "CDLGRAVESTONEDOJI",
+      "name_and_variants": "[Gravestone doji](https://ta-lib.org/functions/cdlgravestonedoji.html)",
+      "definition": "Doji near the range low, negligible lower shadow and a nontrivial upper shadow. Context-dependent, not automatically a short entry."
+    },
+    {
+      "id": "CDLRICKSHAWMAN",
+      "name_and_variants": "[Rickshaw man](https://ta-lib.org/functions/cdlrickshawman.html)",
+      "definition": "Doji near the middle of its range with long shadows on both sides. Neutral; more restrictive than generic doji."
+    },
+    {
+      "id": "CDLTAKURI",
+      "name_and_variants": "[Takuri](https://ta-lib.org/functions/cdltakuri.html)",
+      "definition": "Dragonfly-like doji with an exceptionally long lower shadow. Proposed bullish interpretation requires a preceding decline."
+    },
+    {
+      "id": "CDLSPINNINGTOP",
+      "name_and_variants": "[Spinning top](https://ta-lib.org/functions/cdlspinningtop.html)",
+      "definition": "Small body; both shadows exceed body length. Up/down candle colors are variants of a neutral shape."
+    },
+    {
+      "id": "CDLHIGHWAVE",
+      "name_and_variants": "[High-wave candle](https://ta-lib.org/functions/cdlhighwave.html)",
+      "definition": "Small body and very long shadows on both sides. Neutral; library sign represents color."
+    },
+    {
+      "id": "CDLSHORTLINE",
+      "name_and_variants": "[Short-line candle](https://ta-lib.org/functions/cdlshortline.html)",
+      "definition": "Short body and short shadows. Up/down colors are descriptive; use as a shape/filter or a separately confirmed strategy."
+    },
+    {
+      "id": "CDLLONGLINE",
+      "name_and_variants": "[Long-line candle](https://ta-lib.org/functions/cdllongline.html)",
+      "definition": "Long body and short shadows. Up/down momentum form; classify continuation/reversal only from prior context."
+    },
+    {
+      "id": "CDLMARUBOZU",
+      "name_and_variants": "[Marubozu; up/down](https://ta-lib.org/functions/cdlmarubozu.html)",
+      "definition": "Long body with both shadows negligible. Direction follows body color; the shape alone does not establish a reversal."
+    },
+    {
+      "id": "CDLCLOSINGMARUBOZU",
+      "name_and_variants": "[Closing marubozu; up/down](https://ta-lib.org/functions/cdlclosingmarubozu.html)",
+      "definition": "Long body ending near the favorable extreme: up candle closes near high, down candle near low. The opening-end shadow may remain."
+    },
+    {
+      "id": "CDLBELTHOLD",
+      "name_and_variants": "[Belt hold; bullish/bearish](https://ta-lib.org/functions/cdlbelthold.html)",
+      "definition": "Long body opens near its low for the up form or near its high for the down form. Opposite-end shadow is allowed."
+    },
+    {
+      "id": "CDLHAMMER",
+      "name_and_variants": "[Hammer](https://ta-lib.org/functions/cdlhammer.html)",
+      "definition": "Small upper-positioned body, long lower shadow, minimal upper shadow, near the previous low. Require a preceding decline for the bullish reversal study."
+    },
+    {
+      "id": "CDLHANGINGMAN",
+      "name_and_variants": "[Hanging man](https://ta-lib.org/functions/cdlhangingman.html)",
+      "definition": "Small body, long lower shadow, minimal upper shadow, near the previous high. Require a preceding advance for the bearish study."
+    },
+    {
+      "id": "CDLINVERTEDHAMMER",
+      "name_and_variants": "[Inverted hammer](https://ta-lib.org/functions/cdlinvertedhammer.html)",
+      "definition": "Small body with a long upper shadow and little lower shadow; reference definition also requires a downward body gap. Bullish context after a decline."
+    },
+    {
+      "id": "CDLSHOOTINGSTAR",
+      "name_and_variants": "[Shooting star](https://ta-lib.org/functions/cdlshootingstar.html)",
+      "definition": "Small body, long upper shadow, little lower shadow and an upward body gap in the reference definition. Bearish context after an advance."
+    },
+    {
+      "id": "CDLENGULFING",
+      "name_and_variants": "[Engulfing; bullish/bearish](https://ta-lib.org/functions/cdlengulfing.html)",
+      "definition": "Second opposite-color body encloses the first body. Full-range engulfing is different. Preserve the library's edge-equality recognition grades as metadata."
+    },
+    {
+      "id": "CDLHARAMI",
+      "name_and_variants": "[Harami; bullish/bearish](https://ta-lib.org/functions/cdlharami.html)",
+      "definition": "Long body followed by a short body inside it. Direction is opposite the first candle; record second-candle color rather than silently requiring it to differ."
+    },
+    {
+      "id": "CDLHARAMICROSS",
+      "name_and_variants": "[Harami cross; bullish/bearish](https://ta-lib.org/functions/cdlharamicross.html)",
+      "definition": "Harami whose second body is a doji. Link to the parent harami occurrence when both match."
+    },
+    {
+      "id": "CDLPIERCING",
+      "name_and_variants": "[Piercing](https://ta-lib.org/functions/cdlpiercing.html)",
+      "definition": "Long down candle, then long up candle opening below the prior low and recovering beyond the first body's midpoint while remaining below its open. Bullish."
+    },
+    {
+      "id": "CDLDARKCLOUDCOVER",
+      "name_and_variants": "[Dark cloud cover](https://ta-lib.org/functions/cdldarkcloudcover.html)",
+      "definition": "Long up candle, then down candle opening above the prior high and penetrating sufficiently into the first body without fully engulfing it. Bearish; save penetration setting."
+    },
+    {
+      "id": "CDLDOJISTAR",
+      "name_and_variants": "[Doji star; bullish/bearish context](https://ta-lib.org/functions/cdldojistar.html)",
+      "definition": "Long body followed by a doji whose body gaps away in the first candle's direction. This is a setup, not the completed three-candle morning/evening form."
+    },
+    {
+      "id": "CDLCOUNTERATTACK",
+      "name_and_variants": "[Counterattack; bullish/bearish](https://ta-lib.org/functions/cdlcounterattack.html)",
+      "definition": "Two long opposite-color bodies finish at approximately the same close. Second candle supplies the conventional direction."
+    },
+    {
+      "id": "CDLHOMINGPIGEON",
+      "name_and_variants": "[Homing pigeon](https://ta-lib.org/functions/cdlhomingpigeon.html)",
+      "definition": "Long down body followed by a smaller down body contained within it. Bullish-context study after a decline; overlaps same-color harami geometry."
+    },
+    {
+      "id": "CDLMATCHINGLOW",
+      "name_and_variants": "[Matching low](https://ta-lib.org/functions/cdlmatchinglow.html)",
+      "definition": "Two down candles close at approximately the same level. A close-based support test, unlike tweezers, which compare lows."
+    },
+    {
+      "id": "CDLKICKING",
+      "name_and_variants": "[Kicking; bullish/bearish](https://ta-lib.org/functions/cdlkicking.html)",
+      "definition": "Opposite-color marubozu candles separated by a full-range gap. Conventional direction follows the second candle."
+    },
+    {
+      "id": "CDLKICKINGBYLENGTH",
+      "name_and_variants": "[Kicking by length](https://ta-lib.org/functions/cdlkickingbylength.html)",
+      "definition": "Same kicking geometry, but direction follows the longer marubozu. A direction-policy variant, not independent evidence of a second occurrence."
+    },
+    {
+      "id": "CDLSEPARATINGLINES",
+      "name_and_variants": "[Separating lines; bullish/bearish](https://ta-lib.org/functions/cdlseparatinglines.html)",
+      "definition": "Opposite-color candles open near the same price; second is a long belt-hold candle. Continuation direction follows the second body, with matching prior trend required."
+    },
+    {
+      "id": "CDLONNECK",
+      "name_and_variants": "[On-neck](https://ta-lib.org/functions/cdlonneck.html)",
+      "definition": "Long down candle; next up candle opens below its low and closes near that low. Bearish continuation context."
+    },
+    {
+      "id": "CDLINNECK",
+      "name_and_variants": "[In-neck](https://ta-lib.org/functions/cdlinneck.html)",
+      "definition": "Long down candle; next up candle opens below its low and closes just inside the prior body, near the prior close. Bearish continuation context."
+    },
+    {
+      "id": "CDLTHRUSTING",
+      "name_and_variants": "[Thrusting](https://ta-lib.org/functions/cdlthrusting.html)",
+      "definition": "Long down candle; next up candle opens below its low and recovers into the body, beyond the near-close area but below its midpoint. Bearish continuation context."
+    },
+    {
+      "id": "CDLMORNINGSTAR",
+      "name_and_variants": "[Morning star](https://ta-lib.org/functions/cdlmorningstar.html)",
+      "definition": "Long down body, small downward body-gapped star, then an up candle penetrating the first body. Bullish; save penetration threshold."
+    },
+    {
+      "id": "CDLEVENINGSTAR",
+      "name_and_variants": "[Evening star](https://ta-lib.org/functions/cdleveningstar.html)",
+      "definition": "Long up body, small upward body-gapped star, then a down candle penetrating the first body. Bearish."
+    },
+    {
+      "id": "CDLMORNINGDOJISTAR",
+      "name_and_variants": "[Morning doji star](https://ta-lib.org/functions/cdlmorningdojistar.html)",
+      "definition": "Morning-star structure with a doji as the middle candle. More specific subtype; avoid duplicate recommendations."
+    },
+    {
+      "id": "CDLEVENINGDOJISTAR",
+      "name_and_variants": "[Evening doji star](https://ta-lib.org/functions/cdleveningdojistar.html)",
+      "definition": "Evening-star structure with a middle doji. Same subtype relationship."
+    },
+    {
+      "id": "CDLABANDONEDBABY",
+      "name_and_variants": "[Abandoned baby; bottom/top](https://ta-lib.org/functions/cdlabandonedbaby.html)",
+      "definition": "Middle doji isolated by full-range gaps on both sides; third body reverses into the first. Stricter than a doji star."
+    },
+    {
+      "id": "CDL3WHITESOLDIERS",
+      "name_and_variants": "[Three white soldiers](https://ta-lib.org/functions/cdl3whitesoldiers.html)",
+      "definition": "Three up candles with progressively higher closes, opens within/near prior bodies and short upper shadows, subject to body-size checks. Bullish-context study."
+    },
+    {
+      "id": "CDL3BLACKCROWS",
+      "name_and_variants": "[Three black crows](https://ta-lib.org/functions/cdl3blackcrows.html)",
+      "definition": "Three descending down candles, opening inside preceding down bodies and closing near lows. The reference detector also checks a preceding up candle, so its input pattern uses four bars."
+    },
+    {
+      "id": "CDLIDENTICAL3CROWS",
+      "name_and_variants": "[Identical three crows](https://ta-lib.org/functions/cdlidentical3crows.html)",
+      "definition": "Three descending down candles with short lower shadows, each later open near the preceding close. More specific bearish form."
+    },
+    {
+      "id": "CDL3INSIDE",
+      "name_and_variants": "[Three inside up/down](https://ta-lib.org/functions/cdl3inside.html)",
+      "definition": "Harami pair followed by an opposite-to-first candle closing beyond the first open. The third candle already supplies confirmation."
+    },
+    {
+      "id": "CDL3OUTSIDE",
+      "name_and_variants": "[Three outside up/down](https://ta-lib.org/functions/cdl3outside.html)",
+      "definition": "Engulfing pair followed by a further close in the engulfing direction. Preserve parent-pair relationship and later confirmation time."
+    },
+    {
+      "id": "CDL2CROWS",
+      "name_and_variants": "[Two crows](https://ta-lib.org/functions/cdl2crows.html)",
+      "definition": "Up candle, upward body-gapped down candle, then another down candle opening inside the second body and closing within the first up body. Three candles despite the name."
+    },
+    {
+      "id": "CDLUPSIDEGAP2CROWS",
+      "name_and_variants": "[Upside-gap two crows](https://ta-lib.org/functions/cdlupsidegap2crows.html)",
+      "definition": "Long up body, gapped small down body, then a down body engulfing the second but still closing above the first close. Distinct from two crows."
+    },
+    {
+      "id": "CDLADVANCEBLOCK",
+      "name_and_variants": "[Advance block](https://ta-lib.org/functions/cdladvanceblock.html)",
+      "definition": "Three higher-closing up candles whose bodies/shadows show a weakening advance. Bearish warning setup; do not assume every occurrence reverses."
+    },
+    {
+      "id": "CDLSTALLEDPATTERN",
+      "name_and_variants": "[Stalled pattern / deliberation](https://ta-lib.org/functions/cdlstalledpattern.html)",
+      "definition": "Three higher-closing up candles; the last is a small body near the top of the preceding long candle. Bearish-context setup."
+    },
+    {
+      "id": "CDL3STARSINSOUTH",
+      "name_and_variants": "[Three stars in the south](https://ta-lib.org/functions/cdl3starsinsouth.html)",
+      "definition": "Three down candles with shrinking bodies/ranges: a long lower-shadow first candle, smaller second, then a small contained marubozu. Bullish-context study; use exact reference low relationships."
+    },
+    {
+      "id": "CDLUNIQUE3RIVER",
+      "name_and_variants": "[Unique three-river bottom](https://ta-lib.org/functions/cdlunique3river.html)",
+      "definition": "Long down candle, down harami body making a lower low, then a small up candle in the lower area. Bullish traditional interpretation; confirmation tested separately."
+    },
+    {
+      "id": "CDLTRISTAR",
+      "name_and_variants": "[Tristar; bullish/bearish](https://ta-lib.org/functions/cdltristar.html)",
+      "definition": "Three doji; the middle body gaps away and the third retreats toward the opposite side. Direction depends on whether the middle is the upper or lower star."
+    },
+    {
+      "id": "CDLSTICKSANDWICH",
+      "name_and_variants": "[Stick sandwich](https://ta-lib.org/functions/cdlsticksandwich.html)",
+      "definition": "Down/up/down sequence with approximately equal first and third closes and the middle candle trading above that level. Bullish-context support pattern."
+    },
+    {
+      "id": "CDLGAPSIDESIDEWHITE",
+      "name_and_variants": "[Gap side-by-side white lines; up/down gap](https://ta-lib.org/functions/cdlgapsidesidewhite.html)",
+      "definition": "Two similar up bodies with nearby opens both stand across a body gap from the first candle. Direction follows gap direction, even when the later candles are up."
+    },
+    {
+      "id": "CDLTASUKIGAP",
+      "name_and_variants": "[Tasuki gap; upside/downside](https://ta-lib.org/functions/cdltasukigap.html)",
+      "definition": "Body gap in one direction, then an opposite-color candle opening within the preceding body and retreating into—but not filling—the gap. Continuation context."
+    },
+    {
+      "id": "CDLXSIDEGAP3METHODS",
+      "name_and_variants": "[Gap three methods; upside/downside](https://ta-lib.org/functions/cdlxsidegap3methods.html)",
+      "definition": "Three candles: two same-color bodies separated by a gap, then an opposite candle that fills the gap. Distinct from Tasuki's unfilled gap."
+    },
+    {
+      "id": "CDL3LINESTRIKE",
+      "name_and_variants": "[Three-line strike; bullish/bearish](https://ta-lib.org/functions/cdl3linestrike.html)",
+      "definition": "Three advancing/declining same-color candles followed by a large opposite candle spanning their move. Reference sign follows the first three candles' continuation direction. Any opposite reversal interpretation must be a separate research variant."
+    },
+    {
+      "id": "CDLRISEFALL3METHODS",
+      "name_and_variants": "[Rising/falling three methods](https://ta-lib.org/functions/cdlrisefall3methods.html)",
+      "definition": "Five candles: long directional body, three smaller opposing candles constrained by reference range checks, then a long candle resuming the original direction."
+    },
+    {
+      "id": "CDLMATHOLD",
+      "name_and_variants": "[Mat hold; bullish reference](https://ta-lib.org/functions/cdlmathold.html)",
+      "definition": "Five candles: long up candle, upward-gapped small reaction, two further shallow reaction candles, then an up candle above reaction highs. The library detects bullish only; bearish mirror would be custom."
+    },
+    {
+      "id": "CDLBREAKAWAY",
+      "name_and_variants": "[Breakaway; bullish/bearish](https://ta-lib.org/functions/cdlbreakaway.html)",
+      "definition": "Five candles: long body, same-direction body gap and extension, then an opposite final candle returning into the original gap."
+    },
+    {
+      "id": "CDLLADDERBOTTOM",
+      "name_and_variants": "[Ladder bottom](https://ta-lib.org/functions/cdlladderbottom.html)",
+      "definition": "Five candles: three declining down candles, a fourth down candle with an upper shadow, then an up candle opening above the fourth open and closing above its high."
+    },
+    {
+      "id": "CDLCONCEALBABYSWALL",
+      "name_and_variants": "[Concealing baby swallow](https://ta-lib.org/functions/cdlconcealbabyswall.html)",
+      "definition": "Four down candles: two marubozu, a gapped-down third whose upper shadow reaches the prior body, and a fourth engulfing the third's full range. Bullish traditional interpretation."
+    },
+    {
+      "id": "CDLHIKKAKE",
+      "name_and_variants": "[Hikkake; bullish/bearish](https://ta-lib.org/functions/cdlhikkake.html)",
+      "definition": "Inside bar followed by a directional range displacement; a reversal through the inside-bar boundary within three bars confirms the trap. Preserve setup versus confirmed library outputs."
+    },
+    {
+      "id": "CDLHIKKAKEMOD",
+      "name_and_variants": "[Modified hikkake; bullish/bearish](https://ta-lib.org/functions/cdlhikkakemod.html)",
+      "definition": "Adds a preceding nested-range condition and a close near an extreme before the ordinary trap displacement. Four-bar setup, optional subsequent confirmation within three bars."
+    },
+    {
+      "id": "PA01",
+      "name_and_variants": "Tweezer top / bottom",
+      "definition": "Two adjacent bars test highs/lows within max(one known tick, 0.1 prior ATR); second closes away from the tested level. Require preceding advance/decline.",
+      "coverage_or_priority": "Confirm through the pair's opposite extreme. Distinct from matching closes."
+    },
+    {
+      "id": "PA02",
+      "name_and_variants": "Inside bar; single / nested / mother-bar cluster",
+      "definition": "Entire second range lies within the first, with at least one strict edge. Nested ranges and multiple inside bars share the original mother-bar identity.",
+      "coverage_or_priority": "Close beyond mother-bar high/low. Body-only containment is harami, not this pattern."
+    },
+    {
+      "id": "PA03",
+      "name_and_variants": "Outside bar; bullish/bearish close",
+      "definition": "Second high exceeds first high and second low falls below first low. Tag close in the top/bottom quarter of the second range.",
+      "coverage_or_priority": "Study next-open entry or later range break separately; distinct from body engulfing."
+    },
+    {
+      "id": "PA04",
+      "name_and_variants": "Pin bar / rejection bar; upper/lower shadow",
+      "definition": "Dominant shadow at least twice the body and 60% of total range; opposite shadow at most 15% of range. Exclude zero range; use prior trend as metadata.",
+      "coverage_or_priority": "Close beyond the short-shadow end. Overlaps hammer/shooting-star families; link shared event."
+    },
+    {
+      "id": "PA05",
+      "name_and_variants": "Narrow-range contraction; NR4 / NR7 / inside-NR",
+      "definition": "Current range is strictly smallest among the most recent four/seven complete candles. Inside-NR also satisfies PA02. Equal minima are a separate optional tie variant.",
+      "coverage_or_priority": "Break above/below the contraction range; direction is unknown at detection."
+    },
+    {
+      "id": "PA06",
+      "name_and_variants": "Fakey / failed inside-bar breakout; bull/bear",
+      "definition": "An inside-bar cluster is followed by a breach of a mother-bar edge, then a close back inside within three bars.",
+      "coverage_or_priority": "Confirm through the opposite edge later; retain failure and confirmation times. Hikkake overlap is annotated, not assumed equivalent."
+    },
+    {
+      "id": "PA07",
+      "name_and_variants": "Rising / falling window",
+      "definition": "Current low exceeds prior high, or current high is below prior low. Require both adjacent intervals to be complete; no fabricated bars.",
+      "coverage_or_priority": "Gap-hold, gap-fill and retest are separate outcome/strategy variants."
+    },
+    {
+      "id": "PA08",
+      "name_and_variants": "Gap-and-reversal; bullish/bearish",
+      "definition": "Open beyond the previous full range, then close back inside that range on the same completed candle. Bullish closes in the upper half, bearish in the lower half.",
+      "coverage_or_priority": "Entry can only follow that close. Distinguish an opening gap reversal from an island requiring two full gaps."
+    },
+    {
+      "id": "HA01",
+      "name_and_variants": "[AB=CD](https://harmonictrader.com/harmonic-patterns/abcd-pattern/)",
+      "definition": "Two similarly sized directional legs AB and CD separated by the BC correction; completion is at D.",
+      "coverage_or_priority": "Bull/bear; price equality and time symmetry recorded separately."
+    },
+    {
+      "id": "HA02",
+      "name_and_variants": "[Alternate AB=CD](https://harmonictrader.com/harmonic-patterns/alternate-abcd-pattern/)",
+      "definition": "CD extends the AB-sized projection rather than matching it; distinguish the 1.27 and 1.618 extensions.",
+      "coverage_or_priority": "Bull/bear; separate extension IDs."
+    },
+    {
+      "id": "HA03",
+      "name_and_variants": "[Gartley](https://harmonictrader.com/harmonic-patterns/gartley-pattern/)",
+      "definition": "B near the 0.618 retracement of XA and D near the 0.786 retracement, with supporting AB=CD/BC alignment.",
+      "coverage_or_priority": "Bull/bear; retracement structure stays inside X."
+    },
+    {
+      "id": "HA04",
+      "name_and_variants": "[Bat](https://harmonictrader.com/harmonic-patterns/bat-pattern/)",
+      "definition": "B shallower than 0.618 of XA; D near 0.886; stronger BC extension distinguishes it from Gartley.",
+      "coverage_or_priority": "Bull/bear; 0.382/0.50 B-point subtypes."
+    },
+    {
+      "id": "HA05",
+      "name_and_variants": "[Alternate Bat](https://harmonictrader.com/harmonic-patterns/alternate-bat-pattern/)",
+      "definition": "Shallower B-point structure with terminal extension near 1.13 of XA rather than the standard Bat retracement.",
+      "coverage_or_priority": "Bull/bear; distinct from an invalid standard Bat."
+    },
+    {
+      "id": "HA06",
+      "name_and_variants": "[Butterfly](https://harmonictrader.com/harmonic-patterns/butterfly-pattern/)",
+      "definition": "B near 0.786 of XA; D extends past X, with the ideal 1.27 XA projection and supporting leg relationships.",
+      "coverage_or_priority": "Bull/bear; wider extensions need separately specified variants."
+    },
+    {
+      "id": "HA07",
+      "name_and_variants": "[Crab](https://harmonictrader.com/harmonic-patterns/crab-pattern/)",
+      "definition": "Terminal 1.618 XA extension, with a shallower B retracement and an extreme BC projection.",
+      "coverage_or_priority": "Bull/bear; keep distinct from Deep Crab."
+    },
+    {
+      "id": "HA08",
+      "name_and_variants": "[Deep Crab](https://harmonictrader.com/harmonic-patterns/deep-crab-pattern/)",
+      "definition": "Shares the 1.618 XA terminal extension but B lies near 0.886 of XA.",
+      "coverage_or_priority": "Bull/bear; deeper B is the distinguishing constraint."
+    },
+    {
+      "id": "HA09",
+      "name_and_variants": "[Shark](https://harmonictrader.com/harmonic-patterns/shark-pattern/)",
+      "definition": "Extended impulse returns toward the initial support/resistance region, combining a 0.886–1.13 OX retracement/extension zone with an extreme impulse relationship.",
+      "coverage_or_priority": "Bull/bear; use O-X-A-B-C notation rather than silently borrowing Gartley labels."
+    },
+    {
+      "id": "HA10",
+      "name_and_variants": "[5-0](https://harmonictrader.com/harmonic-patterns/5-0/)",
+      "definition": "Strong BC reversal leg of 1.618–2.24 times AB, followed by a D retracement near half of BC, with reciprocal AB=CD alignment.",
+      "coverage_or_priority": "Bull/bear; a first-pullback structure rather than an ordinary M/W."
+    }
+  ]
+}

@@ -1,0 +1,101 @@
+# ============================================================================
+# KANIDA Falcon — what git must never see
+#
+# The data here is ~168 GB (db/kanida.db alone is 148 GB). The sibling repo
+# KANIDA.AI-TERMINAL carries a note about a 680 GiB git-bloat incident caused
+# by stray database blobs. Nothing under db/ is ever committed; it is all
+# rebuildable from the vendor. A pre-commit hook also refuses large files, so
+# this list is the first guard, not the only one.
+# ============================================================================
+
+# --- Credentials. Never commit. -------------------------------------------
+.env
+*.env
+.env.*
+!*.env.example
+!.env.*.example
+*.key
+**/var/pilot.key
+**/var/OWNER_INVITATION.txt
+*token*.json
+*secret*
+*credential*
+
+# --- Market data and application state. Large, and rebuildable. -----------
+db/
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite3
+**/*.sqlite3-wal
+**/*.sqlite3-shm
+var/
+kanida-app/var/
+market_scanner/output/
+market_scanner/cache/
+outputs/
+research_outputs/
+snapshots/
+
+# --- Logs and run artefacts ------------------------------------------------
+logs/
+*.log
+*.pid
+qa/
+kanida-app/qa/
+
+# --- Build output ----------------------------------------------------------
+dist-pilot/
+kanida-app/dist-pilot/
+.expo/
+kanida-app/.expo/
+build/
+dist/
+
+# --- Dependencies ----------------------------------------------------------
+node_modules/
+.venv/
+.pilot-venv/
+**/.venv/
+**/node_modules/
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# --- Editor / OS -----------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# --- Research OUTPUT, not source. Regenerable from the code + the data. ----
+# v3/ is 1,052 result CSVs beside 2 scripts; the scripts are kept, the results
+# are not. reports/ and cache/ are entirely generated (CSV, xlsx, PNG, .npz
+# bar caches — cache/ alone is 10 GB on disk).
+cache/
+reports/
+v3/**/*.csv
+*.parquet
+*.npz
+outputs/
+research_outputs/
+
+# The nested repo kanida-app/.git was moved aside so kanida-app joins this
+# repo as ordinary files. Kept, not deleted, in case its one commit is wanted.
+kanida-app/.git.nested-backup/
+
+# --- Large generated evidence. Archival, regenerable, not source. ---------
+# The data-repair run produced ~65 MB of JSON/JSONL evidence and the v3 agents
+# ~8 MB per stock. Valuable as a record, wrong in git — a repo is for the code
+# that produces them. Keep them on disk / in object storage.
+market_data/repair/artifacts/
+v3/agent_out/
+docs/kanida_workers.html
+
+# Every exported web bundle, not just dist-pilot (dist-drawing-*, dist-history-*).
+kanida-app/dist-*/
+dist-*/

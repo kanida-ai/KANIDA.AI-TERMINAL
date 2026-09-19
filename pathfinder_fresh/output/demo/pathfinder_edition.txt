@@ -1,0 +1,72 @@
+PATHFINDER — AFTER-CLOSE RESEARCH EDITION
+As of 2026-07-29 · regime range/normal_vol
+Scanned 497 stocks · computed 5 candidates · published 5 · suppressed 0 below the usefulness gate
+No minimum card count. Nothing is published to fill space.
+
+WHAT MATTERS NOW
+
+[NOW 1] Breadth has moved into a historical tail
+I noticed: Fully 75% of the Nifty 500 universe closed higher; this sits in the top 15% of observed breadth.
+I asked: When market breadth is this extreme in the current regime, what usually happens over the next week?
+History showed: In the same range/normal_vol regime, 56 comparable breadth sessions had a median next-week market return of +1.61%.
+Decision: NO TRADE — BELOW EVIDENCE GATE
+Evidence: whole_market · n=56 · period 2018-04-05 to 2026-06-12 · regime range/normal_vol
+Comparison: All other Nifty 500 breadth observations in range/normal_vol · cost hurdle 0.30% · null-calibrated p=0.077
+Frozen grade: The rejected trade loses by more than 0.30% after costs. Outcome: PENDING
+Publication score: 82.8/100 · RESEARCH_EXPERIMENT_NOT_RECOMMENDATION
+
+[NOW 2] Heavy volume arrived without a decisive price move
+I noticed: A Diversified constituent traded at 64.4× its prior 20-session median volume while closing +0.12%.
+I asked: When volume surges but price barely moves, does a larger move follow?
+History showed: Across 215 same-sector quiet-volume events, the median absolute five-session move was +3.21% versus +2.72% normally.
+Decision: NO EDGE — HIGH VOLUME DID NOT LEAD TO EXPANSION
+Evidence: similar_stocks · n=215 · period 2018-01-24 to 2026-07-06 · regime range/normal_vol
+Comparison: All Diversified stock/session observations · cost hurdle 0.30% · null-calibrated p=0.155
+Frozen grade: Absolute basket move exceeds the frozen 3.41% threshold. Outcome: PENDING
+Publication score: 82.4/100 · RA_REVIEW_REQUIRED
+
+[NOW 3] Information Technology has the strongest one-week sector trend
+I noticed: The sector's equal-weight basket gained +3.28% over the prior five sessions, the best current sector trend.
+I asked: Does the strongest sector trend continue for another week after costs?
+History showed: Prior five-session sector leaders produced a median next-week excess return of -0.17% across 375 same-regime cases.
+Decision: NO TRADE — LEADERSHIP IS ALREADY PRICED
+Evidence: sector · n=375 · period 2018-01-25 to 2026-07-22 · regime range/normal_vol
+Comparison: All sector/session observations in the same regime, benchmarked to equal-weight Nifty 500 · cost hurdle 0.30% · null-calibrated p=0.431
+Frozen grade: The rejected trade loses by more than 0.30% after costs. Outcome: PENDING
+Publication score: 79.3/100 · RESEARCH_EXPERIMENT_NOT_RECOMMENDATION
+
+[DISCOVER 4] A stock move has broken far outside its normal range
+I noticed: A Chemicals constituent moved +12.45% today, a +6.3σ event versus its own prior 60-session distribution.
+I asked: After a stock moves this far from its own normal range, does it reverse or continue?
+History showed: Across same-sector stocks, 991 comparable upside shocks had a median three-session reversal return of +0.46% before costs.
+Decision: NO VIRTUAL DEPLOYMENT — NULL CALIBRATION DID NOT CLEAR THE 10% GATE
+Evidence: similar_stocks · n=991 · period 2018-03-15 to 2026-07-24 · regime range/normal_vol
+Comparison: All Chemicals stocks with a same-direction ≥2.5σ shock · cost hurdle 0.30% · null-calibrated p=0.317
+Frozen grade: The rejected trade loses by more than 0.30% after costs. Outcome: PENDING
+Publication score: 75.8/100 · RA_REVIEW_REQUIRED
+
+[DISCOVER 5] A recent laggard has flipped into sector leadership
+I noticed: Telecommunication ranked among today's top 2 sectors after sitting in the bottom quartile over the previous month.
+I asked: When a recent sector laggard suddenly leads the market, does the rotation persist?
+History showed: Across sectors, 189 comparable flips delivered median five-session excess return of +0.21% versus the equal-weight Nifty 500.
+Decision: WATCH — ROTATION DOES NOT CLEAR COSTS
+Evidence: sector · n=189 · period 2018-01-30 to 2026-06-10 · regime range/normal_vol
+Comparison: All liquid sectors in the same market regime, benchmarked to equal-weight Nifty 500 · cost hurdle 0.30% · null-calibrated p=0.165
+Frozen grade: The rejected trade loses by more than 0.30% after costs. Outcome: PENDING
+Publication score: 71.7/100 · RESEARCH_EXPERIMENT_NOT_RECOMMENDATION
+
+PUBLIC SCOREBOARD
+Right 28 · Wrong 32 · Inconclusive 5 · n=65 · Pending 5
+
+EXPERIMENT MEMORY
+HYP-FC435701FBA2 · Oil Gas & Consumable Fuels stock anomaly · v1 · variants 1/3 max · trials 1 · status ACTIVE
+  Historical expectation +0.18% · forward result +4.02% · RIGHT
+  Promotion gate: HOLD · OOS trials 1/20 · positive edge=True · beats incumbent=True · lower drawdown=True
+  Retirement rule: Retire after 3 rule versions without a supported OOS result.
+HYP-C15341529588 · Financial Services stock anomaly · v2 · variants 2/3 max · trials 2 · status ACTIVE
+  Historical expectation +0.08% · forward result -2.67% · WRONG
+  Promotion gate: HOLD · OOS trials 2/20 · positive edge=False · beats incumbent=False · lower drawdown=True
+  Retirement rule: Retire after 3 rule versions without a supported OOS result.
+
+Research experiment — not a recommendation. No user entry, target, stop, or execution instruction.
+Stock-level constituents are withheld from the public output until RA review.

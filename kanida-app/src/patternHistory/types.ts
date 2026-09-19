@@ -1,0 +1,11 @@
+export type Selection={symbol:string;pattern_id:string;variant:string;state:string;strategy_key?:string;detection_id?:string};
+export type Observation={horizon:number;status:'measured'|'pending'|'quality_excluded';reason?:string|null;reference_time:string|null;reference_price:number|null;end_time:string|null;gross_return_pct:number|null;max_up_pct:number|null;max_down_pct:number|null;max_up_bar?:number|null;max_down_bar?:number|null};
+export type Occurrence={id:string;signal_time:string|null;signal_index:number;detected_index?:number;formation_start_index:number;horizons:Observation[];geometry:Record<string,any>};
+export type Stats={n:number;total:number;pending:number;quality_excluded:number;up_n:number;down_n:number;unchanged_n:number;up_pct:number|null;median_gross_return_pct:number|null;mean_gross_return_pct:number|null;median_max_up_pct:number|null;median_max_down_pct:number|null;median_bars_to_max_up?:number|null;median_bars_to_max_down?:number|null};
+export type Envelope={run:string;source_run:string;review_required:boolean;review_label:string|null;source_market_latest:string;coverage:{cached_symbols:number;universe_symbols:number;complete:boolean};methodology:Record<string,unknown>};
+export type History=Envelope&Selection&{name:string;occurrence_count:number;first_seen:string|null;last_seen:string|null;data_start:string|null;data_end:string|null;baseline_window:[string,string]|null;selected_horizon:number;horizons:{horizon:number;observed:Stats;baseline:Stats;mean_difference_pct:number|null}[];recent_completed:Occurrence[];recent_pending:Occurrence[];recent_excluded:Occurrence[]};
+export type Pattern={pattern_id:string;name:string;variant:string;states:string[];definition_version:string;definition:unknown};
+export type Catalogue=Envelope&{patterns:Pattern[]};
+export type Stocks=Envelope&{stocks:{symbol:string;occurrence_count:number;last_seen:string|null}[];total:number};
+export type Bar={index:number;time:string;end:string;open:number;high:number;low:number;close:number;volume:number;gap:boolean};
+export type Replay=Envelope&{occurrence:Occurrence;bars:Bar[];geometry:Record<string,any>;signal_index:number;reference_index:number|null;replay_note:string};

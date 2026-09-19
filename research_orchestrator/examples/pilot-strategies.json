@@ -1,0 +1,210 @@
+{
+  "schema": "kanida.research.v1",
+  "id": "six-family-pilot",
+  "question": "Compare these six explicit daily cash-equity strategies on TITAN, ICICIBANK and MARUTI. Can any beat Nifty 50 with drawdown below 15% in each later test year?",
+  "symbols": [
+    "TITAN",
+    "ICICIBANK",
+    "MARUTI"
+  ],
+  "universe": "explicit",
+  "timeframe": "1D",
+  "product": "CNC",
+  "side": "long",
+  "account": {
+    "capital": 30000,
+    "max_positions": 3,
+    "allocation_pct": 33.333333333333336,
+    "risk_pct": 2,
+    "fee_bps": 30,
+    "slippage_bps": 5
+  },
+  "objectives": {
+    "cagr": 0,
+    "drawdown": 15,
+    "beat_nifty": true
+  },
+  "minimum_trades": 5,
+  "folds": [
+    {
+      "train_start": "2017-01-01",
+      "train_end": "2019-12-31",
+      "test_start": "2020-01-01",
+      "test_end": "2020-12-31"
+    },
+    {
+      "train_start": "2018-01-01",
+      "train_end": "2020-12-31",
+      "test_start": "2021-01-01",
+      "test_end": "2021-12-31"
+    },
+    {
+      "train_start": "2019-01-01",
+      "train_end": "2021-12-31",
+      "test_start": "2022-01-01",
+      "test_end": "2022-12-31"
+    }
+  ],
+  "strategies": [
+    {
+      "id": "rsi_original",
+      "name": "Wilder RSI 14 below 30",
+      "entry": {
+        "kind": "rsi_below",
+        "value": 30
+      },
+      "exit": {
+        "hold": 20,
+        "stop": 7,
+        "target": 15,
+        "stop_kind": "percent",
+        "trailing": 0,
+        "disqualify": false
+      },
+      "ranking": "symbol",
+      "schedule": "daily"
+    },
+    {
+      "id": "rsi_stock_trend",
+      "name": "NDP RSI and Stock Miner trend",
+      "entry": {
+        "all": [
+          {
+            "engine": "ndp",
+            "name": "RSI",
+            "params": "n=14,os=30",
+            "signal": 1
+          },
+          {
+            "engine": "stock_miner",
+            "feature": "d_sma200",
+            "op": ">",
+            "value": 0
+          }
+        ]
+      },
+      "exit": {
+        "hold": 20,
+        "stop": 7,
+        "target": 15,
+        "stop_kind": "percent",
+        "trailing": 0,
+        "disqualify": false
+      },
+      "ranking": "symbol",
+      "schedule": "daily"
+    },
+    {
+      "id": "breakout_volume",
+      "name": "Prior 63-session high with volume",
+      "entry": {
+        "all": [
+          {
+            "kind": "breakout",
+            "value": 63
+          },
+          {
+            "kind": "volume",
+            "value": 1.2
+          }
+        ]
+      },
+      "exit": {
+        "hold": 20,
+        "stop": 7,
+        "target": 15,
+        "stop_kind": "percent",
+        "trailing": 0,
+        "disqualify": false
+      },
+      "ranking": "symbol",
+      "schedule": "daily"
+    },
+    {
+      "id": "momentum_market",
+      "name": "63-session momentum and Nifty trend",
+      "entry": {
+        "all": [
+          {
+            "kind": "momentum",
+            "value": 10
+          },
+          {
+            "kind": "market_trend",
+            "value": 200
+          }
+        ]
+      },
+      "exit": {
+        "hold": 20,
+        "stop": 7,
+        "target": 15,
+        "stop_kind": "percent",
+        "trailing": 0,
+        "disqualify": false
+      },
+      "ranking": "symbol",
+      "schedule": "daily"
+    },
+    {
+      "id": "ema_cross",
+      "name": "EMA 9 crosses above EMA 21",
+      "entry": {
+        "engine": "ndp",
+        "name": "EMA_cross",
+        "params": "9x21",
+        "signal": 1
+      },
+      "exit": {
+        "hold": 20,
+        "stop": 7,
+        "target": 15,
+        "stop_kind": "percent",
+        "trailing": 0,
+        "disqualify": false
+      },
+      "ranking": "symbol",
+      "schedule": "daily"
+    },
+    {
+      "id": "nested_trader",
+      "name": "RSI or SMA crossover, gated by trend and volume",
+      "entry": {
+        "all": [
+          {
+            "any": [
+              {
+                "kind": "rsi_below",
+                "value": 30
+              },
+              {
+                "engine": "ndp",
+                "name": "SMA_cross",
+                "params": "20x50",
+                "signal": 1
+              }
+            ]
+          },
+          {
+            "kind": "above_sma",
+            "value": 200
+          },
+          {
+            "kind": "volume",
+            "value": 1
+          }
+        ]
+      },
+      "exit": {
+        "hold": 20,
+        "stop": 7,
+        "target": 15,
+        "stop_kind": "percent",
+        "trailing": 0,
+        "disqualify": false
+      },
+      "ranking": "symbol",
+      "schedule": "daily"
+    }
+  ]
+}

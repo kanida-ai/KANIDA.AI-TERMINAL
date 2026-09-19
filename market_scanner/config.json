@@ -1,0 +1,17 @@
+{
+  "database": "../db/kanida.db",
+  "host": "127.0.0.1",
+  "port": 8765,
+  "workers": 4,
+  "poll_seconds": 60,
+  "settlement_delay_seconds": 120,
+  "pattern_version": "1.0.1",
+  "enabled_patterns": ["cup_handle", "horizontal_breakout", "flag_pole", "symmetrical_triangle", "falling_wedge", "rising_wedge", "channel", "descending_triangle", "head_shoulders", "inverse_head_shoulders"],
+  "timeframes": ["1H", "4H", "1D", "1W"],
+  "minimum_bars": 40,
+  "history_bars": 260,
+  "calendar_years": [2026],
+  "holidays": ["2026-01-15", "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31", "2026-04-03", "2026-04-14", "2026-05-01", "2026-05-28", "2026-06-26", "2026-09-14", "2026-10-02", "2026-10-20", "2026-11-10", "2026-11-24", "2026-12-25"],
+  "special_sessions": {"2026-02-01": ["09:15", "15:30"]},
+  "closed_special_dates": ["2026-11-08"]
+}

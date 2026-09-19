@@ -1,0 +1,87 @@
+# → Copy to  .github/workflows/deploy-agent-builder.yml  at your repo root.
+# Builds+pushes the agent-builder image to ECR and runs terraform apply on merge to main.
+# Matches your existing deploy-cloud.yml conventions: OIDC role (secrets.AWS_DEPLOY_ROLE_ARN),
+# aws-actions/configure-aws-credentials@v4, region via env.AWS_REGION.
+#
+# Required repo secrets (in addition to AWS_DEPLOY_ROLE_ARN, which you already have):
+#   TF_VAR_ALB_LISTENER_ARN   — your ALB HTTPS:443 listener ARN
+#   TF_VAR_ALB_SG_ID          — your ALB's security-group id
+name: deploy-agent-builder
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent_builder_service/**"
+      - ".github/workflows/deploy-agent-builder.yml"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write        # OIDC
+  contents: read
+
+concurrency:
+  group: deploy-agent-builder
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  SERVICE_DIR: agent_builder_service                       # where you placed the module in your repo
+  TF_DIR: agent_builder_service/deploy/terraform
+  # Terraform reads TF_VAR_* automatically:
+  TF_VAR_alb_https_listener_arn: ${{ secrets.TF_VAR_ALB_LISTENER_ARN }}
+  TF_VAR_alb_security_group_id: ${{ secrets.TF_VAR_ALB_SG_ID }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
+
+      - name: Terraform init + validate
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false
+          terraform validate
+
+      - name: Ensure ECR repo exists (targeted apply)
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve -target=aws_ecr_repository.builder
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push image
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          ECR=$(terraform output -raw ecr_repo_url)
+          echo "ECR=$ECR"
+          docker build -t "$ECR:${GITHUB_SHA}" -t "$ECR:latest" "$GITHUB_WORKSPACE/${SERVICE_DIR}"
+          docker push "$ECR:${GITHUB_SHA}"
+          docker push "$ECR:latest"
+
+      - name: Terraform apply (deploy service on new image)
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve -var="image_tag=${GITHUB_SHA}"
+
+      - name: Wait for service to stabilize + health check
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          CLUSTER=$(aws ecs list-clusters --query "clusterArns[?contains(@,'kanida')]" --output text | head -1)
+          SVC=$(terraform output -raw ecs_service_name)
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SVC"
+          API=$(terraform output -raw api_base)
+          echo "Health: $API/health"
+          curl -fsS "$API/health" || (echo "health check failed" && exit 1)

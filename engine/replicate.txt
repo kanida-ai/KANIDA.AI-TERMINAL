@@ -1,0 +1,31 @@
+loading daily panel from C:\Users\SPS\Documents\Kanida_Falcon\db\kanida.db
+  dropping 3 symbols with a broken feed: NIFTY GS 8 13YR, NIFTY GS COMPSITE, NIFTY50 DIV POINT
+  dropping 16 malformed bars
+  universe split    : 497 stocks, 131 indices
+    indices excluded from trading: BHARATBOND-APR30, BHARATBOND-APR31, BHARATBOND-APR32, BHARATBOND-APR33, INDIA VIX, NIFTY 100...
+  feature factory   : 322 candidates  (107.6s)
+  interactions      : 388 total     (15.3s)
+  panel             : 511,338 rows, 497 symbols, 2022-01-03 -> 2026-07-29
+
+==================================================================================
+SIGNAL REPLICATION   can prior-close data regenerate your signal?
+==================================================================================
+  510,344 symbol-days, 4,681 of them signal days (0.92%)
+  the model will pick the top 9 names each morning
+
+  OUT OF SAMPLE, 25 folds
+    precision at top 9   : 16.7%
+    base rate (random pick)  : 1.8%
+    lift                     : 9.1x
+
+    model's own basket       : -0.280%/day
+    your actual signal       : +1.632%/day
+    whole universe           : -0.207%/day
+    folds beating the universe: 8/25
+
+  READING THIS
+    The model finds your signal days but its picks do not beat
+    the universe. It has learned WHICH days you trade, not what
+    makes them work.
+
+  wrote outputs/replicate_picks.csv - the model's own daily basket

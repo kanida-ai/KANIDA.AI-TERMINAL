@@ -1,0 +1,82 @@
+
+====================================================================
+TRADE LOG   4691 trades, 2024-05-14 -> 2026-07-10
+====================================================================
+  win rate          : 54.1%
+  mean net return   : +1.313%
+  median            : +0.230%
+  avg win / avg loss: +3.50% / -1.26%  (ratio 2.78)
+  top 10 trades     : 3% of P&L
+
+  by exit reason
+                n    win   mean
+exit_reason                    
+EOD          2604  0.754  2.823
+HARD_STOP    1655  0.215 -0.850
+TRAIL         432  0.505  0.502
+
+  pulling 5-min bars for the traded symbol-days only
+    50/415 symbols
+    100/415 symbols
+    150/415 symbols
+    200/415 symbols
+    250/415 symbols
+    300/415 symbols
+    350/415 symbols
+    400/415 symbols
+  loaded 349,611 bars across 532 sessions
+
+==============================================================================
+BASKET PROFILE   526 sessions, target +1.0%
+==============================================================================
+  median names per day  : 9
+  P(touch +1.0%)        : 69.8%
+  P(close above target) : 58.4%
+  mean close            : +1.659%
+  mean peak             : +2.294%
+  mean give-back        : 0.634%
+
+  when it touches, minutes after the open:
+    25th 5   median 30   75th 95
+  of the days that touched, 83.7% still closed above
+  target -- the gap is what a floor lock is for.
+
+==============================================================================
+ENTRY TIMING   basket outcome by entry delay
+==============================================================================
+ entry  sessions  mean_close_%  P_touch_1%  mean_peak_%  mean_trough_%
+ +0min       526         1.484       0.673        2.116         -0.551
+ +5min       526         1.371       0.648        1.987         -0.552
++10min       526         1.295       0.646        1.903         -0.546
++15min       526         1.229       0.635        1.826         -0.536
++30min       526         1.092       0.586        1.662         -0.503
++60min       524         0.922       0.555        1.450         -0.469
+
+  09:15 is a choice, not a constraint. If a later entry has a
+  higher mean and a shallower trough, you were paying for the
+  opening auction's noise.
+
+================================================================================================
+EXIT POLICIES ON THE BASKET   (cost 0.11% per day)
+================================================================================================
+                 policy  days  mean_%  median_%  win_rate  P_over_1%  worst_day_%  max_dd_%  total_%
+          hold to close   526   1.549     1.318     0.721      0.563       -4.223   -14.599  815.006
+arm +1.00% floor +0.50%   526   1.532     1.172     0.755      0.530       -4.223   -12.061  806.034
+arm +1.00% floor +0.75%   526   1.492     0.811     0.755      0.489       -4.223   -10.961  784.866
+arm +0.75% floor +0.50%   526   1.431     0.721     0.770      0.471       -4.223   -12.439  752.851
+            trail 0.75%   526   1.178     0.960     0.656      0.490       -3.616    -8.553  619.385
+  arm +1.00% give 0.50%   526   1.145     0.962     0.749      0.489       -4.223    -9.899  602.190
+  arm +1.00% give 0.30%   526   0.939     0.918     0.753      0.470       -4.223    -9.788  493.698
+            trail 0.50%   526   0.916     0.585     0.639      0.407       -3.616    -8.785  482.068
+  arm +0.75% give 0.30%   526   0.862     0.754     0.768      0.411       -4.223   -11.981  453.179
+  arm +0.50% give 0.20%   526   0.668     0.545     0.789      0.321       -4.223   -11.106  351.445
+            trail 0.30%   526   0.616     0.338     0.612      0.312       -3.616    -8.508  324.256
+          target +1.50%   526   0.592     1.390     0.734      0.610       -4.223   -11.366  311.470
+          target +1.00%   526   0.352     0.890     0.755      0.000       -4.223   -10.272  185.290
+          target +0.75%   526   0.204     0.640     0.770      0.000       -4.223   -13.711  107.533
+          target +0.50%   526   0.043     0.390     0.798      0.000       -4.223   -21.763   22.396
+
+  P_over_1% is the column that matches your objective: the share
+  of days the basket actually delivered +1% or better. A policy with
+  a lower mean but a much higher P_over_1% may be the right one if
+  consistency is what you are buying.

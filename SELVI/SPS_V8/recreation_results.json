@@ -1,0 +1,20 @@
+[
+  {
+    "round": "R1 rulebook feats \u00b7 GBM",
+    "oos_ret_day": -0.14822372094285538,
+    "win_day": 45.1417004048583,
+    "recall": 5.898690757181322
+  },
+  {
+    "round": "R2 +open_gap +pullback \u00b7 GBM",
+    "oos_ret_day": 0.06712665349574132,
+    "win_day": 50.80971659919028,
+    "recall": 5.776083920738008
+  },
+  {
+    "round": "R3 +open_gap \u00b7 deeper GBM",
+    "oos_ret_day": 0.07080366106278055,
+    "win_day": 50.20242914979757,
+    "recall": 5.3285667279377975
+  }
+]

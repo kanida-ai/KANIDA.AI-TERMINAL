@@ -1,0 +1,316 @@
+loading daily panel from C:\Users\SPS\Documents\Kanida_Falcon\db\kanida.db
+  dropping 3 symbols with a broken feed: NIFTY GS 8 13YR, NIFTY GS COMPSITE, NIFTY50 DIV POINT
+  dropping 16 malformed bars
+  universe split    : 497 stocks, 131 indices
+    indices excluded from trading: BHARATBOND-APR30, BHARATBOND-APR31, BHARATBOND-APR32, BHARATBOND-APR33, INDIA VIX, NIFTY 100...
+
+====================================================================
+TRADE LOG   4691 trades, 2024-05-14 -> 2026-07-10
+====================================================================
+  win rate          : 54.1%
+  mean net return   : +1.313%
+  median            : +0.230%
+  avg win / avg loss: +3.50% / -1.26%  (ratio 2.78)
+  top 10 trades     : 3% of P&L
+
+  by exit reason
+                n    win   mean
+exit_reason                    
+EOD          2604  0.754  2.823
+HARD_STOP    1655  0.215 -0.850
+TRAIL         432  0.505  0.502
+  feature factory   : 322 candidates  (49.5s)
+  interactions      : 388 total     (7.7s)
+  panel             : 511,338 rows, 497 symbols, 2022-01-03 -> 2026-07-29
+
+==============================================================================
+SIGNAL DNA   signal days vs other days of the same 413 symbols
+==============================================================================
+  matched 4681 of 4691 trades to the panel
+               feature  signal_mean  other_mean  cohens_d  signal_pctile
+     f_close__distmin5       0.0475      0.0263    0.4900         0.8136
+       f_close__accel5       0.0112      0.0009    0.4193         0.7604
+    f_close__distmin10       0.0738      0.0470    0.4122         0.7811
+        f_ret1__slope3      -0.0074      0.0001   -0.4024         0.2845
+            f_ret1__z3      -0.3145     -0.0070   -0.3990         0.4244
+ f_dollar_vol__accel10       0.1239     -0.0047    0.3916         0.6910
+    f_tr_pct__distmax3      -0.3299     -0.2361   -0.3894         0.3586
+     f_volume__accel10       0.1191     -0.0057    0.3865         0.6871
+      f_ret1__pctrank3       0.5668      0.6638   -0.3732         0.3393
+     f_rel_str__slope3      -0.0061      0.0001   -0.3686         0.2885
+         f_rel_str__z3      -0.2660      0.0125   -0.3589         0.4304
+ f_range_pct__distmax3      -0.3201     -0.2355   -0.3535         0.3683
+            f_ret1__z5      -0.2937     -0.0059   -0.3512         0.4070
+   f_rel_str__pctrank3       0.5824      0.6706   -0.3377         0.3260
+f_dollar_vol__distmax3      -0.3811     -0.2856   -0.3322         0.3738
+    f_volume__distmax3      -0.3799     -0.2845   -0.3320         0.3731
+     f_tr_pct__accel10       0.0577     -0.0013    0.3297         0.6427
+  f_range_pct__accel10       0.0563     -0.0012    0.3290         0.6413
+    f_tr_pct__distmax5      -0.4067     -0.3266   -0.3244         0.4165
+      f_tr_pct__ratio3      -0.0976      0.0021   -0.3116         0.4180
+
+  |d| > 0.5 strong, 0.3-0.5 moderate, < 0.2 incidental.
+  Scoped to your traded symbols, so this measures WHICH DAY the
+  signal picks, not which stock. Run with within_symbols=False
+  to see the stock-selection effect instead.
+  signal_pctile is where the signal's average day sits in the
+  overall distribution: 0.90 means it fires near the top decile.
+
+====================================================================================
+EXIT AUDIT   what each exit rule earned vs simply holding to the close
+====================================================================================
+  4,681 of 4,691 trades matched on entry date
+
+                n  actual_%  hold_to_close_%  cost_of_exit_%  total_cost_%  would_be_better
+exit_reason                                                                                
+EOD          2600     2.824            2.861           0.038        98.043            0.515
+HARD_STOP    1649    -0.848           -0.104           0.743      1225.952            0.563
+TRAIL         432     0.502            0.914           0.411       177.697            0.498
+
+  cost_of_exit_% > 0 means holding to the close would have earned
+  MORE. total_cost_% is that summed across every trade, in units
+  of one position's return -- the aggregate price of the rule.
+
+  ALL TRADES: actual +1.316%  vs  hold-to-close +1.637%   (+0.321%)
+
+  Your exit rules are costing you. Holding every position to the
+  close beats the current stop-and-trail logic on average.
+
+============================================================================================
+STOP WIDTH SWEEP   on your own 4,681 trades
+============================================================================================
+   stop  pct_stopped  mean_%  win_rate  p1_trade_%  worst_trade_%  worst_day_%  max_dd_%  total_%
+  0.50%        0.749   0.659     0.247      -0.610         -0.610       -0.610    -7.109 3084.926
+  0.75%        0.658   0.823     0.326      -0.860         -0.860       -0.860    -9.395 3851.327
+  1.00%        0.573   0.950     0.393      -1.110         -1.110       -1.110   -12.561 4449.124
+  1.50%        0.425   1.157     0.489      -1.610         -1.610       -1.610   -11.732 5415.982
+  2.00%        0.308   1.332     0.548      -2.110         -2.110       -2.110   -13.309 6234.325
+  2.50%        0.223   1.426     0.582      -2.610         -2.610       -2.610   -16.561 6676.357
+  3.00%        0.164   1.479     0.600      -3.110         -3.110       -3.110   -17.179 6925.406
+  4.00%        0.088   1.538     0.617      -4.110         -4.110       -3.578   -13.748 7198.287
+  5.00%        0.050   1.550     0.621      -5.110         -5.110       -4.187   -14.872 7256.989
+no stop        0.000   1.637     0.628      -5.537        -12.571       -4.906   -13.643 7662.292
+
+  worst_day_% and max_dd_% assume the book is equal-weighted each
+  day, so they map onto an account. worst_trade_% is the single
+  position tail -- the thing a stop actually insures against.
+
+  Compare what each width COSTS (mean_% below the no-stop row,
+  times the trade count) against what it BUYS (the improvement in
+  worst_trade_% and max_dd_%). A stop is insurance: judge it on the
+  claim, not the premium.
+
+  total cost of each width, in percentage points across all 4,681 trades:
+      0.50%  costs     4577 pts   caps worst trade at  -0.61%   max DD  -7.11%
+      0.75%  costs     3811 pts   caps worst trade at  -0.86%   max DD  -9.39%
+      1.00%  costs     3213 pts   caps worst trade at  -1.11%   max DD -12.56%
+      1.50%  costs     2246 pts   caps worst trade at  -1.61%   max DD -11.73%
+      2.00%  costs     1428 pts   caps worst trade at  -2.11%   max DD -13.31%
+      2.50%  costs      986 pts   caps worst trade at  -2.61%   max DD -16.56%
+      3.00%  costs      737 pts   caps worst trade at  -3.11%   max DD -17.18%
+      4.00%  costs      464 pts   caps worst trade at  -4.11%   max DD -13.75%
+      5.00%  costs      405 pts   caps worst trade at  -5.11%   max DD -14.87%
+
+  Cheapest width that still halves the single-trade tail: 5.00%
+    costs 405 pts, caps the worst trade at -5.11% instead of -12.57%
+
+  If tightening the stop barely improves max_dd_% while costing
+  thousands of points, your bad trades are IDIOSYNCRATIC, not
+  clustered on the same days -- and a portfolio-level kill switch is
+  then the wrong instrument entirely.
+
+==================================================================================
+WINNER DNA vs LOSER DNA   top 20% (938 trades) vs bottom 20% (942)
+==================================================================================
+  winners avg +6.99%   losers avg -2.12%
+                                   feature  winner_mean  loser_mean  all_mean       d
+                         f_close__distmin5       0.0356      0.0547    0.0475 -0.3840
+                        f_close__distmin10       0.0606      0.0827    0.0738 -0.2987
+   x_f_close__distmin3__X__f_close__ratio5       0.0005      0.0011    0.0009 -0.2961
+x_f_rel_str__pctrank60__X__f_close__ratio5       0.0038      0.0085    0.0072 -0.2799
+x_f_rel_str__pctrank60__X__f_close__distmi       0.0093      0.0144    0.0127 -0.2695
+                           f_close__accel5       0.0051      0.0131    0.0112 -0.2695
+x_f_close__distmin3__X__f_range_pct__pctra       0.0087      0.0143    0.0121 -0.2647
+                     f_dollar_vol__accel10       0.0715      0.1649    0.1239 -0.2619
+                            f_ret1__slope3      -0.0050     -0.0103   -0.0074  0.2590
+   x_f_close__ratio3__X__f_close__distmin3       0.0003      0.0005    0.0004 -0.2583
+                         f_volume__accel10       0.0698      0.1591    0.1191 -0.2548
+                         f_close__distmin3       0.0170      0.0241    0.0219 -0.2472
+                         f_tr_pct__accel10       0.0366      0.0804    0.0577 -0.2337
+                          f_close__ratio10       0.0047      0.0183    0.0154 -0.2333
+                      f_range_pct__accel10       0.0344      0.0766    0.0563 -0.2311
+
+  d > 0 means winners score HIGHER on that feature.
+  Compare against SIGNAL DNA: a feature your signal selects for
+  but which does not separate winners is a filter doing no work.
+
+==================================================================================
+SEPARATORS   which feature splits your winners from your losers
+==================================================================================
+  all 4681 trades: win 54.1%, mean return +1.316%
+                                 feature  best_bin  n_in_best  win_best  ret_best  ret_worst  ret_spread  monotone
+                       f_close__distmin5         1       1170    0.6128    0.0185     0.0052      0.0132   -0.7923
+                         f_close__ratio5         1       1170    0.5966    0.0175     0.0049      0.0126   -0.7904
+                      f_close__distmin10         1       1170    0.6222    0.0179     0.0061      0.0118   -0.8445
+                      f_rel_str__slope20         1       1170    0.6085    0.0176     0.0061      0.0115   -0.8585
+x_f_range_pct__pctrank60__X__f_close__ra         1       1170    0.5829    0.0171     0.0056      0.0114   -0.7876
+x_f_tr_pct__distmin60__X__f_close__ratio         1       1170    0.5915    0.0170     0.0057      0.0113   -0.7983
+x_f_range_pct__distmin60__X__f_close__ra         1       1170    0.5966    0.0174     0.0061      0.0112   -0.8343
+                        f_close__ratio10         1       1170    0.5880    0.0166     0.0054      0.0112   -0.8277
+                         f_close__accel5         1       1170    0.5906    0.0165     0.0055      0.0110   -0.8325
+                      f_rel_str__slope10         1       1170    0.6017    0.0166     0.0062      0.0104   -0.8981
+                            f_close__z20         0       1171    0.5739    0.0174     0.0072      0.0102   -0.8590
+                         f_close__slope5         0       1171    0.5645    0.0167     0.0065      0.0101   -0.9149
+                   f_dollar_vol__slope10         1       1170    0.5906    0.0171     0.0071      0.0100   -0.8344
+x_f_rel_str__pctrank60__X__f_close__rati         0       1171    0.5508    0.0162     0.0063      0.0099   -0.8748
+                        f_ret1__pctrank5         2        342    0.6784    0.0216     0.0120      0.0096    0.9645
+                      f_close__pctrank20         0       1264    0.5744    0.0168     0.0074      0.0093   -0.9579
+                      f_close__distmax60         0       1171    0.5679    0.0176     0.0085      0.0091   -0.9089
+                    f_vwap_dist__slope20         0       1171    0.5773    0.0173     0.0082      0.0091   -0.9872
+                   f_dollar_vol__slope20         1       1170    0.5906    0.0168     0.0079      0.0089   -0.8932
+                        f_close__accel10         0       1171    0.5679    0.0162     0.0074      0.0089   -0.8527
+
+  ret_spread = best bin minus worst bin, in decimal return.
+  |monotone| near 1 means the effect is ordered across bins, which
+  is far more believable than one bin happening to look good.
+  IN-SAMPLE. Nothing here is evidence until it clears walk-forward.
+
+==============================================================================
+MONOTONICITY, CORRECTED FOR SEARCHING 341 FEATURES
+==============================================================================
+  best observed |monotone| : 0.998280
+  95th pct under random    : 0.999886
+  p-value                  : 0.413
+
+  Your best monotone relationship is no stronger than the best
+  one random returns would produce. Ignore the monotone column.
+  Only treat |monotone| above 0.999886 as meaningful.
+  Note: with 4 bins that threshold sits against the ceiling, so
+  monotonicity can barely distinguish anything. Use more bins if
+  you want this column to carry weight.
+
+============================================================================================
+TWO-FEATURE RULES   greedy, 3 bins, min 35 trades per cell
+============================================================================================
+  base return across all 4681 trades: +1.316%
+                                                          rule   n    win    ret   gain  gain_over_seed
+            f_close__distmin5=bin1 AND f_volume__pctrank5=bin2 219 0.6849 0.0226 0.0095          0.0050
+x_f_tr_pct__distmin60__X__f_close__ratio5=bin0 AND f_ret1__acc 520 0.6308 0.0226 0.0094          0.0066
+                f_close__distmin10=bin0 AND f_gap__slope5=bin2 520 0.6154 0.0225 0.0093          0.0060
+                 f_close__ratio5=bin1 AND f_clv__pctrank5=bin2 246 0.6585 0.0224 0.0092          0.0059
+           f_close__distmin5=bin1 AND f_vwap_dist__slope5=bin2 520 0.6692 0.0224 0.0092          0.0048
+        f_close__distmin5=bin1 AND f_dollar_vol__pctrank5=bin2 224 0.6741 0.0221 0.0090          0.0045
+               f_close__distmin10=bin0 AND f_ret1__slope5=bin2 520 0.6500 0.0221 0.0089          0.0056
+                 f_close__accel5=bin1 AND f_clv__pctrank5=bin2 198 0.6616 0.0221 0.0089          0.0052
+         f_close__distmin5=bin1 AND f_vwap_dist__pctrank5=bin2 234 0.6538 0.0218 0.0086          0.0042
+                 f_close__distmin5=bin1 AND f_clv__slope5=bin2 520 0.6654 0.0216 0.0084          0.0040
+               f_close__distmin10=bin0 AND f_ret1__accel5=bin2 520 0.6654 0.0216 0.0084          0.0051
+             f_close__ratio5=bin1 AND f_volume__distmax10=bin2 520 0.6712 0.0216 0.0084          0.0051
+
+  gain_over_seed is the column that matters: how much the SECOND
+  feature added beyond the first. Near zero means the pair is just
+  the single separator wearing a hat.
+
+==============================================================================
+PRE-SPECIFIED EXCLUSION RULES
+  Each rule was chosen from the Winner-DNA disagreement, then tested
+  walk-forward. One rule at a time, so no search inflation -- but the
+  hypothesis did come from this sample, so treat it as suggestive.
+==============================================================================
+
+  f_close__accel5  [keep not_high]
+    folds 18, better 16/18, kept 73% of trades
+    win  54.2% -> 57.6%   ret +1.375% -> +1.642%   (+0.267%)
+    holdout after 2026-01-01: +1.139% -> +1.570%  (n=674)
+
+  f_dollar_vol__accel5  [keep not_high]
+    folds 18, better 9/18, kept 73% of trades
+    win  54.2% -> 54.7%   ret +1.375% -> +1.438%   (+0.063%)
+    holdout after 2026-01-01: +1.139% -> +1.283%  (n=723)
+
+  f_volume__accel5  [keep not_high]
+    folds 18, better 9/18, kept 73% of trades
+    win  54.2% -> 54.6%   ret +1.375% -> +1.430%   (+0.056%)
+    holdout after 2026-01-01: +1.139% -> +1.278%  (n=722)
+
+  f_dollar_vol__ratio20  [keep not_high]
+    folds 18, better 12/18, kept 75% of trades
+    win  54.2% -> 55.2%   ret +1.375% -> +1.465%   (+0.090%)
+    holdout after 2026-01-01: +1.139% -> +1.350%  (n=751)
+
+  f_volume__ratio20  [keep not_high]
+    folds 18, better 12/18, kept 75% of trades
+    win  54.2% -> 54.8%   ret +1.375% -> +1.438%   (+0.063%)
+    holdout after 2026-01-01: +1.139% -> +1.304%  (n=747)
+
+  f_volume__pctrank20  [keep not_high]
+    folds 18, better 11/18, kept 77% of trades
+    win  54.2% -> 54.7%   ret +1.375% -> +1.423%   (+0.049%)
+    holdout after 2026-01-01: +1.139% -> +1.229%  (n=801)
+
+  f_dollar_vol__pctrank60  [keep not_high]
+    folds 18, better 14/18, kept 73% of trades
+    win  54.2% -> 56.0%   ret +1.375% -> +1.518%   (+0.144%)
+    holdout after 2026-01-01: +1.139% -> +1.287%  (n=731)
+
+  f_close__distmin5  [keep low]
+    folds 18, better 10/18, kept 24% of trades
+    win  54.2% -> 53.8%   ret +1.375% -> +1.465%   (+0.090%)
+    holdout after 2026-01-01: +1.139% -> +1.014%  (n=204)
+
+  f_close__distmin3  [keep not_high]
+    folds 18, better 14/18, kept 74% of trades
+    win  54.2% -> 55.7%   ret +1.375% -> +1.468%   (+0.094%)
+    holdout after 2026-01-01: +1.139% -> +1.346%  (n=698)
+
+  best: f_close__accel5 (+0.267%, 16/18 folds)
+  A rule is only worth adopting if it gains AND wins most folds.
+
+====================================================================================================
+STATE REGISTRY   24 states across 1 run(s)
+====================================================================================================
+  Only 1 run(s) recorded. Rediscovery cannot mean anything
+  yet -- every state has been found in every run it could be. Re-run
+  with a different universe, bin count or training window, and the
+  confidence column starts carrying information.
+
+                                                             signature  runs_seen  rediscovery  n_total  mean_ret_%  ret_spread_%  folds  folds_positive  consistency  confidence    status
+                                             f_close__accel5[not_high]          1          1.0      540       1.642           0.0     18              16        0.889       0.810 candidate
+                                     f_dollar_vol__pctrank60[not_high]          1          1.0      540       1.518           0.0     18              14        0.778       0.709 candidate
+                                           f_close__distmin3[not_high]          1          1.0      540       1.468           0.0     18              14        0.778       0.709 candidate
+                                       f_dollar_vol__ratio20[not_high]          1          1.0      540       1.465           0.0     18              12        0.667       0.607 candidate
+                                           f_volume__ratio20[not_high]          1          1.0      540       1.438           0.0     18              12        0.667       0.607 candidate
+                                         f_volume__pctrank20[not_high]          1          1.0      540       1.423           0.0     18              11        0.611       0.557 candidate
+                                                f_close__distmin5[low]          1          1.0      540       1.465           0.0     18              10        0.556       0.506 candidate
+                                        f_dollar_vol__accel5[not_high]          1          1.0      540       1.438           0.0     18               9        0.500       0.455 candidate
+                                            f_volume__accel5[not_high]          1          1.0      540       1.430           0.0     18               9        0.500       0.455 candidate
+                    f_close__distmin5=bin1 AND f_volume__pctrank5=bin2          1          1.0      219       2.263           0.0      0               0        0.000       0.000  rejected
+x_f_tr_pct__distmin60__X__f_close__ratio5=bin0 AND f_ret1__accel5=bin2          1          1.0      520       2.259           0.0      0               0        0.000       0.000  rejected
+                        f_close__distmin10=bin0 AND f_gap__slope5=bin2          1          1.0      520       2.251           0.0      0               0        0.000       0.000  rejected
+                         f_close__ratio5=bin1 AND f_clv__pctrank5=bin2          1          1.0      246       2.239           0.0      0               0        0.000       0.000  rejected
+                   f_close__distmin5=bin1 AND f_vwap_dist__slope5=bin2          1          1.0      520       2.238           0.0      0               0        0.000       0.000  rejected
+                f_close__distmin5=bin1 AND f_dollar_vol__pctrank5=bin2          1          1.0      224       2.212           0.0      0               0        0.000       0.000  rejected
+                       f_close__distmin10=bin0 AND f_ret1__slope5=bin2          1          1.0      520       2.208           0.0      0               0        0.000       0.000  rejected
+                         f_close__accel5=bin1 AND f_clv__pctrank5=bin2          1          1.0      198       2.207           0.0      0               0        0.000       0.000  rejected
+                 f_close__distmin5=bin1 AND f_vwap_dist__pctrank5=bin2          1          1.0      234       2.178           0.0      0               0        0.000       0.000  rejected
+                         f_close__distmin5=bin1 AND f_clv__slope5=bin2          1          1.0      520       2.159           0.0      0               0        0.000       0.000  rejected
+                       f_close__distmin10=bin0 AND f_ret1__accel5=bin2          1          1.0      520       2.158           0.0      0               0        0.000       0.000  rejected
+
+  {'rejected': 15, 'candidate': 9}
+
+  confidence = rediscovery x consistency x support x steadiness.
+  Every term is measured; none is a judgement call.
+
+==============================================================================
+FILTER SEARCH   4681 trades matched, base win rate 54.1%, base return +1.316%
+  1 feature(s), 4 bins, min 20 per state, 8-month train
+==============================================================================
+  folds with a filter : 18
+  trades kept         : 850 of 3213  (26%)
+
+                     take all   filtered      delta
+  win rate              53.8%      62.8%      +9.0%
+  mean return          1.358%     1.873%    +0.515%
+  total P&L           4362.1%    1591.8%
+
+  folds where filtering beat taking everything: 16/18

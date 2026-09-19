@@ -1,0 +1,14 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const assert=require('node:assert/strict'),ts=require('typescript');
+const context={exports:{}};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,'../src/chartWindow.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,context);
+const {chartStart}=context.exports;
+assert.equal(chartStart(300,'pattern',20),12,'Long patterns must not be cropped to the old 115-candle limit');
+assert.equal(chartStart(300,'pattern',60,[5,110]),0,'Earlier detector anchors must remain visible');
+assert.equal(chartStart(300,'pattern',60,[NaN,-100,500]),52,'Invalid anchors must not distort the window');
+assert.equal(chartStart(300,'recent',20),260,'Recent view intentionally focuses the last 40 candles');
+assert.equal(chartStart(300,'all',20),0);
+assert.equal(chartStart(300,'pattern',undefined),242,'Missing geometry falls back to a recent context window');
+assert.equal(chartStart(12,'pattern',3),0);
+assert.equal(chartStart(0,'recent'),0);
+console.log('8 chart-window checks passed: full geometry, invalid anchors, short and empty history, recent/all views.');

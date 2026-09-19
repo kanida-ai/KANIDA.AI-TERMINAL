@@ -1,0 +1,31 @@
+{
+  "family": "kanida-private-pilot",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "REPLACE_WITH_SCOPED_ECS_EXECUTION_ROLE_ARN",
+  "taskRoleArn": "REPLACE_WITH_PILOT_TASK_ROLE_ARN",
+  "containerDefinitions": [{
+    "name": "pilot",
+    "image": "REPLACE_WITH_IMMUTABLE_ECR_IMAGE_DIGEST",
+    "essential": true,
+    "readonlyRootFilesystem": true,
+    "portMappings": [{"containerPort":8080,"protocol":"tcp"}],
+    "environment": [
+      {"name":"PILOT_ENVIRONMENT","value":"staging"},
+      {"name":"PILOT_ORIGIN","value":"https://REPLACE_WITH_PILOT_HOST"},
+      {"name":"PILOT_LIVE_ENABLED","value":"false"},
+      {"name":"PILOT_RESEARCH_URL","value":"http://REPLACE_WITH_PRIVATE_READ_ONLY_RESEARCH_SERVICE"}
+    ],
+    "secrets": [
+      {"name":"PILOT_DATABASE_URL","valueFrom":"REPLACE_WITH_PILOT_SECRET_ARN:database_url::"},
+      {"name":"PILOT_ENCRYPTION_KEY","valueFrom":"REPLACE_WITH_PILOT_SECRET_ARN:encryption_key::"},
+      {"name":"PILOT_OWNER_EMAIL","valueFrom":"REPLACE_WITH_PILOT_SECRET_ARN:owner_email::"},
+      {"name":"PILOT_KITE_API_KEY","valueFrom":"REPLACE_WITH_PILOT_SECRET_ARN:kite_api_key::"},
+      {"name":"PILOT_KITE_API_SECRET","valueFrom":"REPLACE_WITH_PILOT_SECRET_ARN:kite_api_secret::"}
+    ],
+    "logConfiguration":{"logDriver":"awslogs","options":{"awslogs-group":"/kanida/private-pilot","awslogs-region":"ap-south-1","awslogs-stream-prefix":"app"}},
+    "healthCheck":{"command":["CMD-SHELL","python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=4)\""],"interval":30,"timeout":5,"retries":3,"startPeriod":30}
+  }]
+}

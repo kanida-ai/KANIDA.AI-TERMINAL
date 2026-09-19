@@ -1,0 +1,24 @@
+{
+  "agent": "ADANIENT",
+  "ts": "2026-07-30 10:39:32",
+  "kb_rows": 2346,
+  "tested_this_chunk": 2346,
+  "new_survivors_this_chunk": 11,
+  "distinct_survivors_total": 11,
+  "space_covered": "2347/3200",
+  "champion": {
+    "trigger": "ORBlate",
+    "filters": [
+      "AM",
+      "ORWIDE"
+    ],
+    "target": 0.01,
+    "stop": 0.003,
+    "val_trades": 179,
+    "val_win": 0.43575418994413406,
+    "val_net_1x": 0.0014919060930426611,
+    "val_net_5x": 0.007459530465213306,
+    "val_tstat": 3.1742841392563066,
+    "val_tgt_hit": 0.39664804469273746
+  }
+}

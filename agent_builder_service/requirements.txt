@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2.6
+pandas>=2.0
+numpy>=1.26
+duckdb>=0.10          # reads Parquet locally and from S3 (httpfs)
+pyarrow>=14

@@ -1,0 +1,14 @@
+{
+  "catalogue_entries": 107,
+  "directional_variants": 262,
+  "patterns_with_examples": 107,
+  "variants_with_examples": 262,
+  "variants_without_frozen_occurrences": 0,
+  "patterns_without_frozen_occurrences": [],
+  "drawable_examples": 262,
+  "validation_failures": [],
+  "states": {
+    "setup": 74,
+    "confirmed": 188
+  }
+}

@@ -1,0 +1,11 @@
+{
+ "legs": [
+  "y_d3|long",
+  "y_60|short",
+  "y_d3|short",
+  "y_30|short"
+ ],
+ "per_session_pct": 0.2951269709808633,
+ "sessions_traded": 666,
+ "mean_when_trading_pct": 0.4395885213408655
+}

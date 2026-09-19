@@ -1,0 +1,111 @@
+{
+  "overall": "ready",
+  "owner": "Claude Code",
+  "updated": "2026-09-15",
+  "interface": "specifications() -> list[dict]; detect(bars, timeframe) -> dict[(pattern_id, variant, side), list[event]] (CLAUDE_HANDOFF.md)",
+  "test_command": "market_scanner/.venv/Scripts/python.exe -m unittest discover -s market_scanner/tests -p \"test_detectors_*.py\"",
+  "modules": {
+    "market_scanner/pattern_research/common.py": {
+      "status": "ready",
+      "files": [
+        "market_scanner/pattern_research/common.py",
+        "market_scanner/tests/test_detectors_common.py",
+        "market_scanner/tests/test_detectors_support.py"
+      ],
+      "tests": "9 passed",
+      "scope": "Series (segments, prior ATR20, radius-3 causal pivots, 20-close trend), confirm_close_beyond, make_event, Collector, spec"
+    },
+    "market_scanner/pattern_research/candlesticks.py": {
+      "status": "ready",
+      "files": [
+        "market_scanner/pattern_research/candlesticks.py",
+        "market_scanner/tests/test_detectors_candles.py"
+      ],
+      "tests": "16 passed (25 including common); library parity for all 61 raw recognitions + hikkake confirmations; prefix/future invariance; gap fixtures; settings restore; isolated-import lookback regression",
+      "codex_gate": "runner.registry + runner.validate_events pass on gap-heavy synthetic 5000-bar histories (165 cells)",
+      "spec_cells": 165,
+      "timing": "~2.2 s per 20k bars",
+      "known_limitations": [
+        "Named gap_free star/inverted-hammer/shooting-star adaptations not implemented (custom, non-canonical)",
+        "Rare functions (e.g. CDLCONCEALBABYSWALL, CDLMATHOLD, CDLKICKING) have no per-function positive fixture; parity relies on generic wrapper",
+        "Session stubs tagged only; no duration-normalised model"
+      ],
+      "codex_finding_2": "fixed: default candle settings restored before caching _LIB_LOOKBACK; subprocess isolated-import regression test (BodyDoji avgperiod 100 set before import) passes, and a negative control without the fix reproduces the failure (cached 100, raw 0 vs library 100)"
+    },
+    "market_scanner/pattern_research/chart_patterns.py": {
+      "status": "ready",
+      "scope": "CH11-CH28",
+      "files": [
+        "market_scanner/pattern_research/chart_patterns.py",
+        "market_scanner/tests/test_detectors_chart.py"
+      ],
+      "tests": "44 passed: exact-index positive fixture, meaningful negative and quality-gap test for every family; identity/state; contract + prefix/future invariance on fixtures and gapped random walks; short-prefix causality; regressions for Codex 4 and 5",
+      "codex_gate": "registry + validate_events pass (random_walk 5000 clean 278 events, gapped 206); lead re-verified on 4 more gapped seeds",
+      "codex_findings": "4 fixed (_flat_cluster returns None before an empty slice) and 5 fixed (_track skips claim when group is None; CH28 base and volume keys both emit; mirror claims independent); both locked by regression tests",
+      "late_change": "detect() previously returned nothing for histories < 40 bars, breaking short-prefix causality (an island at bar 31 vanished from a 35-bar prefix); now skips only when no ATR is possible (<= 20 bars). Codex real-data prefix cuts start at 159 so should be unaffected, but re-run validation for final hashes.",
+      "spec_cells": 32,
+      "timing": "~0.9 s per 20k bars",
+      "known_limitations": [
+        "Adam/Eve double top/bottom subtypes exposed as geometry/quality_tags only, not separate variants",
+        "CH19/CH20 rounding and CH24 island have no setup state (confirmed only); CH11 downside_resolution confirmed only",
+        "Named gate exceptions: CH12 >=3 touches; CH14 pennant window 15-50 bars; CH24 no window/height/expiry gates; CH26/CH27 expiry min(40,max(10,leg bars)); CH21 legacy handle-volume gate removed (ratio recorded) and window capped at 150",
+        "CH14, CH21, CH23, CH24 did not occur on synthetic random walks; evidence is fixtures plus Codex real-data occurrences"
+      ]
+    },
+    "market_scanner/pattern_research/price_action.py": {
+      "status": "ready",
+      "files": [
+        "market_scanner/pattern_research/price_action.py",
+        "market_scanner/tests/test_detectors_price_action.py"
+      ],
+      "tests": "47 passed; lead re-verified contract+prefix/future invariance+runner.validate_events on 8 extra gap-flagged 3000-bar seeds",
+      "codex_finding_1": "fixed: specifications() TypeError (spec() wrapper) resolved; registry loads 26 cells",
+      "spec_cells": 26,
+      "timing": "~0.8 s per 20k bars",
+      "known_limitations": [
+        "Tick size unavailable in bars: PA01 tolerance = max(0.01 price units, 0.1 ATR)",
+        "PA05 equal-minimum tie variant omitted; PA03 middle-half closes not emitted",
+        "PA02 'single' implemented as 'first' (>=1 inside bar): 'exactly one' is not knowable causally",
+        "PA07 gap-hold/fill/retest strategy variants not implemented (strategy layer)"
+      ]
+    },
+    "market_scanner/pattern_research/harmonics.py": {
+      "status": "ready",
+      "files": [
+        "market_scanner/pattern_research/harmonics.py",
+        "market_scanner/tests/test_detectors_harmonics.py"
+      ],
+      "tests": "19 passed; lead re-verified contract+prefix/future invariance+runner.validate_events on 22 extra gap-flagged 4000-bar seeds across findings 3 and Q1",
+      "codex_gate": "runner.registry + validate_events pass (random_walk 5000, clean and gapped)",
+      "spec_cells": 26,
+      "timing": "~0.05 s per 20k bars",
+      "known_limitations": [
+        "HA04-HA08 never fire on random walks; evidence of correctness is synthetic fixtures only",
+        "Swing sequence = alternating radius-3 pivots; bars that are both high and low pivot are skipped",
+        "HA10 5-0 uses X-A-B-C-D without the preceding origin point",
+        "CD/AB is recorded in geometry for all five-point templates (correction per Codex); narrow 1.27/1.618 AB=CD extension bands are intentionally not gated",
+        "Butterfly 1.618 extension implemented as a separate ext_1_618 variant"
+      ],
+      "codex_finding_3": "fixed: HA03 Gartley and HA10 5-0 canonical now gate CD/AB in [0.90,1.10]; stated in definition/ratio_bands, CD/AB in geometry; rejection fixtures at 0.80 and 1.20 both sides; no relaxed variants; still 26 cells",
+      "codex_q1": "applied: lower-bound-only CD/AB >= 0.90 (bound=minimum, hi=null, unscored) on HA04 b_0_382/b_0_50, HA06 ext_1_27/ext_1_618, HA07 canonical (10 cells); typical 1.27/1.618 extensions annotated descriptively in geometry.abcd_extension; no new variants (26 cells). Minimum is binding only for HA06 ext_1_27 (other bands imply CD/AB >= ~1.08 Bat, ~1.30 Butterfly 1.618, ~1.89 Crab; lead checked algebra). Bar-level rejection fixture for HA06 ext_1_27 at 0.893; ratio-level rejection at 0.80/0.899 for all five."
+    }
+  },
+  "final_verification": {
+    "full_suite": "135 tests passed (common 9, candles 16, chart 44, price_action 47, harmonics 19) via test_command",
+    "registry": "runner.registry(runner.MODULES): 107 pattern IDs, 262 (pattern, variant, side) combinations",
+    "lead_causality": "prefix truncation + future perturbation re-verified by lead on gap-flagged random walks for all modules, including short prefixes (21-60 bars)",
+    "source_sha256": {
+      "market_scanner/pattern_research/common.py": "7c78b0fc08b736545956fe04e3e0b47819bd700f8fe99e0ab58fdb2938efb09a",
+      "market_scanner/pattern_research/candlesticks.py": "526eb1dd6ce7acab796e67ed61b850e60b8ff0eedbff6f0348eeb8efb981fa4c",
+      "market_scanner/pattern_research/chart_patterns.py": "f77a1fb0b7841fe7760153bb431920423d742f7665b2960163c31ec5039a12e4",
+      "market_scanner/pattern_research/price_action.py": "561ce8841ae05eaeced7e49556957b9e2a264003b789d8c9c2c6464b2d6e4413",
+      "market_scanner/pattern_research/harmonics.py": "91ec5639cb46855f344ffc72b2e37df37b5639ac315253e75a6bab0562f0c394",
+      "market_scanner/tests/test_detectors_support.py": "0452d4db449a1a9def47d8af04fab210c5cc9b2dfa6d6cbe3e43a973d8cb390e",
+      "market_scanner/tests/test_detectors_common.py": "e6f57c06279181c6698d4d325f73930e88fa61b11653c5a09d08eec7d269392b",
+      "market_scanner/tests/test_detectors_candles.py": "dec91fc1a9a5c589b1733f72efdbf1c1c86a835203b680aebea6dcf1c805878f",
+      "market_scanner/tests/test_detectors_chart.py": "66f316a8a8f88b5581485913560c5731e0f74d6ecbfc3bd446b27803107ce963",
+      "market_scanner/tests/test_detectors_price_action.py": "13ab7759dc6aa6ba77a6dffef3f9ab171e8e36d64971d880cd95bfd1d346b491",
+      "market_scanner/tests/test_detectors_harmonics.py": "106a0887bfb7652eec918242b5da5724cbbb776eb6b59a8ca327b4db545a2421"
+    }
+  }
+}

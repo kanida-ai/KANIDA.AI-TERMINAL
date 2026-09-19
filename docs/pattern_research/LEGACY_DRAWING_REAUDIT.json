@@ -1,0 +1,530 @@
+{
+  "run": "4b33a5249562631524d6",
+  "scope": "All 13 registered direction variants of CH01\u2013CH10",
+  "examples": [
+    {
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1D",
+        "pattern_id": "CH01",
+        "variant": "legacy_1.0.1",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 89,
+        "formation_at": "2024-07-23 09:15:00",
+        "detected_at": "2024-09-23 09:15:00",
+        "signal_at": "2024-09-23 09:15:00"
+      },
+      "event_sha256": "c4838b5e66a8873471cc9b1adae21c8e90a904f0c9ac732645282c8aa127e11f",
+      "pattern_id": "CH01",
+      "variant": "legacy_1.0.1",
+      "side": "long",
+      "state": "confirmed",
+      "symbol": "AADHARHFC",
+      "timeframe": "1D",
+      "visual_review": {
+        "reviewed": true,
+        "gallery_page": 1,
+        "post_fix_recheck": true,
+        "renderer_bundle": "entry-2c4647c74f9905f0b2b659dc9aad2ef8.js"
+      },
+      "semantic_checks": {
+        "finite_causal_coordinates": true,
+        "published_anchors_match_extremes": true,
+        "saved_curve_matches_detector_close_fit": true,
+        "handle_uses_rim_high_handle_low_signal_close": true
+      },
+      "observations": [
+        "Removed browser replacement of the saved detector quadratic fit; source fit and handle anchors retained."
+      ],
+      "status": "inspected_source_geometry_consistent",
+      "limitations": "Exact frozen example, not every historical occurrence or timeframe; no trading-performance certification."
+    },
+    {
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "CH02",
+        "variant": "legacy_1.0.1",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 842,
+        "formation_at": "2024-10-11 15:15:00",
+        "detected_at": "2024-11-07 10:15:00",
+        "signal_at": "2024-11-07 10:15:00"
+      },
+      "event_sha256": "dee13de88f1da0aac11e47564cd560da180d042de64cba3175ec940d4e0905c3",
+      "pattern_id": "CH02",
+      "variant": "legacy_1.0.1",
+      "side": "long",
+      "state": "confirmed",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "visual_review": {
+        "reviewed": true,
+        "gallery_page": 1,
+        "post_fix_recheck": true,
+        "renderer_bundle": "entry-2c4647c74f9905f0b2b659dc9aad2ef8.js"
+      },
+      "semantic_checks": {
+        "finite_causal_coordinates": true,
+        "published_anchors_match_extremes": true
+      },
+      "observations": [
+        "Removed extra browser-inferred swing points; these were not published by the detector."
+      ],
+      "status": "inspected_source_geometry_consistent",
+      "limitations": "Exact frozen example, not every historical occurrence or timeframe; no trading-performance certification."
+    },
+    {
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "CH03",
+        "variant": "legacy_1.0.1",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 2045,
+        "formation_at": "2025-07-14 15:15:00",
+        "detected_at": "2025-07-21 09:15:00",
+        "signal_at": "2025-07-21 09:15:00"
+      },
+      "event_sha256": "1c39e5e9f25588c5238a6eae7932965cff079455022f9f1a79d2615acdb48145",
+      "pattern_id": "CH03",
+      "variant": "legacy_1.0.1",
+      "side": "long",
+      "state": "confirmed",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "visual_review": {
+        "reviewed": true,
+        "gallery_page": 1,
+        "post_fix_recheck": true,
+        "renderer_bundle": "entry-2c4647c74f9905f0b2b659dc9aad2ef8.js"
+      },
+      "semantic_checks": {
+        "finite_causal_coordinates": true,
+        "published_anchors_match_extremes": true,
+        "pole_matches_published_close_impulse": true
+      },
+      "observations": [
+        "Removed extra browser-inferred swing points; these were not published by the detector."
+      ],
+      "status": "inspected_source_geometry_consistent",
+      "limitations": "Exact frozen example, not every historical occurrence or timeframe; no trading-performance certification."
+    },
+    {
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "ITCHOTELS",
+        "timeframe": "4H",
+        "pattern_id": "CH03",
+        "variant": "legacy_1.0.1",
+        "side": "short",
+        "state": "setup",
+        "episode": 753,
+        "formation_at": "2026-07-15 13:15:00",
+        "detected_at": "2026-08-10 09:15:00",
+        "signal_at": "2026-08-10 09:15:00"
+      },
+      "event_sha256": "af2a20a2c1d025eaaa2c0094dcaa277911424b93ce69a76e6d371f3da389b53b",
+      "pattern_id": "CH03",
+      "variant": "legacy_1.0.1",
+      "side": "short",
+      "state": "setup",
+      "symbol": "ITCHOTELS",
+      "timeframe": "4H",
+      "visual_review": {
+        "reviewed": true,
+        "gallery_page": 1,
+        "post_fix_recheck": true,
+        "renderer_bundle": "entry-2c4647c74f9905f0b2b659dc9aad2ef8.js"
+      },
+      "semantic_checks": {
+        "finite_causal_coordinates": true,
+        "published_anchors_match_extremes": true,
+        "pole_matches_published_close_impulse": true
+      },
+      "observations": [
+        "Removed extra browser-inferred swing points; these were not published by the detector."
+      ],
+      "status": "inspected_source_geometry_consistent",
+      "limitations": "Exact frozen example, not every historical occurrence or timeframe; no trading-performance certification."
+    },
+    {
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1W",
+        "pattern_id": "CH04",
+        "variant": "legacy_1.0.1",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 110,
+        "formation_at": "2025-05-26 09:15:00",
+        "detected_at": "2026-06-29 09:15:00",
+        "signal_at": "2026-06-29 09:15:00"
+      },
+      "event_sha256": "155a2e05a48089dcd6674563bfe195f383537ef59fdb926f05c969973420f8b0",
+      "pattern_id": "CH04",
+      "variant": "legacy_1.0.1",
+      "side": "long",
+      "state": "confirmed",
+      "symbol": "AADHARHFC",
+      "timeframe": "1W",
+      "visual_review": {
+        "reviewed": true,
+        "gallery_page": 1,
+        "post_fix_recheck": true,
+        "renderer_bundle": "entry-2c4647c74f9905f0b2b659dc9aad2ef8.js"
+      },
+      "semantic_checks": {
+        "finite_causal_coordinates": true,
+        "published_anchors_match_extremes": true
+      },
+      "observations": [],
+      "status": "inspected_source_geometry_consistent",
+      "limitations": "Exact frozen example, not every historical occurrence or timeframe; no trading-performance certification."
+    },
+    {
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "CH04",
+        "variant": "legacy_1.0.1",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 3519,
+        "formation_at": "2026-05-21 10:15:00",
+        "detected_at": "2026-06-01 09:15:00",
+        "signal_at": "2026-06-01 09:15:00"
+      },
+      "event_sha256": "e0c2bc7926d408e1f24a23afce886434c8b176808cc594f72cbd7a56d6ba459a",
+      "pattern_id": "CH04",
+      "variant": "legacy_1.0.1",
+      "side": "short",
+      "state": "confirmed",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "visual_review": {
+        "reviewed": true,
+        "gallery_page": 1,
+        "post_fix_recheck": true,
+        "renderer_bundle": "entry-2c4647c74f9905f0b2b659dc9aad2ef8.js"
+      },
+      "semantic_checks": {
+        "finite_causal_coordinates": true,
+        "published_anchors_match_extremes": true
+      },
+      "observations": [],
+      "status": "inspected_source_geometry_consistent",
+      "limitations": "Exact frozen example, not every historical occurrence or timeframe; no trading-performance certification."
+    },
+    {
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "CH05",
+        "variant": "legacy_1.0.1",
+        "side": "long",
+        "state": "confirmed",
+        "episode": 3981,
+        "formation_at": "2026-08-24 13:15:00",
+        "detected_at": "2026-09-01 12:15:00",
+        "signal_at": "2026-09-01 12:15:00"
+      },
+      "event_sha256": "5ee6a58205f508ec414cefe94d0db49c1bc200e9bc637e746155765286a82e80",
+      "pattern_id": "CH05",
+      "variant": "legacy_1.0.1",
+      "side": "long",
+      "state": "confirmed",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "visual_review": {
+        "reviewed": true,
+        "gallery_page": 1,
+        "post_fix_recheck": true,
+        "renderer_bundle": "entry-2c4647c74f9905f0b2b659dc9aad2ef8.js"
+      },
+      "semantic_checks": {
+        "finite_causal_coordinates": true,
+        "published_anchors_match_extremes": true
+      },
+      "observations": [],
+      "status": "inspected_source_geometry_consistent",
+      "limitations": "Exact frozen example, not every historical occurrence or timeframe; no trading-performance certification."
+    },
+    {
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "CH06",
+        "variant": "legacy_1.0.1",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 416,
+        "formation_at": "2024-08-06 10:15:00",
+        "detected_at": "2024-08-12 09:15:00",
+        "signal_at": "2024-08-12 09:15:00"
+      },
+      "event_sha256": "d43bfe30ce784f94b5cc3a4dfaebd79e177fc7edb4bf85552808d5e6d6217b16",
+      "pattern_id": "CH06",
+      "variant": "legacy_1.0.1",
+      "side": "short",
+      "state": "confirmed",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "visual_review": {
+        "reviewed": true,
+        "gallery_page": 1,
+        "post_fix_recheck": true,
+        "renderer_bundle": "entry-2c4647c74f9905f0b2b659dc9aad2ef8.js"
+      },
+      "semantic_checks": {
+        "finite_causal_coordinates": true,
+        "published_anchors_match_extremes": true
+      },
+      "observations": [],
+      "status": "inspected_source_geometry_consistent",
+      "limitations": "Exact frozen example, not every historical occurrence or timeframe; no trading-performance certification."
+    },
+    {
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "CH07",
+        "variant": "legacy_1.0.1",
+        "side": "long",
+        "state": "setup",
+        "episode": 3341,
+        "formation_at": "2026-04-06 15:15:00",
+        "detected_at": "2026-04-22 09:15:00",
+        "signal_at": "2026-04-22 09:15:00"
+      },
+      "event_sha256": "df86fd92e9af31c0cfcf4769adfd809e3eef2f4d581a8afe56e1e5f0d292db96",
+      "pattern_id": "CH07",
+      "variant": "legacy_1.0.1",
+      "side": "long",
+      "state": "setup",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "visual_review": {
+        "reviewed": true,
+        "gallery_page": 1,
+        "post_fix_recheck": true,
+        "renderer_bundle": "entry-2c4647c74f9905f0b2b659dc9aad2ef8.js"
+      },
+      "semantic_checks": {
+        "finite_causal_coordinates": true,
+        "published_anchors_match_extremes": true
+      },
+      "observations": [],
+      "status": "inspected_source_geometry_consistent",
+      "limitations": "Exact frozen example, not every historical occurrence or timeframe; no trading-performance certification."
+    },
+    {
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "CH07",
+        "variant": "legacy_1.0.1",
+        "side": "short",
+        "state": "setup",
+        "episode": 3821,
+        "formation_at": "2026-07-16 12:15:00",
+        "detected_at": "2026-07-30 13:15:00",
+        "signal_at": "2026-07-30 13:15:00"
+      },
+      "event_sha256": "fb2408ef22260f69c86c13172696be8c081de222781b0d6c0c043c2f531dfc35",
+      "pattern_id": "CH07",
+      "variant": "legacy_1.0.1",
+      "side": "short",
+      "state": "setup",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "visual_review": {
+        "reviewed": true,
+        "gallery_page": 2,
+        "post_fix_recheck": true,
+        "renderer_bundle": "entry-2c4647c74f9905f0b2b659dc9aad2ef8.js"
+      },
+      "semantic_checks": {
+        "finite_causal_coordinates": true,
+        "published_anchors_match_extremes": true
+      },
+      "observations": [],
+      "status": "inspected_source_geometry_consistent",
+      "limitations": "Exact frozen example, not every historical occurrence or timeframe; no trading-performance certification."
+    },
+    {
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "4H",
+        "pattern_id": "CH08",
+        "variant": "legacy_1.0.1",
+        "side": "short",
+        "state": "confirmed",
+        "episode": 790,
+        "formation_at": "2025-11-18 13:15:00",
+        "detected_at": "2025-12-17 09:15:00",
+        "signal_at": "2025-12-17 09:15:00"
+      },
+      "event_sha256": "ea3af403531f03f6eba254edd5a2d0bbfe192c0c67153a3bedfbb047e4093c2b",
+      "pattern_id": "CH08",
+      "variant": "legacy_1.0.1",
+      "side": "short",
+      "state": "confirmed",
+      "symbol": "AADHARHFC",
+      "timeframe": "4H",
+      "visual_review": {
+        "reviewed": true,
+        "gallery_page": 2,
+        "post_fix_recheck": true,
+        "renderer_bundle": "entry-2c4647c74f9905f0b2b659dc9aad2ef8.js"
+      },
+      "semantic_checks": {
+        "finite_causal_coordinates": true,
+        "published_anchors_match_extremes": true
+      },
+      "observations": [],
+      "status": "inspected_source_geometry_consistent",
+      "limitations": "Exact frozen example, not every historical occurrence or timeframe; no trading-performance certification."
+    },
+    {
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "4H",
+        "pattern_id": "CH09",
+        "variant": "legacy_1.0.1",
+        "side": "short",
+        "state": "setup",
+        "episode": 316,
+        "formation_at": "2024-12-10 09:15:00",
+        "detected_at": "2025-01-02 13:15:00",
+        "signal_at": "2025-01-02 13:15:00"
+      },
+      "event_sha256": "c18c622d6af2860182b5a695bc29c8852fc5647c49cdfe791ed9348fb8ec034f",
+      "pattern_id": "CH09",
+      "variant": "legacy_1.0.1",
+      "side": "short",
+      "state": "setup",
+      "symbol": "AADHARHFC",
+      "timeframe": "4H",
+      "visual_review": {
+        "reviewed": true,
+        "gallery_page": 2,
+        "post_fix_recheck": true,
+        "renderer_bundle": "entry-2c4647c74f9905f0b2b659dc9aad2ef8.js"
+      },
+      "semantic_checks": {
+        "finite_causal_coordinates": true,
+        "published_anchors_match_extremes": true,
+        "shoulders_and_neck_pivots_match_extremes": true,
+        "head_beyond_both_shoulders": true
+      },
+      "observations": [],
+      "status": "inspected_source_geometry_consistent",
+      "limitations": "Exact frozen example, not every historical occurrence or timeframe; no trading-performance certification."
+    },
+    {
+      "event_identity": {
+        "run": "4b33a5249562631524d6",
+        "symbol": "AADHARHFC",
+        "timeframe": "1H",
+        "pattern_id": "CH10",
+        "variant": "legacy_1.0.1",
+        "side": "long",
+        "state": "setup",
+        "episode": 1390,
+        "formation_at": "2025-02-20 13:15:00",
+        "detected_at": "2025-02-28 12:15:00",
+        "signal_at": "2025-02-28 12:15:00"
+      },
+      "event_sha256": "cc958d8108629d36f783cffb15b6095ee920691a519f8b936a43398eb0b31c56",
+      "pattern_id": "CH10",
+      "variant": "legacy_1.0.1",
+      "side": "long",
+      "state": "setup",
+      "symbol": "AADHARHFC",
+      "timeframe": "1H",
+      "visual_review": {
+        "reviewed": true,
+        "gallery_page": 2,
+        "post_fix_recheck": true,
+        "renderer_bundle": "entry-2c4647c74f9905f0b2b659dc9aad2ef8.js"
+      },
+      "semantic_checks": {
+        "finite_causal_coordinates": true,
+        "published_anchors_match_extremes": true,
+        "shoulders_and_neck_pivots_match_extremes": true,
+        "head_beyond_both_shoulders": true
+      },
+      "observations": [],
+      "status": "inspected_source_geometry_consistent",
+      "limitations": "Exact frozen example, not every historical occurrence or timeframe; no trading-performance certification."
+    }
+  ],
+  "coverage": {
+    "variants": 13,
+    "visually_inspected": 13,
+    "post_fix_rechecked": 13,
+    "source_geometry_checks_passed": 13
+  },
+  "findings": [
+    {
+      "id": "LEGACY_CUP_FIT_REPLACED",
+      "patterns": [
+        "CH01"
+      ],
+      "status": "resolved_visual_recheck_complete",
+      "detail": "Removed browser replacement of the saved quadratic cup curve; rendering now uses the detector fit unchanged."
+    },
+    {
+      "id": "LEGACY_INVENTED_SWINGS",
+      "patterns": [
+        "CH02",
+        "CH03"
+      ],
+      "status": "resolved_visual_recheck_complete",
+      "detail": "Removed inferred extra zigzags that were not published detection anchors."
+    },
+    {
+      "id": "LEGACY_SOURCE_BOUNDS",
+      "patterns": [
+        "CH01",
+        "CH02",
+        "CH03",
+        "CH04",
+        "CH05",
+        "CH06",
+        "CH07",
+        "CH08",
+        "CH09",
+        "CH10"
+      ],
+      "status": "resolved_visual_recheck_complete",
+      "detail": "Fit-to-pattern extent and price scale honor saved formation bounds and levels. All 13 legacy directions visually rechecked."
+    },
+    {
+      "id": "LEGACY_PROJECTION_WORDING",
+      "patterns": [
+        "CH04",
+        "CH05",
+        "CH06",
+        "CH07"
+      ],
+      "status": "resolved_visual_recheck_complete",
+      "detail": "Dashed extensions explicitly describe a mathematical intersection, not a price forecast."
+    }
+  ]
+}

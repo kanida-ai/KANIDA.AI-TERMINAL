@@ -1,0 +1,22 @@
+{
+  "version": "1.0.0",
+  "authorization": "User delegated rule selection and mining per stock and pattern.",
+  "entry": "Next complete candle open after first setup or first confirmed breakout in an episode",
+  "episode_rearm_absent_bars": 3,
+  "holding_bars": {"1H": [3, 6, 12, 24], "4H": [3, 6, 12, 24], "1D": [5, 10, 20, 40], "1W": [2, 4, 8, 13]},
+  "stop_atr": [1.0, 2.0],
+  "target_r": [1.0, 2.0, 3.0],
+  "round_trip_fee_bps": 30,
+  "round_trip_slippage_bps": 10,
+  "shorts": "Hypothetical price studies; no borrow, derivative basis, funding or availability modeled",
+  "training_fraction": 0.6,
+  "validation_fraction": 0.2,
+  "minimum_training_trades": 20,
+  "minimum_validation_trades": 8,
+  "minimum_test_trades_for_estimate": 20,
+  "training_shortlist": 5,
+  "selection": "Maximize mean net return minus one standard error; require positive train and validation score",
+  "test": "Final 20% of candles, untouched during selection; embargo one maximum holding period at each boundary",
+  "same_bar_stop_target": "Stop first; record ambiguity",
+  "source_adjustment": "Use stored OHLC as supplied, reject missing candles and >35% discontinuities; no dividend or corporate action adjustment supplied"
+}

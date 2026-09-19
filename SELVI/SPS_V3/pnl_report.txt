@@ -1,0 +1,29 @@
+==============================================================================
+SELVI ORBlate BASKET — P&L VIEW  (sealed OOS: Jan-2026 → 2026-07-29)
+basket 56 stocks · Rs30,000/sleeve · total allocated Rs1,680,000 · modeled cost 0.13% (PRE real slippage)
+==============================================================================
+
+--- HEADLINE ---
+trading days           : 141
+total trades           : 5,190  (36.8/day avg, range 19-49)
+avg stocks live/day    : 36.8 of 56  (capital deployed ~Rs1,104,255/day, 66% of allocated)
+win-day rate           : 67.4%
+
+                            1x (unlevered)            5x (MIS)
+total P&L                        Rs253,110         Rs1,265,550
+avg P&L / day                      Rs1,795             Rs8,976
+avg return/day (dep.)              +0.155%             +0.777%
+best day                          Rs15,814            Rs79,072
+worst day                         Rs-8,111           Rs-40,556
+max drawdown (Rs)                Rs-11,780           Rs-58,898
+return on ALLOCATED                 +15.1%              +75.3%
+
+--- MONTHLY (month-over-month) ---
+month    days  trades  t/day      P&L 1x       P&L 5x  ret/day 1x  ret/day 5x
+2026-01    20     743   37.2    Rs40,030    Rs200,148     +0.180%     +0.898%
+2026-02    21     782   37.2    Rs41,045    Rs205,225     +0.175%     +0.875%  (MoM +3%)
+2026-03    19     714   37.6    Rs72,136    Rs360,682     +0.337%     +1.684%  (MoM +76%)
+2026-04    20     724   36.2    Rs39,850    Rs199,250     +0.183%     +0.917%  (MoM -45%)
+2026-05    19     696   36.6    Rs26,761    Rs133,804     +0.128%     +0.641%  (MoM -33%)
+2026-06    21     766   36.5    Rs31,869    Rs159,347     +0.139%     +0.693%  (MoM +19%)
+2026-07    21     765   36.4     Rs1,419      Rs7,094     +0.006%     +0.031%  (MoM -96%)

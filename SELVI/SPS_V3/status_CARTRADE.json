@@ -1,0 +1,23 @@
+{
+  "agent": "CARTRADE",
+  "ts": "2026-07-30 10:51:14",
+  "kb_rows": 2572,
+  "tested_this_chunk": 2572,
+  "new_survivors_this_chunk": 116,
+  "distinct_survivors_total": 116,
+  "space_covered": "2573/3200",
+  "champion": {
+    "trigger": "ORBlate",
+    "filters": [
+      "WITHVWAP"
+    ],
+    "target": 0.015,
+    "stop": null,
+    "val_trades": 197,
+    "val_win": 0.700507614213198,
+    "val_net_1x": 0.004107640689311476,
+    "val_net_5x": 0.02053820344655738,
+    "val_tstat": 4.1153473158060985,
+    "val_tgt_hit": 0.5380710659898477
+  }
+}

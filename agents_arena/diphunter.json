@@ -1,0 +1,93 @@
+{
+  "id": "diphunter",
+  "name": "DipHunter",
+  "personality": "patient contrarian",
+  "specialty": "oversold reversal",
+  "voice": "calm, buys fear",
+  "direction": "long",
+  "horizon": 3,
+  "hypothesis": {
+    "trigger": {
+      "type": "oversold",
+      "params": {
+        "n": 3,
+        "thr": 0.08
+      }
+    },
+    "scope": "all",
+    "outcome": {
+      "direction": "long",
+      "horizon": 3
+    },
+    "baseline": "universe-same-world",
+    "cost_bps": 30
+  },
+  "overall_evidence": {
+    "n": 29987,
+    "win": 49.3,
+    "avg": 0.04,
+    "med": -0.09,
+    "pf": 1.01,
+    "edge": 0.28,
+    "expct": 0.04
+  },
+  "market_worlds": {
+    "Normal": {
+      "n": 9686,
+      "win": 51.5,
+      "avg": 0.64,
+      "med": 0.17,
+      "pf": 1.33,
+      "edge": 0.86,
+      "expct": 0.64,
+      "rank": 1
+    },
+    "High-Vol": {
+      "n": 12364,
+      "win": 49.4,
+      "avg": -0.35,
+      "med": -0.09,
+      "pf": 0.89,
+      "edge": -0.32,
+      "expct": -0.35,
+      "rank": 3
+    },
+    "Bear": {
+      "n": 14438,
+      "win": 47.5,
+      "avg": -0.53,
+      "med": -0.3,
+      "pf": 0.84,
+      "edge": -0.29,
+      "expct": -0.53,
+      "rank": 3
+    },
+    "Low-Liquidity": {
+      "n": 258165,
+      "win": 42.6,
+      "avg": -0.34,
+      "med": -0.52,
+      "pf": 0.8,
+      "edge": 0.0,
+      "expct": -0.34,
+      "rank": 3
+    },
+    "Unseen 18-19": {
+      "n": 4667,
+      "win": 46.1,
+      "avg": 0.07,
+      "med": -0.42,
+      "pf": 1.03,
+      "edge": 0.59,
+      "expct": 0.07,
+      "rank": 1
+    }
+  },
+  "today_picks": [
+    "GRAVITA",
+    "J&KBANK",
+    "SUZLON"
+  ],
+  "journal": "[DipHunter \u00b7 patient contrarian]  2026-07-29\n  Today I bought 3 oversold reversal setups: GRAVITA, J&KBANK, SUZLON.\n  My edge (all history): 29987 trades, 49.3% win, +0.04%/trade, +0.28% vs the market.\n  I'm strongest in the 'Normal' world (+0.86% edge) and weakest in 'High-Vol' (-0.32%).",
+  "as_of": "2026-07-29"
+}
