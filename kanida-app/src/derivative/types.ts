@@ -55,7 +55,15 @@ export type CaptureHealth={state:CaptureState;state_text:string;at:string|null;r
  latest_complete_is_here?:boolean;
  /** How many contracts cleared the floors, and how many survived the reader's own filters. The pair is what
   *  separates "nothing qualified" from "your filters excluded everything". */
- cleared:number|null;matched:number|null};
+ cleared:number|null;matched:number|null}&FloorsInForce;
+/** WHICH FLOORS THIS READING WAS GATED ON. A floor rests on a captured number, and a reading that never
+ *  captured one cannot be measured against that floor - so the floor is not applied, the rows are kept, and
+ *  this says so. `floors` stays the three section-3 constants: the definition did not move, only what could be
+ *  applied here. A reader shown a list gated on two floors must never read a sentence naming three. */
+export type FloorsInForce={floors?:Floors|null;floors_text?:string|null;
+ floors_applied?:string[]|null;floors_unmeasured?:string[]|null;floors_absent?:string[]|null;
+ floors_degraded?:boolean|null;floors_unmeasured_text?:string[]|null;
+ floors_labels?:Record<string,string>|null};
 /** One contract at one 15-minute reading. */
 export type ContractRow={instrument_token:number|null;tradingsymbol:string;underlying:string;instrument_type:string;
  strike:number|null;expiry:string;lot_size:number|null;days_to_expiry:number|null;captured_at:string|null;
@@ -69,9 +77,15 @@ export type ContractRow={instrument_token:number|null;tradingsymbol:string;under
  /** The underlying's price at this 15-min reading, when the metrics worker writes one; null = not captured,
   *  shown as a dash. */
  spot:number|null};
-export type UnusualGroup={underlying:string;premium_cr:number;strike_count:number;calls:number;puts:number;
+/** `premium_cr` is NULLABLE, and null is not nought: at a 15-min reading that captured no traded average price
+ *  no contract of this name has a premium traded, so the name has none either. A sum of absences is a dash. */
+export type UnusualGroup={underlying:string;premium_cr:number|null;volume?:number|null;strike_count:number;
+ calls:number;puts:number;
  expiries:string[];days_to_expiry:number|null;oi_change_day:number|null;strikes:ContractRow[]};
-export type Unusual=Envelope&{rows:UnusualGroup[];total:number;floor_premium_cr:number;empty_note:string|null};
+/** `floor_premium_cr` is the premium floor that was IN FORCE. Null says it was not applied at this reading at
+ *  all, which is a different answer from a floor of two crore and must never be printed as one. */
+export type Unusual=Envelope&FloorsInForce&{rows:UnusualGroup[];total:number;
+ floor_premium_cr:number|null;empty_note:string|null};
 export type ChainRow={strike:number;ce:ContractRow|null;pe:ContractRow|null};
 export type Chain=Envelope&{rows:ChainRow[];underlying:string;expiry:string;spot:number|null;
  /** Which reading the spot came from. A chain never borrows an earlier reading's spot to have one. */

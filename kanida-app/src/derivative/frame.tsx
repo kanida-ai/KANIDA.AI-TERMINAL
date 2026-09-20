@@ -120,9 +120,15 @@ export function captureView(capture?:CaptureHealth|null):CaptureView|null{
   .filter(f=>f.entry&&f.entry.column)
   .map(f=>`${f.entry.label}: ${Number(f.entry.present||0).toLocaleString()} of ${rows.toLocaleString()}`);
  if(rows&&counted.length)lines.push(`At this 15-min reading — ${counted.join(' · ')}.`);
- if(capture.source==='candles_15m')lines.push('These readings were rebuilt from 15-minute candles. A candle '
-  +'carries no traded-price average and no underlying price, so nothing in them can be measured against a '
-  +'premium floor.');
+ if(capture.source==='candles_15m')lines.push('This reading was rebuilt from 15-minute candles. A candle '
+  +'carries no traded-price average, so there is no premium traded here to measure anything against.');
+ // WHICH FLOORS THE LIST BELOW WAS ACTUALLY GATED ON. A floor that could not be applied is named, with why,
+ // so a shorter floor set can never read as a quiet market or pass unnoticed as a relaxed screen.
+ const gated=(capture.floors_applied||[]).map(key=>(capture.floors_labels||{})[key]||key);
+ if(capture.floors_degraded&&gated.length)
+  lines.push(`The rows at this 15-min reading were gated on ${gated.length} of the 3 liquidity floors: `
+   +`${gated.join(', ')}.`);
+ for(const line of capture.floors_unmeasured_text||[])lines.push(line);
  if(capture.cleared!=null&&capture.matched!=null&&capture.cleared>0&&capture.matched===0)
   lines.push(`${capture.cleared.toLocaleString()} contracts cleared the floors here; the filters in force `
    +'excluded every one of them.');

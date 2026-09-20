@@ -152,6 +152,14 @@ CREATE TABLE IF NOT EXISTS underlying_snapshots (
     mark_kind        TEXT    NOT NULL DEFAULT 'bar_close',
     spot             REAL,
     spot_symbol      TEXT,               -- which NSE instrument the spot came from
+    -- HOW the spot was obtained, because a reconstruction is not a measurement:
+    --   kite.quote            the live capture's own NSE quote AT this mark;
+    --   kite.candles_15m      the vendor's 15-minute bar close, fetched while
+    --                         rebuilding a closed session from candles;
+    --   market15.candles_15m  the same 15-minute bar close taken from OUR equity
+    --                         store after the fact (db/market15.db).
+    -- NULL means the source was not recorded.  It never means "captured".
+    spot_source      TEXT,
     fut_price        REAL,
     fut_token        INTEGER,
     total_ce_oi      INTEGER,
@@ -223,6 +231,10 @@ CREATE TABLE IF NOT EXISTS metrics (
     volume                REAL,
     oi                    REAL,
     spot                  REAL,
+    -- carried straight off `underlying_snapshots.spot_source` for this mark, so
+    -- a reader of the Derivative tab can tell a captured spot from a rebuilt one
+    -- without joining back to the roll-up table.
+    spot_source           TEXT,
     price_change_pct_15m  REAL,
     oi_change_15m         REAL,
     oi_change_pct_15m     REAL,

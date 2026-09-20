@@ -1442,6 +1442,7 @@ CREATE TABLE IF NOT EXISTS metrics (
     volume                REAL,
     oi                    REAL,
     spot                  REAL,
+    spot_source           TEXT,
     price_change_pct_15m  REAL,
     oi_change_15m         REAL,
     oi_change_pct_15m     REAL,
@@ -1831,17 +1832,39 @@ def load_spots(conn: sqlite3.Connection, captured_at: datetime) -> dict[str, flo
     Absent table or absent row => the underlying simply has no spot, and every
     number that needs one (basis, max-pain distance) carries ``"no spot"``.
     """
+    return {k: v for k, (v, _src) in load_spot_rows(conn, captured_at).items()}
+
+
+def load_spot_sources(conn: sqlite3.Connection, captured_at: datetime) -> dict[str, str]:
+    """Where each of those spots came from — ``underlying_snapshots.spot_source``.
+
+    Carried onto every ``metrics`` row so the tab can tell a spot captured at the
+    mark from one rebuilt afterwards without joining back to the roll-up table.
+    A spot with no recorded source yields no entry: "not recorded" is not a claim
+    that it was captured.
+    """
+    return {k: src for k, (_v, src) in load_spot_rows(conn, captured_at).items()
+            if src}
+
+
+def load_spot_rows(
+    conn: sqlite3.Connection, captured_at: datetime
+) -> dict[str, tuple[float, str | None]]:
+    """``underlying -> (spot, spot_source)`` at this mark.  One read for both."""
     if not table_exists(conn, "underlying_snapshots"):
         return {}
+    has_source = "spot_source" in set(_columns(conn, "underlying_snapshots"))
     stamp = captured_at.isoformat(sep=" ", timespec="seconds")
-    out: dict[str, float] = {}
+    column = "spot_source" if has_source else "NULL AS spot_source"
+    out: dict[str, tuple[float, str | None]] = {}
     for r in conn.execute(
-        "SELECT underlying, spot FROM underlying_snapshots WHERE captured_at IN (?, ?)",
+        f"SELECT underlying, spot, {column} FROM underlying_snapshots"
+        " WHERE captured_at IN (?, ?)",
         (stamp, captured_at.isoformat(timespec="seconds")),
     ):
         v = _num(r["spot"])
         if v is not None:
-            out[r["underlying"]] = v
+            out[r["underlying"]] = (v, r["spot_source"])
     return out
 
 
@@ -1898,7 +1921,9 @@ def compute_for_mark(
     prev_snaps = load_snapshots_at(conn, prev_mark, tokens)
     prev_closes = load_previous_closes(conn, captured_at.date(), tokens)
     baselines = load_tod_baselines(conn, captured_at, tokens)
-    spots = load_spots(conn, captured_at)
+    spot_rows = load_spot_rows(conn, captured_at)
+    spots = {k: v for k, (v, _s) in spot_rows.items()}
+    spot_sources = {k: s for k, (_v, s) in spot_rows.items() if s}
 
     by_underlying: dict[str, list[ContractMetrics]] = {}
     fut_tokens: list[int] = []
@@ -1925,7 +1950,12 @@ def compute_for_mark(
             floors=floors,
         )
         by_underlying.setdefault(c.underlying, []).append(m)
-        contract_rows.append(m.to_row())
+        row = m.to_row()
+        # The spot's provenance travels with the spot.  A row whose underlying
+        # has no recorded source carries None, which reads as "not recorded" and
+        # never as "captured at this mark".
+        row["spot_source"] = spot_sources.get(c.underlying)
+        contract_rows.append(row)
 
     # futures (3.7)
     oi_hist = load_daily_oi_history(conn, captured_at.date(), fut_tokens) if fut_tokens else {}
@@ -1942,7 +1972,9 @@ def compute_for_mark(
             as_of=captured_at,
         )
         futures.append(fb)
-        contract_rows.append(futures_row(fb, snaps[token], c, captured_at, floors))
+        fut = futures_row(fb, snaps[token], c, captured_at, floors)
+        fut["spot_source"] = spot_sources.get(c.underlying)
+        contract_rows.append(fut)
 
     underlying_rows: list[dict[str, Any]] = []
     for und, metrics in by_underlying.items():
@@ -1954,7 +1986,9 @@ def compute_for_mark(
                 und, legs, captured_at=captured_at, expiry=exp,
                 spot=spots.get(und), pcr_series=series,
             )
-            underlying_rows.append(roll.to_row())
+            roll_row = roll.to_row()
+            roll_row["spot_source"] = spot_sources.get(und)
+            underlying_rows.append(roll_row)
 
     written = 0
     if write:

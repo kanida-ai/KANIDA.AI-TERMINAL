@@ -55,6 +55,29 @@ POST_CLOSE_MARK = time(15, 45)
 MARK_BAR_CLOSE = "bar_close"
 MARK_POST_CLOSE = "post_close"
 
+# ── where a spot came from (`underlying_snapshots.spot_source`) ──────────────
+#
+# A spot is not always the F&O vendor's own quote at that instant, and a reader
+# who cannot tell the difference will read a reconstruction as a measurement.
+# So every spot records HOW it was obtained, and a spot with no source recorded
+# says exactly that rather than being assumed to be either.
+#
+#   kite.quote            the live capture's own NSE quote at the mark.  This is
+#                         the only one taken at the instant the mark names.
+#   kite.candles_15m      the underlying's 15-minute bar close, fetched from the
+#                         vendor while rebuilding a closed session from candles.
+#   market15.candles_15m  the underlying's 15-minute bar close taken from OUR
+#                         equity store, db/market15.db, after the fact.  Same
+#                         reading, never a neighbouring bar — but it is our own
+#                         store's number, not the F&O vendor's quote.
+SPOT_SOURCE_QUOTE = "kite.quote"
+SPOT_SOURCE_CANDLES = "kite.candles_15m"
+SPOT_SOURCE_MARKET15 = "market15.candles_15m"
+#: Which of them were taken live, at the mark itself.  Everything else is a
+#: reconstruction and has to be labelled as one wherever it is shown.
+SPOT_SOURCES_CAPTURED = (SPOT_SOURCE_QUOTE,)
+SPOT_SOURCES_REBUILT = (SPOT_SOURCE_CANDLES, SPOT_SOURCE_MARKET15)
+
 #: Wait this long after a mark before quoting, so the exchange has published the
 #: bar's last prints.  A quote is a running snapshot, not a bar, so this is a
 #: settling delay, not a data-availability rule.

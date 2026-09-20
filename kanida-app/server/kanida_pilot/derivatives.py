@@ -46,16 +46,84 @@ FLOOR_PREMIUM_CR=2.0
 FLOOR_OI_LOTS=1
 FLOOR_LAST_PRICE=1.0
 FLOORS={'premium_cr':FLOOR_PREMIUM_CR,'oi_lots':FLOOR_OI_LOTS,'last_price':FLOOR_LAST_PRICE}
+# ==================================================================================================================
+# A FLOOR CAN ONLY BE APPLIED WHERE THE NUMBER IT RESTS ON WAS MEASURED.
+#
+# The three §3 floors rest on three different captured numbers. Premium traded is volume × the exchange's own
+# traded average price, and a 15-minute candle carries no traded average at all - so a session rebuilt from
+# candles has `premium_cr` null on EVERY row. Applying the premium floor there does not filter the reading, it
+# deletes it: at the 15:30 reading of 18 Sep 2026 the store held 10,510 contract rows with a real last price, a
+# real volume and a real open interest, and the screen said "no contract cleared the liquidity floors" - which a
+# trader reads as a quiet market. One unmeasurable derived field was hiding four hours of measured ones.
+#
+# So the floors DEGRADE rather than hide. At a reading where premium was never captured the screener applies the
+# floors it CAN apply, keeps the rows, and says on the card which floors are in force and why the third is not.
+# What it never does is substitute a number. The store carries an ESTIMATED traded average beside the real one,
+# and it is not read here on purpose - the floors decide what a reader is shown, and a number that decides
+# visibility has to be one the exchange reported rather than one a model produced. That column's own NAME is
+# kept out of this file so a test can assert its absence; `test_derivatives_series.py` does exactly that. A
+# degraded floor set is announced on screen, never quietly relaxed, and at a reading where premium IS measured
+# nothing about any of this changes.
+# ==================================================================================================================
+#: Each §3 floor and the `FIELDS` signal it is measured on. The name here is the SIGNAL, which the store may
+#: spell differently (a store with `premium_inr` and no `premium_cr` still measures premium); `_floors_in_force`
+#: resolves it through the same map every card reads by. The OI floor is compared against the contract's own lot
+#: size, which is contract metadata rather than a measurement, so it is not part of what makes the floor
+#: measurable - a row missing it fails the floor in `_passes`, exactly as it always did.
+FLOOR_COLUMNS={'premium_cr':('premium_cr',),'last_price':('last_price',),'oi':('oi','lot_size')}
+#: The order the floors are named in, in text and in `floors_applied`.
+FLOOR_ORDER=('premium_cr','oi','last_price')
+FLOOR_PHRASES={'premium_cr':f'premium traded ≥ ₹{FLOOR_PREMIUM_CR:g} cr',
+ 'oi':f'OI ≥ {FLOOR_OI_LOTS} lot','last_price':f'last price ≥ ₹{FLOOR_LAST_PRICE:g}'}
+#: Why each one could not be applied. One sentence per floor, because "premium was never captured" and "open
+#: interest was never captured" are different facts about the capture and must not share a wording.
+FLOOR_UNMEASURED_TEXT={
+ 'premium_cr':("The premium floor could not be applied at this 15-min reading. Premium traded is volume × the "
+  "exchange's own traded average price, and no traded average was captured here - this reading was rebuilt "
+  "from 15-minute candles, and a candle carries none. It cannot be recovered after the fact. The rows below "
+  "were gated on the floors that COULD be measured; they were never measured against a premium floor and did "
+  "not fail one."),
+ 'oi':('The open-interest floor could not be applied at this 15-min reading: no open interest was captured '
+  'here, so no contract in it was measured against one.'),
+ 'last_price':('The last-price floor could not be applied at this 15-min reading: no last price was captured '
+  'here, so no contract in it was measured against one.'),
+}
+#: The sentence when all three are in force, which is every reading the capture reached. It stays a literal,
+#: not a call: `scripts/check-derivative.cjs` reads this declaration out of the source to assert the wording the
+#: reader gets, and `floors_sentence` returns this very object for the all-three case so the two cannot drift.
 FLOORS_TEXT=(f'Liquidity floors in force: premium traded ≥ ₹{FLOOR_PREMIUM_CR:g} cr, '
  f'OI ≥ {FLOOR_OI_LOTS} lot, last price ≥ ₹{FLOOR_LAST_PRICE:g}.')
-#: Which 15-min reading the screener opens on. The newest one is not always usable: a session rebuilt from
-#: 15-minute candles carries no traded-price average, so `premium_cr` is null for every contract in it and
-#: nothing in it can clear the premium floor. The screener opens on the newest reading that HAS rows over the
-#: floors, says so when that is not the newest, and leaves every reading one click away.
+#: What is said when not one of them could be applied - a reading with no premium, no price and no open
+#: interest. It is not "no floors": it is that nothing here was measured against anything.
+FLOORS_NONE_TEXT=('No liquidity floor could be applied at this 15-min reading: none of the numbers they rest '
+ 'on was captured.')
+def floors_sentence(applied=None):
+ """The floors line for ONE reading: the floors actually in force, named.
+
+ Served as `floors_text` so the card states the floors it was gated on rather than the three constants. A
+ reader who is shown a list gated on two floors must never read a sentence that names three.
+ """
+ keys=[k for k in FLOOR_ORDER if applied is None or k in set(applied)]
+ if len(keys)==len(FLOOR_ORDER):return FLOORS_TEXT
+ if not keys:return FLOORS_NONE_TEXT
+ return 'Liquidity floors in force: '+', '.join(FLOOR_PHRASES[k] for k in keys)+'.'
+#: What the screener ranks by when premium cannot be measured. Ordering by a column that is null on every row
+#: is not an ordering at all - it is insertion order wearing a label. Volume IS captured at a rebuilt reading
+#: (a candle carries traded quantity), so that is what the list is ranked by, and it says so.
+FALLBACK_RANK_FIELD='volume'
+FALLBACK_RANK_LABEL='Most contracts traded'
+FALLBACK_RANK_TEXT=('Premium traded was not captured at this 15-min reading, so it cannot order anything here. '
+ 'This list is ranked by volume - contracts traded, which WAS captured.')
+#: Which 15-min reading the screener opens on. It is the newest reading that has contracts over the floors it
+#: can apply THERE. Before the floors degraded, a rebuilt afternoon cleared nothing at all and the whole tab
+#: fell back to the last live reading - 11:30 on 18 Sep 2026, four hours behind the session's own close. Now a
+#: rebuilt reading is usable on the floors that were measured and the tab opens on it, with the floor that was
+#: not applied named on the card.
 READING_RULE_TEXT=('This screener opens on the newest 15-min reading that has contracts over the liquidity '
- 'floors, which is not always the newest reading the store holds: a reading rebuilt from 15-minute candles '
- 'carries no traded-price average, so no contract in it has a premium and none of them can clear the premium '
- 'floor. Every reading the store holds is still listed, and choosing one moves the whole tab to it.')
+ 'floors it can apply at that reading. Not every floor can be applied at every reading: a reading rebuilt '
+ 'from 15-minute candles carries no traded-price average, so no contract in it has a premium traded and the '
+ 'premium floor is not applied there. The floors actually in force are named on the card. Every reading the '
+ 'store holds is still listed, and choosing one moves the whole tab to it.')
 #: §3.2: fewer than 3 sessions of history is "no baseline", never a ratio.
 MIN_BASELINE_SESSIONS=3
 # ==================================================================================================================
@@ -564,9 +632,15 @@ CAPTURE_FIELD_LABELS={'premium_cr':'premium traded','last_price':'last price','o
 CAPTURE_REPORTED_FIELDS=CAPTURE_REQUIRED_FIELDS+('spot',)
 CAPTURE_STATE_TEXT={
  'missing_capture':'No contract row was captured at this 15-min reading.',
- 'partial_capture':('Nothing was measured at this 15-min reading. Contract rows are here, but the fields the '
-  'liquidity floors are applied to were not captured, so no contract could be measured against them at all. '
-  'This is a gap in F&O capture, not a quiet market — and it says nothing about how much was traded.'),
+ # A PARTIAL CAPTURE IS A DEGRADED READING, NOT AN EMPTY ONE. It used to end the sentence at "nothing could
+ # be measured", which was true of the floor that was missing and false of the two that were not: at the 15:30
+ # reading of 18 Sep 2026 that wording sat over 10,510 rows with a real last price, a real volume and a real
+ # open interest. So it now says which floors were applied and which one was not, and the response carries
+ # both lists beside it.
+ 'partial_capture':('Part of this 15-min reading was not captured. The fields that are here were measured and '
+  'the floors that rest on them were applied; the floors that rest on the missing fields were not applied at '
+  'all, so no contract here failed one. This is a gap in F&O capture, not a quiet market — and it says '
+  'nothing about how much was traded.'),
  'complete':'Every field the liquidity floors need was captured at this 15-min reading.',
  'no_eligible_rows':('Every field the floors need was captured at this 15-min reading, and no contract '
   'cleared them. This is a reading of the market, not a gap in it.'),
@@ -650,6 +724,11 @@ class Derivatives:
   #: read through before it can be ruled out, which measured 124 ms over the 18 rebuilt readings of
   #: 18 Sep 2026. That is the one moment a reader most needs the answer, so it is computed once.
   self._complete_cache=(None,None)
+  #: reading -> the floors that reading can be measured against, from `_floors_in_force`. One screener
+  #: request asks the same question from the SQL builder, the row filter, the ranking and the usable-reading
+  #: walk; the answer is three index seeks and it must be the same answer in all four places, or the list, the
+  #: sentence above it and the sort below it would describe different screens.
+  self._floor_cache={}
 
  # --- connection ------------------------------------------------------
  def _connect(self):
@@ -827,6 +906,58 @@ class Derivatives:
   clauses.append(f'"{field}" is not null')
   return bool(self._rows('select 1 from metrics where '+' and '.join(clauses)+' limit 1',(at,)))
 
+ def _floors_in_force(self,at,names=None):
+  """Which of the §3 floors THIS reading can actually be measured against, and which it cannot.
+
+  A floor is in force when the store carries every column it rests on AND that reading filled at least one
+  of them. A floor whose column is present but empty at this reading is `unmeasured`: it is not applied, and
+  the rows it would have judged are kept and said to be ungated on it. A floor whose column the store does
+  not carry at all is `absent` - the query never had that clause to begin with, which is a different fact
+  and is reported under its own name rather than folded in.
+
+  Three `_reading_has` seeks, each of which stops at the first matching row, cached per reading.
+
+  What is NOT here, deliberately: any fallback number. The store's ESTIMATED traded average would make
+  `premium_cr` look measurable at a rebuilt reading, and it is an estimate rather than the exchange's figure.
+  A floor decides what a reader sees; it is applied on a captured number or it is not applied and says so.
+  """
+  at=str(at or '').strip()
+  if not at:return {'applied':(),'unmeasured':(),'absent':tuple(FLOOR_ORDER)}
+  hit=self._floor_cache.get(at)
+  if hit is not None:return hit
+  # THE COLUMN THE READER ACTUALLY USES, not the name §3 gives the floor. `FIELDS` carries the spellings a
+  # store may use - a store that writes `premium_inr` and no `premium_cr` is measuring premium perfectly well,
+  # and asking after the literal name would have called its premium floor unmeasurable and degraded a screen
+  # that needs no degrading.
+  resolved=self._columns('metrics').map
+  applied,unmeasured,absent=[],[],[]
+  for floor in FLOOR_ORDER:
+   column=resolved.get(FLOOR_COLUMNS[floor][0])
+   if column is None and floor=='premium_cr':column=resolved.get('premium_inr')
+   if column is None:absent.append(floor);continue
+   if self._reading_has(at,column):applied.append(floor)
+   else:unmeasured.append(floor)
+  out={'applied':tuple(applied),'unmeasured':tuple(unmeasured),'absent':tuple(absent)}
+  if len(self._floor_cache)>64:self._floor_cache.clear()
+  self._floor_cache[at]=out
+  return out
+
+ @staticmethod
+ def _floor_note(force):
+  """Everything a card needs to SAY about the floors it was gated on, as facts rather than a paragraph.
+
+  `floors_degraded` is the one a reader must not be able to miss: it means the list in front of them was
+  gated on fewer floors than §3 names, and `floors_unmeasured_text` says which and why.
+  """
+  applied=list((force or {}).get('applied') or ())
+  unmeasured=list((force or {}).get('unmeasured') or ())
+  absent=list((force or {}).get('absent') or ())
+  return {'floors':dict(FLOORS),'floors_text':floors_sentence(applied),
+   'floors_applied':applied,'floors_unmeasured':unmeasured,'floors_absent':absent,
+   'floors_degraded':bool(unmeasured or absent),
+   'floors_unmeasured_text':[FLOOR_UNMEASURED_TEXT[k] for k in unmeasured if k in FLOOR_UNMEASURED_TEXT],
+   'floors_labels':dict(FLOOR_PHRASES)}
+
  def _latest_complete_reading(self,readings,limit=None):
   """The newest reading whose required fields were all captured, walking back at most `limit` readings.
 
@@ -869,7 +1000,8 @@ class Derivatives:
    return {'state':'failed','state_text':CAPTURE_STATE_TEXT['failed'],'at':at or None,'rows':0,
     'coverage':{},'missing_fields':[],'source':'none','healthy':False,'capture_text':CAPTURE_TEXT,
     'states':list(CAPTURE_STATES),'latest_attempted_at':None,'latest_available_at':None,
-    'latest_complete_at':None,'cleared':None,'matched':None,'required_fields':list(CAPTURE_REQUIRED_FIELDS)}
+    'latest_complete_at':None,'cleared':None,'matched':None,'required_fields':list(CAPTURE_REQUIRED_FIELDS),
+    **self._floor_note(None)}
   if readings is None:readings=self.screener_readings()
   attempted=(readings[0]['at'] if readings else None) or self._max('metrics') or None
   available=next((r['at'] for r in (readings or ()) if self._reading_rows(r.get('at'))),None)
@@ -884,8 +1016,12 @@ class Derivatives:
   elif cleared is not None and not cleared:state='no_eligible_rows'
   elif cleared and matched is not None and not matched:state='filtered_out'
   else:state='complete'
+  # THE FLOORS THIS READING WAS GATED ON, beside the coverage that decided them. The chip and the screener
+  # take the same answer from the same place, so the amber caveat and the list under it can never describe
+  # two different screens.
   return {'state':state,'state_text':CAPTURE_STATE_TEXT[state],'at':at or None,'rows':rows,
    'coverage':coverage,'missing_fields':missing,'empty_fields':empty,
+   **(self._floor_note(self._floors_in_force(at)) if at and rows else self._floor_note(None)),
    # WHERE THE READING CAME FROM. A reading whose premium column is empty for every row is one the metrics
    # worker rebuilt from 15-minute candles; a candle carries no traded-price average, and that is not a
    # guess about the store, it is what an empty premium column at a full reading means.
@@ -1044,15 +1180,31 @@ class Derivatives:
    'spot':_round(row.get('spot')),
   }
 
- def _passes(self,row):
-  """§3 liquidity floors. A row missing one of the three numbers does not pass - absence is not evidence."""
-  premium,price=row.get('premium_cr'),row.get('last_price')
-  lots=row.get('oi_lots')
-  if lots is None:
-   oi,lot=row.get('oi'),row.get('lot_size')
-   lots=(oi/lot) if oi is not None and lot else None
-  return (premium is not None and premium>=FLOOR_PREMIUM_CR and price is not None and price>=FLOOR_LAST_PRICE
-   and lots is not None and lots>=FLOOR_OI_LOTS)
+ def _passes(self,row,applied=None):
+  """The §3 liquidity floors that are IN FORCE at this reading, applied to one row.
+
+  Within a floor that IS in force nothing changed and nothing is softened: a row missing the number is a row
+  that does not pass, because absence is not evidence. What `applied` changes is which floors are asked at
+  all. It defaults to all three, so every existing caller keeps the behaviour it had.
+
+  The distinction is the whole point. "This contract's premium was below ₹2 cr" is a reading of the market;
+  "no premium was captured at this reading" is a gap in ours. Judging the second as if it were the first is
+  what emptied the screen for four hours of a real session.
+  """
+  keys=FLOOR_ORDER if applied is None else set(applied)
+  if 'premium_cr' in keys:
+   premium=row.get('premium_cr')
+   if premium is None or premium<FLOOR_PREMIUM_CR:return False
+  if 'last_price' in keys:
+   price=row.get('last_price')
+   if price is None or price<FLOOR_LAST_PRICE:return False
+  if 'oi' in keys:
+   lots=row.get('oi_lots')
+   if lots is None:
+    oi,lot=row.get('oi'),row.get('lot_size')
+    lots=(oi/lot) if oi is not None and lot else None
+   if lots is None or lots<FLOOR_OI_LOTS:return False
+  return True
 
  # --- filters ----------------------------------------------------------
  def filters(self):
@@ -1104,20 +1256,34 @@ class Derivatives:
    if option_type:clauses.append('c.instrument_type=?');params.append(option_type)
    shaped,as_of,columns=self._metric_rows(' and '.join(clauses),tuple(params),types=OPTION_TYPES,
     underlying=underlying)
+  # THE SAME DEGRADATION AS THE SCREENER, resolved from the same place. Card 1 rests on the same three floors,
+  # so a reading with no traded average empties it for the same reason and must keep its rows for the same one.
+  # No reading at all is not a degraded reading: there is nothing to serve either way, and the card must not
+  # announce a relaxation that never happened. With no `as_of` the floors stand as §3 writes them.
+  force=(self._floors_in_force(as_of) if as_of
+   else {'applied':tuple(FLOOR_ORDER),'unmeasured':(),'absent':()})
+  in_force=set(force['applied'])
   floor=max(FLOOR_PREMIUM_CR,_num(min_premium_cr) or 0.0)
+  if min_premium_cr is not None and as_of and 'premium_cr' not in in_force:
+   raise ValueError('min_premium_cr cannot be applied at the 15-min reading of '+str(as_of)+
+    ': no traded average price was captured there, so no contract in it has a premium traded.')
   names=self._watchlist(watchlist)
   kept=[]
   for row in shaped:
-   if not self._passes(row):continue
-   if (row.get('premium_cr') or 0)<floor:continue
+   if not self._passes(row,force['applied']):continue
+   if 'premium_cr' in in_force and (row.get('premium_cr') or 0)<floor:continue
    if names is not None and row['underlying'].upper() not in names:continue
    if max_dte is not None and (row.get('days_to_expiry') is None or row['days_to_expiry']>max_dte):continue
    kept.append(row)
   groups={}
   for row in kept:
-   group=groups.setdefault(row['underlying'],{'underlying':row['underlying'],'premium_cr':0.0,'strikes':[],
+   group=groups.setdefault(row['underlying'],{'underlying':row['underlying'],'premium_cr':0.0,
+    'has_premium':False,'volume':0,'strikes':[],
     'expiries':set(),'calls':0,'puts':0,'oi_change_day':0,'has_oi_change':False})
-   group['premium_cr']+=row.get('premium_cr') or 0.0
+   # A sum of absences is not ₹0 cr. See `_screener_groups`: the same rule, for the same reason.
+   if row.get('premium_cr') is not None:
+    group['premium_cr']+=row['premium_cr'];group['has_premium']=True
+   group['volume']+=row.get('volume') or 0
    group['strikes'].append(row)
    if row.get('expiry'):group['expiries'].add(row['expiry'])
    if row['instrument_type']=='CE':group['calls']+=1
@@ -1125,14 +1291,19 @@ class Derivatives:
    if row.get('oi_change_day') is not None:group['oi_change_day']+=row['oi_change_day'];group['has_oi_change']=True
   out=[]
   for group in groups.values():
-   strikes=sorted(group['strikes'],key=lambda r:-(r.get('premium_cr') or 0))
-   out.append({'underlying':group['underlying'],'premium_cr':round(group['premium_cr'],2),
+   strikes=sorted(group['strikes'],key=(lambda r:-(r.get('premium_cr') or 0)) if group['has_premium']
+    else (lambda r:(-(r.get('volume') or 0),r.get('tradingsymbol') or '')))
+   out.append({'underlying':group['underlying'],
+    'premium_cr':(round(group['premium_cr'],2) if group['has_premium'] else None),
+    'volume':group['volume'],
     'strike_count':len(strikes),'calls':group['calls'],'puts':group['puts'],
     'expiries':sorted(group['expiries']),
     'days_to_expiry':min([s['days_to_expiry'] for s in strikes if s['days_to_expiry'] is not None],default=None),
     'oi_change_day':group['oi_change_day'] if group['has_oi_change'] else None,
     'strikes':strikes[:20]})
-  out.sort(key=lambda g:-g['premium_cr'])
+  # Ranked by what this reading measured: premium traded where it is there, volume where it is not.
+  out.sort(key=lambda g:(-(g['premium_cr'] if g['premium_cr'] is not None else (g['volume'] or 0)),
+   g['underlying'] or ''))
   cut=max(1,min(int(limit or ROW_LIMIT_DEFAULT),ROW_LIMIT_MAX))
   # The same rule the screener works to: an empty list says what actually happened. A reading whose premium
   # column was never filled did not fail a premium floor - nothing in it was measured against one.
@@ -1141,7 +1312,12 @@ class Derivatives:
   capture=self.capture_health(as_of or '',cleared=self._cleared_count(as_of or ''),
    matched=len(out)) if as_of else None
   return self.envelope(as_of=as_of,source='metrics_module' if delegated else 'store',missing=columns.missing,
-   rows=out[:cut],total=len(out),floor_premium_cr=floor,capture=capture,
+   rows=out[:cut],total=len(out),
+   # `floor_premium_cr` is the floor that was IN FORCE. None says it was not applied at all, which is a
+   # different answer from "₹2 cr" and must not be printed as one.
+   floor_premium_cr=(floor if 'premium_cr' in in_force else None),
+   ranking=self._ranking('underlying',force['applied']),
+   **self._floor_note(force),capture=capture,
    context=self.context(underlying,expiry,session_date(as_of),as_of or '',
     'metrics_module' if delegated else 'store').as_dict(),
    empty_note=(None if out or not capture else capture['state_text']),
@@ -2932,28 +3108,47 @@ class Derivatives:
   row=self._one('select count(*) as n from metrics where captured_at=?',(at,))
   return _int((row or {}).get('n'))
 
- def _clears_floors(self,at,names=None):
-  """Does ONE reading hold a single contract over the §3 floors? One index seek that stops at the first row.
+ def _floor_clauses(self,names,applied,min_premium_cr=None):
+  """The §3 floors that are in force at a reading, as SQL. ONE builder, so the screener's own query, its
+  existence test and its floors-only count can never drift into asking three different questions.
 
-  The same three floors the screener itself applies, in the same order, over the same columns - premium
-  traded, last price, and open interest of at least one lot. Nothing is substituted for a floor: a reading
-  whose premium was never reported has no premium, and a contract with no premium does not clear a premium
-  floor. The store also carries an ESTIMATED traded price, and it is not read here on purpose: the floors
-  decide what the reader is shown, and a number that decides visibility has to be one the exchange reported
-  rather than one a model produced.
+  A floor is written only when the store carries its column AND that reading measured it. Nothing is
+  substituted for a floor that was not measured: the row is kept and the card says the floor was not applied.
+  """
+  keys=FLOOR_ORDER if applied is None else set(applied)
+  clauses,params=[],[]
+  if 'premium_cr' in keys and 'premium_cr' in names:
+   # a caller may RAISE the premium floor, never lower it; the §3 constant is the floor of the floor
+   clauses.append('premium_cr>=?');params.append(max(FLOOR_PREMIUM_CR,_num(min_premium_cr) or 0.0))
+  if 'last_price' in keys and 'last_price' in names:
+   clauses.append('last_price>=?');params.append(FLOOR_LAST_PRICE)
+  # `oi_lots` is not a column: the floor is open interest against the contract's own lot size, exactly as
+  # `_passes` works it out row by row. A row missing either number does not pass - absence is not evidence.
+  if 'oi' in keys and 'oi' in names and 'lot_size' in names:
+   clauses.append('oi is not null and lot_size is not null and lot_size>0 and oi>=lot_size*?')
+   params.append(FLOOR_OI_LOTS)
+  return clauses,params
+
+ def _clears_floors(self,at,names=None):
+  """Does ONE reading hold a single contract over the floors IT can be measured against? One index seek.
+
+  The same floors the screener itself applies at that reading, in the same order, over the same columns,
+  through the same builder. A floor whose number was never captured at this reading is not asked here either
+  - otherwise this walk would rule out a reading the screener can serve perfectly well, which is exactly
+  what kept the whole tab four hours behind the close of 18 Sep 2026.
+
+  The store also carries an ESTIMATED traded price, and it is not read here on purpose: the floors decide
+  what the reader is shown, and a number that decides visibility has to be one the exchange reported rather
+  than one a model produced.
   """
   if 'metrics' not in self._tables() or not at:return False
   if names is None:names=self._column_names('metrics')
+  force=self._floors_in_force(at,names)
   clauses,params=[],[]
   if self._has_scope():clauses.append("scope='contract'")
   clauses.append('captured_at=?');params.append(at)
-  if 'premium_cr' in names:clauses.append('premium_cr>=?');params.append(FLOOR_PREMIUM_CR)
-  if 'last_price' in names:clauses.append('last_price>=?');params.append(FLOOR_LAST_PRICE)
-  # `oi_lots` is not a column: the floor is open interest against the contract's own lot size, exactly as
-  # `_passes` works it out row by row. A row missing either number does not pass - absence is not evidence.
-  if 'oi' in names and 'lot_size' in names:
-   clauses.append('oi is not null and lot_size is not null and lot_size>0 and oi>=lot_size*?')
-   params.append(FLOOR_OI_LOTS)
+  floors,floor_params=self._floor_clauses(names,force['applied'])
+  clauses+=floors;params+=floor_params
   if 'instrument_type' in names:clauses.append("instrument_type in ('CE','PE')")
   return bool(self._rows('select 1 from metrics where '+' and '.join(clauses)+' limit 1',tuple(params)))
 
@@ -2967,14 +3162,12 @@ class Derivatives:
   """
   if 'metrics' not in self._tables() or not at:return 0
   if names is None:names=self._column_names('metrics')
+  force=self._floors_in_force(at,names)
   clauses,params=[],[]
   if self._has_scope():clauses.append("scope='contract'")
   clauses.append('captured_at=?');params.append(at)
-  if 'premium_cr' in names:clauses.append('premium_cr>=?');params.append(FLOOR_PREMIUM_CR)
-  if 'last_price' in names:clauses.append('last_price>=?');params.append(FLOOR_LAST_PRICE)
-  if 'oi' in names and 'lot_size' in names:
-   clauses.append('oi is not null and lot_size is not null and lot_size>0 and oi>=lot_size*?')
-   params.append(FLOOR_OI_LOTS)
+  floors,floor_params=self._floor_clauses(names,force['applied'])
+  clauses+=floors;params+=floor_params
   if 'instrument_type' in names:clauses.append("instrument_type in ('CE','PE','FUT')")
   row=self._one('select count(*) as n from metrics where '+' and '.join(clauses),tuple(params))
   return _int((row or {}).get('n')) or 0
@@ -2982,15 +3175,19 @@ class Derivatives:
  def _usable_reading(self,readings):
   """The newest reading a reader can actually do anything with, and how many newer ones hold nothing.
 
-  The newest reading the store holds is not always one the tab can show. A session whose capture died is
-  rebuilt from 15-minute candles, and a candle carries no traded-price average - so `premium_cr` is null for
-  every contract in it and NOTHING in that reading can clear the §2 crore floor. Defaulting to it hands the
-  reader an empty screener, no row to click, and therefore no symbol for any block on the tab.
+  The newest reading the store holds is not always one the tab can show. A session with no contract rows at
+  all, or one whose every measurable floor rejects everything, hands the reader an empty screener, no row to
+  click, and therefore no symbol for any block on the tab.
 
-  So the default is the newest reading that has contracts over the floors. It is resolved here, once, next to
-  the coverage the screener already computes, rather than by a browser that would have to fetch readings and
-  throw them away. Nothing is hidden by it: every reading the store holds is still in `readings` and still one
-  click away, and the response says which reading this is and that it is not the newest.
+  A rebuilt reading is NO LONGER one of those. It carries no traded-price average, so the premium floor is
+  not applied there (`_floors_in_force`), and its rows are measured against the two floors that were captured
+  - which is why the 15:45 reading of 18 Sep 2026 is now usable, and why the tab no longer falls back four
+  hours to 11:30 while ten thousand contracts with real prices sit unread.
+
+  It is resolved here, once, next to the coverage the screener already computes, rather than by a browser that
+  would have to fetch readings and throw them away. Nothing is hidden by it: every reading the store holds is
+  still in `readings` and still one click away, and the response says which reading this is and that it is not
+  the newest.
 
   Returns (at, skipped) - the reading to serve, and how many newer readings were walked past to reach it.
   When no reading clears the floors at all, the newest is served and `skipped` is 0: an empty screener under
@@ -3018,19 +3215,34 @@ class Derivatives:
    'reading_rule':READING_RULE_TEXT}
 
  @staticmethod
- def _ranking(view):
+ def _ranking(view,applied=None):
   """The order this view is ACTUALLY served in, with every key and its direction.
 
   It is served with the rows because the page used to print one sort while the list obeyed another: the block
   below the screener took its default instrument from row one of the unusual-ranked list and called it
   "Busiest by premium", which the ordering never guaranteed. A page that prints the server's own answer to
   "what is this sorted by" cannot drift from it again.
+
+  WHEN PREMIUM WAS NOT CAPTURED it cannot be a sort key either. Ordering rows by a column that is null on
+  every one of them is insertion order wearing a label, and this response would then be printing a sort the
+  list does not obey - the very drift the block above exists to prevent. So the key is swapped for volume,
+  which IS captured at a rebuilt reading, and the swap is stated rather than assumed.
   """
+  degraded=applied is not None and 'premium_cr' not in set(applied)
+  fallback={'field':FALLBACK_RANK_FIELD,'direction':'desc','text':FALLBACK_RANK_TEXT}
   if view=='underlying':
-   return {'view':view,'label':SCREENER_RANK_LABEL,'text':SCREENER_RANK_TEXT,
-    'keys':[dict(k) for k in SCREENER_RANK_KEYS]}
-  return {'view':view,'label':CONTRACT_RANK_LABEL,'text':CONTRACT_RANK_TEXT,
-   'keys':[dict(k) for k in CONTRACT_RANK_KEYS]}
+   keys=[dict(k) for k in SCREENER_RANK_KEYS]
+   if degraded:keys=[k for k in keys if k['field']!='premium_cr']
+   if degraded:keys.insert(-1,dict(fallback))
+   return {'view':view,'label':SCREENER_RANK_LABEL,
+    'text':(SCREENER_RANK_TEXT if not degraded else
+     'One row per instrument, ordered by: most distinct condition types, then most contracts flagged, then '
+     'largest volume traded, then instrument name A to Z. '+FALLBACK_RANK_TEXT),
+    'keys':keys,'degraded':degraded,'ranked_by':('premium_cr' if not degraded else FALLBACK_RANK_FIELD)}
+  return {'view':view,'label':(CONTRACT_RANK_LABEL if not degraded else FALLBACK_RANK_LABEL),
+   'text':(CONTRACT_RANK_TEXT if not degraded else 'One row per contract, largest volume traded first. '+FALLBACK_RANK_TEXT),
+   'keys':([dict(k) for k in CONTRACT_RANK_KEYS] if not degraded else [dict(fallback)]),
+   'degraded':degraded,'ranked_by':('premium_cr' if not degraded else FALLBACK_RANK_FIELD)}
 
  def _screener_groups(self,rows):
   """One row per UNDERLYING, out of the contract rows that cleared the floors and the filters.
@@ -3077,14 +3289,18 @@ class Derivatives:
    group=groups.get(name)
    if group is None:
     group=groups[name]={'underlying':name,'underlying_kind':row.get('underlying_kind'),
-     'contracts':0,'options':0,'futures':0,'calls':0,'puts':0,'premium_cr':0.0,'volume':0,'oi':0,
+     # `has_premium` is why `premium_cr` is not simply a running total. At a reading that captured no traded
+     # average price EVERY contract's premium is absent, and a sum of absences is not ₹0 cr - it is no number
+     # at all. Printing 0.0 there would be this method inventing the one figure the whole card is about.
+     'contracts':0,'options':0,'futures':0,'premium_cr':0.0,'has_premium':False,
+     'calls':0,'puts':0,'volume':0,'oi':0,
      'oi_change_day':0,'has_oi_change_day':False,'oi_change_15m':0,'has_oi_change_15m':False,
      'spot':None,'spot_disagrees':False,'expiries':set(),'days_to_expiry':None,
      'volume_ratio_max':None,'volume_ratio_max_symbol':None,'volume_baseline_contracts':0,
      # How many of this name's contracts could carry each ratio at all. THE DENOMINATOR IS THE POINT: the
      # store computes neither §3.2 nor §3.3 for a futures contract, so a futures-only name has nothing to
      # count - and "0 over 1" would read as "nothing unusual" when the truth is "not measured for futures".
-     'volume_to_oi_contracts':0,'volume_to_oi_over_1':0,'buildup_counts':{},'top':None,
+     'volume_to_oi_contracts':0,'volume_to_oi_over_1':0,'buildup_counts':{},'top':None,'top_by_volume':None,
      # WHAT IS UNUSUAL IN THIS NAME, AND IT IS THREE DIFFERENT NUMBERS.
      #
      #   `unusual`              how many CONTRACTS the store flagged;
@@ -3105,7 +3321,8 @@ class Derivatives:
    elif kind=='PE':group['puts']+=1;group['options']+=1
    else:group['futures']+=1
    # --- the sums: rupees and contracts, which add ---
-   group['premium_cr']+=row.get('premium_cr') or 0.0
+   if row.get('premium_cr') is not None:
+    group['premium_cr']+=row['premium_cr'];group['has_premium']=True
    group['volume']+=row.get('volume') or 0
    group['oi']+=row.get('oi') or 0
    if row.get('oi_change_day') is not None:
@@ -3174,16 +3391,26 @@ class Derivatives:
     group['unusual_contracts'].append({'tradingsymbol':row.get('tradingsymbol') or '',
      'instrument_type':row.get('instrument_type') or '','strike':row.get('strike'),
      'expiry':row.get('expiry') or '','premium_cr':row.get('premium_cr'),'triggers':evidence})
-   # the busiest contract of this underlying, by the same measure the list is sorted on
+   # THE BUSIEST CONTRACT OF THIS NAME, by the same measure the list is sorted on - and at a reading with no
+   # premium that measure is volume, not a comparison of Nones that would hand back whichever row arrived
+   # first. Both candidates are carried and the one that fits this reading is chosen below.
+   candidate={'tradingsymbol':row.get('tradingsymbol') or '','strike':row.get('strike'),
+    'instrument_type':row.get('instrument_type') or '','premium_cr':row.get('premium_cr'),
+    'volume':row.get('volume'),
+    'instrument_token':row.get('instrument_token'),'expiry':row.get('expiry') or '',
+    'days_to_expiry':row.get('days_to_expiry')}
    top=group['top']
-   if top is None or (row.get('premium_cr') or 0.0)>(top.get('premium_cr') or 0.0):
-    group['top']={'tradingsymbol':row.get('tradingsymbol') or '','strike':row.get('strike'),
-     'instrument_type':row.get('instrument_type') or '','premium_cr':row.get('premium_cr'),
-     'instrument_token':row.get('instrument_token'),'expiry':row.get('expiry') or '',
-     'days_to_expiry':row.get('days_to_expiry')}
+   if top is None or (row.get('premium_cr') or 0.0)>(top.get('premium_cr') or 0.0):group['top']=candidate
+   busiest=group['top_by_volume']
+   if busiest is None or (row.get('volume') or 0)>(busiest.get('volume') or 0):
+    group['top_by_volume']=candidate
   out=[]
   for group in groups.values():
-   group['premium_cr']=_round(group['premium_cr'],2)
+   # A SUM OF NOTHING IS NOT NOUGHT. No contract of this name carried a premium at this reading, so the name
+   # has no premium traded - a dash, which the tab already renders, and never "₹0.0 cr traded".
+   group['premium_cr']=_round(group['premium_cr'],2) if group['has_premium'] else None
+   if not group['has_premium']:group['top']=group['top_by_volume']
+   group.pop('has_premium');group.pop('top_by_volume')
    group['expiries']=sorted(group['expiries'])
    group['oi_change_day']=group['oi_change_day'] if group['has_oi_change_day'] else None
    group['oi_change_15m']=group['oi_change_15m'] if group['has_oi_change_15m'] else None
@@ -3218,7 +3445,11 @@ class Derivatives:
   # The last key is the NAME, so two instruments level on all three counts come out in the same order on every
   # request and on every machine. Without it the order of a tie was whatever order the rows happened to arrive in.
   # ==================================================================================================================
-  out.sort(key=lambda g:(-(g['unusual_rule_count'] or 0),-(g['unusual'] or 0),-(g['premium_cr'] or 0.0),
+  # The third key is the largest number this READING can support: premium traded where it was captured, and
+  # volume where it was not. Sorting on a premium that is None for every name is not a sort at all - it is the
+  # order the rows arrived in, printed under a caption that claims otherwise. `_ranking` says which it was.
+  out.sort(key=lambda g:(-(g['unusual_rule_count'] or 0),-(g['unusual'] or 0),
+   -(g['premium_cr'] if g['premium_cr'] is not None else (g['volume'] or 0)),
    g['underlying'] or ''))
   return out
 
@@ -3272,7 +3503,9 @@ class Derivatives:
    return self.envelope(rows=[],applied=[],available_filters=available,filters={'applied':[],'available':available},
     readings=readings,total=0,scanned=0,capture=capture,
     context=self.context(source='metrics' if self._has_scope() else 'store').as_dict(),
-    floors=dict(FLOORS),floors_text=FLOORS_TEXT,moneyness_text=MONEYNESS_TEXT,
+    floors=dict(FLOORS),floors_text=FLOORS_TEXT,floors_applied=list(FLOOR_ORDER),floors_unmeasured=[],
+    floors_absent=[],floors_degraded=False,floors_unmeasured_text=[],floors_labels=dict(FLOOR_PHRASES),
+    moneyness_text=MONEYNESS_TEXT,
     index_underlyings=list(INDEX_KINDS),coverage=None,limit=0,buildup_window=BUILDUP_WINDOWS[0],
     view=str(asked.get('group') or SCREENER_VIEW_DEFAULT),views=list(SCREENER_VIEWS),
     ranking=self._ranking(str(asked.get('group') or SCREENER_VIEW_DEFAULT)),
@@ -3280,16 +3513,37 @@ class Derivatives:
     groups_total=0,contracts_total=0,empty_note=capture['state_text'],**reading)
   clauses.append('captured_at=?');params.append(at)
   applied.append({'key':'at','value':at,'always':True,'text':f'The 15-minute reading of {at}.'})
-  # §3's floors. ALWAYS on, and `min_premium_cr` may only raise the premium floor, never lower it.
+  # ========================================================================================================
+  # §3's FLOORS, DEGRADED RATHER THAN HIDDEN.
+  #
+  # Every floor whose number this reading captured is applied exactly as before. A floor whose number was
+  # never captured is NOT applied - and is named, in `floors_unmeasured` and in `floors_text`, so the reader
+  # knows the list in front of them was gated on two floors and not three. The rows are kept: a contract with
+  # no premium did not fail a premium floor, it was never measured against one, and deleting it from the
+  # screen turns a gap in our capture into a statement about the market.
+  # ========================================================================================================
+  force=self._floors_in_force(at,names)
+  in_force=set(force['applied'])
   floor=max(FLOOR_PREMIUM_CR,_num(asked.get('min_premium_cr')) or 0.0)
-  if 'premium_cr' in names:clauses.append('premium_cr>=?');params.append(floor)
-  if 'last_price' in names:clauses.append('last_price>=?');params.append(FLOOR_LAST_PRICE)
-  applied.append({'key':'min_premium_cr','value':floor,'always':True,
-   'text':f'Premium traded at or above ₹{floor:g} cr (the §3 floor is ₹{FLOOR_PREMIUM_CR:g} cr).'})
-  applied.append({'key':'min_last_price','value':FLOOR_LAST_PRICE,'always':True,
-   'text':f'Last price at or above ₹{FLOOR_LAST_PRICE:g} (§3 floor).'})
-  applied.append({'key':'min_oi_lots','value':FLOOR_OI_LOTS,'always':True,
-   'text':f'Open interest at or above {FLOOR_OI_LOTS} lot (§3 floor).'})
+  if 'min_premium_cr' in asked and 'premium_cr' not in in_force:
+   # A filter the caller ASKED for and this reading cannot honour is a refusal the caller sees, exactly as
+   # every other unhonourable filter is. Dropping it silently would serve a wider list than was requested.
+   raise ValueError('min_premium_cr cannot be applied at the 15-min reading of '+at+
+    ': no traded average price was captured there, so no contract in it has a premium traded.')
+  floor_clauses,floor_params=self._floor_clauses(names,force['applied'],min_premium_cr=floor)
+  clauses+=floor_clauses;params+=floor_params
+  for key,value,text in (
+   ('min_premium_cr',floor,f'Premium traded at or above ₹{floor:g} cr (the §3 floor is ₹{FLOOR_PREMIUM_CR:g} cr).'),
+   ('min_oi_lots',FLOOR_OI_LOTS,f'Open interest at or above {FLOOR_OI_LOTS} lot (§3 floor).'),
+   ('min_last_price',FLOOR_LAST_PRICE,f'Last price at or above ₹{FLOOR_LAST_PRICE:g} (§3 floor).')):
+   name={'min_premium_cr':'premium_cr','min_oi_lots':'oi','min_last_price':'last_price'}[key]
+   if name in in_force:
+    applied.append({'key':key,'value':value,'always':True,'text':text})
+   else:
+    # RECORDED AS NOT APPLIED, never omitted. `applied` is the page's own answer to "what did this query do",
+    # and a floor that silently vanished from it would be a relaxation the reader could not see.
+    applied.append({'key':key,'value':None,'always':True,'applied':False,
+     'text':FLOOR_UNMEASURED_TEXT.get(name,f'The {name} floor could not be applied at this 15-min reading.')})
   if 'min_volume_ratio' in asked and 'vol_tod_sessions' in names:
    clauses.append('vol_tod_sessions>=?');params.append(MIN_BASELINE_SESSIONS)
    applied.append({'key':'min_volume_baseline_sessions','value':MIN_BASELINE_SESSIONS,'always':True,
@@ -3368,12 +3622,15 @@ class Derivatives:
   rows=[]
   for row in raw:
    shaped=self._screener_row(row,window)
-   if not self._passes(shaped):continue
+   if not self._passes(shaped,force['applied']):continue
    if buildup is not None and shaped['buildup']!=str(buildup):continue
    if moneyness is not None and shaped['moneyness']!=str(moneyness):continue
    if kind is not None and shaped['underlying_kind']!=str(kind):continue
    rows.append(shaped)
-  rows.sort(key=lambda r:-(r.get('premium_cr') or 0.0))
+  # RANKED BY SOMETHING THAT WAS MEASURED AT THIS READING. Premium traded when it is there; volume when it is
+  # not, because a sort over a column that is null on every row is not a sort. `ranking` below says which.
+  if 'premium_cr' in in_force:rows.sort(key=lambda r:-(r.get('premium_cr') or 0.0))
+  else:rows.sort(key=lambda r:(-(r.get(FALLBACK_RANK_FIELD) or 0),r.get('tradingsymbol') or ''))
   # The default cut was written for a list of CONTRACTS, where a hundred rows is a page of a long tail. One
   # row per instrument is a different list: there are 214 of them at the 11:30 reading of 18 Sep 2026, and
   # cutting it at a hundred would hide 114 names from the only list that reaches them - which is the bug this
@@ -3416,7 +3673,7 @@ class Derivatives:
    rows=served[:cut],view=view,views=list(SCREENER_VIEWS),
    # THE SORT THAT IS ACTUALLY IN FORCE, and the closed list of rules a row can be flagged under, so the page
    # never has to guess at either.
-   ranking=self._ranking(view),
+   ranking=self._ranking(view,force['applied']),
    unusual_rules=[dict(r) for r in UNUSUAL_RULES],unusual_rules_version=UNUSUAL_RULES_VERSION,
    groups_total=len(groups),contracts_total=len(rows),
    total=len(rows),scanned=scanned,returned=min(len(served),cut),limit=cut,
@@ -3425,7 +3682,10 @@ class Derivatives:
     'many of those this response carries.'),
    applied=applied,available_filters=available,filters={'applied':applied,'available':available},
    readings=readings,coverage=coverage,**reading,
-   buildup_window=window,floors=dict(FLOORS),floors_text=FLOORS_TEXT,moneyness_text=MONEYNESS_TEXT,
+   # THE FLOORS THIS LIST WAS GATED ON, on the card itself. `floors` stays the three §3 constants because
+   # they are the tab's definition and they did not change; `floors_applied` / `floors_unmeasured` /
+   # `floors_text` are about THIS reading, and they are what a reader has to be able to see.
+   buildup_window=window,**self._floor_note(force),moneyness_text=MONEYNESS_TEXT,
    index_underlyings=list(INDEX_KINDS),buildup_values=list(BUILDUP_VALUES),
    buildup_labels=dict(BUILDUP_LABELS),
    # The sentence an empty list prints. It is the CAPTURE STATE's own sentence, so an outage can never be

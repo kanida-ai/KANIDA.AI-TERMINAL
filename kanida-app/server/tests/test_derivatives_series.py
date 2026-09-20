@@ -22,6 +22,7 @@ What is asserted, and why each one is here:
  * nothing any of them says is a forecast (§5).
 """
 import math
+import pathlib
 import sqlite3
 import pytest
 from kanida_pilot import derivatives as D
@@ -915,14 +916,19 @@ def test_the_tab_header_counts_its_sessions_by_walking_the_index(reader):
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# WHICH 15-MIN READING THE SCREENER OPENS ON
+# WHICH 15-MIN READING THE SCREENER OPENS ON, AND WHICH FLOORS IT CAN APPLY THERE
 #
-# The newest reading the store holds is not always one a reader can do anything with. When the capture dies
-# part-way through a session the rest of it is rebuilt from 15-minute candles, and a candle carries no
-# traded-price average - so `premium_cr` is NULL for every contract in those readings and not one of them can
-# clear the §3 premium floor. Defaulting to the newest reading then hands the reader an empty screener, no row
-# to click, and therefore no symbol for any block on the tab. That is the real store on 18 Sep 2026: nine
-# readings with rows over the floors, then seventeen with none.
+# When the capture dies part-way through a session the rest of it is rebuilt from 15-minute candles, and a
+# candle carries no traded-price average - so `premium_cr` is NULL for every contract in those readings.
+#
+# That USED to mean the readings were unusable: the premium floor was applied anyway, it removed every row, and
+# the tab fell back to the last live reading. On the real store of 18 Sep 2026 that left the whole tab sitting
+# on 11:30 while the 15:30 reading held 10,510 contracts with a real last price, a real volume and a real open
+# interest. One derived field that could not be measured was hiding four hours of fields that could.
+#
+# Now the floors DEGRADE: a floor is applied where its number was captured and is NOT applied where it was not,
+# the rows are kept, and the response says which floors were in force and why the others were not. What is
+# never done is substitute a number for the missing one - `average_price_est` is in the store and is not read.
 # ---------------------------------------------------------------------------------------------------------------
 REBUILT_MARKS=[f'{SESSION} {t}:00' for t in ('09:30','09:45','10:00','10:15','10:30','10:45')]
 
@@ -952,48 +958,74 @@ def _rebuilt_store(path):
  connection.commit();connection.close()
 
 
-def test_the_screener_opens_on_the_newest_reading_that_has_rows_over_the_floors(tmp_path):
- """The tab must never LAND on a reading no contract can clear the floors at: that is an empty screener,
- no row to click, and no symbol for any block on the page."""
+def test_a_rebuilt_reading_keeps_its_rows_under_the_floors_it_can_apply(tmp_path):
+ """THE OWNER'S COMPLAINT, as a test. The newest reading carries no premium and IS still usable: it is
+ gated on the two floors that were captured, the rows survive, and the card says which floors those were."""
  path=tmp_path/'rebuilt-afternoon.db'
  _rebuilt_store(path)
  reader=D.Derivatives(str(path))
  try:
   body=reader.screener({})
-  # not the newest - the newest three hold nothing over the floors
-  assert body['as_of']==REBUILT_MARKS[2]
+  # the NEWEST reading, not an older one: nothing is four hours behind any more
+  assert body['as_of']==REBUILT_MARKS[-1]
   assert body['newest_at']==REBUILT_MARKS[-1]
-  assert body['reading_at']==REBUILT_MARKS[2]
-  assert body['reading_is_newest'] is False
+  assert body['reading_is_newest'] is True
   assert body['reading_chosen'] is False
-  assert body['reading_skipped']==3
+  assert body['reading_skipped']==0
   # and it is a reading with real rows on it, across more than one underlying
   assert body['rows'] and len({row['underlying'] for row in body['rows']})==2
+  # THE DEGRADED FLOOR SET IS ON THE CARD. Two floors, named; the third named as not applied, with why.
+  assert body['floors_degraded'] is True
+  assert body['floors_applied']==['oi','last_price']
+  assert body['floors_unmeasured']==['premium_cr']
+  assert 'premium traded' not in body['floors_text']
+  assert 'OI \u2265 1 lot' in body['floors_text'] and 'last price' in body['floors_text']
+  assert any('premium floor could not be applied' in line for line in body['floors_unmeasured_text'])
+  # the §3 constants themselves are unchanged - the definition did not move, only what could be applied
+  assert body['floors']=={'premium_cr':2.0,'oi_lots':1,'last_price':1.0}
+  # AND THE SORT IS ONE THE READING CAN SUPPORT. Ordering by a column that is null on every row is not an
+  # ordering; the response says what it actually ranked by.
+  assert body['ranking']['ranked_by']=='volume'
+  assert body['ranking']['degraded'] is True
+  assert all(key['field']!='premium_cr' for key in body['ranking']['keys'])
   # every reading is still listed, so nothing was taken away from the reader
   assert {row['at'] for row in body['readings']}=={*REBUILT_MARKS}
  finally:reader.close()
 
 
-def test_a_reading_the_reader_chose_is_served_exactly_as_asked_even_when_it_is_empty(tmp_path):
- """The default narrows the CHOICE; it never overrides one. A reader who asks for the newest reading is
- shown the newest reading, empty, and told it was their own choice."""
+def test_a_premium_filter_asked_for_at_a_reading_with_no_premium_is_refused_not_ignored(tmp_path):
+ """A floor the reader RAISED cannot be honoured where premium was never captured. Dropping it silently
+ would serve a wider list than was asked for, under the caption of a narrower one."""
  path=tmp_path/'rebuilt-afternoon.db'
  _rebuilt_store(path)
  reader=D.Derivatives(str(path))
  try:
-  body=reader.screener({'at':REBUILT_MARKS[-1]})
-  assert body['as_of']==REBUILT_MARKS[-1] and body['rows']==[]
-  assert body['reading_chosen'] is True and body['reading_is_newest'] is True
+  try:
+   reader.screener({'at':REBUILT_MARKS[-1],'min_premium_cr':20})
+   assert False,'a filter that cannot be applied must be refused'
+  except ValueError as error:
+   assert 'no traded average price was captured' in str(error)
+  # at a reading that DID capture premium the same filter is honoured exactly as before
+  body=reader.screener({'at':REBUILT_MARKS[0],'min_premium_cr':20})
+  assert body['as_of']==REBUILT_MARKS[0]
+  assert any(rule['key']=='min_premium_cr' and rule['value']==20 for rule in body['applied'])
+ finally:reader.close()
+
+
+def test_a_reading_the_reader_chose_is_served_exactly_as_asked(tmp_path):
+ """The default narrows the CHOICE; it never overrides one."""
+ path=tmp_path/'rebuilt-afternoon.db'
+ _rebuilt_store(path)
+ reader=D.Derivatives(str(path))
+ try:
+  body=reader.screener({'at':REBUILT_MARKS[0]})
+  assert body['as_of']==REBUILT_MARKS[0]
+  assert body['reading_chosen'] is True and body['reading_is_newest'] is False
   assert body['reading_skipped']==0
-  # THE EMPTY NOTE IS THE CAPTURE STATE'S, not a claim that the market was quiet. These rebuilt readings
-  # carry no premium at all, so no contract was ever measured against the premium floor - saying "no
-  # contract cleared the floors" would describe a quiet market, the opposite of what happened.
-  assert body['empty_state']=='partial_capture'
-  assert 'Nothing was measured' in (body['empty_note'] or '')
-  assert 'not a quiet market' in (body['empty_note'] or '')
-  assert 'cleared the floors' not in (body['empty_note'] or '')
-  assert body['capture']['healthy'] is False
-  assert body['capture']['missing_fields']==['premium_cr']
+  # a live reading measured all three, so nothing about it is degraded
+  assert body['floors_degraded'] is False
+  assert body['floors_applied']==['premium_cr','oi','last_price']
+  assert body['ranking']['ranked_by']=='premium_cr'
  finally:reader.close()
 
 
@@ -1004,21 +1036,25 @@ def test_the_usable_reading_rests_on_the_floors_and_never_on_an_estimated_price(
  assert source
  with open(source,encoding='utf-8') as handle:text=handle.read()
  assert 'average_price_est' not in text
- # and the probe applies the same three floors the screener itself applies
+ # and the probe applies the SAME floors the screener applies at that same reading, through one builder
  path=tmp_path/'rebuilt-afternoon.db'
  _rebuilt_store(path)
  reader=D.Derivatives(str(path))
  try:
   assert reader._clears_floors(REBUILT_MARKS[0]) is True
-  assert reader._clears_floors(REBUILT_MARKS[-1]) is False
+  assert reader._clears_floors(REBUILT_MARKS[-1]) is True,'the two measurable floors are enough'
+  assert reader._floors_in_force(REBUILT_MARKS[0])['applied']==('premium_cr','oi','last_price')
+  assert reader._floors_in_force(REBUILT_MARKS[-1])['applied']==('oi','last_price')
+  assert reader._floors_in_force(REBUILT_MARKS[-1])['unmeasured']==('premium_cr',)
   at,skipped=reader._usable_reading(reader.screener_readings())
-  assert (at,skipped)==(REBUILT_MARKS[2],3)
+  assert (at,skipped)==(REBUILT_MARKS[-1],0)
  finally:reader.close()
 
 
 def test_a_store_where_no_reading_clears_the_floors_still_serves_its_newest(tmp_path):
  """When EVERY reading is empty the honest answer is the newest one, empty - not an older one that is just
- as empty under an older as-of."""
+ as empty under an older as-of. The floors that COULD be applied here reject everything on their own: the
+ last price is under ₹1 and the open interest is under one lot."""
  path=tmp_path/'nothing-clears.db'
  connection=sqlite3.connect(path);connection.executescript(SCHEMA)
  connection.execute('insert into contracts(instrument_token,tradingsymbol,underlying,instrument_type,strike,'
@@ -1027,8 +1063,8 @@ def test_a_store_where_no_reading_clears_the_floors_still_serves_its_newest(tmp_
  connection.executemany('insert into metrics(scope,metric_key,captured_at,instrument_token,tradingsymbol,'
   'underlying,instrument_type,strike,expiry,lot_size,days_to_expiry,last_price,volume,oi,spot,premium_cr)'
   ' values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-  [('contract','NIFTY26SEP23500CE',mark,101,'NIFTY26SEP23500CE','NIFTY','CE',23500.0,EXPIRY,75,10,236.0,
-    500000.0,900000.0,23480.0,None) for mark in REBUILT_MARKS])
+  [('contract','NIFTY26SEP23500CE',mark,101,'NIFTY26SEP23500CE','NIFTY','CE',23500.0,EXPIRY,75,10,0.5,
+    500000.0,10.0,23480.0,None) for mark in REBUILT_MARKS])
  connection.executemany('insert into underlying_snapshots(underlying,captured_at,spot) values(?,?,?)',
   [('NIFTY',mark,100.0) for mark in REBUILT_MARKS])
  connection.commit();connection.close()
@@ -1037,6 +1073,45 @@ def test_a_store_where_no_reading_clears_the_floors_still_serves_its_newest(tmp_
   body=reader.screener({})
   assert body['as_of']==REBUILT_MARKS[-1] and body['rows']==[]
   assert body['reading_is_newest'] is True and body['reading_skipped']==0
+  # AND THE SENTENCE IS STILL THE CAPTURE STATE'S. Premium was never measured here, so this is not a reading
+  # of a quiet market however empty the list is.
+  assert body['empty_state']=='partial_capture'
+  note=body['empty_note'] or ''
+  assert 'not a quiet market' in note
+  assert 'cleared the floors' not in note and 'clears the floors' not in note
+  assert body['capture']['healthy'] is False
+  assert body['capture']['missing_fields']==['premium_cr']
+ finally:reader.close()
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# NOTHING CHANGES AT A READING WHERE PREMIUM WAS MEASURED
+#
+# The degradation above is the whole risk of this change: a screen that quietly stops applying a floor at a
+# reading that CAN support it would show contracts no reader asked to see. This is the guard, run against the
+# real store when it is there - the 11:30 reading of 18 Sep 2026, the last live one before the outage.
+# ---------------------------------------------------------------------------------------------------------------
+REAL_STORE=pathlib.Path(__file__).resolve().parents[3]/'db'/'derivatives.db'
+LIVE_READING='2026-09-18 11:30:00'
+
+
+@pytest.mark.skipif(not REAL_STORE.is_file(),reason='the production F&O store is not on this machine')
+def test_the_last_live_reading_of_18_sep_still_applies_all_three_floors():
+ """27,239 contract rows, every floor measurable, all three applied, ranked by premium - unchanged."""
+ reader=D.Derivatives(str(REAL_STORE))
+ try:
+  if not reader.available() or not reader._reading_rows(LIVE_READING):
+   pytest.skip('this store does not hold the 18 Sep 2026 session')
+  force=reader._floors_in_force(LIVE_READING)
+  assert force['applied']==('premium_cr','oi','last_price')
+  assert force['unmeasured']==() and force['absent']==()
+  body=reader.screener({'at':LIVE_READING,'group':'contract'})
+  assert body['floors_degraded'] is False
+  assert body['floors_text']==D.FLOORS_TEXT,'the three-floor sentence, word for word'
+  assert body['ranking']['ranked_by']=='premium_cr'
+  assert all(row['premium_cr']>=2.0 for row in body['rows']),'the premium floor is still in force'
+  # the floors-only count is the one the screener reports as `cleared`; it must not have moved
+  assert body['capture']['cleared']==reader._cleared_count(LIVE_READING)
  finally:reader.close()
 
 

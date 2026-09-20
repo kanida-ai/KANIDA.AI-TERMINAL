@@ -558,8 +558,13 @@ def create_app(settings=None,http=None,evidence=None):
   member(request)
   dte=None if max_dte<0 else max_dte
   name,date,kind=_derivative_query(underlying,expiry,option_type,dte,min_premium_cr,limit)
-  return derivatives.unusual(name,date,watchlist=watchlist[:20],max_dte=dte,option_type=kind,
-   min_premium_cr=min_premium_cr or None,limit=limit or None)
+  # A premium floor the READER raised cannot be honoured at a 15-min reading where no traded average price was
+  # captured: there is no premium in it to measure against. That is a refusal the caller sees, exactly as the
+  # screener's own refused filters are - dropping it quietly would serve a wider list than was asked for.
+  try:
+   return derivatives.unusual(name,date,watchlist=watchlist[:20],max_dte=dte,option_type=kind,
+    min_premium_cr=min_premium_cr or None,limit=limit or None)
+  except ValueError as error:raise PilotError(400,'FILTER_REFUSED',str(error))
  # `at` is the 15-minute reading the TAB is on - the one its screener resolved. Omitted, each of these reads
  # the newest reading the underlying has, exactly as it did before. It is passed because the newest reading of
  # a session rebuilt from candles carries no spot, and a chain with no spot has nothing to sit around: that is

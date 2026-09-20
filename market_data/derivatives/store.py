@@ -66,12 +66,24 @@ RETIRED_SNAPSHOT_COLUMNS = frozenset({
 #: Columns added after the first database was created, as (table, column, type).
 #: `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that exists, so
 #: they are applied explicitly and idempotently on every open.
-MIGRATIONS = (("snapshots", "average_price_est", "REAL"),)
+#:
+#: `spot_source` (2026-09-20): a spot is not always the F&O vendor's own quote at
+#: the mark.  Friday 18 Sep 2026 is the case that forced it — the capture died at
+#: 11:30 and the afternoon was rebuilt afterwards, so the spots for 11:45 onward
+#: had to come from our own equity store.  Without a source column a reader
+#: cannot tell a captured spot from a reconstructed one, and the two are not the
+#: same number.  NULL means "not recorded", never "captured".
+MIGRATIONS = (
+    ("snapshots", "average_price_est", "REAL"),
+    ("underlying_snapshots", "spot_source", "TEXT"),
+    ("metrics", "spot_source", "TEXT"),
+)
 
 UNDERLYING_COLUMNS = (
-    "underlying", "captured_at", "mark_kind", "spot", "spot_symbol", "fut_price",
-    "fut_token", "total_ce_oi", "total_pe_oi", "total_ce_volume", "total_pe_volume",
-    "ce_contracts", "pe_contracts", "vendor_id", "fetched_at", "snapshot_id",
+    "underlying", "captured_at", "mark_kind", "spot", "spot_symbol", "spot_source",
+    "fut_price", "fut_token", "total_ce_oi", "total_pe_oi", "total_ce_volume",
+    "total_pe_volume", "ce_contracts", "pe_contracts", "vendor_id", "fetched_at",
+    "snapshot_id",
 )
 
 CANDLE_COLUMNS = (
@@ -787,11 +799,38 @@ class DerivativesStore:
         }
 
 
+def apply_migrations(con: sqlite3.Connection) -> list[str]:
+    """Apply `MIGRATIONS` to an already-open connection; return what was added.
+
+    `DerivativesStore.init_schema` is the usual route, but it takes the store's
+    own connection and its whole schema script with it.  A tool that holds a
+    plain connection to the same file -- the metrics worker and the spot
+    backfill both do, because the advisory writer lock belongs to the capture
+    loop -- needs the columns without the rest.  Idempotent: a column that is
+    already there is left alone, and an absent TABLE is skipped rather than
+    created, because creating one here would be this function inventing a schema
+    it does not own.
+    """
+    added: list[str] = []
+    for table, column, coltype in MIGRATIONS:
+        info = list(con.execute(f"PRAGMA table_info({table})"))
+        if not info:
+            continue
+        if column in {r[1] for r in info}:
+            continue
+        LOG.info("adding %s.%s", table, column)
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+        added.append(f"{table}.{column}")
+    if added:
+        con.commit()
+    return added
+
+
 def open_readonly(path: str | os.PathLike = config.DEFAULT_DB_PATH) -> DerivativesStore:
     return DerivativesStore(path, read_only=True, create=False)
 
 
-__all__ = ["DerivativesStore", "open_readonly", "SNAPSHOT_COLUMNS",
+__all__ = ["DerivativesStore", "open_readonly", "apply_migrations", "SNAPSHOT_COLUMNS",
            "RETIRED_SNAPSHOT_COLUMNS",
            "UNDERLYING_COLUMNS", "CANDLE_COLUMNS", "DAILY_CANDLE_COLUMNS",
            "CONTRACT_COLUMNS", "utcnow"]

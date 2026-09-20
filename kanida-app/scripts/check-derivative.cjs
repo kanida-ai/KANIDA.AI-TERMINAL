@@ -249,6 +249,13 @@ ok(()=>assert.equal(L.groupSummary({underlying:'RELIANCE',premium_cr:48,strike_c
 ok(()=>assert.equal(L.groupSummary({underlying:'X',premium_cr:6.4,strike_count:2,calls:1,puts:1,expiries:[],
  days_to_expiry:null,oi_change_day:null,strikes:[]}),
  `1 call strike and 1 put strike over the floors · ${RUPEE}6.4 cr traded`));
+ok(()=>{ // NULL IS NOT NOUGHT. A reading that captured no traded average price has no premium for this name -
+ // and "₹0.0 cr traded" is a claim about the market where the truth is a gap in our own capture.
+ const line=L.groupSummary({underlying:'X',premium_cr:null,strike_count:2,calls:1,puts:1,expiries:[],
+  days_to_expiry:null,oi_change_day:null,strikes:[]});
+ assert.ok(/premium traded not captured at this 15-min reading/.test(line),line);
+ assert.ok(!/0\.0 cr/.test(line)&&!/₹0/.test(line),'never a fabricated zero');
+});
 ok(()=>assert.equal(L.strikeSummary({instrument_type:'CE',strike:25000,premium_cr:48,buildup_day:'long_buildup',
  volume_ratio:2.4,volume_baseline_sessions:10,volume_baseline:'ok'}),
  `25,000 call · ${RUPEE}48.0 cr · Long build-up · volume 2.4${TIMES} its 10-session median`));
@@ -3637,36 +3644,58 @@ ok(()=>{ // every OTHER §5 sweep on this tab must leave the owner's two sentenc
 // script's own hash and the exported bundle's timestamp, exactly as scripts/check-discover.e2e.cjs does.
 
 // =================================================================================================================
-// THE TAB MUST NOT LAND ON A DEAD READING
+// THE TAB MUST NOT LAND ON A DEAD READING - AND A FLOOR MUST NOT MAKE ONE DEAD
 //
 // Measured on the real store, 18 Sep 2026: nine readings from 09:30 to 11:30 with 157-491 contracts over the
 // floors, then SEVENTEEN readings from 11:45 to 15:45 with none at all. The afternoon was rebuilt from 15-minute
 // candles after the capture died, and a candle carries no traded-price average - so `premium_cr` is NULL for
-// every contract in those readings and nothing in them can ever clear the 2-crore floor.
+// every contract in those readings.
 //
 // The tab defaulted to the newest reading. So the screener was empty, there was no row to click, and every block
 // on the page stayed on its fallback index: "why other stocks are not populating".
 //
-// The fix is a DEFAULT, not a filter. The server opens on the newest reading that HAS contracts over the floors,
-// serves the facts about that choice, and the browser says in plain words which reading is on screen and that it
-// is not the newest. Every reading the store holds is still one click away, the empty ones included.
+// THE FIRST FIX was a DEFAULT, not a filter: open on the newest reading that HAS contracts over the floors, serve
+// the facts about that choice, and say in plain words which reading is on screen. It left the tab four hours
+// behind the close of a session whose last reading held 10,510 contracts with a real price, volume and open
+// interest - because the premium floor was still being applied to a premium nobody had measured.
 //
-// WHAT IS NOT DONE, and must not be: the store also carries an ESTIMATED traded price. Using it here would let a
+// THE SECOND FIX is that the floors DEGRADE. A floor is applied at a reading that measured the number it rests
+// on and is NOT applied at one that did not; the rows are kept, and the response names the floors in force and
+// why the others are not. "Premium was below 2 crore" is a reading of the market; "no premium was captured" is a
+// gap in ours, and judging the second as the first is what emptied the screen.
+//
+// WHAT IS NOT DONE, and must not be: the store also carries an ESTIMATED traded price. Using it would let a
 // model's number decide what the reader can see. The floors decide visibility, so the floors rest on what the
-// exchange reported and on nothing else.
+// exchange reported and on nothing else - and a floor that cannot rest on that is dropped ALOUD, never filled in.
 // =================================================================================================================
 ok(()=>{ // the server resolves the usable reading, next to the coverage it already computes
  assert.ok(/def _clears_floors\(self,at,names=None\):/.test(DERIV_PY),
   'derivatives.py must be able to ask whether ONE reading has anything over the floors');
  assert.ok(/def _usable_reading\(self,readings\):/.test(DERIV_PY),
   'and to walk back to the newest reading that has');
- const probe=DERIV_PY.slice(DERIV_PY.indexOf('def _clears_floors'),DERIV_PY.indexOf('def _usable_reading'));
- // the SAME three floors the screener applies, over the same columns - not a second, looser definition
- assert.ok(/premium_cr>=\?/.test(probe)&&/FLOOR_PREMIUM_CR/.test(probe),'the premium floor');
- assert.ok(/last_price>=\?/.test(probe)&&/FLOOR_LAST_PRICE/.test(probe),'the last-price floor');
- assert.ok(/oi>=lot_size\*\?/.test(probe)&&/FLOOR_OI_LOTS/.test(probe),
+ // ONE BUILDER, so the probe, the floors-only count and the screener's own query cannot become three
+ // definitions. The SQL lives in `_floor_clauses` and every one of the three calls it.
+ assert.ok(/def _floor_clauses\(self,names,applied,min_premium_cr=None\):/.test(DERIV_PY),
+  'the floor SQL must be built in one place');
+ const builder=DERIV_PY.slice(DERIV_PY.indexOf('def _floor_clauses'),DERIV_PY.indexOf('def _clears_floors'));
+ assert.ok(/premium_cr>=\?/.test(builder)&&/FLOOR_PREMIUM_CR/.test(builder),'the premium floor');
+ assert.ok(/last_price>=\?/.test(builder)&&/FLOOR_LAST_PRICE/.test(builder),'the last-price floor');
+ assert.ok(/oi>=lot_size\*\?/.test(builder)&&/FLOOR_OI_LOTS/.test(builder),
   'and the open-interest floor, worked out against the contract\'s own lot size exactly as _passes does');
+ const probe=DERIV_PY.slice(DERIV_PY.indexOf('def _clears_floors'),DERIV_PY.indexOf('def _usable_reading'));
+ assert.ok(/self\._floor_clauses\(names,force\['applied'\]\)/.test(probe),
+  'the probe asks the builder, it does not write its own floors');
+ assert.ok(/self\._floors_in_force\(at,names\)/.test(probe),
+  'and asks which floors that reading can be measured against at all');
  assert.ok(/limit 1/.test(probe),'it stops at the first row: this is a question, not a count');
+ // a floor is applied where its number was captured, and dropped ALOUD where it was not
+ assert.ok(/def _floors_in_force\(self,at,names=None\):/.test(DERIV_PY),
+  'derivatives.py must resolve which floors a reading can be measured against');
+ for(const key of ['floors_applied','floors_unmeasured','floors_degraded','floors_unmeasured_text'])
+  assert.ok(new RegExp(`'${key}'`).test(DERIV_PY),`the response must carry ${key}`);
+ assert.ok(/FLOOR_UNMEASURED_TEXT=\{/.test(DERIV_PY),'with one sentence per floor, never one shared sentence');
+ assert.ok(/FALLBACK_RANK_FIELD='volume'/.test(DERIV_PY),
+  'and a list whose premium is null is ranked by something that was measured');
  // and it rests on nothing a model produced
  assert.ok(!/average_price_est/.test(DERIV_PY),
   'a number that decides what the reader SEES must be one the exchange reported, never an estimate');
@@ -3689,6 +3718,30 @@ ok(()=>{ // the screener opens on it, and an explicitly chosen reading is never 
   'which says "15-min reading", never "mark"');
  const banned=/\b(will|expect|forecast|predict|likely|bullish|bearish)\b/i;
  assert.ok(!banned.test(pySentence('READING_RULE_TEXT')),'and predicts nothing');
+});
+ok(()=>{ // the BROWSER says which floors the list was gated on, whenever that is not all three
+ // A reader who cannot see this takes a two-floor list for a three-floor one, which is the same mistake in
+ // the other direction from the one that emptied the screen.
+ assert.equal(L.floorsDegradedNote(null),'');
+ assert.equal(L.floorsDegradedNote({floors_degraded:false,floors_unmeasured:['premium_cr']}),'',
+  'a reading that measured every floor has nothing to caveat');
+ assert.equal(L.floorsDegradedNote({floors_degraded:true,floors_unmeasured:[],floors_absent:[]}),'',
+  'and nothing is said when nothing is actually missing');
+ const note=L.floorsDegradedNote({floors_degraded:true,floors_applied:['oi','last_price'],
+  floors_unmeasured:['premium_cr'],floors_absent:[],
+  floors_labels:{premium_cr:'premium traded \u2265 \u20b92 cr',oi:'OI \u2265 1 lot',last_price:'last price \u2265 \u20b91'}});
+ assert.ok(/2 of the 3 liquidity floors/.test(note),'it says how many of the three were in force');
+ assert.ok(note.includes('OI \u2265 1 lot')&&note.includes('last price \u2265 \u20b91'),'and names them');
+ assert.ok(/Not applied here: premium traded/.test(note),'and names the one that was not');
+ assert.ok(/was not captured/.test(note),'with the reason, which is a gap in our capture');
+ assert.ok(/no contract in the list failed it/.test(note),
+  'and the distinction that matters: nothing here failed a floor it was never measured against');
+ assert.ok(!/mark/i.test(note),'in the owner\u2019s words, not ours');
+ assert.ok(!/\b(will|expect|forecast|predict|likely|bullish|bearish)\b/i.test(note),'and it predicts nothing');
+ // the bar actually prints it, beside the reading note and in the same amber
+ const rail=SRC('ScreenerSection.tsx');
+ assert.ok(/const floorNote=floorsDegradedNote\(body\)/.test(rail),'the bar works it out from the response');
+ assert.ok(/\{!!floorNote&&<View role="note"/.test(rail),'and prints it, on the bar, above the rows');
 });
 ok(()=>{ // the BROWSER says which reading is on screen, and only when that is worth saying
  const dash=L.DASH;
@@ -4771,8 +4824,15 @@ ok(()=>{ // ONE TRIGGER, READ OUT: value, comparator, threshold, baseline, sampl
 });
 ok(()=>{ // THE ORDER IS DETERMINISTIC, AND THE TIE-BREAKER IS THE NAME
  const fn=DERIV_PY.slice(DERIV_PY.indexOf('def _screener_groups'),DERIV_PY.indexOf('def screener(self,filters'));
- assert.ok(/out\.sort\(key=lambda g:\(-\(g\['unusual_rule_count'\] or 0\),-\(g\['unusual'\] or 0\),-\(g\['premium_cr'\] or 0\.0\),\s*g\['underlying'\] or ''\)\)/
+ // FOUR KEYS, and the last is the NAME. The third is premium traded where the reading captured one and
+ // volume where it did not: sorting on a premium that is None for every row is the arrival order wearing a
+ // caption. `_ranking` names whichever it was, and the page prints that name.
+ assert.ok(/out\.sort\(key=lambda g:\(-\(g\['unusual_rule_count'\] or 0\),-\(g\['unusual'\] or 0\),\s*-\(g\['premium_cr'\] if g\['premium_cr'\] is not None else \(g\['volume'\] or 0\)\),\s*g\['underlying'\] or ''\)\)/
   .test(fn),'four keys, and the last is the instrument name so a tie is stable');
+ // AND A SUM OF NOTHING IS NOT NOUGHT: a name with no premium captured carries no premium, never 0.0
+ assert.ok(/group\['premium_cr'\]=_round\(group\['premium_cr'\],2\) if group\['has_premium'\] else None/.test(fn),
+  'a name whose contracts carried no premium must show a dash, not a fabricated zero');
+ assert.ok(/if row\.get\('premium_cr'\) is not None:/.test(fn),'and only a real number is added to the sum');
  assert.ok(!/-len\(g\['unusual_reasons'\]\)/.test(fn),'nothing is ordered by how many SENTENCES were written');
  assert.ok(!/group\['unusual_reasons'\]\[reason\]=/.test(fn),'and nothing tallies a sentence at all');
  assert.ok(/group\['unusual_rule_count'\]=len\(group\['unusual_rules'\]\)/.test(fn),
@@ -4792,8 +4852,15 @@ ok(()=>{ // THE SORT THAT IS ACTUALLY IN FORCE IS THE ONE THE PAGE PRINTS
  assert.ok(/SCREENER_RANK_TEXT=\('One row per instrument, ordered by: most distinct condition types/.test(DERIV_PY));
  assert.ok(/^CONTRACT_RANK_LABEL='Largest premium traded'$/m.test(DERIV_PY),
   'and the contract list is a different order with a different name');
- assert.ok(/def _ranking\(view\):/.test(DERIV_PY),'one helper answers "what is this sorted by"');
- assert.ok(/ranking=self\._ranking\(view\)/.test(DERIV_PY),'and it travels with the rows');
+ assert.ok(/def _ranking\(view,applied=None\):/.test(DERIV_PY),'one helper answers "what is this sorted by"');
+ assert.ok(/ranking=self\._ranking\(view,force\['applied'\]\)/.test(DERIV_PY),'and it travels with the rows');
+ // A SORT KEY HAS TO BE A COLUMN THE READING FILLED. Premium is null on every row of a rebuilt reading, so
+ // ordering by it there is insertion order wearing a label - and this response would be printing a sort the
+ // list does not obey, which is the exact drift this whole block exists to prevent.
+ assert.ok(/'ranked_by':\('premium_cr' if not degraded else FALLBACK_RANK_FIELD\)/.test(DERIV_PY),
+  'and it names the field actually ranked by, which is not always premium');
+ assert.ok(/FALLBACK_RANK_TEXT=\(/.test(DERIV_PY)&&!MARK_WORD.test(pySentence('FALLBACK_RANK_TEXT')),
+  'the swap is stated in the owner\u2019s words, never assumed');
  const ranking={view:'underlying',label:'Unusual first',text:'ordered by ...',
   keys:[{field:'unusual_rule_count',direction:'desc',text:'most distinct condition types'},
    {field:'underlying',direction:'asc',text:'then the name A to Z'}]};

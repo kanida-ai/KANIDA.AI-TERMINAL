@@ -204,8 +204,12 @@ def seed_session(store: DerivativesStore, provider, *, session: date,
     for stamp, per_underlying in sorted(agg.items()):
         for underlying, slot in sorted(per_underlying.items()):
             symbol, series = spot_series.get(underlying, (None, {}))
+            spot_value = series.get(stamp)
             u_rows.append((
-                underlying, stamp, slot["kind"], series.get(stamp), symbol,
+                underlying, stamp, slot["kind"], spot_value, symbol,
+                # A rebuilt spot says so.  It is the underlying's own 15-minute
+                # bar close at this mark, not the vendor's quote at that instant.
+                (config.SPOT_SOURCE_CANDLES if spot_value is not None else None),
                 slot["fut_price"], slot["fut_token"], slot["ce_oi"], slot["pe_oi"],
                 slot["ce_vol"], slot["pe_vol"], slot["ce_n"], slot["pe_n"],
                 config.VENDOR_ID, fetched_at, snapshot_id_for(

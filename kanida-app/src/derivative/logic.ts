@@ -7,7 +7,7 @@
 //     never a number (§3.2) - and the UI never has to remember that, because the server already sends
 //     volume_ratio: null with volume_baseline: 'none' and this file re-checks both.
 //  3. Nothing is phrased as a prediction. Every line describes a state and says when it was captured (§5).
-import type {ChainRow,ContractRow,DirectionLabels,DirectionWords,Envelope,Floors,GridDirection,GridPoint,GridPriceDirection,GridSlot,IndexRow,
+import type {ChainRow,ContractRow,DirectionLabels,DirectionWords,Envelope,Floors,FloorsInForce,GridDirection,GridPoint,GridPriceDirection,GridSlot,IndexRow,
  OiGrid,SeriesPoint,StrikeOi,UnusualContract,UnusualGroup,UnusualRuleTally,UnusualTrigger} from './types';
 export const DASH='—',MINUS='−',RUPEE='₹',TIMES='×';
 /** The one empty-state sentence for the whole tab. Matches derivatives.EMPTY_TEXT on the server. */
@@ -214,6 +214,27 @@ export function floorsText(floors?:Floors|null,sentence?:string|null){
  if(!floors)return '';
  return `Liquidity floors in force: premium traded ≥ ${RUPEE}${floors.premium_cr} cr, OI ≥ ${floors.oi_lots} lot, last price ≥ ${RUPEE}${floors.last_price}.`;
 }
+/** THE FLOOR SET THIS LIST WAS GATED ON, when it is not the full one - as a sentence on the bar rather than a
+ *  detail behind a chip. A floor rests on a captured number: a reading that captured no traded-price average
+ *  has no premium traded, so the premium floor is not applied there, the rows are KEPT, and the reader has to
+ *  be able to see that the screen in front of them was gated on two floors and not three.
+ *
+ *  It is not a relaxation. Nothing was substituted for the missing floor and nothing was let through that
+ *  failed one; the floor was never applied, because there was nothing to apply it to. The server's own
+ *  sentences say which and why, and they are printed rather than paraphrased. Returns '' when all three
+ *  floors were in force, which is every reading the capture reached. */
+export function floorsDegradedNote(body?:FloorsInForce|null){
+ if(!body||!body.floors_degraded)return '';
+ const labels=body.floors_labels||{};
+ const on=(body.floors_applied||[]).map(k=>labels[k]||k);
+ const off=(body.floors_unmeasured||[]).concat(body.floors_absent||[]).map(k=>labels[k]||k);
+ if(!off.length)return '';
+ const head=on.length
+  ? `These rows were gated on ${on.length} of the 3 liquidity floors — ${on.join(', ')}.`
+  : 'No liquidity floor could be applied at this 15-min reading.';
+ return `${head} Not applied here: ${off.join(', ')} — the number it rests on was not captured at this `
+  +'15-min reading, so no contract in the list failed it.';
+}
 /** Names the §3 signals the metrics worker has not written yet, so a dash is never mistaken for a zero. */
 export const MISSING_LABELS:Record<string,string>={premium_cr:'premium (₹ cr)',premium_inr:'premium',
  oi_change_15m:'OI change (15 min)',oi_change_15m_pct:'OI change % (15 min)',buildup_15m:'build-up (15 min)',
@@ -244,6 +265,10 @@ export function groupSummary(group:UnusualGroup){
  if(group.puts)parts.push(`${group.puts} put strike${group.puts===1?'':'s'}`);
  const strikes=parts.length?`${parts.join(' and ')} over the floors`:`${group.strike_count} strikes over the floors`;
  const oi=group.oi_change_day==null?'':` · OI ${signedUnits(group.oi_change_day)} today`;
+ // NULL IS NOT NOUGHT. At a 15-min reading with no traded average price captured there is no premium traded
+ // for this name - not zero of it - and the line says which, because "₹0.0 cr traded" is a claim about the
+ // market and "not captured" is a statement about our own capture.
+ if(group.premium_cr==null)return `${strikes} · premium traded not captured at this 15-min reading${oi}`;
  return `${strikes} · ${crore(group.premium_cr,group.premium_cr>=10?0:1)} traded${oi}`;
 }
 /** One strike's line under the roll-up. */

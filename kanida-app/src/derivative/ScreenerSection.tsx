@@ -22,8 +22,8 @@ import type {Read} from './useDerivatives';
 import {IDLE_H,InfoDisclosure,SymbolPill,head,type InfoGroup} from './frame';
 import {UnusualWidget} from './UnusualWidget';
 import {SIGNAL_W,SignalTable} from './SignalTable';
-import {alwaysApplied,appliedCount,asOfText,coverageText,customizeLabel,filterStatuses,floorsText,
- notAppliedText,readingChoices,readingIsFallback,readingNote,rulesText,
+import {alwaysApplied,appliedCount,asOfText,coverageText,customizeLabel,filterStatuses,floorsDegradedNote,
+ floorsText,notAppliedText,readingChoices,readingIsFallback,readingNote,rulesText,
  SEARCH_WHAT,UNUSUAL_COLOUR_TEXT,UNUSUAL_COUNTS_TEXT,UNUSUAL_HONEST_TEXT,UNUSUAL_RULE_TEXT,UNUSUAL_SORT_TEXT,
  UNUSUAL_WHAT,rankingLabel,rankingText,
  type FilterRule,type FilterStatus} from './logic';
@@ -70,6 +70,10 @@ export function ScreenerRail({read,rules,rulesLine,ruleLabel,seq,badge,linked,ta
  // stayed on its fallback index. The server now opens on the newest reading that HAS rows over the floors.
  const note=readingNote(body);
  const fallback=readingIsFallback(body);
+ // WHICH FLOORS THE LIST BELOW WAS GATED ON, on the bar rather than behind a chip. A reading with no traded
+ // price average has no premium traded, so the premium floor is not applied there and the rows are kept - and
+ // a reader must not have to open anything to learn that the screen was gated on two floors and not three.
+ const floorNote=floorsDegradedNote(body);
  // THE ONE SEARCH ON THIS TAB. There was no other, so this is it, and it lives here on the bar that already
  // drives every block rather than in a second field the reader would have to tell apart from this one. It
  // narrows the rows the server returned - it does not re-query - so everything this bar prints above the rows
@@ -140,6 +144,13 @@ export function ScreenerRail({read,rules,rulesLine,ruleLabel,seq,badge,linked,ta
    borderWidth:1,borderColor:fallback?'#4A3E1E':C.line,backgroundColor:fallback?C.amberBg:C.dark}]}>
    <Icon name={fallback?'alert-triangle':'clock'} size={12} color={fallback?C.amber:C.muted}/>
    <T style={{flex:1,fontSize:11,lineHeight:16,color:fallback?C.amber:C.muted}}>{note}</T>
+  </View>}
+  {/* A SHORTER FLOOR SET IS A CAVEAT ON THE LIST, so it is amber and it is on the bar. It is never silent:
+      the alternative is a reader taking a two-floor list for a three-floor one. */}
+  {!!floorNote&&<View role="note" style={[s.row,{gap:7,paddingHorizontal:10,paddingVertical:6,borderRadius:9,
+   borderWidth:1,borderColor:'#4A3E1E',backgroundColor:C.amberBg}]}>
+   <Icon name="alert-triangle" size={12} color={C.amber}/>
+   <T style={{flex:1,fontSize:11,lineHeight:16,color:C.amber}}>{floorNote}</T>
   </View>}
   {/* THE SCREENER, AND THE SIGNAL TABLE BESIDE IT. The owner: "we should show something like this in right
       side of the screener." They are the same height to the pixel, they share this one bar's as-of and this

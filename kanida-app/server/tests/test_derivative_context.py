@@ -332,25 +332,51 @@ def test_the_context_says_when_the_boundary_is_not_the_newest_reading(reader):
 # ============================================================================================================
 
 def test_the_recorded_outage_is_a_partial_capture_and_never_a_quiet_market(reader):
- """THE AUDIT'S THIRD CASE. Rows are there; nothing in them was measured."""
+ """THE AUDIT'S THIRD CASE, and the owner's complaint on top of it.
+
+ Rows are there. The premium in them was never measured - so the premium floor is not applied, the rows are
+ KEPT, and the reading still reports itself as a partial capture rather than as a reading of a quiet market.
+ Both halves matter: hiding the rows was the bug, and calling the reading healthy would be the next one."""
  body=reader.screener({'at':NEWEST_MARK})
- assert body['rows']==[]
- assert body['empty_state']=='partial_capture'
- note=body['empty_note'] or ''
- assert 'Nothing was measured' in note
+ # THE ROWS SURVIVE. This is the fix: 10,510 contracts with a real last price and a real open interest were
+ # being deleted from the screen by a floor that rested on a number nobody had.
+ assert body['rows'],'a reading with prices and open interest is not an empty reading'
+ assert body['empty_note'] is None and body['empty_state'] is None
+ # ...AND THE READING IS STILL NOT HEALTHY, and still says why in its own words.
+ capture=body['capture']
+ assert capture['state']=='partial_capture' and capture['healthy'] is False
+ note=capture['state_text']
+ assert 'not captured' in note
  assert 'not a quiet market' in note
  # the old wording is GONE: it described a market, and no market was described
  assert 'cleared the floors' not in note and 'clears the floors' not in note
- capture=body['capture']
- assert capture['state']=='partial_capture' and capture['healthy'] is False
- assert sorted(capture['missing_fields'])==['last_price','premium_cr'] or \
-  capture['missing_fields']==['premium_cr']
  assert 'premium_cr' in capture['missing_fields']
  # the counts are MEASURED, not asserted: rows present, premium and spot absent
  assert capture['rows']>0
  assert capture['coverage']['premium_cr']['present']==0
  assert capture['coverage']['spot']['present']==0
  assert capture['coverage']['oi']['present']==capture['rows'],'open interest DID survive the outage'
+ # AND THE DEGRADED FLOOR SET IS ON THE CARD, in the response the page renders from.
+ assert body['floors_degraded'] is True
+ assert body['floors_unmeasured']==['premium_cr']
+ assert 'premium_cr' not in body['floors_applied']
+ assert 'premium traded' not in body['floors_text']
+ assert any('premium floor could not be applied' in line for line in body['floors_unmeasured_text'])
+ assert capture['floors_unmeasured']==['premium_cr'],'the chip and the list read the same answer'
+ # the sort says what it is: premium cannot order a reading that has none
+ assert body['ranking']['ranked_by']=='volume'
+
+
+def test_a_live_reading_of_the_same_store_is_untouched_by_the_degradation(reader):
+ """THE GUARD. The reading before the outage measured all three floors, so all three are applied, the
+ sentence is the three-floor one word for word, and the sort is still premium traded."""
+ body=reader.screener({'at':LIVE_MARK})
+ assert body['floors_degraded'] is False
+ assert body['floors_applied']==['premium_cr','oi','last_price']
+ assert body['floors_unmeasured']==[] and body['floors_unmeasured_text']==[]
+ assert body['floors_text']==D.FLOORS_TEXT
+ assert body['ranking']['ranked_by']=='premium_cr'
+ assert body['capture']['state']=='complete' and body['capture']['healthy'] is True
 
 
 def test_a_complete_reading_with_nothing_eligible_still_says_no_matches(tmp_path):

@@ -434,6 +434,10 @@ class DerivativesCapture:
                     spot_price = _num(q.get("last_price"))
             rows.append((
                 underlying, captured_at, kind, spot_price, spot_symbol,
+                # The source is recorded only when there IS a spot: a row with no
+                # spot has no source, and writing one would claim a measurement
+                # that never happened.
+                (config.SPOT_SOURCE_QUOTE if spot_price is not None else None),
                 slot["fut_price"], slot["fut_token"],
                 slot["ce_oi"], slot["pe_oi"], slot["ce_vol"], slot["pe_vol"],
                 slot["ce_n"], slot["pe_n"], config.VENDOR_ID, fetched_at, sid,
