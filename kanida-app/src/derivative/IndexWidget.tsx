@@ -6,10 +6,10 @@ import {View} from 'react-native';
 import Svg,{Path,Line} from 'react-native-svg';
 import {C,T} from '../ui';
 import {useDerivativeRead} from './useDerivatives';
-import {WidgetFrame,stateOf} from './frame';
+import {WidgetFrame,metaText,stateOf} from './frame';
 import {Table,Cell,type Column,type TableItem} from './Table';
-import {clock,compact,dteText,linePath,maxPainText,nextSort,pcrText,price,scaleSeries,shortDate,sortRows,
- type SortState} from './logic';
+import {asOfText,clock,compact,dteText,floorsText,linePath,maxPainText,nextSort,pcrText,price,scaleSeries,
+ shortDate,sortRows,type SortState} from './logic';
 import type {IndexRow,Indices,ChartTarget} from './types';
 const SPARK_W=118,SPARK_H=30;
 const VALUE:Record<string,(row:IndexRow)=>unknown>={symbol:r=>r.underlying,spot:r=>r.spot,pcr_oi:r=>r.pcr_oi,
@@ -31,9 +31,12 @@ function OiSpark({row}:{row:IndexRow}){
   <Path d={map(points.map(p=>p.total_pe_oi))} stroke={C.green} strokeWidth={1.3} fill="none"/>
  </Svg>;
 }
-export type IndexWidgetProps={seq:number;target:ChartTarget|null;onTarget:(t:ChartTarget)=>void;onExpand?:()=>void;
+/** What this list holds, handed UP so its block can print an as-of and a headline figure like every other
+ *  block on the tab. A count of rows and the reading they came from: nothing derived, nothing new. */
+export type ListSummary={count:number;asOf:string|null};
+export type IndexWidgetProps={onSummary?:(s:ListSummary)=>void;seq:number;target:ChartTarget|null;onTarget:(t:ChartTarget)=>void;onExpand?:()=>void;
  expanded?:boolean;onClose?:()=>void;pinFirst?:boolean;style?:any};
-export function IndexWidget({seq,target,onTarget,onExpand,expanded,onClose,pinFirst,style}:IndexWidgetProps){
+export function IndexWidget({onSummary,seq,target,onTarget,onExpand,expanded,onClose,pinFirst,style}:IndexWidgetProps){
  const read=useDerivativeRead<Indices>('/api/derivatives/indices',seq);
  const body=read.data,state=stateOf(read,'No index snapshot has been captured yet.');
  const [sort,setSort]=useState<SortState>(null);
@@ -58,9 +61,12 @@ export function IndexWidget({seq,target,onTarget,onExpand,expanded,onClose,pinFi
   return list.map(row=>({kind:'row' as const,key:row.underlying,row}));
  },[rows,sort]);
  const missingIndices=rows.filter(r=>!r.captured).map(r=>r.underlying);
+ const count=rows.length,asOf=body?.as_of||null;
+ React.useEffect(()=>{onSummary?.({count,asOf})},[count,asOf,onSummary]);
  return <WidgetFrame name="Index dashboard" subtitle="NIFTY · BANKNIFTY · FINNIFTY" body={body} state={state}
-  onRefresh={read.reload} onExpand={onExpand} expanded={expanded} onClose={onClose} style={style}
+  onRefresh={read.reload} onExpand={onExpand} expanded={expanded} onClose={onClose} style={style} inBlock
   note={<>
+   <T style={metaText}>{asOfText(body?.as_of)} · {floorsText(body?.floors,body?.floors_text)}</T>
    <T style={{fontSize:10,lineHeight:14,color:C.muted}}>
     PCR is put open interest divided by call open interest at this 15-min reading, and the volume PCR the same for the day&apos;s
     volume (§3.5). Max pain is computed from the open interest standing right now (§3.6). Both describe the book as

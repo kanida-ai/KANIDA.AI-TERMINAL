@@ -493,6 +493,78 @@ class TestContractMetrics:
         assert m.volume_vs_tod.ratio == pytest.approx(1.0)
         assert m.unusual is False and m.unusual_reasons == []
 
+class TestUnusualRules:
+    """A TRIGGER IS A RULE, NOT A SENTENCE.
+
+    The store writes "volume 206.0x its own time-of-day median", and that sentence differs at every multiple.
+    Counting sentences is what let one underlying's 80 flagged contracts read as "124 conditions" downstream.
+    Everything here is additive: the stored text is byte-for-byte what it always was.
+    """
+
+    def test_a_flagged_contract_carries_its_rules_and_their_numbers(self):
+        m = build_metrics()
+        assert [t.rule_id for t in m.triggers] == [M.RULE_VOL_TOD, M.RULE_DAY_VOL_VS_PREV_OI]
+        tod, voi = m.triggers
+        assert tod.comparator == ">=" and tod.threshold == M.UNUSUAL_VOL_TOD_RATIO
+        assert tod.value == pytest.approx(1_200_000 / 450_000)
+        assert tod.baseline == pytest.approx(450_000)     # the median it was measured against
+        assert tod.sample_count == 4                      # over four sessions, not four contracts
+        assert voi.comparator == ">" and voi.threshold == M.VOL_OI_SPIKE_RATIO
+        assert voi.baseline == pytest.approx(450_000)     # yesterday's closing OI
+        assert voi.sample_count == 1                      # one prior session IS the baseline
+        assert all(t.rule_version == M.UNUSUAL_RULES_VERSION for t in m.triggers)
+
+    def test_the_stored_sentence_is_derived_from_the_trigger_and_is_unchanged(self):
+        m = build_metrics()
+        assert m.unusual_reasons == [t.reason for t in m.triggers]
+        assert m.to_row()["unusual_reasons"] == (
+            "volume 2.7x its own time-of-day median,day volume 2.7x yesterday's OI"
+        )
+        # NO COLUMN IS ADDED. A store written before this registry existed keeps every column it had.
+        assert "unusual_triggers" not in m.to_row()
+        assert "rule_id" not in m.to_row()
+
+    def test_a_quiet_contract_has_no_triggers_at_all(self):
+        m = build_metrics(volume=500_000, avg=100.0, baseline=[400_000, 500_000, 600_000],
+                          close_oi=5_000_000)
+        assert m.triggers == () and m.unusual_reasons == []
+
+    @pytest.mark.parametrize("text,rule_id,value", [
+        ("volume 206.0x its own time-of-day median", M.RULE_VOL_TOD, 206.0),
+        ("volume 781.9x its own time-of-day median", M.RULE_VOL_TOD, 781.9),
+        ("day volume 28.3x yesterday's OI", M.RULE_DAY_VOL_VS_PREV_OI, 28.3),
+        ("day volume 1.2x yesterday's OI", M.RULE_DAY_VOL_VS_PREV_OI, 1.2),
+    ])
+    def test_every_multiple_of_one_rule_reads_back_to_that_one_rule(self, text, rule_id, value):
+        assert M.classify_reason(text) == (rule_id, value)
+
+    def test_a_sentence_no_rule_claims_stays_itself(self):
+        assert M.classify_reason("something this build never wrote") == (M.RULE_UNCLASSIFIED, None)
+        assert M.classify_reason("") == (M.RULE_UNCLASSIFIED, None)
+
+    def test_a_stored_row_is_read_back_into_triggers_without_recomputing_anything(self):
+        row = {
+            "unusual_reasons": "volume 206.0x its own time-of-day median,day volume 28.3x yesterday's OI",
+            "vol_tod_ratio": 206.04, "vol_tod_median": 1200.0, "vol_tod_sessions": 7,
+            "vol_oi_ratio": 28.31, "vol_oi_prev_oi": 999.0,
+        }
+        tod, voi = M.triggers_from_metric_row(row)
+        # the COLUMN's exact number, not the rounded one the sentence prints
+        assert tod.value == 206.04 and tod.baseline == 1200.0 and tod.sample_count == 7
+        assert voi.value == 28.31 and voi.baseline == 999.0 and voi.sample_count == 1
+        # a row whose columns are gone keeps the number its own sentence states, and invents nothing else
+        thin = M.triggers_from_metric_row({"unusual_reasons": "volume 206.0x its own time-of-day median"})
+        assert thin[0].value == 206.0 and thin[0].baseline is None and thin[0].sample_count is None
+        assert M.triggers_from_metric_row({"unusual_reasons": None}) == []
+
+    def test_the_registry_is_closed_and_every_rule_states_its_comparison(self):
+        assert [r.rule_id for r in M.UNUSUAL_RULES] == [M.RULE_VOL_TOD, M.RULE_DAY_VOL_VS_PREV_OI]
+        assert len(M.UNUSUAL_RULES) == 2, "there is no third rule, so no name can trip three"
+        for rule in M.UNUSUAL_RULES:
+            assert rule.comparator in (">=", ">") and rule.threshold > 0
+            assert rule.label and rule.measure and rule.baseline_label and rule.sample_label
+            assert rule.version == M.UNUSUAL_RULES_VERSION
+
 
 class TestRollup:
     def test_headline_pcr_max_pain_and_premium_agree_with_the_strikes(self):

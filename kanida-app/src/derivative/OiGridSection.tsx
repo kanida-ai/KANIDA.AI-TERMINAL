@@ -30,21 +30,19 @@ import Svg,{Path,Line,Circle,Text as SvgText} from 'react-native-svg';
 import {C,T,s} from '../ui';
 import {useDerivativeRead,type Read} from './useDerivatives';
 import {LinkText} from '../discover/parts';
-import {InfoDisclosure,Section,WidgetFrame,head,stateOf,tone,buildupColor,typeColor,
- type InfoGroup,type InfoLine} from './frame';
+import {Block,InfoDisclosure,WidgetFrame,head,stateOf,tone,buildupColor,typeColor,
+ type HeadlineProps,type InfoGroup,type InfoLine,type PaneStyle} from './frame';
 import {FuturesChartPanel} from './FuturesChartPanel';
-import {DASH,GRID_LEGEND_TEXT,GRID_NOT_ENOUGH_MARKS,asOfText,axisTimes,buildupLabel,buildupTone,contractSummary,
- crore,customizeLabel,deltaAxis,deltaUnits,directionChip,directionTone,dteText,expiryText,floorsText,gridBasis,
- gridBlockRead,gridDirection,gridFlow,
- gridSlotDetail,gridSlotLabel,gridSlotNote,gridSlotTitle,gridSourceText,groupSummary,linePath,optionTone,price,
- rowKey,rulesToFilters,scaleDelta,scaleGridPrice,signedUnits,strike as strikeText,unusualQuery,
- volumeRatioShort,type FilterRule} from './logic';
-import type {ChartTarget,ContractRow,GridSlot,OiGrid,Unusual} from './types';
+import {DASH,GRID_LEGEND_TEXT,GRID_NOT_ENOUGH_MARKS,asOfText,axisTimes,customizeLabel,deltaAxis,deltaUnits,
+ directionChip,directionTone,dteText,expiryText,gridBasis,gridBlockRead,gridDirection,gridFlow,
+ gridSlotDetail,gridSlotLabel,headlineAgainst,gridSlotNote,gridSlotTitle,gridSourceText,linePath,optionTone,price,
+ scaleDelta,scaleGridPrice,strike as strikeText,type FilterRule} from './logic';
+import type {ChartTarget,GridSlot,OiGrid} from './types';
 
 /** Room for the K/L labels down the left of every small chart. */
 // PLOT_H was set when a wall of prose sat under the grid. With that gone the block had ~100px of nothing
 // under its second row, so the charts take it: the same ten readings, drawn tall enough to read.
-const AXIS_W=34,PLOT_H=80,TIME_H=12,CELL_GAP=8;
+const AXIS_W=34,PLOT_H=64,TIME_H=12,CELL_GAP=8;
 // ONE rhythm for both rows. Every zone of a tile is given a fixed height, so a call tile and a put tile are
 // exactly the same height whatever their labels happen to say, every tile in a row shares a baseline, and the
 // numbers line up across the grid for an eye scanning it. Nothing is clamped that used to be whole: the
@@ -60,6 +58,7 @@ export const SCREENER_FLOOR_TEXT='A contract is listed only when it clears all t
 // block. This is the same fact in a phrase that fits; the sentence itself is in How to read this.
 export const SCREENER_IDLE_SUB='Over the floors';
 export const SCREENER_CLICK_TEXT='Clicking a row points the futures chart and the ten tiles at that contract.';
+export const GRID_HIGHLIGHT_TEXT='Pointing at a tile lights the same strike wherever else it is on this tab — on the option chain and in the volatility-by-strike list. It highlights; it changes nothing.';
 export const GRID_GAP_TEXT='A 15-min reading with no snapshot is drawn as a gap on both lines; nothing here is interpolated.';
 /** The price line is the SECOND series: thinner and dashed, so it reads as secondary without relying on colour. */
 const PRICE_DASH='3 2',PRICE_WIDTH=1,DELTA_WIDTH=1.4;
@@ -67,7 +66,8 @@ const PRICE_DASH='3 2',PRICE_WIDTH=1,DELTA_WIDTH=1.4;
 export function gridColumns(width:number){return width<420?2:width<660?3:5;}
 
 // --- one small chart -----------------------------------------------------------------------------------------
-function DeltaCell({slot,width,selected,onPress}:{slot:GridSlot;width:number;selected:boolean;onPress:()=>void}){
+function DeltaCell({slot,width,selected,lit,onPress,onHighlight}:{slot:GridSlot;width:number;selected:boolean;
+ lit?:boolean;onPress:()=>void;onHighlight?:(strike:number|null)=>void}){
  // The chip AND the two sentences are derived from the very points this cell draws, so a tile can never
  // disagree with its own chart. The server computes the same reading and serves it; neither is trusted over
  // the other, because both are the same rule over the same points.
@@ -87,8 +87,16 @@ function DeltaCell({slot,width,selected,onPress}:{slot:GridSlot;width:number;sel
  const height=CHART_H;
  return <Pressable accessibilityRole="button" accessibilityLabel={gridSlotLabel(slot,direction)}
   accessibilityState={{selected}} disabled={!slot.present} onPress={onPress}
-  style={(st:any)=>[{width,height:TILE_H,padding:CELL_PAD,borderRadius:10,borderWidth:1,gap:ROW_GAP,
-   borderColor:selected?C.green:C.line,backgroundColor:st.hovered||st.focused?C.dark:'transparent'}]}>
+  onHoverIn={()=>onHighlight?.(slot.strike==null?null:Number(slot.strike))}
+  onHoverOut={()=>onHighlight?.(null)}
+  onFocus={()=>onHighlight?.(slot.strike==null?null:Number(slot.strike))}
+  onBlur={()=>onHighlight?.(null)}
+  style={(st:any)=>[{width,height:TILE_H,padding:CELL_PAD,borderRadius:10,gap:ROW_GAP,
+   // selected is the reader's CHOICE and wins; lit is the same strike under the pointer somewhere else on
+   // the tab; focused is the keyboard, which must be as visible as the mouse.
+   borderWidth:selected||st.focused?2:1,
+   borderColor:selected||st.focused?C.green:lit?C.mint:C.line,
+   backgroundColor:selected?C.soft:lit||st.hovered||st.focused?C.dark:'transparent'}]}>
   <T numberOfLines={1} style={{fontFamily:'InterSemi',fontSize:12,lineHeight:TITLE_H,height:TITLE_H,
    color:colour}}>{gridSlotTitle(slot)}</T>
   <T numberOfLines={1} style={{fontSize:9,lineHeight:DETAIL_H,height:DETAIL_H,color:C.muted}}>{gridSlotDetail(slot)}</T>
@@ -136,8 +144,10 @@ function DeltaCell({slot,width,selected,onPress}:{slot:GridSlot;width:number;sel
 // the one "How to read this" panel in its header) and hands it down, so the block and the grid can never be
 // looking at two different readings of the same symbol.
 type GridProps={underlying:string;read:Read<OiGrid>;target:ChartTarget|null;onTarget:(t:ChartTarget)=>void;
+ highlight?:number|null;onHighlight?:(strike:number|null)=>void;
  onExpand?:()=>void;expanded?:boolean;onClose?:()=>void;style?:any};
-function DeltaOiGrid({underlying,read,target,onTarget,onExpand,expanded,onClose,style}:GridProps){
+function DeltaOiGrid({underlying,read,target,onTarget,highlight,onHighlight,onExpand,expanded,onClose,
+ style}:GridProps){
  const [width,setWidth]=useState(0);
  const body=read.data;
  const state=underlying?stateOf(read,body?.not_enough_marks||GRID_NOT_ENOUGH_MARKS)
@@ -180,6 +190,8 @@ function DeltaOiGrid({underlying,read,target,onTarget,onExpand,expanded,onClose,
      {/* every tile is TILE_H tall, so the calls row and the puts row are the same height to the pixel */}
      <View style={[s.row,{flexWrap:'wrap',alignItems:'flex-start',gap:CELL_GAP}]}>
       {band.slots.map(slot=><DeltaCell key={slot.slot} slot={slot} width={cell} onPress={()=>pick(slot)}
+       onHighlight={onHighlight}
+       lit={highlight!=null&&slot.strike!=null&&Math.abs(Number(slot.strike)-highlight)<0.5}
        selected={slot.instrument_token!=null&&target?.instrumentToken===slot.instrument_token}/>)}
      </View>
     </View>)}
@@ -188,125 +200,61 @@ function DeltaOiGrid({underlying,read,target,onTarget,onExpand,expanded,onClose,
  </WidgetFrame>;
 }
 
-// --- the screener down the left -------------------------------------------------------------------------------
-type ScreenerProps={rules:FilterRule[];rulesLine:string;seq:number;target:ChartTarget|null;
- onTarget:(t:ChartTarget)=>void;onExpand?:()=>void;expanded?:boolean;onClose?:()=>void;
- onFloors?:(text:string)=>void;style?:any};
-function UnusualScreenerPanel({rules,rulesLine,seq,target,onTarget,onExpand,expanded,onClose,onFloors,
- style}:ScreenerProps){
- const read=useDerivativeRead<Unusual>(`/api/derivatives/unusual${unusualQuery(rulesToFilters(rules||[]))}`,seq);
- const body=read.data;
- const state=stateOf(read,'No contract clears the liquidity floors at this 15-min reading.');
- const required=body?.baseline_sessions_required??3;
- const groups=body?.rows||[];
- const count=groups.reduce((n,g)=>n+(g.strikes||[]).length,0);
- const pick=(row:ContractRow)=>onTarget({underlying:row.underlying,instrumentToken:row.instrument_token,
-  label:row.tradingsymbol||row.underlying,
-  detail:`${strikeText(row.strike)} ${row.instrument_type} · ${dteText(row.days_to_expiry)}`});
- // the floors this list applied go to the block header, where one copy stands for all three panels
- const floors=floorsText(body?.floors,body?.floors_text);
- React.useEffect(()=>{onFloors?.(floors)},[floors,onFloors]);
- return <WidgetFrame name="Unusual contracts" subtitle={(rules||[]).length?rulesLine:SCREENER_IDLE_SUB}
-  body={body} state={state}
-  onRefresh={read.reload} onExpand={onExpand}
-  expanded={expanded} onClose={onClose}
-  showsSignals={['premium_cr','volume_ratio','buildup_day','oi_change_day']}
-  note={`${count} strike${count===1?'':'s'} over the floors`}
-  emptyDetail="A contract is listed only when it clears all three floors, which are named in How to read this."
-  inBlock style={style}>
-  <ScrollView style={{flex:1}} contentContainerStyle={{paddingVertical:4}}>
-   {groups.map(group=><View key={`g-${group.underlying}`}>
-    <View style={{paddingHorizontal:10,paddingVertical:5,backgroundColor:C.dark,gap:1}}>
-     <T numberOfLines={1} style={{fontFamily:'InterSemi',fontSize:11,lineHeight:15}}>{group.underlying}</T>
-     <T numberOfLines={2} style={{fontSize:9,lineHeight:13,color:C.muted}}>{groupSummary(group)}</T>
-    </View>
-    {(group.strikes||[]).map((row,i)=>{
-     const selected=row.instrument_token!=null&&target?.instrumentToken===row.instrument_token;
-     return <Pressable key={rowKey(row,`${group.underlying}-${i}`)} accessibilityRole="button"
-      accessibilityState={{selected}} onPress={()=>pick(row)}
-      accessibilityLabel={`${row.tradingsymbol||row.underlying}. ${contractSummary(row)}. ${crore(row.premium_cr)} traded. ${buildupLabel(row.buildup_day)} on the day. Volume ${volumeRatioShort(row,required)} of its own median.`}
-      style={(st:any)=>[{paddingHorizontal:10,paddingVertical:6,borderBottomWidth:1,borderColor:C.line,gap:2,
-       backgroundColor:selected?C.soft:st.hovered||st.focused?C.dark:'transparent'}]}>
-      <View style={[s.row,{gap:6}]}>
-       <T numberOfLines={1} style={{flex:1,fontFamily:'InterSemi',fontSize:11,lineHeight:15,
-        color:typeColor(optionTone(row.instrument_type))}}>{contractSummary(row)}</T>
-       <T style={{fontSize:11,lineHeight:15,fontVariant:['tabular-nums']}}>{crore(row.premium_cr)}</T>
-      </View>
-      <View style={[s.row,{gap:6}]}>
-       <T numberOfLines={1} style={{flex:1,fontSize:9,lineHeight:13,
-        color:buildupColor(buildupTone(row.buildup_day))}}>{buildupLabel(row.buildup_day)}</T>
-       <T style={{fontSize:9,lineHeight:13,color:C.muted}}>vol {volumeRatioShort(row,required)}</T>
-       <T style={{fontSize:9,lineHeight:13,color:tone(row.oi_change_day)}}>OI {signedUnits(row.oi_change_day)}</T>
-      </View>
-     </Pressable>;
-    })}
-   </View>)}
-  </ScrollView>
- </WidgetFrame>;
-}
-
 // --- the block ------------------------------------------------------------------------------------------------
-// Left to right, one block, all three panels the same height: the screener, the futures chart, the 2 × 5 grid.
-// The screener is the narrow dense list it already was; the futures chart is a single tall panel spanning the
-// FULL height of the block (as tall as both tile rows together, not one row); the grid keeps its five columns.
-// The owner drew the chart roughly one grid-column wide; at that width a candle series is a smear, so it is
-// given about the screener's width instead and the grid keeps the largest share of the row. The screener gets
-// the extra tenth because its rows carry three numbers on a line and the chart's do not.
-// Below index.tsx's GRID_BESIDE the three no longer fit without dropping the grid under five columns, so the
-// block stacks into one column instead of shrinking the tiles — nothing here loses content silently.
-// The futures panel's share was set when its header only had to fit a name; it now has to fit the CONTRACT
-// without cutting it short, at the narrowest width the three still sit side by side. The screener gains a
-// little for the same reason. The grid keeps its share untouched, so it still gets five tiles across.
-export const SCREENER_FLEX=1.15,FUTURES_FLEX=1.25,GRID_FLEX=2.9;
+// TWO panels, on the tab's one template: the front futures chart of the symbol on the left, the 2 x 5 grid of
+// delta-OI tiles on the right. It used to be THREE - a screener down the left, then the chart, then the grid -
+// and that screener was one of the seven copies of one list the owner objected to. There is now exactly ONE
+// screener on this tab, pinned at the top, and it drives this block like every other.
+//
+// The GRID IS THE CONTENT PANEL. That is the question this block had to answer to fit the skeleton, and the
+// answer is yes: ten small charts of one symbol's strikes at the money are what this block is ABOUT, so they
+// take the content panel and the futures chart takes the chart panel. The template gives the content panel the
+// larger share, which is what keeps the grid five tiles across.
 /** `symbol` and `badge` are the TAB's, resolved once in index.tsx and handed down. This block used to resolve its
  *  own, which was right when it was the only block with a symbol and wrong the moment the session blocks arrived:
  *  two resolutions is two answers, and the owner asked for one. */
-export type OiGridSectionProps={symbol:string;badge:string;expiry:string;seq:number;rules:FilterRule[];
- rulesLine:string;target:ChartTarget|null;onTarget:(t:ChartTarget)=>void;onCustomize:()=>void;stacked?:boolean;
- height:number;hidden?:Record<string,boolean>;onHide?:(key:string)=>void;expanded?:string;
- onExpand?:(key:string)=>void};
-export function OiGridSection({symbol,badge,expiry,seq,rules,rulesLine,target,onTarget,onCustomize,stacked,height,
- hidden,onHide,expanded,onExpand}:OiGridSectionProps){
+export type OiGridSectionProps={symbol:string;badge:string;linked?:boolean;expiry:string;seq:number;
+ /** The tab's ONE ΔOI-grid read, made in index.tsx and handed to every panel built on it.
+  *
+  *  It used to be made here, and then the signal table beside the screener needed the SAME ten contracts and
+  *  made its own - two fetches of one payload, and two answers that could drift apart at a refresh. One read,
+  *  one envelope, one as-of: the grid and the signal table are now built on the very same rows. */
+ read:Read<OiGrid>;
+ rules:FilterRule[];target:ChartTarget|null;onTarget:(t:ChartTarget)=>void;onCustomize:()=>void;
+ stacked?:boolean;height?:number;hidden?:Record<string,boolean>;onHide?:(key:string)=>void;expanded?:string;
+ onExpand?:(key:string)=>void;
+ /** The strike the pointer is on anywhere on the tab. Lighting it here is what links this grid to the chain
+  *  and to the volatility list: three panels about the same strikes that used to share no visual cue at all. */
+ highlight?:number|null;onHighlight?:(strike:number|null)=>void};
+export function OiGridSection({symbol,badge,linked,expiry,seq,read,rules,target,onTarget,onCustomize,stacked,height,
+ hidden,onHide,expanded,onExpand,highlight,onHighlight}:OiGridSectionProps){
  const shows=(key:string)=>!hidden?.[key]&&(!expanded||expanded===key);
- // The panels hand their own definitions UP to the block, which shows them behind ONE control. A panel the
- // reader closed takes its group with it, so the panel never explains something that is not on screen.
- const [floors,setFloors]=useState('');
- const onFloors=useCallback((text:string)=>setFloors(v=>v===text?v:text),[]);
+ // The futures panel hands its own definitions UP to the block, which shows them behind ONE control.
  const [chartInfo,setChartInfo]=useState<InfoLine[]>([]);
  const onChartInfo=useCallback((lines:InfoLine[])=>setChartInfo(v=>
   v.length===lines.length&&v.every((l,i)=>l.text===lines[i].text)?v:lines),[]);
  // The symbol is the TAB's, resolved once in index.tsx (logic.resolveTabSymbol) and handed to every block on the
- // page, this one included. The futures chart and all ten ΔOI tiles get that same answer, so a screener click
- // re-points the whole TAB together and no panel can be looking at a different underlying from the one beside it.
- // A symbol nobody chose still says it is a default: `badge` carries that, and it came down with the symbol.
- // The grid's read is made HERE, once, because the block header needs the same envelope: its as-of is the
- // block's one as-of line, and its served sentences are the block's one "How to read this" panel. Reading it
- // in two places would let the header and the tiles describe two different readings of the same symbol.
- const gridPath=symbol?`/api/derivatives/oi-grid?underlying=${encodeURIComponent(symbol)}${expiry?`&expiry=${encodeURIComponent(expiry)}`:''}`:null;
- const gridRead=useDerivativeRead<OiGrid>(gridPath,seq);
+ // page, this one included. The futures chart and all ten delta-OI tiles get that same answer, so a screener
+ // click re-points the whole TAB together and no panel can be looking at a different underlying from its
+ // neighbour. A symbol nobody chose still says it is a default: `badge` carries that, and `linked` is false.
+ // The read is the TAB's, made once in index.tsx and handed down: the signal table beside the screener is
+ // built on these very same ten contracts, so neither can drift from the other at a refresh.
+ const gridRead=read;
  const gridBody=gridRead.data;
- // All three panels are the same height when they sit side by side: the chart spans both tile rows.
- const screenerStyle=stacked?{height:Math.min(height,380)}:{flex:SCREENER_FLEX,minWidth:0,height};
- const futuresStyle=stacked?{height:Math.min(height,460)}:{flex:FUTURES_FLEX,minWidth:0,height};
- const gridStyle=stacked?{height}:{flex:GRID_FLEX,minWidth:0,height};
- const screener=!shows('oi_grid_screener')?null:<UnusualScreenerPanel key="oi_grid_screener" rules={rules}
-  rulesLine={rulesLine} seq={seq} target={target} onTarget={onTarget} onFloors={onFloors}
-  onExpand={onExpand?()=>onExpand('oi_grid_screener'):undefined} expanded={expanded==='oi_grid_screener'}
-  onClose={onHide?()=>onHide('oi_grid_screener'):undefined} style={screenerStyle}/>;
- const futures=!shows('oi_grid_futures')?null:<FuturesChartPanel key="oi_grid_futures" underlying={symbol}
-  seq={seq} onInfo={onChartInfo} onExpand={onExpand?()=>onExpand('oi_grid_futures'):undefined}
+ const futures=(style:PaneStyle)=>!shows('oi_grid_futures')?null:<FuturesChartPanel key="oi_grid_futures"
+  underlying={symbol} seq={seq} onInfo={onChartInfo}
+  onExpand={onExpand?()=>onExpand('oi_grid_futures'):undefined}
   expanded={expanded==='oi_grid_futures'} onClose={onHide?()=>onHide('oi_grid_futures'):undefined}
-  style={futuresStyle}/>;
- const grid=!shows('oi_grid')?null:<DeltaOiGrid key="oi_grid" underlying={symbol} read={gridRead}
-  target={target} onTarget={onTarget}
+  style={style}/>;
+ const grid=(style:PaneStyle)=>!shows('oi_grid')?null:<DeltaOiGrid key="oi_grid" underlying={symbol}
+  read={gridRead} target={target} onTarget={onTarget} highlight={highlight} onHighlight={onHighlight}
   onExpand={onExpand?()=>onExpand('oi_grid'):undefined} expanded={expanded==='oi_grid'}
-  onClose={onHide?()=>onHide('oi_grid'):undefined} style={gridStyle}/>;
- if(!screener&&!futures&&!grid)return null;
+  onClose={onHide?()=>onHide('oi_grid'):undefined} style={style}/>;
  // EVERY definition this block works to, in one place, behind one control. Not one word of any of them is
- // changed by the move: the server's own sentences are preferred wherever it sends them, exactly as they were
- // when they sat under the panels, and the fallbacks are the same fallbacks.
+ // changed: the server's own sentences are preferred wherever it sends them, exactly as they were when they
+ // sat under the panels, and the fallbacks are the same fallbacks.
  const groups:InfoGroup[]=[
-  {heading:'ΔOI by strike',lines:!grid?[]:[
+  {heading:'delta-OI by strike',lines:!shows('oi_grid')?[]:[
    gridBody?.delta_oi_text||'ΔOI is open interest added or removed since the previous close. Every line starts at 0 at the first 15-min reading of the day.',
    gridBody?.atm_text||'ATM is the listed strike nearest spot in the front expiry. ATM+n is n strikes above spot, ATM−n is n strikes below.',
    gridBody?.direction_text||'',
@@ -316,19 +264,24 @@ export function OiGridSection({symbol,badge,expiry,seq,rules,rulesLine,target,on
    gridBody?.flow_text||'Every opened contract has a buyer and a seller. These two lines read which side was paying up at each 15-min reading — they do not say what happens next.',
    gridBody?.block_text||'',
    gridBasis(gridBody),
-   `${GRID_GAP_TEXT} ${gridSourceText(gridBody?.points_source)}`.trim()]},
-  {heading:'Unusual contracts',lines:!screener?[]:[floors,SCREENER_FLOOR_TEXT,SCREENER_CLICK_TEXT]},
-  {heading:'Futures chart',lines:futures?chartInfo:[]},
+   (GRID_GAP_TEXT+' '+gridSourceText(gridBody?.points_source)).trim(),
+   GRID_HIGHLIGHT_TEXT]},
+  {heading:'Futures chart',lines:shows('oi_grid_futures')?chartInfo:[]},
  ];
- // One as-of for the block, not one per panel: all three panels are pointed at the SAME symbol, and the grid's
- // envelope is the read of it. One symbol badge too, handed down from the tab, which is also where a defaulted
- // symbol is flagged as a default rather than the reader's own choice.
- return <Section title="ΔOI by strike, through the session"
+ // The block's one headline: the strike the ten tiles are built around, and the spot it is nearest to.
+ const headline:HeadlineProps=symbol
+  ?{label:'At-the-money strike',value:strikeText(gridBody?.atm_strike),
+    against:headlineAgainst(gridBody?.spot!=null?'nearest the captured spot '+price(gridBody.spot):'',
+     gridBody?.expiry?expiryText(gridBody.expiry,gridBody?.days_to_expiry??null):''),
+    reason:gridBody?.not_enough_marks||GRID_NOT_ENOUGH_MARKS}
+  :{label:'At-the-money strike',value:DASH,
+    reason:'Click any row on the screener above, or choose a symbol in Customize, to point this block at one.'};
+ return <Block title="ΔOI by strike, through the session"
   subtitle="One symbol across the block: its front futures contract, and the ten strikes at the money."
-  asOf={asOfText(gridBody?.as_of)} badge={badge}
+  asOf={asOfText(gridBody?.as_of)} badge={badge} linked={linked} headline={headline}
   info={<InfoDisclosure title="ΔOI by strike, through the session" groups={groups}/>}
   actions={<LinkText label={customizeLabel((rules||[]).length)}
-   a11y={`Customize this block: ${(rules||[]).length} filters in force. Open the filter builder`}
+   a11y={'Customize this block: '+(rules||[]).length+' filters in force. Open the filter builder'}
    onPress={onCustomize}/>}
-  stacked={stacked}>{screener}{futures}{grid}</Section>;
+  stacked={stacked} height={height} chart={futures} content={grid}/>;
 }

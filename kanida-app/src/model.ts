@@ -30,9 +30,16 @@ export const apiBase=Platform.OS==='web'?'':process.env.EXPO_PUBLIC_API_URL||'';
 let sessionToken='',sessionCsrf='';
 export function setApiSession(token='',csrf=''){sessionToken=token;sessionCsrf=csrf;}
 export class ApiError extends Error{constructor(message:string,public status:number,public code:string){super(message)}}
-export async function api(path:string,body?:unknown,extraHeaders:Record<string,string>={}){
+/** `signal` lets a CALLER cancel a request it no longer wants. The 30-second timeout is unchanged and still
+ *  applies; a caller's signal simply aborts the same controller early. It is optional, so nothing that does
+ *  not pass one behaves differently. The Derivative tab uses it: on a rapid symbol or expiry change the
+ *  answer to the symbol the reader has already moved off is not just dropped on arrival, it is never
+ *  finished - which is one fewer way for two panels to end up describing two different instruments. */
+export async function api(path:string,body?:unknown,extraHeaders:Record<string,string>={},signal?:AbortSignal){
  const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),30000);
- try {const r=await fetch(apiBase+path,{signal:controller.signal,credentials:'include',headers:{...(body?{'Content-Type':'application/json'}:{}),...(sessionToken?{Authorization:'Bearer '+sessionToken}:{}),...(sessionCsrf?{'X-Kanida-CSRF':sessionCsrf}:{}),...extraHeaders},...(body?{method:'POST',body:JSON.stringify(body)}:{})});const d=await r.json();if(!r.ok)throw new ApiError(d.error||'Unable to load KANIDA',r.status,d.code||'REQUEST_FAILED');return d;} finally {clearTimeout(timeout);}
+ const stop=()=>controller.abort();
+ if(signal){if(signal.aborted)controller.abort();else signal.addEventListener('abort',stop);}
+ try {const r=await fetch(apiBase+path,{signal:controller.signal,credentials:'include',headers:{...(body?{'Content-Type':'application/json'}:{}),...(sessionToken?{Authorization:'Bearer '+sessionToken}:{}),...(sessionCsrf?{'X-Kanida-CSRF':sessionCsrf}:{}),...extraHeaders},...(body?{method:'POST',body:JSON.stringify(body)}:{})});const d=await r.json();if(!r.ok)throw new ApiError(d.error||'Unable to load KANIDA',r.status,d.code||'REQUEST_FAILED');return d;} finally {clearTimeout(timeout);if(signal)signal.removeEventListener('abort',stop);}
 }
 export function cellQuery(m:Match,side:string){return `symbol=${encodeURIComponent(m.symbol)}&timeframe=${m.timeframe}&pattern=${m.pattern}&side=${side}`;}
 export function sizing(price:number,account:number,allocation:number,risk:number,stop:number,costPct=.4){

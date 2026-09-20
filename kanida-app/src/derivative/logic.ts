@@ -8,7 +8,7 @@
 //     volume_ratio: null with volume_baseline: 'none' and this file re-checks both.
 //  3. Nothing is phrased as a prediction. Every line describes a state and says when it was captured (§5).
 import type {ChainRow,ContractRow,DirectionLabels,DirectionWords,Envelope,Floors,GridDirection,GridPoint,GridPriceDirection,GridSlot,IndexRow,
- OiGrid,SeriesPoint,StrikeOi,UnusualGroup} from './types';
+ OiGrid,SeriesPoint,StrikeOi,UnusualContract,UnusualGroup,UnusualRuleTally,UnusualTrigger} from './types';
 export const DASH='—',MINUS='−',RUPEE='₹',TIMES='×';
 /** The one empty-state sentence for the whole tab. Matches derivatives.EMPTY_TEXT on the server. */
 export const EMPTY_TEXT='No F&O data captured yet — capture starts at the next 15-min reading';
@@ -69,16 +69,83 @@ export function expiryText(expiry?:string|null,dte?:number|null){
 }
 
 // --- §3.1 build-up -------------------------------------------------------------------------------------------
+// ONE CANONICAL ID, one display label, one wire value, normalised at a single boundary.
+//
+// The store writes the READER-FACING strings ('Long build-up', 'Flat', 'no data'); §3.1 and this file's own code
+// speak snake_case ids. Handing one where the other was expected is what turned every build-up the screener
+// served, and all six choices in the build-up filter, into a dash on screen. `buildupId` is now the only door
+// between the two vocabularies and every reader of a stored build-up goes through it.
+//
+// FOUR ANSWERS THAT ARE NOT THE SAME ANSWER, and none of them collapses into another:
+//   `flat`    - the store labelled this reading Flat: a zero change on one of the two axes. A real label.
+//   `no_data` - the metrics worker could not label the reading at all. A dash, and the store's own word for it.
+//   `missing` - nothing was served for this field. A dash.
+//   `unknown` - something WAS served and this tab does not recognise it. It says so on screen and
+//               `buildupId` reports it, because a value quietly rendered as Flat is a lie about the book.
+export type BuildupId='long_buildup'|'short_buildup'|'short_covering'|'long_unwinding'|'flat'|'no_data'
+ |'unknown'|'missing';
+/** The four §3.1 labels, word for word derivatives.BUILDUP_LABELS. */
 export const BUILDUP_LABELS:Record<string,string>={long_buildup:'Long build-up',short_buildup:'Short build-up',
  short_covering:'Short covering',long_unwinding:'Long unwinding'};
-/** An unknown or absent label is a dash — a build-up is never guessed from price alone. */
-export function buildupLabel(key:unknown){const k=String(key||'');return BUILDUP_LABELS[k]||DASH;}
-/** Colour intent only. 'up' = new longs / shorts covering; 'down' = new shorts / longs leaving. */
-export function buildupTone(key:unknown):'up'|'down'|'flat'{
- const k=String(key||'');
- if(k==='long_buildup'||k==='short_covering')return 'up';
- if(k==='short_buildup'||k==='long_unwinding')return 'down';
+/** The store's own two NON-labels, kept apart from the four above because they are states, not classifications. */
+export const BUILDUP_STATE_LABELS:Record<string,string>={flat:'Flat',no_data:'no data'};
+/** Every id a stored build-up can carry, in the server's own order. */
+export const BUILDUP_IDS:BuildupId[]=['long_buildup','short_buildup','short_covering','long_unwinding',
+ 'flat','no_data'];
+/** id → the exact string the STORE holds and the screener's `buildup` parameter takes. */
+export const BUILDUP_WIRE:Record<string,string>={...BUILDUP_LABELS,...BUILDUP_STATE_LABELS};
+/** What the reader sees when the tab does not recognise a served build-up. Never 'Flat', never a dash. */
+export const BUILDUP_UNKNOWN='unrecognised build-up';
+const BUILDUP_BY_WIRE:Record<string,BuildupId>=(()=>{
+ const map:Record<string,BuildupId>={};
+ for(const id of BUILDUP_IDS)map[BUILDUP_WIRE[id].toLowerCase()]=id;
+ return map;
+})();
+/** THE BOUNDARY. Any stored, served or restored build-up value in; exactly one id out. */
+export function buildupId(value:unknown):BuildupId{
+ if(value==null)return 'missing';
+ const text=String(value).trim();
+ if(!text)return 'missing';
+ const key=text.toLowerCase().replace(/[\s-]+/g,'_');
+ if((BUILDUP_IDS as string[]).includes(key))return key as BuildupId;
+ return BUILDUP_BY_WIRE[text.toLowerCase()]||'unknown';
+}
+/** The reader's words for a stored build-up. A value nothing recognises SAYS so rather than disappearing. */
+export function buildupLabel(value:unknown){
+ const id=buildupId(value);
+ if(id==='missing'||id==='no_data')return DASH;
+ if(id==='unknown')return BUILDUP_UNKNOWN;
+ return BUILDUP_WIRE[id];
+}
+/** The same value in a MENU, where the reader is choosing it: the store's own "no data" is one of the six
+ *  choices and has to be readable as one rather than as a blank row. */
+export function buildupChoiceLabel(value:unknown){
+ const id=buildupId(value);
+ return id==='no_data'?BUILDUP_WIRE.no_data:buildupLabel(value);
+}
+/** Colour intent only. 'up' = new longs / shorts covering; 'down' = new shorts / longs leaving. Every state
+ *  that is not one of the four §3.1 labels — flat, no data, missing, unrecognised — is toneless. */
+export function buildupTone(value:unknown):'up'|'down'|'flat'{
+ const id=buildupId(value);
+ if(id==='long_buildup'||id==='short_covering')return 'up';
+ if(id==='short_buildup'||id==='long_unwinding')return 'down';
  return 'flat';
+}
+/** §3.1 AS A CLOSED TRUTH TABLE over the two observed moves of one instrument's own price and open interest —
+ *  the FUTURES row of the same price × open-interest grid the two option sides are read on below. All nine
+ *  cells are listed, so a flat axis has its own answer rather than borrowing a neighbour's: the store's own
+ *  definition of Flat is "a zero change on either axis", and that is what these five cells say.
+ *
+ *  It is an interpretation of two measured changes. It does not say who initiated the trade: every opened
+ *  contract has a buyer and a seller, and neither price nor open interest names the aggressor. */
+export const BUILDUP_FROM_MOVES:Record<string,BuildupId>={
+ 'up|building':'long_buildup','down|building':'short_buildup',
+ 'up|unwinding':'short_covering','down|unwinding':'long_unwinding',
+ 'up|flat':'flat','down|flat':'flat','flat|building':'flat','flat|unwinding':'flat','flat|flat':'flat',
+};
+/** The truth table, applied. An axis with no direction at all yields no build-up to report. */
+export function buildupFromMoves(priceDirection:unknown,oiDirection:unknown):BuildupId{
+ return BUILDUP_FROM_MOVES[`${String(priceDirection||'')}|${String(oiDirection||'')}`]||'unknown';
 }
 /** §3.1: the 15-minute and the day-on-day classification are NEVER merged into one label. */
 export function buildupPair(row:Pick<ContractRow,'buildup_15m'|'buildup_day'>){
@@ -207,7 +274,7 @@ export function linePath(scaled:Scaled|null){
  return out;
 }
 /** The x of the strike nearest a price (spot / max pain marker on the OI-by-strike chart). None → null. */
-export function nearestStrikeIndex(rows:StrikeOi[]|ChainRow[],value:unknown){
+export function nearestStrikeIndex(rows:{strike:number}[],value:unknown){
  const v=num(value);if(v==null||!rows?.length)return null;
  let best=0,bestGap=Infinity;
  rows.forEach((row,i)=>{const gap=Math.abs((row.strike??NaN)-v);if(Number.isFinite(gap)&&gap<bestGap){best=i;bestGap=gap}});
@@ -325,11 +392,10 @@ export const VOLUME_RATIO_VALUES=[1.5,2,3,5,10];
 export const VOLUME_TO_OI_VALUES=[0.5,1,2,5];
 /** Percentage steps for the two OI-change filters (15-minute and day-on-day). */
 export const OI_CHANGE_VALUES=[1,2,5,10,25];
-/** The build-up values the SCREENER takes. They are the reader-facing labels, not the snake keys §3.1 uses on the
- *  other routes — the screener's rows carry the label and it filters on that. Two of them have no §3.1 equivalent:
- *  "Flat" is a contract that moved neither way, and "no data" is one the metrics worker could not label at all.
- *  A contract the store cannot label is still a contract, and the reader is allowed to look for those. */
-export const BUILDUP_VALUES=['Long build-up','Short build-up','Short covering','Long unwinding','Flat','no data'];
+/** The build-up values the SCREENER takes, on the wire: the reader-facing strings the store holds, checked
+ *  against derivatives.BUILDUP_VALUES. A RULE never carries one of these — a rule carries the canonical id and
+ *  `screenerParam` turns it into the wire value at the edge, which is the whole point of having one enum. */
+export const BUILDUP_VALUES=BUILDUP_IDS.map(id=>BUILDUP_WIRE[id]);
 /** Which window `buildup` reads. The 15-minute and the day-on-day label are never mixed in one answer (§3.1). */
 export const BUILDUP_WINDOWS=[{value:'15m',label:'Over the last 15 minutes'},
  {value:'day',label:'Since the previous close'}];
@@ -351,10 +417,15 @@ const RULE_VALUE:Record<FilterColumn,(v:string)=>boolean>={
  volumeToOi:v=>/^\d{1,3}(\.\d{1,2})?$/.test(v)&&Number(v)>0&&Number(v)<=999,
  oiChange15m:PCT_RULE,
  oiChangeDay:PCT_RULE,
- buildup:v=>BUILDUP_VALUES.includes(v),
+ // A build-up rule is valid when it names one of the six the store holds, WHICHEVER vocabulary it arrives in:
+ // a rule restored from a browser that stored the wire string is the same rule as one built today.
+ buildup:v=>(BUILDUP_IDS as string[]).includes(buildupId(v)),
  moneyness:v=>MONEYNESS_VALUES.some(m=>m.value===v),
  market:v=>MARKET_VALUES.some(m=>m.value===v),
 };
+/** Columns whose stored value is re-written to its canonical form as it is sanitised, so everything downstream —
+ *  the menus, the chips, the screen reader line and the query string — reads one vocabulary. */
+const RULE_NORMALIZE:Partial<Record<FilterColumn,(v:string)=>string>>={buildup:v=>buildupId(v)};
 /** A rule set restored from localStorage is re-typed before it can reach a query string: a bad rule is dropped, a
  *  second rule on a column the server can only answer once is dropped, and the list is capped. */
 export function sanitizeRules(stored:unknown):FilterRule[]{
@@ -366,7 +437,7 @@ export function sanitizeRules(stored:unknown):FilterRule[]{
   const operator=row.operator as FilterOperator;if(!column.operators.includes(operator))continue;
   const value=typeof row.value==='string'?row.value.trim():'';
   if(!value||!RULE_VALUE[column.key](value))continue;
-  seen.add(column.key);out.push({column:column.key,operator,value});
+  seen.add(column.key);out.push({column:column.key,operator,value:RULE_NORMALIZE[column.key]?.(value)??value});
   if(out.length>=FILTER_COLUMNS.length)break;
  }
  return out;
@@ -1026,12 +1097,22 @@ export function futuresChartSpoken(body?:{contract?:FuturesContractRef|null;cand
  *  whenever the newest reading was rebuilt from candles, which carry no VWAP). A fallback is FLAGGED, so it is
  *  never mistaken for the reader's own choice. */
 export type BlockSymbol={symbol:string;defaulted:boolean;label:string};
-export const BLOCK_DEFAULT_PREMIUM='Busiest by premium',BLOCK_DEFAULT_INDEX='Default';
-export function resolveBlockSymbol(chosen?:string|null,byPremium?:string|null,byIndex?:string|null):BlockSymbol{
+// THE BADGE NAMES THE ORDER THE ROW CAME FROM, AND THE SERVER SAYS WHAT THAT ORDER IS.
+//
+// This badge used to read "Busiest by premium". The row it takes is row ONE of the screener, and the screener
+// has not been ordered by premium for a long time: it opens with the unusual first, and premium is only its
+// third key. The label was describing a sort that was not in force, on a name the reader had not chosen.
+//
+// So the label is the SERVER's own `ranking.label` for the list it actually served, and the constant below is
+// only the fallback for a response that carried no ranking at all. The keys behind it are printed in full on
+// the screener's own control, under "The order these rows are in".
+export const BLOCK_DEFAULT_RANKED='First in the screener order',BLOCK_DEFAULT_INDEX='Default';
+export function resolveBlockSymbol(chosen?:string|null,byRank?:string|null,byIndex?:string|null,
+ rankLabel?:string|null):BlockSymbol{
  const picked=String(chosen||'').trim();
  if(picked)return {symbol:picked,defaulted:false,label:''};
- const premium=String(byPremium||'').trim();
- if(premium)return {symbol:premium,defaulted:true,label:BLOCK_DEFAULT_PREMIUM};
+ const ranked=String(byRank||'').trim();
+ if(ranked)return {symbol:ranked,defaulted:true,label:String(rankLabel||'').trim()||BLOCK_DEFAULT_RANKED};
  const index=String(byIndex||'').trim();
  if(index)return {symbol:index,defaulted:true,label:BLOCK_DEFAULT_INDEX};
  return {symbol:'',defaulted:false,label:''};
@@ -1084,7 +1165,8 @@ export function screenerParam(rule:FilterRule):{key:string;value:string}|null{
   // the two OI changes read either way round, so the direction picks which bound is sent
   case 'oiChange15m':return {key:rule.operator==='lt'?'max_oi_change_15m_pct':'min_oi_change_15m_pct',value};
   case 'oiChangeDay':return {key:rule.operator==='lt'?'max_oi_change_day_pct':'min_oi_change_day_pct',value};
-  case 'buildup':return {key:'buildup',value};
+  // the rule holds the canonical id; the wire holds the string the store wrote. One conversion, here.
+  case 'buildup':{const wire=BUILDUP_WIRE[buildupId(value)];return wire?{key:'buildup',value:wire}:null}
   case 'moneyness':return {key:'moneyness',value};
   default:return null;
  }
@@ -1096,7 +1178,7 @@ export function screenerParam(rule:FilterRule):{key:string;value:string}|null{
  *  reads, and is sent ONLY with that rule — §3.1's two windows are never mixed in one answer. `at` pins the
  *  15-minute reading: omitted, the server reads its newest, and a reader who steps back to an earlier one is
  *  choosing it explicitly rather than being quietly moved there. */
-export function screenerQuery(rules:FilterRule[],options?:{buildupWindow?:string;at?:string}){
+export function screenerQuery(rules:FilterRule[],options?:{buildupWindow?:string;at?:string;group?:string}){
  const parts:string[]=[];
  let wantsBuildup=false;
  for(const rule of sanitizeRules(rules)){
@@ -1109,6 +1191,11 @@ export function screenerQuery(rules:FilterRule[],options?:{buildupWindow?:string
  if(wantsBuildup&&BUILDUP_WINDOWS.some(w=>w.value===window))parts.push(`buildup_window=${window}`);
  const at=String(options?.at||'').trim();
  if(at)parts.push(`at=${encodeURIComponent(at)}`);
+ // WHICH LIST: one row per instrument. Sent explicitly rather than left to a default the two sides have to
+ // agree on, and only when it is a list the server offers - so a stale value here is a refusal the reader
+ // sees rather than a quietly different list.
+ const group=String(options?.group||'').trim();
+ if(group&&SCREENER_VIEWS.some(v=>v.value===group))parts.push(`group=${group}`);
  return parts.length?`?${parts.join('&')}`:'';
 }
 
@@ -1232,10 +1319,10 @@ export function appliedText(statuses:FilterStatus[]){
  *  that the last row the reader clicked anywhere on the tab; failing that the defaults `resolveBlockSymbol` already
  *  applies, still flagged as defaults. No block resolves its own - that is how two panels end up describing two
  *  different underlyings under one as-of line. */
-export function resolveTabSymbol(chosen?:string|null,clicked?:string|null,byPremium?:string|null,
- byIndex?:string|null):BlockSymbol{
+export function resolveTabSymbol(chosen?:string|null,clicked?:string|null,byRank?:string|null,
+ byIndex?:string|null,rankLabel?:string|null):BlockSymbol{
  const picked=String(chosen||'').trim()||String(clicked||'').trim();
- return resolveBlockSymbol(picked,byPremium,byIndex);
+ return resolveBlockSymbol(picked,byRank,byIndex,rankLabel);
 }
 /** What the badge says. A defaulted symbol always says it is a default; a chosen one is just itself. */
 export function symbolBadge(choice?:BlockSymbol|null){
@@ -1777,12 +1864,10 @@ export function futuresLine(body?:{latest_oi_vs_avg?:unknown;latest_basis?:unkno
 /** Why a basis is missing. It is always the same reason: the store captured the contract but not the spot. */
 export const BASIS_NO_SPOT='no spot was captured at this reading, so there is no basis';
 export const BASIS_NO_SPOT_ROW='A basis needs a futures price and a spot at the same reading.';
-/** A build-up label the server already wrote for the reader. "no data" is a state, not a label, and reads as one. */
-export function servedBuildup(label?:string|null){
- const text=String(label||'').trim();
- if(!text||text==='no data')return DASH;
- return text;
-}
+/** A build-up the server already wrote for the reader, read through the SAME boundary every other build-up on
+ *  this tab goes through — the futures summary and a table cell can no longer disagree about one value.
+ *  "no data" is a state, not a label, and reads as a dash; a value the tab does not recognise says so. */
+export function servedBuildup(label?:string|null){return buildupLabel(label);}
 
 // --- the screener, aligned -------------------------------------------------------------------------------------------
 /** How wide the reading on screen was. This is what stands in place of a blank when nothing cleared the floors:
@@ -1833,3 +1918,920 @@ export function screenerEmptyDetail(body?:{empty_note?:string|null;scanned?:unkn
  return `${coverage}${more}`.trim();
 }
 
+
+// --- WHICH 15-MIN READING THE TAB IS ON ---------------------------------------------------------------------
+// The tab used to open on the newest reading the store held, full stop. On 18 Sep 2026 that was 15:45, and the
+// capture had died at 11:30 - everything after it was rebuilt from 15-minute candles. A candle carries no
+// traded-price average, so `premium_cr` is null for every contract in those readings and NOTHING in them can
+// clear the 2-crore floor. The reader got an empty screener, no row to click, and a tab stuck on NIFTY.
+//
+// The server now resolves the newest reading that HAS rows over the floors and says, in facts rather than a
+// sentence, which reading that is and whether it is the newest. The sentence is built here, because this is
+// where the tab's one date formatter and the checks over it already live.
+//
+// It never hides anything: every reading the store holds is still in the control, and one click moves the whole
+// tab to any of them - including the empty ones.
+export type ReadingFacts={newest_at?:string|null;reading_at?:string|null;reading_is_newest?:boolean;
+ reading_chosen?:boolean;reading_skipped?:number|null};
+/** A reading written the way the control above writes one: "18 Sep 2026 · 11:30". */
+export function readingLabel(at?:string|null){
+ const s=stamp(at);
+ return s?(s.time?`${s.date} · ${s.time}`:s.date):'';
+}
+/** True when the tab moved itself off the newest reading because that reading has nothing over the floors.
+ *  This is a caveat on the DATA - the newest state of the book is not what is on screen - so it is amber. */
+export function readingIsFallback(body?:ReadingFacts|null){
+ return !!body&&body.reading_is_newest===false&&!body.reading_chosen;
+}
+/** Which reading is on screen, said plainly whenever that is not the newest one the store holds. Empty when
+ *  the tab IS on the newest reading, because then there is nothing to say. */
+export function readingNote(body?:ReadingFacts|null){
+ if(!body||body.reading_is_newest!==false)return '';
+ const here=readingLabel(body.reading_at),newest=readingLabel(body.newest_at);
+ if(!here)return '';
+ if(body.reading_chosen)
+  return `Showing the 15-min reading of ${here}, the one chosen above.${newest?` The newest this store holds is ${newest}.`:''}`;
+ const skipped=num(body.reading_skipped)||0;
+ const why=skipped>0
+  ?` No contract cleared the liquidity floors at the ${Math.round(skipped)} reading${Math.round(skipped)===1?'':'s'} after it.`
+  :'';
+ return `Showing the 15-min reading of ${here} — NOT the newest this store holds${newest?` (${newest})`:''}.${why} Any reading can be chosen above.`;
+}
+
+// --- the headline figure of a block -------------------------------------------------------------------------
+/** Max pain against the captured spot, as one comparison rather than two bare numbers. The arithmetic is the
+ *  store's own - STRIKE MINUS SPOT - and the words name their subject so the sign cannot be read backwards. */
+export function maxPainAgainstSpot(strikeValue:unknown,spot:unknown,distance:unknown,spotAt?:string,
+ strikeAt?:string){
+ const s=num(spot);
+ // No spot, no distance - and a headline that just trailed off would leave the reader working out why.
+ if(s==null)return 'No spot was captured for this underlying at any reading of this session, so there is no distance to it.';
+ // BOTH TIMES, OR NEITHER. The strike and the spot are routinely from two different readings on a rebuilt
+ // session - a 15:45 strike beside an 11:30 spot - and stamping only the spot left the reader to assume the
+ // strike was from the same reading. Whichever of the two the caller can name, it names.
+ const spotWhen=String(spotAt||'').trim(),strikeWhen=String(strikeAt||'').trim();
+ const parts:string[]=[];
+ // the strike's own number is the headline figure this line sits under, so what is missing from the line is
+ // its READING - and that is exactly what gets added, never a second copy of the number
+ if(strikeWhen)parts.push(`strike ${strikeWhen}`);
+ parts.push(`spot ${price(s)}${spotWhen?` ${spotWhen}`:''}`);
+ const d=num(distance);
+ if(d!=null)parts.push(d===0?'the strike is at spot'
+  :`the strike is ${strike(Math.abs(d))} ${d>0?'above':'below'} it`);
+ return parts.join(' · ');
+}
+/** The comparison beside a headline figure: the parts that HAVE a value, never a trailing dash. A part that is
+ *  a dash is not a comparison - it is a hole, and it belongs in the panel where its reason is printed too. */
+export function headlineAgainst(...parts:(string|null|undefined)[]){
+ return parts.map(p=>String(p||'').trim()).filter(p=>p&&!p.endsWith(DASH)&&p!==DASH).join(' · ');
+}
+/** Put open interest against call open interest, written out under a ratio so the ratio is not a bare number. */
+export function pcrAgainst(pe:unknown,ce:unknown){
+ if(num(pe)==null&&num(ce)==null)return '';
+ return `${compact(pe)} put open interest against ${compact(ce)} call`;
+}
+
+// --- THE SCREENER'S TWO VIEWS -------------------------------------------------------------------------------
+// The screener lists contracts, largest premium first. At the 11:30 reading of 18 Sep 2026 NIFTY had 104 of
+// the 491 contracts over the floors, so a hundred-row list was a hundred rows of NIFTY and the reader's
+// conclusion was the obvious one: no stock is active. That is what the owner meant by "why other stocks are
+// not populating".
+//
+// So the default view is ONE ROW PER UNDERLYING - which is what a screener is for, scanning the market for
+// which names are busy - and the contract list is the drill-down.
+//
+// Everything below FORMATS what the server aggregated. Nothing here combines anything: the rule that a mean
+// of ratios is not a ratio is enforced where the rows are built, and these functions only have sums, counts
+// and maxima to write out.
+/** The lists the SERVER offers. The tab asks for one of them and never shows the reader a choice: there is one
+ *  list on this tab, one row per instrument. The other exists so the aggregate can be checked against the rows
+ *  it was built from. */
+export const SCREENER_VIEWS=[{value:'underlying',label:'Instruments'},{value:'contract',label:'Contracts'}];
+export const SCREENER_VIEW_DEFAULT='underlying';
+/** How many contracts of this name cleared the floors: the whole F&O book, and what it is made of. Counts,
+ *  nothing more. */
+export function groupContracts(group?:{contracts?:unknown;calls?:unknown;puts?:unknown;
+ options?:unknown;futures?:unknown}|null){
+ const n=num(group?.contracts);
+ if(n==null)return DASH;
+ const split=groupSplit(group);
+ return `${Math.round(n)} contract${Math.round(n)===1?'':'s'}`+(split?` · ${split}`:'');
+}
+/** WHAT THE BOOK IS MADE OF. The calls/puts split describes the OPTIONS half: a future is not a call, not a
+ *  put and not a side of anything. A name with futures and no listed options says "futures only" - because
+ *  "0C / 0P" would say its options were quiet, and it has none listed at all. Different facts. */
+export function groupSplit(group?:{calls?:unknown;puts?:unknown;options?:unknown;futures?:unknown}|null){
+ const calls=num(group?.calls)??0,puts=num(group?.puts)??0;
+ const options=num(group?.options)??(calls+puts),futures=num(group?.futures)??0;
+ const fut=futures?`${Math.round(futures)}F`:'';
+ if(!options)return fut?`futures only · ${fut}`:'';
+ return [`${Math.round(calls)}C / ${Math.round(puts)}P`,fut].filter(Boolean).join(' · ');
+}
+/** The two §3 signals are computed for OPTIONS only - the store carries neither for a futures contract - so
+ *  every count of them travels with what it was counted over. */
+export function groupOptionsNote(group?:{options?:unknown;contracts?:unknown}|null){
+ const options=num(group?.options)??0,total=num(group?.contracts)??0;
+ if(!options)return 'no options listed';
+ return options===total?`of ${Math.round(total)}`:`of ${Math.round(options)} options`;
+}
+/** §3.2 at the underlying level. THERE IS NO AVERAGE HERE and there must not be: a mean of ratios is not a
+ *  ratio. What the server serves, and what this writes, is the LARGEST reading among that name's contracts -
+ *  a real number belonging to a real contract, which is named beside it. */
+export function groupVolumeRatioMax(group?:{volume_ratio_max?:unknown;volume_ratio_max_symbol?:unknown}|null){
+ const v=num(group?.volume_ratio_max);
+ return v==null?NO_BASELINE:`${v.toFixed(v>=100?0:1)}${TIMES}`;
+}
+/** The whole sentence, for a screen reader and for the row's own detail line: the maximum, whose it is, and
+ *  how many of the name's contracts had enough baseline to carry one at all (§3.2). */
+export function groupVolumeRatioText(group?:{volume_ratio_max?:unknown;volume_ratio_max_symbol?:unknown;
+ volume_baseline_contracts?:unknown;contracts?:unknown}|null){
+ const v=num(group?.volume_ratio_max);
+ const withBase=num(group?.volume_baseline_contracts)??0,total=num(group?.contracts)??0;
+ const counted=`${Math.round(withBase)} of ${Math.round(total)} carried a baseline`;
+ if(v==null)return `No contract of this instrument has ${MIN_BASELINE_SESSIONS_TEXT}, so there is no ratio to show — ${counted}. It is not computed for futures at all.`;
+ const symbol=String(group?.volume_ratio_max_symbol||'').trim();
+ return `Highest on one contract: ${groupVolumeRatioMax(group)}${symbol?` on ${symbol}`:''}. This is that contract's own reading, not an average — ${counted}.`;
+}
+export const MIN_BASELINE_SESSIONS_TEXT='the three sessions of history §3.2 requires';
+/** §3.3 at the underlying level, as a COUNT rather than a mean: how many of this name's contracts traded more
+ *  today than was standing at yesterday's close. The threshold is the tab's own existing one, not a new one. */
+export function groupHot(group?:{volume_to_oi_over_1?:unknown;volume_to_oi_contracts?:unknown}|null){
+ // No contract of this name could carry the ratio, so there is NO COUNT - not a count of zero. A zero here
+ // would read as "nothing unusual"; the truth is "not measured for a futures contract".
+ const n=num(group?.volume_to_oi_over_1);
+ if(n==null||!num(group?.volume_to_oi_contracts))return DASH;
+ return `${Math.round(n)}`;
+}
+export function groupHotText(group?:{volume_to_oi_over_1?:unknown;volume_to_oi_contracts?:unknown;
+ contracts?:unknown}|null){
+ const counted=num(group?.volume_to_oi_contracts)??0;
+ if(!counted)return 'Volume against open interest (§3.3) is not computed for a futures contract, and no option of this instrument cleared the floors, so there is nothing to count.';
+ const n=num(group?.volume_to_oi_over_1)??0;
+ return `${Math.round(n)} of the ${Math.round(counted)} contracts that carry the ratio traded more today than was standing at the previous close (§3.3). It is not computed for futures.`;
+}
+/** §3.1 at the underlying level: the four labels and how many contracts carried each. There is no such thing
+ *  as an underlying's build-up - a build-up is a statement about ONE contract - so this is never rendered as
+ *  a label. It is counts, and it lives in the row's detail and in the contracts view. */
+export function groupBuildupText(group?:{buildup_counts?:Record<string,unknown>|null}|null){
+ // The store keys these counts by the string it WROTE on the row, which is the wire vocabulary and not §3.1's
+ // snake ids; reading them straight off by id counted nothing and printed nothing. They cross the same
+ // boundary every other build-up on this tab crosses, and a key nothing recognises is counted and SAID.
+ const counts=group?.buildup_counts||{};
+ const total:Record<string,number>={};
+ for(const [key,value] of Object.entries(counts)){
+  const n=num(value);if(n==null||n<=0)continue;
+  const id=buildupId(key);
+  total[id]=(total[id]||0)+n;
+ }
+ const parts=[...BUILDUP_IDS,'unknown' as BuildupId].filter(id=>(total[id]||0)>0)
+  .map(id=>`${id==='unknown'?BUILDUP_UNKNOWN:buildupChoiceLabel(id)} ${total[id]}`);
+ return parts.length?parts.join(' · '):'';
+}
+// =================================================================================================================
+// THE SIGNAL TABLE — one row per 15-min reading, newest first.
+//
+// The owner specified this column for column: TIME | CALL ACTIVITY | PUT ACTIVITY | OI INTERPRETATION |
+// MARKET SIGNAL. He asked for it, it was removed at his request, and he has now asked for it back with a full
+// specification. It is built as he wrote it, and these lines hold:
+//
+//  * PRESENT TENSE, POSITIONING ONLY. "Sellers are building resistance" describes where open interest sits at
+//    this reading. There is no price target anywhere, no support or resistance LEVEL with a number, no buy or
+//    sell instruction, and no forecast of any kind. Every sentence is the §5 sweep's business and passes it.
+//  * ONE CAVEAT, ONCE, in "How to read this": this is the conventional reading of option positioning, not a
+//    prediction, and every opened contract has a buyer and a seller. It is NOT repeated on every row.
+//  * NEVER AN INVENTED ROW. A reading with no data on either side gets a row that SAYS it has none - never a
+//    signal. A reading the store never took is not a row at all.
+//  * THE VOCABULARY IS FLOW_LABELS, the owner's own source table, already on screen under every ΔOI tile and
+//    already served verbatim by derivatives.py. Not one word of it is restated here.
+//  * THE TEN AT-THE-MONEY CONTRACTS, not the whole chain. This reads the very slots the ΔOI grid drew - the
+//    five calls at and above the money and the five puts at and below it - so the table and the tiles can
+//    never disagree, and the panel says which ten in its own subtitle.
+//  * THE BALANCE TOLERANCE IS THE BLOCK'S, reused: GRID_BLOCK_BALANCE_RATIO. There is no second constant.
+export const SIGNAL_AGGREGATE_TEXT='Each row aggregates the SAME ten at-the-money contracts the ΔOI tiles draw — the five calls at and above the money and the five puts at and below it — and no others. It is not the whole chain, and the ten are the ten at the LATEST reading: the same basket is carried back over the earlier rows, so an earlier row is not a record of which strikes were at the money at that time.';
+export const SIGNAL_BASKET_TEXT='A side is compared with itself an hour earlier — the latest reading at least 60 minutes before this one, found by the reading times themselves and never by counting four rows back, because four rows is not an hour when a reading is missing. Only the contracts that carried a value at BOTH readings are in the comparison, and the row says how many did. A reading with less than an hour of session behind it, or with no contract in common with the reading an hour back, has no direction at all and says which.';
+export const SIGNAL_CAVEAT_TEXT='This is the conventional reading of option positioning at each 15-min reading, not a prediction: every opened contract has a buyer and a seller, the tape does not say which side was the aggressor, and this describes where open interest sits rather than what the price does next.';
+export const SIGNAL_RULE_TEXT='Each side is read from the owner\'s own table, on its price AND its open interest together: a premium that moved with open interest reads one way on a call and the other way on a put, because a call\'s premium rises with the underlying and a put\'s falls with it. Open interest alone never decides a row — a side whose premium barely moved, or whose open interest barely moved, carries no reading of its own. Where the two sides read the same way the row says Strong; where only one of them reads at all it says the plain word; where they read OPPOSITE ways the row says Neutral and leaves the disagreement on screen; and where neither side reads it says Flat. Rule signal/2: signal/1 chose the word from open interest alone and measured every row against the whole session, including readings taken after it.';
+export const SIGNAL_NO_DATA='No contract carried a value at this 15-min reading';
+export const SIGNAL_NO_BASELINE='no baseline';
+/** A reading taken before an hour of session stood behind it, or after a hole wider than the window. It is not
+ *  a missing reading and not an empty basket, so it does not borrow either of their sentences. */
+export const SIGNAL_NO_WINDOW='Less than an hour of readings stands behind this one';
+/** The strength ladder needs something to rank against. Until it has one, the side keeps its direction and its
+ *  words and says the strength is not ranked - it never ranks a change against itself and calls it the largest. */
+export const SIGNAL_NO_STRENGTH='not yet ranked';
+/** The strength ladder. NOT a hand-picked constant: the flat cut is the tab's own GRID_FLAT_FRACTION, and the
+ *  three strength bands are EQUAL THIRDS of the largest window change that side produced today — so the words
+ *  are measured against that instrument's own session and nothing else. Three bands because there are three
+ *  strength words; no number was chosen to make a particular row read a particular way. */
+export const SIGNAL_STRENGTH_BANDS=[1/3,2/3] as const;
+export const SIGNAL_STRENGTH_TEXT='Strength is a size, not a confidence and not a chance of anything: it says how big this side\'s change is beside the changes that same side had already made, and nothing else. It is measured against that instrument\'s own session AS IT STOOD AT THIS READING — never a fixed number of contracts and never a reading taken later, so a row cannot be rewritten by what arrives after it. Under 5% of that largest change is stable — the same 5% band the ΔOI tiles use — and the rest is split into equal thirds, which is Mild, Strong and Very strong. Until three measured changes stand behind the ladder the row says the strength is not yet ranked.';
+export const SIGNAL_STRENGTH_WORDS=['Mild','Strong','Very strong'] as const;
+/** How many measured window changes must stand behind the ladder before a word is offered. Not a picked
+ *  number: it is one observation per strength word, because ranking one change against itself is not a rank. */
+export const SIGNAL_STRENGTH_MIN=SIGNAL_STRENGTH_WORDS.length;
+export const SIGNAL_ARROWS=['↑','↑↑','↑↑↑'] as const,SIGNAL_ARROWS_DOWN=['↓','↓↓','↓↓↓'] as const;
+export const SIGNAL_STABLE='Stable';
+/** The owner's own market-signal words. Present tense, about positioning. Neutral is his word too, and it is
+ *  what a row says when its two sides point OPPOSITE ways: mixed evidence stays mixed rather than being
+ *  resolved into a direction by whichever side happened to move more. */
+export const SIGNAL_LABELS:Record<string,string>={strong_bullish:'Strong Bullish',bullish:'Bullish',
+ neutral:'Neutral',flat:'Flat',bearish:'Bearish',strong_bearish:'Strong Bearish'};
+export const SIGNAL_DOTS:Record<string,string>={strong_bullish:'🟢',bullish:'🟢',neutral:'⚪',flat:'🟡',
+ bearish:'🔴',strong_bearish:'🔴'};
+/** THE OI INTERPRETATION, as a CLOSED table over the two sides' open-interest directions. Every one of the
+ *  nine combinations has its own sentence, and the both-building cell is split three ways by the block's own
+ *  balance tolerance — so nothing is ever collapsed into a neighbour and no row is left without a reading.
+ *  Present tense, positioning only: not one of these names a level or a number. */
+export const SIGNAL_INTERPRETATIONS:Record<string,string>={
+ 'building|building':'Both sides adding positions',
+ 'building|unwinding':'Resistance increasing + support weakening',
+ 'unwinding|building':'Resistance reducing + support increasing',
+ 'unwinding|unwinding':'Both sides reducing positions',
+ 'building|flat':'Resistance strengthening',
+ 'flat|building':'Support strengthening',
+ 'unwinding|flat':'Resistance reducing',
+ 'flat|unwinding':'Support weakening',
+ 'flat|flat':'No meaningful new positioning',
+};
+/** The two ways the both-building cell can tip, inside the block's own tolerance. */
+export const SIGNAL_MORE_CALLS='More resistance than support',SIGNAL_MORE_PUTS='More support than resistance';
+export const SIGNAL_BALANCED=GRID_BLOCK_BOTH_BUILDING;
+// ------------------------------------------------------------------------------------------------------------
+// P03 — POINT-IN-TIME IS LAW. A row is computed from what was on the screen at its OWN 15-min reading, and
+// from nothing that arrived afterwards.
+//
+// WHAT WAS WRONG (reproduced, and kept as a check): the strength yardstick was the largest window change the
+// side made over the WHOLE available session, later readings included. One more observation at the end of the
+// session therefore rewrote every row before it — the auditor's appended extreme observation turned the same
+// time=4 call row from Very strong to Stable and its market signal from one direction to the other. A table
+// that rewrites its own history cannot be replayed, cannot back an alert, and is not evidence of anything.
+//
+// WHAT IS TRUE NOW:
+//   * the yardstick for row i is the largest window change the side had made BY reading i - readings 0..i and
+//     no others, so appending reading i+1 cannot touch it;
+//   * the hour is an HOUR, by the readings' own times: the baseline is the latest reading at least
+//     SIGNAL_WINDOW_MINUTES earlier, not the row four places back, because four places is only an hour when
+//     every reading in between was captured;
+//   * a hole wider than SIGNAL_WINDOW_MAX_MINUTES leaves the row with NO baseline rather than a stale one;
+//   * a row with less than an hour of session behind it says so instead of quietly comparing against the
+//     session's first reading;
+//   * every row carries the rule version that produced it and the reading it was compared against.
+// ------------------------------------------------------------------------------------------------------------
+/** The comparison window, in minutes. The owner's "an hour back", stated in time rather than in rows. */
+export const SIGNAL_WINDOW_MINUTES=60;
+/** How far past the window the search will still accept a baseline. Beyond this the hole is wider than the
+ *  window itself and there is no comparable earlier reading — which is an answer, not a reason to reach further. */
+export const SIGNAL_WINDOW_MAX_MINUTES=120;
+/** The version of the rule that produced a row. signal/1 normalised each row against the whole session,
+ *  later readings included, and chose its word from open interest alone. */
+export const SIGNAL_RULE_VERSION='signal/2';
+/** A reading's own wall-clock stamp as a plain minute count, for ordering and differencing two readings of the
+ *  SAME session. The store's stamps are IST wall clock and are read exactly as written, never re-zoned: this
+ *  turns "2026-09-18 14:45" into a number and does nothing else. Null when there is no readable time, and a
+ *  reading with no readable time is never used as a baseline. */
+export function readingMinutes(at?:string|null):number|null{
+ const m=/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(at||'').trim());
+ if(!m)return null;
+ const day=Date.UTC(Number(m[1]),Number(m[2])-1,Number(m[3]));
+ if(!Number.isFinite(day))return null;
+ return day/60000+Number(m[4])*60+Number(m[5]);
+}
+/** The reading THIS reading is compared against: the latest one at least `window` minutes earlier, and no more
+ *  than `limit` minutes earlier. Null when the session holds none — an early reading, a hole wider than the
+ *  window, a stamp that cannot be read, or two readings sharing one stamp. */
+export function signalBaselineIndex(times:(string|null|undefined)[],i:number,
+ window=SIGNAL_WINDOW_MINUTES,limit=SIGNAL_WINDOW_MAX_MINUTES):number|null{
+ const now=readingMinutes(times?.[i]);
+ if(now==null)return null;
+ for(let j=i-1;j>=0;j--){
+  const then=readingMinutes(times[j]);
+  if(then==null)continue;
+  const gap=now-then;
+  if(gap<window)continue;          // still inside the window: not yet an hour back
+  return gap<=limit?j:null;        // the first reading that IS an hour back; anything older is no baseline
+ }
+ return null;
+}
+/** The conventional lean one side carries when its PRICE and its OPEN INTEREST are read together — the owner's
+ *  own flow table, one cell at a time. A call's premium rises with the underlying and a put's falls with it,
+ *  so the same pair of moves reads opposite ways on the two sides.
+ *
+ *  ONLY the four cells where BOTH axes moved carry a lean. A flat axis is not a quiet version of a direction:
+ *  open interest that barely moved is not positioning, and a premium that barely moved says nothing about how
+ *  a position was opened. Those five cells carry none, and a row built on them says so.
+ *
+ *  This is an interpretation of two measured changes. It does not identify who initiated the trade — every
+ *  opened contract has a buyer and a seller, and neither price nor open interest names the aggressor. */
+export type SignalLean='up'|'down'|'';
+export const SIGNAL_LEANS:Record<string,SignalLean>={
+ 'CE|up|building':'up','CE|up|unwinding':'up','CE|down|building':'down','CE|down|unwinding':'down',
+ 'CE|flat|building':'','CE|flat|unwinding':'','CE|up|flat':'','CE|down|flat':'','CE|flat|flat':'',
+ 'PE|up|building':'down','PE|up|unwinding':'down','PE|down|building':'up','PE|down|unwinding':'up',
+ 'PE|flat|building':'','PE|flat|unwinding':'','PE|up|flat':'','PE|down|flat':'','PE|flat|flat':'',
+};
+export const signalLean=(kind:unknown,priceDirection:unknown,oiDirection:unknown):SignalLean=>
+ SIGNAL_LEANS[`${String(kind||'').toUpperCase()}|${String(priceDirection||'')}|${String(oiDirection||'')}`]||'';
+export type SignalSide={contracts:number;change:number|null;price_change:number|null;
+ oi_direction:GridDirection;price_direction:GridPriceDirection;strength:number;
+ /** The conventional lean of this side's price + open-interest pair, or '' where the pair carries none. */
+ lean:SignalLean;
+ /** How many measured window changes, this one included, stand behind the strength ladder. */
+ ranked:number;
+ what_label:string;meaning:string;text:string};
+export type SignalRow={at:string|null;
+ /** The reading this row was compared against, and how wide that comparison actually was. Both are on the row
+  *  so the window a word came from can be inspected rather than assumed. */
+ from:string|null;window_minutes:number|null;rule_version:string;
+ calls:SignalSide|null;puts:SignalSide|null;
+ interpretation:string;signal:string;label:string;dot:string;reason:string};
+/** The change one side made between reading `i` and reading `back`, over the contracts that carried a value at
+ *  BOTH — a like-for-like basket, and the count of what was in it.
+ *
+ *  ON `price`: this is the change in the total premium of a FIXED basket — the same contracts at both readings,
+ *  or the comparison does not happen at all. It is a DIRECTION and nothing else. It is never shown as a price,
+ *  never printed in rupees, and never drawn as a series: five strikes added together are not an instrument and
+ *  nobody can trade their sum. */
+function sideChange(slots:GridSlot[],i:number,back:number,key:'delta_oi'|'price'){
+ let now=0,then=0,n=0;
+ for(const slot of slots){
+  const a=num(slot?.points?.[i]?.[key]),b=num(slot?.points?.[back]?.[key]);
+  if(a==null||b==null)continue;
+  now+=a;then+=b;n++;
+ }
+ return n?{change:now-then,contracts:n}:{change:null,contracts:0};
+}
+/** One side of one reading, in the owner's vocabulary. The words come from FLOW_LABELS and nowhere else.
+ *
+ *  `peak` and `pricePeak` are the largest changes this side had made BY THIS READING — the caller computes
+ *  them walking forwards and never looks ahead. `ranked` is how many measured changes stand behind them. */
+export function signalSide(slots:GridSlot[],i:number,back:number|null,kind:'CE'|'PE',peak:number,
+ pricePeak:number,ranked=0,flatFraction=GRID_FLAT_FRACTION):SignalSide|null{
+ if(back==null)return null;
+ const oi=sideChange(slots,i,back,'delta_oi');
+ if(oi.change==null)return null;
+ const price=sideChange(slots,i,back,'price');
+ // the SAME shape the tiles use, applied to the side's own peak SO FAR rather than one contract's
+ const flat=peak>0&&Math.abs(oi.change)<flatFraction*peak;
+ const oiDir:GridDirection=peak<=0||flat?'flat':oi.change>0?'building':'unwinding';
+ // the premium side of the vocabulary, on the SAME shape and the side's own largest premium move so far
+ const priceDir:GridPriceDirection=price.change==null?NO_DIRECTION
+  :pricePeak<=0||Math.abs(price.change)<GRID_PRICE_FLAT_FRACTION*pricePeak?'flat'
+  :price.change>0?'up':'down';
+ const found=FLOW_LABELS[`${kind}|${priceDir}|${oiDir}`];
+ // strength: equal thirds of the side's own largest change SO FAR, with the tab's own 5% band under them.
+ // A change with nothing behind it is not ranked against itself; it keeps its direction and says so.
+ const share=peak>0?Math.min(1,Math.abs(oi.change)/peak):0;
+ const rankable=ranked>=SIGNAL_STRENGTH_MIN;
+ const strength=!rankable||flat||!peak?0
+  :share<SIGNAL_STRENGTH_BANDS[0]?1:share<SIGNAL_STRENGTH_BANDS[1]?2:3;
+ const arrows=strength?(oiDir==='building'?SIGNAL_ARROWS:SIGNAL_ARROWS_DOWN)[strength-1]:'';
+ const word=strength?SIGNAL_STRENGTH_WORDS[strength-1]:!rankable?SIGNAL_NO_STRENGTH:SIGNAL_STABLE;
+ return {contracts:oi.contracts,change:oi.change,price_change:price.change,oi_direction:oiDir,
+  price_direction:priceDir,strength,lean:signalLean(kind,priceDir,oiDir),ranked,
+  what_label:found?found[0]:FLOW_NOT_ENOUGH,meaning:found?found[1]:'',
+  text:`${word}${arrows?' '+arrows:''}`};
+}
+/** The two sides read together, in the closed interpretation table. Never blank, never a level, never a number. */
+export function signalInterpretation(calls:SignalSide|null,puts:SignalSide|null,
+ ratio=GRID_BLOCK_BALANCE_RATIO){
+ if(!calls||!puts)return '';
+ const key=`${calls.oi_direction}|${puts.oi_direction}`;
+ if(key==='building|building'){
+  const c=Math.abs(calls.change||0),p=Math.abs(puts.change||0);
+  if(!c||!p)return SIGNAL_INTERPRETATIONS[key]||'';
+  // the BLOCK's own tolerance, reused - there is no second balance constant on this tab
+  if(c>ratio*p)return SIGNAL_MORE_CALLS;
+  if(p>ratio*c)return SIGNAL_MORE_PUTS;
+  return SIGNAL_BALANCED;
+ }
+ return SIGNAL_INTERPRETATIONS[key]||'';
+}
+// ------------------------------------------------------------------------------------------------------------
+// P04 — WHAT WAS OBSERVED, AND WHAT IS AN INTERPRETATION OF IT.
+//
+// WHAT WAS WRONG: this chose its word from the two sides' OPEN INTEREST alone, with the price-direction fields
+// sitting unread beside it. Puts building while calls unwound read Strong Bullish whether the put premium was
+// rising or falling — so a put-BUYING state, which is the opposite reading, produced the same word as a
+// put-WRITING one. The owner's own source table is keyed on price AND open interest together; reading half of
+// it and reporting the answer as his rule was the defect.
+//
+// WHAT IS TRUE NOW: each side is looked up whole in SIGNAL_LEANS — his table, all nine cells per side — and the
+// two leans are combined. The combination resolves nothing it cannot resolve: two sides pointing opposite ways
+// is Neutral and stays visible as a disagreement on the row, because the size of an open-interest change is a
+// size and not a casting vote. No percentage anywhere is a measured hit rate, and nothing here says who
+// initiated a trade.
+// ------------------------------------------------------------------------------------------------------------
+/** The two observed sides, combined. Both reading the same way and both legs present is Strong; one leg alone
+ *  is the plain word; opposite readings are Neutral; neither side reading is Flat; a side with no comparable
+ *  baseline gets no word at all. */
+export function marketSignal(calls:SignalSide|null,puts:SignalSide|null){
+ if(!calls||!puts)return '';
+ const c=calls.lean,p=puts.lean;
+ // MIXED EVIDENCE STAYS MIXED. There is no tie-break here on purpose: whichever side moved more is still only
+ // the side that moved more, and calling that a direction is the claim this prompt exists to stop.
+ if(c&&p&&c!==p)return 'neutral';
+ const lean=c||p;
+ if(!lean)return 'flat';
+ const both=!!(c&&p);
+ return lean==='up'?(both?'strong_bullish':'bullish'):(both?'strong_bearish':'bearish');
+}
+/** THE TABLE: one row per 15-min reading the grid holds, newest first.
+ *
+ *  A reading the store never took is not here at all. A reading that was taken but carried no value on either
+ *  side IS here, and it SAYS it carried none — that is a captured fact, and dropping it would hide a hole. It
+ *  never carries a signal. */
+export function signalRows(rows?:GridSlot[]|null,window=SIGNAL_WINDOW_MINUTES,
+ limit=SIGNAL_WINDOW_MAX_MINUTES):SignalRow[]{
+ const slots=(rows||[]).filter(s=>s&&s.present);
+ const calls=slots.filter(s=>s.row!=='puts'),puts=slots.filter(s=>s.row==='puts');
+ const length=Math.max(0,...slots.map(s=>(s.points||[]).length));
+ if(!length)return [];
+ // One stamp per reading, taken from whichever slot carried one — the same reading for every slot.
+ const times=Array.from({length},(_,i)=>slots.map(s=>s.points?.[i]?.at).find(Boolean)||null);
+ // THE FORWARD WALK. Each side's yardstick grows reading by reading and is READ before this reading's own
+ // change is folded into it for the next one — so row i sees readings 0..i and never a reading after it.
+ // This loop is the whole of P03: delete it and history repaints again.
+ const state={
+  calls:{peak:0,pricePeak:0,ranked:0},
+  puts:{peak:0,pricePeak:0,ranked:0},
+ };
+ const built:SignalRow[]=[];
+ for(let i=0;i<length;i++){
+  const at=times[i];
+  const back=signalBaselineIndex(times,i,window,limit);
+  const from=back==null?null:times[back];
+  const span=back==null?null:(readingMinutes(at)??0)-(readingMinutes(from)??0);
+  const side=(list:GridSlot[],kind:'CE'|'PE',keep:{peak:number;pricePeak:number;ranked:number})=>{
+   const own={...keep};
+   let oiChange:number|null=null,priceChange:number|null=null;
+   if(back!=null){
+    oiChange=sideChange(list,i,back,'delta_oi').change;
+    priceChange=sideChange(list,i,back,'price').change;
+   }
+   // the peak this reading is judged by INCLUDES this reading, so a change can be its own session's largest;
+   // what it can never include is a reading that had not happened yet.
+   const peak=oiChange==null?own.peak:Math.max(own.peak,Math.abs(oiChange));
+   const pricePeak=priceChange==null?own.pricePeak:Math.max(own.pricePeak,Math.abs(priceChange));
+   const ranked=own.ranked+(oiChange==null?0:1);
+   const value=signalSide(list,i,back,kind,peak,pricePeak,ranked);
+   keep.peak=peak;keep.pricePeak=pricePeak;keep.ranked=ranked;
+   return value;
+  };
+  const c=side(calls,'CE',state.calls),p=side(puts,'PE',state.puts);
+  const head={at,from,window_minutes:span,rule_version:SIGNAL_RULE_VERSION};
+  if(!c&&!p){
+   // three different absences, and each says which it is. A reading the store took that carried nothing is a
+   // captured fact; a reading with no hour behind it is a young session; an empty basket is neither.
+   const carried=slots.some(s=>num(s?.points?.[i]?.delta_oi)!=null);
+   const reason=!carried?SIGNAL_NO_DATA:back==null?SIGNAL_NO_WINDOW:SIGNAL_NO_BASELINE;
+   built.push({...head,calls:null,puts:null,interpretation:'',signal:'',label:DASH,dot:'',reason});
+   continue;
+  }
+  const signal=marketSignal(c,p);
+  built.push({...head,calls:c,puts:p,interpretation:signalInterpretation(c,p),signal,
+   label:signal?SIGNAL_LABELS[signal]:DASH,dot:signal?SIGNAL_DOTS[signal]:'',
+   reason:signal?'':SIGNAL_NO_BASELINE});
+ }
+ // newest first, which is what he asked for. The walk had to go forwards; the table reads backwards.
+ return built.reverse();
+}
+
+// --- WHAT IS UNUSUAL IN A NAME, and why -------------------------------------------------------------------------
+//
+// The owner: "screener should have some condition like unusual options activities - based on that it will show
+// some color coding or highlighting or sorting." This is that, and it is built on the §3 conditions the store
+// ALREADY computes per contract. No new definition of "unusual" is invented here, and NO NEW THRESHOLD IS
+// INTRODUCED ANYWHERE.
+//
+// THREE NUMBERS THAT ARE NOT THE SAME NUMBER. This column used to print one, and it was the wrong one:
+//
+//   CONDITIONS   how many DISTINCT RULES the name's contracts tripped between them. Two rules exist, §3.2 and
+//                §3.3, so this is 1 or 2 and it cannot be three.
+//   CONTRACTS    how many of the name's contracts the store flagged.
+//   OBSERVATIONS how many TIMES a rule fired across those contracts.
+//
+// What it used to count was the store's complete reason SENTENCE, and a sentence carries its multiple: "volume
+// 206.0x its own time-of-day median" and "volume 781.9x its own time-of-day median" are the SAME RULE at two
+// contracts. NIFTY's 80 flagged contracts at the 11:30 reading of 18 Sep 2026 wrote 124 different sentences; the
+// cell clamped that to three and drew "Unusual · 3 conditions". It was not a count of condition types, the order
+// it drove was really "how many different numbers appeared under this name", and the concatenated sentences ran
+// to 5,015 characters in one table cell — clamped to two lines on screen, read out in full by a screen reader.
+//
+// So the cell now carries the counts and a BADGE PER RULE, the full per-contract evidence is one click away in a
+// drawer, and nothing on this tab counts a sentence.
+//
+// COLOUR IS NEVER THE ONLY CARRIER. `unusualText` is the word and the counts, and it is printed beside the
+// colour on every marked row; the rule badges name the conditions themselves.
+/** The two rules, mirrored from `market_data.derivatives.metrics` (which computes them) and from
+ *  `server/kanida_pilot/derivatives.py` (which serves them). check-derivative.cjs reads all three files and
+ *  fails if the ids, comparators, thresholds or reason wordings ever drift apart.
+ *
+ *  It is here for ONE job: a server that predates the structured fields sends only the old sentence tally, and
+ *  this is the boundary that reads those sentences back into the rule that wrote each one — the same boundary
+ *  normalisation the build-up vocabulary uses, and never a rewrite of anything stored. */
+export const UNUSUAL_RULE_DEFS:{rule_id:string;label:string;short_label:string;measure:string;
+ baseline_label:string;sample_label:string;comparator:string;threshold:number;pattern:RegExp}[]=[
+ {rule_id:'vol_tod_median',label:'Volume vs its own median',short_label:'Vol vs median',
+  measure:'cumulative volume so far today',
+  baseline_label:"the median of this contract's own cumulative volume at the same clock time",
+  sample_label:'session',comparator:'>=',threshold:2,
+  pattern:/^volume\s+([0-9.]+)x its own time-of-day median$/i},
+ {rule_id:'day_vol_vs_prev_oi',label:'Day volume vs previous-close OI',short_label:'Day vol vs prev OI',
+  measure:"the day's volume",baseline_label:'the open interest standing at the previous close',
+  sample_label:'prior session',comparator:'>',threshold:1,
+  pattern:/^day volume\s+([0-9.]+)x yesterday's OI$/i},
+];
+export const UNUSUAL_RULE_UNCLASSIFIED='unclassified';
+export const UNUSUAL_RULE_UNCLASSIFIED_LABEL='Condition this build does not name';
+export const UNUSUAL_RULE_UNCLASSIFIED_SHORT='Unnamed condition';
+/** How many DISTINCT rules exist. The count on the badge can never exceed it, so the inspected two-rule case
+ *  cannot display three conditions however many different multiples its contracts reported. */
+export const UNUSUAL_RULE_MAX=UNUSUAL_RULE_DEFS.length;
+export const UNUSUAL_WHAT='A row is flagged when the store flagged one of its contracts under §3. The flag is the store\'s own, not a score this tab invents, and the word beside the colour says which conditions were tripped and by how many contracts.';
+export const UNUSUAL_COUNTS_TEXT='Three numbers, and they are not the same number. CONDITIONS is how many DISTINCT rules the name\'s contracts tripped between them — two rules exist, §3.2 and §3.3, so it is 1 or 2. CONTRACTS is how many of its contracts were flagged. OBSERVATIONS is how many times a rule fired across them. The same rule at twenty different multiples is ONE condition and twenty observations.';
+export const UNUSUAL_RULE_TEXT='Each condition is a rule with a version, a comparator, a threshold and a baseline — not a sentence. The badge names the rule and how many contracts tripped it; the evidence drawer lists those contracts with the value, the threshold it was compared against, the baseline it was measured against and how many observations that baseline stands on.';
+export const UNUSUAL_SORT_TEXT='The list opens with the unusual first — most distinct conditions, then most contracts flagged, then largest premium traded, then instrument name A to Z so a tie comes out in the same order every time. Every column still sorts on its own header, and a sort re-orders these rows without re-querying them.';
+export const UNUSUAL_COLOUR_TEXT='Colour never carries the flag on its own: the word and the counts are printed on the row beside it, the conditions are named as badges under them, and the contracts behind them are in the evidence drawer.';
+export const UNUSUAL_HONEST_TEXT='The §3.2 figure a flag can rest on is the LARGEST reading among this name\'s contracts, with that contract named - never an average of its contracts.';
+export const UNUSUAL_EVIDENCE_LABEL='Evidence';
+export const UNUSUAL_EVIDENCE_NONE='This reading\'s response carried the rule totals for this instrument but not the contracts behind them.';
+/** A name the store could NOT measure is not a quiet name. §3.2 and §3.3 are computed for no futures contract
+ *  at all, so an instrument whose whole book is futures has nothing to have been flagged ON - and saying
+ *  "nothing flagged" about it would claim a quiet book where the truth is that the measurement does not
+ *  exist. The two are different sentences, and this is the difference. */
+export const UNUSUAL_NONE='Nothing flagged';
+export const UNUSUAL_NOT_MEASURED='Not measured';
+export const UNUSUAL_NOT_MEASURED_TEXT='§3.2 and §3.3 are not computed for a futures contract. An instrument whose whole book over the floors is futures therefore reads "Not measured", never "Nothing flagged" — a name nothing was measured on is not a name nothing was found on.';
+/** Was there anything this name COULD have been flagged on. False for a book the store measures neither §3
+ *  ratio over - which is every futures-only name. */
+export function unusualMeasured(group?:{options?:unknown;volume_to_oi_contracts?:unknown;
+ volume_baseline_contracts?:unknown}|null){
+ return (num(group?.volume_to_oi_contracts)||0)>0||(num(group?.volume_baseline_contracts)||0)>0
+  ||(num(group?.options)||0)>0;
+}
+/** One stored reason sentence, read back into the rule that wrote it. A sentence no rule claims stays itself:
+ *  it is never guessed at and never folded into a rule that did not fire. */
+/** The registry's words for one rule id: the name, the comparison and what it is measured against. Numbers
+ *  from a contract never live here - those are on the trigger and on the tally. */
+export function unusualRuleWords(ruleId:unknown){
+ const def=UNUSUAL_RULE_DEFS.find(r=>r.rule_id===String(ruleId||''));
+ if(!def)return {label:UNUSUAL_RULE_UNCLASSIFIED_LABEL,short_label:UNUSUAL_RULE_UNCLASSIFIED_SHORT,
+  measure:null,baseline_label:null,sample_label:null,comparator:null,threshold:null,unit:null};
+ return {label:def.label,short_label:def.short_label,measure:def.measure,baseline_label:def.baseline_label,
+  sample_label:def.sample_label,comparator:def.comparator,threshold:def.threshold,unit:'x'};
+}
+export function unusualRuleOf(text:unknown){
+ const clean=String(text||'').trim();
+ for(const rule of UNUSUAL_RULE_DEFS)if(rule.pattern.test(clean))return rule.rule_id;
+ return clean?UNUSUAL_RULE_UNCLASSIFIED:'';
+}
+/** THE RULES THIS NAME'S CONTRACTS TRIPPED, one entry per rule and never one per sentence.
+ *
+ *  The server's own `unusual_rules` tally when it sent one. A server that predates it sends the old sentence
+ *  map, and those sentences are normalised here into the same shape — with `contracts` left NULL, because a
+ *  tally of sentences cannot say how many CONTRACTS tripped a rule and a guess would be an invention. */
+export function unusualRules(group?:{unusual_rules?:UnusualRuleTally[]|null;
+ unusual_reasons?:Record<string,unknown>|null}|null):UnusualRuleTally[]{
+ const served=group?.unusual_rules;
+ // A SERVED TALLY IS NUMBERS. The rule's name, comparator, threshold and baseline wording are the registry's
+ // and are filled in here, so the response carries them once rather than on all 214 instrument rows. A field
+ // the server DID send always wins, so a future rule this build has never heard of still displays as itself.
+ if(Array.isArray(served))return served.filter(r=>r&&r.rule_id).map(r=>({...unusualRuleWords(r.rule_id),
+  ...Object.fromEntries(Object.entries(r).filter(([,v])=>v!=null&&v!==''))} as UnusualRuleTally));
+ const counts=group?.unusual_reasons;
+ if(!counts||typeof counts!=='object')return [];
+ const order=UNUSUAL_RULE_DEFS.map(r=>r.rule_id);
+ const byRule=new Map<string,UnusualRuleTally>();
+ for(const text of Object.keys(counts)){
+  const id=unusualRuleOf(text);
+  if(!id)continue;
+  let tally=byRule.get(id);
+  if(!tally){
+   tally={rule_id:id,...unusualRuleWords(id),
+    // a sentence tally counts SENTENCES, so it can say how many times a rule fired and not how many
+    // contracts fired it. Null is that difference, and it is printed as "not counted at this reading".
+    contracts:null as unknown as number,observations:0};
+   byRule.set(id,tally);
+  }
+  tally.observations+=num((counts as Record<string,unknown>)[text])||0;
+ }
+ return [...byRule.values()].sort((a,b)=>{
+  const ai=order.indexOf(a.rule_id),bi=order.indexOf(b.rule_id);
+  return (ai<0?order.length:ai)-(bi<0?order.length:bi)||a.rule_id.localeCompare(b.rule_id);
+ });
+}
+/** HOW MANY DISTINCT CONDITIONS. The server's own count when it sent one, else the rules resolved above. It
+ *  can never exceed UNUSUAL_RULE_MAX, because there are no other rules to trip. */
+export function unusualConditions(group?:{unusual?:unknown;unusual_rule_count?:unknown;
+ unusual_rules?:UnusualRuleTally[]|null;unusual_reasons?:Record<string,unknown>|null}|null){
+ if(!group)return 0;
+ if((num(group.unusual)||0)<=0)return 0;
+ const served=num(group.unusual_rule_count);
+ const count=served!=null?served:unusualRules(group).length;
+ return Math.max(0,Math.round(count));
+}
+/** HOW MANY CONTRACTS the store flagged in this name. */
+export function unusualContractCount(group?:{unusual?:unknown}|null){return num(group?.unusual)||0;}
+/** HOW MANY TIMES a rule fired across them. The server's own total when it sent one, else the rules' own. */
+export function unusualObservations(group?:{unusual_observations?:unknown;
+ unusual_rules?:UnusualRuleTally[]|null;unusual_reasons?:Record<string,unknown>|null}|null){
+ const served=num(group?.unusual_observations);
+ if(served!=null)return Math.max(0,Math.round(served));
+ return unusualRules(group).reduce((total,rule)=>total+(num(rule.observations)||0),0);
+}
+/** The colour rail's step, and nothing else. It is the condition count, so it moves only when a DIFFERENT
+ *  rule is tripped — never when the same rule reports a bigger multiple. */
+export function unusualDegree(group?:{unusual?:unknown;unusual_rule_count?:unknown;
+ unusual_rules?:UnusualRuleTally[]|null;unusual_reasons?:Record<string,unknown>|null}|null){
+ if(!group)return 0;
+ if((num(group.unusual)||0)<=0)return 0;
+ // A store that flagged contracts but named no condition is still a flag: it draws the first step, and the
+ // badges say the store named none rather than showing a blank.
+ return Math.max(1,Math.min(UNUSUAL_RULE_MAX,unusualConditions(group)));
+}
+/** The word and the counts, printed beside the colour on every marked row. '' when the row is not marked. */
+export function unusualText(group?:{unusual?:unknown;unusual_rule_count?:unknown;
+ unusual_rules?:UnusualRuleTally[]|null;unusual_reasons?:Record<string,unknown>|null}|null){
+ if(!unusualDegree(group))return '';
+ const conditions=unusualConditions(group);
+ const flagged=unusualContractCount(group);
+ const parts=[conditions>0?`${conditions} condition${conditions===1?'':'s'}`:'',
+  `${flagged} contract${flagged===1?'':'s'}`].filter(Boolean);
+ return `Unusual · ${parts.join(' · ')}`;
+}
+/** The short form in the column: the word and the counts, or which of the two silences this row is. */
+export function unusualShort(group?:{unusual?:unknown;unusual_rule_count?:unknown;
+ unusual_rules?:UnusualRuleTally[]|null;unusual_reasons?:Record<string,unknown>|null;
+ options?:unknown;volume_to_oi_contracts?:unknown;volume_baseline_contracts?:unknown}|null){
+ if(unusualDegree(group))return unusualText(group);
+ return unusualMeasured(group)?UNUSUAL_NONE:UNUSUAL_NOT_MEASURED;
+}
+/** ONE BADGE PER RULE: the rule's name and how many contracts tripped it. Short enough for a table cell, and
+ *  it carries no multiple — the multiples are in the drawer, on the contracts that reported them. `short` is
+ *  the cell's width; the drawer has room for the rule's full name. */
+export function unusualRuleBadge(rule?:UnusualRuleTally|null,short=false){
+ if(!rule)return '';
+ const label=(short?rule.short_label:'')||rule.label||(short?UNUSUAL_RULE_UNCLASSIFIED_SHORT
+  :UNUSUAL_RULE_UNCLASSIFIED_LABEL);
+ const contracts=num(rule.contracts);
+ if(contracts!=null)return `${label} · ${Math.round(contracts)}`;
+ // a sentence tally cannot say how many contracts, so it says what it CAN count
+ const seen=num(rule.observations);
+ return seen!=null?`${label} · ${Math.round(seen)} seen`:label;
+}
+/** The badges as one line, for the row's spoken description. Concise by construction: one entry per rule. */
+export function unusualBadgesText(group?:{unusual?:unknown;unusual_rule_count?:unknown;
+ unusual_rules?:UnusualRuleTally[]|null;unusual_reasons?:Record<string,unknown>|null}|null){
+ if(!unusualDegree(group))return '';
+ const badges=unusualRules(group).map(rule=>unusualRuleBadge(rule,true)).filter(Boolean);
+ return badges.length?badges.join(' · '):'the store named no condition';
+}
+/** WHAT THIS RULE ACTUALLY MEASURED, in the drawer: the comparison, the largest reading in this name, the
+ *  contract that reported it, the baseline it was measured against and how many observations that stands on.
+ *  Every part is dropped when the server did not send it — nothing here is filled in. */
+export function unusualRuleDetail(rule?:UnusualRuleTally|null){
+ if(!rule)return '';
+ const parts:string[]=[];
+ const comparator=String(rule.comparator||'').trim();
+ const threshold=num(rule.threshold);
+ if(comparator&&threshold!=null)
+  parts.push(`Flagged when ${rule.measure||'the measurement'} is ${comparator==='>='?'at least':'more than'} ${ratio(threshold,1)} ${rule.baseline_label||'its baseline'}`);
+ const peak=num(rule.value_max);
+ if(peak!=null)parts.push(`Largest in this instrument ${ratio(peak,1)}${rule.value_max_symbol?` on ${rule.value_max_symbol}`:''}`);
+ const baseline=num(rule.baseline_at_max);
+ if(baseline!=null)parts.push(`measured against ${compact(baseline)}`);
+ const sample=num(rule.sample_count_at_max);
+ if(sample!=null)parts.push(`over ${Math.round(sample)} ${rule.sample_label||'observation'}${Math.round(sample)===1?'':'s'}`);
+ return parts.join(' · ');
+}
+/** ONE TRIGGER ON ONE CONTRACT, in the drawer: the value, what it was compared against, and what it was
+ *  measured over. A trigger whose value the store no longer carries says so rather than printing a nought. */
+export function unusualTriggerText(trigger?:UnusualTrigger|null,rules?:UnusualRuleTally[]|null){
+ if(!trigger)return '';
+ const rule=(rules||[]).find(r=>r.rule_id===trigger.rule_id);
+ const label=rule?.label||UNUSUAL_RULE_DEFS.find(r=>r.rule_id===trigger.rule_id)?.label
+  ||String(trigger.text||'')||UNUSUAL_RULE_UNCLASSIFIED_LABEL;
+ const value=num(trigger.value);
+ const parts=[label,value!=null?ratio(value,1):'no value stored'];
+ const comparator=String(trigger.comparator||'').trim(),threshold=num(trigger.threshold);
+ if(comparator&&threshold!=null)parts.push(`${comparator} ${ratio(threshold,1)}`);
+ const baseline=num(trigger.baseline);
+ if(baseline!=null)parts.push(`baseline ${compact(baseline)}`);
+ const sample=num(trigger.sample_count);
+ if(sample!=null)parts.push(`${Math.round(sample)} observation${Math.round(sample)===1?'':'s'}`);
+ return parts.join(' · ');
+}
+/** The contracts behind the badge, as the server served them. Never re-ordered here: the server sorted them
+ *  largest reading first, then by name, so the drawer lists the same contracts in the same order every time. */
+export function unusualEvidence(group?:{unusual_contracts?:UnusualContract[]|null}|null):UnusualContract[]{
+ const rows=group?.unusual_contracts;
+ return Array.isArray(rows)?rows.filter(row=>row&&row.tradingsymbol):[];
+}
+/** The one line over the drawer: the three counts, said apart. */
+export function unusualEvidenceSummary(group?:{unusual?:unknown;unusual_rule_count?:unknown;
+ unusual_rules?:UnusualRuleTally[]|null;unusual_reasons?:Record<string,unknown>|null;
+ unusual_observations?:unknown}|null){
+ const conditions=unusualConditions(group),flagged=unusualContractCount(group);
+ const seen=unusualObservations(group);
+ return `${conditions} condition${conditions===1?'':'s'} · ${flagged} contract${flagged===1?'':'s'} flagged · ${seen} observation${seen===1?'':'s'}`;
+}
+/** Sorted so the unusual comes first: most distinct conditions, then most contracts flagged, then largest
+ *  premium, then the instrument name so a tie is stable. The SAME order the server serves, restated here so a
+ *  client-side narrowing cannot quietly change it. */
+export function unusualRank(group?:{unusual?:unknown;unusual_rule_count?:unknown;
+ unusual_rules?:UnusualRuleTally[]|null;unusual_reasons?:Record<string,unknown>|null;
+ premium_cr?:unknown;underlying?:unknown}|null){
+ return [unusualConditions(group),num(group?.unusual)||0,num(group?.premium_cr)||0,
+  String(group?.underlying||'')];
+}
+/** THE SORT THAT IS ACTUALLY IN FORCE, in the server's own words. A page that prints this cannot drift from
+ *  the ordering again — which is exactly what "Busiest by premium" over an unusual-ranked list was. */
+export function rankingLabel(ranking?:{label?:string|null}|null){
+ return String(ranking?.label||'').trim();
+}
+export function rankingText(ranking?:{text?:string|null;keys?:{field?:string;direction?:string;
+ text?:string}[]|null}|null){
+ const lines=[String(ranking?.text||'').trim(),
+  ...(ranking?.keys||[]).map(key=>String(key?.text||'').trim())];
+ return lines.filter(Boolean);
+}
+
+// --- GOING STRAIGHT TO ONE NAME ----------------------------------------------------------------------------------
+// The owner: "if user needs to look into specific stock they can also do it." There is no other search on this
+// tab, so this is the one - it lives on the pinned screener bar, beside the reading control, and there is no
+// second search field anywhere for a reader to have to tell it apart from.
+//
+// It NARROWS THE ROWS THE SERVER RETURNED and never re-queries, exactly as the header sort does, so the as-of
+// line, the floors and the applied filters printed above still describe precisely the rows on screen. A name
+// that did not clear the floors at this reading is therefore not found - and the panel says that in those
+// words rather than leaving the reader looking at an empty list.
+export const SEARCH_WHAT='Typing a name narrows the instruments this 15-min reading returned. It does not re-query: the as-of, the floors and the applied filters above still describe exactly these rows.';
+export const SEARCH_NOT_FOUND='No instrument in this 15-min reading matches that name. A name whose contracts did not clear the liquidity floors is not in this list to be found.';
+/** Does this row answer to what was typed. Case- and space-insensitive, on the instrument name itself. */
+export function matchesSearch(name:unknown,query:unknown){
+ const q=String(query||'').trim().toUpperCase().replace(/\s+/g,'');
+ if(!q)return true;
+ return String(name||'').toUpperCase().replace(/\s+/g,'').includes(q);
+}
+/** The rows that answer to what was typed, in the order they arrived. Nothing is re-ordered and nothing added. */
+export function searchRows<R extends {underlying?:string}>(rows:R[]|null|undefined,query:unknown):R[]{
+ const list=rows||[];
+ const q=String(query||'').trim();
+ return q?list.filter(r=>matchesSearch(r?.underlying,q)):list.slice();
+}
+/** What the panel says under the rows once a search is narrowing them. '' when nothing was typed. */
+export function searchNote(query:unknown,shown:number,total:number){
+ const q=String(query||'').trim();
+ if(!q)return '';
+ if(!shown)return SEARCH_NOT_FOUND;
+ return `${shown} of ${total} instrument${total===1?'':'s'} at this 15-min reading match “${q}”.`;
+}
+
+/** The busiest contract of this name, by the same measure the list is sorted on. A real row, not an average. */
+export function groupTopText(group?:{top?:{tradingsymbol?:string;strike?:unknown;instrument_type?:string;
+ premium_cr?:unknown}|null}|null){
+ const top=group?.top;
+ if(!top)return '';
+ const kind=String(top.instrument_type||'').toUpperCase();
+ const name=String(top.tradingsymbol||'').trim()||`${strike(top.strike)} ${kind}`;
+ return `Busiest contract ${name} at ${crore(top.premium_cr)}`;
+}
+/** Everything one underlying row says, in one sentence, for a screen reader. */
+export function groupRowLabel(group:any,required=3){
+ return [`${group?.underlying||''}.`,
+  // WHY THIS ROW IS FLAGGED, spoken in the same concise form the cell draws: the counts and one badge per
+  // RULE. It used to be nowhere in the spoken row at all, while the cell itself exposed every reason sentence
+  // of every flagged contract - 5,015 characters on NIFTY, clamped to two lines on screen and read out whole.
+  unusualDegree(group)?`${unusualShort(group)}: ${unusualBadgesText(group)}.`:'',
+  `${groupContracts(group)} over the liquidity floors, options and futures together.`,
+  `${crore(group?.premium_cr)} traded.`,
+  group?.spot==null?'':`Spot ${price(group.spot)}.`,
+  `Open interest ${compact(group?.oi)}, change today ${signedUnits(group?.oi_change_day)}.`,
+  groupVolumeRatioText(group),
+  groupHotText(group),
+  groupBuildupText(group)?`Build-up across those contracts: ${groupBuildupText(group)}.`:'',
+  groupTopText(group)?`${groupTopText(group)}.`:'',
+  'Click to point the whole tab at it and open its contracts.',
+ ].filter(Boolean).join(' ');
+}
+/** The line under the list in the underlying view: how many names cleared, and how many are on screen. */
+export function groupsCountText(body?:{groups_total?:unknown;contracts_total?:unknown;returned?:unknown}|null){
+ const names=num(body?.groups_total),contracts=num(body?.contracts_total),shown=num(body?.returned);
+ if(names==null)return '';
+ const listed=shown!=null&&shown<names?`, and this list carries ${Math.round(shown)} of them`:'';
+ // "instrument" is the owner's word for a ROW of this list, and the column it heads says the same. The
+ // coverage sentence beside it still says "underlyings", because that counts something else: how many names
+ // the reading reached at all, over the floors or not.
+ return `${Math.round(names)} instrument${Math.round(names)===1?'':'s'} have a contract over the floors at this 15-min reading`
+  +`${contracts==null?'':`, ${Math.round(contracts)} contracts between them`}${listed}.`;
+}
+
+// --- WHICH READING A FIGURE CAME FROM -----------------------------------------------------------------------
+// "Latest" used to mean the newest reading carrying the block's primary figure, and every other figure beside
+// it was taken from that same reading. On 18 Sep 2026 that put max pain 23,350 next to a spot of "—": the
+// newest reading with a max-pain strike was 15:45, rebuilt from candles, which carries no spot at all.
+//
+// Each figure is now resolved on its own reading and the server says which. Where that is NOT the block's own
+// as-of, the panel says so beside the number - because two figures captured an hour apart are two different
+// readings, and a reader comparing them is owed that.
+/** The clock of the reading a figure came from, or '' when it is the block's own. */
+export function figureAt(at?:string|null,asOf?:string|null){
+ const one=String(at||'').trim();
+ if(!one||one===String(asOf||'').trim())return '';
+ const time=clock(one);
+ return time===DASH?'':time;
+}
+/** The same, as the phrase a panel prints beside the number. */
+export function figureAtText(at?:string|null,asOf?:string|null){
+ const time=figureAt(at,asOf);
+ return time?`at ${time}`:'';
+}
+
+// --- the option chain opens AT THE MONEY --------------------------------------------------------------------
+/** Which row of the chain the reader should land on: the strike nearest the captured spot, a few rows from
+ *  the top so the strikes either side of it are on screen too. Nothing is reordered and nothing is dropped -
+ *  the whole ladder is still there, and this only says where to start.
+ *
+ *  Why it was needed: the chain took the newest reading, a session rebuilt from candles carries no spot, so
+ *  the panel had no anchor at all and opened at its lowest strike - 21,350 against a spot of 23,302. */
+export const CHAIN_LEAD_ROWS=3;
+export function chainStartRow(rows:{strike:number}[]|null|undefined,spot:unknown,lead=CHAIN_LEAD_ROWS){
+ const index=nearestStrikeIndex(rows||[],spot);
+ if(index==null)return 0;
+ return Math.max(0,index-lead);
+}
+export const CHAIN_AT_MONEY_TEXT='The chain opens at the money: the tinted row is the strike nearest the captured spot at this 15-min reading. Every strike of the expiry is still listed above and below it.';
+export const CHAIN_NO_SPOT_TEXT='No spot was captured for this underlying at this 15-min reading, so the chain cannot say which strike is at the money. It opens at the lowest strike listed.';
+
+// --- Δ SINCE THE PREVIOUS SESSION'S CLOSE ---------------------------------------------------------------------
+// The owner asked for the NUMBER, not the word: he could see PCR was "flat" but not that it had moved 0.03. So
+// every one of these prints the change ALONGSIDE the server's direction word - it never replaces it.
+//
+// Three rules, and they are the whole section:
+//  1. A Δ with no previous close is NOT a zero and NOT "unchanged". It is the server's reason, printed.
+//  2. Each figure keeps its own unit. Max pain is a strike, so its Δ is in POINTS. IV is already a percentage,
+//     so its Δ is in VOLATILITY POINTS. PCR is a ratio, so its Δ is a change in that ratio.
+//  3. Nothing here computes a percentage of a percentage, and nothing here computes a Δ at all - the server
+//     does the one subtraction, and this file writes it down.
+/** The sign in front of a Δ. A true zero IS a zero here: the figure was measured and it did not move. */
+function deltaSign(n:number){return n>0?'+':n<0?MINUS:'';}
+/** PCR's Δ: "+0.03" / "−0.03" / "0.00". A ratio change, never a percentage.
+ *
+ *  A change that is real but smaller than two decimals shows MORE decimals rather than a signed zero:
+ *  −0.0047 printed as "−0.00" is a minus sign on a zero, which is a number that cannot be read. Precision
+ *  climbs until the figure is visible, and a change too small to show even at four is printed unsigned. */
+export function deltaRatio(v:unknown,places=2,most=4){
+ const n=num(v);if(n==null)return DASH;
+ let use=places;
+ while(use<most&&n!==0&&Number(Math.abs(n).toFixed(use))===0)use++;
+ const shown=Math.abs(n).toFixed(use);
+ return `${Number(shown)===0?'':deltaSign(n)}${shown}`;
+}
+/** Max pain's Δ: "+50 pts" / "−100 pts" / "0 pts". Strike points, in whole strike steps, never a percentage. */
+export function deltaStrikePoints(v:unknown){
+ const n=num(v);if(n==null)return DASH;
+ return `${deltaSign(n)}${Math.round(Math.abs(n)).toLocaleString('en-IN')} pts`;
+}
+/** IV's Δ: "+1.2 vol pts" / "−2.1 vol pts". VOLATILITY POINTS — 11.1% to 9.0% is 2.1 points down, not 19% down. */
+export function deltaVolPoints(v:unknown,places=1){
+ const n=num(v);if(n==null)return DASH;
+ return `${deltaSign(n)}${Math.abs(n).toFixed(places)} vol pts`;
+}
+/** The one sentence that stands in for an absent Δ, in the SERVER's words wherever it sent them. An absent
+ *  baseline is not a claim, so this never says "unchanged" and never resolves to a number. */
+export function deltaReasonText(body?:{previous_close_reason?:string|null;
+ delta_reason_text?:Record<string,string>|null}|null,reason?:string|null){
+ const served=String(body?.previous_close_reason||'').trim();
+ const key=String(reason||'').trim();
+ const mapped=key?String(body?.delta_reason_text?.[key]||'').trim():'';
+ return mapped||served||'';
+}
+/** The comparison that turns a bare level into a figure with meaning: "+0.03 since yesterday's close". When
+ *  there is no baseline it is the reason instead, so the headline never trails off into a dash. */
+export function deltaSince(text:string,body?:{previous_close_reason?:string|null;
+ delta_reason_text?:Record<string,string>|null}|null,reason?:string|null){
+ const shown=String(text||'').trim();
+ if(shown&&shown!==DASH)return `${shown} since the previous session's close`;
+ return deltaReasonText(body,reason);
+}
+/** "Previous close 1.16 · 17 Sep 2026 · 15:45" — what the Δ was measured FROM, named and dated, so the reader
+ *  can check the subtraction rather than take it. A baseline that is not there says why. */
+export function previousCloseText(value:string,body?:{previous_close_at?:string|null;
+ previous_close_reason?:string|null}|null){
+ const shown=String(value||'').trim();
+ if(!shown||shown===DASH)return String(body?.previous_close_reason||'').trim();
+ const when=readingLabel(body?.previous_close_at);
+ return `Previous close ${shown}${when?` · ${when}`:''}`;
+}
+/** When the previous close was, with its DATE. Every other `at` on these blocks is a time inside today's
+ *  session, so "at 15:45" beside a baseline would read as today's 15:45 — the one reading it is not. */
+export function previousCloseAtText(at?:string|null){
+ const label=readingLabel(at);
+ return label?`at ${label}`:'';
+}
+/** How much of the session carries a Δ at all, beside how much carries a value. Counts, nothing more. */
+export function deltaReadingsText(body?:{readings_with_delta?:number|null;total_readings?:number|null}|null){
+ const n=num(body?.readings_with_delta),total=num(body?.total_readings);
+ if(n==null||total==null)return '';
+ return `${Math.round(n)} of ${Math.round(total)} 15-min readings carry a change since the previous close`;
+}

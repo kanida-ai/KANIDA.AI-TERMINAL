@@ -2,22 +2,26 @@
 // with its day-on-day build-up label, open interest as a share of its own 20-day average, and basis (futures − spot).
 // A basis needs BOTH prices; with one of them missing the cell is a dash, never half a number.
 import React,{useMemo,useState} from 'react';
-import {C} from '../ui';
+import {View} from 'react-native';
+import {C,T} from '../ui';
 import {useDerivativeRead} from './useDerivatives';
-import {WidgetFrame,stateOf,tone,buildupColor} from './frame';
+import {WidgetFrame,metaText,stateOf,tone,buildupColor} from './frame';
 import {Table,Cell,type Column,type TableItem} from './Table';
-import {basisText,buildupLabel,buildupTone,clock,compact,contractSummary,dteText,nextSort,oiShareText,price,
- rowKey,shortDate,signed,signedUnits,sortRows,type SortState} from './logic';
+import {asOfText,basisText,buildupLabel,buildupTone,clock,compact,contractSummary,dteText,floorsText,nextSort,
+ oiShareText,price,rowKey,shortDate,signed,signedUnits,sortRows,type SortState} from './logic';
 import type {ContractRow,Futures,ChartTarget} from './types';
 const VALUE:Record<string,(row:ContractRow)=>unknown>={time:r=>r.captured_at,symbol:r=>r.underlying,
  summary:r=>r.tradingsymbol,expiry:r=>r.expiry,dte:r=>r.days_to_expiry,price:r=>r.last_price,
  chg:r=>r.price_change_day_pct,oi:r=>r.oi,oi_chg:r=>r.oi_change_day,oi_avg:r=>r.oi_vs_20d_avg,basis:r=>r.basis,
  buildup:r=>r.buildup_day};
-export type FuturesWidgetProps={underlying:string;watchlist:string;seq:number;target:ChartTarget|null;
+/** What this list holds, handed UP so its block can print an as-of and a headline figure like every other
+ *  block on the tab. A count of rows and the reading they came from: nothing derived, nothing new. */
+export type ListSummary={count:number;asOf:string|null};
+export type FuturesWidgetProps={onSummary?:(s:ListSummary)=>void;underlying:string;watchlist:string;seq:number;target:ChartTarget|null;
  onTarget:(t:ChartTarget)=>void;filterCount?:number;onCustomize?:()=>void;onExpand?:()=>void;expanded?:boolean;
  onClose?:()=>void;pinFirst?:boolean;style?:any};
-export function FuturesWidget({underlying,watchlist,seq,target,onTarget,filterCount,onCustomize,onExpand,expanded,
- onClose,pinFirst,style}:FuturesWidgetProps){
+export function FuturesWidget({onSummary,underlying,watchlist,seq,target,onTarget,filterCount,onCustomize,onExpand,
+ expanded,onClose,pinFirst,style}:FuturesWidgetProps){
  const query=[underlying?`underlying=${encodeURIComponent(underlying)}`:'',
   watchlist&&watchlist!=='all'?`watchlist=${encodeURIComponent(watchlist)}`:''].filter(Boolean).join('&');
  const read=useDerivativeRead<Futures>(`/api/derivatives/futures${query?`?${query}`:''}`,seq);
@@ -47,15 +51,20 @@ export function FuturesWidget({underlying,watchlist,seq,target,onTarget,filterCo
   {key:'buildup',label:'Build-up',width:104,value:VALUE.buildup,
    render:r=><Cell text={buildupLabel(r.buildup_day)} color={buildupColor(buildupTone(r.buildup_day))}/>},
  ],[onCustomize]);
+ const count=body?.total??rows.length,asOf=body?.as_of||null;
+ React.useEffect(()=>{onSummary?.({count,asOf})},[count,asOf,onSummary]);
  const items=useMemo(():TableItem<ContractRow>[]=>{
   const list=sort?sortRows(rows,VALUE[sort.key]||(()=>null),sort.dir):rows;
   return list.map((row,i)=>({kind:'row' as const,key:rowKey(row,i),row}));
  },[rows,sort]);
  return <WidgetFrame name="Futures OI build-up" subtitle={`${body?.total??0} front contracts`} body={body}
   state={state} onRefresh={read.reload} filterCount={filterCount} onCustomize={onCustomize} onExpand={onExpand}
-  expanded={expanded} onClose={onClose} style={style}
+  expanded={expanded} onClose={onClose} style={style} inBlock
   showsSignals={['buildup_day','oi_change_day','oi_vs_20d_avg','basis','price_change_day_pct']}
-  note="Build-up compares this contract's price change with its open-interest change over the same day-on-day window (§3.1). Basis is futures minus the captured spot.">
+  note={<View style={{gap:2}}>
+   <T style={metaText}>{asOfText(body?.as_of)} · {floorsText(body?.floors,body?.floors_text)}</T>
+   <T style={metaText}>Build-up compares this contract&apos;s price change with its open-interest change over the same day-on-day window (§3.1). Basis is futures minus the captured spot.</T>
+  </View>}>
   <Table label="Futures build-up" columns={columns} items={items} sort={sort} pinFirst={pinFirst}
    onSort={key=>setSort(s=>nextSort(s,key))}
    onRowPress={row=>onTarget({underlying:row.underlying,instrumentToken:row.instrument_token,

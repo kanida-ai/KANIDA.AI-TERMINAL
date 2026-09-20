@@ -32,7 +32,7 @@ Degradation: a missing file, a missing table or a locked database all report `av
 `EMPTY_TEXT` - "No F&O data captured yet - capture starts at the next 15-min reading" - never an error page.
 """
 from __future__ import annotations
-import logging,sqlite3,threading
+import logging,re,sqlite3,threading
 from datetime import date,datetime,timedelta,timezone
 from pathlib import Path
 from . import implied_vol as IV
@@ -48,8 +48,99 @@ FLOOR_LAST_PRICE=1.0
 FLOORS={'premium_cr':FLOOR_PREMIUM_CR,'oi_lots':FLOOR_OI_LOTS,'last_price':FLOOR_LAST_PRICE}
 FLOORS_TEXT=(f'Liquidity floors in force: premium traded ≥ ₹{FLOOR_PREMIUM_CR:g} cr, '
  f'OI ≥ {FLOOR_OI_LOTS} lot, last price ≥ ₹{FLOOR_LAST_PRICE:g}.')
+#: Which 15-min reading the screener opens on. The newest one is not always usable: a session rebuilt from
+#: 15-minute candles carries no traded-price average, so `premium_cr` is null for every contract in it and
+#: nothing in it can clear the premium floor. The screener opens on the newest reading that HAS rows over the
+#: floors, says so when that is not the newest, and leaves every reading one click away.
+READING_RULE_TEXT=('This screener opens on the newest 15-min reading that has contracts over the liquidity '
+ 'floors, which is not always the newest reading the store holds: a reading rebuilt from 15-minute candles '
+ 'carries no traded-price average, so no contract in it has a premium and none of them can clear the premium '
+ 'floor. Every reading the store holds is still listed, and choosing one moves the whole tab to it.')
 #: §3.2: fewer than 3 sessions of history is "no baseline", never a ratio.
 MIN_BASELINE_SESSIONS=3
+# ==================================================================================================================
+# WHAT "UNUSUAL" IS: TWO RULES, NOT A HUNDRED SENTENCES.
+#
+# The store flags a contract under §3 and writes WHY as prose — "volume 206.0x its own time-of-day median". That
+# sentence is different at every number, so NIFTY's 80 flagged contracts at the 11:30 reading of 18 Sep 2026 wrote
+# 124 DIFFERENT sentences. Counting those sentences said "124 conditions"; the tab clamped that to three and drew
+# "3 conditions". The truth is TWO: §3.2 and §3.3, fired at many multiples.
+#
+# So a trigger is carried as WHAT FIRED and WHAT THE NUMBERS WERE, never as the sentence:
+#
+#     rule id · rule version · the measured value · the comparator · the threshold · the baseline it was
+#     measured against · how many observations that baseline stands on.
+#
+# These definitions belong to `market_data.derivatives.metrics` (D2), which computes them; the pilot runs with
+# PYTHONPATH=server and usually cannot import it, so the registry is MIRRORED here and check-derivative.cjs reads
+# both files and fails if the ids, comparators or thresholds ever differ.
+#
+# NOTHING IS RECOMPUTED HERE. Which rules fired is the store's own `unusual_reasons`, classified back to the rule
+# that WROTE each sentence; the numbers beside them are the store's own columns (`vol_tod_ratio`, `vol_tod_median`,
+# `vol_tod_sessions`, `vol_oi_ratio`, `vol_oi_prev_oi`). A sentence no rule claims is kept as itself under
+# `unclassified` — observable, never folded into a rule that did not fire and never silently dropped.
+# ==================================================================================================================
+#: Bumped when a rule's measurement, comparator or threshold changes.
+UNUSUAL_RULES_VERSION=1
+#: The multiples the two rules compare against. Mirrors metrics.UNUSUAL_VOL_TOD_RATIO / VOL_OI_SPIKE_RATIO.
+UNUSUAL_VOL_TOD_RATIO=2.0
+VOL_OI_SPIKE_RATIO=1.0
+RULE_VOL_TOD='vol_tod_median'
+RULE_DAY_VOL_VS_PREV_OI='day_vol_vs_prev_oi'
+RULE_UNCLASSIFIED='unclassified'
+UNUSUAL_RULES=(
+ {'rule_id':RULE_VOL_TOD,'rule_version':UNUSUAL_RULES_VERSION,
+  'label':'Volume vs its own median','short_label':'Vol vs median',
+  'measure':'cumulative volume so far today',
+  'baseline_label':"the median of this contract's own cumulative volume at the same clock time",
+  'sample_label':'session','comparator':'>=','threshold':UNUSUAL_VOL_TOD_RATIO,'unit':'x',
+  'text':('§3.2. A contract is flagged when the volume it has traded so far today is at least '
+   f'{UNUSUAL_VOL_TOD_RATIO:g}x the median of its OWN cumulative volume at the same clock time over the '
+   f'baseline sessions. Fewer than {MIN_BASELINE_SESSIONS} sessions of history is no baseline, so no flag.')},
+ {'rule_id':RULE_DAY_VOL_VS_PREV_OI,'rule_version':UNUSUAL_RULES_VERSION,
+  'label':'Day volume vs previous-close OI','short_label':'Day vol vs prev OI',
+  'measure':"the day's volume",
+  'baseline_label':'the open interest standing at the previous close',
+  'sample_label':'prior session','comparator':'>','threshold':VOL_OI_SPIKE_RATIO,'unit':'x',
+  'text':('§3.3. A contract is flagged when the volume it has traded today is more than '
+   f'{VOL_OI_SPIKE_RATIO:g}x the open interest that was standing at the previous close. One prior session is '
+   'the whole baseline.')},
+)
+UNUSUAL_RULES_BY_ID={rule['rule_id']:rule for rule in UNUSUAL_RULES}
+#: The one unrecognised case, named rather than hidden. It is not a rule and it is never given a threshold.
+UNUSUAL_UNCLASSIFIED_RULE={'rule_id':RULE_UNCLASSIFIED,'rule_version':UNUSUAL_RULES_VERSION,
+ 'label':'Condition this build does not name','short_label':'Unnamed condition',
+ 'measure':'','baseline_label':'','sample_label':'',
+ 'comparator':'','threshold':None,'unit':'',
+ 'text':('The store recorded a condition in words that no rule in this build writes. It is shown in the '
+  'store\'s own words and counted on its own, never added to one of the named rules.')}
+#: How each rule's sentence is read back. The pattern lives beside the rule it belongs to, exactly as it does in
+#: `market_data.derivatives.metrics`, so the two directions cannot drift apart.
+UNUSUAL_REASON_PATTERNS=(
+ (RULE_VOL_TOD,re.compile(r'^volume\s+([0-9.]+)x its own time-of-day median$',re.I)),
+ (RULE_DAY_VOL_VS_PREV_OI,re.compile(r"^day volume\s+([0-9.]+)x yesterday's OI$",re.I)),
+)
+#: THE ORDER THE SCREENER SERVES, written down once and served with the rows so the page can print the sort that
+#: is actually in force rather than a sort somebody once assumed. Every key is a number the store produced, and
+#: the last key is the instrument NAME — so two instruments that match on all three counts still come out in the
+#: same order on every request, on every machine.
+SCREENER_RANK_KEYS=(
+ {'field':'unusual_rule_count','direction':'desc',
+  'text':'How many DISTINCT condition types the instrument\'s contracts tripped between them — not how many '
+   'different numbers appeared.'},
+ {'field':'unusual','direction':'desc','text':'Then how many of its contracts tripped any of them.'},
+ {'field':'premium_cr','direction':'desc','text':'Then the premium traded across its whole book, largest first.'},
+ {'field':'underlying','direction':'asc',
+  'text':'Then the instrument name, A to Z, so two instruments level on all three still come out in the same '
+   'order every time.'},
+)
+SCREENER_RANK_LABEL='Unusual first'
+SCREENER_RANK_TEXT=('One row per instrument, ordered by: most distinct condition types, then most contracts '
+ 'flagged, then largest premium traded, then instrument name A to Z.')
+#: The contract list is a different list with a different order, and it says so rather than borrowing the above.
+CONTRACT_RANK_KEYS=({'field':'premium_cr','direction':'desc','text':'Largest premium traded first.'},)
+CONTRACT_RANK_LABEL='Largest premium traded'
+CONTRACT_RANK_TEXT='One row per contract, largest premium traded first.'
 #: The one empty-state sentence for the whole tab. Not an error - capture simply has not run yet.
 EMPTY_TEXT='No F&O data captured yet — capture starts at the next 15-min reading'
 #: §4 card 4 names these three exactly.
@@ -261,6 +352,13 @@ INDEX_KINDS=('NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY','NIFTYNXT50','NIFTYFPI'
 UNDERLYING_KINDS=('index','stock')
 #: The screener's own ceiling on returned rows. It always reports how many rows it SCANNED beside how many it
 #: kept, so a cut list can never read as an empty market.
+#: The screener's two views. ONE ROW PER UNDERLYING is the default: the contract list is sorted by
+#: premium, and one busy index can own every visible row of it - 106 of the 491 contracts at 11:30 on
+#: 18 Sep 2026 were NIFTY's, so a hundred-row list was a hundred rows of NIFTY.
+#: Every instrument type the screener lists. A future is not an option and is not a side of one.
+INSTRUMENT_TYPES=('CE','PE','FUT')
+SCREENER_VIEWS=('underlying','contract')
+SCREENER_VIEW_DEFAULT='underlying'
 SCREENER_LIMIT_DEFAULT=100
 SCREENER_LIMIT_MAX=500
 
@@ -272,13 +370,53 @@ MAX_PAIN_DEFINITION=('Max pain is the strike at which the total payout to option
  'smallest, from the open interest standing across every strike of this expiry at that reading. It is read '
  'from the metrics worker, not recomputed here, and it moves as open interest moves.')
 MAX_PAIN_DISTANCE_DEFINITION=('Distance is the max-pain strike MINUS spot at the same 15-min reading, which '
- 'is the convention the store itself uses. A positive distance means the strike sits above spot.')
+ 'is the convention the store itself uses. A positive distance means the strike sits above spot. Two figures '
+ 'from two different readings are never subtracted from one another: with no reading carrying both, the '
+ 'distance is unavailable and says why.')
+#: Why a distance is unavailable. A distance is the ONE figure on this tab that is a relationship between two
+#: others, so it is the one figure that can be fabricated by pairing numbers that were never true together.
+DISTANCE_REASONS={
+ 'no_strike':'No 15-min reading of this session carried a max-pain strike, so there is nothing to measure.',
+ 'no_spot_at_reading':('The reading that carries this max-pain strike carries no spot, so there is no '
+  'distance at it. An earlier reading\'s spot is a different reading and is never subtracted from this '
+  'strike — it would be a distance that was true of neither.'),
+ 'no_spot':'No 15-min reading of this session carried a spot, so there is no distance to measure to.',
+}
+#: The clearly-labelled ALTERNATIVE offered when the newest strike has no spot beside it: the newest reading
+#: that carried BOTH. It is never substituted for the headline figure — it is served alongside it, with its
+#: own reading stamp, for the reader to choose.
+COMPLETE_PAIR_TEXT=('The newest 15-min reading of this session that carried a max-pain strike AND a spot '
+ 'together. It is offered as its own reading, with its own time — it is never mixed into the newest strike.')
 FUTURES_DEFINITION=('OI vs average is this futures contract\'s open interest as a share of its own 20-day '
  'average — 1.00 is exactly its average. Basis is the futures price minus spot at the same reading, and '
  'basis % is that difference as a share of spot. All three are read from the metrics worker.')
 IV_ATM_RULE=('The at-the-money strike is the listed strike nearest spot at the session\'s LAST reading, and '
  'is then held fixed across the whole session, so the line follows two contracts instead of hopping between '
  'strikes as spot drifts.')
+#: ---------------------------------------------------------------------------------------------------------
+#: THE ONE DEFINITION OF A DELTA ON THIS TAB. ΔOI already means "since the previous session's close"; PCR, max
+#: pain and implied volatility now mean exactly the same thing by the same arithmetic, so a reader never has to
+#: ask which baseline a Δ on this tab was measured from.
+#:
+#: No previous close means NO DELTA. Null with a stated reason — never a zero, never "unchanged". An absent
+#: baseline is not a claim, and a 0 in a Δ column is a claim that the figure did not move.
+SERIES_DELTA_TEXT=('Δ is the change since the previous session\'s close: this reading\'s figure minus the same '
+ 'figure at the last 15-min reading of the session before. The same baseline ΔOI uses. A figure with no '
+ 'previous close carries no Δ at all — it is null with a reason, never a zero and never "unchanged".')
+SERIES_DELTA_REASONS={
+ 'no_baseline':'No previous-session close is stored for this figure, so there is nothing to measure against.',
+ 'no_value':'This 15-min reading carries no value for this figure, so there is nothing to measure.',
+}
+#: What each Δ is measured IN. A unit is part of the number, so it is served with it rather than assumed.
+PCR_DELTA_TEXT=('PCR is a ratio, so its Δ is a change in that ratio: 0.93 to 0.96 is +0.03. It is never shown '
+ 'as a percentage of a ratio.')
+MAX_PAIN_DELTA_TEXT=('Max pain is a STRIKE, so its Δ is in strike points and it moves in whole strike steps — '
+ '23,300 to 23,350 is +50 points. A strike change is never shown as a percentage.')
+IV_DELTA_TEXT=('Implied volatility is already a percentage, so its Δ is in VOLATILITY POINTS: 11.1% to 9.0% is '
+ '2.1 points down. It is never shown as a percentage change of a percentage.')
+PCR_DELTA_UNIT='ratio'
+MAX_PAIN_DELTA_UNIT='strike points'
+IV_DELTA_UNIT='volatility points'
 IV_ATM_BASIS_RULE=('The at-the-money reading is the average of the at-the-money call\'s and the at-the-money '
  'put\'s solved volatility at the same 15-min reading. When only one of the two can be solved, that one IS '
  'the reading and `basis` says so — an average of one number and a blank is not an average.')
@@ -300,10 +438,37 @@ def clean_expiry(value):
  return text
 
 def days_to_expiry(expiry,today=None):
- """Whole days from today (IST) to the expiry date. None when the date is unreadable."""
+ """Whole days from today (IST) to the expiry date. None when the date is unreadable.
+
+ NOT for anything a reader sees beside a captured figure — use `session_days_to_expiry`. This one counts from
+ the wall clock, which is right only for a card describing right now.
+ """
  text=clean_expiry(expiry)
  if not text:return None
  try:return (date.fromisoformat(text)-(today or today_ist())).days
+ except ValueError:return None
+
+def session_date(value):
+ """The session date out of a session string or a 15-min reading stamp, or ''."""
+ return clean_expiry(str(value or '').strip()[:10])
+
+def session_days_to_expiry(expiry,session=None):
+ """Whole CALENDAR days from the session on screen to the expiry date. None when either date is unreadable.
+
+ THE ONE DAY CONVENTION ON THIS TAB (`DTE_CONVENTION`). The same 22 Sep option used to read as 4 days on one
+ panel and 2 on another: one panel counted from the date the reading was captured, the other from today. A
+ session read back from the store is not today, and a figure captured on 18 Sep does not change because the
+ clock moved — so every days-to-expiry beside a captured figure is counted from THAT figure's session.
+
+ Calendar days, not trading days: the store holds no exchange holiday calendar, and a trading-day count
+ built without one would be a guess wearing a number. Expiry day is 0 and the day before it is 1.
+ """
+ text=clean_expiry(expiry)
+ if not text:return None
+ base=session_date(session)
+ try:start=date.fromisoformat(base) if base else today_ist()
+ except ValueError:start=today_ist()
+ try:return (date.fromisoformat(text)-start).days
  except ValueError:return None
 
 def _num(value):
@@ -319,6 +484,102 @@ def _int(value):
 def _round(value,places=2):
  out=_num(value)
  return None if out is None else round(out,places)
+
+
+# --- ONE ANALYSIS CONTEXT ------------------------------------------------------------------------------------
+# WHAT WENT WRONG WITHOUT ONE. Every card on this tab resolved its own instrument, its own expiry, its own
+# session and its own "latest", and then the page put the answers side by side under one heading. On 18 Sep
+# 2026 the max-pain headline printed a strike of 23,350 (the 15:45 reading), a spot of 23,302 (the 11:30
+# reading) and "2 below" (a distance true only of the 11:30 PAIR). Every one of those three numbers was
+# captured and correct. The sentence they made was false.
+#
+# So the tab has ONE context: which instrument, which expiry, which session, which 15-min reading is the
+# boundary, in which timezone, and whether that boundary is the live edge of the store or a session read back.
+# It travels on every response as `context`, and every metric under it is resolved AT OR BEFORE that boundary
+# carrying the reading it was ACTUALLY observed at. Nothing is forward-filled into a reading that has no
+# value, and no two figures from two different readings are combined into a third.
+ANALYSIS_TZ='Asia/Kolkata'
+ANALYSIS_MODES=('live','historical')
+CONTEXT_TEXT=('Every figure under this context is resolved at or before the 15-min reading named by `at`, and '
+ 'carries the reading it was actually observed at. A figure with no value at a reading is left empty — it is '
+ 'never carried forward from an earlier one — and two figures observed at two different readings are never '
+ 'combined into a third.')
+DTE_CONVENTION=('Days to expiry is counted from the SESSION on screen to the expiry date, in whole calendar '
+ 'days: expiry day is 0 and the day before it is 1. It is never counted from today\'s date, because a '
+ 'session read back from the store is not today. Calendar days, not trading days — this store holds no '
+ 'exchange holiday calendar, and a trading-day count built without one would be a guess wearing a number.')
+
+class AnalysisContext:
+ """Instrument, expiry, session, as-of reading, timezone and live-versus-historical. Carried on every response.
+
+ `mode` is a fact about the boundary, not a setting: a session whose date is today (IST) is the live edge of
+ the store and will grow at the next capture; any earlier session is closed and will not.
+ """
+ __slots__=('underlying','expiry','session','at','newest_at','source','tz')
+ def __init__(self,underlying='',expiry='',session='',at='',newest_at='',source='store'):
+  self.underlying=clean_symbol(underlying)
+  self.expiry=clean_expiry(expiry)
+  self.session=session_date(session) or session_date(at)
+  self.at=str(at or '').strip()
+  self.newest_at=str(newest_at or '').strip()
+  self.source=source or 'store'
+  self.tz=ANALYSIS_TZ
+
+ @property
+ def mode(self):
+  """'live' while the session on screen is today in IST, 'historical' once it is a closed session."""
+  if not self.session:return 'live'
+  return 'live' if self.session==today_ist().isoformat() else 'historical'
+
+ @property
+ def days_to_expiry(self):
+  return session_days_to_expiry(self.expiry,self.session)
+
+ def as_dict(self):
+  return {'underlying':self.underlying or None,'expiry':self.expiry or None,'session':self.session or None,
+   'at':self.at or None,'newest_at':self.newest_at or None,'timezone':self.tz,'mode':self.mode,
+   'is_newest':bool(not self.at or not self.newest_at or self.at==self.newest_at),
+   'source':self.source,'days_to_expiry':self.days_to_expiry,'days_to_expiry_basis':DTE_CONVENTION,
+   'context_text':CONTEXT_TEXT}
+
+
+# --- DERIVATIVE CAPTURE HEALTH -------------------------------------------------------------------------------
+# WHAT WENT WRONG WITHOUT IT. At the 15:45 reading of 18 Sep 2026 the store held 10,552 contract rows and NOT
+# ONE of them carried a spot or a premium: the capture had died at 11:30 and everything after it was rebuilt
+# from 15-minute candles, and a candle has no traded-price average. Nothing could ever clear a premium floor,
+# because nothing was measured. The screen said "No contract cleared the liquidity floors", which a reader
+# reads as "the market is quiet" — the opposite of the truth — while the page's own status chip said prices
+# and patterns were healthy, which describes the cash feed and says nothing at all about F&O coverage.
+#
+# So the five states below are kept APART, each with its own sentence. "Nothing was measured" and "nothing
+# qualified" are different facts about the market and must never share a wording.
+CAPTURE_STATES=('missing_capture','partial_capture','complete','no_eligible_rows','filtered_out','failed')
+#: The fields a contract row needs before it can be measured against the §3 floors at all. A row missing one
+#: of these is not a row that failed the floor — it is a row that was never measured.
+CAPTURE_REQUIRED_FIELDS=('premium_cr','last_price','oi')
+CAPTURE_FIELD_LABELS={'premium_cr':'premium traded','last_price':'last price','oi':'open interest',
+ 'spot':'the underlying price','lot_size':'lot size'}
+#: Fields that are not required to clear a floor but whose absence changes what the tab can say. A reading
+#: with no spot cannot carry a distance, an at-the-money strike or a moneyness.
+CAPTURE_REPORTED_FIELDS=CAPTURE_REQUIRED_FIELDS+('spot',)
+CAPTURE_STATE_TEXT={
+ 'missing_capture':'No contract row was captured at this 15-min reading.',
+ 'partial_capture':('Nothing was measured at this 15-min reading. Contract rows are here, but the fields the '
+  'liquidity floors are applied to were not captured, so no contract could be measured against them at all. '
+  'This is a gap in F&O capture, not a quiet market — and it says nothing about how much was traded.'),
+ 'complete':'Every field the liquidity floors need was captured at this 15-min reading.',
+ 'no_eligible_rows':('Every field the floors need was captured at this 15-min reading, and no contract '
+  'cleared them. This is a reading of the market, not a gap in it.'),
+ 'filtered_out':'Contracts cleared the liquidity floors at this 15-min reading; the filters in force excluded every one of them.',
+ 'failed':'The F&O store could not be read for this request. No rows are shown, which is not the same as no rows existing.',
+}
+#: Which of the five a reader may treat as a healthy, complete reading. A partial capture is NEVER one.
+CAPTURE_HEALTHY=('complete','no_eligible_rows','filtered_out')
+CAPTURE_TEXT=('Capture health describes what was MEASURED in the F&O store at a 15-min reading, separately '
+ 'from what the measurements say. A reading with no premium captured cannot clear a premium floor for '
+ 'reasons that have nothing to do with trading activity, so the two are never reported under one sentence. '
+ 'This covers F&O capture only: the page-wide status chip describes the cash price and pattern feeds and '
+ 'says nothing at all about F&O coverage.')
 
 
 # --- the §3 signal -> column-name map -----------------------------------------------------------------------
@@ -382,6 +643,13 @@ class Derivatives:
   self._read=read_module        # market_data.derivatives.read_api, same deal
   self._read_tried=read_module is not None
   self._lock=threading.Lock()
+  #: (newest reading, answer) for `_latest_complete_reading`. Keyed on the newest reading the store holds,
+  #: so a capture landing invalidates it by itself - a cache that cannot go stale because its key IS the
+  #: store's clock. It exists because the walk is cheap when the newest reading is complete (it stops at the
+  #: first seek) and expensive exactly when it is not: during an outage every reading walked past has to be
+  #: read through before it can be ruled out, which measured 124 ms over the 18 rebuilt readings of
+  #: 18 Sep 2026. That is the one moment a reader most needs the answer, so it is computed once.
+  self._complete_cache=(None,None)
 
  # --- connection ------------------------------------------------------
  def _connect(self):
@@ -501,6 +769,134 @@ class Derivatives:
   body.update(extra)
   return body
 
+ # --- the one analysis context ----------------------------------------
+ def context(self,underlying='',expiry='',session='',at='',source='store',newest_at=None):
+  """The tab's ONE context for a request, as a typed object. Served as `context` on every card.
+
+  `newest_at` is resolved for the same underlying the caller asked about rather than store-wide, because the
+  capture worker does not reach every name at every reading: taking the store-wide newest reading for a card
+  about RELIANCE says RELIANCE is behind when RELIANCE simply has no row at that reading.
+  """
+  newest=newest_at if newest_at is not None else (self._latest_mark(clean_symbol(underlying)) or '')
+  return AnalysisContext(underlying=underlying,expiry=expiry,session=session,at=at,newest_at=newest,
+   source=source)
+
+ # --- derivative capture health ---------------------------------------
+ def _field_coverage(self,at,fields=CAPTURE_REPORTED_FIELDS):
+  """How many contract rows at ONE reading carry each field, counted rather than assumed.
+
+  One aggregate over the reading's own slice of the primary key. `count(column)` is the count of NON-NULL
+  values, which is exactly the question: a column the store has but never filled is not coverage.
+  """
+  names=self._column_names('metrics')
+  present=[f for f in fields if f in names]
+  clauses=['captured_at=?']
+  if self._has_scope():clauses.insert(0,"scope='contract'")
+  if 'instrument_type' in names:clauses.append("instrument_type in ('CE','PE','FUT')")
+  select=['count(*) as rows']+[f'count("{f}") as "n_{f}"' for f in present]
+  row=self._one('select '+','.join(select)+' from metrics where '+' and '.join(clauses),(at,)) or {}
+  rows=_int(row.get('rows')) or 0
+  out={}
+  for field in fields:
+   if field not in present:
+    out[field]={'present':None,'rows':rows,'share':None,'column':False,
+     'label':CAPTURE_FIELD_LABELS.get(field,field)}
+    continue
+   have=_int(row.get(f'n_{field}')) or 0
+   out[field]={'present':have,'rows':rows,'share':(round(have/rows,4) if rows else None),'column':True,
+    'label':CAPTURE_FIELD_LABELS.get(field,field)}
+  return rows,out
+
+ #: How far back the "latest complete reading" walk may go. A session is 26 readings, so this covers one
+ #: whole session plus a little: an outage that ran longer than a session has no recent complete reading to
+ #: offer, and saying so is the honest answer. Bounded because this runs on the screener's own request.
+ COMPLETE_LOOKBACK=32
+
+ def _reading_has(self,at,field):
+  """Does ONE reading hold a single row with this field filled in? An index seek that stops at the first row.
+
+  Deliberately an EXISTS and not a COUNT. `count(premium_cr) ... where captured_at=?` visits every row of
+  the reading - 27,239 of them at 11:30 on 18 Sep 2026 - and this walk asks the question up to 32 times.
+  Whether the field was captured AT ALL is a question the first matching row answers.
+  """
+  if 'metrics' not in self._tables() or not at:return False
+  if field not in self._column_names('metrics'):return True  # a column the store lacks is not a gap it has
+  clauses=[]
+  if self._has_scope():clauses.append("scope='contract'")
+  clauses.append('captured_at=?')
+  clauses.append(f'"{field}" is not null')
+  return bool(self._rows('select 1 from metrics where '+' and '.join(clauses)+' limit 1',(at,)))
+
+ def _latest_complete_reading(self,readings,limit=None):
+  """The newest reading whose required fields were all captured, walking back at most `limit` readings.
+
+  This is the reading the tab OFFERS when the one on screen measured nothing. It is never substituted for
+  the reader's own choice - naming it is the whole point, because a reader who is silently moved to another
+  reading has no way to know the one they asked for was empty.
+
+  When nothing inside the window is complete it returns '' and the tab says so, rather than reaching further
+  back and calling a reading from two sessions ago "the latest complete one".
+  """
+  newest=(readings or [{}])[0].get('at') if readings else None
+  key,cached=self._complete_cache
+  if newest and key==newest and limit is None:return cached
+  found=''
+  for row in (readings or ())[:max(1,int(limit or self.COMPLETE_LOOKBACK))]:
+   at=row.get('at')
+   if not at:continue
+   if all(self._reading_has(at,field) for field in CAPTURE_REQUIRED_FIELDS):found=at;break
+  if newest and limit is None:self._complete_cache=(newest,found)
+  return found
+
+ def capture_health(self,at='',readings=None,cleared=None,matched=None):
+  """What was MEASURED at one 15-min reading, as one of `CAPTURE_STATES`, with the counts behind it.
+
+  `cleared` is how many rows cleared the §3 floors and `matched` how many survived the reader's own filters;
+  either may be None when the caller has not run that step. The state is decided in this order, because each
+  one makes the next question meaningful:
+
+    no rows at all              -> missing_capture   (nothing was captured)
+    a required field is empty   -> partial_capture   (nothing could be measured)
+    nothing cleared the floors  -> no_eligible_rows  (a real reading of a real market)
+    filters removed the rest    -> filtered_out      (the reader's own choice, not the market's)
+    otherwise                   -> complete
+
+  A partial capture NEVER reaches `no_eligible_rows`: a contract with no premium did not fail a premium
+  floor, it was never measured against one.
+  """
+  at=str(at or '').strip()
+  if not self.available():
+   return {'state':'failed','state_text':CAPTURE_STATE_TEXT['failed'],'at':at or None,'rows':0,
+    'coverage':{},'missing_fields':[],'source':'none','healthy':False,'capture_text':CAPTURE_TEXT,
+    'states':list(CAPTURE_STATES),'latest_attempted_at':None,'latest_available_at':None,
+    'latest_complete_at':None,'cleared':None,'matched':None,'required_fields':list(CAPTURE_REQUIRED_FIELDS)}
+  if readings is None:readings=self.screener_readings()
+  attempted=(readings[0]['at'] if readings else None) or self._max('metrics') or None
+  available=next((r['at'] for r in (readings or ()) if self._reading_rows(r.get('at'))),None)
+  complete=self._latest_complete_reading(readings) or None
+  rows,coverage=self._field_coverage(at) if at else (0,{})
+  missing=[f for f in CAPTURE_REQUIRED_FIELDS
+   if (coverage.get(f) or {}).get('column') and not ((coverage.get(f) or {}).get('present') or 0)]
+  empty=[f for f in CAPTURE_REPORTED_FIELDS
+   if (coverage.get(f) or {}).get('column') and not ((coverage.get(f) or {}).get('present') or 0)]
+  if not at or not rows:state='missing_capture'
+  elif missing:state='partial_capture'
+  elif cleared is not None and not cleared:state='no_eligible_rows'
+  elif cleared and matched is not None and not matched:state='filtered_out'
+  else:state='complete'
+  return {'state':state,'state_text':CAPTURE_STATE_TEXT[state],'at':at or None,'rows':rows,
+   'coverage':coverage,'missing_fields':missing,'empty_fields':empty,
+   # WHERE THE READING CAME FROM. A reading whose premium column is empty for every row is one the metrics
+   # worker rebuilt from 15-minute candles; a candle carries no traded-price average, and that is not a
+   # guess about the store, it is what an empty premium column at a full reading means.
+   'source':('candles_15m' if state=='partial_capture' and 'premium_cr' in missing
+    else ('metrics' if rows else 'none')),
+   'healthy':state in CAPTURE_HEALTHY,'capture_text':CAPTURE_TEXT,'states':list(CAPTURE_STATES),
+   'latest_attempted_at':attempted,'latest_available_at':available,'latest_complete_at':complete,
+   'latest_complete_is_here':bool(complete and at and complete==at),
+   'cleared':cleared,'matched':matched,'required_fields':list(CAPTURE_REQUIRED_FIELDS),
+   'field_labels':dict(CAPTURE_FIELD_LABELS)}
+
  def status(self):
   """Is there anything captured at all, and when. The tab's own header line reads this."""
   tables=self._tables()
@@ -523,11 +919,51 @@ class Derivatives:
   if 'contracts' in tables:
    for row in self._rows('select instrument_type as t, count(*) as n from contracts group by instrument_type'):
     counts[str(row.get('t') or '?')]=_int(row.get('n')) or 0
+  # THE TAB'S OWN HEALTH, NOT THE APP'S. The global status chip describes the cash feed; it said prices and
+  # patterns were healthy through a derivative capture outage that had left every contract row of the newest
+  # reading with no premium and no spot. F&O coverage is a separate measurement and is reported separately.
+  capture=self.capture_health(as_of or '') if 'metrics' in tables else None
   return self.envelope(as_of=as_of,source='metrics_module' if self.metrics_module() else 'store',
    missing=columns.missing,tables=sorted(tables),contracts=counts,backfill_sessions=sessions,
-   metrics_ready=bool(columns.map),index_underlyings=list(INDEX_UNDERLYINGS))
+   metrics_ready=bool(columns.map),index_underlyings=list(INDEX_UNDERLYINGS),capture=capture)
 
  # --- row assembly -----------------------------------------------------
+ @staticmethod
+ def _latest_at(points,key):
+  """The newest reading that CARRIES this figure, and which reading that was.
+
+  "Latest" used to mean the newest reading carrying the block's PRIMARY figure, and every other `latest_*`
+  was taken from that same reading. On 18 Sep 2026 that put max pain at 23,350 beside a spot of "-": the
+  newest reading with a max-pain strike was 15:45, a reading rebuilt from candles, which carries no spot at
+  all. Two figures that were captured an hour apart are two different readings and must say so.
+
+  So each figure is resolved on its own, and each says which reading it came from. Nothing is carried
+  forward and nothing is combined: this walks back to a reading that HAS the number, or returns None.
+  """
+  row=next((p for p in reversed(points or ()) if p and p.get(key) is not None),None)
+  return (row.get(key) if row else None),(row.get('at') if row else None)
+
+ @staticmethod
+ def _figure_at(points,at,key):
+  """One figure AT a named reading. No walk-back: a reading with no value for it returns None, full stop.
+
+  This is the counterpart to `_latest_at` and the one a RELATIONSHIP between two figures must use. A
+  distance is only a distance when both of its terms were observed together; resolved with a walk-back it
+  becomes an older pair's distance wearing a newer strike's heading, which is the sentence this tab printed
+  on 18 Sep 2026: 23,350, 23,302 and "2 below", none of which were ever true at the same moment.
+  """
+  if not at:return None
+  row=next((p for p in (points or ()) if p and p.get('at')==at),None)
+  return (row or {}).get(key)
+
+ @staticmethod
+ def _latest_pair(points,*keys):
+  """The newest reading that carries EVERY one of `keys`, as {'at':…, key:…}, or None when there is none."""
+  for point in reversed(points or ()):
+   if point and all(point.get(k) is not None for k in keys):
+    return {'at':point.get('at'),**{k:point.get(k) for k in keys}}
+  return None
+
  def _latest_mark(self,underlying=''):
   """The newest reading the store holds - for ONE underlying when named, otherwise across the whole store.
 
@@ -545,13 +981,17 @@ class Derivatives:
   row=self._one('select max(captured_at) as v from metrics where underlying=?',(underlying,))
   return (row or {}).get('v') or self._max('metrics')
 
- def _metric_rows(self,where='',params=(),limit=None,types=None,order='',underlying=''):
-  """Latest-mark `metrics` rows joined to their contract. Column-driven; absent signals come back None."""
+ def _metric_rows(self,where='',params=(),limit=None,types=None,order='',underlying='',at=''):
+  """`metrics` rows joined to their contract, at ONE reading. Column-driven; absent signals come back None.
+
+  `at` names the reading. Omitted, it is the newest one this underlying has, exactly as before - the caller
+  that knows which reading the TAB is on passes it, and a caller that does not is left alone.
+  """
   tables=self._tables()
   if 'metrics' not in tables or 'contracts' not in tables:return [],None,_Columns(())
   columns=self._columns('metrics')
   if not columns.map:return [],None,columns
-  as_of=self._latest_mark(underlying)
+  as_of=str(at or '').strip() or self._latest_mark(underlying)
   if not as_of:return [],None,columns
   clauses=['m.captured_at=?']
   args=[as_of]
@@ -576,7 +1016,10 @@ class Derivatives:
   # §3.2, enforced on the serving side too: a ratio without a stated baseline of >= 3 sessions is not served.
   enough=sessions is not None and sessions>=MIN_BASELINE_SESSIONS
   dte=_int(row.get('days_to_expiry'))
-  if dte is None:dte=days_to_expiry(row.get('expiry'))
+  # The stored figure is the metrics worker's own, counted at capture. The fallback is counted from THIS
+  # ROW'S OWN reading for the same reason (DTE_CONVENTION): counted from today, a row captured on 18 Sep
+  # would read as fewer days every morning while the number beside it never moved.
+  if dte is None:dte=session_days_to_expiry(row.get('expiry'),session_date(row.get('captured_at')))
   return {
    'instrument_token':_int(row.get('instrument_token')),'tradingsymbol':row.get('tradingsymbol') or '',
    'underlying':row.get('underlying') or '','instrument_type':row.get('instrument_type') or '',
@@ -634,8 +1077,13 @@ class Derivatives:
    if not expiry:continue
    expiries.append({'underlying':row.get('underlying') or '','expiry':expiry,
     'days_to_expiry':days_to_expiry(expiry,today),'contracts':_int(row.get('contracts')) or 0})
+  # THE ONE PLACE `days_to_expiry` IS COUNTED FROM TODAY, and it says so. This list is a PICKER of expiries
+  # still to come, not a description of a captured reading: "which expiries can I choose right now" is a
+  # question about today. Every days-to-expiry beside a captured figure uses DTE_CONVENTION instead.
   return self.envelope(as_of=as_of,missing=self._columns('metrics').missing,underlyings=underlyings,expiries=expiries,
    watchlists=[{'key':k,'label':l} for k,l in WATCHLISTS],option_types=list(OPTION_TYPES),
+   expiry_days_basis=('Days to expiry in this picker is counted from today, because this list is the '
+    'expiries still to come rather than a reading of a session. '+DTE_CONVENTION),
    index_underlyings=list(INDEX_UNDERLYINGS))
 
  # --- card 1: unusual activity ----------------------------------------
@@ -686,9 +1134,18 @@ class Derivatives:
     'strikes':strikes[:20]})
   out.sort(key=lambda g:-g['premium_cr'])
   cut=max(1,min(int(limit or ROW_LIMIT_DEFAULT),ROW_LIMIT_MAX))
+  # The same rule the screener works to: an empty list says what actually happened. A reading whose premium
+  # column was never filled did not fail a premium floor - nothing in it was measured against one.
+  # `cleared` is the FLOORS-ONLY count, which is the one that separates "nothing qualified" from "the
+  # filters in force excluded everything". `matched` is what survived this call's own narrowing.
+  capture=self.capture_health(as_of or '',cleared=self._cleared_count(as_of or ''),
+   matched=len(out)) if as_of else None
   return self.envelope(as_of=as_of,source='metrics_module' if delegated else 'store',missing=columns.missing,
-   rows=out[:cut],total=len(out),floor_premium_cr=floor,
-   empty_note=None if not as_of else ('No contract clears the liquidity floors at this 15-min reading.' if not out else None))
+   rows=out[:cut],total=len(out),floor_premium_cr=floor,capture=capture,
+   context=self.context(underlying,expiry,session_date(as_of),as_of or '',
+    'metrics_module' if delegated else 'store').as_dict(),
+   empty_note=(None if out or not capture else capture['state_text']),
+   empty_state=(None if out or not capture else capture['state']))
 
  def _watchlist(self,key):
   key=str(key or '').strip().lower()
@@ -696,11 +1153,22 @@ class Derivatives:
   return None
 
  # --- card 2: option chain ---------------------------------------------
- def chain(self,underlying,expiry='',option_type=''):
-  """§4 card 2: one row per strike with CE and PE beside each other, at the latest mark."""
+ def chain(self,underlying,expiry='',option_type='',at=''):
+  """§4 card 2: one row per strike with CE and PE beside each other, at ONE 15-min reading.
+
+  `at` is the reading the tab is on - the one its screener resolved. Omitted, the newest this underlying has,
+  which is what every caller got before. It is passed because the newest reading of a rebuilt session carries
+  no spot, and a chain with no spot has nothing to sit around.
+  """
   if not underlying:return self.envelope(rows=[],underlying='',expiry='')
   expiry=expiry or self._front_expiry(underlying)
-  rows,delegated=self._delegate('option_chain',underlying=underlying,expiry=expiry or None)
+  # A NAMED READING NEVER GOES THROUGH THE DELEGATE. D2's reader answers for the newest reading it finds and
+  # has no parameter for a different one, so handing it `at` would silently return the newest anyway - the
+  # chain would look fixed here and still open two thousand points from spot in front of the reader. When a
+  # reading is named, the store is read directly for that reading.
+  at=str(at or '').strip()
+  rows,delegated=(([],False) if at
+   else self._delegate('option_chain',underlying=underlying,expiry=expiry or None))
   columns=self._columns('metrics')
   if delegated:
    shaped=[self._shape(r) for r in rows];as_of=shaped[0]['captured_at'] if shaped else self._max('metrics')
@@ -708,7 +1176,7 @@ class Derivatives:
    clauses,params=['c.underlying=?'],[underlying]
    if expiry:clauses.append('c.expiry=?');params.append(expiry)
    shaped,as_of,columns=self._metric_rows(' and '.join(clauses),tuple(params),types=OPTION_TYPES,
-    order='order by c.strike',underlying=underlying)
+    order='order by c.strike',underlying=underlying,at=at)
   strikes={}
   for row in shaped:
    if option_type and row['instrument_type']!=option_type:continue
@@ -716,11 +1184,19 @@ class Derivatives:
    if strike is None:continue
    slot=strikes.setdefault(strike,{'strike':strike,'ce':None,'pe':None})
    slot['ce' if row['instrument_type']=='CE' else 'pe']=row
-  spot=self._spot(underlying)
+  # The spot is read AT this chain's own reading, so `spot_at` is this reading or the spot is not there. A
+  # chain never borrows an earlier reading's spot to have one.
+  spot=self._spot(underlying,as_of)
   out=sorted(strikes.values(),key=lambda r:r['strike'])
+  session=session_date(as_of)
   return self.envelope(as_of=as_of,source='metrics_module' if delegated else 'store',missing=columns.missing,
    rows=out,underlying=underlying,expiry=expiry,spot=spot.get('spot'),
-   days_to_expiry=days_to_expiry(expiry),total=len(out))
+   spot_at=(spot.get('captured_at') if spot.get('spot') is not None else None),
+   session=session or None,
+   context=self.context(underlying,expiry,session,as_of or '',
+    'metrics_module' if delegated else 'store').as_dict(),
+   days_to_expiry=session_days_to_expiry(expiry,session),days_to_expiry_basis=DTE_CONVENTION,
+   total=len(out))
 
  def _chain_metrics(self,underlying,expiry,at):
   """The per-underlying metric row for one chain at ONE reading, or None. A primary-key seek."""
@@ -733,10 +1209,19 @@ class Derivatives:
    (underlying,today_ist().isoformat()))
   return clean_expiry((row or {}).get('e'))
 
- def _spot(self,underlying):
-  """Latest `underlying_snapshots` row: spot, futures price, PCR, max pain - all D1/D2's numbers."""
+ def _spot(self,underlying,at=''):
+  """One `underlying_snapshots` row: spot, futures price, PCR, max pain - all D1/D2's numbers.
+
+  `at` names the reading. This matters more than it looks: a session rebuilt from 15-minute candles carries
+  NO SPOT at all, so the newest snapshot of 18 Sep 2026 has `spot` null from 11:45 onward. A chain that took
+  the newest row therefore had no spot to sit around, and opened at its lowest strike - 21,350 against a spot
+  of 23,302, nearly two thousand points away, with every visible contract far out of the money.
+  """
   if 'underlying_snapshots' not in self._tables():return {}
-  row=self._one('select * from underlying_snapshots where underlying=? order by captured_at desc limit 1',(underlying,))
+  at=str(at or '').strip()
+  row=(self._one('select * from underlying_snapshots where underlying=? and captured_at=?',(underlying,at))
+   if at else
+   self._one('select * from underlying_snapshots where underlying=? order by captured_at desc limit 1',(underlying,)))
   if not row:return {}
   return {'captured_at':row.get('captured_at'),'spot':_round(row.get('spot')),'fut_price':_round(row.get('fut_price')),
    'total_ce_oi':_int(row.get('total_ce_oi')),'total_pe_oi':_int(row.get('total_pe_oi')),
@@ -745,10 +1230,10 @@ class Derivatives:
    'max_pain_strike':_num(row.get('max_pain_strike'))}
 
  # --- card 3: OI by strike ---------------------------------------------
- def oi_by_strike(self,underlying,expiry=''):
+ def oi_by_strike(self,underlying,expiry='',at=''):
   """§4 card 3: CE vs PE OI per strike, with max pain and spot marked. §3.6's total OI travels with it."""
   if not underlying:return self.envelope(rows=[],underlying='',expiry='')
-  chain=self.chain(underlying,expiry)
+  chain=self.chain(underlying,expiry,at=at)
   series=[]
   total_ce=total_pe=0
   for row in chain.get('rows') or []:
@@ -757,29 +1242,54 @@ class Derivatives:
    series.append({'strike':row['strike'],'ce_oi':ce.get('oi'),'pe_oi':pe.get('oi'),
     'ce_oi_change_day':ce.get('oi_change_day'),'pe_oi_change_day':pe.get('oi_change_day'),
     'ce_buildup_day':ce.get('buildup_day'),'pe_buildup_day':pe.get('buildup_day')})
-  spot=self._spot(underlying)
-  # Max pain per expiry lives in the metrics worker's per-underlying row, NOT in `underlying_snapshots`,
-  # whose `max_pain_strike` column the worker leaves null. Reading only the snapshot left this card with no
-  # max pain for any underlying at all. The chain row is read at the SAME reading this card is showing, and
-  # the snapshot is kept as the fallback for a store that has no per-underlying metric rows.
-  chain_row=self._chain_metrics(underlying,chain.get('expiry'),chain.get('as_of'))
+  # ONE READING, AND ONLY ONE. Max pain per expiry lives in the metrics worker's per-underlying row, NOT in
+  # `underlying_snapshots`, whose `max_pain_strike` column the worker leaves null - so the chain row is read
+  # at the SAME reading this card is showing, and the snapshot is the fallback for a store that has no
+  # per-underlying metric rows at all.
+  #
+  # The fallback used to be taken PER FIGURE: a missing strike fell back to the newest snapshot's strike and
+  # a missing spot to the newest snapshot's spot, and the distance was then computed across whichever two
+  # readings happened to answer. Now a fallback is taken for the PAIR or not at all, and whichever reading
+  # the two figures came from travels with them.
+  at=chain.get('as_of')
+  chain_row=self._chain_metrics(underlying,chain.get('expiry'),at)
   max_pain=_num((chain_row or {}).get('max_pain_strike'))
-  if max_pain is None:max_pain=spot.get('max_pain_strike')
   here=_num((chain_row or {}).get('spot'))
-  if here is None:here=spot.get('spot')
+  pain_at=spot_at=at if (chain_row is not None) else None
+  if max_pain is None:
+   snapshot=self._spot(underlying,at)
+   max_pain=snapshot.get('max_pain_strike')
+   pain_at=snapshot.get('captured_at') if max_pain is not None else None
+  if here is None:
+   snapshot=self._spot(underlying,at)
+   here=snapshot.get('spot')
+   spot_at=snapshot.get('captured_at') if here is not None else None
   # The store's own convention, which `maxpain-series` and the metrics table both use: the max-pain STRIKE
   # MINUS spot, so a positive distance means the strike sits above spot. This card used to return the
   # opposite sign, which would have put two contradictory readings of one number on one tab.
   distance=_num((chain_row or {}).get('max_pain_distance'))
-  if distance is None and max_pain is not None and here is not None:distance=round(max_pain-here,2)
-  return self.envelope(as_of=chain.get('as_of'),source=chain.get('source','store'),missing=chain.get('missing',[]),
-   rows=series,underlying=underlying,expiry=chain.get('expiry'),spot=here,
-   max_pain_strike=max_pain,max_pain_distance=_round(distance),
+  reason=None
+  if distance is None:
+   # A distance is a relationship, so it needs BOTH of its terms at ONE reading. Two figures a reading
+   # apart are never subtracted from one another to produce one.
+   if max_pain is None:reason='no_strike'
+   elif here is None:reason='no_spot_at_reading'
+   elif pain_at!=spot_at:reason='no_spot_at_reading'
+   else:distance=round(max_pain-here,2)
+  session=session_date(at)
+  return self.envelope(as_of=at,source=chain.get('source','store'),missing=chain.get('missing',[]),
+   rows=series,underlying=underlying,expiry=chain.get('expiry'),spot=here,spot_at=spot_at,
+   max_pain_strike=max_pain,max_pain_strike_at=pain_at,max_pain_distance=_round(distance),
+   max_pain_distance_at=(pain_at if distance is not None else None),
+   max_pain_distance_reason=(DISTANCE_REASONS.get(reason) if reason else None),
+   max_pain_distance_withheld=reason,
    max_pain_distance_definition=MAX_PAIN_DISTANCE_DEFINITION,
    max_pain_total_oi=_int((chain_row or {}).get('max_pain_total_oi')),
    max_pain_status=(chain_row or {}).get('max_pain_status'),
-   total_ce_oi=total_ce or None,total_pe_oi=total_pe or None,
-   days_to_expiry=chain.get('days_to_expiry'))
+   total_ce_oi=total_ce or None,total_pe_oi=total_pe or None,session=session or None,
+   context=self.context(underlying,chain.get('expiry') or '',session,at or '',
+    chain.get('source','store')).as_dict(),
+   days_to_expiry=chain.get('days_to_expiry'),days_to_expiry_basis=DTE_CONVENTION)
 
  # --- card 4: index dashboard ------------------------------------------
  def indices(self,names=None,points=None):
@@ -806,16 +1316,31 @@ class Derivatives:
      'total_ce_oi':_int(row.get('total_ce_oi')),'total_pe_oi':_int(row.get('total_pe_oi')),
      'max_pain_strike':_num(row.get('max_pain_strike'))})
    series.reverse()
-   distance=None
-   if latest.get('max_pain_strike') is not None and latest.get('spot') is not None:
-    distance=round(latest['spot']-latest['max_pain_strike'],2)
+   # ONE CONVENTION FOR THE WHOLE TAB: the max-pain STRIKE MINUS SPOT, so a positive distance means the
+   # strike sits above spot. This list used to compute spot minus strike - the opposite sign of what
+   # `maxpain-series`, `oi-by-strike` and the metrics table itself all serve - which put two contradictory
+   # readings of one number on one page under one heading.
+   #
+   # Both terms come from the SAME `underlying_snapshots` row, so they are one reading by construction;
+   # when either is absent the distance is unavailable with the reason, never a subtraction across readings.
+   distance,reason=None,None
+   if latest.get('max_pain_strike') is None:reason='no_strike'
+   elif latest.get('spot') is None:reason='no_spot_at_reading'
+   else:distance=round(latest['max_pain_strike']-latest['spot'],2)
    expiry=self._front_expiry(name)
+   session=session_date(latest.get('captured_at')) or session_date(as_of)
    out.append({'underlying':name,'captured':bool(latest),'captured_at':latest.get('captured_at'),
     'spot':latest.get('spot'),'pcr_oi':latest.get('pcr_oi'),'pcr_volume':latest.get('pcr_volume'),
     'max_pain_strike':latest.get('max_pain_strike'),'max_pain_distance':distance,
+    'max_pain_distance_reason':(DISTANCE_REASONS.get(reason) if reason else None),
+    'max_pain_distance_withheld':reason,
     'total_ce_oi':latest.get('total_ce_oi'),'total_pe_oi':latest.get('total_pe_oi'),
-    'expiry':expiry,'days_to_expiry':days_to_expiry(expiry),'series':series})
-  return self.envelope(as_of=as_of,rows=out,missing=self._columns('metrics').missing)
+    'expiry':expiry,'days_to_expiry':session_days_to_expiry(expiry,session),
+    'session':session or None,'series':series})
+  return self.envelope(as_of=as_of,rows=out,missing=self._columns('metrics').missing,
+   context=self.context(session=session_date(as_of),at=as_of or '',source='underlying_snapshots').as_dict(),
+   max_pain_distance_definition=MAX_PAIN_DISTANCE_DEFINITION,
+   distance_reason_text=dict(DISTANCE_REASONS),days_to_expiry_basis=DTE_CONVENTION)
 
  # --- card 5: futures build-up -----------------------------------------
  def futures(self,underlying='',watchlist='',limit=None):
@@ -1072,7 +1597,6 @@ class Derivatives:
   contract=raw.get('contract') or None
   symbol=(contract or {}).get('tradingsymbol') or ''
   expiry=clean_expiry((contract or {}).get('expiry')) or ''
-  dte=days_to_expiry(expiry) if expiry else None
   counts=raw.get('intervals') or {}
   offered=[]
   for key in CHART_INTERVALS:
@@ -1099,6 +1623,10 @@ class Derivatives:
   # different numbers at the 15-minute interval and are never conflated.
   days=sorted({str(c['at'])[:10] for c in drawn})
   sessions=len(days)
+  # Counted from the LAST SESSION ON THE CHART, not from today (DTE_CONVENTION). A chart of last week's
+  # sessions is not a chart of today, and its contract's days-to-expiry must not move with the clock.
+  chart_session=days[-1] if days else ''
+  dte=session_days_to_expiry(expiry,chart_session) if expiry else None
   short=bool(drawn) and sessions<SHORT_HISTORY_SESSIONS
   served=next((o for o in offered if o['interval']==interval),None)
   # An empty card must say WHY it is empty. The tab's one empty sentence is about the 15-min capture, and on a
@@ -1111,8 +1639,10 @@ class Derivatives:
    empty_reason=reason,
    underlying=underlying,interval=interval,bars=len(drawn),gaps=len(candles)-len(drawn),
    contract=({'tradingsymbol':symbol,'instrument_token':_int((contract or {}).get('instrument_token')),
-    'expiry':expiry or None,'days_to_expiry':dte} if contract else None),
-   candles=candles,sessions=sessions,session=(days[-1] if days else None),
+    'expiry':expiry or None,'days_to_expiry':dte,'days_to_expiry_basis':DTE_CONVENTION}
+    if contract else None),
+   context=self.context(underlying,expiry,chart_session,(drawn[-1]['at'] if drawn else ''),source).as_dict(),
+   candles=candles,sessions=sessions,session=(chart_session or None),
    short_history=short,
    short_history_text=(self.short_history_text(symbol,interval,sessions,expiry,dte) if short else None),
    intervals=offered,note=(served or {}).get('note'),
@@ -1213,8 +1743,14 @@ class Derivatives:
   if low<=0 or high>BLOCK_BALANCE_RATIO*low:return ''
   return BLOCK_BOTH_BUILDING
 
- def _grid_session(self):
-  """The day the grid describes: the newest captured day in the store."""
+ def _grid_session(self,at=''):
+  """The day the grid describes: the session of the reading the TAB is on, else the newest captured day.
+
+  `at` is the tab's own 15-min boundary. Without it this block resolved its own newest session while the
+  chain and the screener beside it were on another, which is one page describing two different moments.
+  """
+  here=session_date(at)
+  if here:return here
   newest=self._max('snapshots') or self._max('candles_15m','bar_start') or self._max('underlying_snapshots')
   return str(newest or '')[:10] or None
 
@@ -1262,7 +1798,7 @@ class Derivatives:
    if rows:return {'source':'candles_15m','rows':rows}
   return {'source':'none','rows':[]}
 
- def _grid_from_store(self,underlying,expiry=''):
+ def _grid_from_store(self,underlying,expiry='',at=''):
   """The ten at-the-money contracts and their ΔOI series, read straight from the §2 store.
 
   Same shape and same definitions as `market_data.derivatives.read_api.strike_oi_series`; that module answers
@@ -1272,13 +1808,18 @@ class Derivatives:
   base={'underlying':underlying,'expiry':expiry or None,'session':None,'as_of':None,'spot':None,
    'spot_symbol':None,'atm_strike':None,'atm_basis':None,'marks':[],'contracts':[],'points_source':'none',
    'note':None}
-  session=self._grid_session()
+  at=str(at or '').strip()
+  session=self._grid_session(at)
   if session is None:
    base['note']='the store has no captured readings yet';return base
   base['session']=session
+  # THE BOUNDARY IS RESPECTED. The anchor reading is the newest one AT OR BEFORE the tab's own reading that
+  # carried a spot - never one after it. A block reading past the boundary the rest of the page is on is how
+  # two panels come to describe two different moments under one heading.
+  bound=at or f'{session}~'
   # `spot_symbol` is an optional column, so the row is read whole and the field simply read off it.
   row=self._one('select * from underlying_snapshots where underlying=? and substr(captured_at,1,10)=?'
-   ' and spot is not null order by captured_at desc limit 1',(underlying,session)) \
+   ' and captured_at<=? and spot is not null order by captured_at desc limit 1',(underlying,session,bound)) \
    if 'underlying_snapshots' in self._tables() else None
   mark,spot=(row or {}).get('captured_at'),_num((row or {}).get('spot'))
   if row is None or spot is None:
@@ -1354,12 +1895,16 @@ class Derivatives:
   out.setdefault('points_source','read_api')
   return out
 
- def oi_grid(self,underlying,expiry=''):
+ def oi_grid(self,underlying,expiry='',at=''):
   """The owner's ΔOI block: ten small series, five calls at and above the money, five puts at and below it.
 
-  ΔOI is open interest added or removed since the previous close, at each 15-minute mark of the newest captured
-  session. Ten slots are ALWAYS returned in the same order, so a strike the exchange does not list reads as a
-  named gap instead of shifting the grid under the reader.
+  ΔOI is open interest added or removed since the previous close, at each 15-minute reading of the session.
+  Ten slots are ALWAYS returned in the same order, so a strike the exchange does not list reads as a named
+  gap instead of shifting the grid under the reader.
+
+  `at` is the tab's own 15-min boundary. Omitted, this block resolves the newest captured session exactly as
+  it did before; passed, it stops there - a block that ran on to a later reading than the chain and the
+  screener beside it is one page describing two different moments.
   """
   notes={'delta_oi_text':DELTA_OI_TEXT,'atm_text':ATM_TEXT,'direction_text':DIRECTION_TEXT,
    'not_enough_marks':NOT_ENOUGH_MARKS,'direction_lookback_marks':DIRECTION_LOOKBACK_MARKS,
@@ -1370,9 +1915,13 @@ class Derivatives:
    return self.envelope(rows=[],underlying='',expiry='',session=None,spot=None,spot_symbol=None,
     atm_strike=None,atm_basis=None,marks=[],total=0,days_to_expiry=None,points_source='none',
     empty_note=None,empty_detail=None,block_read='',**notes)
-  raw=self._grid_delegate(underlying,expiry)
+  # A NAMED READING NEVER GOES THROUGH THE DELEGATE, for the same reason the chain's does not: D2's reader
+  # answers for the newest reading it finds and has no parameter for a different one, so handing it the tab's
+  # boundary would silently return the newest anyway and the block would look fixed while it still ran past.
+  at=str(at or '').strip()
+  raw=None if at else self._grid_delegate(underlying,expiry)
   source='metrics_module' if raw is not None else 'store'
-  if raw is None:raw=self._grid_from_store(underlying,clean_expiry(expiry))
+  if raw is None:raw=self._grid_from_store(underlying,clean_expiry(expiry),at=at)
   found={}
   for contract in raw.get('contracts') or []:
    kind=str(contract.get('option_type') or '').upper()
@@ -1430,7 +1979,11 @@ class Derivatives:
    empty_detail=detail,block_read=block,
    expiry=expiry_out,session=raw.get('session'),spot=_round(raw.get('spot')),spot_symbol=raw.get('spot_symbol'),
    atm_strike=_num(raw.get('atm_strike')),atm_basis=raw.get('atm_basis'),marks=list(raw.get('marks') or []),
-   total=present,days_to_expiry=days_to_expiry(expiry_out) if expiry_out else None,
+   total=present,
+   days_to_expiry=(session_days_to_expiry(expiry_out,raw.get('session')) if expiry_out else None),
+   days_to_expiry_basis=DTE_CONVENTION,
+   context=self.context(underlying,expiry_out or '',raw.get('session') or '',raw.get('as_of') or '',
+    source).as_dict(),
    points_source=raw.get('points_source') or 'none',empty_note=note,**notes)
 
  # ==============================================================================================================
@@ -1584,6 +2137,65 @@ class Derivatives:
   if (ce is not None and ce<=0) or (pe is not None and pe<=0):return 'one_side_empty'
   return None
 
+ @staticmethod
+ def _delta_against(value,baseline,places=4):
+  """(delta, reason) for ONE figure against the previous session's close. ΔOI's rule, nothing added.
+
+  Three answers and only three: a number, `no_value` when this reading carries nothing to measure, and
+  `no_baseline` when no previous close is stored. A missing baseline never becomes a zero — a 0 in a Δ is a
+  claim that the figure did not move, and an absent baseline makes no claim at all.
+  """
+  if value is None:return None,'no_value'
+  if baseline is None:return None,'no_baseline'
+  return _round(value-baseline,places),None
+
+ def _chain_previous_close(self,underlying,expiry,session,source):
+  """The per-underlying row of the LAST 15-min reading BEFORE `session`, or None. The chain's ΔOI baseline.
+
+  `metrics`'s primary key is (scope, metric_key, captured_at), so the newest row strictly before the session's
+  first second IS the previous session's closing reading — one index seek, whatever the store's size. A store
+  that holds nothing before this session has no baseline at all, which is a null Δ with a reason, not a 0.
+  """
+  if not session or not underlying:return None
+  if source=='underlying_snapshots':
+   if 'underlying_snapshots' not in self._tables():return None
+   return self._one('select * from underlying_snapshots where underlying=? and captured_at<?'
+    ' order by captured_at desc limit 1',(underlying,f'{session} '))
+  if not expiry or not self._has_scope() or 'metrics' not in self._tables():return None
+  return self._one("select * from metrics where scope='underlying' and metric_key=? and captured_at<?"
+   ' order by captured_at desc limit 1',(f'{underlying}|{expiry}',f'{session} '))
+
+ def _chain_baseline(self,underlying,expiry,session,source):
+  """{'row','at','withheld','reason'} for the chain's previous close, with the SAME gate the readings get.
+
+  A previous close that would have been withheld at its own reading — a chain too thin to carry a ratio, a
+  side with no open interest — is not quietly promoted into a baseline. It is refused for the same reason,
+  and every Δ that would have rested on it is null with that reason beside it.
+  """
+  row=self._chain_previous_close(underlying,expiry,session,source)
+  if row is None:
+   return {'row':None,'at':None,'withheld':None,'reason':SERIES_DELTA_REASONS['no_baseline']}
+  withheld=self._chain_withheld(row)
+  at=str(row.get('captured_at') or '') or None
+  if withheld:
+   return {'row':None,'at':at,'withheld':withheld,
+    'reason':WITHHELD_REASONS.get(withheld) or SERIES_DELTA_REASONS['no_baseline']}
+  return {'row':row,'at':at,'withheld':None,'reason':None,'present':True}
+
+ @staticmethod
+ def _delta_notes(unit,unit_text,baseline,extra=None):
+  """The shared Δ header every series carries: what a Δ IS here, what it is measured in, and its baseline."""
+  out={'delta_text':SERIES_DELTA_TEXT,'delta_unit':unit,'delta_unit_text':unit_text,
+   'delta_reason_text':dict(SERIES_DELTA_REASONS),
+   'previous_close_at':(baseline or {}).get('at'),
+   # A baseline that is not there ALWAYS says so. A blank reason beside a null Δ is the one thing this must
+   # never serve: it reads as "no change" to anyone who does not know the difference.
+   'previous_close_reason':(baseline or {}).get('reason') or (None if (baseline or {}).get('present')
+    else SERIES_DELTA_REASONS['no_baseline']),
+   'previous_close_withheld':(baseline or {}).get('withheld')}
+  out.update(extra or {})
+  return out
+
  def _series_envelope(self,underlying,expiry,session,source,extra):
   """The shared header every one of the four series carries: what it is, and what it is not.
 
@@ -1595,8 +2207,11 @@ class Derivatives:
   if source=='underlying_snapshots':
    expiry='';basis=('all expiries — this store has no per-expiry chain, so these numbers are the underlying '
     'across every listed expiry at that reading')
+  # DAYS TO EXPIRY IS COUNTED FROM THE SESSION ON SCREEN, not from today. Counted from today, the same
+  # 22 Sep option read as 4 days on a panel that used the captured date and 2 on a panel that used the clock.
   return {'underlying':underlying,'expiry':expiry or None,'expiry_basis':basis,'session':session,
-   'days_to_expiry':days_to_expiry(expiry) if expiry else None,
+   'days_to_expiry':session_days_to_expiry(expiry,session) if expiry else None,
+   'days_to_expiry_basis':DTE_CONVENTION,
    'direction_text':SERIES_DIRECTION_TEXT,'direction_labels':dict(DIRECTION_LABELS),
    'gaps_text':SERIES_GAPS_TEXT,'direction_lookback_marks':DIRECTION_LOOKBACK_MARKS,
    'flat_fraction':SERIES_FLAT_FRACTION,'series_source':source,**extra}
@@ -1616,14 +2231,22 @@ class Derivatives:
    'chain_floors':dict(CHAIN_FLOORS),'chain_floors_text':CHAIN_FLOORS_TEXT,
    'direction_words':dict(DIRECTION_WORDS['pcr']),'volume_direction':'no baseline',
    'volume_direction_detail':{},'volume_direction_label':'No baseline',
-   'latest_pcr_oi':None,'latest_pcr_volume':None,'definition':PCR_DEFINITION}
+   'latest_pcr_oi':None,'latest_pcr_volume':None,'definition':PCR_DEFINITION,
+   'readings_with_delta':0,'latest_delta_pcr_oi':None,'latest_delta_pcr_volume':None,
+   'previous_close_pcr_oi':None,'previous_close_pcr_volume':None,
+   **self._delta_notes(PCR_DELTA_UNIT,PCR_DELTA_TEXT,None)}
   if not underlying:
-   return self.envelope(points=[],**self._series_envelope('','',None,'none',blank))
+   return self.envelope(points=[],context=self.context().as_dict(),**self._series_envelope('','',None,'none',blank))
   expiries=self._underlying_expiries(underlying)
   chosen=clean_expiry(expiry) or (expiries[0] if expiries else '')
   rows,session,source=self._chain_session(underlying,chosen) if chosen else ([],None,'store')
   by_mark={str(r.get('captured_at')):r for r in rows}
   grid=self._session_readings(session) or sorted(by_mark)
+  # ΔOI's baseline, read for the chain: the last reading of the session BEFORE this one. Withheld there is
+  # withheld here — a ratio that was refused at its own reading does not become a baseline for every other.
+  baseline=self._chain_baseline(underlying,chosen,session,source)
+  base_oi=_round((baseline['row'] or {}).get('pcr_oi'),4) if baseline['row'] else None
+  base_volume=_round((baseline['row'] or {}).get('pcr_volume'),4) if baseline['row'] else None
   points,withheld=[],{}
   for at in grid:
    row=by_mark.get(at)
@@ -1635,18 +2258,40 @@ class Derivatives:
      'total_ce_oi':_int(row.get('total_ce_oi')),'total_pe_oi':_int(row.get('total_pe_oi'))})
     if point['pcr_oi'] is None and point['pcr_volume'] is None:
      point['withheld']=reason='not_computed'
+   # A gap stays a gap: a reading with no ratio gets no Δ, and no previous close gets no Δ either.
+   delta_oi,why_oi=self._delta_against(point['pcr_oi'],base_oi)
+   delta_volume,why_volume=self._delta_against(point['pcr_volume'],base_volume)
+   point.update({'delta_pcr_oi':delta_oi,'delta_pcr_oi_reason':why_oi,
+    'delta_pcr_volume':delta_volume,'delta_pcr_volume_reason':why_volume})
    if reason:withheld[reason]=withheld.get(reason,0)+1
    points.append(point)
   direction,detail=self.series_direction(points,'pcr_oi','pcr')
   volume_direction,volume_detail=self.series_direction(points,'pcr_volume','pcr')
   latest=next((p for p in reversed(points) if p['pcr_oi'] is not None),None)
+  # each figure from the newest reading that HAS it, and each saying which reading that was
+  oi_value,oi_at=self._latest_at(points,'pcr_oi')
+  vol_value,vol_at=self._latest_at(points,'pcr_volume')
+  ce_value,ce_at=self._latest_at(points,'total_ce_oi')
+  pe_value,pe_at=self._latest_at(points,'total_pe_oi')
+  delta_oi_value,delta_oi_at=self._latest_at(points,'delta_pcr_oi')
+  delta_vol_value,delta_vol_at=self._latest_at(points,'delta_pcr_volume')
   return self.envelope(as_of=(points[-1]['at'] if points else None),source=source,missing=[],points=points,
+   context=self.context(underlying,chosen,session,(points[-1]['at'] if points else ''),source).as_dict(),
    **self._series_envelope(underlying,chosen,session,source,{
     'direction':direction,'direction_detail':detail,'direction_label':DIRECTION_LABELS.get(direction,direction),
     'volume_direction':volume_direction,'volume_direction_detail':volume_detail,
     'volume_direction_label':DIRECTION_LABELS.get(volume_direction,volume_direction),
     'direction_words':dict(DIRECTION_WORDS['pcr']),
-    'latest_pcr_oi':(latest or {}).get('pcr_oi'),'latest_pcr_volume':(latest or {}).get('pcr_volume'),
+    'latest_pcr_oi':oi_value,'latest_pcr_oi_at':oi_at,
+    'latest_pcr_volume':vol_value,'latest_pcr_volume_at':vol_at,
+    'latest_total_ce_oi':ce_value,'latest_total_ce_oi_at':ce_at,
+    'latest_total_pe_oi':pe_value,'latest_total_pe_oi_at':pe_at,
+    # the Δ is resolved on its own reading too, exactly as every other figure on this tab is
+    'latest_delta_pcr_oi':delta_oi_value,'latest_delta_pcr_oi_at':delta_oi_at,
+    'latest_delta_pcr_volume':delta_vol_value,'latest_delta_pcr_volume_at':delta_vol_at,
+    'previous_close_pcr_oi':base_oi,'previous_close_pcr_volume':base_volume,
+    'readings_with_delta':sum(1 for p in points if p['delta_pcr_oi'] is not None),
+    **self._delta_notes(PCR_DELTA_UNIT,PCR_DELTA_TEXT,baseline),
     'total_readings':len(points),
     'readings_with_value':sum(1 for p in points if p['pcr_oi'] is not None),
     'expiries':expiries,'withheld_reasons':withheld,'reason_text':dict(WITHHELD_REASONS),
@@ -1667,15 +2312,32 @@ class Derivatives:
    'readings_with_value':0,'expiries':[],'withheld_reasons':{},'reason_text':dict(WITHHELD_REASONS),
    'chain_floors':dict(CHAIN_FLOORS),'chain_floors_text':CHAIN_FLOORS_TEXT,
    'direction_words':dict(DIRECTION_WORDS['max_pain']),'latest_max_pain_strike':None,'latest_spot':None,
-   'latest_distance':None,'latest_total_oi':None,'distance_definition':MAX_PAIN_DISTANCE_DEFINITION,
-   'definition':MAX_PAIN_DEFINITION}
+   'latest_distance':None,'latest_distance_reason':DISTANCE_REASONS['no_strike'],
+   'latest_distance_withheld':'no_strike','latest_complete_pair':None,
+   'latest_complete_pair_text':COMPLETE_PAIR_TEXT,'distance_reason_text':dict(DISTANCE_REASONS),
+   'latest_total_oi':None,'distance_definition':MAX_PAIN_DISTANCE_DEFINITION,
+   'definition':MAX_PAIN_DEFINITION,'readings_with_delta':0,'latest_delta_max_pain_strike':None,
+   'previous_close_max_pain_strike':None,
+   **self._delta_notes(MAX_PAIN_DELTA_UNIT,MAX_PAIN_DELTA_TEXT,None)}
   if not underlying:
-   return self.envelope(points=[],**self._series_envelope('','',None,'none',blank))
+   return self.envelope(points=[],context=self.context().as_dict(),**self._series_envelope('','',None,'none',blank))
   expiries=self._underlying_expiries(underlying)
   chosen=clean_expiry(expiry) or (expiries[0] if expiries else '')
   rows,session,source=self._chain_session(underlying,chosen) if chosen else ([],None,'store')
   by_mark={str(r.get('captured_at')):r for r in rows}
   grid=self._session_readings(session) or sorted(by_mark)
+  # The previous session's CLOSING max-pain strike. A baseline the worker itself marked unusable, or that the
+  # chain floors would have refused, is no baseline at all — a strike is not carried over just to have one.
+  baseline=self._chain_baseline(underlying,chosen,session,source)
+  base_row=baseline['row']
+  if base_row is not None and str(base_row.get('max_pain_status') or '').strip().lower() not in ('','ok'):
+   baseline={'row':None,'at':baseline['at'],'withheld':'store_status',
+    'reason':WITHHELD_REASONS['store_status']}
+   base_row=None
+  base_strike=_num((base_row or {}).get('max_pain_strike')) if base_row is not None else None
+  if base_row is not None and base_strike is None:
+   baseline={'row':None,'at':baseline['at'],'withheld':'not_computed',
+    'reason':WITHHELD_REASONS['not_computed']}
   points,withheld=[],{}
   for at in grid:
    row=by_mark.get(at)
@@ -1699,16 +2361,56 @@ class Derivatives:
       distance=strike-spot;point['distance_computed']=True
      point.update({'max_pain_strike':strike,'distance':_round(distance,4),
       'total_oi':_int(row.get('max_pain_total_oi'))})
+   # In STRIKE POINTS, never a percentage: max pain is a strike and it moves in whole strike steps.
+   delta,why=self._delta_against(point['max_pain_strike'],base_strike,2)
+   point.update({'delta_max_pain_strike':delta,'delta_max_pain_strike_reason':why})
    if reason:withheld[reason]=withheld.get(reason,0)+1
    points.append(point)
   direction,detail=self.series_direction(points,'max_pain_strike','max_pain')
-  latest=next((p for p in reversed(points) if p['max_pain_strike'] is not None),None)
+  pain_value,pain_at=self._latest_at(points,'max_pain_strike')
+  spot_value,spot_at=self._latest_at(points,'spot')
+  # ======================================================================================================
+  # THE DISTANCE BELONGS TO THE STRIKE'S OWN READING, OR IT DOES NOT EXIST.
+  #
+  # `latest_distance` used to be resolved the way every other figure here is - walk back to the newest
+  # reading that HAS one. For a strike and a spot that is right: each is a measurement of its own and says
+  # which reading it came from. For a distance it is wrong, because a distance is not a measurement, it is
+  # a RELATIONSHIP between two of them. The newest reading with a max-pain strike on 18 Sep 2026 was 15:45
+  # (23,350); the newest reading with a distance was 11:30 (-2, from 23,300 against a spot of 23,302). Put
+  # under one heading they read as "23,350, 2 below spot", a sentence that was true of no reading at all.
+  #
+  # So the distance is resolved AT the strike's reading and nowhere else. No spot there means no distance,
+  # with the reason printed where the number would have been.
+  # ======================================================================================================
+  gap_at,gap_value,gap_reason=pain_at,None,None
+  if pain_at is None:gap_reason,gap_at='no_strike',None
+  else:
+   gap_value=self._figure_at(points,pain_at,'distance')
+   if gap_value is None:
+    gap_reason='no_spot' if spot_at is None else 'no_spot_at_reading'
+    gap_at=None
+  # The clearly-labelled ALTERNATIVE, never a substitution: the newest reading that carried BOTH, with its
+  # own time on it, so a reader who wants a coherent pair can have one and can see which reading it is.
+  pair=self._latest_pair(points,'max_pain_strike','spot','distance')
+  oi_value,oi_at=self._latest_at(points,'total_oi')
+  delta_value,delta_at=self._latest_at(points,'delta_max_pain_strike')
   return self.envelope(as_of=(points[-1]['at'] if points else None),source=source,missing=[],points=points,
+   context=self.context(underlying,chosen,session,(points[-1]['at'] if points else ''),source).as_dict(),
    **self._series_envelope(underlying,chosen,session,source,{
     'direction':direction,'direction_detail':detail,'direction_label':DIRECTION_LABELS.get(direction,direction),
     'direction_words':dict(DIRECTION_WORDS['max_pain']),
-    'latest_max_pain_strike':(latest or {}).get('max_pain_strike'),'latest_spot':(latest or {}).get('spot'),
-    'latest_distance':(latest or {}).get('distance'),'latest_total_oi':(latest or {}).get('total_oi'),
+    'latest_max_pain_strike':pain_value,'latest_max_pain_strike_at':pain_at,
+    'latest_spot':spot_value,'latest_spot_at':spot_at,
+    'latest_distance':gap_value,'latest_distance_at':gap_at,
+    'latest_distance_reason':(DISTANCE_REASONS.get(gap_reason) if gap_reason else None),
+    'latest_distance_withheld':gap_reason,
+    'latest_complete_pair':pair,'latest_complete_pair_text':COMPLETE_PAIR_TEXT,
+    'distance_reason_text':dict(DISTANCE_REASONS),
+    'latest_total_oi':oi_value,'latest_total_oi_at':oi_at,
+    'latest_delta_max_pain_strike':delta_value,'latest_delta_max_pain_strike_at':delta_at,
+    'previous_close_max_pain_strike':base_strike,
+    'readings_with_delta':sum(1 for p in points if p['delta_max_pain_strike'] is not None),
+    **self._delta_notes(MAX_PAIN_DELTA_UNIT,MAX_PAIN_DELTA_TEXT,baseline),
     'total_readings':len(points),
     'readings_with_value':sum(1 for p in points if p['max_pain_strike'] is not None),
     'expiries':expiries,'withheld_reasons':withheld,'reason_text':dict(WITHHELD_REASONS),
@@ -1849,9 +2551,11 @@ class Derivatives:
   header=self._iv_header(used_rate)
   blank={'atm':None,'strike':None,'spot':None,'expiries':[],'rejections':{},'total_readings':0,
    'readings_with_value':0,'direction':'no baseline','direction_detail':{},'direction_label':'No baseline',
-   'atm_rule':IV_ATM_RULE,**header}
+   'atm_rule':IV_ATM_RULE,'readings_with_delta':0,'latest_delta_iv':None,'latest_delta_iv_pct':None,
+   'previous_close_iv':None,'previous_close_iv_pct':None,'previous_close_basis':None,
+   **self._delta_notes(IV_DELTA_UNIT,IV_DELTA_TEXT,None),**header}
   if not underlying:
-   return self.envelope(points=[],**self._series_envelope('','',None,'none',blank))
+   return self.envelope(points=[],context=self.context().as_dict(),**self._series_envelope('','',None,'none',blank))
   expiries=self._underlying_expiries(underlying)
   chosen=clean_expiry(expiry) or (expiries[0] if expiries else '')
   chain,session,source=self._chain_session(underlying,chosen) if chosen else ([],None,'store')
@@ -1869,20 +2573,79 @@ class Derivatives:
    requested=self._iv_leg(row,session,used_rate,grid) if row else {
     'present':False,'strike':wanted,'option_type':kind,'tradingsymbol':None,'instrument_token':None,
     'points':[],'direction':'no baseline','direction_detail':{},'direction_label':'No baseline',
-    'rejections':{},'readings_with_value':0,
+    'rejections':{},'readings_with_value':0,'readings_with_delta':0,
+    'previous_close_iv':None,'previous_close_iv_pct':None,'previous_close_at':None,
+    'previous_close_reason':SERIES_DELTA_REASONS['no_baseline'],'latest_delta_iv_pct':None,
+    'delta_unit':IV_DELTA_UNIT,'delta_unit_text':IV_DELTA_TEXT,'delta_text':SERIES_DELTA_TEXT,
     'missing_text':f'{wanted:g} {kind} is not a listed strike in {underlying} {chosen}.'}
    for key,count in (requested.get('rejections') or {}).items():rejections[key]=rejections.get(key,0)+count
   points=(atm or {}).get('points') or []
   direction,detail=self.series_direction(points,'iv','iv')
   latest=next((p for p in reversed(points) if p.get('iv') is not None),None)
+  iv_value,iv_at=self._latest_at(points,'iv')
+  iv_pct_value,iv_pct_at=self._latest_at(points,'iv_pct')
+  delta_iv_value,delta_iv_at=self._latest_at(points,'delta_iv')
+  delta_pct_value,delta_pct_at=self._latest_at(points,'delta_iv_pct')
   return self.envelope(as_of=(points[-1]['at'] if points else None),source=source,missing=[],points=points,
+   context=self.context(underlying,chosen,session,(points[-1]['at'] if points else ''),source).as_dict(),
    **self._series_envelope(underlying,chosen,session,source,{
     'atm':atm,'strike':requested,'spot':_round(spot),'atm_strike':atm_strike,'atm_rule':IV_ATM_RULE,
     'direction':direction,'direction_detail':detail,'direction_label':DIRECTION_LABELS.get(direction,direction),
-    'latest_iv':(latest or {}).get('iv'),'latest_iv_pct':(latest or {}).get('iv_pct'),
+    'latest_iv':iv_value,'latest_iv_at':iv_at,
+    'latest_iv_pct':iv_pct_value,'latest_iv_pct_at':iv_pct_at,
+    # in VOLATILITY POINTS, against the at-the-money reading of the previous session's close
+    'latest_delta_iv':delta_iv_value,'latest_delta_iv_at':delta_iv_at,
+    'latest_delta_iv_pct':delta_pct_value,'latest_delta_iv_pct_at':delta_pct_at,
+    'previous_close_iv':(atm or {}).get('previous_close_iv'),
+    'previous_close_iv_pct':(atm or {}).get('previous_close_iv_pct'),
+    'previous_close_basis':(atm or {}).get('previous_close_basis'),
+    'readings_with_delta':sum(1 for p in points if p.get('delta_iv_pct') is not None),
+    **self._delta_notes(IV_DELTA_UNIT,IV_DELTA_TEXT,{'at':(atm or {}).get('previous_close_at'),
+     'reason':(atm or {}).get('previous_close_reason'),'withheld':None,
+     'present':(atm or {}).get('previous_close_iv') is not None}),
     'total_readings':len(points),
     'readings_with_value':sum(1 for p in points if p.get('iv') is not None),
     'expiries':expiries,'rejections':rejections,**header}))
+
+ def _iv_previous_close(self,contract,session,rate):
+  """This option's implied volatility at the LAST reading BEFORE `session` — the ΔOI baseline, solved.
+
+  Implied volatility is not in the store, so the previous session's closing reading is re-solved here with
+  the same model, the same rate and the same rejections the session's own readings get. A closing reading the
+  maths refuses is NOT a baseline: the reason travels out and every Δ that would have rested on it is null.
+  """
+  blank={'iv':None,'iv_pct':None,'at':None,'reason':'no_baseline',
+   'reason_text':SERIES_DELTA_REASONS['no_baseline']}
+  symbol=(contract or {}).get('tradingsymbol') or ''
+  if not contract or not session or not symbol:return blank
+  if not self._has_scope() or 'metrics' not in self._tables():return blank
+  row=self._one("select * from metrics where scope='contract' and metric_key=? and captured_at<?"
+   ' order by captured_at desc limit 1',(symbol,f'{session} '))
+  if row is None:return blank
+  day=str(row.get('captured_at') or '')[:10]
+  solved,_ignored=self._iv_points([row],_int(contract.get('instrument_token')),day,
+   str(contract.get('instrument_type') or '').upper(),rate)
+  point=solved[0] if solved else {}
+  if point.get('iv') is None:
+   reason=point.get('reason') or 'no_baseline'
+   return {'iv':None,'iv_pct':None,'at':point.get('at') or row.get('captured_at'),'reason':reason,
+    'reason_text':IV.REASONS.get(reason) or SERIES_DELTA_REASONS['no_baseline']}
+  return {'iv':point.get('iv'),'iv_pct':point.get('iv_pct'),'at':point.get('at'),'reason':None,
+   'reason_text':None}
+
+ @staticmethod
+ def _iv_deltas(points,baseline_iv,baseline_pct):
+  """Write a Δ in VOLATILITY POINTS onto every reading of an implied-volatility series, in place.
+
+  Never a percentage change of a percentage: 11.1% to 9.0% is 2.1 points down, not 19% down. A reading that
+  could not be solved has no Δ, and a session with no solved previous close has no Δ anywhere.
+  """
+  for point in points or ():
+   delta,why=Derivatives._delta_against(point.get('iv'),baseline_iv,6)
+   delta_pct,why_pct=Derivatives._delta_against(point.get('iv_pct'),baseline_pct,4)
+   point['delta_iv'],point['delta_iv_reason']=delta,why
+   point['delta_iv_pct'],point['delta_iv_pct_reason']=delta_pct,why_pct
+  return points
 
  def _iv_leg(self,contract,session,rate,grid=None):
   """One listed option's implied-volatility series, on the store's own reading grid."""
@@ -1899,10 +2662,20 @@ class Derivatives:
     'last_trade_at':None,'staleness':'unknown','seconds_since_last_trade':None,'seconds_before_mark':None,
     'rate_sensitivity_pct_points':None,'gap':True} for at in grid]
   direction,detail=self.series_direction(points,'iv','iv')
+  # Δ against this leg's OWN previous close, in volatility points. A leg with no solved previous close gets
+  # no Δ at all rather than borrowing the other leg's or the at-the-money reading's.
+  prior=self._iv_previous_close(contract,session,rate)
+  self._iv_deltas(points,prior['iv'],prior['iv_pct'])
+  delta_value,delta_at=self._latest_at(points,'delta_iv_pct')
   return {'present':True,'strike':_num(contract.get('strike')),'option_type':kind,'tradingsymbol':symbol,
    'instrument_token':token,'points':points,'direction':direction,'direction_detail':detail,
    'direction_label':DIRECTION_LABELS.get(direction,direction),'rejections':rejections,
-   'readings_with_value':sum(1 for p in points if p.get('iv') is not None),'missing_text':None}
+   'readings_with_value':sum(1 for p in points if p.get('iv') is not None),'missing_text':None,
+   'previous_close_iv':prior['iv'],'previous_close_iv_pct':prior['iv_pct'],
+   'previous_close_at':prior['at'],'previous_close_reason':prior['reason_text'],
+   'latest_delta_iv_pct':delta_value,'latest_delta_iv_pct_at':delta_at,
+   'readings_with_delta':sum(1 for p in points if p.get('delta_iv_pct') is not None),
+   'delta_unit':IV_DELTA_UNIT,'delta_unit_text':IV_DELTA_TEXT,'delta_text':SERIES_DELTA_TEXT}
 
  def _iv_leg_pair(self,call,put,session,rate,grid=None):
   """The at-the-money reading: the call's and the put's solved volatility averaged at the same reading.
@@ -1939,10 +2712,30 @@ class Derivatives:
     'spot':(ce or pe or {}).get('spot'),
     'gap':bool((ce is None or ce.get('gap')) and (pe is None or pe.get('gap')))})
   direction,detail=self.series_direction(out,'iv','iv')
+  # The at-the-money BASELINE is built the same way the at-the-money reading is: whichever of the two legs
+  # solved at the previous session's close, averaged. `previous_close_basis` says which, because an average
+  # of one leg is not an average of two and the reader is told which one the Δ is measured from.
+  ce_prior=(legs['ce'] or {}).get('previous_close_iv')
+  pe_prior=(legs['pe'] or {}).get('previous_close_iv')
+  prior_values=[v for v in (ce_prior,pe_prior) if v is not None]
+  prior_basis='call and put' if len(prior_values)==2 else ('call only' if ce_prior is not None
+   else ('put only' if pe_prior is not None else 'neither'))
+  prior_iv=(sum(prior_values)/len(prior_values)) if prior_values else None
+  prior_pct=_round(prior_iv*100.0,4) if prior_iv is not None else None
+  prior_at=next((a for a in ((legs['ce'] or {}).get('previous_close_at'),
+   (legs['pe'] or {}).get('previous_close_at')) if a),None)
+  self._iv_deltas(out,_round(prior_iv,6) if prior_iv is not None else None,prior_pct)
+  delta_value,delta_at=self._latest_at(out,'delta_iv_pct')
   return {'strike':_num((call or put or {}).get('strike')),
    'ce':legs['ce'],'pe':legs['pe'],'points':out,'direction':direction,'direction_detail':detail,
    'direction_label':DIRECTION_LABELS.get(direction,direction),'rejections':rejections,
    'basis_rule':IV_ATM_BASIS_RULE,
+   'previous_close_iv':_round(prior_iv,6) if prior_iv is not None else None,
+   'previous_close_iv_pct':prior_pct,'previous_close_at':prior_at,'previous_close_basis':prior_basis,
+   'previous_close_reason':None if prior_iv is not None else SERIES_DELTA_REASONS['no_baseline'],
+   'latest_delta_iv_pct':delta_value,'latest_delta_iv_pct_at':delta_at,
+   'readings_with_delta':sum(1 for p in out if p.get('delta_iv_pct') is not None),
+   'delta_unit':IV_DELTA_UNIT,'delta_unit_text':IV_DELTA_TEXT,'delta_text':SERIES_DELTA_TEXT,
    'readings_with_value':sum(1 for p in out if p.get('iv') is not None)}
 
  # --- 5. Futures build-up through the session -------------------------------------------------------------
@@ -1961,10 +2754,11 @@ class Derivatives:
    'latest_oi_vs_avg':None,'latest_basis':None,'latest_basis_pct':None,'definition':FUTURES_DEFINITION,
    'buildup_labels':dict(BUILDUP_LABELS)}
   if not underlying:
-   return self.envelope(points=[],**self._series_envelope('','',None,'none',blank))
+   return self.envelope(points=[],context=self.context().as_dict(),**self._series_envelope('','',None,'none',blank))
   contract=self._front_future(underlying)
   if contract is None:
-   return self.envelope(points=[],**self._series_envelope(underlying,'',None,'store',
+   return self.envelope(points=[],context=self.context(underlying).as_dict(),
+    **self._series_envelope(underlying,'',None,'store',
     {**blank,'empty_note':f'{underlying} has no futures contract in the F&O store.'}))
   symbol=contract.get('tradingsymbol') or ''
   expiry=clean_expiry(contract.get('expiry'))
@@ -1994,19 +2788,33 @@ class Derivatives:
   oi_direction,oi_detail=self.series_direction(points,'oi_vs_avg','oi')
   basis_direction,basis_detail=self.series_direction(points,'basis','basis')
   latest=next((p for p in reversed(points) if not p['gap']),None) or {}
+  share_value,share_at=self._latest_at(points,'oi_vs_avg')
+  basis_value,basis_at=self._latest_at(points,'basis')
+  basis_pct_value,basis_pct_at=self._latest_at(points,'basis_pct')
+  fut_oi_value,fut_oi_at=self._latest_at(points,'oi')
+  day_value,day_at=self._latest_at(points,'buildup_day')
+  fifteen_value,fifteen_at=self._latest_at(points,'buildup_15m')
+  change_value,change_at=self._latest_at(points,'oi_change_pct_day')
   return self.envelope(as_of=(points[-1]['at'] if points else None),source='metrics' if rows else 'store',
    missing=[],points=points,
+   context=self.context(underlying,expiry,session,(points[-1]['at'] if points else ''),
+    'metrics' if rows else 'store').as_dict(),
    **self._series_envelope(underlying,expiry,session,'metrics' if rows else 'store',{
     'contract':{'tradingsymbol':symbol,'instrument_token':_int(contract.get('instrument_token')),
-     'expiry':expiry or None,'days_to_expiry':days_to_expiry(expiry) if expiry else None},
+     'expiry':expiry or None,'days_to_expiry':session_days_to_expiry(expiry,session) if expiry else None,
+     'days_to_expiry_basis':DTE_CONVENTION},
     'oi_direction':oi_direction,'oi_direction_detail':oi_detail,
     'oi_direction_label':DIRECTION_LABELS.get(oi_direction,oi_direction),
     'basis_direction':basis_direction,'basis_direction_detail':basis_detail,
     'basis_direction_label':DIRECTION_LABELS.get(basis_direction,basis_direction),
     'direction_words':{'oi':dict(DIRECTION_WORDS['oi']),'basis':dict(DIRECTION_WORDS['basis'])},
-    'latest_oi_vs_avg':latest.get('oi_vs_avg'),'latest_basis':latest.get('basis'),
-    'latest_basis_pct':latest.get('basis_pct'),'latest_buildup_15m':latest.get('buildup_15m'),
-    'latest_buildup_day':latest.get('buildup_day'),
+    'latest_oi_vs_avg':share_value,'latest_oi_vs_avg_at':share_at,
+    'latest_basis':basis_value,'latest_basis_at':basis_at,
+    'latest_basis_pct':basis_pct_value,'latest_basis_pct_at':basis_pct_at,
+    'latest_oi':fut_oi_value,'latest_oi_at':fut_oi_at,
+    'latest_oi_change_pct_day':change_value,'latest_oi_change_pct_day_at':change_at,
+    'latest_buildup_15m':fifteen_value,'latest_buildup_15m_at':fifteen_at,
+    'latest_buildup_day':day_value,'latest_buildup_day_at':day_at,
     'total_readings':len(points),
     'readings_with_value':sum(1 for p in points if p.get('oi_vs_avg') is not None),
     'buildup_labels':dict(BUILDUP_LABELS),'definition':FUTURES_DEFINITION,'empty_note':None}))
@@ -2057,7 +2865,12 @@ class Derivatives:
   'underlying':{'column':'underlying','op':'=','kind':'symbol','text':'One underlying by name.'},
   'expiry':{'column':'expiry','op':'=','kind':'date','text':'One expiry, as YYYY-MM-DD.'},
   'at':{'column':None,'op':'choice','kind':'reading',
-   'text':'One 15-minute reading the store holds. Omitted, the screener reads the newest one.'},
+   'text':'One 15-minute reading the store holds. Omitted, the screener opens on the newest one that has '
+    'contracts over the liquidity floors.'},
+  'group':{'column':None,'op':'choice','kind':'enum','values':SCREENER_VIEWS,
+   'text':'One row per UNDERLYING (the default), or one row per CONTRACT. The per-underlying rows are sums '
+    'and counts over the contracts that name has at this reading; a per-contract signal that cannot be '
+    'summed honestly is served as a maximum or a count, never as an average.'},
   'limit':{'column':None,'op':'cut','kind':'number','min':1,'max':SCREENER_LIMIT_MAX,
    'text':'How many rows to return. The count scanned and the count kept are always reported beside them.'},
  }
@@ -2080,6 +2893,9 @@ class Derivatives:
  def _moneyness(strike,spot,option_type):
   """itm / atm / otm for one row, or None when the store did not carry both numbers."""
   strike,spot=_num(strike),_num(spot)
+  # A FUTURE HAS NO MONEYNESS. It has no strike to be in or out of the money against, and its stored strike is
+  # 0 - which, left alone, is "far below spot" and would come back as a real-looking bucket.
+  if str(option_type or '').upper() not in OPTION_TYPES:return None
   if strike is None or spot is None or spot<=0:return None
   if abs(strike-spot)<=MONEYNESS_BAND*spot:return 'atm'
   above=strike>spot
@@ -2116,6 +2932,296 @@ class Derivatives:
   row=self._one('select count(*) as n from metrics where captured_at=?',(at,))
   return _int((row or {}).get('n'))
 
+ def _clears_floors(self,at,names=None):
+  """Does ONE reading hold a single contract over the §3 floors? One index seek that stops at the first row.
+
+  The same three floors the screener itself applies, in the same order, over the same columns - premium
+  traded, last price, and open interest of at least one lot. Nothing is substituted for a floor: a reading
+  whose premium was never reported has no premium, and a contract with no premium does not clear a premium
+  floor. The store also carries an ESTIMATED traded price, and it is not read here on purpose: the floors
+  decide what the reader is shown, and a number that decides visibility has to be one the exchange reported
+  rather than one a model produced.
+  """
+  if 'metrics' not in self._tables() or not at:return False
+  if names is None:names=self._column_names('metrics')
+  clauses,params=[],[]
+  if self._has_scope():clauses.append("scope='contract'")
+  clauses.append('captured_at=?');params.append(at)
+  if 'premium_cr' in names:clauses.append('premium_cr>=?');params.append(FLOOR_PREMIUM_CR)
+  if 'last_price' in names:clauses.append('last_price>=?');params.append(FLOOR_LAST_PRICE)
+  # `oi_lots` is not a column: the floor is open interest against the contract's own lot size, exactly as
+  # `_passes` works it out row by row. A row missing either number does not pass - absence is not evidence.
+  if 'oi' in names and 'lot_size' in names:
+   clauses.append('oi is not null and lot_size is not null and lot_size>0 and oi>=lot_size*?')
+   params.append(FLOOR_OI_LOTS)
+  if 'instrument_type' in names:clauses.append("instrument_type in ('CE','PE')")
+  return bool(self._rows('select 1 from metrics where '+' and '.join(clauses)+' limit 1',tuple(params)))
+
+ def _cleared_count(self,at,names=None):
+  """How many contracts at ONE reading clear the §3 floors, with NO reader filter in the way.
+
+  The screener's own row count is taken after the reader's filters, so on its own it cannot tell
+  "the filters in force excluded everything" from "nothing cleared the floors" - two facts a trader
+  reads completely differently. This is the floors-only count that separates them: same three floors,
+  same columns, same order as `_clears_floors`, counted instead of existence-tested.
+  """
+  if 'metrics' not in self._tables() or not at:return 0
+  if names is None:names=self._column_names('metrics')
+  clauses,params=[],[]
+  if self._has_scope():clauses.append("scope='contract'")
+  clauses.append('captured_at=?');params.append(at)
+  if 'premium_cr' in names:clauses.append('premium_cr>=?');params.append(FLOOR_PREMIUM_CR)
+  if 'last_price' in names:clauses.append('last_price>=?');params.append(FLOOR_LAST_PRICE)
+  if 'oi' in names and 'lot_size' in names:
+   clauses.append('oi is not null and lot_size is not null and lot_size>0 and oi>=lot_size*?')
+   params.append(FLOOR_OI_LOTS)
+  if 'instrument_type' in names:clauses.append("instrument_type in ('CE','PE','FUT')")
+  row=self._one('select count(*) as n from metrics where '+' and '.join(clauses),tuple(params))
+  return _int((row or {}).get('n')) or 0
+
+ def _usable_reading(self,readings):
+  """The newest reading a reader can actually do anything with, and how many newer ones hold nothing.
+
+  The newest reading the store holds is not always one the tab can show. A session whose capture died is
+  rebuilt from 15-minute candles, and a candle carries no traded-price average - so `premium_cr` is null for
+  every contract in it and NOTHING in that reading can clear the §2 crore floor. Defaulting to it hands the
+  reader an empty screener, no row to click, and therefore no symbol for any block on the tab.
+
+  So the default is the newest reading that has contracts over the floors. It is resolved here, once, next to
+  the coverage the screener already computes, rather than by a browser that would have to fetch readings and
+  throw them away. Nothing is hidden by it: every reading the store holds is still in `readings` and still one
+  click away, and the response says which reading this is and that it is not the newest.
+
+  Returns (at, skipped) - the reading to serve, and how many newer readings were walked past to reach it.
+  When no reading clears the floors at all, the newest is served and `skipped` is 0: an empty screener under
+  the newest reading is the honest answer when every reading is empty.
+  """
+  if not readings:return '',0
+  names=self._column_names('metrics')
+  for index,row in enumerate(readings):
+   at=row.get('at')
+   if at and self._clears_floors(at,names):return at,index
+  return readings[0].get('at') or '',0
+
+ def _reading_note(self,at,newest,asked,skipped):
+  """The FACTS about which reading is on screen. The sentence itself is built in the browser.
+
+  Not a formatted sentence, on purpose: the tab already owns one date formatter and one set of checks over it
+  (logic.asOfText), and a second one here would be a second place for "18 Sep 2026 · 11:30" to drift. What
+  the server owns is what it knows - which reading it served, which is the newest, whether the reader picked
+  it, and how many newer readings hold nothing over the floors. `reading_rule` is a definition rather than a
+  date, so it is served like every other definition on this tab.
+  """
+  return {'newest_at':newest or None,'reading_at':at or None,
+   'reading_is_newest':bool(not at or not newest or at==newest),
+   'reading_chosen':bool(asked),'reading_skipped':int(skipped or 0),
+   'reading_rule':READING_RULE_TEXT}
+
+ @staticmethod
+ def _ranking(view):
+  """The order this view is ACTUALLY served in, with every key and its direction.
+
+  It is served with the rows because the page used to print one sort while the list obeyed another: the block
+  below the screener took its default instrument from row one of the unusual-ranked list and called it
+  "Busiest by premium", which the ordering never guaranteed. A page that prints the server's own answer to
+  "what is this sorted by" cannot drift from it again.
+  """
+  if view=='underlying':
+   return {'view':view,'label':SCREENER_RANK_LABEL,'text':SCREENER_RANK_TEXT,
+    'keys':[dict(k) for k in SCREENER_RANK_KEYS]}
+  return {'view':view,'label':CONTRACT_RANK_LABEL,'text':CONTRACT_RANK_TEXT,
+   'keys':[dict(k) for k in CONTRACT_RANK_KEYS]}
+
+ def _screener_groups(self,rows):
+  """One row per UNDERLYING, out of the contract rows that cleared the floors and the filters.
+
+  WHY THIS IS THE DEFAULT VIEW. The screener lists contracts, sorted by premium traded. At the 11:30 reading
+  of 18 Sep 2026, 214 underlyings cleared the floors - and NIFTY alone had 106 of the 491 contracts. A list
+  of 100 contracts was therefore 100 rows of NIFTY, and the reader's conclusion was the obvious one: no stock
+  is active. It is what the owner meant by "why other stocks are not populating". Scanning the market for
+  which NAMES are busy is what a screener is for; the contract list is the drill-down.
+
+  WHAT MAY BE AGGREGATED, AND WHAT MAY NOT. Every figure here is either a SUM of things that add up, or a
+  COUNT of contracts. Nothing else is honest:
+
+    * premium traded, volume, open interest and both open-interest changes ADD - they are rupees and
+      contracts, and a sum of them is the same kind of number as its parts;
+    * calls, puts and the contract count are COUNTS;
+    * spot is not an aggregate at all: every contract of one underlying at one reading carries the same one,
+      so it is passed through rather than combined.
+
+  And what is REFUSED, because a mean of these is not the thing it looks like:
+
+    * volume against its own median (§3.2) is a ratio per contract, and a ratio of ratios is not a ratio.
+      The LARGEST one is served instead, with the contract it belongs to named, plus how many of the
+      underlying's contracts had enough baseline to carry one at all. A maximum is a real reading of a real
+      contract; an average would be a number nothing reported.
+    * volume to open interest (§3.3), for the same reason. What is served is a COUNT - how many contracts
+      traded more today than was standing at yesterday's close, which is the tab's own existing threshold
+      (`volumeToOiHot`), not a new one invented here.
+    * the build-up label (§3.1) is a statement about ONE contract. There is no such thing as an underlying's
+      build-up, so none is served as a label; the four counts are, and the labels themselves stay in the
+      contract view where they belong.
+    * moneyness, strike and last price are not aggregated at all: a set of contracts has no strike.
+
+  A word on FUTURES, which are in this list because the reader's question is about a NAME and not about its
+  option chain. They carry a premium, an open interest, a build-up label and a spot, so they are in every sum
+  and every count that uses those. They carry NEITHER §3.2 nor §3.3 - the store computes no volume-against-
+  median and no volume-to-open-interest for a futures contract, 0 of 411 at the 11:30 reading of 18 Sep 2026 -
+  so both of those arrive with the count of contracts that could carry them, and a name whose whole book is
+  futures gets nothing rather than a zero.
+  """
+  groups={}
+  for row in rows:
+   name=row.get('underlying') or ''
+   group=groups.get(name)
+   if group is None:
+    group=groups[name]={'underlying':name,'underlying_kind':row.get('underlying_kind'),
+     'contracts':0,'options':0,'futures':0,'calls':0,'puts':0,'premium_cr':0.0,'volume':0,'oi':0,
+     'oi_change_day':0,'has_oi_change_day':False,'oi_change_15m':0,'has_oi_change_15m':False,
+     'spot':None,'spot_disagrees':False,'expiries':set(),'days_to_expiry':None,
+     'volume_ratio_max':None,'volume_ratio_max_symbol':None,'volume_baseline_contracts':0,
+     # How many of this name's contracts could carry each ratio at all. THE DENOMINATOR IS THE POINT: the
+     # store computes neither §3.2 nor §3.3 for a futures contract, so a futures-only name has nothing to
+     # count - and "0 over 1" would read as "nothing unusual" when the truth is "not measured for futures".
+     'volume_to_oi_contracts':0,'volume_to_oi_over_1':0,'buildup_counts':{},'top':None,
+     # WHAT IS UNUSUAL IN THIS NAME, AND IT IS THREE DIFFERENT NUMBERS.
+     #
+     #   `unusual`              how many CONTRACTS the store flagged;
+     #   `unusual_rule_count`   how many DISTINCT RULES they tripped between them — two exist, so this is 0, 1
+     #                          or 2, and it can never be three;
+     #   `unusual_observations` how many TIMES a rule fired across those contracts.
+     #
+     # These used to be one number. The old code tallied the store's complete reason SENTENCE, which differs at
+     # every multiple, so NIFTY's 80 flagged contracts produced 124 "conditions" — and the tab clamped that to
+     # three and called it "3 conditions". Nothing here counts a sentence.
+     'unusual':0,'unusual_rules':{},'unusual_observations':0,'unusual_contracts':[]}
+   group['contracts']+=1
+   # The calls/puts split describes the OPTIONS half and nothing else. A future is not a call, not a put, and
+   # not a side of anything - a name with futures and no listed options must never read as "0C / 0P", which
+   # says its options were quiet when it has none at all.
+   kind=row.get('instrument_type')
+   if kind=='CE':group['calls']+=1;group['options']+=1
+   elif kind=='PE':group['puts']+=1;group['options']+=1
+   else:group['futures']+=1
+   # --- the sums: rupees and contracts, which add ---
+   group['premium_cr']+=row.get('premium_cr') or 0.0
+   group['volume']+=row.get('volume') or 0
+   group['oi']+=row.get('oi') or 0
+   if row.get('oi_change_day') is not None:
+    group['oi_change_day']+=row['oi_change_day'];group['has_oi_change_day']=True
+   if row.get('oi_change_15m') is not None:
+    group['oi_change_15m']+=row['oi_change_15m'];group['has_oi_change_15m']=True
+   # --- passed through, not combined: one underlying at one reading has one spot ---
+   # ...but only when its rows AGREE on it. Picking the first of two different numbers and printing it as
+   # the underlying's spot is exactly the kind of quiet invention the rest of this method refuses.
+   if row.get('spot') is not None:
+    if group['spot'] is None and not group['spot_disagrees']:group['spot']=row['spot']
+    elif group['spot'] is not None and row['spot']!=group['spot']:
+     group['spot']=None;group['spot_disagrees']=True
+   if row.get('expiry'):group['expiries'].add(row['expiry'])
+   dte=row.get('days_to_expiry')
+   if dte is not None and (group['days_to_expiry'] is None or dte<group['days_to_expiry']):
+    group['days_to_expiry']=dte
+   # --- the ratios: a maximum and a count, never a mean ---
+   ratio=row.get('volume_ratio')
+   if ratio is not None:
+    group['volume_baseline_contracts']+=1
+    if group['volume_ratio_max'] is None or ratio>group['volume_ratio_max']:
+     group['volume_ratio_max']=ratio
+     group['volume_ratio_max_symbol']=row.get('tradingsymbol') or ''
+   if row.get('volume_to_oi') is not None:
+    group['volume_to_oi_contracts']+=1
+    if row['volume_to_oi']>1:group['volume_to_oi_over_1']+=1
+   label=row.get('buildup_day')
+   if label:group['buildup_counts'][label]=group['buildup_counts'].get(label,0)+1
+   # --- the store's own §3 flag, counted; and the RULES its reasons name, tallied ---
+   if row.get('unusual'):
+    group['unusual']+=1
+    triggers=row.get('unusual_triggers') or []
+    evidence=[]
+    for trigger in triggers:
+     rule_id=trigger.get('rule_id') or RULE_UNCLASSIFIED
+     tally=group['unusual_rules'].get(rule_id)
+     if tally is None:
+      # THE WORDS LIVE IN THE REGISTRY, ONCE. A tally carries the rule's ID and its NUMBERS; its name, its
+      # comparator, its threshold and its prose are served once per response under `unusual_rules`, not
+      # copied onto all 214 instrument rows. The same registry is mirrored in logic.ts, and
+      # check-derivative.cjs fails if any of the three copies drift.
+      tally=group['unusual_rules'][rule_id]={'rule_id':rule_id,
+       'rule_version':trigger.get('rule_version') or UNUSUAL_RULES_VERSION,
+       # a COUNT of contracts and a COUNT of firings: the same contract can trip a rule once, and two
+       # contracts tripping the same rule is one rule and two contracts
+       'contracts':0,'observations':0,
+       # the LARGEST reading of this rule in this name, with the contract it belongs to named and the
+       # baseline it was measured against beside it — never an average of multiples
+       'value_max':None,'value_max_symbol':None,'baseline_at_max':None,'sample_count_at_max':None}
+     tally['observations']+=1
+     group['unusual_observations']+=1
+     value=trigger.get('value')
+     if value is not None and (tally['value_max'] is None or value>tally['value_max']):
+      tally['value_max']=value
+      tally['value_max_symbol']=row.get('tradingsymbol') or ''
+      tally['baseline_at_max']=trigger.get('baseline')
+      tally['sample_count_at_max']=trigger.get('sample_count')
+     evidence.append(trigger)
+    # ONE ENTRY PER FLAGGED CONTRACT, so the same contract is counted once per rule and once in total
+    for rule_id in {t.get('rule_id') or RULE_UNCLASSIFIED for t in triggers}:
+     group['unusual_rules'][rule_id]['contracts']+=1
+    # THE EVIDENCE ITSELF. 396 contracts carried 688 triggers across the whole market at the 11:30 reading of
+    # 18 Sep 2026 — small enough to travel with the rows, so the drawer that lists them needs no second
+    # request and cannot show a different reading from the one on screen.
+    group['unusual_contracts'].append({'tradingsymbol':row.get('tradingsymbol') or '',
+     'instrument_type':row.get('instrument_type') or '','strike':row.get('strike'),
+     'expiry':row.get('expiry') or '','premium_cr':row.get('premium_cr'),'triggers':evidence})
+   # the busiest contract of this underlying, by the same measure the list is sorted on
+   top=group['top']
+   if top is None or (row.get('premium_cr') or 0.0)>(top.get('premium_cr') or 0.0):
+    group['top']={'tradingsymbol':row.get('tradingsymbol') or '','strike':row.get('strike'),
+     'instrument_type':row.get('instrument_type') or '','premium_cr':row.get('premium_cr'),
+     'instrument_token':row.get('instrument_token'),'expiry':row.get('expiry') or '',
+     'days_to_expiry':row.get('days_to_expiry')}
+  out=[]
+  for group in groups.values():
+   group['premium_cr']=_round(group['premium_cr'],2)
+   group['expiries']=sorted(group['expiries'])
+   group['oi_change_day']=group['oi_change_day'] if group['has_oi_change_day'] else None
+   group['oi_change_15m']=group['oi_change_15m'] if group['has_oi_change_15m'] else None
+   group.pop('has_oi_change_day');group.pop('has_oi_change_15m')
+   # kept, and named, so a dash where a spot should be is explained rather than just blank
+   group['spot_disagrees']=bool(group['spot_disagrees'])
+   # Nothing carried the ratio, so there is no count - not a count of zero.
+   if not group['volume_to_oi_contracts']:group['volume_to_oi_over_1']=None
+   # THE RULES, IN THE REGISTRY'S OWN ORDER, and the three counts kept apart. `unusual_rule_count` is how many
+   # DISTINCT rules were tripped — the registry holds two, so it is 0, 1 or 2 and can never be three.
+   order={rule['rule_id']:i for i,rule in enumerate(UNUSUAL_RULES)}
+   group['unusual_rules']=sorted(group['unusual_rules'].values(),
+    key=lambda r:(order.get(r['rule_id'],len(order)),r['rule_id']))
+   group['unusual_rule_count']=len(group['unusual_rules'])
+   # the evidence in a stable order: the contract with the largest reading of any rule first, then by name,
+   # so the drawer lists the same contracts in the same order on every request
+   group['unusual_contracts'].sort(key=lambda c:(
+    -max([t['value'] for t in c['triggers'] if t.get('value') is not None],default=float('-inf')),
+    c['tradingsymbol']))
+   out.append(group)
+  # ==================================================================================================================
+  # THE DEFAULT ORDER, WRITTEN DOWN AND SERVED WITH THE ROWS.
+  #
+  # Sorted by premium alone this list is a directory - the same large names on top every session, with nothing
+  # telling the reader where to look. The keys are SCREENER_RANK_KEYS and they are served in the response, so the
+  # page prints the sort that is actually in force instead of a sort somebody once assumed.
+  #
+  # The first key is how many DISTINCT RULES the name's contracts tripped. It used to be how many distinct reason
+  # SENTENCES they wrote, which is close to meaningless: the same rule at two multiples wrote two sentences, so
+  # the list was ordered by how many different NUMBERS appeared under a name.
+  #
+  # The last key is the NAME, so two instruments level on all three counts come out in the same order on every
+  # request and on every machine. Without it the order of a tie was whatever order the rows happened to arrive in.
+  # ==================================================================================================================
+  out.sort(key=lambda g:(-(g['unusual_rule_count'] or 0),-(g['unusual'] or 0),-(g['premium_cr'] or 0.0),
+   g['underlying'] or ''))
+  return out
+
  def screener(self,filters=None,limit=None):
   """§3.2-§3.4 as a real screen: the §3 floors always, plus whatever else the caller asked for.
 
@@ -2144,17 +3250,34 @@ class Derivatives:
   # The reading. Omitted, the newest one; named, it must be one the store actually holds - a reading that is
   # not there would otherwise answer with an empty list that reads exactly like an empty market.
   readings=self.screener_readings()
+  newest=readings[0]['at'] if readings else (self._max('metrics') or '')
   at=str(asked.get('at') or '').strip()
+  asked_for_reading=bool(at)
+  skipped=0
   if at:
    if at not in {r['at'] for r in readings}:raise ValueError(f'{at} is not a 15-min reading this store holds.')
   else:
-   at=readings[0]['at'] if readings else (self._max('metrics') or '')
+   # NOT simply the newest. The newest reading of a rebuilt session carries no premium at all, so nothing in
+   # it can clear the §3 floors and the screener lands empty - no row to click, and therefore no symbol for
+   # any block on the tab. `_usable_reading` walks back to the newest one that HAS rows over the floors, and
+   # `reading_text` below says so in plain words.
+   at,skipped=self._usable_reading(readings)
+   # A store with no `underlying_snapshots` has no reading list to walk, so the newest metric row is still
+   # the fallback it always was - the usable-reading rule narrows the choice, it never removes one.
+   if not at:at=newest
   coverage=next((dict(r) for r in readings if r['at']==at),None)
+  reading=self._reading_note(at,newest,asked_for_reading,skipped)
   if not at:
+   capture=self.capture_health('',readings=readings)
    return self.envelope(rows=[],applied=[],available_filters=available,filters={'applied':[],'available':available},
-    readings=readings,total=0,scanned=0,
+    readings=readings,total=0,scanned=0,capture=capture,
+    context=self.context(source='metrics' if self._has_scope() else 'store').as_dict(),
     floors=dict(FLOORS),floors_text=FLOORS_TEXT,moneyness_text=MONEYNESS_TEXT,
-    index_underlyings=list(INDEX_KINDS),coverage=None,limit=0,buildup_window=BUILDUP_WINDOWS[0])
+    index_underlyings=list(INDEX_KINDS),coverage=None,limit=0,buildup_window=BUILDUP_WINDOWS[0],
+    view=str(asked.get('group') or SCREENER_VIEW_DEFAULT),views=list(SCREENER_VIEWS),
+    ranking=self._ranking(str(asked.get('group') or SCREENER_VIEW_DEFAULT)),
+    unusual_rules=[dict(r) for r in UNUSUAL_RULES],unusual_rules_version=UNUSUAL_RULES_VERSION,
+    groups_total=0,contracts_total=0,empty_note=capture['state_text'],**reading)
   clauses.append('captured_at=?');params.append(at)
   applied.append({'key':'at','value':at,'always':True,'text':f'The 15-minute reading of {at}.'})
   # §3's floors. ALWAYS on, and `min_premium_cr` may only raise the premium floor, never lower it.
@@ -2173,7 +3296,7 @@ class Derivatives:
     'text':f'Only contracts with at least {MIN_BASELINE_SESSIONS} sessions of baseline behind the ratio '
      '(§3.2); the rest are "no baseline" and are never given one.'})
   for key,value in asked.items():
-   if key in ('at','limit','buildup_window','min_premium_cr'):continue
+   if key in ('at','limit','buildup_window','min_premium_cr','group'):continue
    rule=self.SCREENER_FILTERS[key]
    column=rule.get('column')
    if column is None:continue  # applied on the rows below, and recorded there
@@ -2199,15 +3322,19 @@ class Derivatives:
     if not when:raise ValueError(f'{key} must be a date as YYYY-MM-DD.')
     clauses.append(f'"{column}"=?');params.append(when)
     applied.append({'key':key,'value':when,'always':False,'text':rule['text']})
-  # Options only - the futures build-up route reads the futures. Skipped when `option_type` already pinned one
-  # side, so `applied` never carries two clauses saying different things about the same column.
+  # EVERY INSTRUMENT TYPE. This list used to be options only, which hid 129 of the 214 instruments that clear
+  # the floors: at the 11:30 reading of 18 Sep 2026, 85 names had an option over them and 214 had a contract of
+  # any kind. A name with futures premium and no liquid options is a name where something is happening, and
+  # this is the only list on the tab that reaches it. `option_type` still narrows to one side when it is asked,
+  # and a future is neither side, so asking for it excludes the futures - which is what asking for it means.
   if 'instrument_type' in names and 'option_type' not in asked:
-   clauses.append("instrument_type in ('CE','PE')")
-   applied.append({'key':'instrument_type','value':list(OPTION_TYPES),'always':True,
-    'text':'Options only. The futures build-up card reads the futures.'})
+   applied.append({'key':'instrument_type','value':list(INSTRUMENT_TYPES),'always':True,
+    'text':'Every instrument type: calls, puts and futures. This is the F&O book of each name, not its '
+     'option chain alone.'})
   wanted=('captured_at','tradingsymbol','underlying','instrument_type','strike','expiry','lot_size',
    'days_to_expiry','last_price','average_price','oi','volume','spot','premium_cr','vol_tod_ratio',
-   'vol_tod_sessions','vol_tod_status','vol_oi_ratio','vol_oi_status','oi_change_pct_15m','oi_change_pct_day',
+   'vol_tod_median','vol_tod_sessions','vol_tod_status','vol_oi_ratio','vol_oi_prev_oi','vol_oi_status',
+   'oi_change_pct_15m','oi_change_pct_day',
    'oi_change_15m','oi_change_day','buildup_15m','buildup_day','price_change_pct_15m','price_change_pct_day',
    'instrument_token','unusual','unusual_reasons')
   have=[c for c in wanted if c in names]
@@ -2247,18 +3374,115 @@ class Derivatives:
    if kind is not None and shaped['underlying_kind']!=str(kind):continue
    rows.append(shaped)
   rows.sort(key=lambda r:-(r.get('premium_cr') or 0.0))
-  cut=max(1,min(int(limit or SCREENER_LIMIT_DEFAULT),SCREENER_LIMIT_MAX))
+  # The default cut was written for a list of CONTRACTS, where a hundred rows is a page of a long tail. One
+  # row per instrument is a different list: there are 214 of them at the 11:30 reading of 18 Sep 2026, and
+  # cutting it at a hundred would hide 114 names from the only list that reaches them - which is the bug this
+  # view exists to fix, one step further down. A limit the caller ASKED for is still obeyed exactly.
+  asked_limit=None if limit in (None,0,'') else max(1,min(int(limit),SCREENER_LIMIT_MAX))
+  cut=asked_limit or max(1,min(SCREENER_LIMIT_DEFAULT,SCREENER_LIMIT_MAX))
+  # THE VIEW. One row per underlying by default; the contract list is the drill-down. The aggregate is built
+  # over EVERY row that cleared the floors and the filters, not over the page - a sum of the first hundred
+  # contracts would be a number about this list rather than about the market.
+  view=str(asked.get('group') or SCREENER_VIEW_DEFAULT)
+  if view not in SCREENER_VIEWS:raise ValueError(f'group must be one of {", ".join(SCREENER_VIEWS)}.')
+  groups=self._screener_groups(rows)
+  applied.append({'key':'group','value':view,'always':True,
+   'text':(('One row per underlying: sums and counts over the contracts that name has at this reading. '
+    +SCREENER_RANK_TEXT) if view=='underlying' else CONTRACT_RANK_TEXT)})
+  served=groups if view=='underlying' else rows
+  if view=='underlying' and asked_limit is None:cut=max(1,min(len(served) or 1,SCREENER_LIMIT_MAX))
+  # ========================================================================================================
+  # WHAT THE EMPTY SCREEN IS ALLOWED TO SAY.
+  #
+  # An empty list used to say one thing - "No contract clears the floors" - whatever had actually happened.
+  # At the 15:45 reading of 18 Sep 2026 that reading held 10,552 contract rows with ZERO spots and ZERO
+  # premiums: the capture had died at 11:30 and the rest of the session was rebuilt from 15-minute candles,
+  # which carry no traded-price average. Nothing could clear a premium floor because nothing had a premium -
+  # nothing was MEASURED. A trader reads "nothing cleared the floors" as "the market is quiet", which is the
+  # opposite of what happened.
+  #
+  # So the state is resolved from what was measured, and the five states are kept apart: no capture, partial
+  # capture, a complete reading with nothing eligible, a complete reading the reader's own filters emptied,
+  # and a failed request. The floors-only count is what separates the last two.
+  # ========================================================================================================
+  cleared=self._cleared_count(at,names)
+  capture=self.capture_health(at,readings=readings,cleared=cleared,matched=len(rows))
+  # A LATEST COMPLETE READING IS OFFERED, NEVER SUBSTITUTED. The screener stays on the reading it resolved;
+  # this only names the newest reading whose required fields were all captured, so the reader can choose it.
   return self.envelope(as_of=at,source='metrics' if self._has_scope() else 'store',missing=[],
-   rows=rows[:cut],total=len(rows),scanned=scanned,returned=min(len(rows),cut),limit=cut,
+   capture=capture,
+   context=self.context(str(asked.get('underlying') or ''),str(asked.get('expiry') or ''),
+    session_date(at),at,'metrics' if self._has_scope() else 'store',newest_at=newest).as_dict(),
+   rows=served[:cut],view=view,views=list(SCREENER_VIEWS),
+   # THE SORT THAT IS ACTUALLY IN FORCE, and the closed list of rules a row can be flagged under, so the page
+   # never has to guess at either.
+   ranking=self._ranking(view),
+   unusual_rules=[dict(r) for r in UNUSUAL_RULES],unusual_rules_version=UNUSUAL_RULES_VERSION,
+   groups_total=len(groups),contracts_total=len(rows),
+   total=len(rows),scanned=scanned,returned=min(len(served),cut),limit=cut,
    scanned_text=('`scanned` is every metric row the store holds at this reading — the whole set the query '
     'seeks over before the floors and the filters. `total` is what came through them, and `returned` is how '
     'many of those this response carries.'),
    applied=applied,available_filters=available,filters={'applied':applied,'available':available},
-   readings=readings,coverage=coverage,
+   readings=readings,coverage=coverage,**reading,
    buildup_window=window,floors=dict(FLOORS),floors_text=FLOORS_TEXT,moneyness_text=MONEYNESS_TEXT,
    index_underlyings=list(INDEX_KINDS),buildup_values=list(BUILDUP_VALUES),
    buildup_labels=dict(BUILDUP_LABELS),
-   empty_note=(None if rows else 'No contract clears the floors and the filters at this 15-min reading.'))
+   # The sentence an empty list prints. It is the CAPTURE STATE's own sentence, so an outage can never be
+   # printed as a quiet market and a genuinely complete reading with nothing eligible still says "no matches".
+   empty_note=(None if rows else capture['state_text']),
+   empty_state=(None if rows else capture['state']))
+
+ # --- WHAT FIRED ON ONE CONTRACT, AS RULES RATHER THAN AS PROSE -------
+ @staticmethod
+ def _classify_reason(text):
+  """One stored reason sentence, read back into (rule id, the value it states).
+
+  The store's own words are the statement of WHICH rules fired at that reading; this turns each sentence back
+  into the rule that wrote it. A sentence no rule claims comes back as `unclassified` with no value — it is
+  never guessed at, and never folded into a rule that did not fire.
+  """
+  clean=str(text or '').strip()
+  for rule_id,pattern in UNUSUAL_REASON_PATTERNS:
+   found=pattern.match(clean)
+   if found:
+    try:return rule_id,float(found.group(1))
+    except ValueError:return rule_id,None
+  return RULE_UNCLASSIFIED,None
+
+ @classmethod
+ def _unusual_triggers(cls,row):
+  """Every rule that fired on one STORED metrics row, structured.
+
+  Rule id, rule version, the measured value, the comparator, the threshold it was compared against, the
+  baseline it was measured against and how many observations that baseline stands on. Nothing is recomputed:
+  the rules come from the row's own `unusual_reasons`, and every number beside them is one of the row's own
+  columns. A value the store no longer carries falls back to the number its own sentence states, and a
+  sentence that states none is served as null rather than as a nought.
+  """
+  out=[]
+  for piece in str(row.get('unusual_reasons') or '').split(','):
+   piece=piece.strip()
+   if not piece:continue
+   rule_id,stated=cls._classify_reason(piece)
+   rule=UNUSUAL_RULES_BY_ID.get(rule_id) or UNUSUAL_UNCLASSIFIED_RULE
+   if rule_id==RULE_VOL_TOD:
+    value,baseline=_num(row.get('vol_tod_ratio')),_num(row.get('vol_tod_median'))
+    sample=_int(row.get('vol_tod_sessions'))
+   elif rule_id==RULE_DAY_VOL_VS_PREV_OI:
+    value,baseline=_num(row.get('vol_oi_ratio')),_num(row.get('vol_oi_prev_oi'))
+    sample=1
+   else:
+    value,baseline,sample=None,None,None
+   out.append({'rule_id':rule_id,'rule_version':UNUSUAL_RULES_VERSION,
+    'value':_round(value if value is not None else stated,4),
+    'comparator':rule['comparator'],'threshold':rule['threshold'],
+    'baseline':_round(baseline,4),'sample_count':sample,'unit':rule['unit'],
+    # THE STORE'S OWN WORDS, kept for a condition no rule claims - that sentence is the only statement of
+    # what it was. A sentence a rule DID write is not repeated here: it is that rule at that value, and both
+    # are already on this trigger.
+    **({'text':piece} if rule_id==RULE_UNCLASSIFIED else {})})
+  return out
 
  def _screener_row(self,row,window=BUILDUP_WINDOWS[0]):
   """One screener row in the tab's own shape. Presentation and two lookups - no signal is computed here."""
@@ -2282,7 +3506,11 @@ class Derivatives:
    # §3.2 on the serving side too: a ratio without >= MIN_BASELINE_SESSIONS behind it is not served at all.
    'volume_ratio':_round(ratio,4) if enough else None,'volume_baseline_sessions':sessions,
    'volume_baseline':'ok' if enough else 'none','volume_baseline_status':row.get('vol_tod_status') or None,
+   # WHAT THE RATIO WAS MEASURED AGAINST. A multiple with no denominator beside it cannot be judged: 782x a
+   # median of four lots and 782x a median of forty thousand are not the same event.
+   'volume_baseline_median':_round(row.get('vol_tod_median'),4),
    'volume_to_oi':_round(row.get('vol_oi_ratio'),4),'volume_to_oi_status':row.get('vol_oi_status') or None,
+   'volume_to_oi_prev_oi':_round(row.get('vol_oi_prev_oi'),4),
    'oi_change_15m':_int(row.get('oi_change_15m')),
    'oi_change_15m_pct':_round(row.get('oi_change_pct_15m'),4),
    'oi_change_day':_int(row.get('oi_change_day')),
@@ -2293,4 +3521,7 @@ class Derivatives:
    # The label the `buildup` filter read, and which window it read it over. §3.1 forbids mixing the two, so
    # the row says which one this is rather than leaving the caller to guess from a bare label.
    'buildup':(window_day if window=='day' else window_15m),'buildup_window':window,
-   'unusual':bool(_int(row.get('unusual'))),'unusual_reasons':row.get('unusual_reasons') or None}
+   'unusual':bool(_int(row.get('unusual'))),'unusual_reasons':row.get('unusual_reasons') or None,
+   # The SAME flags, as rules rather than as sentences: rule id, version, value, comparator, threshold,
+   # baseline and sample count. The prose above is kept because it is what the store actually wrote.
+   'unusual_triggers':self._unusual_triggers(row)}

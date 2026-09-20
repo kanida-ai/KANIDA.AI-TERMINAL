@@ -7,6 +7,12 @@ const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),ts=r
 const load=(rel,req)=>{const code=ts.transpileModule(fs.readFileSync(path.join(__dirname,'..',rel),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;const ctx={exports:{},require:req,process:{env:{}}};vm.runInNewContext(code,ctx);return ctx.exports;};
 const L=load('src/derivative/logic.ts',n=>{throw Error('unexpected import: '+n)});
 let checks=0;const ok=fn=>{fn();checks++};
+/** Source with its COMMENTS removed - line and block both. A comment explains the rule and never reaches the
+ *  reader, and prose in one contains apostrophes: leaving block comments in meant a doc comment could open a
+ *  quote that ran on into the code, so a check looking for user-facing strings saw neither the comment nor
+ *  what it had swallowed. Strings are extracted from what this returns and from nothing else. */
+const NO_COMMENTS=(text)=>text.replace(/\/\*[\s\S]*?\*\//g,'')
+ .split('\n').filter(line=>!line.trim().startsWith('//')).join('\n');
 const DASH='—',MINUS='−',TIMES='×',RUPEE='₹';
 const MISSING=[null,undefined,NaN,Infinity,-Infinity,'12','',{}];
 
@@ -64,10 +70,126 @@ ok(()=>{assert.equal(L.volumeToOiHot({volume_to_oi:1.01}),true);assert.equal(L.v
 ok(()=>assert.deepEqual({...L.BUILDUP_LABELS},{long_buildup:'Long build-up',short_buildup:'Short build-up',
  short_covering:'Short covering',long_unwinding:'Long unwinding'}));
 ok(()=>{for(const [k,v] of Object.entries(L.BUILDUP_LABELS))assert.equal(L.buildupLabel(k),v)});
-ok(()=>{for(const v of [null,undefined,'','up','bullish','LONG_BUILDUP'])assert.equal(L.buildupLabel(v),DASH,String(v))});
+ok(()=>{for(const v of [null,undefined,'',' '])assert.equal(L.buildupLabel(v),DASH,String(v))});
 ok(()=>{assert.equal(L.buildupTone('long_buildup'),'up');assert.equal(L.buildupTone('short_covering'),'up');
  assert.equal(L.buildupTone('short_buildup'),'down');assert.equal(L.buildupTone('long_unwinding'),'down');
  assert.equal(L.buildupTone('nonsense'),'flat');assert.equal(L.buildupTone(null),'flat')});
+
+// =================================================================================================================
+// P05 — THE BUILD-UP VOCABULARY, END TO END.
+//
+// THE DEFECT, REPRODUCED: the store writes the reader-facing strings ('Long build-up', 'Flat', 'no data') and
+// this file's lookup was keyed on §3.1's snake ids. Every served build-up missed the lookup, so every build-up
+// cell fed from a screener row, and all six choices in the build-up filter menu, rendered as a dash. The 359
+// checks that stood here did not catch it because they only ever fed the lookup its OWN keys.
+//
+// THE FIX: one canonical id, one display label, one wire value, and a single normalising boundary. These checks
+// feed the boundary the STORE's vocabulary, which is what the screen actually receives.
+// =================================================================================================================
+ok(()=>{ // THE REPRODUCTION: every value the database actually holds renders as words, not as a dash
+ const stored=['Long build-up','Short build-up','Short covering','Long unwinding','Flat','no data'];
+ assert.deepEqual([...L.BUILDUP_VALUES],stored,'these are the six the store holds');
+ for(const value of stored.slice(0,5)) // the five that are labels the reader sees
+  assert.notEqual(L.buildupLabel(value),DASH,
+   `the store's own "${value}" must not render as a dash - this is the P05 defect`);
+ assert.equal(L.buildupLabel('Long build-up'),'Long build-up');
+ assert.equal(L.buildupLabel('Flat'),'Flat','Flat is a label the store wrote, not an absence');
+ // "no data" is the store saying it could not classify the reading: a dash, and never the word Flat
+ assert.equal(L.buildupLabel('no data'),DASH);
+ assert.notEqual(L.buildupLabel('no data'),L.buildupLabel('Flat'));
+});
+ok(()=>{ // ONE ENUM: the ids, the labels and the wire values are one list read three ways
+ assert.deepEqual([...L.BUILDUP_IDS],['long_buildup','short_buildup','short_covering','long_unwinding',
+  'flat','no_data']);
+ assert.deepEqual([...L.BUILDUP_IDS].map(id=>L.BUILDUP_WIRE[id]),[...L.BUILDUP_VALUES],
+  'every id has exactly one wire value, in the server\'s own order');
+ for(const id of L.BUILDUP_IDS)assert.equal(L.buildupId(L.BUILDUP_WIRE[id]),id,
+  `the wire value of ${id} must fold back to ${id}`);
+ for(const id of L.BUILDUP_IDS)assert.equal(L.buildupId(id),id,'and an id is already canonical');
+});
+ok(()=>{ // FLAT, MISSING, NO DATA and UNKNOWN are four different answers and none becomes another
+ assert.equal(L.buildupId('Flat'),'flat');
+ assert.equal(L.buildupId('no data'),'no_data');
+ for(const v of [null,undefined,'','   '])assert.equal(L.buildupId(v),'missing',String(v));
+ for(const v of ['up','bullish','Long buildup!','LONG-BUILD-UPP','3','{}'])
+  assert.equal(L.buildupId(v),'unknown',String(v));
+ // the one that matters: a value nothing recognises must NEVER read as Flat, and must be observable
+ for(const v of ['up','bullish','Long buildup!']){
+  assert.notEqual(L.buildupLabel(v),L.buildupLabel('Flat'),`"${v}" must not silently become Flat`);
+  assert.notEqual(L.buildupLabel(v),DASH,`"${v}" must not silently vanish either`);
+  assert.equal(L.buildupLabel(v),L.BUILDUP_UNKNOWN,'it says the tab does not recognise it');
+  assert.equal(L.buildupTone(v),'flat','and it carries no colour it has not earned');
+ }
+});
+ok(()=>{ // case and spelling variants of OUR OWN id fold in; they are the same value written differently
+ for(const v of ['LONG_BUILDUP','long buildup','Long-Buildup'])assert.equal(L.buildupId(v),'long_buildup',v);
+ for(const v of ['SHORT COVERING','short_covering','Short covering'])assert.equal(L.buildupId(v),'short_covering',v);
+});
+ok(()=>{ // the MENU says "no data" out loud, because it is one of the six the reader can choose
+ assert.equal(L.buildupChoiceLabel('no_data'),'no data');
+ assert.equal(L.buildupChoiceLabel('no data'),'no data');
+ assert.equal(L.buildupChoiceLabel('flat'),'Flat');
+ assert.equal(L.buildupChoiceLabel('long_buildup'),'Long build-up');
+ // and a TABLE CELL keeps the tab's rule: nothing captured is a dash
+ assert.equal(L.buildupLabel('no_data'),DASH);
+});
+ok(()=>{ // §3.1 AS A TRUTH TABLE: all nine price x open-interest cells, for the instrument's own price
+ assert.equal(L.buildupFromMoves('up','building'),'long_buildup');
+ assert.equal(L.buildupFromMoves('down','building'),'short_buildup');
+ assert.equal(L.buildupFromMoves('up','unwinding'),'short_covering');
+ assert.equal(L.buildupFromMoves('down','unwinding'),'long_unwinding');
+ // a flat axis is NOT a quiet version of a direction: the store's own Flat is a zero change on either axis
+ for(const [price,oi] of [['up','flat'],['down','flat'],['flat','building'],['flat','unwinding'],['flat','flat']])
+  assert.equal(L.buildupFromMoves(price,oi),'flat',`${price} + ${oi}`);
+ // nine cells, no tenth, and nothing falls through to a neighbour
+ assert.equal(Object.keys(L.BUILDUP_FROM_MOVES).length,9);
+ for(const price of ['up','down','flat'])for(const oi of ['building','flat','unwinding'])
+  assert.ok(L.BUILDUP_FROM_MOVES[`${price}|${oi}`],`no §3.1 answer for ${price} + ${oi}`);
+ // an axis with no direction at all yields no build-up to report
+ for(const [price,oi] of [['no baseline','building'],['up','no baseline'],['',''],[null,null]])
+  assert.equal(L.buildupFromMoves(price,oi),'unknown',`${price} + ${oi}`);
+ // and the colour intent is that same table read once more, never a second rule
+ for(const id of L.BUILDUP_IDS)assert.equal(L.buildupTone(id),L.buildupTone(L.BUILDUP_WIRE[id]),
+  `${id}: the id and the wire value must colour the same`);
+});
+ok(()=>{ // the FUTURES summary reads build-ups through the same boundary as a table cell
+ assert.equal(L.servedBuildup('Long build-up'),L.buildupLabel('Long build-up'));
+ assert.equal(L.servedBuildup('Flat'),'Flat');
+ assert.equal(L.servedBuildup('not a build-up'),L.BUILDUP_UNKNOWN,
+  'the futures summary cannot show a value the table would refuse');
+});
+ok(()=>{ // the §3.1 counts are keyed by the string the STORE wrote, and are folded by id
+ assert.equal(L.groupBuildupText({buildup_counts:{'Long build-up':4,'Short covering':2}}),
+  'Long build-up 4 · Short covering 2');
+ assert.equal(L.groupBuildupText({buildup_counts:{long_buildup:1,'Long build-up':2}}),'Long build-up 3',
+  'the same build-up written two ways is one count');
+ assert.equal(L.groupBuildupText({buildup_counts:{'Flat':3,'no data':1}}),'Flat 3 · no data 1');
+ assert.ok(L.groupBuildupText({buildup_counts:{'Long buildup!':2}}).includes(L.BUILDUP_UNKNOWN),
+  'a key nothing recognises is counted and said, not dropped');
+ assert.equal(L.groupBuildupText({buildup_counts:{}}),'');
+ assert.equal(L.groupBuildupText(null),'');
+});
+ok(()=>{ // A FILTER RULE ROUND-TRIPS: menu id -> sanitised rule -> the exact string the server validates
+ for(const id of L.BUILDUP_IDS){
+  const clean=L.sanitizeRules([{column:'buildup',operator:'is',value:id}]);
+  assert.equal(clean.length,1,`the builder must accept ${id}`);
+  assert.equal(clean[0].value,id,'and keep it canonical');
+  const query=L.screenerQuery([{column:'buildup',operator:'is',value:id}]);
+  assert.equal(query,`?buildup=${encodeURIComponent(L.BUILDUP_WIRE[id])}`,
+   `${id} must reach the server as the string it stores`);
+ }
+ // a rule restored from a browser that stored the WIRE string is the same rule, normalised on the way in
+ for(const wire of L.BUILDUP_VALUES){
+  const clean=L.sanitizeRules([{column:'buildup',operator:'is',value:wire}]);
+  assert.equal(clean.length,1,`a stored "${wire}" must survive`);
+  assert.equal(clean[0].value,L.buildupId(wire),'as its canonical id');
+  assert.equal(L.screenerQuery([{column:'buildup',operator:'is',value:wire}]),
+   `?buildup=${encodeURIComponent(wire)}`,'and reach the wire unchanged');
+ }
+ // and a value neither vocabulary holds is still refused outright
+ for(const junk of ['bull','Flatt','long_build_up_x',''])
+  assert.deepEqual([...L.sanitizeRules([{column:'buildup',operator:'is',value:junk}])],[],junk);
+});
 ok(()=>assert.deepEqual({...L.buildupPair({buildup_15m:'long_buildup',buildup_day:'short_buildup'})},
  {fifteen:'Long build-up',day:'Short build-up'}));
 ok(()=>assert.deepEqual({...L.buildupPair({buildup_day:'short_buildup'})},{fifteen:DASH,day:'Short build-up'}));
@@ -183,7 +305,7 @@ ok(()=>assert.equal(L.unusualQuery(L.sanitizeFilters({underlying:"x' or 1=1"})),
 ok(()=>{
  const source=fs.readFileSync(path.join(__dirname,'..','src','derivative','logic.ts'),'utf8');
  // Only the words inside produced strings are checked; comments explain the rule and are exempt.
- const strings=source.split('\n').filter(line=>!line.trim().startsWith('//')).join('\n').match(/'[^']*'|`[^`]*`/g)||[];
+ const strings=NO_COMMENTS(source).match(/'[^']*'|`[^`]*`/g)||[];
  const banned=/\b(will|expect|forecast|predict|likely|should rise|should fall|target price|bullish signal|bearish signal)\b/i;
  for(const text of strings)assert.ok(!banned.test(text),`a user-facing string must not predict: ${text}`);
 });
@@ -409,19 +531,22 @@ ok(()=>{assert.equal(L.rowKey({instrument_token:123,tradingsymbol:'X'}),'123');
 
 // --- the frame is really on the page: sections, widget headers, the filter popup -----------------------------------
 const SRC=p=>fs.readFileSync(path.join(__dirname,'..','src','derivative',p),'utf8');
-ok(()=>{ // the five sections, in the order the owner asked for
+ok(()=>{ // every block on the page, in the order the owner asked for, UNDER the one pinned screener
  const page=SRC('index.tsx');
- const order=[["Unusual activity","'Unusual activity'"],['Option chain',"'Option chain'"],
-  ['OI by strike','<OiByStrikeSection'],['Index dashboard',"'Index dashboard'"],
-  ['Futures OI build-up',"'Futures OI build-up'"]];
+ // The rail is rendered in the page's own return, AFTER `body` is built, so it is not in this sequence:
+ // being pinned and being the ONLY screener on the tab are checked on their own below.
+ const order=[['Option chain','title="Option chain"'],
+  ['OI by strike','<OiByStrikeSection'],['delta-OI by strike','<OiGridSection'],['PCR','<PcrSection'],
+  ['Max pain','<MaxPainSection'],['IV','<IvSection'],['Futures build-up','<FuturesBuildupSection'],
+  ['Index dashboard','title="Index dashboard"'],['Futures OI build-up','title="Futures OI build-up"']];
  let at=-1;
  for(const [title,needle] of order){
   const next=page.indexOf(needle);
-  assert.ok(next>at,`section "${title}" is missing or out of order on the Derivative page`);
+  assert.ok(next>at,`block "${title}" is missing or out of order on the Derivative page`);
   at=next;
  }
- assert.ok(SRC('OiByStrikeSection.tsx').includes("title=\"OI by strike\"")||
-  SRC('OiByStrikeSection.tsx').includes("title='OI by strike'"),'the OI-by-strike section needs its own title');
+ assert.ok(SRC('OiByStrikeSection.tsx').includes('title="OI by strike"')||
+  SRC('OiByStrikeSection.tsx').includes("title='OI by strike'"),'the OI-by-strike block needs its own title');
 });
 ok(()=>{ // every widget on the page wears the shared frame, so every one carries its own as-of and floors
  for(const file of ['UnusualWidget.tsx','ChainWidget.tsx','OiByStrikeSection.tsx','IndexWidget.tsx',
@@ -451,7 +576,7 @@ ok(()=>{ // §5 again, over every file the rebuild added: nothing on this tab ma
  const banned=/\b(will|expect|forecast|predict|likely|should rise|should fall|target price|bullish signal|bearish signal)\b/i;
  for(const file of ['frame.tsx','Table.tsx','FilterDialog.tsx','ChartTile.tsx','UnusualWidget.tsx','ChainWidget.tsx',
   'OiByStrikeSection.tsx','IndexWidget.tsx','FuturesWidget.tsx','index.tsx']){
-  const strings=SRC(file).split('\n').filter(line=>!line.trim().startsWith('//')).join('\n').match(/'[^']*'|`[^`]*`/g)||[];
+  const strings=NO_COMMENTS(SRC(file)).match(/'[^']*'|`[^`]*`/g)||[];
   for(const text of strings)assert.ok(!banned.test(text),`${file}: a user-facing string must not predict: ${text}`);
  }
 });
@@ -627,28 +752,44 @@ ok(()=>{ // never dressed up as more than it is
 // --- the block is really on the page ---------------------------------------------------------------------------------
 ok(()=>{
  const block=SRC('OiGridSection.tsx'),page=SRC('index.tsx');
- assert.ok(/WidgetFrame/.test(block),'both halves of the block wear the shared widget frame');
- assert.ok(/<Section\b/.test(block),'the block is one section of the tab, in the tab\'s own frame');
- assert.ok(block.includes('Unusual contracts'),'the left panel carries its own title');
- assert.ok(/api\/derivatives\/oi-grid\?underlying=/.test(block),'the grid reads the oi-grid route');
- assert.ok(/api\/derivatives\/unusual/.test(block),'the screener reads the unusual route the tab already serves');
+ assert.ok(/WidgetFrame/.test(block),'both panels of the block wear the shared widget frame');
+ assert.ok(/<Block\b/.test(block),'the block is drawn through the tab\'s ONE template');
+ assert.ok(!/<Section\b/.test(block),'and not through a shape of its own');
+ // THE OI-GRID ROUTE IS READ EXACTLY ONCE FOR THE WHOLE TAB, in index.tsx. Three panels are built on those
+ // ten at-the-money contracts - the ΔOI grid, the signal table beside the screener, and the IV grid - and each
+ // used to fetch them itself. That is three fetches of one payload, three answers that can drift apart at a
+ // refresh, and precisely the redundancy the owner objected to. It must not be able to come back quietly.
+ assert.ok(/api\/derivatives\/oi-grid\?underlying=/.test(page),'the PAGE reads the oi-grid route');
+ assert.ok(/read=\{gridRead\}/.test(page),'and hands that one read to the ΔOI block');
+ assert.equal((page.match(/api\/derivatives\/oi-grid\?underlying=/g)||[]).length,1,
+  'exactly one oi-grid read exists on this tab');
+ for(const name of ['OiGridSection.tsx','SignalTable.tsx','IvGridSection.tsx']){
+  let src;try{src=SRC(name)}catch{continue}
+  assert.ok(!/api\/derivatives\/oi-grid\?underlying=/.test(src),
+   `${name} must RECEIVE the ten contracts, not fetch them: one payload, one answer`);
+ }
+ // THE SCREENER IS GONE FROM THIS BLOCK. It was the second copy of the tab's one list, down the left of the
+ // block, and it is what the owner objected to: one screener, once, pinned at the top.
+ assert.ok(!/api\/derivatives\/unusual/.test(block),
+  'the block must not carry its own screener: there is ONE screener on this tab and it is pinned at the top');
+ assert.ok(!/Unusual contracts/.test(block),'and no panel of it is titled like one');
  assert.ok(page.includes('<OiGridSection'),'the block is mounted on the Derivative page');
- for(const key of ['oi_grid_screener','oi_grid'])assert.ok(page.includes(`'${key}'`),
+ assert.ok(!page.includes("'oi_grid_screener'"),'the screener panel key is gone with the panel');
+ for(const key of ['oi_grid_futures','oi_grid'])assert.ok(page.includes(`'${key}'`),
   `${key} must be a widget the reader can close and restore`);
- // clicking a chart re-points the tab's one chart target — the same mechanism a table row uses
+ // clicking a chart re-points the tab's one chart target - the same mechanism a table row uses
  assert.ok(/onTarget\(\{underlying/.test(block),'a click must write a chart target, not open its own chart');
  assert.ok(/instrumentToken:slot\.instrument_token/.test(block),'the target is the contract that was clicked');
 });
-ok(()=>{ // the block gets its OWN height: at the shared ROW_H the puts band was cut off mid-chart
- const page=SRC('index.tsx');
- const number=(name)=>{const m=new RegExp(`\\b${name}=(\\d+)`).exec(page);
-  assert.ok(m,`index.tsx must declare ${name}`);return Number(m[1]);};
- const row=number('ROW_H'),stack=number('STACK_TABLE_H');
- const gridRow=number('GRID_ROW_H'),gridStack=number('GRID_STACK_H');
- assert.ok(gridRow>row,'the ΔOI block is taller than a table row: its tiles carry a chart, a chip and two sentences');
- assert.ok(gridStack>stack,'and taller again when the page is stacked');
- assert.ok(/<OiGridSection[\s\S]*?height=\{expanded\?EXPANDED_H:stacked\?GRID_STACK_H:GRID_ROW_H\}/.test(page),
-  'the block must be given GRID_ROW_H / GRID_STACK_H, never the shared ROW_H');
+ok(()=>{ // TWO panels, on the template: the futures chart, and the grid AS THE CONTENT PANEL
+ const block=SRC('OiGridSection.tsx');
+ assert.ok(/chart=\{futures\}/.test(block),'the front futures chart is the block\'s CHART panel');
+ assert.ok(/content=\{grid\}/.test(block),'and the 2 x 5 grid IS its CONTENT panel');
+ assert.ok(/const futures=\(style:PaneStyle\)=>/.test(block)&&/const grid=\(style:PaneStyle\)=>/.test(block),
+  'both panels take the style the template hands them, rather than choosing their own');
+ assert.ok(!/SCREENER_FLEX|FUTURES_FLEX|GRID_FLEX/.test(block),
+  'the block declares no widths of its own: the template owns them');
+ assert.ok(!/height=\{Math\.min/.test(block),'and no height of its own either');
 });
 ok(()=>{ // the grid lays the served slots out — it never drops one
  const block=SRC('OiGridSection.tsx');
@@ -671,7 +812,7 @@ ok(()=>{ // the three definitions are still the block's own words - moved behind
 ok(()=>{ // §5 over the new files too: describe, never predict — and never in the market's mood words
  const banned=/\b(will|expect|forecast|predict|likely|should rise|should fall|target price|bullish|bearish)\b/i;
  for(const file of ['OiGridSection.tsx','FuturesChartPanel.tsx']){
-  const strings=SRC(file).split('\n').filter(line=>!line.trim().startsWith('//')).join('\n').match(/'[^']*'|`[^`]*`/g)||[];
+  const strings=NO_COMMENTS(SRC(file)).match(/'[^']*'|`[^`]*`/g)||[];
   for(const text of strings)assert.ok(!banned.test(text),`${file}: a user-facing string must not predict: ${text}`);
  }
  // every sentence this block can put on screen, whatever the data does
@@ -977,10 +1118,13 @@ ok(()=>{ // anything that is not "both building, similarly" prints NOTHING, neve
 ok(()=>{ // it aggregates the ten tiles on screen - it never asks the pilot for anything of its own
  const block=SRC('OiGridSection.tsx');
  assert.ok(/const blockRead=gridBlockRead\(rows\)/.test(block),'the block line is read off the served slots');
- // The two default-symbol fallbacks moved UP to the page when the tab took over resolving its one symbol, so
- // the block now makes exactly two reads of its own: the grid and the screener beside it.
- assert.ok((block.match(/useDerivativeRead</g)||[]).length===2,
-  'the grid and the screener - the block line adds no third read');
+ // The two default-symbol fallbacks moved UP to the page when the tab took over resolving its one symbol, and
+ // the screener went with the panel that carried it. The GRID READ moved up too, once the signal table and the
+ // IV grid needed the very same ten contracts. The block now makes NO read of its own at all: it RECEIVES the
+ // one the page made. (The futures chart panel still makes its own, in its own file.)
+ assert.equal((block.match(/useDerivativeRead</g)||[]).length,0,
+  'the block receives the ten contracts and fetches nothing: one payload, one answer');
+ assert.ok(/read:Read<OiGrid>/.test(block),'and it says so in its own props');
  assert.ok(!/resolveBlockSymbol\(/.test(block),
   'the block must NOT resolve its own symbol: the tab resolves one and hands it down');
  assert.ok(/note=\{blockRead\|\|undefined\}/.test(block),'nothing is printed when there is nothing to say');
@@ -997,15 +1141,60 @@ ok(()=>{
  for(const name of ['PRICE_TEXT','FLOW_TEXT','BLOCK_TEXT','BLOCK_BOTH_BUILDING','FLOW_FLAT_WHAT',
   'FLOW_FLAT_MEANING','FLOW_NOT_ENOUGH'])
   assert.ok(!banned.test(pySentence(name)),`derivatives.py ${name} must not predict`);
- // The owner ruled the two words out: neither may reach the screen from ANY string on the tab, on either side.
- // (A comment may still state the rule - that is what the comments in logic.ts and OiGridSection.tsx do.)
+ // ================================================================================================================
+ // THE OWNER'S MARKET SIGNAL COLUMN, AND WHY THESE WORDS ARE ALLOWED IN EXACTLY ONE PLACE.
+ //
+ // This guard was added when the owner told us to REMOVE the bullish/bearish column, and it was right then. He
+ // has since asked for it back, in writing, with a full specification: the MARKET SIGNAL column of the signal
+ // table, with his own rule -
+ //   🟢 Bullish: put writing up + call unwinding down
+ //   🔴 Bearish: call writing up + put unwinding down
+ //   🟡 Flat:    both sides roughly balanced, or little change
+ //
+ // THIS COLUMN STATES HOW OPTION POSITIONING READS RIGHT NOW, IN THE OWNER'S OWN VOCABULARY, AT HIS EXPLICIT
+ // INSTRUCTION. IT IS NOT A FORECAST, AND THE WORDS ARE ALLOWED HERE AND NOWHERE ELSE.
+ //
+ // IF YOU ARE HERE BECAUSE A SWEEP FLAGGED THE OWNER'S SIGNAL COLUMN, DO NOT REWORD IT - this allowance is
+ // deliberate. Add to the list below only if he extends the vocabulary himself.
+ //
+ // The allowance is the WHOLE VALUE, never a substring of a sentence. That shortcut is exactly what let
+ // "Sellers are building resistance at 23,500" through the support/resistance sweep the first time, and the
+ // mutation tests under this check exist to prove it cannot happen again: his words in the signal column pass,
+ // the same words in a block subtitle fail, and a forecast inside the signal table fails.
+ // ================================================================================================================
  const moody=/bullish|bearish/i;
- for(const file of ['logic.ts','types.ts','OiGridSection.tsx','ChartTile.tsx','frame.tsx','index.tsx',
+ const OWNER_SIGNAL_VALUES=['Bullish','Strong Bullish','Bearish','Strong Bearish','Neutral','Flat'];
+ /** True only when the whole string IS one of his signal values (or its key form), punctuation aside. */
+ const ownerSignalValue=(text)=>{
+  const bare=String(text||'').replace(/^[\s"'“”‘’🟢🔴🟡]+|[\s.!?,;:"'“”‘’]+$/g,'');
+  return OWNER_SIGNAL_VALUES.includes(bare)
+   ||OWNER_SIGNAL_VALUES.map(v=>v.toLowerCase().replace(/ /g,'_')).includes(bare);
+ };
+ // Every file on the tab EXCEPT the signal table: the words may not reach the screen at all.
+ // (A comment may still state the rule - that is what the comments in logic.ts and OiGridSection.tsx do.)
+ for(const file of ['types.ts','OiGridSection.tsx','ChartTile.tsx','frame.tsx','index.tsx',
   'UnusualWidget.tsx','ChainWidget.tsx','OiByStrikeSection.tsx','IndexWidget.tsx','FuturesWidget.tsx',
   'FuturesChartPanel.tsx']){
   const said=VISIBLE(SRC(file)).filter(t=>moody.test(t));
   assert.deepEqual(said,[],`${file}: the tab does not label a reading bullish or bearish: ${said.join(' | ')}`);
  }
+ // logic.ts and SignalTable.tsx hold the signal column. His VALUES pass; any other use of the words fails.
+ for(const file of ['logic.ts','SignalTable.tsx']){
+  const said=VISIBLE(SRC(file)).filter(t=>moody.test(t)&&!ownerSignalValue(t));
+  assert.deepEqual(said,[],
+   `${file}: only the owner's own signal VALUES may use these words - see the note above: ${said.join(' | ')}`);
+ }
+ // The allowance is not a doorway. His values pass...
+ for(const text of [...OWNER_SIGNAL_VALUES,'🟢 Bullish','🔴 Strong Bearish','strong_bullish','bearish'])
+  assert.ok(ownerSignalValue(text),`the owner's own signal value must pass: ${text}`);
+ // ...and every sentence that merely CONTAINS one of them does not.
+ for(const text of ['NIFTY looks bullish here','A bullish reading of the chain','Bullish above 23,500',
+  'The book is bearish','bearish momentum','Strong Bullish above the max pain strike',
+  'This is bullish for the index'])
+  assert.ok(!ownerSignalValue(text),`this must still be refused: ${text}`);
+ // And a forecast inside the signal table is still a forecast: the §5 sweep below covers that file too.
+ for(const text of ['NIFTY will fall to 23,200','Expect a move to 23,500','A target of 23,500'])
+  assert.ok(banned.test(text),`a forecast must fail wherever it is written: ${text}`);
  for(const file of ['server/kanida_pilot/derivatives.py','../market_data/derivatives/read_api.py']){
   const said=VISIBLE(fs.readFileSync(path.join(__dirname,'..',file),'utf8')).filter(t=>moody.test(t));
   assert.deepEqual(said,[],`${file}: the tab does not label a reading bullish or bearish: ${said.join(' | ')}`);
@@ -1035,7 +1224,7 @@ ok(()=>{ // the block states the price line, the reading, the tolerance and the 
 const candle=(o,h,l,c,at)=>({at:at||null,open:o,high:h,low:l,close:c,volume:null,oi:null});
 // A file with its // comments stripped. A negative check about what the CODE does must not be tripped by a
 // comment that states the very rule being checked.
-const CODE=(file)=>SRC(file).split('\n').filter(line=>!line.trim().startsWith('//')).join('\n');
+const CODE=(file)=>NO_COMMENTS(SRC(file));
 
 // --- the control at the top: 15-min opens, daily is one click away ------------------------------------------------
 ok(()=>{ // two choices, in the owner's order, and the default is the one the endpoint itself defaults to
@@ -1551,14 +1740,22 @@ ok(()=>{ // a chosen symbol always wins, and is never flagged as a default
  assert.deepEqual({...picked},{symbol:'RELIANCE',defaulted:false,label:''});
  assert.deepEqual({...L.resolveBlockSymbol('  RELIANCE  ',null,null)},{symbol:'RELIANCE',defaulted:false,label:''});
 });
-ok(()=>{ // nothing chosen: the busiest by premium first, the index second, and BOTH are flagged as defaults
+ok(()=>{ // nothing chosen: row one of the list the server served first, the index second, BOTH flagged
  assert.deepEqual({...L.resolveBlockSymbol('','TCS','NIFTY')},
-  {symbol:'TCS',defaulted:true,label:L.BLOCK_DEFAULT_PREMIUM});
+  {symbol:'TCS',defaulted:true,label:L.BLOCK_DEFAULT_RANKED});
  assert.deepEqual({...L.resolveBlockSymbol(null,null,'NIFTY')},
   {symbol:'NIFTY',defaulted:true,label:L.BLOCK_DEFAULT_INDEX});
  assert.deepEqual({...L.resolveBlockSymbol(null,'  ','NIFTY')},
-  {symbol:'NIFTY',defaulted:true,label:L.BLOCK_DEFAULT_INDEX},'a blank premium answer is no answer');
- assert.equal(L.BLOCK_DEFAULT_PREMIUM,'Busiest by premium');
+  {symbol:'NIFTY',defaulted:true,label:L.BLOCK_DEFAULT_INDEX},'a blank ranked answer is no answer');
+ // THE LABEL NAMES THE ORDER THAT IS ACTUALLY IN FORCE. "Busiest by premium" described a sort the screener
+ // has not used for a long time - it opens with the unusual first and premium is its THIRD key - over a row
+ // the reader never chose. The server's own name for the order it served wins; the constant is the fallback.
+ assert.equal(L.BLOCK_DEFAULT_RANKED,'First in the screener order');
+ assert.ok(!/premium/i.test(L.BLOCK_DEFAULT_RANKED),'and it must not claim a premium sort');
+ assert.deepEqual({...L.resolveBlockSymbol('','TCS','NIFTY','Unusual first')},
+  {symbol:'TCS',defaulted:true,label:'Unusual first'},"the server's own ranking label wins");
+ assert.deepEqual({...L.resolveBlockSymbol('','TCS','NIFTY','   ')},
+  {symbol:'TCS',defaulted:true,label:L.BLOCK_DEFAULT_RANKED},'a blank label falls back, never to a blank badge');
  assert.equal(L.BLOCK_DEFAULT_INDEX,'Default');
 });
 ok(()=>{ // nothing anywhere is no symbol - and no symbol is never dressed up as a default
@@ -1578,8 +1775,8 @@ ok(()=>{ // the block is HANDED the tab's symbol and gives the same answer to th
  assert.ok(!/derivatives\/unusual/.test(panelCode)&&!/derivatives\/indices/.test(panelCode),
   'and it never reads the block\'s fallback lists for itself');
  assert.equal((panel.match(/useDerivativeRead</g)||[]).length,1,'the panel makes exactly one read: its own candles');
- assert.equal((block.match(/useDerivativeRead</g)||[]).length,2,
-  'the grid and the screener - the chart adds no third read to the block');
+ assert.equal((block.match(/useDerivativeRead</g)||[]).length,0,
+  'the block fetches nothing itself - the page hands it the grid, the panel makes its own candles');
 });
 ok(()=>{ // a defaulted symbol is still said to be a default - ONCE, where the tab resolved it, and passed down
  const page=SRC('index.tsx'),block=SRC('OiGridSection.tsx'),panel=SRC('FuturesChartPanel.tsx');
@@ -1592,74 +1789,164 @@ ok(()=>{ // a defaulted symbol is still said to be a default - ONCE, where the t
  assert.ok(!/defaulted/.test(panel),'the futures panel does not carry a default notice of its own at all');
 });
 
-// --- the three-panel layout ---------------------------------------------------------------------------------------------
-ok(()=>{ // left to right: the screener, the futures chart, the grid - in one section, in that order
- const block=SRC('OiGridSection.tsx');
- assert.ok(block.includes('{screener}{futures}{grid}'),
-  'the block is three panels left to right: screener, futures chart, 2 x 5 grid');
- assert.ok(/<Section\b/.test(block),'still one section of the tab');
- assert.ok(block.indexOf('const screener=')<block.indexOf('const futures=')
-  &&block.indexOf('const futures=')<block.indexOf('const grid='),'built in the order they are drawn');
- assert.ok(/WidgetFrame/.test(SRC('FuturesChartPanel.tsx')),'the chart wears the block\'s own widget frame');
- assert.ok(/api\/derivatives\/futures-chart\?underlying=/.test(SRC('FuturesChartPanel.tsx')),
-  'and it reads the fixed futures-chart route');
+// =================================================================================================================
+// ONE TEMPLATE FOR THE WHOLE TAB, AND ONE SCREENER
+//
+// The owner, on the version where every section had its own shape: "everything is wrong - I asked for same block
+// template across for all blocks right?" These are the checks that make the answer something the code holds to.
+//
+// What is protected here:
+//   * the geometry lives in ONE place (frame.tsx) - a block is HANDED its panel styles and never invents them;
+//   * every block on the tab is drawn through frame.Block, with exactly two panels;
+//   * there is exactly ONE screener on the tab, it is PINNED, and it cannot be closed;
+//   * one height, one pair of widths, one breakpoint - no block has a wider one;
+//   * the grid is still five tiles across, measured at the ONE breakpoint rather than at its own.
+// =================================================================================================================
+const FRAME=SRC('frame.tsx');
+const frameNum=(name)=>{const m=new RegExp(`\\b${name}=(\\d+(?:\\.\\d+)?)`).exec(FRAME);
+ assert.ok(m,`frame.tsx must declare ${name}`);return Number(m[1]);};
+/** Every block of the tab: its file, and the two panel keys the template gives it. */
+const BLOCKS=[
+ ['Option chain','index.tsx','chain_chart','chain'],
+ ['OI by strike','OiByStrikeSection.tsx','oi_chart','oi_table'],
+ ['delta-OI by strike','OiGridSection.tsx','oi_grid_futures','oi_grid'],
+ ['PCR','SessionBlocks.tsx','pcr_chart','pcr_readings'],
+ ['Max pain','SessionBlocks.tsx','max_pain_chart','max_pain_readings'],
+ ['IV','SessionBlocks.tsx','iv_chart','iv_strikes'],
+ ['Futures build-up','SessionBlocks.tsx','fut_oi','fut_readings'],
+ ['Index dashboard','index.tsx','indices_chart','indices'],
+ ['Futures OI build-up','index.tsx','futures_chart','futures'],
+];
+ok(()=>{ // the geometry is declared ONCE, in the frame, and nowhere else
+ for(const name of ['BLOCK_H','BLOCK_CHART_FLEX','BLOCK_CONTENT_FLEX','BLOCK_BESIDE','BLOCK_GAP'])
+  assert.ok(new RegExp(`export const [A-Z_,=\\d.]*${name}=`).test(FRAME),`frame.tsx must export ${name}`);
+ assert.ok(/export function paneStyles\(stacked:boolean,height:number\)/.test(FRAME),
+  'and it must build BOTH panel styles from that one height, in one function');
+ // no block file may declare a width, a height or a breakpoint of its own
+ for(const file of ['OiGridSection.tsx','OiByStrikeSection.tsx','SessionBlocks.tsx','ScreenerSection.tsx']){
+  const code=CODE(file);
+  assert.ok(!/\b(ROW_H|STACK_TABLE_H|GRID_ROW_H|GRID_STACK_H|SESSION_ROW_H|SESSION_STACK_H|CHART_FLEX|READINGS_FLEX|SCREENER_FLEX|FUTURES_FLEX|GRID_FLEX|GRID_BESIDE|CHART_BESIDE)\b/
+   .test(code),`${file} must not declare a geometry of its own: the template owns it`);
+ }
+ const page=CODE('index.tsx');
+ assert.ok(!/\bGRID_BESIDE\b|\bCHART_BESIDE\b/.test(page),'and the page has ONE breakpoint, not two');
+ assert.ok(/BLOCK_BESIDE/.test(page)&&/const stacked=page<BLOCK_BESIDE/.test(page),
+  'which every block is given, together');
 });
-ok(()=>{ // all three are the SAME height: the chart spans both tile rows, not one
- const block=SRC('OiGridSection.tsx');
- for(const name of ['screener','futures','grid'])
-  assert.ok(new RegExp(`const ${name}Style=[^\\n]*:\\{flex:\\w+,minWidth:0,height\\};`).test(block),
-   `${name} must take the block's full height when the three sit side by side`);
- assert.ok(!/futuresStyle=[^\n]*height\s*\/\s*2/.test(block),'the chart is never half the block');
- // and stacked, each gets a height of its own rather than collapsing to nothing
- for(const name of ['screener','futures','grid'])
-  assert.ok(new RegExp(`const ${name}Style=stacked\\?\\{height`).test(block),`${name} needs a stacked height`);
+ok(()=>{ // every block is drawn through the ONE template, with exactly two panels
+ for(const [title,file,chartKey,contentKey] of BLOCKS){
+  const code=SRC(file);
+  assert.ok(/<Block\b/.test(code),`${title}: ${file} must draw its blocks through frame.Block`);
+  assert.ok(code.includes(`'${chartKey}'`)||code.includes(`"${chartKey}"`),
+   `${title}: its CHART panel is ${chartKey}`);
+  assert.ok(code.includes(`'${contentKey}'`)||code.includes(`"${contentKey}"`),
+   `${title}: its CONTENT panel is ${contentKey}`);
+ }
+ // and the widget list is exactly those pairs, in order, under the pinned screener
+ const page=SRC('index.tsx');
+ const list=/export const WIDGET_KEYS=\[([\s\S]*?)\] as const;/.exec(page);
+ assert.ok(list,'index.tsx must list every widget in one place');
+ const keys=(list[1].match(/'[^']+'/g)||[]).map(t=>t.slice(1,-1));
+ const want=['unusual',...BLOCKS.flatMap(([,,c,n])=>[c,n])];
+ assert.deepEqual(keys,want,'the widget list is the pinned screener, then each block\'s chart and content in turn');
 });
-ok(()=>{ // the proportions: the grid keeps the largest share, and neither neighbour is squeezed out
- const block=SRC('OiGridSection.tsx');
- const flex=(name)=>{const m=new RegExp(`\\b${name}=(\\d+(?:\\.\\d+)?)`).exec(block);
-  assert.ok(m,`OiGridSection.tsx must declare ${name}`);return Number(m[1]);};
- const screener=flex('SCREENER_FLEX'),futures=flex('FUTURES_FLEX'),grid=flex('GRID_FLEX');
- assert.ok(screener>0&&futures>0&&grid>0,'no panel is given zero width');
- assert.ok(grid>=futures&&grid>screener,'the 2 x 5 grid keeps the largest share of the row');
- assert.ok(futures>=screener*0.5,'the chart is not squeezed to a smear');
- // at a 1536px row with two 12px gaps, no panel may fall under a width it cannot show its content in
- const row=1536-24,total=screener+futures+grid;
- assert.ok(row*screener/total>=260,'the screener must still fit a contract, a premium and its three readings');
- assert.ok(row*futures/total>=260,'the chart must still fit a candle series and its axis');
- assert.ok(row*grid/total>=800,'and the grid must still fit five tiles across');
+ok(()=>{ // no block invents a third shape: two panels, both taking the style the template hands them
+ for(const file of ['OiGridSection.tsx','OiByStrikeSection.tsx','SessionBlocks.tsx']){
+  const code=SRC(file);
+  const blocks=(code.match(/<Block\b/g)||[]).length;
+  assert.equal((code.match(/\bchart=\{/g)||[]).length,blocks,`${file}: one chart panel per block`);
+  assert.equal((code.match(/\bcontent=\{/g)||[]).length,blocks,`${file}: one content panel per block`);
+  assert.ok(!/<Section\b/.test(code),`${file} must not use the old section shape`);
+ }
+ // the futures build-up block had THREE panels; its two charts share the template's one chart panel now
+ const session=SRC('SessionBlocks.tsx');
+ assert.ok(!session.includes("'fut_basis'"),'the basis is no longer a panel of its own');
+ assert.ok(/<SessionPairPanel/.test(session),'it shares the chart panel with open interest');
+ const panel=SRC('SessionPanel.tsx');
+ assert.ok(/export function SessionPairPanel/.test(panel)&&/<SessionPlot \{\.\.\.top\}/.test(panel)
+  &&/<SessionPlot \{\.\.\.bottom\}/.test(panel),'two plots, one panel, each keeping its own legend and scale');
+ assert.ok(/times=\{times\}/.test(panel),'both drawn on the same reading grid');
 });
-ok(()=>{ // three panels need more room than two: below its own breakpoint the block STACKS rather than
- // quietly dropping the grid under five tiles across, which is what shrinking it would do
- const page=SRC('index.tsx'),block=SRC('OiGridSection.tsx');
- const num=(text,name)=>{const m=new RegExp(`\\b${name}=(\\d+(?:\\.\\d+)?)`).exec(text);
-  assert.ok(m,`${name} must be declared`);return Number(m[1]);};
- const beside=num(page,'GRID_BESIDE'),chartBeside=num(page,'CHART_BESIDE');
- assert.ok(beside>chartBeside,'the three-panel block needs a wider break than a table-and-chart row');
- assert.ok(/stacked=\{stacked\|\|page<GRID_BESIDE\|\|!!expanded\}/.test(page),
-  'and the block must actually be given that break');
- // the five-column promise, measured: page padding, two 12px gaps, the widget border and the grid's padding
- const flex=(n)=>num(block,n);
- const total=flex('SCREENER_FLEX')+flex('FUTURES_FLEX')+flex('GRID_FLEX');
- const gridWidth=(beside-40-24)*flex('GRID_FLEX')/total,inner=gridWidth-22;
+ok(()=>{ // ONE screener on the tab, pinned, and it cannot be closed
+ const page=SRC('index.tsx');
+ assert.equal((page.match(/<ScreenerRail\b/g)||[]).length,1,'the screener is mounted exactly once');
+ // and nowhere else on the tab does a panel read the screener or the list it replaced
+ for(const file of ['OiGridSection.tsx','OiByStrikeSection.tsx','SessionBlocks.tsx','ChainWidget.tsx',
+  'IndexWidget.tsx','FuturesChartPanel.tsx']){
+  const code=CODE(file);
+  assert.ok(!/derivatives\/screener/.test(code)&&!/derivatives\/unusual/.test(code),
+   `${file} must not carry a second copy of the tab's one list`);
+ }
+ assert.equal((page.match(/SCREENER_PATH/g)||[]).length>0,true,'the page makes the one screener read itself');
+ // NOT PINNED, and this is the guard that keeps it that way. The screener was sticky; the owner's verdict on
+ // seeing it was "I can't see anything other than the screener". It is a table beside a signal table, not a
+ // thin strip, so stuck to the top it held most of the window and left a sliver for nine blocks. A reader who
+ // has already chosen an instrument wants to read the blocks, not keep the list they chose from in view.
+ assert.ok(!/stickyHeaderIndices/.test(page),
+  'the page scroller pins nothing: the screener scrolls away with everything else');
+ const rail=SRC('ScreenerSection.tsx');
+ assert.ok(!/Pinned/.test(rail),'and no badge claims it is pinned, because it is not');
+ assert.ok(/backgroundColor:C\.bg/.test(rail),'a pinned bar needs an opaque background to scroll under');
+ // it is the tab's control surface, not one of its widgets: no close control anywhere on it
+ assert.ok(!/onClose/.test(rail),'the screener cannot be closed: every block answers to it');
+ assert.ok(/export const PINNED_KEY/.test(page)&&/if\(key!==PINNED_KEY&&raw\[key\]===true\)/.test(page),
+  'and it can never be restored from storage into a hidden state');
+});
+ok(()=>{ // the five-column promise, measured at the ONE breakpoint the whole tab shares
+ const block=SRC('OiGridSection.tsx');
+ const beside=frameNum('BLOCK_BESIDE'),chartFlex=frameNum('BLOCK_CHART_FLEX'),
+  contentFlex=frameNum('BLOCK_CONTENT_FLEX'),gap=frameNum('BLOCK_GAP');
+ assert.ok(contentFlex>chartFlex,'the content panel carries the block\'s substance, so it takes the larger share');
+ // page padding either side, the gutter, the widget border and the grid's own padding
+ const contentWidth=(beside-40-gap)*contentFlex/(chartFlex+contentFlex),inner=contentWidth-22;
  const cols=/width<(\d+)\?2:width<(\d+)\?3:5/.exec(block);
  assert.ok(cols,'gridColumns must still declare its own wrap points');
  assert.ok(inner>=Number(cols[2]),
   `at ${beside}px the grid gets ${Math.round(inner)}px and must still be five tiles across (needs ${cols[2]})`);
- // and one tile must still be wider than the floor the grid itself refuses to go under
  const cell=(inner-8*4)/5;
  assert.ok(cell>=120,`a tile at the breakpoint is ${Math.round(cell)}px and must clear the grid's own 120px floor`);
+ // and the chart panel beside it must still be a chart rather than a smear
+ assert.ok((beside-40-gap)*chartFlex/(chartFlex+contentFlex)>=260,
+  'the chart panel must still fit a candle series and its axis');
 });
-ok(()=>{ // the chart is a widget of the page like every other: closable, restorable, expandable
- const page=SRC('index.tsx');
- assert.ok(/'oi_grid_screener','oi_grid_futures','oi_grid'/.test(page),
-  'oi_grid_futures sits between the screener and the grid in the widget list');
- assert.ok(/shows\('oi_grid_screener'\)\|\|shows\('oi_grid_futures'\)\|\|shows\('oi_grid'\)/.test(page),
-  'closing two of the three must not take the third off the page');
+ok(()=>{ // the one height really is one height: the tallest content panel fits inside it
  const block=SRC('OiGridSection.tsx');
+ const n=(name)=>{const m=new RegExp(`\\b${name}=(\\d+)`).exec(block);
+  assert.ok(m,`OiGridSection.tsx must declare ${name}`);return Number(m[1]);};
+ const tile=n('CELL_PAD')*2+n('BORDER')+n('ROW_GAP')*5+n('TITLE_H')+n('DETAIL_H')
+  +(n('PLOT_H')+n('TIME_H'))+n('CHIP_H')+n('WHAT_H')+n('MEANING_H');
+ // two bands, each with its heading and gap, the block's own padding, and the widget's header and footer
+ const needed=tile*2+2*(14+6)+10+20+38+26;
+ assert.ok(frameNum('BLOCK_H')>=needed,
+  `BLOCK_H is ${frameNum('BLOCK_H')} and the two tile bands need ${needed}: the puts band must not be cut off`);
+});
+ok(()=>{ // the futures chart is a panel of the page like every other: closable, restorable, expandable
+ const page=SRC('index.tsx'),block=SRC('OiGridSection.tsx');
  for(const piece of ["shows('oi_grid_futures')","onExpand('oi_grid_futures')","onHide('oi_grid_futures')"])
   assert.ok(block.includes(piece),`the chart must support ${piece}`);
- assert.ok(/if\(!screener&&!futures&&!grid\)return null/.test(block),
-  'the block disappears only when all three of its panels are closed');
+ assert.ok(/WidgetFrame/.test(SRC('FuturesChartPanel.tsx')),'the chart wears the tab\'s own widget frame');
+ assert.ok(/api\/derivatives\/futures-chart\?underlying=/.test(SRC('FuturesChartPanel.tsx')),
+  'and it reads the fixed futures-chart route');
+ assert.ok(/if\(!left&&!right\)return null/.test(FRAME),
+  'a block disappears only when BOTH of its panels are closed - the template decides that, once');
+ assert.ok(page.includes("'oi_grid_futures'")&&page.includes("'oi_grid'"),
+  'both panels are widgets the reader can close and restore');
+});
+ok(()=>{ // ONE headline figure per block, and it is never a bare number
+ assert.ok(/export function Headline\(/.test(FRAME),'the headline is built in one place');
+ assert.ok(/fontSize:26/.test(FRAME),'at a size nothing else in the block comes close to');
+ assert.ok(/missing\?\(reason\|\|''\):\(against\|\|''\)/.test(FRAME),
+  'and it carries either the comparison that gives it meaning, or the reason there is no figure');
+ assert.ok(/export function headlineAgainst/.test(SRC('logic.ts')),
+  'a comparison is built from the parts that HAVE a value');
+ const dash=L.DASH;
+ assert.equal(L.headlineAgainst('1.01x its 20-day average',`basis ${dash}`),'1.01x its 20-day average',
+  'a part that is a dash is dropped, never printed as half a comparison');
+ assert.equal(L.headlineAgainst(dash,'',null),'','and nothing is printed when nothing has a value');
+ assert.ok(L.maxPainAgainstSpot(23350,null,null).includes('no distance'),
+  'no spot, no distance - and the headline says why rather than trailing off');
+ assert.ok(L.maxPainAgainstSpot(23350,23302,48).includes('above'),
+  'and with both, the strike is placed against the captured spot');
 });
 
 // --- the control: 15-min on arrival, daily one click away, a dead interval disabled and SAID ---------------------------------
@@ -1739,7 +2026,7 @@ ok(()=>{
   L.futuresChartName({tradingsymbol:'NIFTY25SEPFUT',expiry:'2026-09-25'}),L.futuresChartName(null,null),
   L.futuresChartSubtitle({contract:{days_to_expiry:8},candles:[{}]},'15m'),
   L.futuresChartSubtitle({contract:{days_to_expiry:0},candles:[{}]},'1d'),
-  L.futuresNote(null,'15m'),L.futuresNote(null,'1d'),L.BLOCK_DEFAULT_PREMIUM,L.BLOCK_DEFAULT_INDEX,
+  L.futuresNote(null,'15m'),L.futuresNote(null,'1d'),L.BLOCK_DEFAULT_RANKED,L.BLOCK_DEFAULT_INDEX,
   L.futuresChartSpoken({contract:{tradingsymbol:'X',expiry:'2026-09-25'},
    candles:[candle(1,2,1,2,'2026-09-18 09:30'),candle(2,3,1,1,'2026-09-18 09:45')]},'15m','X'),
   L.futuresChartSpoken(null,'1d','X')];
@@ -1793,11 +2080,11 @@ ok(()=>{ // the block really uses it, and every sentence that used to sit under 
  const groups=block.slice(at,block.indexOf('];',at));
  for(const piece of ['delta_oi_text','atm_text','direction_text','price_text','flow_text','block_text',
   'GRID_LEGEND_TEXT','TILE_READING_TEXT','gridBasis(gridBody)','gridSourceText(gridBody?.points_source)',
-  'GRID_GAP_TEXT','SCREENER_FLOOR_TEXT','SCREENER_CLICK_TEXT','floors','chartInfo'])
+  'GRID_GAP_TEXT','GRID_HIGHLIGHT_TEXT','chartInfo'])
   assert.ok(groups.includes(piece),`the definitions panel must still carry ${piece}`);
  // a panel the reader closed takes its group with it: the block never explains what is not on screen
- assert.ok(/lines:!grid\?\[\]:\[/.test(block)&&/lines:!screener\?\[\]:\[/.test(block)
-  &&/lines:futures\?chartInfo:\[\]/.test(block),'a closed panel contributes no group');
+ assert.ok(/lines:!shows\('oi_grid'\)\?\[\]:\[/.test(block)
+  &&/lines:shows\('oi_grid_futures'\)\?chartInfo:\[\]/.test(block),'a closed panel contributes no group');
  // and NOTHING of the old wall is left printed under the panels
  assert.ok(!/fontSize:10,lineHeight:14,color:C\.muted\}\}>\{body\?\.delta_oi_text/.test(block),
   'the ΔOI definition is no longer printed under the grid');
@@ -1809,7 +2096,7 @@ ok(()=>{
  assert.ok(/asOf\?:string;/.test(frame),'the section header can carry the block\'s one as-of line');
  assert.ok(/asOf=\{asOfText\(gridBody\?\.as_of\)\}/.test(block),'and the block gives it one');
  // every panel of the block is marked as living inside one: screener, grid, futures chart
- assert.equal((block.match(/\binBlock\b/g)||[]).length,2,'both panels in this file sit inside the block');
+ assert.equal((block.match(/\binBlock\b/g)||[]).length,1,'the grid panel sits inside the block');
  assert.equal((panel.match(/\binBlock\b/g)||[]).length,1,'and so does the futures chart');
  // the in-block footer prints the panel's own line and NOTHING the block header already printed
  const at=frame.indexOf('{inBlock?('),end=frame.indexOf('footer!==undefined?');
@@ -1818,11 +2105,15 @@ ok(()=>{
  assert.ok(!/asOfText|floorsText/.test(foot),
   'a panel inside a block must not repeat the as-of or the floors its block header already printed');
  // and no panel of the block asks the frame for the full as-of/floors footer by leaving inBlock off
- for(const tag of ['<UnusualScreenerPanel','<FuturesChartPanel','<DeltaOiGrid'])
+ for(const tag of ['<FuturesChartPanel','<DeltaOiGrid'])
   assert.ok(block.includes(tag),`${tag} must be mounted by the block`);
+ assert.ok(!block.includes('<UnusualScreenerPanel'),
+  'and the screener that used to sit beside them is gone: there is ONE screener, pinned at the top');
  assert.equal((block.match(/asOfText\(/g)||[]).length,1,'the block prints an as-of exactly once');
- assert.equal((block.match(/floorsText\(/g)||[]).length,1,'and reads the floors exactly once');
- assert.ok(/onFloors\?\.\(floors\)/.test(block),'which the screener hands up to the block header');
+ // the floors left with the screener that applied them; they are printed on the pinned bar now
+ assert.equal((block.match(/floorsText\(/g)||[]).length,0,'the block no longer reads the floors');
+ assert.ok(SRC('ScreenerSection.tsx').includes('floorsText(body?.floors,body?.floors_text)'),
+  'the pinned screener does, once, beside the rows the floors decided');
 });
 
 // --- no title is cut short at any width the tab draws this block at ----------------------------------------------
@@ -1832,34 +2123,39 @@ ok(()=>{
 // for a title, ordinary case for a subtitle), so a title that passes here has room to spare in the browser.
 const TITLE_PX=8.0,SUB_PX=5.6;
 ok(()=>{
- const frame=SRC('frame.tsx'),block=SRC('OiGridSection.tsx'),page=SRC('index.tsx');
+ const frame=SRC('frame.tsx');
  const bar=/const btn=inBlock\?(\d+):\d+,pad=inBlock\?(\d+):\d+,gap=inBlock\?(\d+):\d+/.exec(frame);
  assert.ok(bar,'frame.tsx must declare the in-block header geometry in one place');
  const btn=Number(bar[1]),pad=Number(bar[2]),gap=Number(bar[3]);
  // titleBlock, spacer, refresh, expand, close = five children and four gaps
  const chrome=2+pad+2+gap*4+4+btn*3;
- const num=(text,name)=>{const m=new RegExp(`\\b${name}=(\\d+(?:\\.\\d+)?)`).exec(text);
-  assert.ok(m,`${name} must be declared`);return Number(m[1]);};
- const flex={screener:num(block,'SCREENER_FLEX'),futures:num(block,'FUTURES_FLEX'),grid:num(block,'GRID_FLEX')};
- const total=flex.screener+flex.futures+flex.grid;
- const beside=num(page,'GRID_BESIDE');
- // the narrowest width the three still sit side by side at: page padding 20 either side, two 12px gaps
- const row=beside-40-24;
- const box=(key)=>row*flex[key]/total-chrome;
- // the longest title each panel can ever show. A futures tradingsymbol is a root of at most ~11 characters
- // plus "26SEPFUT", and the panel now shows the contract alone.
- const titles={screener:'Unusual contracts',grid:'Strikes at the money',futures:'BAJAJFINSV26SEPFUT'};
- // the two fixed titles are read straight out of the source, so a longer one cannot slip past this
- for(const m of block.matchAll(/name="([^"]+)"/g)){
-  const key=/strike/i.test(m[1])?'grid':'screener';
-  assert.ok(m[1].length*TITLE_PX<=box(key),
-   `at ${beside}px the ${key} panel gives its title ${Math.round(box(key))}px and "${m[1]}" needs ${Math.round(m[1].length*TITLE_PX)}px`);
- }
+ const beside=frameNum('BLOCK_BESIDE'),chartFlex=frameNum('BLOCK_CHART_FLEX'),
+  contentFlex=frameNum('BLOCK_CONTENT_FLEX'),gutter=frameNum('BLOCK_GAP');
+ // the narrowest width the two panels still sit side by side at: page padding 20 either side, one gutter
+ const row=beside-40-gutter;
+ const box=(key)=>row*(key==='chart'?chartFlex:contentFlex)/(chartFlex+contentFlex)-chrome;
+ // The longest title each panel of the template can ever show. Every block is measured, not just one: that is
+ // what "the same header treatment" has to mean if it is to survive the next edit.
+ const titles={
+  chart:'BAJAJFINSV26SEPFUT',            // the futures chart panel, named for its contract
+  content:'Strikes at the money',
+ };
+ // the fixed titles are read straight out of the source, so a longer one cannot slip past this
+ for(const file of ['OiGridSection.tsx','OiByStrikeSection.tsx','ChainWidget.tsx','SessionPanel.tsx'])
+  for(const m of SRC(file).matchAll(/name="([^"]+)"/g))
+   assert.ok(m[1].length*TITLE_PX<=box('chart'),
+    `at ${beside}px the narrower panel gives its title ${Math.round(box('chart'))}px and "${m[1]}" needs ${Math.round(m[1].length*TITLE_PX)}px`);
+ // the session panels are titled by their block, so those titles are checked where they are written
+ for(const text of ['PCR through the session','Max pain against spot','ATM implied volatility',
+  'Futures open interest and basis','Latest futures reading','Volatility by strike','Latest max pain',
+  'Latest PCR reading'])
+  assert.ok(text.length*TITLE_PX<=box('chart'),
+   `at ${beside}px a panel title has ${Math.round(box('chart'))}px and "${text}" needs ${Math.round(text.length*TITLE_PX)}px`);
  for(const [key,text] of Object.entries(titles))assert.ok(text.length*TITLE_PX<=box(key),
   `at ${beside}px the ${key} panel gives its title ${Math.round(box(key))}px and "${text}" needs ${Math.round(text.length*TITLE_PX)}px`);
  // and the subtitle beside it, at the same width
- const subs={screener:'Over the floors',futures:'25 Sep 2026 · 8 days to expiry',
-  grid:'NIFTY · 2026-09-25 · ATM 23,350 · spot ₹23,346.40'};
+ const subs={chart:'25 Sep 2026 · 8 days to expiry',
+  content:'NIFTY · 2026-09-25 · ATM 23,350 · spot ₹23,346.40'};
  for(const [key,text] of Object.entries(subs))assert.ok(text.length*SUB_PX<=box(key),
   `at ${beside}px the ${key} subtitle needs ${Math.round(text.length*SUB_PX)}px and has ${Math.round(box(key))}px`);
  // stacked, each panel is the page wide: the narrowest phone the tab renders at must still fit every title
@@ -1869,12 +2165,12 @@ ok(()=>{
 });
 ok(()=>{ // the titles really are those strings, and the long ones the owner saw are gone
  const block=SRC('OiGridSection.tsx');
- assert.ok(block.includes('name="Unusual contracts"'),'the screener\'s title is the short one');
- assert.ok(block.includes('name="Strikes at the money"'),'and so is the grid\'s');
+ assert.ok(block.includes('name="Strikes at the money"'),'the grid\'s title is the short one');
  for(const old of ['Unusual derivative screener','ΔOI by strike · ten strikes at the money'])
   assert.ok(!block.includes(old),`"${old}" was cut short in its own header and must not come back`);
- assert.ok(/subtitle=\{\(rules\|\|\[\]\)\.length\?rulesLine:SCREENER_IDLE_SUB\}/.test(block),
-  'and with no filter in force the screener says so in a phrase that fits');
+ // the one screener on the tab is titled once, on the pinned bar
+ assert.ok(SRC('UnusualWidget.tsx').includes('name="Screener"'),'the pinned screener keeps its short title');
+ assert.ok(!block.includes('Unusual contracts'),'and the copy that lived in this block is gone with it');
 });
 
 // --- both tile rows are the same height, to the pixel -------------------------------------------------------------
@@ -1897,23 +2193,22 @@ ok(()=>{
   'the second sentence still gets two lines');
 });
 
-// --- the OI-by-strike section no longer owns 600px of page while showing one sentence -----------------------------
+// --- a block with no symbol yet collapses rather than owning 600px of page for one sentence -----------------------
 ok(()=>{
- const sect=SRC('OiByStrikeSection.tsx'),page=SRC('index.tsx');
- const idle=/export const IDLE_H=(\d+);/.exec(SRC('frame.tsx'));
+ const sect=SRC('OiByStrikeSection.tsx'),frame=SRC('frame.tsx');
+ const idle=/export const IDLE_H=(\d+);/.exec(frame);
  assert.ok(idle,'frame.tsx must declare, once, the height an unchosen widget needs');
- assert.ok(/\bIDLE_H\b/.test(sect)&&/\bIDLE_H\b/.test(page),
-  'and every section that collapses must use that one number, not its own');
- const rowH=/\bROW_H=(\d+)/.exec(page);
- assert.ok(rowH&&Number(idle[1])<Number(rowH[1])/2,
-  'and it must be well under the height the section takes when it has a symbol');
- assert.ok(/const idle=!underlying;/.test(sect),'the collapse is driven by there being no symbol yet');
- assert.ok(/const tableH=idle\?IDLE_H:height;/.test(sect)&&/height:idle\?IDLE_H:chartHeight\+150/.test(sect),
-  'both panels of the section collapse together, so the row stays square');
- assert.ok(/note=\{idle\?undefined:/.test(sect),'and an empty panel prints no footer line about rows it has not got');
- // nothing about WHAT it says changed: the same empty sentence, the same note when there is a symbol
- assert.ok(sect.includes('Add a "Symbol is …" filter to see open interest by strike.'),
-  'the empty sentence is untouched');
+ assert.ok(Number(idle[1])<frameNum('BLOCK_H')/2,
+  'and it must be well under the one height a block takes when it has a symbol');
+ // the collapse is the TEMPLATE's decision now, taken once for both panels together, so a block where one
+ // panel shrank and the other did not is not a shape the code can make any more
+ assert.ok(/const h=height\|\|\(idle\?IDLE_H:BLOCK_H\);/.test(frame),
+  'the template collapses BOTH panels of a block together, from one height');
+ assert.ok(/const idle=!underlying;/.test(sect),'and a block says when it has no symbol yet');
+ assert.ok(/idle=\{idle\}/.test(sect),'which is what it hands the template');
+ assert.ok(/note=\{idle\?undefined:/.test(sect),'an empty panel prints no footer line about rows it has not got');
+ // nothing about WHAT it says changed beyond naming the pinned screener as where a symbol comes from
+ assert.ok(sect.includes('to see open interest by strike.'),'the empty sentence still names what is missing');
  assert.ok(sect.includes('neither is a forecast.'),'and so is the max-pain note');
 });
 
@@ -1927,8 +2222,7 @@ ok(()=>{
   assert.deepEqual(said,[],`${file}: a string the reader can reach must not predict: ${said.join(' | ')}`);
  }
  // the sentences this change introduced, whatever the data does
- for(const name of ['TILE_READING_TEXT','SCREENER_FLOOR_TEXT','SCREENER_CLICK_TEXT','SCREENER_IDLE_SUB',
-  'GRID_GAP_TEXT']){
+ for(const name of ['TILE_READING_TEXT','GRID_HIGHLIGHT_TEXT','GRID_GAP_TEXT']){
   const m=new RegExp(`export const ${name}='([^']*)'`).exec(SRC('OiGridSection.tsx'));
   assert.ok(m,`OiGridSection.tsx must declare ${name}`);
   assert.ok(!banned.test(m[1]),`${name} must not predict: ${m[1]}`);
@@ -1973,7 +2267,10 @@ ok(()=>{ // the shared six keep the SAME inclusive translations they already had
 });
 ok(()=>{ // a rule restored from localStorage is re-typed before it can reach the wire
  for(const junk of [[rule('volumeRatio','gt','0')],[rule('volumeRatio','gt','-2')],[rule('volumeToOi','gt','abc')],
-  [rule('buildup','is','long_buildup')],[rule('buildup','is','bull')],[rule('buildup','is','long_buildup')],[rule('moneyness','is','deep')],
+  // P05: 'long_buildup' USED to be junk here, because the rule carried the wire string and the id was a
+  // stranger to it. The id is now the canonical rule value and the wire string is made at the edge, so the
+  // junk that belongs on this line is a value NEITHER vocabulary holds.
+  [rule('buildup','is','bull')],[rule('buildup','is','Long buildup!')],[rule('moneyness','is','deep')],
   [rule('market','is','crypto')],
   [rule('oiChange15m','gt','-5')],[rule('oiChange15m','gt','1e9')],[rule('volumeRatio','is','2')]])
   assert.equal(L.screenerQuery(junk),'',JSON.stringify(junk));
@@ -2266,12 +2563,21 @@ ok(()=>{ // the MARKING, on screen, everywhere an implied volatility appears
  // 3. the line's own legend entry
  assert.ok(/\{key:'iv',label:IV_ATM_LABEL,color:C\.mint,values:iv,format:ivText,tag:IV_COMPUTED_TAG\}/.test(blocks),
   'the legend entry beside the latest value carries it');
- assert.ok(/\{line\.tag\?` \$\{line\.tag\}`:''\}/.test(panel),'and the legend prints it');
- // 4. the legs list header AND every solved row
- assert.ok(/<T style=\{head\}>Implied vol<\/T><Tag label=\{IV_COMPUTED_TAG\}\/>/.test(blocks),
-  'the legs list says it in its column header');
- assert.ok(/ivText\(last\.iv_pct\?\?last\.iv\)\}<\/T>\n\s*<Tag label=\{IV_COMPUTED_TAG\}\/>/
-  .test(blocks.replace(/\r/g,'')),'and on every row that has a number');
+ assert.ok(/\{line\.tag\?' '\+line\.tag:''\}/.test(panel),'and the legend prints it');
+ // 4. and the crosshair readout, which is what a reader sees while pointing at the line
+ assert.ok(/\{row\.value\}\{row\.tag\?` \$\{row\.tag\}`:''\}/.test(SRC('frame.tsx')),
+  'a value read off the chart under the pointer carries the tag too');
+ // 4. EVERY TILE of the 2 x 5 grid — the strike list became a grid, and the marking came with it
+ const grid=SRC('IvGridSection.tsx');
+ assert.equal((grid.match(/<Tag label=\{IV_COMPUTED_TAG\}/g)||[]).length,2,
+  'a tile says it twice: once on its title, once beside its number');
+ assert.ok(/height:TITLE_H\}\]\}>[\s\S]{0,400}<Tag label=\{IV_COMPUTED_TAG\} a11y="Computed by a pricing model, not reported by the exchange"\/>/
+  .test(grid.replace(/\r/g,'')),'the title row carries it, and says it to a screen reader');
+ // and it is OUTSIDE every conditional in the tile: a tile that solved nothing is still a computed tile
+ assert.ok(!/\{[^\n]*\?[^\n]*<Tag label=\{IV_COMPUTED_TAG\}/.test(grid),
+  'the label is never made conditional on there being a number');
+ assert.ok(/\{ivText\(value\)\}<\/T>\n\s*<Tag label=\{IV_COMPUTED_TAG\}\/>/.test(grid.replace(/\r/g,'')),
+  'and it rides beside the figure itself');
  // 5. the readings panel's own line
  assert.ok(/tag:\(body\?\.latest_iv_pct\?\?body\?\.latest_iv\)==null\?undefined:IV_COMPUTED_TAG/.test(blocks),
   'the latest reading carries it, and a dash does not');
@@ -2298,12 +2604,14 @@ ok(()=>{ // the RATE is on screen, not only behind the control
  assert.ok(/heading:'Every other assumption',lines:Object\.values\(body\?\.assumptions\|\|\{\}\)/.test(blocks),
   "the server's own assumptions are all carried, not a selection of them");
 });
-ok(()=>{ // a null is never a blank on a row, and never a drawn point on the line
- const blocks=CODE('SessionBlocks.tsx');
- assert.ok(/const refusal=last\?'':ivLatestRefusal\(leg\.points,reasons\)\|\|String\(leg\.missing_text\|\|''\)/
-  .test(blocks),'a leg without a number works out its reason');
- assert.ok(/:<T numberOfLines=\{3\}[\s\S]{0,160}\{refusal\}<\/T>/.test(blocks),
+ok(()=>{ // a null is never a blank on a tile, and never a drawn point on the line
+ const grid=CODE('IvGridSection.tsx');
+ assert.ok(/const refusal=value!=null\?''\s*\n?\s*:\(ivLatestRefusal\(points,body\?\.reason_text\)/
+  .test(grid.replace(/\r/g,'')),'a tile without a number works out its reason');
+ assert.ok(/<T numberOfLines=\{2\}[\s\S]{0,120}\{refusal\}<\/T>/.test(grid),
   'and prints that reason where the number would have been');
+ // the reason box is ALWAYS reserved, so a refused tile is the same height as a solved one
+ assert.ok(/<View style=\{\{height:REASON_H\}\}>/.test(grid),'and the room for it is always there');
  // the line itself: a null value is a null point, so the path breaks rather than joining through it
  const scaled=L.scaleValues([0.18,null,0.2,0.21],100,50);
  assert.equal(scaled.points[1],null,'a reading with no volatility is not a point');
@@ -2661,7 +2969,9 @@ ok(()=>{ // the owner's order: Customize wins, then the row last clicked, then t
  assert.deepEqual({...L.resolveTabSymbol('','TCS','INFY','NIFTY')},
   {symbol:'TCS',defaulted:false,label:''},'then the row the reader clicked - and that is a choice, not a default');
  assert.deepEqual({...L.resolveTabSymbol('','','INFY','NIFTY')},
-  {symbol:'INFY',defaulted:true,label:L.BLOCK_DEFAULT_PREMIUM});
+  {symbol:'INFY',defaulted:true,label:L.BLOCK_DEFAULT_RANKED});
+ assert.deepEqual({...L.resolveTabSymbol('','','INFY','NIFTY','Unusual first')},
+  {symbol:'INFY',defaulted:true,label:'Unusual first'},"and the server's own ranking label reaches the badge");
  assert.deepEqual({...L.resolveTabSymbol('','','','NIFTY')},
   {symbol:'NIFTY',defaulted:true,label:L.BLOCK_DEFAULT_INDEX});
  assert.deepEqual({...L.resolveTabSymbol('','','','')},{symbol:'',defaulted:false,label:''});
@@ -2669,7 +2979,9 @@ ok(()=>{ // the owner's order: Customize wins, then the row last clicked, then t
 });
 ok(()=>{ // a defaulted symbol still SAYS it is a default, and a chosen one is just itself
  assert.equal(L.symbolBadge({symbol:'NIFTY',defaulted:true,label:'Default'}),'Default: NIFTY');
- assert.equal(L.symbolBadge({symbol:'INFY',defaulted:true,label:L.BLOCK_DEFAULT_PREMIUM}),'Busiest by premium: INFY');
+ assert.equal(L.symbolBadge({symbol:'INFY',defaulted:true,label:L.BLOCK_DEFAULT_RANKED}),
+  'First in the screener order: INFY');
+ assert.equal(L.symbolBadge({symbol:'INFY',defaulted:true,label:'Unusual first'}),'Unusual first: INFY');
  assert.equal(L.symbolBadge({symbol:'RELIANCE',defaulted:false,label:''}),'RELIANCE');
  assert.equal(L.symbolBadge({symbol:'',defaulted:false,label:''}),'');
  assert.equal(L.symbolBadge(null),'');
@@ -2679,14 +2991,20 @@ ok(()=>{ // the PAGE resolves it once, and every block on the page is handed tha
  assert.equal((page.match(/resolveTabSymbol\(/g)||[]).length,1,'the tab resolves its symbol exactly once');
  assert.ok(/const symbol=choice\.symbol,badge=symbolBadge\(choice\)/.test(page),'and keeps it in one place');
  // every block that takes a symbol is given THAT one, by name - never its own lookup
- assert.ok(/<ChainWidget underlying=\{symbol\}/.test(page),'the option chain');
+ assert.ok(/<ChainWidget key="chain" underlying=\{symbol\}/.test(page),'the option chain');
  assert.ok(/<OiByStrikeSection underlying=\{symbol\}/.test(page),'the strikes');
  assert.ok(/<OiGridSection symbol=\{symbol\}\n?\s*badge=\{badge\}/.test(page.replace(/\r/g,'')),'the ΔOI block');
  assert.ok(/const sessionProps=\{symbol,choice,badge,/.test(page),'and the four session blocks, through one object');
  for(const tag of ['<PcrSection {...sessionProps}/>','<MaxPainSection {...sessionProps}/>',
-  '<IvSection {...sessionProps}/>','<FuturesBuildupSection {...sessionProps} '])
+  '<IvSection {...sessionProps} ','<FuturesBuildupSection {...sessionProps}/>'])
   assert.ok(page.includes(tag),`${tag} must be given the tab's symbol`);
- assert.ok(/badge=\{badge\}/.test(SRC('ScreenerSection.tsx')),'and the screener block names it too');
+ // The pinned screener names it in the SAME pill every block header uses, so the link between the bar
+ // and everything under it is something the reader SEES rather than something they confirm by reading.
+ assert.ok(/<SymbolPill label=\{badge\} linked=\{linked\} large\/>/.test(SRC('ScreenerSection.tsx')),
+  'and the pinned screener names it in the same pill');
+ assert.ok(/export function SymbolPill/.test(SRC('frame.tsx'))
+  &&/<SymbolPill label=\{badge\} linked=\{linked\}\/>/.test(SRC('frame.tsx')),
+  'which is built once and worn by every block header');
 });
 ok(()=>{ // NO block resolves a symbol of its own, by any route
  for(const file of ['OiGridSection.tsx','FuturesChartPanel.tsx','SessionBlocks.tsx','ScreenerSection.tsx',
@@ -2723,21 +3041,22 @@ ok(()=>{ // clicking a row ANYWHERE re-points the whole tab: every list writes t
 // --- the block rhythm: one as-of, one "How to read this", and no chart-sized voids --------------------------------------
 ok(()=>{
  const blocks=SRC('SessionBlocks.tsx'),screener=SRC('ScreenerSection.tsx');
- // one as-of per block, in the Section header, never once per panel
+ // one as-of per block, in the block header, never once per panel
  assert.equal((blocks.match(/asOf=\{asOfText\(body\?\.as_of\)\}/g)||[]).length,4,'each block prints its as-of once');
  assert.equal((blocks.match(/asOfText\(/g)||[]).length,4,'and only there');
- assert.equal((screener.match(/asOfText\(/g)||[]).length,1,'the screener block too');
- // every panel of every block declares it lives in one, so the frame drops the repeated footer
- assert.equal((SRC('SessionPanel.tsx').match(/\binBlock\b/g)||[]).length,2,
-  'both panel shapes sit inside a block');
+ assert.equal((screener.match(/asOfText\(/g)||[]).length,1,'the pinned screener too');
+ // every panel shape of every block declares it lives in one, so the frame drops the repeated footer
+ assert.equal((SRC('SessionPanel.tsx').match(/\binBlock\b/g)||[]).length,3,
+  'all three panel shapes - the plot, the pair of plots and the readings - sit inside a block');
  // one "How to read this" per block, and the definitions live behind it rather than on the surface
  assert.equal((blocks.match(/<InfoDisclosure /g)||[]).length,4);
  assert.equal((screener.match(/<InfoDisclosure /g)||[]).length,1);
- assert.equal((blocks.match(/<Section /g)||[]).length,4,'four blocks, four sections');
+ assert.equal((blocks.match(/<Block /g)||[]).length,4,'four blocks, four copies of the ONE template');
+ assert.equal((blocks.match(/<Section /g)||[]).length,0,'and no shape of their own');
 });
 ok(()=>{ // a panel showing ONE SENTENCE takes one sentence's height, not a chart's
- const blocks=SRC('SessionBlocks.tsx'),screener=SRC('ScreenerSection.tsx');
- const idle=/export const IDLE_H=(\d+);/.exec(SRC('frame.tsx'));
+ const blocks=SRC('SessionBlocks.tsx'),frame=SRC('frame.tsx');
+ const idle=/export const IDLE_H=(\d+);/.exec(frame);
  assert.ok(idle,'frame.tsx declares that height once');
  assert.ok(/export function oneSentence\(phase:string\)\{return phase==='error';\}/.test(blocks),
   'an unavailable endpoint is one sentence');
@@ -2745,50 +3064,37 @@ ok(()=>{ // a panel showing ONE SENTENCE takes one sentence's height, not a char
   'and so is no symbol at all');
  assert.equal((blocks.match(/const idle=shrink\(symbol,read\.phase\)/g)||[]).length,4,
   'all four blocks collapse on the same rule');
- assert.ok(/idle\?\(stacked\?\{height:IDLE_H\}:\{flex,minWidth:0,height:IDLE_H\}\)/.test(blocks),
-  'to frame.tsx\'s one number, at both layouts');
- assert.ok(/const idle=oneSentence\(read\.phase\)/.test(screener)&&/const tall=idle\?IDLE_H:height/.test(screener),
-  'and so does the screener block');
- // both panels of a block collapse TOGETHER, so the row stays square
- assert.ok(/const tile=chart\?chart\(idle\):null/.test(screener),
-  'the chart beside the screener shrinks with the table rather than standing tall beside it');
+ assert.equal((blocks.match(/idle=\{idle\}/g)||[]).length,4,'and hand that one answer to the template');
+ // the TEMPLATE decides what a collapsed block is worth, once, for BOTH panels together - so a block where
+ // one panel shrank and the other did not is not a shape the code can produce any more
+ assert.ok(/const h=height\|\|\(idle\?IDLE_H:BLOCK_H\);/.test(frame),'to frame.tsx\'s one number');
+ assert.ok(/const panes=paneStyles\(!!stacked,h\);/.test(frame),'at both layouts');
  // a reading that returned nothing is NOT this case and keeps its height: rows will be there at the next one
  assert.ok(!/phase==='empty'/.test(blocks),'an empty READING is not an empty panel and keeps its full height');
- const row=/const SESSION_ROW_H=(\d+),SESSION_STACK_H=(\d+);/.exec(SRC('index.tsx'));
- assert.ok(row&&Number(idle[1])<Number(row[1])/1.5,'and IDLE_H is well under the height a block takes with data');
+ assert.ok(Number(idle[1])<frameNum('BLOCK_H')/1.5,'and IDLE_H is well under the height a block takes with data');
 });
-ok(()=>{ // no title on a new panel is cut short at the widths the tab draws these blocks at
- const frame=SRC('frame.tsx');
+ok(()=>{ // no title on a session panel is cut short at the ONE width the tab draws every block at
+ const frame=SRC('frame.tsx'),blocks=SRC('SessionBlocks.tsx');
  const bar=/const btn=inBlock\?(\d+):\d+,pad=inBlock\?(\d+):\d+,gap=inBlock\?(\d+):\d+/.exec(frame);
  assert.ok(bar,'the in-block header geometry is declared in one place');
  const btn=Number(bar[1]),pad=Number(bar[2]),gap=Number(bar[3]);
  const chrome=2+pad+2+gap*4+4+btn*3;
  const TITLE_PX=8.0;
- const page=SRC('index.tsx'),blocks=SRC('SessionBlocks.tsx');
- const beside=Number(/export const CHART_BESIDE=(\d+)/.exec(page)[1]);
- const three=Number(/export const GRID_BESIDE=(\d+)/.exec(page)[1]);
- // Two-panel blocks (PCR, max pain, IV) split 2.2 : 1 and sit side by side from CHART_BESIDE. The futures
- // block has THREE panels, so - like the ΔOI block - it stacks until GRID_BESIDE rather than squeezing them.
- assert.ok(/<FuturesBuildupSection \{\.\.\.sessionProps\} stacked=\{stacked\|\|page<GRID_BESIDE\|\|!!expanded\}\/>/
-  .test(page),'the three-panel block waits for the room three panels need');
- const box=(width,share,total)=>(width-40-24)*share/total-chrome;
- const pairChart=box(beside,2.2,3.2),pairSide=box(beside,1,3.2);
- const trioChart=box(three,1.4,3.8),trioSide=box(three,1,3.8);
- // which panel each title belongs to, read off the file in the order the panels are built
+ const beside=frameNum('BLOCK_BESIDE'),chartFlex=frameNum('BLOCK_CHART_FLEX'),
+  contentFlex=frameNum('BLOCK_CONTENT_FLEX'),gutter=frameNum('BLOCK_GAP');
+ const row=beside-40-gutter;
+ // ONE pair of widths for every block. The chart panel is the narrower of the two, so measuring every title
+ // against IT is the strict reading - a title that fits there fits anywhere on the tab.
+ const narrow=row*chartFlex/(chartFlex+contentFlex)-chrome;
  const titles=[...blocks.matchAll(/name="([^"]+)"/g)].map(m=>m[1]);
  assert.ok(titles.length>=8,'every session panel has a title');
- const room=(text)=>/^(Latest|Volatility by)/.test(text)
-  ?(/futures/i.test(text)?trioSide:pairSide)
-  :(/^(Futures open interest|Basis through)/.test(text)?trioChart:pairChart);
- for(const text of titles)assert.ok(text.length*TITLE_PX<=room(text),
-  `side by side, that panel gives its title ${Math.round(room(text))}px and "${text}" needs ${Math.round(text.length*TITLE_PX)}px`);
- // stacked on a 360px phone every one of them still fits
- const phone=360-24-chrome;
- for(const text of [...titles,'Screener'])assert.ok(text.length*TITLE_PX<=phone,
-  `stacked on a 360px phone a title has ${Math.round(phone)}px and "${text}" needs ${Math.round(text.length*TITLE_PX)}px`);
- // and nothing is clamped away to make it fit: the titles are short, the layout is not squeezed
- assert.ok(!/numberOfLines=\{1\}[^\n]*\{name\}/.test(SRC('SessionPanel.tsx')),
-  'the panel does not clamp its own name - WidgetFrame owns that, once');
+ for(const text of titles)assert.ok(text.length*TITLE_PX<=narrow,
+  `at ${beside}px a panel has ${Math.round(narrow)}px for its title and "${text}" needs ${Math.round(text.length*TITLE_PX)}px`);
+ // the subtitle under it is the same shape for all four blocks, so it is measured once
+ assert.ok(/export function blockSubtitle/.test(blocks),'one subtitle shape for the family');
+ const sub='BAJAJFINSV · 25 Sep 2026 · 8 days to expiry';
+ assert.ok(sub.length*5.6<=narrow,
+  `the block subtitle needs ${Math.round(sub.length*5.6)}px and has ${Math.round(narrow)}px`);
 });
 
 // --- §5 OVER EVERY STRING THE FIVE BLOCKS ADDED -------------------------------------------------------------------------
@@ -2852,7 +3158,12 @@ ok(()=>{ // amber is a caveat on the DATA, and is not spent on anything else in 
  const panel=SRC('SessionPanel.tsx'),widget=SRC('UnusualWidget.tsx');
  // the only amber on the chart panel is the server's withheld sentence
  const ambers=[...panel.matchAll(/C\.amber/g)];
- assert.equal(ambers.length,2,'the chart panel and the readings panel spend their amber once each');
+ // The fourth is the reading a figure came from when it is NOT the block's own. That is a caveat on
+ // the data - the number beside it was captured at a different reading - so it is amber too.
+ assert.equal(ambers.length,4,
+  'the plot, the pair of plots, the readings panel and the earlier-reading note, once each');
+ assert.ok(/\{!!row\.at&&!missing&&<T numberOfLines=\{1\} style=\{\[metaText,\{color:C\.amber\}\]\}>/
+  .test(panel),'and a figure from an earlier reading says so where the number is');
  assert.ok(/\{!!caveat&&<T style=\{\[metaText,\{color:C\.amber\}\]\}>\{caveat\}<\/T>\}/.test(panel),
   'and it is the caveat the server sent');
  // on the screener it is the filter that did not run - also a caveat on the rows
@@ -2869,7 +3180,8 @@ ok(()=>{ // a value the server withheld is the SERVER's own sentence, never a bl
  assert.equal((blocks.match(/const caveat=withheldText\(body\)/g)||[]).length,3,
   'PCR, max pain and futures build-up each carry the reasons their session is short');
  assert.ok(/const rateCaveat=ivRateIsAssumed\(body\)/.test(blocks),'and IV carries its own, about the rate');
- assert.equal((blocks.match(/caveat=\{caveat\}/g)||[]).length,7,'and every panel of those three prints it');
+ // the futures block's TWO charts share one panel now, so its three caveats became two
+ assert.equal((blocks.match(/caveat=\{caveat\}/g)||[]).length,6,'and every panel of those three prints it');
  assert.equal((blocks.match(/caveat=\{rateCaveat\}/g)||[]).length,2,'as do both IV panels');
  // the tally and the sentences behind it go into the block's one disclosure, marked as what is missing
  assert.equal((blocks.match(/gapGroup\(body\)/g)||[]).length,3);
@@ -3126,8 +3438,37 @@ ok(()=>{ // and the ROW keeps its dash, because there the label beside it says w
   .test(blocks));
  assert.ok(/reason:BASIS_NO_SPOT_ROW/.test(blocks),'and the reason stands under it');
  assert.ok(/A basis needs a futures price and a spot at the same reading\./.test(CODE('logic.ts')));
- // the same shape as max pain's, which is the other derived figure with a missing input
- assert.ok(/reason:'Distance needs both a strike and a spot at the same reading\.'/.test(blocks));
+ // THE SAME SHAPE AS MAX PAIN'S, which is the other derived figure with a missing input - except that max
+ // pain's reason is the SERVER'S, not a sentence written in the page.
+ //
+ // The page used to hard-code "no reading of this session carried both", and that is false in the very case
+ // the dash appears in most often: on 18 Sep 2026 the 11:30 reading carried a strike AND a spot, while the
+ // newest strike (15:45) had no spot beside it. The server already tells the three cases apart - no strike at
+ // all, no spot at all, and no spot at THIS strike's reading - and `latest_distance_reason` says which.
+ assert.ok(/reason:body\?\.latest_distance_reason\|\|undefined/.test(blocks),
+  "the distance row must print the server's own reason");
+ assert.ok(!/no reading of this session carried both/.test(blocks),
+  'and must not claim the session carried no pair when an earlier reading did');
+ assert.ok(/'no_spot_at_reading':\('The reading that carries this max-pain strike carries no spot/.test(DERIV_PY),
+  'the server distinguishes a strike with no spot at ITS reading from a session with no spot at all');
+ assert.ok(/'latest_distance_reason':\(DISTANCE_REASONS\.get\(gap_reason\) if gap_reason else None\)/.test(DERIV_PY),
+  'and serves it under the name the page reads');
+ // BOTH TIMES OR NEITHER. A 15:45 strike beside an 11:30 spot with only the spot time-stamped reads as one
+ // reading. Whichever of the two the caller can name, the comparison names.
+ assert.equal(L.maxPainAgainstSpot(23350,23302,48,'at 11:30','at 15:45'),
+  'strike at 15:45 · spot ₹23,302.00 at 11:30 · the strike is 48 above it');
+ assert.equal(L.maxPainAgainstSpot(23350,23302,48,'at 11:30'),
+  'spot ₹23,302.00 at 11:30 · the strike is 48 above it','and a caller with only one time still says it');
+ assert.ok(/maxPainAgainstSpot\(body\?\.latest_max_pain_strike,body\?\.latest_spot,body\?\.latest_distance,pairAt\('spot'\),\s*pairAt\('max_pain_strike'\)\)/
+  .test(blocks),"and the max-pain headline passes the strike's own reading through");
+ // AND THE STAMP IS SUPPRESSED ONLY WHEN THE PAIR AGREES. The block-wide `at()` hides a stamp that equals
+ // the block's as-of - which on 18 Sep 2026 was the 15:45 strike itself, so the line stamped the 11:30 spot
+ // and left the strike bare, reading as one reading.
+ assert.ok(/const samePair=body\?\.latest_max_pain_strike_at===body\?\.latest_spot_at;/.test(blocks));
+ assert.ok(/const pairAt=\(key:string\)=>figureAtText\(\(body as any\)\?\.\[`latest_\$\{key\}_at`\],samePair\?body\?\.as_of:null\);/
+  .test(blocks),'the pair stamps itself against the OTHER figure, not against the block');
+ assert.equal(L.figureAtText('2026-09-18 15:45',null),'at 15:45','with no as-of every figure names its reading');
+ assert.equal(L.figureAtText('2026-09-18 15:45','2026-09-18 15:45'),'','and a figure at its own as-of stays bare');
  // every readings row whose value can be a dash carries a reason for it
  const rows=[...blocks.matchAll(/{label:'[^']+',value:[^}]*?}/g)].map(m=>m[0]);
  assert.ok(rows.length>=14,`the readings rows look unread: ${rows.length}`);
@@ -3155,9 +3496,31 @@ ok(()=>{ // and the ROW keeps its dash, because there the label beside it says w
 // "around", to a zone, a band or a line, or to a number anywhere in the same sentence. Every OTHER use is
 // refused too, so the allowance is exactly two sentences and not a doorway.
 //
-// IF YOU ARE HERE BECAUSE A SWEEP FLAGGED THE OWNER'S SENTENCES: do not reword them. Add them to the allow list.
+// THE SAME ALLOWANCE COVERS HIS OI INTERPRETATION COLUMN, and for the same reason. He wrote that table too -
+// "More resistance than support", "Resistance reducing + support increasing", "Resistance increasing + support
+// weakening" - and in every one of them:
+//
+//     "RESISTANCE" AND "SUPPORT" ARE NAMES FOR WHERE OPTION WRITERS HAVE BUILT POSITIONS, AT THIS READING.
+//     THEY ARE NOT LEVELS.
+//
+// A LEVEL is a price the market is claimed to respect: "resistance at 23,500", "support near 23,300", "23,500 is
+// resistance". Those stay banned, with a number and without one, and the mutation tests below prove it.
+//
+// TWO OWNER-SPECIFIED VOCABULARIES NOW LIVE ON THIS TAB, AND BOTH ARE DELIBERATE: his MARKET SIGNAL column
+// (Bullish / Bearish / Flat, guarded further up this file) and his OI INTERPRETATION column (here). He had
+// previously asked for BOTH to be removed, and he has since asked for BOTH back in writing, with a full
+// specification of each. They are his words, at his explicit written instruction.
+//
+// THIS IS THE THIRD TIME A SWEEP HAS FLAGGED THE OWNER'S OWN COPY. IF YOU ARE HERE BECAUSE OF THAT: DO NOT
+// REWORD WHAT HE WROTE. EXTEND THE ALLOW LIST BELOW.
 // =================================================================================================================
-const OWNER_FLOW_PHRASES=['Sellers are building resistance','Sellers are building support'];
+const OWNER_FLOW_PHRASES=['Sellers are building resistance','Sellers are building support',
+ // his OI INTERPRETATION column, verbatim from the table he wrote
+ 'More resistance than support','Support strengthening','Resistance reducing + support increasing',
+ 'Resistance increasing + support weakening','No meaningful new positioning',
+ // the rest of the closed interpretation table, which names no level either
+ 'More support than resistance','Resistance strengthening','Resistance reducing','Support weakening',
+ 'Both sides adding positions','Both sides reducing positions'];
 const LEVEL_WORD=/\b(support|resistance)\b/i;
 /** '' when a string is clean; otherwise the offending sentence.
  *
@@ -3189,6 +3552,22 @@ ok(()=>{ // and every level form is refused, including the owner's words turned 
   '23,500 is resistance','The book shows resistance here','Buyers are defending support'];
  for(const text of banned)assert.ok(levelForm(text),`this must be refused: ${text}`);
 });
+ok(()=>{ // HIS INTERPRETATION COLUMN: the whole value passes, and the same value with a price does not
+ for(const phrase of ['More resistance than support','Support strengthening',
+  'Resistance reducing + support increasing','Resistance increasing + support weakening',
+  'No meaningful new positioning'])
+  assert.equal(levelForm(phrase),'',`the owner's own interpretation must pass: ${phrase}`);
+ // the allowance is the WHOLE VALUE and never a substring - a price turns any of them into a level
+ for(const text of ['Resistance increasing + support weakening at 23,500',
+  'More resistance than support near 23,300','Support strengthening around 23,000',
+  'Resistance reducing + support increasing above 23,500','More resistance than support at the 23,300 level'])
+  assert.ok(levelForm(text),`his words turned into a price must still be refused: ${text}`);
+ // and every value the interpretation table can actually produce is on the allow list
+ for(const text of Object.values(L.SIGNAL_INTERPRETATIONS))
+  assert.equal(levelForm(text),'',`the interpretation table must not name a level: ${text}`);
+ for(const text of [L.SIGNAL_MORE_CALLS,L.SIGNAL_MORE_PUTS,L.SIGNAL_BALANCED])
+  assert.equal(levelForm(text),'',`the both-building readings must not name a level: ${text}`);
+});
 ok(()=>{ // NOTHING the reader can reach on this tab is a level form - on either side
  const files=fs.readdirSync(path.join(__dirname,'..','src','derivative')).filter(f=>/\.tsx?$/.test(f));
  assert.ok(files.length>=15,`the tab's files look unread: ${files.length}`);
@@ -3211,17 +3590,31 @@ ok(()=>{ // the two sentences are still there, VERBATIM, on both sides
  // This is the guard against the well-meaning fix. If someone "cleans up" the owner's wording, this fails and
  // points at the paragraph above rather than letting the table drift away from what he wrote.
  const client=SRC('logic.ts');
+ // The two PER-SIDE sentences are served by the server's own FLOW_LABELS, so both sides must carry them.
+ // His INTERPRETATION values are read together in the browser from the very slots the ΔOI grid drew - the same
+ // place gridBlockRead is computed - so they live in logic.ts and the server serves no such sentence. Both are
+ // his wording and neither may be reworded; only one of them has a server side to check.
+ const OWNER_SERVED_PHRASES=['Sellers are building resistance','Sellers are building support'];
  for(const phrase of OWNER_FLOW_PHRASES){
   assert.ok(client.includes(phrase),
    `"${phrase}" is the owner's own wording and must not be reworded - see the note above this check`);
-  assert.ok(DERIV_PY.includes(phrase),`derivatives.py must serve "${phrase}" verbatim`);
+  if(OWNER_SERVED_PHRASES.includes(phrase))
+   assert.ok(DERIV_PY.includes(phrase),`derivatives.py must serve "${phrase}" verbatim`);
  }
  // and they really are the pair the flow table puts on a written-option reading
  assert.ok(/'CE\|down\|building':\('Call writing increasing','Sellers are building resistance'\)/.test(DERIV_PY));
  assert.ok(/'PE\|down\|building':\('Put writing increasing','Sellers are building support'\)/.test(DERIV_PY));
  const labels=Object.values(L.FLOW_LABELS).flat();
- for(const phrase of OWNER_FLOW_PHRASES)assert.ok(labels.includes(phrase),
+ for(const phrase of OWNER_SERVED_PHRASES)assert.ok(labels.includes(phrase),
   `the browser's flow table must carry "${phrase}" too, so both sides say the same thing`);
+ // and his INTERPRETATION values really are the ones the interpretation table produces - not just strings
+ // sitting in an allow list that nothing on screen uses
+ const interpretations=[...Object.values(L.SIGNAL_INTERPRETATIONS),L.SIGNAL_MORE_CALLS,L.SIGNAL_MORE_PUTS];
+ for(const phrase of ['More resistance than support','Support strengthening',
+  'Resistance reducing + support increasing','Resistance increasing + support weakening',
+  'No meaningful new positioning'])
+  assert.ok(interpretations.includes(phrase),
+   `the interpretation table must produce the owner's own "${phrase}"`);
 });
 ok(()=>{ // every OTHER §5 sweep on this tab must leave the owner's two sentences alone
  // A future tightening that outlaws them would be a real regression, and this is where it gets caught: the
@@ -3242,6 +3635,1204 @@ ok(()=>{ // every OTHER §5 sweep on this tab must leave the owner's two sentenc
 // WHAT WAS RUN, recorded with every run. Two of us changed the bundle and a check script at the same time
 // without recording either, and a script change read as a product regression. The summary carries this
 // script's own hash and the exported bundle's timestamp, exactly as scripts/check-discover.e2e.cjs does.
+
+// =================================================================================================================
+// THE TAB MUST NOT LAND ON A DEAD READING
+//
+// Measured on the real store, 18 Sep 2026: nine readings from 09:30 to 11:30 with 157-491 contracts over the
+// floors, then SEVENTEEN readings from 11:45 to 15:45 with none at all. The afternoon was rebuilt from 15-minute
+// candles after the capture died, and a candle carries no traded-price average - so `premium_cr` is NULL for
+// every contract in those readings and nothing in them can ever clear the 2-crore floor.
+//
+// The tab defaulted to the newest reading. So the screener was empty, there was no row to click, and every block
+// on the page stayed on its fallback index: "why other stocks are not populating".
+//
+// The fix is a DEFAULT, not a filter. The server opens on the newest reading that HAS contracts over the floors,
+// serves the facts about that choice, and the browser says in plain words which reading is on screen and that it
+// is not the newest. Every reading the store holds is still one click away, the empty ones included.
+//
+// WHAT IS NOT DONE, and must not be: the store also carries an ESTIMATED traded price. Using it here would let a
+// model's number decide what the reader can see. The floors decide visibility, so the floors rest on what the
+// exchange reported and on nothing else.
+// =================================================================================================================
+ok(()=>{ // the server resolves the usable reading, next to the coverage it already computes
+ assert.ok(/def _clears_floors\(self,at,names=None\):/.test(DERIV_PY),
+  'derivatives.py must be able to ask whether ONE reading has anything over the floors');
+ assert.ok(/def _usable_reading\(self,readings\):/.test(DERIV_PY),
+  'and to walk back to the newest reading that has');
+ const probe=DERIV_PY.slice(DERIV_PY.indexOf('def _clears_floors'),DERIV_PY.indexOf('def _usable_reading'));
+ // the SAME three floors the screener applies, over the same columns - not a second, looser definition
+ assert.ok(/premium_cr>=\?/.test(probe)&&/FLOOR_PREMIUM_CR/.test(probe),'the premium floor');
+ assert.ok(/last_price>=\?/.test(probe)&&/FLOOR_LAST_PRICE/.test(probe),'the last-price floor');
+ assert.ok(/oi>=lot_size\*\?/.test(probe)&&/FLOOR_OI_LOTS/.test(probe),
+  'and the open-interest floor, worked out against the contract\'s own lot size exactly as _passes does');
+ assert.ok(/limit 1/.test(probe),'it stops at the first row: this is a question, not a count');
+ // and it rests on nothing a model produced
+ assert.ok(!/average_price_est/.test(DERIV_PY),
+  'a number that decides what the reader SEES must be one the exchange reported, never an estimate');
+});
+ok(()=>{ // the screener opens on it, and an explicitly chosen reading is never overridden
+ const fn=DERIV_PY.slice(DERIV_PY.indexOf('def screener(self,filters=None'),
+  DERIV_PY.indexOf('def _screener_row'));
+ assert.ok(/asked_for_reading=bool\(at\)/.test(fn),'the server knows whether the reader chose the reading');
+ assert.ok(/at,skipped=self\._usable_reading\(readings\)/.test(fn),
+  'and resolves the usable one ONLY when they did not');
+ const chosen=fn.indexOf("if at:"),resolved=fn.indexOf('self._usable_reading(readings)');
+ assert.ok(chosen>0&&chosen<resolved,'a reading the reader named is honoured before anything else is tried');
+ assert.ok(/if not at:at=newest/.test(fn),
+  'and a store with no reading list still falls back to its newest metric row, as it always did');
+ // the facts the browser needs, served rather than guessed at
+ for(const key of ['newest_at','reading_at','reading_is_newest','reading_chosen','reading_skipped','reading_rule'])
+  assert.ok(new RegExp(`'${key}'`).test(DERIV_PY),`the response must carry ${key}`);
+ assert.ok(/READING_RULE_TEXT=\(/.test(DERIV_PY),'and the RULE itself is one served sentence');
+ assert.ok(!MARK_WORD.test(pySentence('READING_RULE_TEXT')),
+  'which says "15-min reading", never "mark"');
+ const banned=/\b(will|expect|forecast|predict|likely|bullish|bearish)\b/i;
+ assert.ok(!banned.test(pySentence('READING_RULE_TEXT')),'and predicts nothing');
+});
+ok(()=>{ // the BROWSER says which reading is on screen, and only when that is worth saying
+ const dash=L.DASH;
+ // on the newest reading there is nothing to say
+ assert.equal(L.readingNote({reading_is_newest:true,reading_at:'2026-09-18 15:45',newest_at:'2026-09-18 15:45'}),'');
+ assert.equal(L.readingNote(null),'');
+ assert.equal(L.readingNote({}),'');
+ // the fallback: the reading, the fact that it is NOT the newest, the newest, and why
+ const note=L.readingNote({reading_is_newest:false,reading_chosen:false,reading_skipped:17,
+  reading_at:'2026-09-18 11:30:00',newest_at:'2026-09-18 15:45:00'});
+ assert.ok(note.includes('18 Sep 2026 · 11:30'),'it names the reading on screen');
+ assert.ok(/NOT the newest/.test(note),'it says plainly that this is not the newest');
+ assert.ok(note.includes('18 Sep 2026 · 15:45'),'and names the one it is not');
+ assert.ok(/17 readings after it/.test(note),'and says how many newer readings hold nothing over the floors');
+ assert.ok(/Any reading can be chosen/.test(note),'and that the reader can still go to any of them');
+ assert.ok(!/mark/i.test(note),'in the owner\'s words, not ours');
+ // a reading the READER chose is described as their own choice, never as a fallback
+ const picked=L.readingNote({reading_is_newest:false,reading_chosen:true,reading_skipped:0,
+  reading_at:'2026-09-18 09:45:00',newest_at:'2026-09-18 15:45:00'});
+ assert.ok(/the one chosen above/.test(picked)&&!/NOT the newest/.test(picked),
+  'a chosen reading is not a fallback and must not be reported as one');
+ assert.ok(picked.includes('The newest this store holds is 18 Sep 2026 · 15:45'));
+ // and only the fallback is treated as a caveat on the data
+ assert.equal(L.readingIsFallback({reading_is_newest:false,reading_chosen:false}),true);
+ assert.equal(L.readingIsFallback({reading_is_newest:false,reading_chosen:true}),false);
+ assert.equal(L.readingIsFallback({reading_is_newest:true}),false);
+ assert.equal(L.readingIsFallback(null),false);
+ assert.equal(L.readingLabel(null),'');
+ assert.equal(L.readingLabel('2026-09-18 11:30:00'),'18 Sep 2026 · 11:30');
+ assert.notEqual(L.readingLabel('2026-09-18 11:30:00'),dash);
+});
+ok(()=>{ // and the pinned bar really puts it where the reader is looking
+ const rail=SRC('ScreenerSection.tsx');
+ assert.ok(/const note=readingNote\(body\)/.test(rail)&&/const fallback=readingIsFallback\(body\)/.test(rail),
+  'the bar works the note out from the facts the server served');
+ assert.ok(/\{!!note&&<View role="note"/.test(rail),'and prints it, on the bar, above the rows');
+ assert.ok(/backgroundColor:fallback\?C\.amberBg:C\.dark/.test(rail),
+  'a tab that moved itself off the newest reading is AMBER: the newest state of the book is not on screen');
+ assert.ok(/String\(body\?\.reading_rule\|\|''\)/.test(rail),
+  'and the rule behind the choice is in the one "How to read this"');
+ // the reading control is still there, and it still reaches every reading of the session
+ assert.ok(/readings=\{readings\}/.test(rail)&&/onAt=\{onAt\}/.test(rail),
+  'the reader can still move to any reading, the empty ones included');
+ assert.ok(/readingChoices\(body\)/.test(rail),'from the list the server served');
+});
+
+// =================================================================================================================
+// INTERACTION: a terminal answers the reader
+//
+// "Hovering a chart should tell you the values at that moment." Four blocks draw a time series against the same
+// session grid and a reader could see the shape and not one number on it. And the grid, the chain and the
+// volatility list are all about the same strikes and shared no visual link at all.
+//
+// What must hold while they do it: a crosshair READS the series, it never fills one in. A slot the store has no
+// value for still reads as a dash under the pointer, and no ring is drawn where nothing was captured.
+// =================================================================================================================
+ok(()=>{ // one hover mechanism, built once
+ const frame=SRC('frame.tsx');
+ assert.ok(/export function useHoverIndex\(/.test(frame),'pointer-to-index arithmetic lives in one place');
+ assert.ok(/native\?\.pointerType==='touch'/.test(frame),
+  'a finger has no hover, and a tap is a different gesture');
+ assert.ok(/requestAnimationFrame/.test(frame),'at most one update per frame');
+ assert.ok(/Platform\.OS!=='web'/.test(frame),'and nothing at all off the web');
+ assert.ok(/export function CrosshairReadout\(/.test(frame),'and one readout shape for every chart that has one');
+ // every chart on the tab that draws a series can be read off
+ for(const file of ['SessionPanel.tsx','ChartTile.tsx','OiByStrikeSection.tsx']){
+  const code=SRC(file);
+  assert.ok(/useHoverIndex\(/.test(code),`${file} must let the reader read a value off it`);
+  assert.ok(/<CrosshairReadout/.test(code),`${file} must show what is under the pointer`);
+ }
+});
+ok(()=>{ // the crosshair reads the series - it never bridges a gap
+ const panel=SRC('SessionPanel.tsx');
+ assert.ok(/value:line\.format\(\(line\.values\|\|\[\]\)\[cursor as number\]\)/.test(panel),
+  'the readout takes the series\' own value at that reading, through the series\' own formatter');
+ // logic.ts already guarantees that formatter turns a null into a dash - the same rule as everywhere else
+ assert.equal(L.pcrText(null),L.DASH);
+ assert.equal(L.compact(undefined),L.DASH);
+ assert.ok(/const point=scaled\?\.points\?\.\[cursor as number\];\s*\n?\s*return point\?/.test(panel.replace(/\r/g,'')),
+  'and a ring is drawn only where the line HAS a point: nothing is drawn where nothing was captured');
+ assert.ok(/time=\{clock\(times\[cursor as number\]\)\}/.test(panel),
+  'the readout names the reading it is reading, so a value can never be read against the wrong one');
+ // the index can never point outside the readings actually drawn
+ assert.ok(/Math\.max\(0,Math\.min\(count-1,/.test(panel),'the cursor is clamped to the series');
+});
+ok(()=>{ // the same strike is lit wherever it is on the tab
+ const page=SRC('index.tsx');
+ assert.ok(/const \[strikeHover,setStrikeHover\]=useState<number\|null>\(null\)/.test(page),
+  'the tab holds ONE hovered strike, as it holds one target');
+ for(const tag of ['<ChainWidget','<OiByStrikeSection','<OiGridSection','<IvSection'])
+  assert.ok(new RegExp(`${tag}[\\s\\S]{0,900}?highlight=\\{strikeHover\\}`).test(page),
+   `${tag} must be given the hovered strike`);
+ // every one of them lights it the same way, and NONE of them acts on it
+ for(const file of ['ChainWidget.tsx','OiByStrikeSection.tsx','OiGridSection.tsx','SessionBlocks.tsx']){
+  const code=SRC(file);
+  assert.ok(/highlight/.test(code),`${file} must take the hovered strike`);
+  assert.ok(/C\.mint/.test(code),`${file} must light it in the one highlight colour`);
+  assert.ok(!/onTarget\([\s\S]{0,80}highlight/.test(code),
+   `${file} must not let a HOVER change what the tab is pointed at`);
+ }
+ // and it is said, once, in a block's own words
+ assert.ok(/It highlights; it changes nothing\./.test(SRC('OiGridSection.tsx')));
+ assert.ok(/It highlights; it changes nothing\./.test(SRC('OiByStrikeSection.tsx')));
+});
+ok(()=>{ // anything clickable looks clickable, and the keyboard lands exactly where the mouse does
+ const table=SRC('Table.tsx');
+ assert.ok(/onHoverIn=\{\(\)=>onRowHover\?\.\(row\)\}/.test(table)&&/onFocus=\{\(\)=>onRowHover\?\.\(row\)\}/.test(table),
+  'a row reports itself on hover AND on focus: a keyboard reader gets the same link a mouse does');
+ assert.ok(/borderLeftColor:on\|\|st\.focused\?C\.green:glow\?C\.mint:'transparent'/.test(table),
+  'and the rail says which of the three states the row is in');
+ assert.ok(/tabIndex:0/.test(table),'rows are reachable by keyboard');
+ // the same three states on the grid tiles and on the chain
+ assert.ok(/borderWidth:selected\|\|st\.focused\?2:1/.test(SRC('OiGridSection.tsx')),
+  'a focused tile is as loud as a selected one');
+ assert.ok(/borderColor:selected\|\|st\.focused\?C\.green:lit\?C\.mint:C\.line/.test(SRC('OiGridSection.tsx')));
+ assert.ok(/borderWidth:selected\|\|st\.focused\?2:1/.test(SRC('ChainWidget.tsx')),
+  'and so is a focused leg of the chain');
+});
+
+
+// =================================================================================================================
+// ONE ROW PER INSTRUMENT
+//
+// The owner: "Just show one row per instrument - like nifty show one row, stock show one row."
+//
+// The screener listed CONTRACTS, largest premium traded first. At the 11:30 reading of 18 Sep 2026, 85
+// instruments had a contract over the liquidity floors and NIFTY alone held 104 of the 491 contracts - so a
+// hundred-row list was a hundred rows of NIFTY, and the reader's conclusion was the obvious one: no stock is
+// active. That is "why other stocks are not populating".
+//
+// What these checks hold is the part that can quietly go wrong once a row IS an instrument: AN AGGREGATE THAT
+// IS NOT HONEST. A sum of rupees is a sum. A mean of ratios is not a ratio, and none is served.
+// =================================================================================================================
+ok(()=>{ // the aggregate is built on the server, over every row that cleared - never in the browser
+ assert.ok(/def _screener_groups\(self,rows\):/.test(DERIV_PY),
+  'derivatives.py must build the per-instrument rows itself');
+ // EVERY INSTRUMENT TYPE. Options-only hid 129 of the 214 names that clear the floors, which is the same bug
+ // this view exists to fix, one step further down.
+ assert.ok(/INSTRUMENT_TYPES=\('CE','PE','FUT'\)/.test(DERIV_PY),'calls, puts and futures');
+ const screener=DERIV_PY.slice(DERIV_PY.indexOf('def screener(self,filters'),
+  DERIV_PY.indexOf('def _screener_row'));
+ assert.ok(!/clauses\.append\("instrument_type in \('CE','PE'\)"\)/.test(screener),
+  'the screener must not narrow itself to options: a futures-only name is a name where something is happening');
+ // ...and a future has no moneyness, which left alone would be computed from strike 0 and look like a bucket
+ assert.ok(/if str\(option_type or ''\)\.upper\(\) not in OPTION_TYPES:return None/.test(DERIV_PY),
+  'a future has no moneyness and must not be given one');
+ const fn=DERIV_PY.slice(DERIV_PY.indexOf('def _screener_groups'),DERIV_PY.indexOf('def screener(self,filters'));
+ // the SUMS: things that add
+ for(const key of ['premium_cr','volume','oi','oi_change_day','oi_change_15m'])
+  assert.ok(new RegExp(`group\\['${key}'\\]\\+=`).test(fn),`${key} is summed`);
+ // the COUNTS
+ for(const key of ['contracts','calls','puts','volume_baseline_contracts','volume_to_oi_over_1'])
+  assert.ok(new RegExp(`group\\['${key}'\\]\\+=1`).test(fn),`${key} is a count of contracts`);
+ // AND THE REFUSALS. Not one of these may be averaged anywhere in the method.
+ assert.ok(!/sum\(.*volume_ratio/.test(fn)&&!/\/len\(/.test(fn),
+  'nothing in the aggregate is divided by a count: a mean of ratios is not a ratio');
+ assert.ok(/group\['volume_ratio_max'\] is None or ratio>group\['volume_ratio_max'\]/.test(fn),
+  '§3.2 is the LARGEST reading among the instrument\'s contracts');
+ assert.ok(/group\['volume_ratio_max_symbol'\]=row\.get\('tradingsymbol'\)/.test(fn),
+  'and the contract it belongs to is named, so it can never be read as the instrument\'s own');
+ assert.ok(/if row\['volume_to_oi'\]>1:group\['volume_to_oi_over_1'\]\+=1/.test(fn),
+  '§3.3 is a COUNT over the tab\'s own existing threshold');
+ // AND IT TRAVELS WITH ITS DENOMINATOR. The store computes neither §3.2 nor §3.3 for a futures contract, so
+ // an instrument whose whole book is futures has nothing to count - and a zero would read as "nothing
+ // unusual" when the truth is "not measured".
+ assert.ok(/group\['volume_to_oi_contracts'\]\+=1/.test(fn),'and it says what it was counted over');
+ assert.ok(/if not group\['volume_to_oi_contracts'\]:group\['volume_to_oi_over_1'\]=None/.test(fn),
+  'nothing to count is None, never 0');
+ assert.ok(/group\['buildup_counts'\]\[label\]=/.test(fn),'§3.1 is counts per label');
+ // the calls/puts split is the OPTIONS half; a future is neither side of anything
+ assert.ok(/if kind=='CE':group\['calls'\]\+=1;group\['options'\]\+=1/.test(fn));
+ assert.ok(/elif kind=='PE':group\['puts'\]\+=1;group\['options'\]\+=1/.test(fn));
+ assert.ok(/else:group\['futures'\]\+=1/.test(fn),'and a futures contract is counted as one');
+ assert.equal(L.groupSplit({calls:45,puts:59,options:104,futures:2}),'45C / 59P · 2F');
+ assert.equal(L.groupSplit({calls:0,puts:0,options:0,futures:2}),'futures only · 2F',
+  'a name with no listed options must NOT read as 0C / 0P: that would say its options were quiet');
+ assert.equal(L.groupSplit({calls:8,puts:9,options:17,futures:0}),'8C / 9P');
+ assert.equal(L.groupHot({volume_to_oi_over_1:null,volume_to_oi_contracts:0}),DASH,
+  'nothing to count is a dash, never a zero');
+ assert.equal(L.groupHot({volume_to_oi_over_1:67,volume_to_oi_contracts:104}),'67');
+ assert.equal(L.groupOptionsNote({options:0,contracts:2}),'no options listed');
+ assert.equal(L.groupOptionsNote({options:17,contracts:19}),'of 17 options');
+ assert.equal(L.groupOptionsNote({options:19,contracts:19}),'of 19');
+ assert.ok(L.groupHotText({volume_to_oi_over_1:null,volume_to_oi_contracts:0}).includes('not computed for a futures contract'),
+  'and it says why rather than leaving a dash unexplained');
+ // a build-up LABEL for a whole instrument does not exist and must not be invented
+ assert.ok(!/group\['buildup_day'\]|group\['buildup'\]=/.test(fn),
+  'there is no such thing as an instrument\'s build-up label');
+ // spot is passed through, and only when the rows AGREE on it
+ assert.ok(/group\['spot'\]=None;group\['spot_disagrees'\]=True/.test(fn),
+  'a spot the rows disagree on is served as nothing, not as one of the two');
+});
+ok(()=>{ // the tab asks for that list, and shows the reader no other
+ const page=CODE('index.tsx'),widget=SRC('UnusualWidget.tsx'),rail=SRC('ScreenerSection.tsx');
+ assert.ok(/group:SCREENER_VIEW_DEFAULT/.test(page),'the page asks for one row per instrument, by name');
+ assert.equal(L.SCREENER_VIEW_DEFAULT,'underlying');
+ // NO view control anywhere the reader can reach: one list, full stop
+ for(const piece of ['onView','onDrill','All underlyings','Show:'])
+  assert.ok(!widget.includes(piece),`the screener must not offer a mode switch (${piece})`);
+ assert.ok(!/onView|onDrill|view=\{/.test(rail),'and neither must the bar it sits on');
+ // which table is drawn is the SERVER's statement about what it served, not a setting
+ assert.ok(/const grouped=\(body\?\.view\|\|'underlying'\)==='underlying'/.test(widget),
+  'the table draws what the server says it served');
+ // clicking a row points the tab, and does nothing else
+ const pick=widget.slice(widget.indexOf('const pickGroup='),widget.indexOf('const contractColumns'));
+ assert.ok(/onTarget\(\{underlying:row\.underlying/.test(pick),'a row click points the whole tab at it');
+ assert.ok(!/setView|onDrill|scrollTo/.test(pick),'and does not open a second list inside the screener');
+});
+ok(()=>{ // the columns answer "is something happening in this name", and the two that cannot be summed say so
+ const widget=SRC('UnusualWidget.tsx');
+ const block=widget.slice(widget.indexOf('const groupColumns'),widget.indexOf('],[onCustomize]);',
+  widget.indexOf('const groupColumns')));
+ const labels=[...block.matchAll(/label:'([^']+)'/g)].map(m=>m[1]);
+ for(const want of ['Instrument','Contracts','Premium ₹cr','OI chg (day)'])
+  assert.ok(labels.includes(want),`the list must carry ${want}`);
+ // the honest roll-ups are LABELLED as what they are, in the header the reader reads
+ assert.ok(labels.some(l=>/highest/i.test(l)),
+  'the §3.2 column must say in its own header that it is the highest reading, not an average');
+ assert.ok(labels.some(l=>/over 1/i.test(l)),'and the §3.3 column that it is a count');
+ // no column may present a per-contract signal as the instrument's own
+ for(const banned of ['Build-up','Strike','Vol/OI','Moneyness'])
+  assert.ok(!labels.includes(banned),`${banned} is a statement about one contract and must not head a column`);
+ assert.ok(/groupSplit\(r\)/.test(block),
+  'what the book is made of is on the row, through the one helper that knows a future is not a side');
+});
+ok(()=>{ // the sentences that explain the list, and what it refuses to compute
+ const rail=SRC('ScreenerSection.tsx');
+ for(const name of ['SCREENER_GROUP_WHAT','SCREENER_GROUP_SUMS','SCREENER_GROUP_REFUSED','SCREENER_GROUP_DRILL'])
+  assert.ok(new RegExp(`export const ${name}=`).test(rail),`the bar must declare ${name}`);
+ const refused=/export const SCREENER_GROUP_REFUSED='([^']*)'/.exec(rail);
+ assert.ok(refused,'the refusal must be one plain sentence');
+ assert.ok(/mean of ratios is not a ratio/.test(refused[1]),'and it must say why');
+ // The REQUIREMENT is that the sentence says neither signal exists for a futures contract. "Neither is
+ // computed by the store for a FUTURES contract" and "not computed by the store for a FUTURES contract" both
+ // say it; pinning one of the two phrasings pinned the grammar rather than the claim.
+ assert.ok(/computed by the store for a FUTURES contract/.test(refused[1]),
+  'and that neither signal exists for a futures contract at all');
+ assert.ok(/dash rather than a nought/.test(refused[1]),'and what that means on a futures-only row');
+ assert.ok(/\{text:SCREENER_GROUP_REFUSED,tone:'amber' as const\}/.test(rail),
+  'a signal the tab will NOT compute is a caveat on the data, so it is amber');
+ assert.ok(/heading:'One row per instrument'/.test(rail),'and it is all behind the one control');
+ // the formatters never average either
+ assert.equal(L.groupVolumeRatioMax({volume_ratio_max:null}),L.NO_BASELINE);
+ assert.equal(L.groupVolumeRatioMax({volume_ratio_max:2.44}),`2.4${TIMES}`);
+ assert.ok(L.groupVolumeRatioText({volume_ratio_max:2.44,volume_ratio_max_symbol:'NIFTY26SEP23300CE',
+  volume_baseline_contracts:98,contracts:104}).includes('not an average'),
+  'the spoken form says in words that it is one contract\'s reading');
+ assert.ok(L.groupVolumeRatioText({volume_ratio_max:null,volume_baseline_contracts:0,contracts:9})
+  .includes('no ratio to show'),'and with no baseline at all it says that instead of a number');
+ assert.equal(L.groupContracts({contracts:104,calls:45,puts:59}),'104 contracts · 45C / 59P');
+ assert.equal(L.groupContracts(null),DASH);
+ // §3.3 counts over the contracts that CARRY the ratio, not over the whole book: the store computes it for no
+ // futures contract, so the denominator is the options that had one. A count over 104 when only 98 could
+ // carry it would be a count over six contracts that were never measured.
+ assert.ok(L.groupHotText({volume_to_oi_over_1:67,volume_to_oi_contracts:98,contracts:104}).includes('67 of the 98'),
+  'the §3.3 count names the contracts it was counted over');
+ assert.ok(L.groupHotText({volume_to_oi_over_1:null,volume_to_oi_contracts:0,contracts:104})
+  .includes('nothing to count'),
+  'and a book no contract of which carries the ratio says so rather than counting zero');
+ assert.equal(L.groupBuildupText({buildup_counts:{long_buildup:41,short_buildup:32}}),
+  'Long build-up 41 · Short build-up 32');
+ assert.equal(L.groupBuildupText({buildup_counts:{}}),'');
+});
+
+// --- the option chain opens AT THE MONEY --------------------------------------------------------------------
+ok(()=>{ // the reading the tab is on reaches the blocks that need a spot
+ const page=SRC('index.tsx');
+ assert.ok(/const reading=screener\.data\?\.reading_at\|\|screener\.data\?\.coverage\?\.at\|\|''/.test(page),
+  'the page knows which 15-min reading its screener resolved');
+ assert.ok(/<ChainWidget[\s\S]{0,200}at=\{reading\}/.test(page),'and the chain is read at it');
+ assert.ok(/<OiByStrikeSection[\s\S]{0,200}at=\{reading\}/.test(page),'and so are the strikes');
+ // the server: a NAMED reading must never go through the delegate, which has no parameter for one
+ const fn=DERIV_PY.slice(DERIV_PY.indexOf('def chain(self,underlying'),DERIV_PY.indexOf('def _chain_metrics'));
+ assert.ok(/rows,delegated=\(\(\[\],False\) if at/.test(fn),
+  'a named reading reads the store directly: the delegate answers for the newest and would silently return it');
+ assert.ok(/spot=self\._spot\(underlying,as_of\)/.test(fn),'and the spot comes from THAT reading');
+});
+ok(()=>{ // where the chain lands, and what it says when it cannot land anywhere
+ const chain=SRC('ChainWidget.tsx');
+ assert.ok(/const ROW_H=\d+;/.test(chain),'one row height, so the offset can be worked out at all');
+ assert.ok(/height:ROW_H/.test(chain),'and every row really takes it');
+ assert.ok(/const atmIndex=useMemo\(\(\)=>nearestStrikeIndex\(rows,body\?\.spot\)/.test(chain),
+  'the anchor is the strike nearest the captured spot');
+ assert.ok(/useEffect\(\(\)=>\{jump\(false\)\}/.test(chain),'the chain lands there on arrival');
+ assert.ok(/scrollTo\?\.\(\{y:chainStartRow\(rows,body\?\.spot\)\*ROW_H/.test(chain),'at the computed offset');
+ assert.ok(/\{atmIndex==null\?CHAIN_NO_SPOT_TEXT:CHAIN_AT_MONEY_TEXT\}/.test(chain),
+  'and it says which of the two it did');
+ // NOTHING is dropped or reordered to achieve it
+ assert.ok(!/\.slice\(/.test(chain)&&!/\.filter\(/.test(chain),
+  'the whole ladder is still listed: the chain is not windowed, only scrolled');
+ // the arithmetic itself
+ const rows=[{strike:21350},{strike:21400},{strike:23300},{strike:23350},{strike:23400}];
+ assert.equal(L.chainStartRow(rows,23302),0,'three rows of lead, clamped at the top of the list');
+ assert.equal(L.chainStartRow(rows,23302,0),2,'with no lead it is the at-the-money row itself');
+ assert.equal(L.chainStartRow(rows,null),0,'no spot, no anchor - it opens where it always did');
+ assert.equal(L.chainStartRow([],23302),0);
+ assert.ok(L.CHAIN_NO_SPOT_TEXT.includes('No spot was captured'),
+  'and a reading with no spot says so rather than marking the wrong strike');
+ assert.ok(!MARK_WORD.test(L.CHAIN_AT_MONEY_TEXT)&&!MARK_WORD.test(L.CHAIN_NO_SPOT_TEXT));
+});
+
+// --- the IV block is a 2 x 5 grid of the SAME ten contracts the ΔOI grid draws ---------------------------------------
+// The owner asked to read volatility and open interest on the same ten contracts, laid out identically, so the two
+// blocks can be compared tile for tile. What is pinned here is the ten slots and their ORDER, that the tile height
+// is the ΔOI tile's own rather than a copy of it, that every tile carries the COMPUTED marking, that a tile the
+// model could not solve prints the reason instead of a blank, and that an unsolved reading is a HOLE in the line.
+ok(()=>{ // ten slots, one order, and a slot the server did not send is still a slot
+ const grid=SRC('IvGridSection.tsx');
+ const order=/export const IV_GRID_ORDER=\[([^\]]+)\] as const;/.exec(grid);
+ assert.ok(order,'the ten slots are declared in ONE place');
+ const keys=(order[1].match(/'[^']+'/g)||[]).map(t=>t.slice(1,-1));
+ assert.deepEqual(keys,['CE+0','CE+1','CE+2','CE+3','CE+4','PE+0','PE-1','PE-2','PE-3','PE-4'],
+  'calls at the money and above, then puts at the money and below — the ΔOI grid\'s own order');
+ assert.equal(keys.length,10,'exactly ten');
+ // the same ten the ΔOI block builds: its expected list, read out of the server, is that same sequence
+ const py=fs.readFileSync(path.join(__dirname,'..','server','kanida_pilot','derivatives.py'),'utf8');
+ assert.ok(/expected=\[\('CE',n\) for n in range\(GRID_WIDTH\+1\)\]\+\[\('PE',0\)\]\+\[\('PE',-n\) for n in range\(1,GRID_WIDTH\+1\)\]/
+  .test(py),'and the server builds the ΔOI ladder in that same order');
+ // the grid is built FROM that list, not from whatever arrived, so nothing shifts under the reader
+ assert.ok(/return IV_GRID_ORDER\.map\(key=>\{/.test(grid),
+  'the ten tiles are laid out from the fixed order, not from the response');
+ assert.ok(/missing_text:underlying\?IV_GRID_NO_LADDER:''/.test(grid),
+  'and a slot with nothing behind it still says why it is empty');
+ assert.ok(/present:false/.test(grid),'an unlisted strike keeps its slot');
+ // The ladder is the ΔOI endpoint's: ONE resolution of "at the money" on this tab, not two - and it is now
+ // RECEIVED rather than fetched. The page reads it once and hands it to all three panels built on those ten
+ // contracts, so this grid's eleventh request is gone and the two grids still cannot be about different
+ // strikes. The ten per-strike IV reads below it are inherent; a second ladder was not.
+ assert.ok(/ladder:Read<OiGrid>/.test(CODE('IvGridSection.tsx')),
+  'the at-the-money ladder is handed down, so the two grids cannot be about different strikes');
+ assert.ok(/ladder=\{gridRead\}/.test(CODE('SessionBlocks.tsx')),
+  'and the IV block passes the tab\'s one grid read into it');
+ // two bands, five each
+ assert.ok(/slots:slots\.slice\(0,IV_GRID_SLOTS\/2\)/.test(grid)&&/slots:slots\.slice\(IV_GRID_SLOTS\/2\)/.test(grid),
+  'calls on the first row, puts on the second');
+ assert.ok(/IV_GRID_CALLS_LABEL='Calls — at the money and above'/.test(grid)
+  &&/IV_GRID_PUTS_LABEL='Puts — at the money and below'/.test(grid),'each row named as the ΔOI grid names it');
+});
+ok(()=>{ // the tile is the ΔOI tile's size, by import rather than by copy
+ const grid=SRC('IvGridSection.tsx');
+ assert.ok(/import \{TILE_H,gridColumns\} from '\.\/OiGridSection';/.test(grid),
+  'the IV tile takes its height and its wrap points FROM the ΔOI grid, so the two cannot drift apart');
+ assert.equal((grid.match(/height:TILE_H/g)||[]).length,1,'and exactly one place sets it');
+ assert.ok(/width,height:TILE_H,padding:CELL_PAD/.test(grid),'which is the tile itself');
+ // the chart is the REMAINDER of that height, so "both rows are the same height" is arithmetic, not a promise
+ assert.ok(/export const IV_CHART_H=TILE_H-\(CELL_PAD\*2\+BORDER\+ROW_GAP\*5\+TITLE_H\+DETAIL_H\+CHIP_H\+STATE_H\+REASON_H\);/
+  .test(grid),'every zone is fixed and the chart takes what is left');
+ // and no zone of the tile is left to the text inside it
+ for(const zone of ['TITLE_H','DETAIL_H','CHIP_H','STATE_H','REASON_H'])
+  assert.ok(new RegExp(`height:${zone}`).test(grid),`${zone} is a reserved box, whatever its label says`);
+ // the direction words are the owner's, and they are the block's own vocabulary rather than a new one
+ assert.deepEqual(Object.values(L.IV_CHIPS),['↑ EXPANDING','→ STABLE','↓ COOLING'],
+  'Expanding · Stable · Cooling');
+ assert.ok(/sessionChip\(IV_CHIPS,direction\)/.test(grid)&&/sessionTone\(IV_CHIPS,direction\)/.test(grid),
+  'and the tile spends them, rather than hardcoding a fourth set');
+ assert.ok(/servedDirection\(leg\?\.direction,values,IV_KEYS\)/.test(grid),
+  "the server's word wins, and the points the tile drew answer when it sent none");
+});
+ok(()=>{ // a gap is a gap: an unsolved reading is never interpolated, carried forward or drawn at zero
+ const grid=CODE('IvGridSection.tsx');
+ assert.ok(/if\(typeof v!=='number'\|\|!Number\.isFinite\(v\)\)return null;/.test(grid),
+  'a reading with no volatility maps to null, not to zero');
+ assert.ok(/points:values\.map\(\(v,i\)=>v==null\?null:\{x:i\*step/.test(grid),
+  'and a null value is a null point, so nothing is drawn where nothing was solved');
+ assert.ok(!/fill\(0\)|\?\?0|\|\|0\b/.test(grid.split('scaleIv')[1].split('export function ivAxis')[0]),
+  'nothing in the scaler substitutes a zero for a missing reading');
+ assert.ok(/d=\{linePath\(scaled\)\}/.test(grid),'the line is drawn by the one path builder that breaks at gaps');
+ // the builder itself, on a series with a hole in it
+ const scaled={lo:18,hi:20,points:[{x:0,y:10,i:0},null,{x:20,y:4,i:2},{x:30,y:2,i:3}]};
+ const d=L.linePath(scaled);
+ assert.ok(!d.includes('NaN'));
+ assert.equal((d.match(/M/g)||[]).length,2,'the path breaks at the gap and starts again after it');
+ // the x labels come from readings that were captured, so a hole is never relabelled as a time
+ assert.ok(/axisTimes\(points as any,3\)/.test(grid));
+});
+ok(()=>{ // a tile that could not be solved prints the REASON, and nothing on a tile is a forecast
+ const grid=SRC('IvGridSection.tsx');
+ // the five reasons a solver returns, in the server's own sentences, reached from the tile's refusal chain
+ for(const key of ['stale_trade','no_time_value','below_intrinsic','no_convergence','expiry_today'])
+  assert.ok(L.IV_REASONS[key]&&L.IV_REASONS[key].startsWith('No volatility:'),
+   `${key} has a sentence a tile can print`);
+ assert.ok(/ivLatestRefusal\(points,body\?\.reason_text\)/.test(grid),
+  "a tile asks the server for its reason first");
+ assert.ok(/\|\|String\(slot\.missing_text\|\|''\)\|\|\(read\.phase==='loading'\?'':IV_GRID_NO_VALUE\)/.test(grid),
+  'and falls through to the slot\'s own reason, then to a sentence — never to a blank');
+ assert.ok(/value==null\?'No volatility at the latest reading':'Solved at the latest reading'/.test(grid),
+  'the tile says outright whether its latest reading carries a number');
+ // every sentence this file owns is past tense and about what was captured
+ const code=CODE('IvGridSection.tsx');
+ for(const word of ['forecast','predict','bullish','bearish','support level','resistance','will be','expected to'])
+  assert.ok(!new RegExp(word,'i').test(code),`"${word}" has no place on an IV tile`);
+ // "mark" is OUR word for a 15-min reading and the reader never meets it. The stored FIELD names keep it
+ // (`marks_with_delta` is the server's), so this is held against what reaches the screen, not the code.
+ for(const text of VISIBLE(grid))
+  assert.ok(!MARK_WORD.test(text),`IvGridSection.tsx: "mark" is our word, not the reader's: "${text}"`);
+ // the highlight is a highlight and nothing else, said in the block's own words
+ assert.ok(/It highlights; it changes nothing\./.test(grid));
+ assert.ok(/onHighlight\?\.\(slot\.strike==null\?null:Number\(slot\.strike\)\)/.test(grid),
+  'pointing at a tile lights that strike wherever else it is on the tab');
+ assert.ok(!/onPick\([\s\S]{0,80}highlight/.test(code),'and a hover never re-points the tab');
+});
+
+// =================================================================================================================
+// THE SIGNAL TABLE (the owner's TIME | CALL ACTIVITY | PUT ACTIVITY | OI INTERPRETATION | MARKET SIGNAL)
+//
+// This is the one panel on the tab a reader could mistake for a trading signal, so it is the one that must be
+// pinned hardest. What is guarded here: his signal rule exactly as he wrote it; that the strength words are
+// MEASURED against the instrument's own session rather than against a constant somebody picked; that no row is
+// invented for a reading with no data; and that every row of his source vocabulary really is reachable.
+// =================================================================================================================
+/** "2026-09-18 09:15" and onwards. REAL stamps, because the window is now found BY the stamps: a fixture whose
+ *  times do not parse would quietly test nothing at all. */
+const sigStamp=(i,start=9*60+15,step=15)=>{const m=start+i*step;
+ return `2026-09-18 ${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`};
+/** A slot of `n` readings whose ΔOI walks by `step` each reading and whose premium walks by `priceStep`. */
+const sigSlot=(row,type,n,step,priceStep=0,from=0,times=null)=>({slot:`${type}+0`,option_type:type,row,present:true,
+ strike:23300,instrument_token:1,points:Array.from({length:n},(_,i)=>({at:times?times[i]:sigStamp(i),
+  oi:null,delta_oi:from+step*i,price:100+priceStep*i}))});
+/** One side of one reading, built by hand, for the rule tests. `lean` comes from the table under test. */
+const leg=(kind,price,oi,change=100)=>({contracts:5,change,price_change:0,oi_direction:oi,
+ price_direction:price,strength:1,lean:L.signalLean(kind,price,oi),ranked:9,what_label:'',meaning:'',text:''});
+const PRICE_DIRS=['up','down','flat'],OI_DIRS=['building','unwinding','flat'];
+
+// =================================================================================================================
+// P03 — THE REPAINT, REPRODUCED, AND THE FIX PROVED.
+//
+// signal/1 measured every row against the largest window change over the WHOLE available array, later readings
+// included, and found "an hour back" by counting four rows. The auditor appended one extreme observation to the
+// end of a stored session and watched the same time=4 row rewrite itself: Very strong became Stable, and its
+// market signal turned over. Below is that rule in eleven lines, the flip it produces, and the proof that the
+// rule on this tab today does not produce it.
+//
+// This matters more than the count of checks in this file: the 359 that stood here all fed signalRows ONE
+// payload and never asked what a second, longer one did to the first one's rows.
+// =================================================================================================================
+/** signal/1's side, reproduced: whole-array peak, four ROWS back, open interest only. */
+const v1Side=(points,i,lookback=4)=>{
+ const ch=points.map((_,k)=>points[k].delta_oi-points[Math.max(0,k-lookback)].delta_oi);
+ const peak=Math.max(0,...ch.map(Math.abs));
+ const v=ch[i],flat=peak>0&&Math.abs(v)<0.05*peak;
+ const dir=peak<=0||flat?'flat':v>0?'building':'unwinding';
+ const share=peak>0?Math.abs(v)/peak:0;
+ const strength=flat||!peak?0:share<1/3?1:share<2/3?2:3;
+ return {dir,change:v,word:strength?['Mild','Strong','Very strong'][strength-1]:'Stable'};
+};
+/** signal/1's market signal, reproduced: it never reads a price. */
+const v1Signal=(c,p)=>{
+ if(p.dir==='building'&&c.dir==='unwinding')return 'strong_bullish';
+ if(c.dir==='building'&&p.dir==='unwinding')return 'strong_bearish';
+ if((p.dir==='building'&&c.dir==='flat')||(c.dir==='unwinding'&&p.dir==='flat'))return 'bullish';
+ if((c.dir==='building'&&p.dir==='flat')||(p.dir==='unwinding'&&c.dir==='flat'))return 'bearish';
+ if(c.dir==='flat'&&p.dir==='flat')return 'flat';
+ const cm=Math.abs(c.change),pm=Math.abs(p.change);
+ if(!cm||!pm)return 'flat';
+ if(cm<=1.33*pm&&pm<=1.33*cm)return 'flat';
+ const callsBigger=cm>pm;
+ if(c.dir==='building')return callsBigger?'bearish':'bullish';
+ return callsBigger?'bullish':'bearish';
+};
+ok(()=>{ // THE OLD FAILURE, KEPT: appending one later observation rewrote the time=4 row under signal/1
+ const callPts=Array.from({length:8},(_,i)=>({at:sigStamp(i),oi:null,delta_oi:1000*i,price:100}));
+ const putPts=Array.from({length:8},(_,i)=>({at:sigStamp(i),oi:null,delta_oi:100*i,price:100}));
+ // BEFORE: at time=4 the calls are the session's largest builder and the puts are the smaller one
+ const before=v1Signal(v1Side(callPts,4),v1Side(putPts,4));
+ assert.equal(v1Side(callPts,4).word,'Very strong','signal/1 read the time=4 calls as Very strong');
+ assert.equal(before,'bearish','and the time=4 row as one direction');
+ // AFTER: one more observation, taken an hour and a quarter LATER, and nothing else changes
+ const callsPlus=[...callPts,{at:sigStamp(8),oi:null,delta_oi:1000*7+1e6,price:100}];
+ const putsPlus=[...putPts,{at:sigStamp(8),oi:null,delta_oi:100*7,price:100}];
+ const after=v1Signal(v1Side(callsPlus,4),v1Side(putsPlus,4));
+ assert.equal(v1Side(callsPlus,4).word,'Stable','signal/1 then read the SAME time=4 calls as Stable');
+ assert.equal(after,'bullish','and turned the SAME time=4 row over');
+ assert.notEqual(before,after,'this is the defect: a later reading rewrote an earlier row');
+});
+ok(()=>{ // AND THE FIX: the same two payloads through the rule on this tab today, row for row
+ const mk=(n,extra)=>[
+  {slot:'CE+0',option_type:'CE',row:'calls',present:true,strike:23300,instrument_token:1,
+   points:Array.from({length:n},(_,i)=>({at:sigStamp(i),oi:null,
+    delta_oi:1000*i+(extra&&i===n-1?1e6:0),price:100+5*i}))},
+  {slot:'PE+0',option_type:'PE',row:'puts',present:true,strike:23300,instrument_token:2,
+   points:Array.from({length:n},(_,i)=>({at:sigStamp(i),oi:null,delta_oi:100*i,price:100-2*i}))},
+ ];
+ const before=L.signalRows(mk(8,false));
+ const after=L.signalRows(mk(9,true));
+ assert.equal(before.length,8);assert.equal(after.length,9);
+ // the rows are newest-first, so the eight earlier readings are the TAIL of the longer table
+ assert.equal(JSON.stringify(after.slice(1)),JSON.stringify(before),
+  'appending an extreme later observation must leave every earlier row byte for byte identical');
+ // named explicitly, because this is the auditor's own row
+ const at4=(rows)=>rows.find(r=>r.at===sigStamp(4));
+ assert.ok(at4(before)&&at4(after),'the time=4 row is in both tables');
+ assert.deepEqual(JSON.parse(JSON.stringify(at4(after))),JSON.parse(JSON.stringify(at4(before))),
+  'the time=4 row reads the same before and after the append - strength, signal and all');
+});
+ok(()=>{ // APPEND-INVARIANCE, generally: over gaps, holes, flat sides and long sessions alike
+ const shapes=[
+  [sigSlot('calls','CE',9,1000,5),sigSlot('puts','PE',9,100,-2)],
+  [sigSlot('calls','CE',9,-500,-4),sigSlot('puts','PE',9,700,3)],
+  [sigSlot('calls','CE',9,0,0),sigSlot('puts','PE',9,0,0)],
+  [sigSlot('calls','CE',9,100,1,-9000)],
+ ];
+ for(const shape of shapes){
+  const short=shape.map(s=>({...s,points:s.points.slice(0,7)}));
+  const base=L.signalRows(short);
+  for(const spike of [1e9,-1e9,0]){
+   const grown=shape.map(s=>({...s,points:[...s.points.slice(0,7),
+    {at:sigStamp(7),oi:null,delta_oi:spike,price:spike}]}));
+   const rows=L.signalRows(grown);
+   assert.equal(rows.length,base.length+1);
+   assert.equal(JSON.stringify(rows.slice(1)),JSON.stringify(base),
+    `an appended observation of ${spike} rewrote an earlier row`);
+  }
+ }
+});
+ok(()=>{ // AN HOUR IS AN HOUR, BY THE CLOCK - not four rows. A hole makes those two different things.
+ assert.equal(L.SIGNAL_WINDOW_MINUTES,60);
+ // 09:15, 09:30, 09:45, 10:00, 10:15: five readings, and the fifth has exactly an hour behind it
+ const dense=[0,15,30,45,60].map(m=>sigStamp(0,9*60+15+m,0));
+ assert.equal(L.signalBaselineIndex(dense,4),0,'exactly sixty minutes back is the baseline');
+ assert.equal(L.signalBaselineIndex(dense,3),null,'forty-five minutes is not an hour');
+ assert.equal(L.signalBaselineIndex(dense,0),null,'and the first reading has nothing behind it');
+ // FOUR ROWS BACK IS NOT AN HOUR when readings are missing. 09:15, 09:30, 10:45, 11:30, 11:45: four rows
+ // back from 11:45 is 09:15, which is two and a half hours. The window picks 10:45, which really is an hour.
+ const gappy=[0,15,90,135,150].map(m=>sigStamp(0,9*60+15+m,0));
+ assert.equal(L.signalBaselineIndex(gappy,4),2,'the window is found by the clock, not by counting rows');
+ assert.notEqual(L.signalBaselineIndex(gappy,4),0,'which is what four rows back would have given');
+ // and a hole WIDER than the window leaves no baseline at all rather than a stale one
+ const holed=[0,15,150,165,180].map(m=>sigStamp(0,9*60+15+m,0));
+ assert.equal(L.signalBaselineIndex(holed,4),null,
+  'the nearest earlier reading is 165 minutes back - wider than the window, so there is no baseline');
+ assert.equal(L.signalBaselineIndex(holed,3),null);
+ // a hole of exactly the limit is still usable; a minute more is not
+ const edge=[sigStamp(0,0,0),sigStamp(0,L.SIGNAL_WINDOW_MAX_MINUTES,0)];
+ assert.equal(L.signalBaselineIndex(edge,1),0);
+ const over=[sigStamp(0,0,0),sigStamp(0,L.SIGNAL_WINDOW_MAX_MINUTES+1,0)];
+ assert.equal(L.signalBaselineIndex(over,1),null);
+ // the LATEST qualifying reading wins, never the oldest one lying around
+ const many=[0,15,30,45,60,75,90].map(m=>sigStamp(0,9*60+m,0));
+ assert.equal(L.signalBaselineIndex(many,6),2,'90 minutes in, the reading 60 minutes back is the baseline');
+});
+ok(()=>{ // DUPLICATE STAMPS, UNREADABLE STAMPS, AND A SESSION BOUNDARY
+ // two readings carrying one stamp are not an hour apart, and neither is a baseline for the other
+ const twins=['2026-09-18 10:15','2026-09-18 10:15','2026-09-18 11:15'];
+ assert.equal(L.signalBaselineIndex(twins,1),null);
+ assert.equal(L.signalBaselineIndex(twins,2),1,'and the later of the twins is the one an hour back');
+ // a stamp that cannot be read is skipped over, never guessed at
+ assert.equal(L.readingMinutes(null),null);
+ assert.equal(L.readingMinutes('2026-09-18'),null,'a date with no time is not a reading time');
+ assert.equal(L.readingMinutes('not a time'),null);
+ assert.equal(L.readingMinutes('2026-09-18 10:15')-L.readingMinutes('2026-09-18 09:15'),60);
+ assert.equal(L.readingMinutes('2026-09-19 09:15')-L.readingMinutes('2026-09-18 09:15'),1440);
+ assert.equal(L.signalBaselineIndex(['2026-09-18 09:15',null,'2026-09-18 10:15'],2),0);
+ assert.equal(L.signalBaselineIndex([null,'2026-09-18 10:15'],1),null);
+ // yesterday's close is a day away, not an hour: it is outside the window and is refused
+ assert.equal(L.signalBaselineIndex(['2026-09-17 15:30','2026-09-18 09:15'],1),null,
+  'a reading from the previous session is not this session\'s hour-back baseline');
+});
+ok(()=>{ // AN EARLY-SESSION ROW SAYS WHAT IT HAS, AND IS NEVER GIVEN A DIRECTION IT CANNOT HAVE
+ const rows=L.signalRows([sigSlot('calls','CE',6,1000,5),sigSlot('puts','PE',6,100,-2)]);
+ assert.equal(rows.length,6,'every captured reading keeps its row');
+ const early=rows.filter(r=>r.at<sigStamp(4)); // 09:15 .. 10:00, none with an hour behind it
+ assert.equal(early.length,4);
+ for(const row of early){
+  assert.equal(row.calls,null,'no side is computed without a baseline');
+  assert.equal(row.puts,null);
+  assert.equal(row.signal,'','and no direction is invented for it');
+  assert.equal(row.label,DASH);
+  assert.equal(row.reason,L.SIGNAL_NO_WINDOW,'the row says which absence this is');
+  assert.equal(row.from,null,'and names no reading it was compared against');
+  assert.equal(row.window_minutes,null);
+ }
+ // and the rows that DO have an hour behind them carry that hour, in minutes, on the row
+ for(const row of rows.filter(r=>r.at>=sigStamp(4))){
+  assert.equal(row.window_minutes,60,'the window a word came from is on the row');
+  assert.ok(row.from&&row.from<row.at,'together with the reading it was compared against');
+  assert.equal(L.readingMinutes(row.at)-L.readingMinutes(row.from),60);
+ }
+ // the three absences are three different sentences and never borrow each other's
+ assert.notEqual(L.SIGNAL_NO_WINDOW,L.SIGNAL_NO_DATA);
+ assert.notEqual(L.SIGNAL_NO_WINDOW,L.SIGNAL_NO_BASELINE);
+});
+ok(()=>{ // EVERY ROW CARRIES THE RULE THAT PRODUCED IT
+ assert.equal(L.SIGNAL_RULE_VERSION,'signal/2');
+ const rows=L.signalRows([sigSlot('calls','CE',8,1000,5),sigSlot('puts','PE',8,100,-2)]);
+ for(const row of rows)assert.equal(row.rule_version,L.SIGNAL_RULE_VERSION,'on every row, signal or not');
+ assert.ok(L.SIGNAL_RULE_TEXT.includes(L.SIGNAL_RULE_VERSION),
+  'and the reader can find the version in How to read this');
+});
+ok(()=>{ // THE TEN CONTRACTS ARE THE LATEST TEN, AND THE TABLE SAYS SO RATHER THAN PRETENDING OTHERWISE
+ // The basket is chosen from the LATEST spot and carried back over the session. This browser cannot choose a
+ // historical basket - the server picks the ten - so the honest answer is to label the view, and it is.
+ assert.ok(/LATEST reading/.test(L.SIGNAL_AGGREGATE_TEXT),
+  'the panel must say the ten are the ten at the latest reading');
+ assert.ok(/carried back/.test(L.SIGNAL_AGGREGATE_TEXT)&&/not a record of which strikes/.test(L.SIGNAL_AGGREGATE_TEXT),
+  'and that an earlier row is not a record of the strikes that were at the money then');
+});
+ok(()=>{ // NOTHING IS REMEMBERED BETWEEN CALLS: an expiry change is a different payload and nothing else
+ const septem=[sigSlot('calls','CE',8,1000,5),sigSlot('puts','PE',8,100,-2)];
+ const octob=[sigSlot('calls','CE',8,-4000,-9),sigSlot('puts','PE',8,25,1)];
+ const first=JSON.stringify(L.signalRows(septem));
+ L.signalRows(octob);L.signalRows(octob);L.signalRows([]);
+ assert.equal(JSON.stringify(L.signalRows(septem)),first,
+  'reading another expiry in between must not change what the first one says');
+ assert.notEqual(JSON.stringify(L.signalRows(octob)),first,'and the two really are different payloads');
+});
+ok(()=>{ // THE STRENGTH RULE IS MEASURED, NOT A CONSTANT, AND NEVER AGAINST A READING TAKEN LATER
+ // One side climbing 100 a reading against one climbing 10,000 a reading. The LAST row of each is the same
+ // fraction of its own session's largest change, so both read the same word - which is the point: the ladder
+ // is that instrument's own session and never a fixed number of contracts.
+ const small=L.signalRows([sigSlot('calls','CE',10,100),sigSlot('puts','PE',10,100)]);
+ const big=L.signalRows([sigSlot('calls','CE',10,10000),sigSlot('puts','PE',10,10000)]);
+ assert.equal(small[0].calls.text,big[0].calls.text,
+  'a hundred contracts and ten thousand read the same when each is the same share of its own session');
+ assert.ok(small[0].calls.text!=='','and both really got a word');
+ // the flat cut IS the tab's own band, and the bands are equal thirds - no third constant anywhere
+ assert.equal(L.GRID_FLAT_FRACTION,0.05);
+ assert.deepEqual([...L.SIGNAL_STRENGTH_BANDS],[1/3,2/3],'equal thirds of the side\'s own largest change');
+ assert.equal(L.SIGNAL_STRENGTH_WORDS.length,L.SIGNAL_STRENGTH_BANDS.length+1,
+  'one word per band, and the bands are derived from how many words there are');
+ assert.equal(L.SIGNAL_STRENGTH_MIN,L.SIGNAL_STRENGTH_WORDS.length,
+  'and the ladder needs one observation per word before it ranks anything');
+ // a side that barely moved is STABLE and gets no arrow at all
+ const still=L.signalRows([sigSlot('calls','CE',10,0),sigSlot('puts','PE',10,0)]);
+ assert.equal(still[0].calls.text,L.SIGNAL_STABLE,'a side that did not move is stable, not mildly anything');
+ assert.equal(still[0].calls.oi_direction,'flat');
+ // A CHANGE IS NOT RANKED AGAINST ITSELF. The first measurable reading has nothing behind it, and the row
+ // keeps its direction and says the strength is not ranked rather than calling it the session's largest.
+ const young=L.signalRows([sigSlot('calls','CE',6,1000,5),sigSlot('puts','PE',6,100,-2)]);
+ const firstMeasured=young[young.length-5]; // the 10:15 reading, the first with an hour behind it
+ assert.equal(firstMeasured.at,sigStamp(4));
+ assert.equal(firstMeasured.calls.ranked,1,'one measured change stands behind it');
+ assert.equal(firstMeasured.calls.text,L.SIGNAL_NO_STRENGTH);
+ assert.equal(firstMeasured.calls.strength,0);
+ assert.notEqual(firstMeasured.calls.oi_direction,'no baseline','and it still has its direction');
+ // the third measured change - 11:00, with 10:15 and 10:30 behind it - is the first the ladder can rank
+ const longer=L.signalRows([sigSlot('calls','CE',8,1000,5),sigSlot('puts','PE',8,100,-2)]);
+ const third=longer.find(r=>r.at===sigStamp(6));
+ assert.equal(third.calls.ranked,3);
+ assert.ok([...L.SIGNAL_STRENGTH_WORDS].some(w=>third.calls.text.startsWith(w)),
+  `the third measured change is the first that can be ranked: ${third.calls.text}`);
+ assert.equal(longer.find(r=>r.at===sigStamp(5)).calls.text,L.SIGNAL_NO_STRENGTH,
+  'and the second one still is not');
+ // and the rule is STATED where the reader can find it, in the words it actually uses
+ assert.ok(/own session/i.test(L.SIGNAL_STRENGTH_TEXT)&&/thirds/i.test(L.SIGNAL_STRENGTH_TEXT),
+  'How to read this must say the strength is measured against the instrument\'s own session');
+ assert.ok(/never a reading taken later/i.test(L.SIGNAL_STRENGTH_TEXT),
+  'and that a later reading is never in the yardstick');
+ assert.ok(/not a confidence/i.test(L.SIGNAL_STRENGTH_TEXT),
+  'strength is a size, and must say it is not a confidence');
+ for(const word of L.SIGNAL_STRENGTH_WORDS)
+  assert.ok(L.SIGNAL_STRENGTH_TEXT.includes(word),`and must name the word "${word}"`);
+});
+ok(()=>{ // NO ROW IS INVENTED FOR A READING WITHOUT DATA
+ // a reading the store never took is not a row at all.
+ // (Spread first: logic.ts runs in its own vm realm, so its arrays have a different Array prototype and
+ // deepStrictEqual would compare the realms rather than the contents.)
+ assert.deepEqual([...L.signalRows([])],[],'no slots, no rows');
+ assert.deepEqual([...L.signalRows(null)],[],'and a null body is not a table of zeroes');
+ assert.deepEqual([...L.signalRows([{slot:'CE+0',option_type:'CE',row:'calls',present:false,points:[]}])],[],
+  'an unlisted strike contributes no reading');
+ // a reading that WAS taken but carried nothing keeps its row, says so, and gets NO signal
+ const holed=[{slot:'CE+0',option_type:'CE',row:'calls',present:true,strike:1,instrument_token:1,
+  points:[{at:'2026-09-18 09:30',oi:null,delta_oi:null,price:null},
+   {at:'2026-09-18 09:45',oi:null,delta_oi:null,price:null}]}];
+ const rows=L.signalRows(holed);
+ assert.equal(rows.length,2,'the readings are still there');
+ for(const row of rows){
+  assert.equal(row.signal,'','a reading with no data is never given a signal');
+  assert.equal(row.label,DASH,'and never a word');
+  assert.equal(row.reason,L.SIGNAL_NO_DATA,'it says what it has instead');
+  assert.equal(row.interpretation,'','and reads nothing into nothing');
+ }
+ // a reading that carried nothing is not the same thing as one with no hour behind it, even side by side
+ const mixed=[{slot:'CE+0',option_type:'CE',row:'calls',present:true,strike:1,instrument_token:1,
+  points:[{at:sigStamp(0),oi:null,delta_oi:null,price:null},
+   {at:sigStamp(1),oi:null,delta_oi:5,price:10},
+   {at:sigStamp(4),oi:null,delta_oi:7,price:12}]}];
+ const said=L.signalRows(mixed).map(r=>r.reason);
+ assert.equal(said[said.length-1],L.SIGNAL_NO_DATA,'the reading that carried nothing says so');
+ assert.equal(said[said.length-2],L.SIGNAL_NO_WINDOW,'the one with no hour behind it says THAT');
+ // an empty BASKET is a third thing again: both readings carried values, but no contract carried both
+ const apart=[{slot:'CE+0',option_type:'CE',row:'calls',present:true,strike:1,instrument_token:1,
+   points:[{at:sigStamp(0),oi:null,delta_oi:5,price:10},{at:sigStamp(4),oi:null,delta_oi:null,price:null}]},
+  {slot:'CE+1',option_type:'CE',row:'calls',present:true,strike:2,instrument_token:2,
+   points:[{at:sigStamp(0),oi:null,delta_oi:null,price:null},{at:sigStamp(4),oi:null,delta_oi:9,price:11}]}];
+ assert.equal(L.signalRows(apart)[0].reason,L.SIGNAL_NO_BASELINE,
+  'two readings with no contract in common are not a comparison');
+ // newest first, which is what he asked for
+ const ordered=L.signalRows([sigSlot('calls','CE',8,100),sigSlot('puts','PE',8,100)]);
+ assert.equal(ordered.length,8);
+ assert.ok(String(ordered[0].at)>String(ordered[ordered.length-1].at),'newest reading is the first row');
+});
+
+// =================================================================================================================
+// P04 — THE TRUTH TABLE. PRICE AND OPEN INTEREST TOGETHER, OR NO DIRECTION AT ALL.
+//
+// signal/1 chose the market signal from the two sides' OPEN INTEREST alone while the price-direction fields sat
+// unread beside it. Puts building while calls unwound read Strong Bullish whether the put premium was rising or
+// falling - so put BUYING, which is the opposite reading, produced the same word as put WRITING. The owner's own
+// source table is keyed on price AND open interest; reading half of it was the defect.
+//
+// Written out below, cell by cell, because a truth table asserted by re-deriving it is not a test of anything.
+// =================================================================================================================
+ok(()=>{ // THE CALL SIDE, all nine cells, from the owner's own flow table
+ // both axes moved: the four §3.1 pairs, and a call's premium rises with the underlying
+ assert.equal(L.signalLean('CE','up','building'),'up');    // call buying increasing
+ assert.equal(L.signalLean('CE','up','unwinding'),'up');   // call short covering
+ assert.equal(L.signalLean('CE','down','building'),'down');// call writing increasing
+ assert.equal(L.signalLean('CE','down','unwinding'),'down');// call buyers exiting
+ // an axis that barely moved carries NO lean - it is not a quiet version of a direction
+ assert.equal(L.signalLean('CE','flat','building'),'');
+ assert.equal(L.signalLean('CE','flat','unwinding'),'');
+ assert.equal(L.signalLean('CE','up','flat'),'');
+ assert.equal(L.signalLean('CE','down','flat'),'');
+ assert.equal(L.signalLean('CE','flat','flat'),'');
+});
+ok(()=>{ // THE PUT SIDE, all nine cells. A put's premium falls as the underlying rises, so it reads the other way
+ assert.equal(L.signalLean('PE','up','building'),'down');  // put buying increasing
+ assert.equal(L.signalLean('PE','up','unwinding'),'down'); // put short covering
+ assert.equal(L.signalLean('PE','down','building'),'up');  // put writing increasing
+ assert.equal(L.signalLean('PE','down','unwinding'),'up'); // put buyers exiting
+ assert.equal(L.signalLean('PE','flat','building'),'');
+ assert.equal(L.signalLean('PE','flat','unwinding'),'');
+ assert.equal(L.signalLean('PE','up','flat'),'');
+ assert.equal(L.signalLean('PE','down','flat'),'');
+ assert.equal(L.signalLean('PE','flat','flat'),'');
+ // eighteen cells, no nineteenth, and each one has a row of the owner's flow table behind it
+ assert.equal(Object.keys(L.SIGNAL_LEANS).length,18);
+ for(const kind of ['CE','PE'])for(const price of PRICE_DIRS)for(const oi of OI_DIRS)
+  assert.ok(L.FLOW_LABELS[`${kind}|${price}|${oi}`],`no flow row behind ${kind}|${price}|${oi}`);
+ // a side with no baseline on either axis leans nowhere at all
+ for(const kind of ['CE','PE']){
+  assert.equal(L.signalLean(kind,'no baseline','building'),'');
+  assert.equal(L.signalLean(kind,'up','no baseline'),'');
+  assert.equal(L.signalLean(kind,'',''),'');
+ }
+});
+ok(()=>{ // THE DEFECT, NAMED: put buying with rising open interest may not read Strong Bullish
+ // calls unwinding on a falling premium, puts BUILDING on a RISING premium - traders buying downside.
+ const calls=leg('CE','down','unwinding'),puts=leg('PE','up','building');
+ // signal/1 saw only "puts building + calls unwinding" and said so:
+ assert.equal(v1Signal({dir:'unwinding',change:-100},{dir:'building',change:100}),'strong_bullish',
+  'this is what the old rule produced for a put-BUYING state');
+ // signal/2 reads both axes and cannot:
+ assert.notEqual(L.marketSignal(calls,puts),'strong_bullish');
+ assert.equal(L.marketSignal(calls,puts),'strong_bearish','both sides read the same way, and it is not that one');
+ // and the put-WRITING state - the same open-interest move on a FALLING premium - reads the other way
+ assert.equal(L.marketSignal(leg('CE','up','unwinding'),leg('PE','down','building')),'strong_bullish');
+ // the two states differ ONLY in the price fields the old rule never read
+ assert.equal(leg('PE','up','building').oi_direction,leg('PE','down','building').oi_direction);
+ assert.notEqual(L.signalLean('PE','up','building'),L.signalLean('PE','down','building'));
+});
+ok(()=>{ // THE COMBINATION, over every one of the eighty-one pairs of cells
+ const seen=new Set();
+ for(const cp of PRICE_DIRS)for(const co of OI_DIRS)for(const pp of PRICE_DIRS)for(const po of OI_DIRS){
+  const calls=leg('CE',cp,co),puts=leg('PE',pp,po);
+  const signal=L.marketSignal(calls,puts);
+  seen.add(signal);
+  assert.ok(L.SIGNAL_LABELS[signal],`${cp}/${co} vs ${pp}/${po} produced no word`);
+  const c=calls.lean,p=puts.lean;
+  if(c&&p&&c!==p)assert.equal(signal,'neutral','mixed evidence must stay mixed');
+  else if(!c&&!p)assert.equal(signal,'flat','neither side reading is Flat');
+  else if(c&&p)assert.ok(signal==='strong_bullish'||signal==='strong_bearish','both legs present reads Strong');
+  else assert.ok(signal==='bullish'||signal==='bearish','one leg alone is the plain word');
+  // and the word never contradicts the two sides it came from
+  if(signal==='strong_bullish'||signal==='bullish')assert.ok(c!=='down'&&p!=='down');
+  if(signal==='strong_bearish'||signal==='bearish')assert.ok(c!=='up'&&p!=='up');
+ }
+ // every one of his words is reachable from the table, and no word outside it is
+ assert.deepEqual([...seen].sort(),['bullish','bearish','flat','neutral','strong_bearish','strong_bullish'].sort());
+ for(const key of [...seen])assert.ok(L.SIGNAL_LABELS[key]&&L.SIGNAL_DOTS[key],
+  `the owner's own word and dot for ${key}`);
+});
+ok(()=>{ // CONTRADICTORY EVIDENCE STAYS ON THE ROW, AND IS NOT RESOLVED BY SIZE
+ const calls=leg('CE','up','building',5_000_000),puts=leg('PE','up','building',1);
+ assert.equal(L.marketSignal(calls,puts),'neutral',
+  'calls read one way and puts the other: the bigger side is still only the bigger side');
+ assert.equal(L.SIGNAL_LABELS.neutral,'Neutral','and it is said in the owner\'s own word');
+ // swapping which side is enormous cannot change the answer
+ assert.equal(L.marketSignal(leg('CE','up','building',1),leg('PE','up','building',5_000_000)),'neutral');
+ // the two readings that disagree are BOTH on the row, in his own vocabulary, for the reader to see
+ const rows=L.signalRows([sigSlot('calls','CE',10,1000,9),sigSlot('puts','PE',10,1000,9)]);
+ const row=rows[0];
+ assert.equal(row.signal,'neutral');
+ assert.equal(row.calls.what_label,'Call buying increasing');
+ assert.equal(row.puts.what_label,'Put buying increasing');
+ assert.ok(row.interpretation,'and the open-interest reading is still stated beside them');
+ // a side with no comparable baseline is never given a word at all
+ assert.equal(L.marketSignal(null,leg('PE','down','building')),'');
+ assert.equal(L.marketSignal(leg('CE','up','building'),null),'');
+});
+ok(()=>{ // THE RULE IS INSPECTABLE: the window, the version and the vocabulary are all on the panel
+ assert.ok(/60 minutes/.test(L.SIGNAL_BASKET_TEXT),'the window is stated in minutes');
+ assert.ok(/never by counting four rows back/.test(L.SIGNAL_BASKET_TEXT),'and why it is not four rows');
+ assert.ok(/price AND its open interest together/.test(L.SIGNAL_RULE_TEXT),
+  'the rule must say it reads both axes');
+ assert.ok(/Open interest alone never decides/.test(L.SIGNAL_RULE_TEXT),'and that open interest alone does not');
+ assert.ok(/Neutral/.test(L.SIGNAL_RULE_TEXT)&&/OPPOSITE/.test(L.SIGNAL_RULE_TEXT),
+  'and what happens when the two sides disagree');
+ assert.ok(/the tape does not say which side was the aggressor/.test(L.SIGNAL_CAVEAT_TEXT),
+  'and the caveat must refuse to name who initiated a trade');
+ // STRENGTH IS A SIZE. Nothing on this table is a hit rate, and no percentage of anything is offered as one.
+ // A sentence that DENIES being one of these is the opposite of offering one - the same exemption the older
+ // §5 sweeps make for "nothing on it is a forecast".
+ const rateWord=/\b(accuracy|accurate|win rate|hit rate|success rate|probability|odds|chance of)\b/i;
+ const deniesRate=(t)=>/\bnot a (confidence|probability|chance|forecast|prediction)\b/i.test(String(t));
+ for(const text of [L.SIGNAL_STRENGTH_TEXT,L.SIGNAL_RULE_TEXT,L.SIGNAL_CAVEAT_TEXT,L.SIGNAL_BASKET_TEXT,
+  L.SIGNAL_AGGREGATE_TEXT])
+  assert.ok(deniesRate(text)||!rateWord.test(text),
+   `the signal table must not offer a measured-looking rate: ${text}`);
+ assert.ok(rateWord.test('a 68% hit rate on these rows'),'and the sweep really does catch one');
+ assert.ok(!deniesRate('a 68% hit rate on these rows'),'without the denial clearing it');
+ // FIVE STRIKES ADDED TOGETHER ARE NOT AN INSTRUMENT. The side's premium change is a DIRECTION over a fixed
+ // basket and nothing else: it is never rendered, never priced in rupees and never drawn as a series.
+ const table=CODE('SignalTable.tsx');
+ assert.ok(!/price_change/.test(table),'the side\'s basket premium change must not reach the screen');
+ assert.ok(!/\bprice\(/.test(table),'and nothing on this table is formatted as a tradable price');
+ const rows=L.signalRows([sigSlot('calls','CE',10,1000,5),sigSlot('puts','PE',10,100,-2)]);
+ assert.ok(typeof rows[0].calls.price_change==='number','it exists as a direction input');
+ assert.ok(['up','down','flat',L.NO_DIRECTION].includes(rows[0].calls.price_direction),
+  'and all the reader ever sees of it is that direction');
+});
+ok(()=>{ // EVERY ROW OF HIS SOURCE VOCABULARY is reachable, and comes from the one table both sides share
+ // his table, verbatim: price direction + OI direction -> what is happening, and what it means
+ const want=[['CE','down','building','Call writing increasing','Sellers are building resistance'],
+  ['PE','down','building','Put writing increasing','Sellers are building support'],
+  ['CE','up','unwinding','Call short covering','Call sellers are exiting'],
+  ['PE','up','unwinding','Put short covering','Put sellers are exiting'],
+  ['CE','up','building','Call buying increasing','Traders are buying upside'],
+  ['PE','up','building','Put buying increasing','Traders are buying downside protection']];
+ for(const [kind,price,oi,what,meaning] of want){
+  const found=L.FLOW_LABELS[`${kind}|${price}|${oi}`];
+  assert.ok(found,`his table has no row for ${kind} ${price} + OI ${oi}`);
+  assert.equal(found[0],what,`the owner's own words for ${kind}|${price}|${oi}`);
+  assert.equal(found[1],meaning,`and his own meaning for ${kind}|${price}|${oi}`);
+ }
+ // "both sides building similarly" -> no clear directional edge, on the BLOCK's own tolerance
+ assert.equal(L.SIGNAL_BALANCED,L.GRID_BLOCK_BOTH_BUILDING,'one balance sentence on this tab, not two');
+ assert.ok(/no clear directional edge/i.test(L.SIGNAL_BALANCED));
+ // "little OI change" -> positioning unchanged / flat
+ assert.equal(L.FLOW_FLAT_WHAT,'Very little change');
+ assert.equal(L.FLOW_FLAT_MEANING,'Positioning is unchanged');
+ assert.equal(L.SIGNAL_INTERPRETATIONS['flat|flat'],'No meaningful new positioning');
+ // the interpretation table is COMPLETE: all nine combinations, so no reading falls through to a blank
+ for(const c of ['building','flat','unwinding'])for(const p of ['building','flat','unwinding'])
+  assert.ok(L.SIGNAL_INTERPRETATIONS[`${c}|${p}`],`no interpretation for calls ${c} + puts ${p}`);
+ // and the both-building cell really does split three ways on the tolerance
+ const side=(dir,change)=>({contracts:5,change,price_change:0,oi_direction:dir,price_direction:'flat',
+  strength:1,what_label:'',meaning:'',text:''});
+ assert.equal(L.signalInterpretation(side('building',1000),side('building',100)),L.SIGNAL_MORE_CALLS);
+ assert.equal(L.signalInterpretation(side('building',100),side('building',1000)),L.SIGNAL_MORE_PUTS);
+ assert.equal(L.signalInterpretation(side('building',100),side('building',100)),L.SIGNAL_BALANCED);
+});
+ok(()=>{ // §5 OVER EVERY STRING THE SIGNAL TABLE ADDED - his vocabulary aside, nothing here may predict
+ const banned=/\b(will|expect|expected|forecast|predict|prediction|likely|should rise|should fall|target price|support level|resistance level|breakout|momentum|overbought|oversold|buy signal|sell signal|uptrend|downtrend|rally|reversal)\b/i;
+ const sentences=[L.SIGNAL_AGGREGATE_TEXT,L.SIGNAL_BASKET_TEXT,L.SIGNAL_CAVEAT_TEXT,L.SIGNAL_RULE_TEXT,
+  L.SIGNAL_STRENGTH_TEXT,L.SIGNAL_NO_DATA,L.SIGNAL_NO_BASELINE,L.SIGNAL_NO_WINDOW,L.SIGNAL_NO_STRENGTH,
+  L.SIGNAL_STABLE,L.SIGNAL_BALANCED,
+  L.SIGNAL_MORE_CALLS,L.SIGNAL_MORE_PUTS,...Object.values(L.SIGNAL_INTERPRETATIONS),
+  ...Object.values(L.SIGNAL_LABELS),...L.SIGNAL_STRENGTH_WORDS];
+ // A sentence that DENIES being a prediction is the opposite of a forecast, and the one caveat is exactly
+ // that sentence. The same exemption the older §5 sweeps make for "nothing on it is a forecast".
+ const denies=(t)=>/\bnot a (prediction|forecast)\b/i.test(String(t));
+ for(const text of sentences){
+  assert.ok(String(text).length>0,'every sentence above must exist');
+  assert.ok(denies(text)||!banned.test(String(text)),
+   `a signal-table sentence must not predict: ${text}`);
+  assert.ok(!MARK_WORD.test(String(text)),`a signal-table sentence says "mark": ${text}`);
+  assert.ok(!/\d/.test(String(text))||!LEVEL_WORD.test(String(text)),
+   `a sentence naming support or resistance must carry no number: ${text}`);
+ }
+ // the file itself, in single, double AND template quotes
+ const said=VISIBLE(SRC('SignalTable.tsx')).filter(t=>banned.test(t));
+ assert.deepEqual(said,[],`SignalTable.tsx must not predict: ${said.join(' | ')}`);
+ assert.deepEqual(marky(SRC('SignalTable.tsx')),[],'and must say "15-min reading", not "mark"');
+ // THE ONE CAVEAT, ONCE: it is in How to read this, and it is not repeated on a row
+ assert.ok(/not a prediction/i.test(L.SIGNAL_CAVEAT_TEXT)&&/buyer and a seller/i.test(L.SIGNAL_CAVEAT_TEXT),
+  'the caveat must say both halves: not a prediction, and every contract has both sides');
+ // ONCE in the body of the file - the import that brings it in is not a second statement of it.
+ const table=CODE('SignalTable.tsx').split('\n').filter(l=>!/^import\b|^\s+[A-Z_,{}\s]+\}?\s*from '/.test(l)).join('\n');
+ assert.equal((table.match(/SIGNAL_CAVEAT_TEXT/g)||[]).length,1,
+  'the caveat is stated ONCE, behind How to read this - never on every row');
+ assert.ok(/tone:'amber' as const\}/.test(table)||/tone:'amber'\}/.test(table),
+  'and it is amber, because it is a caveat on what the table is');
+});
+ok(()=>{ // ONE READ FOR THE TEN CONTRACTS: the grid and the signal table cannot describe different ones
+ const page=CODE('index.tsx'),table=CODE('SignalTable.tsx'),grid=CODE('OiGridSection.tsx');
+ assert.ok(/const gridRead=useDerivativeRead<OiGrid>\(gridPath,seq\)/.test(page),
+  'the page makes the ΔOI-grid read once');
+ assert.ok(/read=\{gridRead\}/.test(page),'and hands it to the block');
+ assert.ok(/gridRead=\{gridRead\}/.test(page),'and to the bar the signal table sits on');
+ for(const [name,src] of [['SignalTable.tsx',table],['OiGridSection.tsx',grid]])
+  assert.ok(!/useDerivativeRead<OiGrid>/.test(src),
+   `${name} must not make its own oi-grid read: two fetches of one payload can drift apart`);
+});
+
+ok(()=>{ // THE MENU IS BUILT FROM THE ENUM, so it cannot drift back into offering the wire strings
+ const dialog=NO_COMMENTS(SRC('FilterDialog.tsx'));
+ assert.ok(/column==='buildup'\)return BUILDUP_IDS\.map/.test(dialog),
+  'the build-up menu must offer the canonical ids');
+ assert.ok(/label:buildupChoiceLabel\(id\)/.test(dialog),'labelled by the same id');
+ assert.ok(/detail:BUILDUP_DETAIL\[id\]/.test(dialog),'and explained by the same id');
+ assert.ok(!/BUILDUP_VALUES/.test(dialog),
+  'the builder must not reach for the wire strings - that is what made all six choices a dash');
+ // every id offered has a §3.1 line under it, including the store's own two non-labels
+ const detail=dialog.slice(dialog.indexOf('const BUILDUP_DETAIL'));
+ for(const id of L.BUILDUP_IDS)assert.ok(new RegExp(`\\b${id}:'`).test(detail),
+  `the menu offers ${id} with nothing under it`);
+});
+ok(()=>{ // ONE BOUNDARY: no file on the tab reads a build-up any other way
+ const files=fs.readdirSync(path.join(__dirname,'..','src','derivative')).filter(f=>/\.tsx?$/.test(f));
+ for(const file of files){
+  if(file==='logic.ts')continue;
+  const code=NO_COMMENTS(SRC(file));
+  assert.ok(!/BUILDUP_LABELS\[/.test(code),`${file} must not index the label table itself`);
+  assert.ok(!/buildup_(day|15m)\s*===/.test(code),
+   `${file} must not compare a served build-up against a literal - use buildupId`);
+ }
+});
+
+// =================================================================================================================
+// P06 — "3 CONDITIONS" WAS NOT A COUNT OF THREE CONDITION TYPES
+//
+// At the 11:30 reading of 18 Sep 2026 the screener drew "Unusual · 3 conditions · 80 contracts" on NIFTY. The
+// server had tallied the store's complete reason SENTENCE, and a sentence carries its own multiple — "volume
+// 206.0x its own time-of-day median" and "volume 781.9x its own time-of-day median" are ONE RULE at two
+// contracts. NIFTY's 80 flagged contracts wrote 124 different sentences. The badge clamped 124 to three.
+//
+// Three separate things were wrong, and all three are checked here:
+//
+//   1. the COUNT counted renderings, not rules. Two rules exist, §3.2 and §3.3, so the number can be 1 or 2.
+//   2. the ORDER rested on that count, which made it "how many different NUMBERS appeared under this name",
+//      and ties fell out in whatever order the rows arrived in.
+//   3. the CELL carried every sentence of every flagged contract — 5,015 characters on NIFTY, clamped to two
+//      lines on screen and read out in full by a screen reader.
+// =================================================================================================================
+const METRICS_PY=fs.readFileSync(path.join(__dirname,'..','..','market_data','derivatives','metrics.py'),'utf8');
+ok(()=>{ // ONE REGISTRY, THREE FILES, NO DRIFT. The thresholds decide what is flagged; a copy that slips is a
+ // page describing a comparison the store never made.
+ assert.ok(/^UNUSUAL_VOL_TOD_RATIO = 2\.0$/m.test(METRICS_PY),'metrics.py pins the §3.2 multiple');
+ assert.ok(/^VOL_OI_SPIKE_RATIO = 1\.0$/m.test(METRICS_PY),'metrics.py pins the §3.3 multiple');
+ assert.ok(/^UNUSUAL_RULES_VERSION = 1$/m.test(METRICS_PY),'and a version on the definitions');
+ assert.ok(/^RULE_VOL_TOD = "vol_tod_median"$/m.test(METRICS_PY));
+ assert.ok(/^RULE_DAY_VOL_VS_PREV_OI = "day_vol_vs_prev_oi"$/m.test(METRICS_PY));
+ assert.ok(/^UNUSUAL_RULES_VERSION=1$/m.test(DERIV_PY),'derivatives.py mirrors the version');
+ assert.ok(/^UNUSUAL_VOL_TOD_RATIO=2\.0$/m.test(DERIV_PY),'and both multiples');
+ assert.ok(/^VOL_OI_SPIKE_RATIO=1\.0$/m.test(DERIV_PY));
+ assert.ok(/^RULE_VOL_TOD='vol_tod_median'$/m.test(DERIV_PY));
+ assert.ok(/^RULE_DAY_VOL_VS_PREV_OI='day_vol_vs_prev_oi'$/m.test(DERIV_PY));
+ // and the browser's own copy, which exists ONLY to read an older server's sentences back into a rule
+ assert.deepEqual([...L.UNUSUAL_RULE_DEFS.map(r=>r.rule_id)],['vol_tod_median','day_vol_vs_prev_oi']);
+ assert.deepEqual([...L.UNUSUAL_RULE_DEFS.map(r=>r.comparator)],['>=','>'],
+  'the comparators are the ones the code performs: §3.2 is at-least, §3.3 is more-than');
+ assert.deepEqual([...L.UNUSUAL_RULE_DEFS.map(r=>r.threshold)],[2,1]);
+ assert.deepEqual([...L.UNUSUAL_RULE_DEFS.map(r=>r.short_label)],['Vol vs median','Day vol vs prev OI']);
+ assert.ok(/short_label="Vol vs median"/.test(METRICS_PY)&&/'short_label':'Vol vs median'/.test(DERIV_PY),
+  'and the short form is one string in all three files too');
+ assert.equal(L.UNUSUAL_RULE_MAX,2,'two rules exist and there is no third to trip');
+ // the comparator each Python side performs, at the one place it performs it
+ assert.ok(/volume_vs_tod\.ratio >= floors\.unusual_vol_tod_ratio/.test(METRICS_PY),'§3.2 fires at >=');
+ assert.ok(/is_spike=ratio > threshold/.test(METRICS_PY),'§3.3 fires at >');
+ // the reason WORDING is written and read back by the same pair of patterns, in the same file
+ assert.ok(/RULE_VOL_TOD: "volume \{value:\.1f\}x its own time-of-day median"/.test(METRICS_PY));
+ assert.ok(/RULE_DAY_VOL_VS_PREV_OI: "day volume \{value:\.1f\}x yesterday's OI"/.test(METRICS_PY));
+ assert.ok(/reasons: list\[str\] = \[t\.reason for t in triggers\]/.test(METRICS_PY),
+  'the stored sentence is DERIVED from the structured trigger, so the two cannot drift');
+ // every side reads the same sentence back to the same rule
+ for(const [text,id] of [['volume 206.0x its own time-of-day median','vol_tod_median'],
+  ['volume 781.9x its own time-of-day median','vol_tod_median'],
+  ["day volume 28.3x yesterday's OI",'day_vol_vs_prev_oi'],
+  ["day volume 1.2x yesterday's OI",'day_vol_vs_prev_oi']])
+  assert.equal(L.unusualRuleOf(text),id,text);
+ assert.equal(L.unusualRuleOf('something the store has never written'),L.UNUSUAL_RULE_UNCLASSIFIED,
+  'a sentence no rule claims stays itself - it is never folded into a rule that did not fire');
+ assert.equal(L.unusualRuleOf(''),'','and nothing at all is nothing, not an unclassified condition');
+});
+ok(()=>{ // NUMERIC VARIANTS OF ONE RULE COUNT ONCE. This is the defect, reproduced from the captured case.
+ const nifty={underlying:'NIFTY',unusual:80,options:104,volume_to_oi_contracts:104,
+  unusual_reasons:{'volume 206.0x its own time-of-day median':1,'volume 781.9x its own time-of-day median':1,
+   'volume 73.1x its own time-of-day median':1,'volume 34.3x its own time-of-day median':1,
+   "day volume 28.3x yesterday's OI":1,"day volume 23.0x yesterday's OI":1,
+   "day volume 35.9x yesterday's OI":1,"day volume 1.2x yesterday's OI":3}};
+ assert.equal(Object.keys(nifty.unusual_reasons).length,8,'eight distinct sentences...');
+ assert.equal(L.unusualConditions(nifty),2,'...two rules');
+ assert.ok(L.unusualConditions(nifty)<3,'the inspected two-family case CANNOT display three conditions');
+ assert.equal(L.unusualDegree(nifty),2,'and the colour step moves with the rule count, not the multiple');
+ // THREE NUMBERS THAT ARE NOT THE SAME NUMBER, and the badge keeps them apart
+ assert.equal(L.unusualContractCount(nifty),80,'contracts flagged');
+ assert.equal(L.unusualObservations(nifty),10,'times a rule fired');
+ assert.equal(L.unusualText(nifty),'Unusual · 2 conditions · 80 contracts');
+ assert.ok(!/3 conditions/.test(L.unusualText(nifty)));
+ // ...and the server's own structured tally says the same, with the contract count it alone can know
+ const served={underlying:'NIFTY',unusual:80,options:104,volume_to_oi_contracts:104,
+  unusual_rule_count:2,unusual_observations:124,
+  unusual_rules:[{rule_id:'vol_tod_median',label:'Volume vs its own median',short_label:'Vol vs median',
+   contracts:74,observations:74,
+   comparator:'>=',threshold:2,measure:'cumulative volume so far today',baseline_label:'its own median',
+   sample_label:'session',value_max:781.9,value_max_symbol:'NIFTY2692223300CE',baseline_at_max:1200,
+   sample_count_at_max:10},
+   {rule_id:'day_vol_vs_prev_oi',label:'Day volume vs previous-close OI',short_label:'Day vol vs prev OI',
+    contracts:50,observations:50,
+    comparator:'>',threshold:1,value_max:57.8,value_max_symbol:'NIFTY2692223300PE'}]};
+ assert.equal(L.unusualConditions(served),2);
+ assert.equal(L.unusualContractCount(served),80);
+ assert.equal(L.unusualObservations(served),124,'observations are the server\'s own total, never the rule count');
+ assert.equal(L.unusualEvidenceSummary(served),'2 conditions · 80 contracts flagged · 124 observations');
+ assert.equal(L.unusualRuleBadge(served.unusual_rules[0]),'Volume vs its own median · 74');
+ // THE CELL'S WIDTH IS THE CELL'S WIDTH. The badge in the table uses the tab's existing column words; the
+ // drawer, which has room, uses the rule's full name.
+ assert.equal(L.unusualRuleBadge(served.unusual_rules[0],true),'Vol vs median · 74');
+ assert.equal(L.unusualRuleBadge({rule_id:'x',label:'Only a long name',contracts:1,observations:1},true),
+  'Only a long name · 1','a rule with no short form keeps its full name rather than losing it');
+ assert.ok(/^Vol vs median · /.test(L.unusualBadgesText(served)),
+  'the cell line is built from the short labels');
+ assert.ok(L.unusualRuleDetail(served.unusual_rules[0]).includes('at least 2.0'),
+  'the drawer states the comparator and the threshold, not just the reading');
+ assert.ok(L.unusualRuleDetail(served.unusual_rules[0]).includes('NIFTY2692223300CE'),
+  'and names the contract the largest reading belongs to');
+ assert.ok(L.unusualRuleDetail(served.unusual_rules[0]).includes('over 10 sessions'),
+  'and how many observations the baseline it was measured against stands on');
+ // a sentence tally cannot say how many CONTRACTS tripped a rule, and does not pretend to
+ assert.equal(L.unusualRules(nifty)[0].contracts,null);
+ assert.ok(L.unusualRuleBadge(L.unusualRules(nifty)[0]).endsWith(' seen'),
+  'it says what it CAN count rather than inventing a contract count');
+});
+ok(()=>{ // a flag with no condition named is still a flag; and nothing flagged is not "not measured"
+ assert.equal(L.unusualDegree({unusual:3,unusual_rules:[],options:5}),1,'a named flag with no rule still marks');
+ assert.equal(L.unusualBadgesText({unusual:3,unusual_rules:[],options:5}),'the store named no condition');
+ assert.equal(L.unusualDegree({unusual:0,options:5}),0);
+ assert.equal(L.unusualShort({unusual:0,options:5}),L.UNUSUAL_NONE);
+ assert.equal(L.unusualShort({unusual:0,options:0,volume_to_oi_contracts:0,volume_baseline_contracts:0}),
+  L.UNUSUAL_NOT_MEASURED,'a futures-only book was not measured, and that is not a quiet book');
+ assert.equal(L.unusualConditions(null),0);
+ assert.equal(L.unusualObservations(null),0);
+});
+ok(()=>{ // THE CELL IS CONCISE, AND THE FULL EVIDENCE IS STILL THERE
+ const evidence=JSON.parse(fs.readFileSync(path.join(__dirname,'..','docs','derivative-audit-2026-09-19',
+  'backend-evidence.json'),'utf8'));
+ const nifty=evidence.screener.rows.find(r=>r.underlying==='NIFTY');
+ assert.equal(Object.keys(nifty.unusual_reasons).length,124,'the captured case: 124 distinct sentences');
+ // what the cell used to carry: every sentence of every flagged contract, concatenated
+ const before=Object.entries(nifty.unusual_reasons).map(([k,v])=>`${k} ${v}`).join(' · ');
+ assert.ok(before.length>4000,`the old reason line was ${before.length} characters`);
+ // what it carries now: the counts and ONE BADGE PER RULE
+ const after=`${L.unusualShort(nifty)} ${L.unusualBadgesText(nifty)}`;
+ assert.equal(L.unusualConditions(nifty),2,'two rules, from the captured 124 sentences');
+ assert.ok(after.length<200,`the cell text must stay short: ${after.length} characters — ${after}`);
+ assert.ok(after.length*20<before.length,'and it is a different order of magnitude, not a trim');
+ // the spoken row says WHY it is flagged, in the same concise form - it used to say nothing at all
+ const spoken=L.groupRowLabel(nifty,3);
+ assert.ok(spoken.includes('Unusual · 2 conditions'),`the row must speak the counts: ${spoken}`);
+ assert.ok(spoken.length<900,`and the spoken row must stay readable: ${spoken.length} characters`);
+ for(const text of [after,spoken])
+  assert.ok(!/206\.0|781\.9|28\.3/.test(text),'no multiple is concatenated into the cell or the row');
+});
+ok(()=>{ // the widget draws badges and a drawer, and no longer concatenates reasons anywhere
+ const widget=SRC('UnusualWidget.tsx'),code=CODE('UnusualWidget.tsx');
+ assert.ok(!/unusualReasonsText/.test(code),'the concatenated reason line is gone from the cell');
+ assert.ok(/unusualRuleBadge\(rule\)/.test(code),'one badge per rule is drawn');
+ assert.ok(/UNUSUAL_RULE_MAX/.test(code),'and the line cannot grow past the number of rules that exist');
+ assert.ok(/function UnusualEvidence\(\{group,onClose\}/.test(widget),'the evidence drawer exists');
+ assert.ok(/<UnusualEvidence group=\{evidence\} onClose=/.test(code),'and is mounted once for the whole list');
+ assert.ok(/unusualEvidence\(group\)/.test(code),'it lists the contracts the SERVER sent');
+ assert.ok(/unusualTriggerText\(trigger,rules\)/.test(code),
+  'each with its value, its threshold, its baseline and its sample count');
+ assert.ok(/UNUSUAL_EVIDENCE_NONE/.test(code),
+  'and a response that carried no contracts says so rather than showing an empty list');
+ // the 5,015-character hover title is gone with it
+ assert.ok(!/title:degree\?/.test(code),'no cell carries every reason as a hover title either');
+});
+ok(()=>{ // ONE TRIGGER, READ OUT: value, comparator, threshold, baseline, sample count. Never a nought for a
+ // number the store does not carry.
+ const rules=[{rule_id:'vol_tod_median',label:'Volume vs its own median',contracts:1,observations:1}];
+ assert.equal(L.unusualTriggerText({rule_id:'vol_tod_median',value:781.9,comparator:'>=',threshold:2,
+  baseline:1200,sample_count:10},rules),
+  `Volume vs its own median · 781.9${TIMES} · >= 2.0${TIMES} · baseline 1.2k · 10 observations`);
+ assert.ok(L.unusualTriggerText({rule_id:'vol_tod_median',value:null,text:'x'},rules).includes('no value stored'),
+  'a condition the store recorded without a number says so rather than printing a nought');
+ assert.equal(L.unusualTriggerText(null),'');
+});
+ok(()=>{ // THE ORDER IS DETERMINISTIC, AND THE TIE-BREAKER IS THE NAME
+ const fn=DERIV_PY.slice(DERIV_PY.indexOf('def _screener_groups'),DERIV_PY.indexOf('def screener(self,filters'));
+ assert.ok(/out\.sort\(key=lambda g:\(-\(g\['unusual_rule_count'\] or 0\),-\(g\['unusual'\] or 0\),-\(g\['premium_cr'\] or 0\.0\),\s*g\['underlying'\] or ''\)\)/
+  .test(fn),'four keys, and the last is the instrument name so a tie is stable');
+ assert.ok(!/-len\(g\['unusual_reasons'\]\)/.test(fn),'nothing is ordered by how many SENTENCES were written');
+ assert.ok(!/group\['unusual_reasons'\]\[reason\]=/.test(fn),'and nothing tallies a sentence at all');
+ assert.ok(/group\['unusual_rule_count'\]=len\(group\['unusual_rules'\]\)/.test(fn),
+  'the condition count is a count of RULES');
+ assert.ok(/group\['unusual_observations'\]\+=1/.test(fn),'observations are counted apart from contracts');
+ assert.ok(/group\['unusual_rules'\]\[rule_id\]\['contracts'\]\+=1/.test(fn),
+  'and a contract is counted ONCE per rule however many times it appears');
+ // the browser restates the same order, so a client-side narrowing cannot quietly change it
+ const a={underlying:'BBB',unusual:5,unusual_rule_count:2,premium_cr:10};
+ const b={underlying:'AAA',unusual:5,unusual_rule_count:2,premium_cr:10};
+ assert.deepEqual([...L.unusualRank(a)],[2,5,10,'BBB']);
+ assert.deepEqual([...L.unusualRank(b)],[2,5,10,'AAA']);
+ assert.ok(L.unusualRank(b)[3]<L.unusualRank(a)[3],'two rows level on all three counts still have an order');
+});
+ok(()=>{ // THE SORT THAT IS ACTUALLY IN FORCE IS THE ONE THE PAGE PRINTS
+ assert.ok(/^SCREENER_RANK_LABEL='Unusual first'$/m.test(DERIV_PY),'the server names its own order');
+ assert.ok(/SCREENER_RANK_TEXT=\('One row per instrument, ordered by: most distinct condition types/.test(DERIV_PY));
+ assert.ok(/^CONTRACT_RANK_LABEL='Largest premium traded'$/m.test(DERIV_PY),
+  'and the contract list is a different order with a different name');
+ assert.ok(/def _ranking\(view\):/.test(DERIV_PY),'one helper answers "what is this sorted by"');
+ assert.ok(/ranking=self\._ranking\(view\)/.test(DERIV_PY),'and it travels with the rows');
+ const ranking={view:'underlying',label:'Unusual first',text:'ordered by ...',
+  keys:[{field:'unusual_rule_count',direction:'desc',text:'most distinct condition types'},
+   {field:'underlying',direction:'asc',text:'then the name A to Z'}]};
+ assert.equal(L.rankingLabel(ranking),'Unusual first');
+ assert.equal(L.rankingLabel(null),'');
+ assert.deepEqual([...L.rankingText(ranking)],['ordered by ...','most distinct condition types','then the name A to Z']);
+ assert.deepEqual([...L.rankingText(null)],[]);
+ // THE PAGE TAKES ROW ONE OF THAT LIST AND SAYS WHICH ORDER IT CAME FROM. It used to say "Busiest by
+ // premium" over a list the screener had not ordered by premium for a long time.
+ const page=CODE('index.tsx');
+ assert.ok(/const rankLabel=rankingLabel\(screener\.data\?\.ranking\)/.test(page),
+  'the page reads the server\u2019s own ranking label');
+ assert.ok(/resolveTabSymbol\(filters\.underlying,target\?\.underlying,ranked,/.test(page),
+  'and hands it, with row one, to the one place the tab resolves its symbol');
+ // the phrase is gone from the CODE; the comments that explain why it was wrong are meant to stay
+ for(const file of ['logic.ts','index.tsx','UnusualWidget.tsx','ScreenerSection.tsx'])
+  assert.ok(!/Busiest by premium/.test(CODE(file)),`${file} must not claim a premium sort it does not perform`);
+ // the reader can read the keys themselves, in the server's words, on the screener's own control
+ const rail=SRC('ScreenerSection.tsx');
+ assert.ok(/heading:'The order these rows are in',lines:\[UNUSUAL_SORT_TEXT,\.\.\.rankingText\(body\?\.ranking\)\]/
+  .test(rail),'the screener prints the server\u2019s ranking keys');
+ assert.ok(/most distinct conditions/.test(L.UNUSUAL_SORT_TEXT)&&/A to Z/.test(L.UNUSUAL_SORT_TEXT),
+  'and the sentence over them names the tie-breaker too');
+});
+ok(()=>{ // the server carries a trigger's numbers, and gets them from the store rather than recomputing them
+ assert.ok(/def _unusual_triggers\(cls,row\):/.test(DERIV_PY));
+ for(const key of ['rule_id','rule_version','value','comparator','threshold','baseline','sample_count'])
+  assert.ok(new RegExp(`'${key}':`).test(DERIV_PY),`a trigger must carry ${key}`);
+ assert.ok(/'vol_tod_median','vol_tod_sessions'/.test(DERIV_PY),
+  'the baseline column is selected, so a multiple never travels without its denominator');
+ assert.ok(/'vol_oi_ratio','vol_oi_prev_oi'/.test(DERIV_PY));
+ assert.ok(/'unusual_triggers':self\._unusual_triggers\(row\)/.test(DERIV_PY),'and every screener row carries them');
+ // a stored row is READ, never rewritten: the metrics table keeps the columns it always had
+ assert.ok(!/alter table metrics/i.test(DERIV_PY)&&!/ALTER TABLE metrics/i.test(METRICS_PY),
+  'no stored row is rewritten and no column is added for this');
+ assert.ok(/"unusual_reasons": ",".join\(self\.unusual_reasons\)/.test(METRICS_PY),
+  'the stored row is written exactly as it always was');
+});
+
 const SCRIPT_SHA=require('node:crypto').createHash('sha256').update(fs.readFileSync(__filename)).digest('hex').slice(0,12);
 const WEB_DIR=process.env.QA_WEB_DIRECTORY||path.join(__dirname,'..','dist-pilot');
 const BUNDLE=(()=>{try{return fs.statSync(path.join(WEB_DIR,'index.html')).mtime.toISOString();}catch{return 'unknown';}})();

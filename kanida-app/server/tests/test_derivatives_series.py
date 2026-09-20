@@ -449,7 +449,7 @@ def test_a_null_iv_always_carries_a_reason_and_a_solved_one_never_does(reader):
 
 # --- the screener: applied or refused, never silently dropped ---------------------------------------------
 def test_the_screener_reports_exactly_what_it_applied(reader):
- body=reader.screener({'option_type':'CE','max_dte':30})
+ body=reader.screener({'option_type':'CE','max_dte':30,'group':'contract'})
  keys={row['key'] for row in body['applied']}
  assert {'at','min_premium_cr','min_last_price','min_oi_lots','option_type','max_dte'} <= keys
  for row in body['applied']:assert row['text'] and 'always' in row
@@ -529,33 +529,209 @@ def test_the_screener_never_serves_a_ratio_without_its_baseline(tmp_path):
  connection.commit();connection.close()
  reader=D.Derivatives(str(path))
  try:
-  row=reader.screener({})['rows'][0]
+  row=reader.screener({'group':'contract'})['rows'][0]
   assert row['volume_ratio'] is None and row['volume_baseline']=='none'
   assert row['volume_baseline_sessions']==2
-  # And the filter cannot smuggle it back in.
+  # And the filter cannot smuggle it back in - in either view.
+  assert reader.screener({'min_volume_ratio':1.0,'group':'contract'})['rows']==[]
   assert reader.screener({'min_volume_ratio':1.0})['rows']==[]
  finally:reader.close()
 
 def test_moneyness_and_underlying_kind_are_computed_from_the_same_reading(reader):
- body=reader.screener({'underlying_kind':'index'})
+ body=reader.screener({'underlying_kind':'index','group':'contract'})
  assert body['rows'] and all(row['underlying_kind']=='index' for row in body['rows'])
  assert all(row['underlying'] in D.INDEX_KINDS for row in body['rows'])
- stock=reader.screener({'underlying_kind':'stock'})
+ stock=reader.screener({'underlying_kind':'stock','group':'contract'})
  assert all(row['underlying'] not in D.INDEX_KINDS for row in stock['rows'])
- atm=reader.screener({'moneyness':'atm'})
+ atm=reader.screener({'moneyness':'atm','group':'contract'})
  for row in atm['rows']:
   assert abs(row['strike']-row['spot'])<=D.MONEYNESS_BAND*row['spot']
+ # the row-level filters narrow the UNDERLYING view too - it is built from the rows that survived them
+ grouped=reader.screener({'underlying_kind':'index'})
+ assert grouped['rows'] and all(row['underlying'] in D.INDEX_KINDS for row in grouped['rows'])
 
 def test_the_buildup_filter_never_mixes_its_two_windows(reader):
  """§3.1: the 15-minute and the day-on-day label are different statements and are never conflated."""
- fifteen=reader.screener({'buildup':'Long build-up','buildup_window':'15m'})
+ fifteen=reader.screener({'group':'contract','buildup':'Long build-up','buildup_window':'15m'})
  assert fifteen['buildup_window']=='15m'
  assert all(row['buildup_15m']=='Long build-up' for row in fifteen['rows'])
- day=reader.screener({'buildup':'Long build-up','buildup_window':'day'})
+ day=reader.screener({'group':'contract','buildup':'Long build-up','buildup_window':'day'})
  assert day['rows']==[],'the fixture writes "Short build-up" on the day window'
- kept=reader.screener({'buildup':'Short build-up','buildup_window':'day'})
+ kept=reader.screener({'group':'contract','buildup':'Short build-up','buildup_window':'day'})
  assert kept['rows'] and all(row['buildup_day']=='Short build-up' for row in kept['rows'])
  for row in kept['rows']:assert row['buildup_window']=='day' and row['buildup']==row['buildup_day']
+
+# --- P06: what "unusual" counts, and the order it drives ---------------------------------------------------
+#
+# The screener drew "Unusual · 3 conditions · 80 contracts" on NIFTY at the 11:30 reading of 18 Sep 2026. It
+# had tallied the store's complete reason SENTENCE, and a sentence carries its own multiple - "volume 206.0x
+# its own time-of-day median" and "volume 781.9x its own time-of-day median" are ONE RULE at two contracts.
+# 80 flagged contracts wrote 124 different sentences, and the badge clamped 124 to three.
+#
+# These build one small store whose contracts trip the SAME rule at many different multiples, which is the
+# exact shape that produced the bug.
+#: The two sentences the store writes, at whatever multiple the contract reported.
+def _vol_tod(value):return f'volume {value:.1f}x its own time-of-day median'
+def _day_vol(value):return f"day volume {value:.1f}x yesterday's OI"
+
+
+def _unusual_store(path,rows):
+ """A store whose `metrics` table carries the two baseline columns the real one has.
+
+ `rows` are (symbol, underlying, type, strike, premium_cr, vol_tod_ratio, vol_oi_ratio, reasons).
+ """
+ schema=SCHEMA.replace('vol_tod_sessions INTEGER','vol_tod_median REAL, vol_tod_sessions INTEGER')\
+  .replace('vol_oi_ratio REAL','vol_oi_ratio REAL, vol_oi_prev_oi REAL')
+ connection=sqlite3.connect(path);connection.executescript(schema)
+ for token,(symbol,underlying,kind,strike,premium,tod,voi,reasons) in enumerate(rows,start=900):
+  connection.execute('insert into contracts(instrument_token,tradingsymbol,underlying,instrument_type,strike,'
+   'expiry,lot_size,first_seen,last_seen) values(?,?,?,?,?,?,?,?,?)',
+   (token,symbol,underlying,kind,strike,EXPIRY,75,SESSION,SESSION))
+  connection.execute('insert into metrics(scope,metric_key,captured_at,instrument_token,tradingsymbol,'
+   'underlying,instrument_type,strike,expiry,lot_size,days_to_expiry,last_price,average_price,volume,oi,spot,'
+   'premium_cr,premium_status,vol_tod_ratio,vol_tod_median,vol_tod_sessions,vol_tod_status,vol_oi_ratio,'
+   'vol_oi_prev_oi,vol_oi_status,buildup_day,unusual,unusual_reasons)'
+   " values('contract',?,?,?,?,?,?,?,?,?,10,240.0,240.0,500000.0,900000.0,23480.0,?,'ok',?,1200.0,10,'ok',?,"
+   "4000.0,'ok','Long build-up',?,?)",
+   (symbol,MARKS[0],token,symbol,underlying,kind,strike,EXPIRY,75,premium,tod,voi,
+    1 if reasons else 0,','.join(reasons)))
+  connection.execute('insert into snapshots(instrument_token,captured_at,last_price,oi,last_trade_time,'
+   "vendor_id,fetched_at,snapshot_id) values(?,?,240.0,900000,?,'kite','x','y')",(token,MARKS[0],MARKS[0]))
+ connection.execute('insert into underlying_snapshots(underlying,captured_at,spot,spot_symbol,fut_price,'
+  'total_ce_oi,total_pe_oi,pcr_oi,pcr_volume,max_pain_strike) values(?,?,?,?,?,?,?,?,?,?)',
+  ('NIFTY',MARKS[0],23480.0,'NIFTY',23483.0,100,100,None,None,None))
+ connection.commit();connection.close()
+ return D.Derivatives(str(path))
+
+
+def test_numeric_variants_of_one_rule_are_one_condition(tmp_path):
+ """THE AUDIT'S CASE: many multiples of the same two rules are TWO conditions, never many."""
+ rows=[('NIFTY26SEP23500CE','NIFTY','CE',23500.0,40.0,206.0,28.3,[_vol_tod(206.0),_day_vol(28.3)]),
+  ('NIFTY26SEP23600CE','NIFTY','CE',23600.0,30.0,781.9,23.0,[_vol_tod(781.9),_day_vol(23.0)]),
+  ('NIFTY26SEP23400PE','NIFTY','PE',23400.0,20.0,73.1,35.9,[_vol_tod(73.1),_day_vol(35.9)]),
+  ('NIFTY26SEP23300PE','NIFTY','PE',23300.0,10.0,34.3,None,[_vol_tod(34.3)])]
+ reader=_unusual_store(tmp_path/'unusual.db',rows)
+ try:
+  group=reader.screener({})['rows'][0]
+  # SEVEN distinct reason SENTENCES across four contracts...
+  assert len({reason for _,_,_,_,_,_,_,reasons in rows for reason in reasons})==7
+  # ...and TWO rules. This number could never be three, because there is no third rule to trip.
+  assert group['unusual_rule_count']==2
+  assert group['unusual_rule_count']<3
+  assert [rule['rule_id'] for rule in group['unusual_rules']]==[D.RULE_VOL_TOD,D.RULE_DAY_VOL_VS_PREV_OI]
+  # THREE DIFFERENT NUMBERS, kept apart: rules, contracts, firings.
+  assert group['unusual']==4,'contracts flagged'
+  assert group['unusual_observations']==7,'times a rule fired'
+  assert [rule['contracts'] for rule in group['unusual_rules']]==[4,3]
+  assert [rule['observations'] for rule in group['unusual_rules']]==[4,3]
+  # the old sentence tally is gone from the row entirely
+  assert 'unusual_reasons' not in group
+ finally:reader.close()
+
+
+def test_a_trigger_carries_its_rule_its_comparison_and_its_baseline(tmp_path):
+ """Not prose: rule id, version, value, comparator, threshold, baseline and sample count."""
+ reader=_unusual_store(tmp_path/'trigger.db',
+  [('NIFTY26SEP23500CE','NIFTY','CE',23500.0,40.0,206.0,28.3,[_vol_tod(206.0),_day_vol(28.3)])])
+ try:
+  row=reader.screener({'group':'contract'})['rows'][0]
+  tod,voi=row['unusual_triggers']
+  assert tod=={'rule_id':D.RULE_VOL_TOD,'rule_version':D.UNUSUAL_RULES_VERSION,'value':206.0,
+   'comparator':'>=','threshold':D.UNUSUAL_VOL_TOD_RATIO,'baseline':1200.0,'sample_count':10,'unit':'x'}
+  assert voi=={'rule_id':D.RULE_DAY_VOL_VS_PREV_OI,'rule_version':D.UNUSUAL_RULES_VERSION,'value':28.3,
+   'comparator':'>','threshold':D.VOL_OI_SPIKE_RATIO,'baseline':4000.0,'sample_count':1,'unit':'x'}
+  # a sentence a RULE wrote is not repeated on the trigger: it is that rule at that value, and both are here
+  assert 'text' not in tod and 'text' not in voi
+  # the store's own words are kept beside the structure, not replaced by it
+  assert row['unusual_reasons']==f'{_vol_tod(206.0)},{_day_vol(28.3)}'
+  # and the same numbers reach the instrument row, as a MAXIMUM with the contract named - never a mean
+  group=reader.screener({})['rows'][0]
+  peak=group['unusual_rules'][0]
+  assert peak['value_max']==206.0 and peak['value_max_symbol']=='NIFTY26SEP23500CE'
+  assert peak['baseline_at_max']==1200.0 and peak['sample_count_at_max']==10
+  # THE EVIDENCE ITSELF travels with the row, so the drawer cannot show a different reading
+  assert [c['tradingsymbol'] for c in group['unusual_contracts']]==['NIFTY26SEP23500CE']
+  assert group['unusual_contracts'][0]['triggers']==[tod,voi]
+ finally:reader.close()
+
+
+def test_a_condition_this_build_does_not_name_stays_itself(tmp_path):
+ """A sentence no rule claims is counted on its own - never folded into a rule that did not fire."""
+ reader=_unusual_store(tmp_path/'odd.db',
+  [('NIFTY26SEP23500CE','NIFTY','CE',23500.0,40.0,206.0,None,[_vol_tod(206.0),'something new'])])
+ try:
+  group=reader.screener({})['rows'][0]
+  assert [rule['rule_id'] for rule in group['unusual_rules']]==[D.RULE_VOL_TOD,D.RULE_UNCLASSIFIED]
+  # a TALLY carries the rule's id and its numbers; the words for every rule are served once per response
+  odd=group['unusual_rules'][1]
+  assert set(odd)=={'rule_id','rule_version','contracts','observations','value_max','value_max_symbol',
+   'baseline_at_max','sample_count_at_max'}
+  assert odd['contracts']==1 and odd['value_max'] is None
+  assert [rule['rule_id'] for rule in reader.screener({})['unusual_rules']]==[
+   D.RULE_VOL_TOD,D.RULE_DAY_VOL_VS_PREV_OI]
+  assert group['unusual_contracts'][0]['triggers'][1]['text']=='something new'
+  assert group['unusual_contracts'][0]['triggers'][1]['value'] is None,'no number is invented for it'
+ finally:reader.close()
+
+
+def test_the_screener_order_is_deterministic_and_says_what_it_is(tmp_path):
+ """Most distinct conditions, then most contracts flagged, then premium, then the NAME."""
+ rows=[
+  # two conditions, one contract, small premium
+  ('AAA26SEP100CE','AAA','CE',100.0,5.0,206.0,28.3,[_vol_tod(206.0),_day_vol(28.3)]),
+  # one condition, one contract, huge premium - and it must NOT come first
+  ('BIG26SEP100CE','BIG','CE',100.0,900.0,206.0,None,[_vol_tod(206.0)]),
+  # a perfect tie with CCC on all three counts: only the name separates them
+  ('DDD26SEP100CE','DDD','CE',100.0,50.0,206.0,None,[_vol_tod(206.0)]),
+  ('CCC26SEP100CE','CCC','CE',100.0,50.0,206.0,None,[_vol_tod(206.0)]),
+ ]
+ reader=_unusual_store(tmp_path/'order.db',rows)
+ try:
+  body=reader.screener({})
+  assert [row['underlying'] for row in body['rows']]==['AAA','BIG','CCC','DDD']
+  # the tie is broken by the name, so the SAME query gives the SAME order every time
+  assert [row['underlying'] for row in reader.screener({})['rows']]==['AAA','BIG','CCC','DDD']
+  # AND THE RESPONSE SAYS WHAT THE ORDER IS. The page used to print "Busiest by premium" over this list.
+  ranking=body['ranking']
+  assert ranking['view']=='underlying' and ranking['label']==D.SCREENER_RANK_LABEL
+  assert [key['field'] for key in ranking['keys']]==['unusual_rule_count','unusual','premium_cr','underlying']
+  assert [key['direction'] for key in ranking['keys']]==['desc','desc','desc','asc']
+  assert all(key['text'] for key in ranking['keys']),'every key says what it is, in words'
+  # the contract list is a different order and says so rather than borrowing this one
+  contracts=reader.screener({'group':'contract'})
+  assert contracts['ranking']['label']==D.CONTRACT_RANK_LABEL
+  assert [key['field'] for key in contracts['ranking']['keys']]==['premium_cr']
+  assert [row['underlying'] for row in contracts['rows']][0]=='BIG','largest premium traded first'
+  # the closed list of rules travels with the rows, so the page never has to guess at it
+  assert [rule['rule_id'] for rule in body['unusual_rules']]==[D.RULE_VOL_TOD,D.RULE_DAY_VOL_VS_PREV_OI]
+  assert body['unusual_rules_version']==D.UNUSUAL_RULES_VERSION
+ finally:reader.close()
+
+
+def test_a_store_without_the_baseline_columns_still_answers(tmp_path):
+ """A trigger keeps the value its own sentence states when the store no longer carries the column."""
+ path=tmp_path/'old.db'
+ connection=sqlite3.connect(path);connection.executescript(SCHEMA)   # the older shape: no baseline columns
+ connection.execute('insert into contracts(instrument_token,tradingsymbol,underlying,instrument_type,strike,'
+  'expiry,lot_size,first_seen,last_seen) values(?,?,?,?,?,?,?,?,?)',
+  (101,'NIFTY26SEP23500CE','NIFTY','CE',23500.0,EXPIRY,75,SESSION,SESSION))
+ connection.execute('insert into metrics(scope,metric_key,captured_at,instrument_token,tradingsymbol,'
+  'underlying,instrument_type,strike,expiry,lot_size,days_to_expiry,last_price,average_price,volume,oi,spot,'
+  'premium_cr,premium_status,vol_tod_ratio,vol_tod_sessions,vol_tod_status,unusual,unusual_reasons)'
+  " values('contract',?,?,101,?,'NIFTY','CE',23500.0,?,75,10,240.0,240.0,500000.0,900000.0,23480.0,40.0,"
+  "'ok',206.0,10,'ok',1,?)",
+  ('NIFTY26SEP23500CE',MARKS[0],'NIFTY26SEP23500CE',EXPIRY,_vol_tod(206.0)))
+ connection.execute('insert into snapshots(instrument_token,captured_at,last_price,oi,last_trade_time,'
+  "vendor_id,fetched_at,snapshot_id) values(101,?,240.0,900000,?,'kite','x','y')",(MARKS[0],MARKS[0]))
+ connection.commit();connection.close()
+ reader=D.Derivatives(str(path))
+ try:
+  row=reader.screener({'group':'contract'})['rows'][0]
+  trigger=row['unusual_triggers'][0]
+  assert trigger['rule_id']==D.RULE_VOL_TOD and trigger['value']==206.0
+  assert trigger['baseline'] is None,'a baseline the store does not hold is missing, never a nought'
+  assert reader.screener({})['rows'][0]['unusual_rule_count']==1
+ finally:reader.close()
 
 
 # --- futures build-up -------------------------------------------------------------------------------------
@@ -736,3 +912,486 @@ def test_the_tab_header_counts_its_sessions_by_walking_the_index(reader):
  connection=reader._connect()
  naive=connection.execute('select count(distinct substr(bar_start,1,10)) from candles_15m').fetchone()[0]
  assert body['backfill_sessions']==naive
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# WHICH 15-MIN READING THE SCREENER OPENS ON
+#
+# The newest reading the store holds is not always one a reader can do anything with. When the capture dies
+# part-way through a session the rest of it is rebuilt from 15-minute candles, and a candle carries no
+# traded-price average - so `premium_cr` is NULL for every contract in those readings and not one of them can
+# clear the §3 premium floor. Defaulting to the newest reading then hands the reader an empty screener, no row
+# to click, and therefore no symbol for any block on the tab. That is the real store on 18 Sep 2026: nine
+# readings with rows over the floors, then seventeen with none.
+# ---------------------------------------------------------------------------------------------------------------
+REBUILT_MARKS=[f'{SESSION} {t}:00' for t in ('09:30','09:45','10:00','10:15','10:30','10:45')]
+
+
+def _rebuilt_store(path):
+ """Three captured readings, then three rebuilt from candles: priced, but with no premium at all."""
+ connection=sqlite3.connect(path);connection.executescript(SCHEMA)
+ connection.executemany('insert into contracts(instrument_token,tradingsymbol,underlying,instrument_type,'
+  'strike,expiry,lot_size,first_seen,last_seen) values(?,?,?,?,?,?,?,?,?)',
+  [(101,'NIFTY26SEP23500CE','NIFTY','CE',23500.0,EXPIRY,75,SESSION,SESSION),
+   (201,'RELIANCE26SEP1240CE','RELIANCE','CE',1240.0,EXPIRY,500,SESSION,SESSION)])
+ live,rebuilt=REBUILT_MARKS[:3],REBUILT_MARKS[3:]
+ _option(connection,101,'NIFTY26SEP23500CE','NIFTY','CE',23500.0,75,live,[240.0]*3,[23480.0]*3)
+ _option(connection,201,'RELIANCE26SEP1240CE','RELIANCE','CE',1240.0,500,live,[34.0]*3,[1244.0]*3)
+ # The rebuilt readings: a close, an open interest, everything a candle carries - and premium_cr NULL,
+ # because a candle has no traded-price average to build one from.
+ for token,symbol,underlying,kind,strike,lot,price in ((101,'NIFTY26SEP23500CE','NIFTY','CE',23500.0,75,236.0),
+   (201,'RELIANCE26SEP1240CE','RELIANCE','CE',1240.0,500,33.0)):
+  connection.executemany('insert into metrics(scope,metric_key,captured_at,instrument_token,tradingsymbol,'
+   'underlying,instrument_type,strike,expiry,lot_size,days_to_expiry,last_price,volume,oi,spot,premium_cr)'
+   ' values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+   [('contract',symbol,mark,token,symbol,underlying,kind,strike,EXPIRY,lot,10,price,500000.0,900000.0,
+     23480.0,None) for mark in rebuilt])
+ # Every reading covered both underlyings: the capture reached them, it just could not price them.
+ connection.executemany('insert into underlying_snapshots(underlying,captured_at,spot) values(?,?,?)',
+  [(name,mark,100.0) for name in ('NIFTY','RELIANCE') for mark in REBUILT_MARKS])
+ connection.commit();connection.close()
+
+
+def test_the_screener_opens_on_the_newest_reading_that_has_rows_over_the_floors(tmp_path):
+ """The tab must never LAND on a reading no contract can clear the floors at: that is an empty screener,
+ no row to click, and no symbol for any block on the page."""
+ path=tmp_path/'rebuilt-afternoon.db'
+ _rebuilt_store(path)
+ reader=D.Derivatives(str(path))
+ try:
+  body=reader.screener({})
+  # not the newest - the newest three hold nothing over the floors
+  assert body['as_of']==REBUILT_MARKS[2]
+  assert body['newest_at']==REBUILT_MARKS[-1]
+  assert body['reading_at']==REBUILT_MARKS[2]
+  assert body['reading_is_newest'] is False
+  assert body['reading_chosen'] is False
+  assert body['reading_skipped']==3
+  # and it is a reading with real rows on it, across more than one underlying
+  assert body['rows'] and len({row['underlying'] for row in body['rows']})==2
+  # every reading is still listed, so nothing was taken away from the reader
+  assert {row['at'] for row in body['readings']}=={*REBUILT_MARKS}
+ finally:reader.close()
+
+
+def test_a_reading_the_reader_chose_is_served_exactly_as_asked_even_when_it_is_empty(tmp_path):
+ """The default narrows the CHOICE; it never overrides one. A reader who asks for the newest reading is
+ shown the newest reading, empty, and told it was their own choice."""
+ path=tmp_path/'rebuilt-afternoon.db'
+ _rebuilt_store(path)
+ reader=D.Derivatives(str(path))
+ try:
+  body=reader.screener({'at':REBUILT_MARKS[-1]})
+  assert body['as_of']==REBUILT_MARKS[-1] and body['rows']==[]
+  assert body['reading_chosen'] is True and body['reading_is_newest'] is True
+  assert body['reading_skipped']==0
+  # THE EMPTY NOTE IS THE CAPTURE STATE'S, not a claim that the market was quiet. These rebuilt readings
+  # carry no premium at all, so no contract was ever measured against the premium floor - saying "no
+  # contract cleared the floors" would describe a quiet market, the opposite of what happened.
+  assert body['empty_state']=='partial_capture'
+  assert 'Nothing was measured' in (body['empty_note'] or '')
+  assert 'not a quiet market' in (body['empty_note'] or '')
+  assert 'cleared the floors' not in (body['empty_note'] or '')
+  assert body['capture']['healthy'] is False
+  assert body['capture']['missing_fields']==['premium_cr']
+ finally:reader.close()
+
+
+def test_the_usable_reading_rests_on_the_floors_and_never_on_an_estimated_price(tmp_path):
+ """A number that decides what the reader can see has to be one the exchange reported. `average_price_est`
+ exists in the real store and is deliberately not read anywhere in this module."""
+ source=(D.__file__ if hasattr(D,'__file__') else '')
+ assert source
+ with open(source,encoding='utf-8') as handle:text=handle.read()
+ assert 'average_price_est' not in text
+ # and the probe applies the same three floors the screener itself applies
+ path=tmp_path/'rebuilt-afternoon.db'
+ _rebuilt_store(path)
+ reader=D.Derivatives(str(path))
+ try:
+  assert reader._clears_floors(REBUILT_MARKS[0]) is True
+  assert reader._clears_floors(REBUILT_MARKS[-1]) is False
+  at,skipped=reader._usable_reading(reader.screener_readings())
+  assert (at,skipped)==(REBUILT_MARKS[2],3)
+ finally:reader.close()
+
+
+def test_a_store_where_no_reading_clears_the_floors_still_serves_its_newest(tmp_path):
+ """When EVERY reading is empty the honest answer is the newest one, empty - not an older one that is just
+ as empty under an older as-of."""
+ path=tmp_path/'nothing-clears.db'
+ connection=sqlite3.connect(path);connection.executescript(SCHEMA)
+ connection.execute('insert into contracts(instrument_token,tradingsymbol,underlying,instrument_type,strike,'
+  'expiry,lot_size,first_seen,last_seen) values(?,?,?,?,?,?,?,?,?)',
+  (101,'NIFTY26SEP23500CE','NIFTY','CE',23500.0,EXPIRY,75,SESSION,SESSION))
+ connection.executemany('insert into metrics(scope,metric_key,captured_at,instrument_token,tradingsymbol,'
+  'underlying,instrument_type,strike,expiry,lot_size,days_to_expiry,last_price,volume,oi,spot,premium_cr)'
+  ' values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+  [('contract','NIFTY26SEP23500CE',mark,101,'NIFTY26SEP23500CE','NIFTY','CE',23500.0,EXPIRY,75,10,236.0,
+    500000.0,900000.0,23480.0,None) for mark in REBUILT_MARKS])
+ connection.executemany('insert into underlying_snapshots(underlying,captured_at,spot) values(?,?,?)',
+  [('NIFTY',mark,100.0) for mark in REBUILT_MARKS])
+ connection.commit();connection.close()
+ reader=D.Derivatives(str(path))
+ try:
+  body=reader.screener({})
+  assert body['as_of']==REBUILT_MARKS[-1] and body['rows']==[]
+  assert body['reading_is_newest'] is True and body['reading_skipped']==0
+ finally:reader.close()
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# ONE ROW PER UNDERLYING
+#
+# The screener listed CONTRACTS, largest premium first. At the 11:30 reading of 18 Sep 2026, 85 underlyings had
+# a contract over the liquidity floors - and NIFTY alone had 104 of the 491 contracts. A hundred-row list was
+# therefore a hundred rows of NIFTY, and the reader's conclusion was the obvious one: no stock is active. That
+# is what the owner meant by "why other stocks are not populating".
+#
+# So the default view is one row per underlying, and the contract list is the drill-down. What these tests hold
+# is the part that can quietly go wrong: an aggregate that is not honest. Sums of rupees and contracts are fine.
+# A MEAN OF RATIOS IS NOT A RATIO, and none is served.
+# ---------------------------------------------------------------------------------------------------------------
+
+def test_the_screener_opens_on_one_row_per_underlying(reader):
+ # The stock in this store stops after its fourth reading, so this asks for one that BOTH names are at -
+ # which is the whole point of the view: more than one underlying in it.
+ body=reader.screener({'at':STOCK_MARKS[0]})
+ assert body['view']=='underlying' and list(body['views'])==['underlying','contract']
+ names=[row['underlying'] for row in body['rows']]
+ assert names==sorted(set(names),key=names.index),'one row per underlying, never two'
+ assert len(names)==body['groups_total']
+ # the counts add up to the contract view, exactly
+ contracts=reader.screener({'group':'contract','at':STOCK_MARKS[0]},limit=500)
+ assert body['contracts_total']==len(contracts['rows'])
+ assert sum(row['contracts'] for row in body['rows'])==body['contracts_total']
+ by_name={}
+ for row in contracts['rows']:by_name.setdefault(row['underlying'],[]).append(row)
+ assert {row['underlying'] for row in body['rows']}==set(by_name)
+ for row in body['rows']:
+  mine=by_name[row['underlying']]
+  assert row['contracts']==len(mine)
+  assert row['calls']==sum(1 for r in mine if r['instrument_type']=='CE')
+  assert row['puts']==sum(1 for r in mine if r['instrument_type']=='PE')
+  # the SUMS: rupees and contracts, which add
+  assert row['premium_cr']==pytest.approx(sum(r['premium_cr'] or 0 for r in mine),abs=0.01)
+  assert row['volume']==sum(r['volume'] or 0 for r in mine)
+  assert row['oi']==sum(r['oi'] or 0 for r in mine)
+  # Spot is NOT an aggregate, and it is not a guess either: it is served only when the rows AGREE on it.
+  # Where they do not, the row carries None and says so, rather than printing one of two numbers.
+  spots={r['spot'] for r in mine if r['spot'] is not None}
+  if len(spots)==1:assert row['spot']==next(iter(spots)) and row['spot_disagrees'] is False
+  elif not spots:assert row['spot'] is None
+  else:assert row['spot'] is None and row['spot_disagrees'] is True
+ # the busiest name no longer owns the whole list: every name that cleared is reachable
+ assert len(names)>1,'the fixture must have more than one underlying over the floors'
+ # and the list is sorted by the same measure the contract list is
+ premiums=[row['premium_cr'] for row in body['rows']]
+ assert premiums==sorted(premiums,reverse=True)
+
+
+def test_no_underlying_row_carries_an_invented_aggregate(reader):
+ """A mean of ratios is not a ratio. §3.2 arrives as the LARGEST reading with its contract named, §3.3 as a
+ count over the tab's own existing threshold, and §3.1 as counts - never as an underlying-level label."""
+ body=reader.screener({'at':STOCK_MARKS[0]})
+ contracts=reader.screener({'group':'contract','at':STOCK_MARKS[0]},limit=500)
+ by_name={}
+ for row in contracts['rows']:by_name.setdefault(row['underlying'],[]).append(row)
+ for row in body['rows']:
+  mine=by_name[row['underlying']]
+  # NOT served at all: a per-contract signal has no underlying-level value
+  for banned in ('volume_ratio','volume_to_oi','buildup_day','buildup_15m','buildup','moneyness','strike',
+    'last_price','instrument_type','tradingsymbol'):
+   assert banned not in row,f'{banned} must not appear on an underlying row'
+  # §3.2: the maximum, and the contract it belongs to
+  ratios=[r['volume_ratio'] for r in mine if r['volume_ratio'] is not None]
+  assert row['volume_ratio_max']==(max(ratios) if ratios else None)
+  assert row['volume_baseline_contracts']==len(ratios)
+  if ratios:
+   owner=max(mine,key=lambda r:(r['volume_ratio'] is not None,r['volume_ratio'] or 0))
+   assert row['volume_ratio_max_symbol']==owner['tradingsymbol']
+   # and it is emphatically NOT the mean, whenever the two differ
+   mean=sum(ratios)/len(ratios)
+   if max(ratios)!=mean:assert row['volume_ratio_max']!=pytest.approx(mean)
+  else:
+   assert row['volume_ratio_max_symbol'] is None
+  # §3.3: a COUNT over the threshold the tab already uses, not a mean
+  assert row['volume_to_oi_over_1']==sum(1 for r in mine if (r['volume_to_oi'] or 0)>1)
+  # §3.1: counts per label, and no label of its own
+  counts={}
+  for r in mine:
+   if r['buildup_day']:counts[r['buildup_day']]=counts.get(r['buildup_day'],0)+1
+  assert row['buildup_counts']==counts
+  # the busiest contract is a real row, not a summary of one
+  if mine:
+   top=max(mine,key=lambda r:r['premium_cr'] or 0)
+   assert row['top']['tradingsymbol']==top['tradingsymbol']
+   assert row['top']['premium_cr']==top['premium_cr']
+
+
+def test_the_view_is_a_filter_the_server_reports_and_refuses(reader):
+ body=reader.screener({'group':'contract'})
+ applied={row['key']:row['value'] for row in body['applied']}
+ assert applied['group']=='contract','the view is reported like every other thing the query did'
+ assert reader.screener({})['view']=='underlying'
+ with pytest.raises(ValueError):reader.screener({'group':'sideways'})
+ # and it is offered, so a caller can discover it rather than guess
+ offered={row['key'] for row in reader.screener_available()}
+ assert 'group' in offered
+
+
+def test_the_underlying_view_is_built_from_every_row_that_cleared_not_from_the_page(reader):
+ """The aggregate must describe the MARKET, not the first page of it. A sum of the first N contracts would
+ be a number about this list rather than about the reading."""
+ full=reader.screener({})
+ capped=reader.screener({},limit=1)
+ assert capped['limit']==1 and len(capped['rows'])==1
+ # the totals are unchanged by the cut, and the one row served is identical to the same row in the full list
+ assert capped['groups_total']==full['groups_total']
+ assert capped['contracts_total']==full['contracts_total']
+ assert capped['rows'][0]==full['rows'][0]
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# THE OPTION CHAIN OPENS AT THE MONEY
+#
+# It did not. It took the newest reading; a session rebuilt from 15-minute candles carries NO SPOT at all; so
+# the chain had no anchor and opened at its lowest strike - 21,350 against a spot of 23,302 on the real store,
+# nearly two thousand points away, every visible contract far out of the money and priced at a rupee.
+#
+# The reading the TAB is on is now passed to it, which is where the spot comes from.
+# ---------------------------------------------------------------------------------------------------------------
+
+def test_the_chain_reads_the_reading_it_is_asked_for(reader):
+ first,last=MARKS[0],MARKS[-1]
+ early=reader.chain('NIFTY',at=first)
+ late=reader.chain('NIFTY',at=last)
+ assert early['as_of']==first and late['as_of']==last
+ assert early['spot'] is not None,'a captured reading has a spot for the chain to sit around'
+ # the ladder itself is untouched by the choice: nothing is dropped and nothing is reordered
+ assert [row['strike'] for row in early['rows']]==sorted(row['strike'] for row in early['rows'])
+ assert {row['strike'] for row in early['rows']}=={row['strike'] for row in late['rows']}
+ # omitted, it behaves exactly as it always did: the newest reading this underlying has
+ assert reader.chain('NIFTY')['as_of']==reader.chain('NIFTY',at=last)['as_of']
+ # and OI by strike rides on it, so it lands on the same reading
+ assert reader.oi_by_strike('NIFTY',at=first)['as_of']==first
+ assert reader.oi_by_strike('NIFTY',at=first)['spot']==early['spot']
+
+
+def test_a_chain_at_a_reading_with_no_spot_says_so_rather_than_guessing(tmp_path):
+ """A rebuilt reading carries no spot. The chain must come back with spot None - never a spot borrowed from
+ another reading, which would put the at-the-money marker on the wrong strike."""
+ path=tmp_path/'no-spot.db'
+ connection=sqlite3.connect(path);connection.executescript(SCHEMA)
+ connection.execute('insert into contracts(instrument_token,tradingsymbol,underlying,instrument_type,strike,'
+  'expiry,lot_size,first_seen,last_seen) values(?,?,?,?,?,?,?,?,?)',
+  (101,'NIFTY26SEP23500CE','NIFTY','CE',23500.0,EXPIRY,75,SESSION,SESSION))
+ live,rebuilt=MARKS[0],MARKS[1]
+ _option(connection,101,'NIFTY26SEP23500CE','NIFTY','CE',23500.0,75,[live],[240.0],[23480.0])
+ connection.execute('insert into metrics(scope,metric_key,captured_at,instrument_token,tradingsymbol,'
+  'underlying,instrument_type,strike,expiry,lot_size,days_to_expiry,last_price,volume,oi,spot,premium_cr)'
+  ' values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+  ('contract','NIFTY26SEP23500CE',rebuilt,101,'NIFTY26SEP23500CE','NIFTY','CE',23500.0,EXPIRY,75,10,236.0,
+   500000.0,900000.0,None,None))
+ connection.executemany('insert into underlying_snapshots(underlying,captured_at,spot) values(?,?,?)',
+  [('NIFTY',live,23480.0),('NIFTY',rebuilt,None)])
+ connection.commit();connection.close()
+ view=D.Derivatives(str(path))
+ try:
+  assert view.chain('NIFTY',at=live)['spot']==23480.0
+  assert view.chain('NIFTY',at=rebuilt)['spot'] is None,'no spot is None, never another reading\'s spot'
+ finally:view.close()
+
+
+# --- Δ SINCE THE PREVIOUS SESSION'S CLOSE ------------------------------------------------------------------
+# The owner could read that PCR was "flat" and max pain "stable" — and could not read that PCR had moved 0.03
+# and the strike 50 points. The word was never the problem; the missing number was. So every reading of PCR,
+# max pain and implied volatility now carries a Δ on ΔOI's own definition: this reading minus the same figure
+# at the LAST 15-min reading of the session before.
+#
+# The rule these tests exist to hold: NO PREVIOUS CLOSE MEANS NO Δ. Null with a reason — never a 0, never
+# "unchanged". A 0 in a Δ column is a claim that the figure did not move, and an absent baseline is not a claim.
+PRIOR_SESSION='2026-09-17'
+PRIOR_MARK=f'{PRIOR_SESSION} 15:45:00'
+
+
+def _prior_close(path,underlying='NIFTY',*,pcr_oi=1.1576,pcr_volume=1.0061,max_pain=23300.0,
+  contracts=192,ce_oi=5_000_000,pe_oi=4_200_000,spot=23470.0,status='ok',expiry=EXPIRY):
+ """The previous session's CLOSING reading for one chain, written into an existing test store."""
+ connection=sqlite3.connect(path)
+ connection.execute('insert into metrics(scope,metric_key,captured_at,underlying,expiry,days_to_expiry,spot,'
+  'pcr_oi,pcr_volume,total_ce_oi,total_pe_oi,max_pain_strike,max_pain_distance,max_pain_total_oi,'
+  'max_pain_status,contracts) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+  ('underlying',f'{underlying}|{expiry}',PRIOR_MARK,underlying,expiry,11,spot,pcr_oi,pcr_volume,ce_oi,pe_oi,
+   max_pain,max_pain-spot,ce_oi+pe_oi,status,contracts))
+ connection.commit();connection.close()
+
+
+def test_every_reading_of_all_three_carries_a_delta_field(reader):
+ """A Δ per point for PCR, max pain and implied volatility — present on EVERY reading, gap or not."""
+ pcr=reader.pcr_series('NIFTY')
+ for point in pcr['points']:
+  assert 'delta_pcr_oi' in point and 'delta_pcr_volume' in point
+  assert 'delta_pcr_oi_reason' in point and 'delta_pcr_volume_reason' in point
+ pain=reader.maxpain_series('NIFTY')
+ for point in pain['points']:
+  assert 'delta_max_pain_strike' in point and 'delta_max_pain_strike_reason' in point
+ iv=reader.iv_series('NIFTY')
+ for point in iv['points']:
+  assert 'delta_iv' in point and 'delta_iv_pct' in point and 'delta_iv_pct_reason' in point
+ for leg in ('ce','pe'):
+  for point in ((iv['atm'] or {}).get(leg) or {}).get('points') or []:
+   assert 'delta_iv_pct' in point and 'delta_iv_pct_reason' in point
+
+
+def test_no_previous_close_is_null_with_a_reason_and_never_a_zero(reader):
+ """This store holds ONE session. Nothing before it, so nothing has a Δ — and nothing says it did not move."""
+ for body,key in ((reader.pcr_series('NIFTY'),'delta_pcr_oi'),
+   (reader.maxpain_series('NIFTY'),'delta_max_pain_strike'),
+   (reader.iv_series('NIFTY'),'delta_iv_pct')):
+  assert body['readings_with_delta']==0
+  assert body['previous_close_reason'],'an absent baseline must always say so'
+  assert 'unchanged' not in body['previous_close_reason'].lower()
+  for point in body['points']:
+   assert point[key] is None,'a missing baseline is never a zero'
+   assert point.get(key+'_reason')=='no_baseline'
+
+
+def test_pcr_delta_is_a_ratio_change_against_the_previous_close(store):
+ """PCR's Δ is a change in the RATIO — never a percentage of a ratio — and it is the plain subtraction."""
+ _prior_close(store)
+ reader=D.Derivatives(store)
+ try:
+  body=reader.pcr_series('NIFTY')
+  assert body['previous_close_at']==PRIOR_MARK
+  assert body['previous_close_pcr_oi']==1.1576 and body['previous_close_pcr_volume']==1.0061
+  assert body['previous_close_reason'] is None
+  assert body['delta_unit']=='ratio'
+  assert body['readings_with_delta']==len(MARKS)
+  for point in body['points']:
+   assert point['delta_pcr_oi']==pytest.approx(point['pcr_oi']-1.1576,abs=1e-4)
+   assert point['delta_pcr_oi_reason'] is None
+  assert body['latest_delta_pcr_oi']==pytest.approx(body['latest_pcr_oi']-1.1576,abs=1e-4)
+  assert body['latest_delta_pcr_oi_at']==MARKS[-1]
+  # the WORD the owner chose is still there; the number stands beside it, it does not replace it
+  assert body['direction'] in D.DIRECTION_WORDS['pcr'].values()
+ finally:
+  reader.close()
+
+
+def test_max_pain_delta_is_in_strike_points_and_never_a_percentage(store):
+ """Max pain is a STRIKE. Its Δ is in points, it moves in strike steps, and the unit is stated."""
+ _prior_close(store)
+ reader=D.Derivatives(store)
+ try:
+  body=reader.maxpain_series('NIFTY')
+  assert body['previous_close_max_pain_strike']==23300.0
+  assert body['delta_unit']=='strike points'
+  assert 'percentage' in body['delta_unit_text'].lower(),'the rule against a percentage is stated on the wire'
+  # the store's chain steps the strike 50 points per reading from 23,500
+  assert body['points'][0]['delta_max_pain_strike']==pytest.approx(200.0)
+  assert body['latest_delta_max_pain_strike']==pytest.approx(body['latest_max_pain_strike']-23300.0)
+  # every Δ is a whole number of strike steps, never a fraction of a percent
+  for point in body['points']:
+   assert point['delta_max_pain_strike'] is None or float(point['delta_max_pain_strike']).is_integer()
+  assert body['direction'] in D.DIRECTION_WORDS['max_pain'].values()
+ finally:
+  reader.close()
+
+
+def test_a_previous_close_the_floors_would_refuse_is_not_a_baseline(store):
+ """A closing reading too thin to carry a ratio does not get promoted into a baseline for a whole session."""
+ _prior_close(store,contracts=3)
+ reader=D.Derivatives(store)
+ try:
+  body=reader.pcr_series('NIFTY')
+  assert body['previous_close_pcr_oi'] is None
+  assert body['previous_close_withheld']=='thin_chain'
+  assert body['previous_close_reason']==D.WITHHELD_REASONS['thin_chain']
+  assert body['readings_with_delta']==0
+  assert all(p['delta_pcr_oi'] is None for p in body['points'])
+ finally:
+  reader.close()
+
+
+def test_a_previous_close_the_worker_marked_unusable_is_not_a_max_pain_baseline(store):
+ """`max_pain_status` is honoured on the BASELINE exactly as it is on a reading of the session itself."""
+ _prior_close(store,status='stale')
+ reader=D.Derivatives(store)
+ try:
+  body=reader.maxpain_series('NIFTY')
+  assert body['previous_close_max_pain_strike'] is None
+  assert body['previous_close_withheld']=='store_status'
+  assert all(p['delta_max_pain_strike'] is None for p in body['points'])
+ finally:
+  reader.close()
+
+
+def test_a_gap_reading_has_no_delta_even_when_a_baseline_exists(store):
+ """Gaps stay gaps. RELIANCE stops after four readings; the eight holes get a reason, not a number."""
+ _prior_close(store,underlying='RELIANCE',pcr_oi=0.5,pcr_volume=0.4,max_pain=1280.0,contracts=86,
+  ce_oi=900_000,pe_oi=480_000,spot=1240.0)
+ reader=D.Derivatives(store)
+ try:
+  body=reader.pcr_series('RELIANCE')
+  assert body['previous_close_pcr_oi']==0.5
+  filled=[p for p in body['points'] if not p['gap']]
+  holes=[p for p in body['points'] if p['gap']]
+  assert len(filled)==len(STOCK_MARKS) and holes
+  assert all(p['delta_pcr_oi'] is not None for p in filled)
+  for point in holes:
+   assert point['delta_pcr_oi'] is None and point['delta_pcr_oi_reason']=='no_value'
+ finally:
+  reader.close()
+
+
+def test_iv_delta_is_in_volatility_points_never_a_percentage_of_a_percentage(store):
+ """The previous session's closing option price is RE-SOLVED with the same model, and Δ is in vol points."""
+ connection=sqlite3.connect(store)
+ for token,symbol,kind,strike,price in ((101,'NIFTY26SEP23500CE','CE',23500.0,250.0),
+   (102,'NIFTY26SEP23500PE','PE',23500.0,235.0)):
+  connection.execute('insert into metrics(scope,metric_key,captured_at,instrument_token,tradingsymbol,'
+   'underlying,instrument_type,strike,expiry,lot_size,days_to_expiry,last_price,average_price,volume,oi,spot)'
+   ' values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+   ('contract',symbol,PRIOR_MARK,token,symbol,'NIFTY',kind,strike,EXPIRY,75,11,price,price,500000.0,900000.0,
+    23470.0))
+  connection.execute('insert into snapshots(instrument_token,captured_at,last_price,oi,last_trade_time,'
+   "vendor_id,fetched_at,snapshot_id) values(?,?,?,?,?,'kite','x','y')",
+   (token,PRIOR_MARK,price,900000,PRIOR_MARK))
+ connection.commit();connection.close()
+ reader=D.Derivatives(store)
+ try:
+  body=reader.iv_series('NIFTY')
+  assert body['delta_unit']=='volatility points'
+  assert body['previous_close_iv_pct'] is not None and body['previous_close_basis']=='call and put'
+  assert body['readings_with_delta']==len(MARKS)
+  base=body['previous_close_iv_pct']
+  for point in body['points']:
+   assert point['delta_iv_pct']==pytest.approx(point['iv_pct']-base,abs=1e-3)
+  # the Δ is a DIFFERENCE of two percentages, not a percentage change of one
+  latest=body['latest_iv_pct']
+  assert body['latest_delta_iv_pct']==pytest.approx(latest-base,abs=1e-3)
+  assert abs(body['latest_delta_iv_pct']-(latest-base)/base*100.0)>1e-3
+  # and each leg carries its OWN baseline rather than borrowing the at-the-money one
+  for leg in ('ce','pe'):
+   side=(body['atm'] or {})[leg]
+   assert side['previous_close_iv_pct'] is not None
+   assert side['readings_with_delta']==len(MARKS)
+   assert side['delta_unit']=='volatility points'
+ finally:
+  reader.close()
+
+
+def test_no_delta_wording_offers_a_percentage_of_a_percentage(reader):
+ """§5, stated as a test: the served Δ wording never offers a percentage for a strike or for a volatility."""
+ assert D.MAX_PAIN_DELTA_UNIT=='strike points'
+ assert D.IV_DELTA_UNIT=='volatility points'
+ assert D.PCR_DELTA_UNIT=='ratio'
+ assert 'never shown as a percentage' in D.MAX_PAIN_DELTA_TEXT
+ assert 'never shown as a percentage change of a percentage' in D.IV_DELTA_TEXT
+ # "mark" is the store's word, not the reader's: nothing served here may say it.
+ for text in (D.SERIES_DELTA_TEXT,D.PCR_DELTA_TEXT,D.MAX_PAIN_DELTA_TEXT,D.IV_DELTA_TEXT,
+   *D.SERIES_DELTA_REASONS.values()):
+  assert 'mark' not in text.lower()
+ for text in D.SERIES_DELTA_REASONS.values():
+  assert 'unchanged' not in text.lower()

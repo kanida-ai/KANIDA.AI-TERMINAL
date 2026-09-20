@@ -10,9 +10,10 @@ import {View,ScrollView,Pressable,TextInput} from 'react-native';
 import {C,T,Icon,Button,Sheet,s} from '../ui';
 import {Popover} from '../layout';
 import {HeaderChip,RadioMenu,webOnly} from '../discover/parts';
-import {BUILDUP_VALUES,DTE_VALUES,FILTER_COLUMNS,MARKET_VALUES,MONEYNESS_VALUES,OI_CHANGE_VALUES,OPERATOR_LABELS,
- PREMIUM_VALUES,RUPEE,TIMES,VOLUME_RATIO_VALUES,VOLUME_TO_OI_VALUES,buildupLabel,dteText,expiriesFor,freeColumns,
- newRule,ruleText,sanitizeRules,stamp,withColumn,type FilterColumn,type FilterRule} from './logic';
+import {BUILDUP_IDS,DTE_VALUES,FILTER_COLUMNS,MARKET_VALUES,MONEYNESS_VALUES,OI_CHANGE_VALUES,OPERATOR_LABELS,
+ PREMIUM_VALUES,RUPEE,TIMES,VOLUME_RATIO_VALUES,VOLUME_TO_OI_VALUES,buildupChoiceLabel,buildupId,dteText,
+ expiriesFor,freeColumns,newRule,ruleText,sanitizeRules,stamp,withColumn,type FilterColumn,
+ type FilterRule} from './logic';
 import type {FilterData} from './types';
 type Choice={value:string;label:string;detail?:string};
 /** The values each column offers, built from what the store actually holds. */
@@ -35,19 +36,28 @@ export function valueChoices(column:FilterColumn,data:FilterData|null,rules:Filt
   detail:v===1?'Day volume equal to the whole standing position':'Day volume against yesterday\'s closing open interest'}));
  if(column==='oiChange15m'||column==='oiChangeDay')return OI_CHANGE_VALUES.map(v=>({value:String(v),label:`${v}%`,
   detail:column==='oiChange15m'?'Open-interest change over the last 15-min reading':'Open-interest change since the previous close'}));
- if(column==='buildup')return BUILDUP_VALUES.map(v=>({value:v,label:buildupLabel(v),detail:BUILDUP_DETAIL[v]}));
+ // THE CANONICAL ID is the choice's value, and the label and the detail are looked up by that same id. The menu
+ // used to offer the STORE's strings and look their labels up by id: every one of the six missed, so all six
+ // rows rendered as a dash with no detail under them.
+ if(column==='buildup')return BUILDUP_IDS.map(id=>({value:id,label:buildupChoiceLabel(id),
+  detail:BUILDUP_DETAIL[id]}));
  if(column==='moneyness')return MONEYNESS_VALUES.map(m=>({value:m.value,label:m.label}));
  if(column==='market')return MARKET_VALUES.map(m=>({value:m.value,label:m.label,
   detail:m.value==='index'?'NIFTY, BANKNIFTY and the other index chains':'Single-stock chains'}));
  return [];
 }
-/** §3.1 in one line each, so a reader picking a build-up knows exactly which pair of moves it is. */
+/** §3.1 in one line each, so a reader picking a build-up knows exactly which pair of moves it is — including
+ *  the store's own two non-labels, which are choices the reader is allowed to make and so must be explained. */
 const BUILDUP_DETAIL:Record<string,string>={long_buildup:'Price up, open interest up',
  short_buildup:'Price down, open interest up',short_covering:'Price up, open interest down',
- long_unwinding:'Price down, open interest down'};
-/** One rule's value in the words the popup used, so the header line and the screen reader agree with the menus. */
+ long_unwinding:'Price down, open interest down',flat:'One of the two did not move at all',
+ no_data:'Captured, but the store could not classify the reading'};
+/** One rule's value in the words the popup used, so the header line and the screen reader agree with the menus.
+ *  A build-up value restored in an older vocabulary is matched by its id, not by its spelling. */
 export function ruleValueLabel(rule:FilterRule,data:FilterData|null,rules:FilterRule[]){
- const found=valueChoices(rule.column,data,rules).find(c=>c.value===rule.value);
+ const choices=valueChoices(rule.column,data,rules);
+ const found=choices.find(c=>c.value===rule.value)
+  ||(rule.column==='buildup'?choices.find(c=>c.value===buildupId(rule.value)):undefined);
  return found?found.label:rule.value;
 }
 export const ruleLabeller=(data:FilterData|null,rules:FilterRule[])=>(rule:FilterRule)=>ruleValueLabel(rule,data,rules);

@@ -532,6 +532,23 @@ def create_app(settings=None,http=None,evidence=None):
  @app.get('/api/derivatives/status')
  def derivative_status(request:Request):
   member(request);return derivatives.status()
+ @app.get('/api/derivatives/capture')
+ def derivative_capture(request:Request,at:str=''):
+  """DERIVATIVE CAPTURE HEALTH, on its own route and separate from the app's cash-feed status.
+
+  What was MEASURED at a 15-min reading, as one of missing_capture / partial_capture / complete /
+  no_eligible_rows / filtered_out / failed, with the required-field coverage behind it and the newest
+  attempted, available and complete readings. This exists because the global status chip describes prices
+  and patterns - the cash feed - and went on saying "healthy" straight through an F&O capture outage that
+  had left every contract row of the newest reading with no premium and no spot. Read-only (section 5).
+  """
+  member(request)
+  try:return derivatives.capture_health(at[:32])
+  except Exception as error:  # noqa: BLE001 - a store that cannot be read is a STATE, not a 500
+   logging.getLogger('pilot').warning('derivatives: capture health failed (%s)',error)
+   return {**derivatives.envelope(),'state':'failed','healthy':False,
+    'state_text':'The F&O store could not be read for this request. No rows are shown, which is not the '
+     'same as no rows existing.'}
  @app.get('/api/derivatives/filters')
  def derivative_filters(request:Request):
   member(request);return derivatives.filters()
@@ -543,20 +560,24 @@ def create_app(settings=None,http=None,evidence=None):
   name,date,kind=_derivative_query(underlying,expiry,option_type,dte,min_premium_cr,limit)
   return derivatives.unusual(name,date,watchlist=watchlist[:20],max_dte=dte,option_type=kind,
    min_premium_cr=min_premium_cr or None,limit=limit or None)
+ # `at` is the 15-minute reading the TAB is on - the one its screener resolved. Omitted, each of these reads
+ # the newest reading the underlying has, exactly as it did before. It is passed because the newest reading of
+ # a session rebuilt from candles carries no spot, and a chain with no spot has nothing to sit around: that is
+ # how the chain came to open at 21,350 against a spot of 23,302.
  @app.get('/api/derivatives/chain')
- def derivative_chain(request:Request,underlying:str='',expiry:str='',option_type:str=''):
+ def derivative_chain(request:Request,underlying:str='',expiry:str='',option_type:str='',at:str=''):
   member(request)
   name,date,kind=_derivative_query(underlying,expiry,option_type)
   if not name:raise PilotError(400,'FIELD_INVALID','underlying is required for the option chain.')
-  return derivatives.chain(name,date,kind)
+  return derivatives.chain(name,date,kind,at=at[:32])
  @app.get('/api/derivatives/oi-by-strike')
- def derivative_oi_by_strike(request:Request,underlying:str='',expiry:str=''):
+ def derivative_oi_by_strike(request:Request,underlying:str='',expiry:str='',at:str=''):
   member(request)
   name,date,_=_derivative_query(underlying,expiry)
   if not name:raise PilotError(400,'FIELD_INVALID','underlying is required for OI by strike.')
-  return derivatives.oi_by_strike(name,date)
+  return derivatives.oi_by_strike(name,date,at=at[:32])
  @app.get('/api/derivatives/oi-grid')
- def derivative_oi_grid(request:Request,underlying:str='',expiry:str=''):
+ def derivative_oi_grid(request:Request,underlying:str='',expiry:str='',at:str=''):
   """The owner's ΔOI block: ten small series — ATM CE and the four strikes above, ATM PE and the four below.
 
   ΔOI is open interest added or removed since the previous close, at each 15-minute mark of the session. Read
@@ -565,7 +586,7 @@ def create_app(settings=None,http=None,evidence=None):
   member(request)
   name,date,_=_derivative_query(underlying,expiry)
   if not name:raise PilotError(400,'FIELD_INVALID','underlying is required for the ΔOI strike grid.')
-  return derivatives.oi_grid(name,date)
+  return derivatives.oi_grid(name,date,at=at[:32])
  @app.get('/api/derivatives/indices')
  def derivative_indices(request:Request,points:int=0):
   member(request);_derivative_query(points=points)

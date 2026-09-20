@@ -40,6 +40,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import statistics
 import time
@@ -863,6 +864,263 @@ def compute_futures_buildup(
 
 
 # ===========================================================================
+# What "unusual" IS: a small, closed registry of RULES -- not a bag of prose
+# ===========================================================================
+#
+# Two rules flag a contract as unusual, and only two: 3.2 (volume against this
+# contract's own time-of-day median) and 3.3 (the day's volume against what was
+# standing at yesterday's close).  Each one fires at many different NUMBERS, so
+# the human sentence it produces is different every time -- "volume 206.0x its
+# own time-of-day median" and "volume 781.9x its own time-of-day median" are the
+# SAME rule at two readings.
+#
+# Counting those sentences is what produced "124 distinct conditions" on NIFTY
+# at the 11:30 reading of 18 Sep 2026, when the truth is TWO.  A reader is owed
+# the rule, not the rendering of it, so a trigger is carried as:
+#
+#     rule id, rule version, the measured value, the comparator, the threshold
+#     it was compared against, the baseline it was measured against, and how
+#     many observations that baseline stands on.
+#
+# The prose is DERIVED from the trigger and is kept byte-for-byte what it always
+# was, so the stored `unusual_reasons` text does not change and no row anywhere
+# needs rewriting.  Everything in this section is additive.
+
+#: Bumped when a rule's measurement, comparator or threshold changes, so a
+#: stored flag can be told apart from a flag this version would produce.
+UNUSUAL_RULES_VERSION = 1
+
+#: 3.2 -- this contract's cumulative volume against the median of its own
+#: cumulative volume at the same clock time over the baseline sessions.
+RULE_VOL_TOD = "vol_tod_median"
+#: 3.3 -- the day's volume against the open interest standing at yesterday's
+#: close.  One prior session is the whole baseline, so the sample count is 1.
+RULE_DAY_VOL_VS_PREV_OI = "day_vol_vs_prev_oi"
+#: A stored reason string this registry does not recognise.  It is carried as
+#: itself rather than dropped or silently folded into one of the two above.
+RULE_UNCLASSIFIED = "unclassified"
+
+
+@dataclass(frozen=True)
+class UnusualRule:
+    """One condition, named once.  Numbers live on the trigger, never here."""
+
+    rule_id: str
+    version: int
+    #: the rule's full name, for a drawer or an explanation
+    label: str
+    #: the same rule in a table cell's width, in the tab's existing column words
+    short_label: str
+    #: what is measured, in a sentence
+    measure: str
+    #: what it is measured against
+    baseline_label: str
+    #: what one observation of the baseline IS, so "3 sessions" is not read as
+    #: "3 contracts"
+    sample_label: str
+    #: '>=' or '>' -- the comparison the code actually performs
+    comparator: str
+    #: the multiple the comparator is applied to at this version
+    threshold: float
+    #: the unit of `value` and `threshold`; both are multiples
+    unit: str = "x"
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+UNUSUAL_RULES: tuple[UnusualRule, ...] = (
+    UnusualRule(
+        rule_id=RULE_VOL_TOD,
+        version=UNUSUAL_RULES_VERSION,
+        label="Volume vs its own median",
+        short_label="Vol vs median",
+        measure="cumulative volume so far today",
+        baseline_label="the median of this contract's own cumulative volume at "
+        "the same clock time",
+        sample_label="session",
+        comparator=">=",
+        threshold=UNUSUAL_VOL_TOD_RATIO,
+    ),
+    UnusualRule(
+        rule_id=RULE_DAY_VOL_VS_PREV_OI,
+        version=UNUSUAL_RULES_VERSION,
+        label="Day volume vs previous-close OI",
+        short_label="Day vol vs prev OI",
+        measure="the day's volume",
+        baseline_label="the open interest standing at the previous close",
+        sample_label="prior session",
+        comparator=">",
+        threshold=VOL_OI_SPIKE_RATIO,
+    ),
+)
+UNUSUAL_RULES_BY_ID: dict[str, UnusualRule] = {r.rule_id: r for r in UNUSUAL_RULES}
+
+#: How each rule's own sentence is written, and how it is read back.  Both
+#: directions live beside the rule so they cannot drift apart: the writer below
+#: produces the text and the reader classifies it with the same pattern.
+_REASON_TEMPLATE: dict[str, str] = {
+    RULE_VOL_TOD: "volume {value:.1f}x its own time-of-day median",
+    RULE_DAY_VOL_VS_PREV_OI: "day volume {value:.1f}x yesterday's OI",
+}
+_REASON_PATTERN: dict[str, "re.Pattern[str]"] = {
+    RULE_VOL_TOD: re.compile(r"^volume\s+([0-9.]+)x its own time-of-day median$", re.I),
+    RULE_DAY_VOL_VS_PREV_OI: re.compile(
+        r"^day volume\s+([0-9.]+)x yesterday's OI$", re.I
+    ),
+}
+
+
+@dataclass(frozen=True)
+class UnusualTrigger:
+    """One rule firing on one contract at one 15-minute reading."""
+
+    rule_id: str
+    rule_version: int
+    #: the measured multiple.  None only when a stored row recorded the
+    #: condition but no longer carries the number behind it.
+    value: float | None
+    comparator: str
+    threshold: float
+    #: the denominator the value was measured against, in the measure's own
+    #: units (median cumulative volume; previous-day closing OI)
+    baseline: float | None
+    #: how many observations that baseline stands on -- sessions for 3.2, and
+    #: the single prior session for 3.3
+    sample_count: int | None
+    unit: str = "x"
+    #: the store's own words, kept for a reason this registry could not classify
+    text: str = ""
+
+    @property
+    def rule(self) -> "UnusualRule | None":
+        return UNUSUAL_RULES_BY_ID.get(self.rule_id)
+
+    @property
+    def reason(self) -> str:
+        """The human sentence this trigger writes into ``unusual_reasons``."""
+        template = _REASON_TEMPLATE.get(self.rule_id)
+        if template is None or self.value is None:
+            return self.text
+        return template.format(value=self.value)
+
+    def as_dict(self) -> dict[str, Any]:
+        rule = self.rule
+        out = asdict(self)
+        out["rule_label"] = rule.label if rule else ""
+        out["rule_short_label"] = rule.short_label if rule else ""
+        out["measure"] = rule.measure if rule else ""
+        out["baseline_label"] = rule.baseline_label if rule else ""
+        out["sample_label"] = rule.sample_label if rule else ""
+        return out
+
+
+def unusual_triggers(
+    volume_vs_tod: VolumeVsTimeOfDay,
+    volume_to_oi_result: VolumeToOi,
+    *,
+    floors: LiquidityFloors = DEFAULT_FLOORS,
+) -> list[UnusualTrigger]:
+    """Every rule that fires on one contract, as structured triggers.
+
+    The comparisons are exactly the ones this module has always made; only the
+    shape of the answer is new.
+    """
+    out: list[UnusualTrigger] = []
+    if (
+        volume_vs_tod.status == STATUS_OK
+        and volume_vs_tod.ratio is not None
+        and volume_vs_tod.ratio >= floors.unusual_vol_tod_ratio
+    ):
+        out.append(
+            UnusualTrigger(
+                rule_id=RULE_VOL_TOD,
+                rule_version=UNUSUAL_RULES_VERSION,
+                value=volume_vs_tod.ratio,
+                comparator=">=",
+                threshold=floors.unusual_vol_tod_ratio,
+                baseline=volume_vs_tod.median_cumulative,
+                sample_count=volume_vs_tod.sessions_used,
+            )
+        )
+    if volume_to_oi_result.is_spike and volume_to_oi_result.ratio is not None:
+        out.append(
+            UnusualTrigger(
+                rule_id=RULE_DAY_VOL_VS_PREV_OI,
+                rule_version=UNUSUAL_RULES_VERSION,
+                value=volume_to_oi_result.ratio,
+                comparator=">",
+                threshold=volume_to_oi_result.threshold,
+                baseline=volume_to_oi_result.prev_day_oi,
+                sample_count=1,
+            )
+        )
+    return out
+
+
+def classify_reason(text: str) -> "tuple[str, float | None]":
+    """Read one stored reason sentence back into (rule id, stated value).
+
+    Rows written before this registry existed carry only the sentence.  This is
+    the boundary that turns them back into the rule that wrote them -- no stored
+    row is rewritten, and a sentence no rule claims stays itself under
+    ``RULE_UNCLASSIFIED`` rather than being folded into one that did not fire.
+    """
+    clean = str(text or "").strip()
+    for rule_id, pattern in _REASON_PATTERN.items():
+        found = pattern.match(clean)
+        if found:
+            try:
+                return rule_id, float(found.group(1))
+            except ValueError:  # shaped right, with a number that is not one
+                return rule_id, None
+    return RULE_UNCLASSIFIED, None
+
+
+def triggers_from_metric_row(row: Mapping[str, Any]) -> list[UnusualTrigger]:
+    """Structured triggers for one STORED ``metrics`` row.
+
+    The store already holds every number a trigger needs -- ``vol_tod_ratio``,
+    ``vol_tod_median``, ``vol_tod_sessions``, ``vol_oi_ratio``,
+    ``vol_oi_prev_oi`` -- so nothing is recomputed and nothing is invented: WHICH
+    rules fired is the row's own ``unusual_reasons``, and the numbers beside them
+    are the row's own columns.  A reason whose column is gone keeps the value its
+    own sentence states, and says nothing more.
+    """
+    out: list[UnusualTrigger] = []
+    for piece in str(row.get("unusual_reasons") or "").split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        rule_id, stated = classify_reason(piece)
+        rule = UNUSUAL_RULES_BY_ID.get(rule_id)
+        if rule_id == RULE_VOL_TOD:
+            value = _num(row.get("vol_tod_ratio"))
+            baseline = _num(row.get("vol_tod_median"))
+            sessions = row.get("vol_tod_sessions")
+            sample = int(sessions) if sessions is not None else None
+        elif rule_id == RULE_DAY_VOL_VS_PREV_OI:
+            value = _num(row.get("vol_oi_ratio"))
+            baseline = _num(row.get("vol_oi_prev_oi"))
+            sample = 1
+        else:
+            value, baseline, sample = None, None, None
+        out.append(
+            UnusualTrigger(
+                rule_id=rule_id,
+                rule_version=UNUSUAL_RULES_VERSION,
+                value=value if value is not None else stated,
+                comparator=rule.comparator if rule else "",
+                threshold=rule.threshold if rule else 0.0,
+                baseline=baseline,
+                sample_count=sample,
+                text=piece,
+            )
+        )
+    return out
+
+
+# ===========================================================================
 # Per-contract assembly and the per-underlying roll-up
 # ===========================================================================
 
@@ -898,6 +1156,10 @@ class ContractMetrics:
     unusual: bool
     unusual_reasons: list[str]
     spot: float | None = None
+    #: The SAME flags as `unusual_reasons`, carried as rule id + version +
+    #: value + comparator + threshold + baseline + sample count instead of as
+    #: prose.  Additive: `to_row()` below is unchanged, so no stored row moves.
+    triggers: tuple["UnusualTrigger", ...] = ()
 
     def to_row(self) -> dict[str, Any]:
         """The ``metrics``-table row for this contract (scope='contract')."""
@@ -972,11 +1234,12 @@ def compute_contract_metrics(
         last_price=cur.last_price,
     )
 
-    reasons: list[str] = []
-    if vtod.status == STATUS_OK and vtod.ratio is not None and vtod.ratio >= floors.unusual_vol_tod_ratio:
-        reasons.append(f"volume {vtod.ratio:.1f}x its own time-of-day median")
-    if voi.is_spike and voi.ratio is not None:
-        reasons.append(f"day volume {voi.ratio:.1f}x yesterday's OI")
+    # ONE source of truth for what fired.  The prose is DERIVED from the
+    # structured trigger rather than written beside it, so the sentence a row
+    # stores and the rule a reader is shown can never drift apart -- and the
+    # text itself is byte-for-byte what it has always been.
+    triggers = unusual_triggers(vtod, voi, floors=floors)
+    reasons: list[str] = [t.reason for t in triggers]
 
     return ContractMetrics(
         contract=c,
@@ -996,6 +1259,7 @@ def compute_contract_metrics(
         unusual=bool(passed and reasons),
         unusual_reasons=reasons,
         spot=_num(inputs.spot),
+        triggers=tuple(triggers),
     )
 
 

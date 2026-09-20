@@ -36,6 +36,11 @@ export type TableProps<R>={
  onSort?:(key:string)=>void;
  onRowPress?:(row:R)=>void;
  selected?:(row:R)=>boolean;
+ /** The row is ABOUT the thing the pointer is on somewhere else on the tab - the same strike, lit here too.
+  *  It is a highlight and nothing more: it selects nothing and it changes no query. */
+ lit?:(row:R)=>boolean;
+ /** Pointing at a row tells the tab which row that is, so the same subject can be lit wherever else it is. */
+ onRowHover?:(row:R|null)=>void;
  rowLabel:(row:R)=>string;
  /** Narrow screens: the first column stays put while the rest scroll sideways (web; a plain column elsewhere). */
  pinFirst?:boolean;
@@ -44,7 +49,7 @@ export type TableProps<R>={
 const justify=(a:Align|undefined)=>a==='right'?'flex-end':a==='center'?'center':'flex-start';
 /** The sticky first column is a web affordance; RN native keeps a normal column and the table simply scrolls. */
 const stick=(on:boolean,background:string)=>on&&web?{position:'sticky',left:0,zIndex:2,backgroundColor:background} as any:null;
-export function Table<R>({label,columns,items,sort,onSort,onRowPress,selected,rowLabel,pinFirst,rowHeight=34}:TableProps<R>){
+export function Table<R>({label,columns,items,sort,onSort,onRowPress,selected,lit,onRowHover,rowLabel,pinFirst,rowHeight=34}:TableProps<R>){
  const total=columns.reduce((sum,c)=>sum+c.width,0);
  const cell=(column:Column<R>,i:number,background:string)=>[{width:column.width,paddingHorizontal:6,
   justifyContent:'center',alignItems:justify(column.align)} as any,
@@ -86,15 +91,21 @@ export function Table<R>({label,columns,items,sort,onSort,onRowPress,selected,ro
        <T numberOfLines={1} style={{fontSize:11,lineHeight:15,fontFamily:'InterSemi',color:C.mint}}>{item.label}</T>
        {!!item.detail&&<T numberOfLines={1} style={{flex:1,fontSize:10,lineHeight:14,color:C.muted}}>{item.detail}</T>}
       </View>;
-      const row=item.row,on=!!selected?.(row);
-      const background=on?C.soft:C.paper;
+      const row=item.row,on=!!selected?.(row),glow=!on&&!!lit?.(row);
+      const background=on?C.soft:glow?C.dark:C.paper;
       const body=columns.map((column,i)=><View key={column.key} style={cell(column,i,background)}>{column.render(row)}</View>);
       if(!onRowPress)return <View key={item.key} role="row" style={[s.row,{gap:0,minHeight:rowHeight,
        paddingHorizontal:6,borderBottomWidth:1,borderColor:'#0F1B22'}]}>{body}</View>;
+      // The left rail says which of three states this row is in, and a keyboard lands on exactly the same one
+      // the mouse does: chosen (green), lit because the same subject is under the pointer elsewhere (mint),
+      // or neither. Focus is as loud as hover - a reader on the keyboard must never have to guess where they are.
       return <Pressable key={item.key} role="row" aria-selected={on} accessibilityState={{selected:on}}
        accessibilityLabel={rowLabel(row)} {...webOnly({tabIndex:0})} onPress={()=>onRowPress(row)}
-       style={(st:any)=>[s.row,{gap:0,minHeight:rowHeight,paddingHorizontal:6,borderBottomWidth:1,
-        borderColor:'#0F1B22',backgroundColor:on?C.soft:st.hovered?'#0F1F28':'transparent'}]}>{body}</Pressable>;
+       onHoverIn={()=>onRowHover?.(row)} onHoverOut={()=>onRowHover?.(null)}
+       onFocus={()=>onRowHover?.(row)} onBlur={()=>onRowHover?.(null)}
+       style={(st:any)=>[s.row,{gap:0,minHeight:rowHeight,paddingHorizontal:3,borderBottomWidth:1,
+        borderLeftWidth:3,borderLeftColor:on||st.focused?C.green:glow?C.mint:'transparent',
+        borderColor:'#0F1B22',backgroundColor:on?C.soft:glow?C.dark:st.hovered||st.focused?'#0F1F28':'transparent'}]}>{body}</Pressable>;
      })}
     </View>
    </ScrollView>

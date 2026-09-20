@@ -918,11 +918,17 @@ def _chart_dates():
  return today,today+timedelta(days=7),today+timedelta(days=45),days
 
 TODAY_IST,FRONT_EXPIRY,NEXT_EXPIRY,CHART_DAYS=_chart_dates()
+#: Days to expiry beside a chart is counted from the LAST SESSION THE CHART DRAWS, not from today
+#: (`D.DTE_CONVENTION`). A chart of last week's sessions is not a chart of today, and the contract's
+#: days-to-expiry must not tick down every morning while the candles beside it never move. These are the two
+#: expected values, derived from the convention rather than hard-coded, so the suite cannot drift from it.
 #: The session and the 15-min reading left out of the FRONT contract on purpose. Both are held by another
 #: contract in the same store, so the store knows the exchange had them - which is what makes them gaps rather
 #: than days the exchange was shut.
 CHART_GAP=CHART_DAYS[6]
 CHART_SESSIONS=[d for d in CHART_DAYS if d!=CHART_GAP]
+FRONT_DTE_AT_LAST_SESSION=(FRONT_EXPIRY-CHART_SESSIONS[-1]).days
+NEXT_DTE_AT_LAST_SESSION=(NEXT_EXPIRY-CHART_SESSIONS[-1]).days
 CHART_BARS=('09:15:00','09:30:00','09:45:00')
 CHART_GAP_BAR=CHART_SESSIONS[-2].isoformat()+' 09:30:00'
 FRONT_TOKEN=401
@@ -981,7 +987,10 @@ def test_the_chart_defaults_to_fifteen_minutes_and_names_its_contract(tmp_path,c
   assert body['contract']['tradingsymbol']=='NIFTYFRONTFUT'
   assert body['contract']['instrument_token']==FRONT_TOKEN
   assert body['contract']['expiry']==FRONT_EXPIRY.isoformat()
-  assert body['contract']['days_to_expiry']==7
+  # counted from the last session ON THE CHART, never from today's date
+  assert body['contract']['days_to_expiry']==FRONT_DTE_AT_LAST_SESSION
+  assert body['contract']['days_to_expiry']>7,'the chart ends before today, so it has MORE days to run'
+  assert 'SESSION on screen' in body['contract']['days_to_expiry_basis']
   assert len(body['candles'])==9,'nine readings on the exchange grid'
   assert body['bars']==8 and body['gaps']==1,'eight stored bars and one empty slot'
   assert body['sessions']==3,'`sessions` counts trading DAYS, not readings'
@@ -1144,7 +1153,7 @@ def test_the_short_history_flag_fires_on_a_real_short_series(tmp_path):
   assert body['sessions']<body['short_history_sessions']
   assert 'NIFTYNEXTFUT' in body['short_history_text']
   assert '3 trading sessions' in body['short_history_text']
-  assert body['contract']['days_to_expiry']==45
+  assert body['contract']['days_to_expiry']==NEXT_DTE_AT_LAST_SESSION
   assert {i['interval']:i['available'] for i in body['intervals']}=={'15m':False,'1d':True}
  finally:reader.close()
 
@@ -1231,7 +1240,8 @@ def test_the_read_module_answers_the_chart_when_it_is_importable(tmp_path,chart_
   assert body['candles'][0]['gap'] is True and body['candles'][1]['gap'] is False
   assert body['candles'][1]['oi'] is None,'a delegate may not turn an unknown into a zero'
   assert body['as_of']==CHART_DAYS[-1].isoformat(),'as-of is the newest real bar, never a trailing hole'
-  assert body['contract']['days_to_expiry']==7,'days-to-expiry is computed here, not taken on trust'
+  # computed HERE from the chart's own last session, never taken on trust and never counted from today
+  assert body['contract']['days_to_expiry']==(FRONT_EXPIRY-CHART_DAYS[-1]).days
  finally:reader.close()
 
 
