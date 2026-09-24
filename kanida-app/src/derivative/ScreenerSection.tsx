@@ -21,7 +21,10 @@ import {IconButton} from '../layout';
 import type {Read} from './useDerivatives';
 import {IDLE_H,InfoDisclosure,SymbolPill,head,type InfoGroup} from './frame';
 import {UnusualWidget} from './UnusualWidget';
-import {SIGNAL_W,SignalTable} from './SignalTable';
+import {SIGNAL_W} from './SignalTable';
+import {SignalPanel} from './SignalPanel';
+import {SummaryPanel} from './SummaryPanel';
+import {WhatsHappening} from './WhatsHappening';
 import {alwaysApplied,appliedCount,asOfText,coverageText,customizeLabel,filterStatuses,floorsDegradedNote,
  floorsText,notAppliedText,readingChoices,readingIsFallback,readingNote,rulesText,
  SEARCH_WHAT,UNUSUAL_COLOUR_TEXT,UNUSUAL_COUNTS_TEXT,UNUSUAL_HONEST_TEXT,UNUSUAL_RULE_TEXT,UNUSUAL_SORT_TEXT,
@@ -41,8 +44,19 @@ export const SCREENER_GROUP_REFUSED='Two \u00a73 signals are NOT aggregated, bec
 export const SCREENER_GROUP_DRILL='Clicking an instrument points every block on this tab at it. Its individual contracts are on the option chain block below.';
 /** The pinned bar's own height. Short on purpose: it has to stay on screen while nine blocks scroll past it,
  *  and a driver that eats half the viewport is not a driver. The rows scroll inside it, and the expand control
- *  gives the reader the whole page when they want to browse the list rather than pick from it. */
-export const RAIL_H=320;
+ *  gives the reader the whole page when they want to browse the list rather than pick from it.
+ *
+ *  RAISED FROM 320. At 320 the screener showed two rows of 216, the signal table five readings of 25, and
+ *  the explanation beside them had 210px of body for about 530px of content — headline visible, ladder and
+ *  cross-market rows below the fold. One number, and all three panes gain by it. */
+export const RAIL_H=430;
+/** The widths the two flexible panes refuse to go below, and the number is arithmetic rather than taste: a
+ *  1,366px window — the narrowest common laptop — leaves 1,326px after the page gutters, the signal table
+ *  is a fixed 556, and the two gaps take 20, so the other two panes have 750 between them. 350 each is that
+ *  with slack for rounding and borders; at 375 it wrapped on the exact tie. Anything wider splits evenly.
+ *  Below this the row wraps and the explanation takes a full line of its own rather than all three being
+ *  crushed together. */
+export const SCREENER_MIN_W=350,SUMMARY_MIN_W=350;
 
 export type ScreenerRailProps={read:Read<Screener>;rules:FilterRule[];rulesLine:string;
  ruleLabel?:(rule:FilterRule)=>string;seq:number;badge:string;linked?:boolean;
@@ -50,12 +64,22 @@ export type ScreenerRailProps={read:Read<Screener>;rules:FilterRule[];rulesLine:
  /** Which 15-min reading is on screen, and the reader's move to any other one. */
  at:string;onAt:(at:string)=>void;buildupWindow:string;onBuildupWindow:(w:string)=>void;
  symbol:string;
- /** The TAB's one ΔOI-grid read, shared with the ΔOI block below: the signal table is built on it. */
+ /** The expiry the tab resolved, so the explanation names the same contract month every block is on. */
+ expiry?:string;
+ /** The TAB's one ΔOI-grid read, shared with the ΔOI block below: the explanation is built on it. */
  gridRead:Read<OiGrid>;
+ /** The two whole-book series, read once by the page and handed down. */
+ pcr?:{points?:unknown[]}|null;futures?:{points?:unknown[]}|null;
+ maxPain?:{points?:unknown[]}|null;iv?:{points?:unknown[]}|null;
+ /** Where positions stand at this reading (oi-by-strike), for the pane's first-reading view. */
+ standing?:any;
+ /** The tab-wide strike highlight, so a strike the explanation names lights up everywhere it appears. */
+ highlight?:number|null;onHighlight?:(v:number|null)=>void;
  pinFirst?:boolean;show:boolean;height?:number;
  onExpand?:()=>void;expanded?:boolean};
 export function ScreenerRail({read,rules,rulesLine,ruleLabel,seq,badge,linked,target,onTarget,onCustomize,
- at,onAt,buildupWindow,onBuildupWindow,symbol,gridRead,pinFirst,show,height,onExpand,expanded}:ScreenerRailProps){
+ at,onAt,buildupWindow,onBuildupWindow,symbol,expiry,gridRead,pcr,futures,maxPain,iv,standing,highlight,onHighlight,
+ pinFirst,show,height,onExpand,expanded}:ScreenerRailProps){
  const body=read.data;
  // The ONE place the tab decides whether a filter is in force. A null body - loading, an error, a refusal -
  // leaves every rule pending, which is not active.
@@ -79,6 +103,14 @@ export function ScreenerRail({read,rules,rulesLine,ruleLabel,seq,badge,linked,ta
  // narrows the rows the server returned - it does not re-query - so everything this bar prints above the rows
  // still describes exactly the rows underneath.
  const [search,setSearch]=useState('');
+ // WHICH MODE THE LEFT PANE IS IN. The events list is the default front door; the instrument table is a
+ // click away with everything it has today.
+ const [showTable,setShowTable]=useState(false);
+ // SEARCHING IS ASKING FOR THE TABLE. The search field sits in this block's header and always has; with
+ // the events list in front of the table, typing into it would filter something the reader cannot see.
+ // A search opens the table, and leaving the table clears the search — one control, one visible effect.
+ const tableMode=showTable||!!search;
+ const setMode=(v:boolean)=>{setShowTable(v);if(!v)setSearch('');};
  if(!show)return null;
  const groups:InfoGroup[]=[
   {heading:'Screener',lines:[SCREENER_WHAT,floorsText(body?.floors,body?.floors_text),SCREENER_SIGNALS_TEXT,
@@ -156,18 +188,42 @@ export function ScreenerRail({read,rules,rulesLine,ruleLabel,seq,badge,linked,ta
       side of the screener." They are the same height to the pixel, they share this one bar's as-of and this
       one bar's symbol, and neither repeats what the other says. On a narrow window the table drops under the
       screener rather than being squeezed: two dense tables at half width is not crystal clear to anybody. */}
-  <View style={{flexDirection:pinFirst?'column':'row',gap:10,alignItems:'stretch'}}>
-   <View style={{flex:1,minWidth:0}}>
-    <UnusualWidget read={read} statuses={statuses} seq={seq} target={target} onTarget={onTarget}
-     onCustomize={onCustomize} pinFirst={pinFirst}
-     readings={readings} at={body?.coverage?.at||body?.as_of||at} onAt={onAt}
-     search={search}
-     buildupWindow={hasBuildupRule?buildupWindow:''} onBuildupWindow={onBuildupWindow}
+  {/* THREE PANES, and the first two are exactly the two that were here before. The owner, on a version
+      that put the explanation where the table had been: "why did u remove what already has". The screener
+      and the signal table are untouched — same widths, same heights, same reads — and the explanation is
+      ADDED to their right.
+
+      The row WRAPS rather than squeezing. Three dense panes need about 1,400px; below that the
+      explanation takes a full-width line of its own under the pair instead of all three being crushed,
+      which is the same rule the table already followed on a narrow window. */}
+  <View style={{flexDirection:pinFirst?'column':'row',flexWrap:pinFirst?'nowrap':'wrap',gap:10,
+   alignItems:'stretch'}}>
+   {/* THE FRONT DOOR: what is happening, not what exists. The screener is the other mode of this same pane
+       — every column, filter, sort and control it has today, one click behind "All instruments". An EVEN
+       split of the free space with the explanation: a table degrades by scrolling sideways, prose degrades
+       by becoming unreadable. */}
+   <View style={{flex:1,minWidth:pinFirst?undefined:SCREENER_MIN_W}}>
+    <WhatsHappening read={read} at={body?.coverage?.at||body?.as_of||at} seq={seq}
+     symbol={symbol} onTarget={onTarget}
+     showTable={tableMode} onShowTable={setMode}
      onExpand={onExpand} expanded={expanded}
-     style={{height:read.phase==='error'?IDLE_H:height||RAIL_H}}/>
+     style={{height:read.phase==='error'?IDLE_H:height||RAIL_H}}
+     table={<UnusualWidget read={read} statuses={statuses} seq={seq} target={target} onTarget={onTarget}
+      onCustomize={onCustomize} pinFirst={pinFirst}
+      readings={readings} at={body?.coverage?.at||body?.as_of||at} onAt={onAt}
+      search={search}
+      buildupWindow={hasBuildupRule?buildupWindow:''} onBuildupWindow={onBuildupWindow}
+      style={{flex:1,borderWidth:0,borderRadius:0}}/>}/>
    </View>
-   <SignalTable symbol={symbol} read={gridRead}
+   <SignalPanel symbol={symbol} read={gridRead} pcr={pcr} maxPain={maxPain} iv={iv} standing={standing}
     style={{width:pinFirst?undefined:SIGNAL_W,height:height||RAIL_H}}/>
+   {/* THE ADDITION: the same ten contracts the table beside it lists, said in plain language. */}
+   <View style={{flex:1,minWidth:pinFirst?undefined:SUMMARY_MIN_W}}>
+    <SummaryPanel symbol={symbol} expiry={expiry} read={gridRead}
+     pcr={pcr} futures={futures} standing={standing}
+     highlight={highlight} onHighlight={onHighlight} onTarget={onTarget}
+     style={{height:height||RAIL_H}}/>
+   </View>
   </View>
  </View>;
 }

@@ -1,0 +1,50 @@
+{
+ "started_ist": "11:04:13",
+ "runs": [
+  {
+   "ttfb_ms": 20552,
+   "transfer_ms": 6574,
+   "bytes": 746257,
+   "label": "NFO, Product=NIFTY",
+   "total_ms": 27437,
+   "rows": 3487,
+   "newest_bar_ist": "10:49"
+  },
+  {
+   "ttfb_ms": 20644,
+   "transfer_ms": 6044,
+   "bytes": 683698,
+   "label": "NFO, Product=RELIANCE",
+   "total_ms": 26690,
+   "rows": 3194,
+   "newest_bar_ist": "10:50"
+  },
+  {
+   "ttfb_ms": 20641,
+   "transfer_ms": 4531,
+   "bytes": 491971,
+   "label": "NFO, stock options only",
+   "total_ms": 25173,
+   "rows": 2308,
+   "newest_bar_ist": "10:50"
+  },
+  {
+   "ttfb_ms": 20760,
+   "transfer_ms": 2769,
+   "bytes": 326021,
+   "label": "NSE, all stocks (control)",
+   "total_ms": 23530,
+   "rows": 1733,
+   "newest_bar_ist": "10:50"
+  },
+  {
+   "ttfb_ms": 20532,
+   "transfer_ms": 6031,
+   "bytes": 687428,
+   "label": "NFO, everything (control)",
+   "total_ms": 26565,
+   "rows": 3213,
+   "newest_bar_ist": "10:51"
+  }
+ ]
+}

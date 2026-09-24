@@ -1288,3 +1288,73 @@ def test_the_pilot_cannot_write_to_the_chart_store(tmp_path,chart_store):
   with pytest.raises(sqlite3.OperationalError):
    reader._connect().execute('delete from candles_day')
  finally:reader.close()
+
+
+# --- the market-wide events pass ---------------------------------------------------------------------
+def test_events_is_empty_not_broken_before_capture(tmp_path):
+ """No store at all: 200, the one empty sentence, no rows. Never an error page."""
+ app,client=client_for(tmp_path)
+ try:
+  result=client.get('/api/derivatives/events')
+  assert result.status_code==200,result.text
+  body=result.json()
+  assert body['available'] is False and body['rows']==[]
+  assert body['empty_reason']==D.EMPTY_TEXT
+  assert body['instruments']==0 and body['measured']==0
+ finally:app.state.db.close()
+
+def test_events_validates_its_query(tmp_path):
+ app,client=client_for(tmp_path)
+ try:
+  assert client.get('/api/derivatives/events?limit=99999').status_code==400
+ finally:app.state.db.close()
+
+def test_events_reads_every_instrument_and_names_no_participant(tmp_path,grid_store):
+ """One row per instrument the capture covered, ordered so the ones with something to say come first.
+
+ Every headline is an observation of what the numbers did. None of them names a buyer or a seller, and
+ none of them forecasts: that is the whole claim policy, enforced at the route.
+ """
+ app,client=client_for(tmp_path,derivatives_database=grid_store)
+ try:
+  body=client.get('/api/derivatives/events').json()
+  assert body['available'] is True
+  assert body['rule_version']=='signal/2'
+  rows=body['rows']
+  assert rows,'the fixture store holds instruments'
+  assert body['instruments']>=len(rows)
+  # one row per instrument, never two
+  names=[r['underlying'] for r in rows]
+  assert len(names)==len(set(names))
+  # the ones reading a behaviour are first
+  live=[i for i,r in enumerate(rows) if r['live']]
+  quiet=[i for i,r in enumerate(rows) if not r['live']]
+  assert not live or not quiet or max(live)<min(quiet)
+  banned=('buying','writing','covering','unwinding','bullish','bearish','will ','expect',
+    'target','support','resistance','should')
+  for row in rows:
+   assert row['headline'],row
+   low=row['headline'].lower()
+   for word in banned:
+    assert word not in low,f'a market row may not say {word!r}: {row["headline"]!r}'
+   # every row carries what it was read from, so a sentence can be traced to a reading
+   assert row['rule_version']=='signal/2'
+   assert row['slots']>=0 and row['measured']<=row['slots']
+ finally:app.state.db.close()
+
+def test_events_respects_the_reading_boundary_and_the_limit(tmp_path,grid_store):
+ """A named reading is a boundary: nothing after it is read, and the answer is the same every time."""
+ app,client=client_for(tmp_path,derivatives_database=grid_store)
+ try:
+  whole=client.get('/api/derivatives/events').json()
+  if not whole['rows']:pytest.skip('fixture store has no readable instrument')
+  at=whole['reading_at']
+  assert at,'a populated pass names the reading it is on'
+  again=client.get(f'/api/derivatives/events?at={at}').json()
+  assert [r['underlying'] for r in again['rows']]==[r['underlying'] for r in whole['rows']]
+  assert again['reading_at']==at
+  # the limit trims the list and nothing else: the counts still describe the whole book
+  few=client.get('/api/derivatives/events?limit=1').json()
+  assert len(few['rows'])==1
+  assert few['instruments']==whole['instruments'] and few['measured']==whole['measured']
+ finally:app.state.db.close()

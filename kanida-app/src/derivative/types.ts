@@ -511,3 +511,31 @@ export type IvDeltas=SeriesDelta&{previous_close_iv?:number|null;previous_close_
  previous_close_basis?:string|null;
  latest_delta_iv?:number|null;latest_delta_iv_at?:string|null;
  latest_delta_iv_pct?:number|null;latest_delta_iv_pct_at?:string|null};
+
+/** GET /api/derivatives/events?at=&limit= — what is happening across the book at one 15-min reading.
+ *
+ *  One row per instrument, computed ONCE on the server per reading and served to every reader. The walk is
+ *  the tab's own (rule `signal/2`), and `server/tests/test_session_events.py` fails if the server's pass
+ *  and `summary.ts` ever disagree on a field. Every line here is an observation of what the numbers did
+ *  between two named readings: no row names a participant, and nothing here is a forecast (§5). */
+export type MarketEvent={
+ underlying:string;expiry:string|null;
+ at:string|null;previous_at:string|null;
+ /** The Tier-1 line: what the measured numbers did. It never names a behaviour. */
+ headline:string;
+ side:'CE'|'PE';row:'calls'|'puts';
+ state:string;behaviour:string;
+ strikes:number[];lead:number|null;
+ first_at:string|null;elapsed_minutes:number|null;scans:number;lead_stable:boolean;
+ /** How many of that side's five slots carried a comparable value here. */
+ measured:number;slots:number;
+ /** The size behind the row. It ORDERS the list and is never shown: it is not a score. */
+ weight:number;
+ /** True when the side is reading one of the four behaviours that carry a story. */
+ live:boolean;
+ spot:number|null;spot_at:string|null;rule_version:string;
+};
+export type MarketEvents=Envelope&{rows:MarketEvent[];session:string|null;reading_at:string|null;
+ /** How many instruments the pass covered, and how many of them are reading a behaviour. */
+ instruments:number;measured:number;
+ rule_version:string;window_minutes:number;grid_width:number;grid_slots:number};

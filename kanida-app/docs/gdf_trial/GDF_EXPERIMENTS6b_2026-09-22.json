@@ -1,0 +1,65 @@
+{
+ "request": {
+  "MessageType": "SubscribeSnapshot",
+  "Exchange": "NFO",
+  "InstrumentIdentifier": "FUTIDX_NIFTY_29SEP2026_XX_0",
+  "Periodicity": "MINUTE",
+  "Period": 1
+ },
+ "events": [
+  {
+   "at": "11:10:01.945",
+   "after_s": 2.6,
+   "type": "RealtimeSnapshotResult",
+   "bytes": 272,
+   "rows": 1,
+   "idents": [
+    "FUTIDX_NIFTY_29SEP2026_XX_0"
+   ],
+   "bar_ist": [
+    "10:55"
+   ],
+   "lag_s_vs_bar_start": 901.9,
+   "keys": [
+    "Close",
+    "Exchange",
+    "High",
+    "InstrumentIdentifier",
+    "LastTradeTime",
+    "Low",
+    "MessageType",
+    "Open",
+    "OpenInterest",
+    "Period"
+   ],
+   "sample": "{\"Exchange\":\"NFO\",\"InstrumentIdentifier\":\"FUTIDX_NIFTY_29SEP2026_XX_0\",\"Periodicity\":\"MINUTE\",\"Period\":1,\"LastTradeTime\":1790054700,\"TradedQty\":7930,\"OpenInterest\":16981770,\"Open\":23385.8,\"High\":23394.9,\"Low\":23382.9,\"Close\":23393.4,\"MessageType\":\"RealtimeSnapshotResult\"}"
+  },
+  {
+   "at": "11:11:01.748",
+   "after_s": 62.4,
+   "type": "RealtimeSnapshotResult",
+   "bytes": 273,
+   "rows": 1,
+   "idents": [
+    "FUTIDX_NIFTY_29SEP2026_XX_0"
+   ],
+   "bar_ist": [
+    "10:56"
+   ],
+   "lag_s_vs_bar_start": 901.7,
+   "keys": [
+    "Close",
+    "Exchange",
+    "High",
+    "InstrumentIdentifier",
+    "LastTradeTime",
+    "Low",
+    "MessageType",
+    "Open",
+    "OpenInterest",
+    "Period"
+   ],
+   "sample": "{\"Exchange\":\"NFO\",\"InstrumentIdentifier\":\"FUTIDX_NIFTY_29SEP2026_XX_0\",\"Periodicity\":\"MINUTE\",\"Period\":1,\"LastTradeTime\":1790054760,\"TradedQty\":10920,\"OpenInterest\":16985085,\"Open\":23393.4,\"High\":23399.2,\"Low\":23386.1,\"Close\":23396.6,\"MessageType\":\"RealtimeSnapshotResult\"}"
+  }
+ ]
+}

@@ -1,0 +1,10 @@
+{
+ "request": {
+  "MessageType": "SubscribeSnapshot",
+  "Exchange": "NFO",
+  "InstrumentIdentifier": "NIFTY-I,",
+  "Periodicity": "MINUTE",
+  "Period": 1
+ },
+ "events": []
+}

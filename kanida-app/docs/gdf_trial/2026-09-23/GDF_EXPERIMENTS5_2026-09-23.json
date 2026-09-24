@@ -1,0 +1,45 @@
+{
+ "request": {
+  "MessageType": "SubscribeSnapshot",
+  "Exchange": "NFO",
+  "InstrumentIdentifier": "FUTIDX_BANKNIFTY_29SEP2026_XX_0,FUTIDX_NIFTY_29SEP2026_XX_0,FUTSTK_RELIANCE_29SEP2026_XX_0,OPTIDX_BANKNIFTY_29SEP2026_CE_56200,OPTIDX_BANKNIFTY_29SEP2026_PE_56200,OPTIDX_NIFTY_29SEP2026_CE_23350,OPTIDX_NIFTY_29SEP2026_PE_23350,",
+  "Periodicity": "MINUTE",
+  "Period": 1
+ },
+ "events": [
+  {
+   "at": "09:21:23.710",
+   "after_s": 0.0,
+   "type": "AllowVMRunningResult",
+   "bytes": 61,
+   "rows": 1,
+   "idents": [
+    "None"
+   ],
+   "bar_ist": [],
+   "lag_s_vs_bar_start": null,
+   "keys": [
+    "AllowVMRunning",
+    "MessageType"
+   ],
+   "sample": "{\"AllowVMRunning\":false,\"MessageType\":\"AllowVMRunningResult\"}"
+  },
+  {
+   "at": "09:21:23.710",
+   "after_s": 0.0,
+   "type": "AllowServerOSRunningResult",
+   "bytes": 73,
+   "rows": 1,
+   "idents": [
+    "None"
+   ],
+   "bar_ist": [],
+   "lag_s_vs_bar_start": null,
+   "keys": [
+    "AllowServerOSRunning",
+    "MessageType"
+   ],
+   "sample": "{\"AllowServerOSRunning\":false,\"MessageType\":\"AllowServerOSRunningResult\"}"
+  }
+ ]
+}

@@ -1,0 +1,33 @@
+{
+ "started_ist": "10:04:43",
+ "subscribe_NFO_1m": [
+  {
+   "at": "10:04:50.580",
+   "after_s": 6.9,
+   "type": "ExchangeSnapshotResult",
+   "bytes": 794263,
+   "rows": 3711,
+   "newest_bar_ist": "09:49",
+   "lag_s": 950.6,
+   "keys": [
+    "MessageType",
+    "Request",
+    "Result"
+   ]
+  }
+ ],
+ "plain_ws": [
+  {
+   "ttfb_ms": 20687,
+   "transfer_ms": 6294,
+   "bytes": 797848,
+   "total_ms": 28027,
+   "rows": 3732,
+   "newest_bar_ist": "09:52",
+   "at": "10:07:50"
+  },
+  {
+   "error": "gdf: no reply within the timeout"
+  }
+ ]
+}

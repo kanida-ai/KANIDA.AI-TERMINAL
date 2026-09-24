@@ -1,0 +1,101 @@
+{
+ "started_ist": "10:18:49",
+ "filtered": [
+  {
+   "ttfb_ms": 20485,
+   "transfer_ms": 0,
+   "bytes": 1378,
+   "label": "NFO futures only",
+   "total_ms": 20486,
+   "rows": 5,
+   "newest_bar_ist": "10:04"
+  },
+  {
+   "ttfb_ms": 20688,
+   "transfer_ms": 953,
+   "bytes": 127823,
+   "label": "NFO index options only",
+   "total_ms": 21642,
+   "rows": 593,
+   "newest_bar_ist": "10:04"
+  },
+  {
+   "ttfb_ms": 20655,
+   "transfer_ms": 6871,
+   "bytes": 726443,
+   "label": "NFO all (control)",
+   "total_ms": 27528,
+   "rows": 3395,
+   "newest_bar_ist": "10:04"
+  }
+ ],
+ "pipeline": [
+  {
+   "i": 0,
+   "sent_s": 0.0
+  },
+  {
+   "i": 1,
+   "sent_s": 5.0
+  },
+  {
+   "i": 2,
+   "sent_s": 10.0
+  },
+  {
+   "reply": "pipe0",
+   "at_s": 27.2,
+   "rows": 3282,
+   "bytes": 701661,
+   "newest_bar_ist": "10:05"
+  }
+ ],
+ "rcvbuf_8MB": [
+  {
+   "ttfb_ms": 20456,
+   "transfer_ms": 8488,
+   "bytes": 741992,
+   "label": "NFO all, 8 MB receive buffer",
+   "total_ms": 30684,
+   "rows": 3468,
+   "newest_bar_ist": "10:07"
+  },
+  {
+   "ttfb_ms": 20607,
+   "transfer_ms": 8061,
+   "bytes": 737486,
+   "label": "NFO all, 8 MB receive buffer",
+   "total_ms": 28669,
+   "rows": 3448,
+   "newest_bar_ist": "10:08"
+  }
+ ],
+ "subscribe_NFO_1m_200s": [
+  {
+   "at": "10:23:11.992",
+   "after_s": 0.0,
+   "type": "AllowVMRunningResult",
+   "bytes": 61,
+   "rows": 0,
+   "newest_bar_ist": null,
+   "lag_s": null,
+   "keys": [
+    "AllowVMRunning",
+    "MessageType"
+   ]
+  },
+  {
+   "at": "10:23:11.992",
+   "after_s": 0.0,
+   "type": "AllowServerOSRunningResult",
+   "bytes": 73,
+   "rows": 0,
+   "newest_bar_ist": null,
+   "lag_s": null,
+   "keys": [
+    "AllowServerOSRunning",
+    "MessageType"
+   ]
+  }
+ ]
+}

@@ -1,0 +1,1190 @@
+{
+ "taken_ist": "2026-09-23 09:11:05",
+ "functions": {
+  "GetLimitation": {
+   "request": {
+    "MessageType": "GetLimitation"
+   },
+   "rows": 1,
+   "fields": {
+    "GeneralParams": {
+     "type": "dict",
+     "sample": "{\"AllowedBandwidthPerHour\": -1.0, \"AllowedCallsPerHour\": 3600, \"AllowedCallsPerM",
+     "empty": 0,
+     "zero": 0
+    },
+    "AllowedExchanges": {
+     "type": "list",
+     "sample": "[{\"AllowedInstruments\": 100, \"DataDelay\": 900, \"ExchangeName\": \"NFO\"}, {\"Allowed",
+     "empty": 0,
+     "zero": 0
+    },
+    "AllowedFunctions": {
+     "type": "list",
+     "sample": "[{\"FunctionName\": \"GetExchangeSnapshot\", \"IsEnabled\": true}, {\"FunctionName\": \"G",
+     "empty": 0,
+     "zero": 0
+    },
+    "HistoryLimitation": {
+     "type": "dict",
+     "sample": "{\"TickEnabled\": false, \"DayEnabled\": false, \"WeekEnabled\": false, \"MonthEnabled\"",
+     "empty": 0,
+     "zero": 0
+    },
+    "GetSnapshotLimitation": {
+     "type": "dict",
+     "sample": "{\"DayEnabled\": false, \"Hour_1Enabled\": false, \"Minute_1Enabled\": true, \"Minute_2",
+     "empty": 0,
+     "zero": 0
+    },
+    "ExchangeSnapshotLimitation": {
+     "type": "dict",
+     "sample": "{\"DayEnabled\": true, \"Hour_1Enabled\": false, \"Minute_1Enabled\": true, \"Minute_2E",
+     "empty": 0,
+     "zero": 0
+    },
+    "ExchangeSnapshotInstrumentTypeLimitation": {
+     "type": "NoneType",
+     "sample": null,
+     "empty": 1,
+     "zero": 0
+    },
+    "SubscribeSnapshotLimitation": {
+     "type": "dict",
+     "sample": "{\"Hour_1Enabled\": false, \"Minute_1Enabled\": true, \"Minute_2Enabled\": true, \"Minu",
+     "empty": 0,
+     "zero": 0
+    },
+    "MessageType": {
+     "type": "str",
+     "sample": "LimitationResult",
+     "empty": 0,
+     "zero": 0
+    }
+   },
+   "top_level": [
+    "AllowedExchanges",
+    "AllowedFunctions",
+    "ExchangeSnapshotInstrumentTypeLimitation",
+    "ExchangeSnapshotLimitation",
+    "GeneralParams",
+    "GetSnapshotLimitation",
+    "HistoryLimitation",
+    "MessageType",
+    "SubscribeSnapshotLimitation"
+   ],
+   "first_row": {
+    "GeneralParams": {
+     "AllowedBandwidthPerHour": -1.0,
+     "AllowedCallsPerHour": 3600,
+     "AllowedCallsPerMonth": 2678400,
+     "AllowedBandwidthPerMonth": -1.0,
+     "ExpirationDate": 1790188199,
+     "Enabled": true
+    },
+    "AllowedExchanges": [
+     {
+      "AllowedInstruments": 100,
+      "DataDelay": 900,
+      "ExchangeName": "NFO"
+     },
+     {
+      "AllowedInstruments": 95,
+      "DataDelay": 900,
+      "ExchangeName": "NSE"
+     },
+     {
+      "AllowedInstruments": 5,
+      "DataDelay": 900,
+      "ExchangeName": "NSE_IDX"
+     }
+    ],
+    "AllowedFunctions": [
+     {
+      "FunctionName": "GetExchangeSnapshot",
+      "IsEnabled": true
+     },
+     {
+      "FunctionName": "GetHistory",
+      "IsEnabled": true
+     },
+     {
+      "FunctionName": "GetSnapshot",
+      "IsEnabled": true
+     },
+     {
+      "FunctionName": "SubscribeSnapshot",
+      "IsEnabled": true
+     }
+    ],
+    "HistoryLimitation": {
+     "TickEnabled": false,
+     "DayEnabled": false,
+     "WeekEnabled": false,
+     "MonthEnabled": false,
+     "MaxEOD": 100000,
+     "MaxIntraday": 66,
+     "Hour_2Enabled": false,
+     "Hour_3Enabled": false,
+     "Hour_4Enabled": false,
+     "Hour_6Enabled": false,
+     "Hour_8Enabled": false,
+     "Hour_12Enabled": false,
+     "Minute_3Enabled": true,
+     "Minute_4Enabled": true,
+     "Minute_6Enabled": true,
+     "Minute_12Enabled": true,
+     "Minute_20Enabled": false,
+     "MaxTicks": 7,
+     "Hour_1Enabled": false,
+     "Minute_1Enabled": true,
+     "Minute_2Enabled": true,
+     "Minute_5Enabled": true,
+     "Minute_10Enabled": true,
+     "Minute_15Enabled": true,
+     "Minute_30Enabled": false
+    },
+    "GetSnapshotLimitation": {
+     "DayEnabled": false,
+     "Hour_1Enabled": false,
+     "Minute_1Enabled": true,
+     "Minute_2Enabled": true,
+     "Minute_5Enabled": true,
+     "Minute_10Enabled": true,
+     "Minute_15Enabled": true,
+     "Minute_30Enabled": false
+    },
+    "ExchangeSnapshotLimitation": {
+     "DayEnabled": true,
+     "Hour_1Enabled": false,
+     "Minute_1Enabled": true,
+     "Minute_2Enabled": true,
+     "Minute_5Enabled": true,
+     "Minute_10Enabled": true,
+     "Minute_15Enabled": true,
+     "Minute_30Enabled": false
+    },
+    "ExchangeSnapshotInstrumentTypeLimitation": null,
+    "SubscribeSnapshotLimitation": {
+     "Hour_1Enabled": false,
+     "Minute_1Enabled": true,
+     "Minute_2Enabled": true,
+     "Minute_5Enabled": true,
+     "Minute_10Enabled": true,
+     "Minute_15Enabled": true,
+     "Minute_30Enabled": false
+    },
+    "MessageType": "LimitationResult"
+   }
+  },
+  "GetExchanges": {
+   "request": {
+    "MessageType": "GetExchanges"
+   },
+   "rows": 3,
+   "fields": {
+    "Value": {
+     "type": "str",
+     "sample": "NFO",
+     "empty": 0,
+     "zero": 0
+    }
+   },
+   "top_level": [
+    "MessageType"
+   ],
+   "first_row": {
+    "Value": "NFO"
+   }
+  },
+  "GetInstruments NSE_IDX": {
+   "request": {
+    "MessageType": "GetInstruments",
+    "Exchange": "NSE_IDX",
+    "DetailedInfo": "true"
+   },
+   "rows": 142,
+   "fields": {
+    "TokenNumber": {
+     "type": "str",
+     "sample": null,
+     "empty": 142,
+     "zero": 0
+    },
+    "LowPriceRange": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 142
+    },
+    "HighPriceRange": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 142
+    },
+    "ISIN": {
+     "type": "str",
+     "sample": null,
+     "empty": 142,
+     "zero": 0
+    },
+    "Series": {
+     "type": "str",
+     "sample": null,
+     "empty": 142,
+     "zero": 0
+    },
+    "High52Week": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 142
+    },
+    "Low52Week": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 142
+    },
+    "IsCommonExchange": {
+     "type": "bool",
+     "sample": null,
+     "empty": 0,
+     "zero": 142
+    },
+    "Category": {
+     "type": "str",
+     "sample": null,
+     "empty": 142,
+     "zero": 0
+    },
+    "Identifier": {
+     "type": "str",
+     "sample": "BHARATBOND-APR25",
+     "empty": 0,
+     "zero": 0
+    },
+    "Name": {
+     "type": "str",
+     "sample": null,
+     "empty": 142,
+     "zero": 0
+    },
+    "Expiry": {
+     "type": "str",
+     "sample": null,
+     "empty": 142,
+     "zero": 0
+    },
+    "StrikePrice": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 142
+    },
+    "Product": {
+     "type": "str",
+     "sample": null,
+     "empty": 142,
+     "zero": 0
+    },
+    "PriceQuotationUnit": {
+     "type": "str",
+     "sample": null,
+     "empty": 142,
+     "zero": 0
+    },
+    "OptionType": {
+     "type": "str",
+     "sample": null,
+     "empty": 142,
+     "zero": 0
+    },
+    "ProductMonth": {
+     "type": "str",
+     "sample": null,
+     "empty": 142,
+     "zero": 0
+    },
+    "UnderlyingAsset": {
+     "type": "str",
+     "sample": null,
+     "empty": 142,
+     "zero": 0
+    },
+    "UnderlyingAssetExpiry": {
+     "type": "str",
+     "sample": null,
+     "empty": 142,
+     "zero": 0
+    },
+    "IndexName": {
+     "type": "str",
+     "sample": "BHARATBOND-APR25",
+     "empty": 0,
+     "zero": 0
+    },
+    "TradeSymbol": {
+     "type": "str",
+     "sample": "BHARATBOND-APR25",
+     "empty": 0,
+     "zero": 0
+    },
+    "QuotationLot": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 142
+    },
+    "Description": {
+     "type": "str",
+     "sample": "NIFTY BHARAT BOND INDEX - APRIL 2030",
+     "empty": 3,
+     "zero": 0
+    }
+   },
+   "top_level": [
+    "MessageType",
+    "Request"
+   ],
+   "first_row": {
+    "TokenNumber": "",
+    "LowPriceRange": 0.0,
+    "HighPriceRange": 0.0,
+    "ISIN": "",
+    "Series": "",
+    "High52Week": 0.0,
+    "Low52Week": 0.0,
+    "IsCommonExchange": false,
+    "Category": "",
+    "Identifier": "BHARATBOND-APR25",
+    "Name": "",
+    "Expiry": "",
+    "StrikePrice": 0.0,
+    "Product": "",
+    "PriceQuotationUnit": "",
+    "OptionType": "",
+    "ProductMonth": "",
+    "UnderlyingAsset": "",
+    "UnderlyingAssetExpiry": "",
+    "IndexName": "BHARATBOND-APR25",
+    "TradeSymbol": "BHARATBOND-APR25",
+    "QuotationLot": 0.0,
+    "Description": ""
+   }
+  },
+  "GetInstruments NFO option": {
+   "request": {
+    "MessageType": "GetInstruments",
+    "Exchange": "NFO",
+    "InstrumentType": "OPTIDX",
+    "Product": "NIFTY",
+    "OptionType": "CE",
+    "DetailedInfo": "true"
+   },
+   "rows": 2026,
+   "fields": {
+    "TokenNumber": {
+     "type": "str",
+     "sample": "74571",
+     "empty": 211,
+     "zero": 0
+    },
+    "LowPriceRange": {
+     "type": "float",
+     "sample": 0.05,
+     "empty": 0,
+     "zero": 211
+    },
+    "HighPriceRange": {
+     "type": "float",
+     "sample": 20.05,
+     "empty": 0,
+     "zero": 211
+    },
+    "ISIN": {
+     "type": "str",
+     "sample": null,
+     "empty": 2026,
+     "zero": 0
+    },
+    "Series": {
+     "type": "str",
+     "sample": null,
+     "empty": 2026,
+     "zero": 0
+    },
+    "High52Week": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 2026
+    },
+    "Low52Week": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 2026
+    },
+    "IsCommonExchange": {
+     "type": "bool",
+     "sample": null,
+     "empty": 0,
+     "zero": 2026
+    },
+    "Category": {
+     "type": "str",
+     "sample": null,
+     "empty": 2026,
+     "zero": 0
+    },
+    "Identifier": {
+     "type": "str",
+     "sample": "OPTIDX_NIFTY_29SEP2026_CE_28850",
+     "empty": 0,
+     "zero": 0
+    },
+    "Name": {
+     "type": "str",
+     "sample": "OPTIDX",
+     "empty": 0,
+     "zero": 0
+    },
+    "Expiry": {
+     "type": "str",
+     "sample": "29Sep2026",
+     "empty": 0,
+     "zero": 0
+    },
+    "StrikePrice": {
+     "type": "float",
+     "sample": 28850.0,
+     "empty": 0,
+     "zero": 0
+    },
+    "Product": {
+     "type": "str",
+     "sample": "NIFTY",
+     "empty": 0,
+     "zero": 0
+    },
+    "PriceQuotationUnit": {
+     "type": "str",
+     "sample": null,
+     "empty": 2026,
+     "zero": 0
+    },
+    "OptionType": {
+     "type": "str",
+     "sample": "CE",
+     "empty": 0,
+     "zero": 0
+    },
+    "ProductMonth": {
+     "type": "str",
+     "sample": "29Sep2026",
+     "empty": 0,
+     "zero": 0
+    },
+    "UnderlyingAsset": {
+     "type": "str",
+     "sample": null,
+     "empty": 2026,
+     "zero": 0
+    },
+    "UnderlyingAssetExpiry": {
+     "type": "str",
+     "sample": null,
+     "empty": 2026,
+     "zero": 0
+    },
+    "IndexName": {
+     "type": "str",
+     "sample": null,
+     "empty": 2026,
+     "zero": 0
+    },
+    "TradeSymbol": {
+     "type": "str",
+     "sample": "NIFTY29SEP2628850CE",
+     "empty": 0,
+     "zero": 0
+    },
+    "QuotationLot": {
+     "type": "float",
+     "sample": 65.0,
+     "empty": 0,
+     "zero": 0
+    },
+    "Description": {
+     "type": "str",
+     "sample": null,
+     "empty": 2026,
+     "zero": 0
+    }
+   },
+   "top_level": [
+    "MessageType",
+    "Request"
+   ],
+   "first_row": {
+    "TokenNumber": "74571",
+    "LowPriceRange": 0.05,
+    "HighPriceRange": 20.05,
+    "ISIN": "",
+    "Series": "",
+    "High52Week": 0.0,
+    "Low52Week": 0.0,
+    "IsCommonExchange": false,
+    "Category": "",
+    "Identifier": "OPTIDX_NIFTY_29SEP2026_CE_28850",
+    "Name": "OPTIDX",
+    "Expiry": "29Sep2026",
+    "StrikePrice": 28850.0,
+    "Product": "NIFTY",
+    "PriceQuotationUnit": "",
+    "OptionType": "CE",
+    "ProductMonth": "29Sep2026",
+    "UnderlyingAsset": "",
+    "UnderlyingAssetExpiry": "",
+    "IndexName": "",
+    "TradeSymbol": "NIFTY29SEP2628850CE",
+    "QuotationLot": 65.0,
+    "Description": ""
+   }
+  },
+  "GetInstruments NSE equity": {
+   "request": {
+    "MessageType": "GetInstruments",
+    "Exchange": "NSE",
+    "Product": "RELIANCE",
+    "DetailedInfo": "true"
+   },
+   "rows": 0,
+   "fields": {},
+   "top_level": [
+    "MessageType",
+    "Request"
+   ],
+   "first_row": null
+  },
+  "GetHistory 1m index": {
+   "request": {
+    "MessageType": "GetHistory",
+    "Exchange": "NSE_IDX",
+    "InstrumentIdentifier": "NIFTY 50",
+    "Periodicity": "MINUTE",
+    "Period": 1,
+    "From": 1790127665,
+    "To": 1790134925
+   },
+   "rows": 0,
+   "fields": {},
+   "top_level": [
+    "MessageType",
+    "Request"
+   ],
+   "first_row": null
+  },
+  "GetHistory 1m equity": {
+   "request": {
+    "MessageType": "GetHistory",
+    "Exchange": "NSE",
+    "InstrumentIdentifier": "RELIANCE",
+    "Periodicity": "MINUTE",
+    "Period": 1,
+    "From": 1790127665,
+    "To": 1790134925
+   },
+   "rows": 0,
+   "fields": {},
+   "top_level": [
+    "MessageType",
+    "Request"
+   ],
+   "first_row": null
+  },
+  "GetHistory 1m future": {
+   "request": {
+    "MessageType": "GetHistory",
+    "Exchange": "NFO",
+    "InstrumentIdentifier": "FUTIDX_NIFTY_29SEP2026_XX_0",
+    "Periodicity": "MINUTE",
+    "Period": 1,
+    "From": 1790127665,
+    "To": 1790134925
+   },
+   "rows": 0,
+   "fields": {},
+   "top_level": [
+    "MessageType",
+    "Request"
+   ],
+   "first_row": null
+  },
+  "GetHistory 1m option": {
+   "request": {
+    "MessageType": "GetHistory",
+    "Exchange": "NFO",
+    "InstrumentIdentifier": "OPTIDX_NIFTY_29SEP2026_CE_23350",
+    "Periodicity": "MINUTE",
+    "Period": 1,
+    "From": 1790127665,
+    "To": 1790134925
+   },
+   "rows": 0,
+   "fields": {},
+   "top_level": [
+    "MessageType",
+    "Request"
+   ],
+   "first_row": null
+  },
+  "GetHistory 15m option": {
+   "request": {
+    "MessageType": "GetHistory",
+    "Exchange": "NFO",
+    "InstrumentIdentifier": "OPTIDX_NIFTY_29SEP2026_CE_23350",
+    "Periodicity": "MINUTE",
+    "Period": 15,
+    "From": 1790127665,
+    "To": 1790134925
+   },
+   "rows": 0,
+   "fields": {},
+   "top_level": [
+    "MessageType",
+    "Request"
+   ],
+   "first_row": null
+  },
+  "GetSnapshot 1m NFO": {
+   "request": {
+    "MessageType": "GetSnapshot",
+    "Exchange": "NFO",
+    "Periodicity": "MINUTE",
+    "Period": 1,
+    "isShortIdentifiers": "false",
+    "InstrumentIdentifiers": [
+     {
+      "Value": "FUTIDX_NIFTY_29SEP2026_XX_0"
+     },
+     {
+      "Value": "OPTIDX_NIFTY_29SEP2026_CE_23350"
+     },
+     {
+      "Value": "OPTIDX_BANKNIFTY_29SEP2026_CE_56200"
+     }
+    ]
+   },
+   "rows": 3,
+   "fields": {
+    "InstrumentIdentifier": {
+     "type": "str",
+     "sample": "FUTIDX_NIFTY_29SEP2026_XX_0",
+     "empty": 0,
+     "zero": 0
+    },
+    "Exchange": {
+     "type": "str",
+     "sample": "NFO",
+     "empty": 0,
+     "zero": 0
+    },
+    "LastTradeTime": {
+     "type": "int",
+     "sample": null,
+     "empty": 0,
+     "zero": 3
+    },
+    "TradedQty": {
+     "type": "int",
+     "sample": null,
+     "empty": 0,
+     "zero": 3
+    },
+    "OpenInterest": {
+     "type": "int",
+     "sample": null,
+     "empty": 0,
+     "zero": 3
+    },
+    "Open": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 3
+    },
+    "High": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 3
+    },
+    "Low": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 3
+    },
+    "Close": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 3
+    },
+    "TokenNumber": {
+     "type": "NoneType",
+     "sample": null,
+     "empty": 3,
+     "zero": 0
+    }
+   },
+   "top_level": [
+    "MessageType"
+   ],
+   "first_row": {
+    "InstrumentIdentifier": "FUTIDX_NIFTY_29SEP2026_XX_0",
+    "Exchange": "NFO",
+    "LastTradeTime": 0,
+    "TradedQty": 0,
+    "OpenInterest": 0,
+    "Open": 0.0,
+    "High": 0.0,
+    "Low": 0.0,
+    "Close": 0.0,
+    "TokenNumber": null
+   }
+  },
+  "GetSnapshot 15m NFO": {
+   "request": {
+    "MessageType": "GetSnapshot",
+    "Exchange": "NFO",
+    "Periodicity": "MINUTE",
+    "Period": 15,
+    "isShortIdentifiers": "false",
+    "InstrumentIdentifiers": [
+     {
+      "Value": "FUTIDX_NIFTY_29SEP2026_XX_0"
+     },
+     {
+      "Value": "OPTIDX_NIFTY_29SEP2026_CE_23350"
+     }
+    ]
+   },
+   "rows": 2,
+   "fields": {
+    "InstrumentIdentifier": {
+     "type": "str",
+     "sample": "FUTIDX_NIFTY_29SEP2026_XX_0",
+     "empty": 0,
+     "zero": 0
+    },
+    "Exchange": {
+     "type": "str",
+     "sample": "NFO",
+     "empty": 0,
+     "zero": 0
+    },
+    "LastTradeTime": {
+     "type": "int",
+     "sample": null,
+     "empty": 0,
+     "zero": 2
+    },
+    "TradedQty": {
+     "type": "int",
+     "sample": null,
+     "empty": 0,
+     "zero": 2
+    },
+    "OpenInterest": {
+     "type": "int",
+     "sample": null,
+     "empty": 0,
+     "zero": 2
+    },
+    "Open": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 2
+    },
+    "High": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 2
+    },
+    "Low": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 2
+    },
+    "Close": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 2
+    },
+    "TokenNumber": {
+     "type": "NoneType",
+     "sample": null,
+     "empty": 2,
+     "zero": 0
+    }
+   },
+   "top_level": [
+    "MessageType"
+   ],
+   "first_row": {
+    "InstrumentIdentifier": "FUTIDX_NIFTY_29SEP2026_XX_0",
+    "Exchange": "NFO",
+    "LastTradeTime": 0,
+    "TradedQty": 0,
+    "OpenInterest": 0,
+    "Open": 0.0,
+    "High": 0.0,
+    "Low": 0.0,
+    "Close": 0.0,
+    "TokenNumber": null
+   }
+  },
+  "GetSnapshot 1m NSE": {
+   "request": {
+    "MessageType": "GetSnapshot",
+    "Exchange": "NSE",
+    "Periodicity": "MINUTE",
+    "Period": 1,
+    "isShortIdentifiers": "false",
+    "InstrumentIdentifiers": [
+     {
+      "Value": "RELIANCE"
+     }
+    ]
+   },
+   "rows": 1,
+   "fields": {
+    "InstrumentIdentifier": {
+     "type": "str",
+     "sample": "RELIANCE",
+     "empty": 0,
+     "zero": 0
+    },
+    "Exchange": {
+     "type": "str",
+     "sample": "NSE",
+     "empty": 0,
+     "zero": 0
+    },
+    "LastTradeTime": {
+     "type": "int",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "TradedQty": {
+     "type": "int",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "OpenInterest": {
+     "type": "int",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "Open": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "High": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "Low": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "Close": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "TokenNumber": {
+     "type": "NoneType",
+     "sample": null,
+     "empty": 1,
+     "zero": 0
+    }
+   },
+   "top_level": [
+    "MessageType"
+   ],
+   "first_row": {
+    "InstrumentIdentifier": "RELIANCE",
+    "Exchange": "NSE",
+    "LastTradeTime": 0,
+    "TradedQty": 0,
+    "OpenInterest": 0,
+    "Open": 0.0,
+    "High": 0.0,
+    "Low": 0.0,
+    "Close": 0.0,
+    "TokenNumber": null
+   }
+  },
+  "GetSnapshot 1m NSE_IDX": {
+   "request": {
+    "MessageType": "GetSnapshot",
+    "Exchange": "NSE_IDX",
+    "Periodicity": "MINUTE",
+    "Period": 1,
+    "isShortIdentifiers": "false",
+    "InstrumentIdentifiers": [
+     {
+      "Value": "NIFTY 50"
+     }
+    ]
+   },
+   "rows": 1,
+   "fields": {
+    "InstrumentIdentifier": {
+     "type": "str",
+     "sample": "NIFTY 50",
+     "empty": 0,
+     "zero": 0
+    },
+    "Exchange": {
+     "type": "str",
+     "sample": "NSE_IDX",
+     "empty": 0,
+     "zero": 0
+    },
+    "LastTradeTime": {
+     "type": "int",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "TradedQty": {
+     "type": "int",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "OpenInterest": {
+     "type": "int",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "Open": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "High": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "Low": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "Close": {
+     "type": "float",
+     "sample": null,
+     "empty": 0,
+     "zero": 1
+    },
+    "TokenNumber": {
+     "type": "NoneType",
+     "sample": null,
+     "empty": 1,
+     "zero": 0
+    }
+   },
+   "top_level": [
+    "MessageType"
+   ],
+   "first_row": {
+    "InstrumentIdentifier": "NIFTY 50",
+    "Exchange": "NSE_IDX",
+    "LastTradeTime": 0,
+    "TradedQty": 0,
+    "OpenInterest": 0,
+    "Open": 0.0,
+    "High": 0.0,
+    "Low": 0.0,
+    "Close": 0.0,
+    "TokenNumber": null
+   }
+  },
+  "GetExchangeSnapshot NFO 1m": {
+   "request": {
+    "MessageType": "GetExchangeSnapshot",
+    "Exchange": "NFO",
+    "Periodicity": "MINUTE",
+    "Period": 1
+   },
+   "rows": 2,
+   "fields": {
+    "InstrumentIdentifier": {
+     "type": "str",
+     "sample": "FUTSTK_181NSETEST_27NOV2036_XX_0",
+     "empty": 0,
+     "zero": 0
+    },
+    "Exchange": {
+     "type": "str",
+     "sample": "NFO",
+     "empty": 0,
+     "zero": 0
+    },
+    "LastTradeTime": {
+     "type": "int",
+     "sample": 1790120880,
+     "empty": 0,
+     "zero": 0
+    },
+    "TradedQty": {
+     "type": "int",
+     "sample": 950,
+     "empty": 0,
+     "zero": 0
+    },
+    "OpenInterest": {
+     "type": "int",
+     "sample": 697350,
+     "empty": 0,
+     "zero": 0
+    },
+    "Open": {
+     "type": "float",
+     "sample": 200.0,
+     "empty": 0,
+     "zero": 0
+    },
+    "High": {
+     "type": "float",
+     "sample": 200.0,
+     "empty": 0,
+     "zero": 0
+    },
+    "Low": {
+     "type": "float",
+     "sample": 200.0,
+     "empty": 0,
+     "zero": 0
+    },
+    "Close": {
+     "type": "float",
+     "sample": 200.0,
+     "empty": 0,
+     "zero": 0
+    },
+    "TokenNumber": {
+     "type": "str",
+     "sample": "48577",
+     "empty": 0,
+     "zero": 0
+    },
+    "_group": {
+     "type": "int",
+     "sample": 1790120880,
+     "empty": 0,
+     "zero": 0
+    }
+   },
+   "top_level": [
+    "MessageType",
+    "Request"
+   ],
+   "first_row": {
+    "InstrumentIdentifier": "FUTSTK_181NSETEST_27NOV2036_XX_0",
+    "Exchange": "NFO",
+    "LastTradeTime": 1790120880,
+    "TradedQty": 950,
+    "OpenInterest": 697350,
+    "Open": 200.0,
+    "High": 200.0,
+    "Low": 200.0,
+    "Close": 200.0,
+    "TokenNumber": "48577",
+    "_group": 1790120880
+   }
+  },
+  "GetLastQuote NFO": {
+   "request": {
+    "MessageType": "GetLastQuote",
+    "Exchange": "NFO",
+    "isShortIdentifier": "false",
+    "InstrumentIdentifier": "FUTIDX_NIFTY_29SEP2026_XX_0"
+   },
+   "refused": "gdf: Function not enabled."
+  },
+  "GetExpiryDates NFO": {
+   "request": {
+    "MessageType": "GetExpiryDates",
+    "Exchange": "NFO",
+    "Product": "NIFTY"
+   },
+   "rows": 19,
+   "fields": {
+    "Value": {
+     "type": "str",
+     "sample": "29SEP2026",
+     "empty": 0,
+     "zero": 0
+    }
+   },
+   "top_level": [
+    "MessageType",
+    "Request"
+   ],
+   "first_row": {
+    "Value": "29SEP2026"
+   }
+  },
+  "GetHistory DAY": {
+   "request": {
+    "MessageType": "GetHistory",
+    "Exchange": "NSE",
+    "InstrumentIdentifier": "RELIANCE",
+    "Periodicity": "DAY",
+    "Period": 1,
+    "From": 1790127665,
+    "To": 1790134925
+   },
+   "refused": "gdf: Selected periodicity or period disabled."
+  },
+  "GetHistory TICK": {
+   "request": {
+    "MessageType": "GetHistory",
+    "Exchange": "NFO",
+    "InstrumentIdentifier": "FUTIDX_NIFTY_29SEP2026_XX_0",
+    "Periodicity": "TICK",
+    "Period": 1,
+    "From": 1790127665,
+    "To": 1790134925
+   },
+   "refused": "gdf: Selected periodicity or period disabled."
+  }
+ }
+}

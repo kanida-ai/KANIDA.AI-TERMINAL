@@ -6,6 +6,8 @@ export {Popover,MenuList,useDismiss,type PopoverProps,type PopoverAnchor,type Po
 export {BottomSheet,SHEET_SNAPS,type SheetSnap,type BottomSheetProps} from './BottomSheet';
 export {TopBar,DataAgePill,dataAgeDays,dataAgeTone,formatDataDate,type TopBarProps,type DataAgePillProps,type DataAgeTone} from './TopBar';
 export {DataStatusPanel,DataStatusPopover,type DataStatusPanelProps,type DataStatusPopoverProps} from './DataStatusPanel';
+// F&O capture health, the feed the data pill above does NOT describe (src/layout/fnoCapture.ts).
+export {FNO_POLL_MS,FNO_SEPARATE_TEXT,fnoCaptureView,useFnoCapture,resetFnoCapture,type FnoCapture,type FnoCaptureView} from './fnoCapture';
 export {dataStatusView,dataStatusTone,pillContent,connectionView,RECONNECT_GRACE_SECONDS,barLagSeconds,formatIst,agoText,inText,istMs,type DataStatus,type DataStatusView,type DataStatusRow,type DataStatusTone,type DataPillContent,type CacheProvenance,type ConnectionView,type ConnectionMode} from './dataStatus';
 export {ToolRail,type ToolRailProps,type ToolRailItem} from './ToolRail';
 export {IconButton,useDragResize,useTitle,useRoving,readStore,writeStore,storeKey,type IconButtonProps,type DragResizeOpts} from './shared';

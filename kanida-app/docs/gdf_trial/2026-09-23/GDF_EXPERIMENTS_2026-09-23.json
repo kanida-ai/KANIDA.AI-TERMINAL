@@ -1,0 +1,24 @@
+{
+ "started_ist": "09:18:34",
+ "subscribe_NFO_1m": [],
+ "plain_ws": [
+  {
+   "ttfb_ms": 4448,
+   "transfer_ms": 0,
+   "bytes": 669,
+   "total_ms": 5553,
+   "rows": 2,
+   "newest_bar_ist": "05:18",
+   "at": "09:21:20"
+  },
+  {
+   "ttfb_ms": 784,
+   "transfer_ms": 0,
+   "bytes": 669,
+   "total_ms": 785,
+   "rows": 2,
+   "newest_bar_ist": "05:18",
+   "at": "09:21:21"
+  }
+ ]
+}

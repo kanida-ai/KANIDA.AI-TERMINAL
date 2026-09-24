@@ -547,14 +547,45 @@ class DerivativesCapture:
                 return mark
         return None
 
+    #: How often a WAITING loop says it is still alive, in seconds.  Not a
+    #: setting anyone tunes: it is short enough that a stuck loop shows up
+    #: inside one 15-minute mark, and long enough that an overnight wait costs
+    #: a couple of dozen lines rather than a thousand.
+    HEARTBEAT_SECONDS = 300.0
+
     def _sleep_until(self, wake: datetime, sleep, until: datetime | None,
                      poll_seconds: float = 5.0) -> None:
+        """Wait for ``wake``, saying so periodically.
+
+        Two things this has to survive, and both cost a session when it does
+        not.
+
+        1. **A suspended machine.**  The wait is a poll of the CLOCK, never one
+           long ``sleep``: on 18 Sep 2026 the host went to sleep at 11:32 IST
+           mid-session and woke after the close, and a loop parked in a single
+           six-hour ``sleep(...)`` call comes back still owing that sleep.  This
+           re-reads ``now_ist()`` every few seconds, so a resumed machine finds
+           the wake time already past and gets straight back to work.
+
+        2. **Silence that reads as health.**  A loop waiting for the 09:30 mark
+           and a loop that died at 20:01 last night produce the SAME log file
+           for thirteen hours — the last line of each says it is armed.  That is
+           what made Friday's outage invisible.  So a waiting loop says, on a
+           fixed interval, that it is alive and what it is waiting for: the
+           log's own modification time is then enough to tell the two apart,
+           with no process list and nothing to run.
+        """
+        spoke = _time.monotonic()
         while True:
             now = now_ist()
             if now >= wake:
                 return
             if until is not None and now >= until:
                 return
+            if _time.monotonic() - spoke >= self.HEARTBEAT_SECONDS:
+                spoke = _time.monotonic()
+                LOG.info("waiting for %s (%.0f min to go); the capture loop is alive",
+                         _fmt(wake), max(0.0, (wake - now).total_seconds()) / 60.0)
             sleep(min(poll_seconds, max(0.2, (wake - now).total_seconds())))
 
 

@@ -32,7 +32,8 @@ Degradation: a missing file, a missing table or a locked database all report `av
 `EMPTY_TEXT` - "No F&O data captured yet - capture starts at the next 15-min reading" - never an error page.
 """
 from __future__ import annotations
-import logging,re,sqlite3,threading
+import logging,re,sqlite3,threading,time
+from . import session_events
 from datetime import date,datetime,timedelta,timezone
 from pathlib import Path
 from . import implied_vol as IV
@@ -264,6 +265,11 @@ GRID_SOURCE_TEXT=('Which readings the exchange had is taken from the store itsel
 #: than shifting the grid.
 GRID_WIDTH=4
 GRID_SLOTS=2*(GRID_WIDTH+1)
+#: The market-wide events pass is held for this long. A captured reading never changes; a request with no
+#: `at` resolves to the newest the store holds, and new marks land through the session — so it is seconds,
+#: not the session. Well inside the 15-minute cadence either way.
+EVENTS_CACHE_TTL=60.0
+EVENTS_CACHE_MAX=24
 #: "the latest mark versus four marks ago" — one hour of 15-minute marks.
 DIRECTION_LOOKBACK_MARKS=4
 #: |change| under this fraction of the contract's OWN largest |ΔOI| today is flat, not a direction.
@@ -715,6 +721,8 @@ class Derivatives:
   self._metrics=metrics_module  # tests inject; production resolves lazily
   self._metrics_tried=metrics_module is not None
   self._read=read_module        # market_data.derivatives.read_api, same deal
+  # the market-wide events pass, computed once per reading and handed to every reader after it
+  self._events_cache={}
   self._read_tried=read_module is not None
   self._lock=threading.Lock()
   #: (newest reading, answer) for `_latest_complete_reading`. Keyed on the newest reading the store holds,
@@ -1006,6 +1014,11 @@ class Derivatives:
   attempted=(readings[0]['at'] if readings else None) or self._max('metrics') or None
   available=next((r['at'] for r in (readings or ()) if self._reading_rows(r.get('at'))),None)
   complete=self._latest_complete_reading(readings) or None
+  # NO READING NAMED MEANS THE NEWEST ONE, NOT NONE. Found live on 21 Sep 2026: the app-wide F&O chip calls this
+  # route with no `at`, and with no `at` the state below fell straight to `missing_capture` — so the chip read
+  # "F&O not captured" through a complete 27,317-row capture, and had said so on every healthy day before it.
+  # A caller that names no reading is asking about the live one, and that is the newest attempted reading.
+  if not at:at=str(attempted or '')
   rows,coverage=self._field_coverage(at) if at else (0,{})
   missing=[f for f in CAPTURE_REQUIRED_FIELDS
    if (coverage.get(f) or {}).get('column') and not ((coverage.get(f) or {}).get('present') or 0)]
@@ -1929,6 +1942,185 @@ class Derivatives:
   if here:return here
   newest=self._max('snapshots') or self._max('candles_15m','bar_start') or self._max('underlying_snapshots')
   return str(newest or '')[:10] or None
+
+
+ # --- WHAT IS HAPPENING ACROSS THE BOOK ---------------------------------------------------------------
+ #
+ # One pass per reading, over every instrument the capture covered, computed HERE and served to every
+ # reader. The browser used to do this one instrument at a time: two hundred requests to answer "is
+ # anything happening", repeated per user, with no way to alert on the answer.
+ #
+ # FIVE QUERIES, NOT SIX HUNDRED. The naive shape is `oi_grid` in a loop, which is four queries per name.
+ # This resolves the spot of every underlying, the front expiry of every underlying, the ten at-the-money
+ # contracts of each, and then reads ALL their points and ALL their previous closes in one statement each.
+ #
+ # It adds no analytic: `session_events` is the tab's own walk (rule signal/2, FLOW_LABELS, the hour-wide
+ # window, the 5% flat bands), and `server/tests/test_session_events.py` fails if it drifts from the
+ # TypeScript the panel uses for the selected instrument.
+ def events(self,at='',limit=None):
+  """The market list: one row per instrument, at the reading the tab is on.
+
+  COMPUTED ONCE PER READING. A 15-minute reading that has been captured does not change, so this walk over
+  two hundred instruments is done once and handed to every reader after it. Measured cold at 2.8 seconds of
+  SQLite and arithmetic — running that on every page load, per user, for an answer identical to all of
+  them, is the shape this endpoint exists to replace.
+
+  The entry is held for a short time rather than forever because a request with NO `at` means "the newest
+  reading the store holds", and new marks land through the session.
+  """
+  session=self._grid_session(at)
+  key=(session,str(at or ''))
+  hit=self._events_cache.get(key)
+  if hit and (time.time()-hit[0])<EVENTS_CACHE_TTL:
+   body=dict(hit[1])
+   if limit:body['rows']=body['rows'][:int(limit)]
+   return body
+  built=self._events(session,at)
+  # a small, bounded store: the oldest half is dropped when it grows past the cap
+  if len(self._events_cache)>EVENTS_CACHE_MAX:
+   for stale in sorted(self._events_cache,key=lambda k:self._events_cache[k][0])[:EVENTS_CACHE_MAX//2]:
+    self._events_cache.pop(stale,None)
+  self._events_cache[key]=(time.time(),built)
+  body=dict(built)
+  if limit:body['rows']=body['rows'][:int(limit)]
+  return body
+
+ def _events(self,session,at=''):
+  notes={'rule_version':session_events.RULE_VERSION,'window_minutes':session_events.WINDOW_MINUTES,
+   'grid_width':GRID_WIDTH,'grid_slots':GRID_SLOTS}
+  if not session:
+   return self.envelope(rows=[],session=None,reading_at=None,instruments=0,measured=0,**notes)
+  bound=str(at or '').strip() or f'{session}~'
+  tables=self._tables()
+  if 'contracts' not in tables or 'underlying_snapshots' not in tables:
+   return self.envelope(rows=[],session=session,reading_at=None,instruments=0,measured=0,**notes)
+
+  # 1. THE SPOT OF EVERY UNDERLYING at or before the boundary. Everything below hangs off the at-the-money
+  #    strike, and the at-the-money strike hangs off the spot: a name with no spot at or before this
+  #    reading cannot be placed on a ladder, and is reported as not measurable rather than as quiet.
+  spots={}
+  for row in self._rows('select underlying,captured_at,spot from underlying_snapshots'
+   ' where substr(captured_at,1,10)=? and captured_at<=? and spot is not null order by captured_at',
+   (session,bound)):
+   name=clean_symbol(row.get('underlying'))
+   value=_num(row.get('spot'))
+   if name and value is not None:spots[name]=(value,row.get('captured_at'))
+  if not spots:
+   return self.envelope(rows=[],session=session,reading_at=None,instruments=0,measured=0,**notes)
+
+  names=sorted(spots)
+  marks=','.join('?' for _ in names)
+  # 2. THE FRONT EXPIRY of each, from the contracts the store actually lists.
+  today=today_ist().isoformat()
+  fronts={}
+  for row in self._rows(f'select underlying,min(expiry) as e from contracts'
+   f" where underlying in ({marks}) and expiry>=? and instrument_type in ('CE','PE')"
+   ' group by underlying',(*names,today)):
+   name=clean_symbol(row.get('underlying'))
+   expiry=clean_expiry(row.get('e'))
+   if name and expiry:fronts[name]=expiry
+
+  # 3. THE LADDER of each name at that expiry, and the ten slots around its spot.
+  ladders={}
+  for row in self._rows(f'select underlying,expiry,instrument_token,tradingsymbol,strike,instrument_type'
+   f" from contracts where underlying in ({marks}) and instrument_type in ('CE','PE')",(*names,)):
+   name=clean_symbol(row.get('underlying'))
+   if not name or fronts.get(name)!=clean_expiry(row.get('expiry')):continue
+   strike=_num(row.get('strike'))
+   if strike is None:continue
+   ladders.setdefault(name,[]).append(row)
+
+  chosen={}   # underlying -> [(contract row, offset)]
+  tokens=[]
+  for name,rows in ladders.items():
+   spot=spots[name][0]
+   rungs=sorted({_num(r.get('strike')) for r in rows if _num(r.get('strike')) is not None})
+   if not rungs:continue
+   atm=min(rungs,key=lambda s:(abs(s-spot),-s))
+   index=rungs.index(atm)
+   wanted=[(atm,'CE',0),(atm,'PE',0)]
+   for step in range(1,GRID_WIDTH+1):
+    if index+step<len(rungs):wanted.append((rungs[index+step],'CE',step))
+    if index-step>=0:wanted.append((rungs[index-step],'PE',-step))
+   by_key={(_num(r.get('strike')),r.get('instrument_type')):r for r in rows}
+   picked=[(by_key[(s,t)],off) for s,t,off in wanted if (s,t) in by_key]
+   if not picked:continue
+   chosen[name]=picked
+   tokens.extend([_int(r.get('instrument_token')) for r,_ in picked if _int(r.get('instrument_token')) is not None])
+  if not tokens:
+   return self.envelope(rows=[],session=session,reading_at=None,instruments=len(names),measured=0,**notes)
+
+  # 4 and 5. EVERY POINT and EVERY PREVIOUS CLOSE, in one statement each.
+  points=self._events_points(tokens,session,bound)
+  closes=self._grid_previous_close_oi(tokens,session)
+
+  reading=None
+  out=[]
+  for name in sorted(chosen):
+   # THE SAME ANCHOR THE ΔOI BLOCK USES, per instrument. That block stops at the newest reading which
+   # carried a SPOT, because everything it draws hangs off the strike at the money. Reading further here
+   # would put this list and the explanation beside it on two different moments for the same name — on
+   # 18 Sep 2026, where NIFTY's capture died at 11:30 and the rest was rebuilt from candles without a
+   # spot, that is a four-hour disagreement on one screen.
+   anchor=spots[name][1]
+   slots=[]
+   for contract,offset in chosen[name]:
+    token=_int(contract.get('instrument_token'))
+    kind=contract.get('instrument_type') or ''
+    close=closes.get(token)
+    series=[]
+    for point in points.get(token,()):
+     mark=point.get('captured_at')
+     if anchor and mark and str(mark)>str(anchor):continue
+     oi=_num(point.get('oi'))
+     series.append({'at':mark,'oi':None if oi is None else _int(oi),
+      'delta_oi':None if (oi is None or close is None) else _int(oi-close),
+      'price':_round(point.get('price'))})
+    slots.append({'present':True,'row':'puts' if kind=='PE' else 'calls','option_type':kind,
+     'strike':_num(contract.get('strike')),'instrument_token':token,
+     'tradingsymbol':contract.get('tradingsymbol') or '','points':series})
+   walk=session_events.observe(slots)
+   if not walk:continue
+   row=session_events.summarise(name,walk,slots)
+   if not row:continue
+   row['expiry']=fronts.get(name)
+   row['spot']=_round(spots[name][0])
+   row['spot_at']=spots[name][1]
+   out.append(row)
+   if row.get('at') and (reading is None or str(row['at'])>str(reading)):reading=row['at']
+  # THE ORDER: the ones with something to say first, then by the size behind them. `weight` orders the
+  # list and is never shown as a score - it is the sum of the position changes the row is built on.
+  # `limit` is NOT applied here: the pass is always the whole book, and the caller trims after the cache.
+  out.sort(key=lambda r:(0 if r.get('live') else 1,-(r.get('weight') or 0),r['underlying']))
+  measured=sum(1 for r in out if r.get('live'))
+  return self.envelope(as_of=reading,rows=out,session=session,reading_at=reading,
+   instruments=len(names),measured=measured,**notes)
+
+ def _events_points(self,tokens,session,mark):
+  """Every 15-minute point of every token handed in, grouped by token, in capture order. One statement.
+
+  The same preference `_grid_points` uses: the capture worker's own table first, the 15-minute backfill
+  second. A mark with no row is simply absent - nothing here interpolates or carries forward.
+  """
+  tables=self._tables()
+  out={}
+  marks=','.join('?' for _ in tokens)
+  rows=[]
+  if 'snapshots' in tables:
+   kind=' and mark_kind=?' if 'mark_kind' in self._column_names('snapshots') else ''
+   args=[*tokens,session]+([MARK_BAR_CLOSE] if kind else [])+[mark]
+   rows=self._rows(f'select instrument_token,captured_at,oi,last_price as price from snapshots'
+    f' where instrument_token in ({marks})'
+    f' and substr(captured_at,1,10)=?{kind} and captured_at<=? order by captured_at',tuple(args))
+  if not rows and 'candles_15m' in tables:
+   rows=self._rows(f'select instrument_token,bar_start as captured_at,oi,close as price from candles_15m'
+    f' where instrument_token in ({marks}) and substr(bar_start,1,10)=? and bar_start<=? order by bar_start',
+    (*tokens,session,mark))
+  for row in rows:
+   token=_int(row.get('instrument_token'))
+   if token is None:continue
+   out.setdefault(token,[]).append(row)
+  return out
 
  def _grid_previous_close_oi(self,tokens,session):
   """Each contract's OI at the last bar of the last session BEFORE `session`, from `candles_15m`.

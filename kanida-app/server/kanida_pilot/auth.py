@@ -52,12 +52,17 @@ class Auth:
    raise PilotError(403,'INVITE_REQUIRED','Use a valid private-pilot invitation for this email.')
   c.execute(invites.update().where(invites.c.hash==invite['hash']).values(used=now()))
   return invite['role']
+ def registration_role(self,c,invite,email):
+  # Explicit invitations retain their role and single-use validation in either mode.
+  # Public signup never derives authority from an email address or request field.
+  if invite or self.settings.invitation_required:return self.consume_invite(c,invite,email)
+  return 'member'
  def create_user(self,c,email,name,role,password_hash=None,sub=None):
   user=dict(id=ident(),email=email,name=name[:80] or email.split('@')[0],role=role,password_hash=password_hash,google_sub=sub,
    active=True,onboarded=False,policy_version=None,preferences={},created=now())
   c.execute(users.insert().values(**user))
   c.execute(wallets.insert().values(user_id=user['id'],initial_paise=10000000,cash_paise=10000000,reserved_paise=0,realized_paise=0,paused=False))
-  record(c,user['id'],'account','Account created','Private pilot invitation accepted.')
+  record(c,user['id'],'account','Account created','Account registered.',data={'registration_mode':self.settings.registration_mode})
   return user
  def register(self,email,password,name,invite,policy):
   email=email_value(email);password_value(password)
@@ -65,7 +70,7 @@ class Auth:
   hashed=ph.hash(password)
   with self.db.tx() as c:
    if row(c,select(users).where(users.c.email==email)):raise PilotError(409,'ACCOUNT_EXISTS','An account already exists. Sign in instead.')
-   role=self.consume_invite(c,invite,email)
+   role=self.registration_role(c,invite,email)
    user=self.create_user(c,email,str(name),role,hashed)
    c.execute(users.update().where(users.c.id==user['id']).values(policy_version=policy))
    return user
@@ -135,7 +140,7 @@ class Auth:
      if existing['google_sub'] and existing['google_sub']!=sub:raise PilotError(403,'IDENTITY_MISMATCH','Sign in using the account originally invited.')
      c.execute(users.update().where(users.c.id==existing['id']).values(google_sub=sub));user=existing
     else:
-     role=self.consume_invite(c,flow['return_path'] or '',email)
+     role=self.registration_role(c,flow['return_path'] or '',email)
      user=self.create_user(c,email,claims.get('name',''),role,sub=sub)
    if not user['active']:raise PilotError(403,'ACCOUNT_DISABLED','This pilot account has been disabled.')
    return user

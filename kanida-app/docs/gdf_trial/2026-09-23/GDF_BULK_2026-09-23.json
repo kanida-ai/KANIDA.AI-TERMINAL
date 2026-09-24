@@ -1,0 +1,101 @@
+{
+ "started_ist": "10:05:07",
+ "probes": [
+  {
+   "label": "option chain, one request",
+   "request": {
+    "MessageType": "GetLastQuoteOptionChain",
+    "Exchange": "NFO",
+    "Product": "NIFTY",
+    "Expiry": "29SEP2026",
+    "StrikePrice": 23350,
+    "Depth": 10
+   },
+   "messages": [
+    {
+     "after_s": 0.3,
+     "type": "RequestError",
+     "message": "Function not enabled.",
+     "bytes": 100,
+     "rows": 0,
+     "idents": [],
+     "bars": [],
+     "fields": [
+      "Message",
+      "MessageType",
+      "PaketID",
+      "RequestRefState"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "option chain, pushed",
+   "request": {
+    "MessageType": "SubscribeOptionChain",
+    "Exchange": "NFO",
+    "Product": "NIFTY",
+    "Expiry": "29SEP2026",
+    "StrikePrice": 23350,
+    "Depth": 10,
+    "Unsubscribe": false
+   },
+   "messages": [
+    {
+     "after_s": 0.3,
+     "type": "RequestError",
+     "message": "Function not enabled.",
+     "bytes": 101,
+     "rows": 0,
+     "idents": [],
+     "bars": [],
+     "fields": [
+      "Message",
+      "MessageType",
+      "PaketID",
+      "RequestRefState"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "chain unsubscribe",
+   "request": {
+    "MessageType": "SubscribeOptionChain",
+    "Exchange": "NFO",
+    "Product": "NIFTY",
+    "Expiry": "29SEP2026",
+    "StrikePrice": 23350,
+    "Depth": 10,
+    "Unsubscribe": true
+   },
+   "messages": [
+    {
+     "after_s": 0.3,
+     "type": "RequestError",
+     "message": "Function not enabled.",
+     "bytes": 101,
+     "rows": 0,
+     "idents": [],
+     "bars": [],
+     "fields": [
+      "Message",
+      "MessageType",
+      "PaketID",
+      "RequestRefState"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "ALL symbols, pushed (NFO)",
+   "request": {
+    "MessageType": "StreamAllSnapshots",
+    "Exchange": "NFO",
+    "Periodicity": "MINUTE",
+    "Period": 1
+   },
+   "messages": []
+  }
+ ]
+}

@@ -1,0 +1,840 @@
+{
+ "slots": [
+  {
+   "present": true,
+   "row": "calls",
+   "option_type": "CE",
+   "strike": 23350,
+   "instrument_token": 23350,
+   "tradingsymbol": "X23350CE",
+   "points": [
+    {
+     "at": "2026-09-18 09:15:00",
+     "delta_oi": 0,
+     "price": 80
+    },
+    {
+     "at": "2026-09-18 09:30:00",
+     "delta_oi": 0,
+     "price": 80
+    },
+    {
+     "at": "2026-09-18 09:45:00",
+     "delta_oi": 0,
+     "price": 80
+    },
+    {
+     "at": "2026-09-18 10:00:00",
+     "delta_oi": 0,
+     "price": 80
+    },
+    {
+     "at": "2026-09-18 10:15:00",
+     "delta_oi": 20000,
+     "price": 95
+    },
+    {
+     "at": "2026-09-18 10:30:00",
+     "delta_oi": 40000,
+     "price": 110
+    },
+    {
+     "at": "2026-09-18 10:45:00",
+     "delta_oi": 60000,
+     "price": 125
+    },
+    {
+     "at": "2026-09-18 11:00:00",
+     "delta_oi": 80000,
+     "price": 140
+    }
+   ]
+  },
+  {
+   "present": true,
+   "row": "calls",
+   "option_type": "CE",
+   "strike": 23400,
+   "instrument_token": 23400,
+   "tradingsymbol": "X23400CE",
+   "points": [
+    {
+     "at": "2026-09-18 09:15:00",
+     "delta_oi": 0,
+     "price": 55
+    },
+    {
+     "at": "2026-09-18 09:30:00",
+     "delta_oi": 0,
+     "price": 55
+    },
+    {
+     "at": "2026-09-18 09:45:00",
+     "delta_oi": 0,
+     "price": 55
+    },
+    {
+     "at": "2026-09-18 10:00:00",
+     "delta_oi": 0,
+     "price": 55
+    },
+    {
+     "at": "2026-09-18 10:15:00",
+     "delta_oi": 0,
+     "price": 55
+    },
+    {
+     "at": "2026-09-18 10:30:00",
+     "delta_oi": 25000,
+     "price": 66
+    },
+    {
+     "at": "2026-09-18 10:45:00",
+     "delta_oi": 50000,
+     "price": 78
+    },
+    {
+     "at": "2026-09-18 11:00:00",
+     "delta_oi": 50000,
+     "price": 56
+    }
+   ]
+  },
+  {
+   "present": true,
+   "row": "calls",
+   "option_type": "CE",
+   "strike": 23450,
+   "instrument_token": 23450,
+   "tradingsymbol": "X23450CE",
+   "points": [
+    {
+     "at": "2026-09-18 09:15:00",
+     "delta_oi": 0,
+     "price": 40
+    },
+    {
+     "at": "2026-09-18 09:30:00",
+     "delta_oi": 0,
+     "price": 40
+    },
+    {
+     "at": "2026-09-18 09:45:00",
+     "delta_oi": 0,
+     "price": 40
+    },
+    {
+     "at": "2026-09-18 10:00:00",
+     "delta_oi": 0,
+     "price": 40
+    },
+    {
+     "at": "2026-09-18 10:15:00",
+     "delta_oi": 0,
+     "price": 40
+    },
+    {
+     "at": "2026-09-18 10:30:00",
+     "delta_oi": 0,
+     "price": 40
+    },
+    {
+     "at": "2026-09-18 10:45:00",
+     "delta_oi": 30000,
+     "price": 52
+    },
+    {
+     "at": "2026-09-18 11:00:00",
+     "delta_oi": 30500,
+     "price": 40
+    }
+   ]
+  },
+  {
+   "present": true,
+   "row": "calls",
+   "option_type": "CE",
+   "strike": 23500,
+   "instrument_token": 23500,
+   "tradingsymbol": "X23500CE",
+   "points": [
+    {
+     "at": "2026-09-18 09:15:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 09:30:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 09:45:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:00:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:15:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:30:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:45:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 11:00:00",
+     "delta_oi": 0,
+     "price": 20
+    }
+   ]
+  },
+  {
+   "present": true,
+   "row": "calls",
+   "option_type": "CE",
+   "strike": 23550,
+   "instrument_token": 23550,
+   "tradingsymbol": "X23550CE",
+   "points": [
+    {
+     "at": "2026-09-18 09:15:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 09:30:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 09:45:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:00:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:15:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:30:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:45:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 11:00:00",
+     "delta_oi": 0,
+     "price": 20
+    }
+   ]
+  },
+  {
+   "present": true,
+   "row": "puts",
+   "option_type": "PE",
+   "strike": 23300,
+   "instrument_token": 23300,
+   "tradingsymbol": "X23300PE",
+   "points": [
+    {
+     "at": "2026-09-18 09:15:00",
+     "delta_oi": 0,
+     "price": 70
+    },
+    {
+     "at": "2026-09-18 09:30:00",
+     "delta_oi": 0,
+     "price": 70
+    },
+    {
+     "at": "2026-09-18 09:45:00",
+     "delta_oi": 0,
+     "price": 70
+    },
+    {
+     "at": "2026-09-18 10:00:00",
+     "delta_oi": 0,
+     "price": 70
+    },
+    {
+     "at": "2026-09-18 10:15:00",
+     "delta_oi": -15000,
+     "price": 60
+    },
+    {
+     "at": "2026-09-18 10:30:00",
+     "delta_oi": -30000,
+     "price": 50
+    },
+    {
+     "at": "2026-09-18 10:45:00",
+     "delta_oi": -45000,
+     "price": 40
+    },
+    {
+     "at": "2026-09-18 11:00:00",
+     "delta_oi": -60000,
+     "price": 30
+    }
+   ]
+  },
+  {
+   "present": true,
+   "row": "puts",
+   "option_type": "PE",
+   "strike": 23250,
+   "instrument_token": 23250,
+   "tradingsymbol": "X23250PE",
+   "points": [
+    {
+     "at": "2026-09-18 09:15:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 09:30:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 09:45:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:00:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:15:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:30:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:45:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 11:00:00",
+     "delta_oi": 0,
+     "price": 20
+    }
+   ]
+  },
+  {
+   "present": true,
+   "row": "puts",
+   "option_type": "PE",
+   "strike": 23200,
+   "instrument_token": 23200,
+   "tradingsymbol": "X23200PE",
+   "points": [
+    {
+     "at": "2026-09-18 09:15:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 09:30:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 09:45:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:00:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:15:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:30:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:45:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 11:00:00",
+     "delta_oi": 0,
+     "price": 20
+    }
+   ]
+  },
+  {
+   "present": true,
+   "row": "puts",
+   "option_type": "PE",
+   "strike": 23150,
+   "instrument_token": 23150,
+   "tradingsymbol": "X23150PE",
+   "points": [
+    {
+     "at": "2026-09-18 09:15:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 09:30:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 09:45:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:00:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:15:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:30:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:45:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 11:00:00",
+     "delta_oi": 0,
+     "price": 20
+    }
+   ]
+  },
+  {
+   "present": true,
+   "row": "puts",
+   "option_type": "PE",
+   "strike": 23100,
+   "instrument_token": 23100,
+   "tradingsymbol": "X23100PE",
+   "points": [
+    {
+     "at": "2026-09-18 09:15:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 09:30:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 09:45:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:00:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:15:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:30:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 10:45:00",
+     "delta_oi": 0,
+     "price": 20
+    },
+    {
+     "at": "2026-09-18 11:00:00",
+     "delta_oi": 0,
+     "price": 20
+    }
+   ]
+  }
+ ],
+ "expected": [
+  {
+   "at": "2026-09-18 09:15:00",
+   "from": null,
+   "window_minutes": null,
+   "previous_at": null,
+   "covered": false,
+   "calls": {
+    "behaviour": "none",
+    "state": "no_baseline",
+    "strikes": [],
+    "lead": null,
+    "joined": [],
+    "left": [],
+    "lead_stable": false,
+    "first_at": null,
+    "last_confirmed_at": null,
+    "elapsed_minutes": null,
+    "scans": 0,
+    "measured": 0,
+    "slots": 5
+   },
+   "puts": {
+    "behaviour": "none",
+    "state": "no_baseline",
+    "strikes": [],
+    "lead": null,
+    "joined": [],
+    "left": [],
+    "lead_stable": false,
+    "first_at": null,
+    "last_confirmed_at": null,
+    "elapsed_minutes": null,
+    "scans": 0,
+    "measured": 0,
+    "slots": 5
+   },
+   "headline": "Not enough readings yet to compare"
+  },
+  {
+   "at": "2026-09-18 09:30:00",
+   "from": null,
+   "window_minutes": null,
+   "previous_at": "2026-09-18 09:15:00",
+   "covered": false,
+   "calls": {
+    "behaviour": "none",
+    "state": "no_baseline",
+    "strikes": [],
+    "lead": null,
+    "joined": [],
+    "left": [],
+    "lead_stable": false,
+    "first_at": null,
+    "last_confirmed_at": null,
+    "elapsed_minutes": null,
+    "scans": 0,
+    "measured": 0,
+    "slots": 5
+   },
+   "puts": {
+    "behaviour": "none",
+    "state": "no_baseline",
+    "strikes": [],
+    "lead": null,
+    "joined": [],
+    "left": [],
+    "lead_stable": false,
+    "first_at": null,
+    "last_confirmed_at": null,
+    "elapsed_minutes": null,
+    "scans": 0,
+    "measured": 0,
+    "slots": 5
+   },
+   "headline": "Not enough readings yet to compare"
+  },
+  {
+   "at": "2026-09-18 09:45:00",
+   "from": null,
+   "window_minutes": null,
+   "previous_at": "2026-09-18 09:30:00",
+   "covered": false,
+   "calls": {
+    "behaviour": "none",
+    "state": "no_baseline",
+    "strikes": [],
+    "lead": null,
+    "joined": [],
+    "left": [],
+    "lead_stable": false,
+    "first_at": null,
+    "last_confirmed_at": null,
+    "elapsed_minutes": null,
+    "scans": 0,
+    "measured": 0,
+    "slots": 5
+   },
+   "puts": {
+    "behaviour": "none",
+    "state": "no_baseline",
+    "strikes": [],
+    "lead": null,
+    "joined": [],
+    "left": [],
+    "lead_stable": false,
+    "first_at": null,
+    "last_confirmed_at": null,
+    "elapsed_minutes": null,
+    "scans": 0,
+    "measured": 0,
+    "slots": 5
+   },
+   "headline": "Not enough readings yet to compare"
+  },
+  {
+   "at": "2026-09-18 10:00:00",
+   "from": null,
+   "window_minutes": null,
+   "previous_at": "2026-09-18 09:45:00",
+   "covered": false,
+   "calls": {
+    "behaviour": "none",
+    "state": "no_baseline",
+    "strikes": [],
+    "lead": null,
+    "joined": [],
+    "left": [],
+    "lead_stable": false,
+    "first_at": null,
+    "last_confirmed_at": null,
+    "elapsed_minutes": null,
+    "scans": 0,
+    "measured": 0,
+    "slots": 5
+   },
+   "puts": {
+    "behaviour": "none",
+    "state": "no_baseline",
+    "strikes": [],
+    "lead": null,
+    "joined": [],
+    "left": [],
+    "lead_stable": false,
+    "first_at": null,
+    "last_confirmed_at": null,
+    "elapsed_minutes": null,
+    "scans": 0,
+    "measured": 0,
+    "slots": 5
+   },
+   "headline": "Not enough readings yet to compare"
+  },
+  {
+   "at": "2026-09-18 10:15:00",
+   "from": "2026-09-18 09:15:00",
+   "window_minutes": 60,
+   "previous_at": "2026-09-18 10:00:00",
+   "covered": true,
+   "calls": {
+    "behaviour": "buying",
+    "state": "appeared",
+    "strikes": [
+     23350
+    ],
+    "lead": 23350,
+    "joined": [
+     23350
+    ],
+    "left": [],
+    "lead_stable": true,
+    "first_at": "2026-09-18 10:15:00",
+    "last_confirmed_at": "2026-09-18 10:15:00",
+    "elapsed_minutes": 0,
+    "scans": 1,
+    "measured": 5,
+    "slots": 5
+   },
+   "puts": {
+    "behaviour": "buyers_exiting",
+    "state": "appeared",
+    "strikes": [
+     23300
+    ],
+    "lead": 23300,
+    "joined": [
+     23300
+    ],
+    "left": [],
+    "lead_stable": true,
+    "first_at": "2026-09-18 10:15:00",
+    "last_confirmed_at": "2026-09-18 10:15:00",
+    "elapsed_minutes": 0,
+    "scans": 1,
+    "measured": 5,
+    "slots": 5
+   },
+   "headline": "Call positions begin building"
+  },
+  {
+   "at": "2026-09-18 10:30:00",
+   "from": "2026-09-18 09:30:00",
+   "window_minutes": 60,
+   "previous_at": "2026-09-18 10:15:00",
+   "covered": true,
+   "calls": {
+    "behaviour": "buying",
+    "state": "broadened",
+    "strikes": [
+     23350,
+     23400
+    ],
+    "lead": 23350,
+    "joined": [
+     23400
+    ],
+    "left": [],
+    "lead_stable": true,
+    "first_at": "2026-09-18 10:15:00",
+    "last_confirmed_at": "2026-09-18 10:30:00",
+    "elapsed_minutes": 15,
+    "scans": 2,
+    "measured": 5,
+    "slots": 5
+   },
+   "puts": {
+    "behaviour": "buyers_exiting",
+    "state": "strengthened",
+    "strikes": [
+     23300
+    ],
+    "lead": 23300,
+    "joined": [],
+    "left": [],
+    "lead_stable": true,
+    "first_at": "2026-09-18 10:15:00",
+    "last_confirmed_at": "2026-09-18 10:30:00",
+    "elapsed_minutes": 15,
+    "scans": 2,
+    "measured": 5,
+    "slots": 5
+   },
+   "headline": "Call positions build at another strike"
+  },
+  {
+   "at": "2026-09-18 10:45:00",
+   "from": "2026-09-18 09:45:00",
+   "window_minutes": 60,
+   "previous_at": "2026-09-18 10:30:00",
+   "covered": true,
+   "calls": {
+    "behaviour": "buying",
+    "state": "broadened",
+    "strikes": [
+     23350,
+     23400,
+     23450
+    ],
+    "lead": 23350,
+    "joined": [
+     23450
+    ],
+    "left": [],
+    "lead_stable": true,
+    "first_at": "2026-09-18 10:15:00",
+    "last_confirmed_at": "2026-09-18 10:45:00",
+    "elapsed_minutes": 30,
+    "scans": 3,
+    "measured": 5,
+    "slots": 5
+   },
+   "puts": {
+    "behaviour": "buyers_exiting",
+    "state": "strengthened",
+    "strikes": [
+     23300
+    ],
+    "lead": 23300,
+    "joined": [],
+    "left": [],
+    "lead_stable": true,
+    "first_at": "2026-09-18 10:15:00",
+    "last_confirmed_at": "2026-09-18 10:45:00",
+    "elapsed_minutes": 30,
+    "scans": 3,
+    "measured": 5,
+    "slots": 5
+   },
+   "headline": "Call positions build at another strike"
+  },
+  {
+   "at": "2026-09-18 11:00:00",
+   "from": "2026-09-18 10:00:00",
+   "window_minutes": 60,
+   "previous_at": "2026-09-18 10:45:00",
+   "covered": true,
+   "calls": {
+    "behaviour": "buying",
+    "state": "narrowed",
+    "strikes": [
+     23350
+    ],
+    "lead": 23350,
+    "joined": [],
+    "left": [
+     23400,
+     23450
+    ],
+    "lead_stable": true,
+    "first_at": "2026-09-18 10:15:00",
+    "last_confirmed_at": "2026-09-18 11:00:00",
+    "elapsed_minutes": 45,
+    "scans": 4,
+    "measured": 5,
+    "slots": 5
+   },
+   "puts": {
+    "behaviour": "buyers_exiting",
+    "state": "strengthened",
+    "strikes": [
+     23300
+    ],
+    "lead": 23300,
+    "joined": [],
+    "left": [],
+    "lead_stable": true,
+    "first_at": "2026-09-18 10:15:00",
+    "last_confirmed_at": "2026-09-18 11:00:00",
+    "elapsed_minutes": 45,
+    "scans": 4,
+    "measured": 5,
+    "slots": 5
+   },
+   "headline": "Call position building narrows to one strike"
+  }
+ ]
+}

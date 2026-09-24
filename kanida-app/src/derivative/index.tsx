@@ -29,7 +29,7 @@ import {View,ScrollView,useWindowDimensions} from 'react-native';
 import {C,T,Icon,s} from '../ui';
 import {IconButton,readStore,writeStore} from '../layout';
 import {HeaderChip} from '../discover/parts';
-import {useDerivativeRead} from './useDerivatives';
+import {useDerivativeRead,useFollowLatest} from './useDerivatives';
 import {BLOCK_BESIDE,BLOCK_H,BLOCK_PIN_COLUMN,Block,CaptureChip,CaptureContext,head,
  type PaneStyle} from './frame';
 import {FilterDialog,ruleLabeller} from './FilterDialog';
@@ -213,6 +213,8 @@ export function DerivativeTab(){
   return {...served,underlying:symbol||served.underlying,expiry:symbolExpiry||served.expiry};
  },[screener.data,symbol,symbolExpiry]);
  const refresh=()=>setSeq(x=>x+1);
+ // A new 15-min reading re-reads the whole tab — unless the reader pinned a past one (see useFollowLatest).
+ useFollowLatest(!at,refresh);
  // ================================================================================================================
  // THE TAB'S ONE ΔOI-GRID READ.
  //
@@ -228,6 +230,23 @@ export function DerivativeTab(){
  // session whose capture died at 11:30 those two moments are four hours apart.
  const gridPath=symbol?`/api/derivatives/oi-grid?underlying=${encodeURIComponent(symbol)}${symbolExpiry?`&expiry=${encodeURIComponent(symbolExpiry)}`:''}${reading?`&at=${encodeURIComponent(reading)}`:''}`:null;
  const gridRead=useDerivativeRead<OiGrid>(gridPath,seq);
+ // WHERE POSITIONS STAND, at the same reading and expiry as the grid — what the explanation shows when there is
+ // not yet a second reading to compare against (the day's first reading).
+ const standPath=symbol?`/api/derivatives/oi-by-strike?underlying=${encodeURIComponent(symbol)}${symbolExpiry?`&expiry=${encodeURIComponent(symbolExpiry)}`:''}${reading?`&at=${encodeURIComponent(reading)}`:''}`:null;
+ const standRead=useDerivativeRead<any>(standPath,seq);
+ // THE COMPETING EXPLANATION, AND THE WHOLE BOOK. Two series the blocks below already read, resolved here
+ // as well so the explanation beside the screener can state the underlying’s own move over the same
+ // interval as the premium change it is describing. Neither route is new and neither block below changes.
+ const futPath=symbol?`/api/derivatives/futures-buildup?underlying=${encodeURIComponent(symbol)}`:null;
+ const pcrPath=symbol?`/api/derivatives/pcr-series?underlying=${encodeURIComponent(symbol)}${symbolExpiry?`&expiry=${encodeURIComponent(symbolExpiry)}`:''}`:null;
+ const futRead=useDerivativeRead<any>(futPath,seq);
+ const pcrRead=useDerivativeRead<any>(pcrPath,seq);
+ // The other two whole-book series the middle pane reads. Both are routes the blocks below already use,
+ // resolved once here so the panel and those blocks can never describe two different readings.
+ const mpPath=symbol?`/api/derivatives/maxpain-series?underlying=${encodeURIComponent(symbol)}${symbolExpiry?`&expiry=${encodeURIComponent(symbolExpiry)}`:''}`:null;
+ const ivPath=symbol?`/api/derivatives/iv-series?underlying=${encodeURIComponent(symbol)}${symbolExpiry?`&expiry=${encodeURIComponent(symbolExpiry)}`:''}`:null;
+ const mpRead=useDerivativeRead<any>(mpPath,seq);
+ const ivRead=useDerivativeRead<any>(ivPath,seq);
  // One target, one series read: clicking a row in ANY block re-points the same chart, and the tiles in the
  // blocks that draw it ask the pilot for nothing extra.
  const seriesQuery=target?(target.instrumentToken?`instrument_token=${target.instrumentToken}`
@@ -387,7 +406,9 @@ export function DerivativeTab(){
    {captured?<ScreenerRail read={screener} rules={rules} rulesLine={rulesLine} ruleLabel={ruleLabel} seq={seq}
     badge={badge} linked={linked} target={target} onTarget={onTarget} onCustomize={()=>setDialog(true)}
     at={at} onAt={setAt} buildupWindow={buildupWindow} onBuildupWindow={setBuildupWindow} pinFirst={pinFirst}
-    symbol={symbol} gridRead={gridRead}
+    symbol={symbol} expiry={symbolExpiry} gridRead={gridRead}
+    pcr={pcrRead.data} futures={futRead.data} maxPain={mpRead.data} iv={ivRead.data} standing={standRead.data}
+    highlight={strikeHover} onHighlight={onStrikeHover}
     show={shows(PINNED_KEY)} height={expanded===PINNED_KEY?EXPANDED_H:undefined}
     onExpand={()=>toggleExpand(PINNED_KEY)} expanded={expanded===PINNED_KEY}/>:<View/>}
    {body}

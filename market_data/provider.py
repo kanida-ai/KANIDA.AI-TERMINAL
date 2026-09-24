@@ -189,6 +189,7 @@ _FACTORIES: Dict[str, Callable[..., MarketDataProvider]] = {}
 _BUILTIN_MODULES = {
     "kite": ".kite_provider",
     "vendor15": ".vendor15_provider",
+    "gdf": ".gdf_provider",
     "fake": ".fake_provider",
 }
 _CACHE: Dict[str, MarketDataProvider] = {}

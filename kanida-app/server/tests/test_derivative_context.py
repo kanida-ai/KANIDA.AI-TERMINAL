@@ -610,3 +610,16 @@ def test_the_boundary_is_read_in_ist_and_not_in_the_server_s_own_timezone(monkey
  assert D.session_days_to_expiry(EXPIRY,SESSION)==4
  # and the today-based helper DOES move, which is why it is not used beside a captured figure
  assert D.days_to_expiry(EXPIRY)==1
+
+
+def test_no_reading_named_means_the_newest_reading_not_no_reading(reader):
+ """Found live 21 Sep 2026 09:36 IST: the app-wide chip calls the capture route with no `at`, and the route
+ answered `missing_capture` — "F&O not captured" — through a complete capture. Unnamed means the newest."""
+ unnamed=reader.capture_health()
+ newest=unnamed['latest_attempted_at']
+ assert newest,'the fixture store must hold a reading for this to mean anything'
+ named=reader.capture_health(newest)
+ assert unnamed['at']==newest,'an unnamed request is answered about the newest attempted reading'
+ assert unnamed['state']==named['state'] and unnamed['rows']==named['rows']
+ assert not (unnamed['state']=='missing_capture' and named['rows']>0),\
+  'a reading holding rows may never be reported as not captured'

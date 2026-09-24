@@ -1,0 +1,10 @@
+{
+ "request": {
+  "MessageType": "SubscribeSnapshot",
+  "Exchange": "NFO",
+  "InstrumentIdentifier": "FUTIDX_NIFTY_29SEP2026_XX_0",
+  "Periodicity": "MINUTE",
+  "Period": 1
+ },
+ "events": []
+}

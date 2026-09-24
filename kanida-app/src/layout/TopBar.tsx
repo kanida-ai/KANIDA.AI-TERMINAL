@@ -21,6 +21,7 @@ export function TopBar({left,center,right,below,label='Workspace top bar',style}
 // popover); re-exported here so every existing import keeps working.
 export {dataAgeDays,formatDataDate} from './dataStatus';
 import {dataAgeDays,formatDataDate,pillContent,type CacheProvenance,type DataStatus,type DataStatusTone} from './dataStatus';
+import {fnoCaptureView,useFnoCapture} from './fnoCapture';
 export type DataAgeTone=DataStatusTone;
 export function dataAgeTone(age:number|undefined,staleLimit:number=DATA_STALE_DAYS,redAfterDays:number=staleLimit*5):DataAgeTone{return age==null||!Number.isFinite(age)?'unknown':age>redAfterDays?'very-stale':age>staleLimit?'stale':'fresh';}
 export type DataAgePillProps={dataEnd?:string;ageDays?:number;staleLimit?:number;redAfterDays?:number;onPress?:()=>void;compact?:boolean;status?:DataStatus|null;expanded?:boolean;
@@ -50,10 +51,28 @@ export function DataAgePill({dataEnd,ageDays,staleLimit=DATA_STALE_DAYS,redAfter
  const col=tone==='fresh'?C.green:tone==='very-stale'?C.red:C.amber,bg=tone==='fresh'?C.soft:tone==='very-stale'?'#2A1519':C.amberBg;
  const a11y=pill.label;
  const ref=useTitle(a11y);
+ // THE SECOND FEED, NEVER MERGED INTO THE FIRST. Everything above describes prices and patterns - the cash
+ // feed. F&O capture is a different pipeline, and on 18 Sep 2026 it went dark at 11:30 IST while this pill
+ // stayed green all afternoon, because the cash feed really was fine. So a degraded F&O capture gets its own
+ // chip beside this one, in the tab's own amber, with the server's own sentence behind it. Nothing here
+ // changes the tone, the wording or the a11y label of the pill itself: two facts, two chips.
+ const fno=fnoCaptureView(useFnoCapture());
  const body=<><Icon name={stale||tone==='unknown'?'alert-circle':'database'} size={13} color={col}/><T numberOfLines={line?2:1} style={{fontSize:line?12:11,lineHeight:line?17:16,fontFamily:line?'InterMedium':'InterSemi',color:col,flexShrink:1}}>{line?pill.line:pill.text}</T></>;
  const box={flexDirection:'row' as const,alignItems:'center' as const,gap:6,alignSelf:'center' as const,minHeight:28,flexShrink:1,maxWidth:'100%' as const,paddingHorizontal:9,borderRadius:8,backgroundColor:bg,borderWidth:1,borderColor:tone==='fresh'?C.line:col+'55'};
- if(onPress)return <View ref={ref} role="status" aria-label={a11y} accessibilityLabel={a11y} style={{alignSelf:'center'}}>
-  <Pressable accessibilityRole="button" accessibilityLabel={`${a11y}. Open data status`} accessibilityState={{expanded:!!expanded}} {...webOnly({'aria-expanded':!!expanded,'aria-haspopup':'dialog'})} onPress={onPress} style={({pressed,hovered,focused}:any)=>[box,{opacity:pressed?.7:1,borderColor:hovered||focused?col:(tone==='fresh'?C.line:col+'55')}]}>{body}</Pressable>
+ // Amber and on the surface, because it is a caveat on the DATA - the convention the Derivative tab already
+ // works to. It carries its own status role so a screen reader is told about it without the cash feed's
+ // label being rewritten, and the full sentence is in the panel this pill opens.
+ const badge=!fno?null:<View role="status" aria-label={fno.a11y} accessibilityLabel={fno.a11y}
+  style={{flexDirection:'row',alignItems:'center',gap:5,alignSelf:'center',minHeight:28,flexShrink:1,
+   paddingHorizontal:8,borderRadius:8,backgroundColor:C.amberBg,borderWidth:1,borderColor:C.amber+'55'}}>
+  <Icon name="alert-triangle" size={12} color={C.amber}/>
+  <T numberOfLines={1} style={{fontSize:11,lineHeight:16,fontFamily:'InterSemi',color:C.amber,
+   flexShrink:1}}>{fno.label}</T>
  </View>;
- return <View ref={ref} role="status" aria-label={a11y} accessibilityLabel={a11y} style={box}>{body}</View>;
+ const withBadge=(node:React.ReactNode)=>!badge?node
+  :<View style={{flexDirection:'row',alignItems:'center',gap:6,flexShrink:1,maxWidth:'100%'}}>{node}{badge}</View>;
+ if(onPress)return withBadge(<View ref={ref} role="status" aria-label={a11y} accessibilityLabel={a11y} style={{alignSelf:'center'}}>
+  <Pressable accessibilityRole="button" accessibilityLabel={`${a11y}. Open data status`} accessibilityState={{expanded:!!expanded}} {...webOnly({'aria-expanded':!!expanded,'aria-haspopup':'dialog'})} onPress={onPress} style={({pressed,hovered,focused}:any)=>[box,{opacity:pressed?.7:1,borderColor:hovered||focused?col:(tone==='fresh'?C.line:col+'55')}]}>{body}</Pressable>
+ </View>);
+ return withBadge(<View ref={ref} role="status" aria-label={a11y} accessibilityLabel={a11y} style={box}>{body}</View>);
 }

@@ -4900,6 +4900,965 @@ ok(()=>{ // the server carries a trigger's numbers, and gets them from the store
   'the stored row is written exactly as it always was');
 });
 
+// =================================================================================================================
+// F&O CAPTURE HEALTH, BESIDE THE APP-WIDE DATA PILL
+//
+// THE DEFECT THESE CLOSE. `/api/derivatives/capture` was built, tested, and called by nothing at all. It is the
+// one route that answers "was anything actually MEASURED in the F&O store", and it exists because the app's data
+// pill describes the CASH feed — prices and patterns. On 18 Sep 2026 those two disagreed for an entire afternoon:
+// F&O capture stopped at 11:30 IST, every contract row after it came back with no premium and no spot, and the
+// pill stayed green the whole time because the cash feed really was healthy. Nothing anywhere on screen said the
+// F&O book had gone dark.
+//
+// So the pill now carries a SECOND chip, from that route, and the rules below are what keep it honest:
+// it appears only when the capture is a caveat, it never touches the cash feed's own tone or wording, and every
+// sentence in it is the server's.
+// =================================================================================================================
+const LAYOUT=p=>fs.readFileSync(path.join(__dirname,'..','src','layout',p),'utf8');
+/** `fnoCapture.ts` imports React and the app's `api`; neither is needed to judge its PURE half, so both are
+ *  stubbed. Nothing below calls the hook — a hook is behaviour, and what is checked here is the wording. */
+const F=(()=>{
+ const code=ts.transpileModule(LAYOUT('fnoCapture.ts'),{compilerOptions:{module:ts.ModuleKind.CommonJS,
+  target:ts.ScriptTarget.ES2022}}).outputText;
+ const stub={react:{useState:()=>[null,()=>{}],useEffect:()=>{},default:{}},
+  '../model':{api:()=>Promise.resolve(null)}};
+ const ctx={exports:{},require:(n)=>{const key=n==='react'?'react':n;
+  if(!(key in stub))throw Error('unexpected import: '+n);return stub[key];},process:{env:{}},
+  setInterval:()=>0,clearInterval:()=>{}};
+ vm.runInNewContext(code,ctx);return ctx.exports;
+})();
+const CAP_TEXT='Part of this 15-min reading was not captured.';
+ok(()=>{ // NOTHING TO SAY IS NOTHING SHOWN. A badge that is always on is a badge nobody reads.
+ for(const v of [null,undefined,{},{state:''},{state:'   '}])
+  assert.equal(F.fnoCaptureView(v),null,`a capture with no state draws no chip: ${JSON.stringify(v)}`);
+});
+ok(()=>{ // a HEALTHY capture draws no chip at all, in every one of the three states that are healthy
+ for(const state of ['complete','no_eligible_rows','filtered_out'])
+  assert.equal(F.fnoCaptureView({state,healthy:true,state_text:'x'}),null,
+   `${state} is not a caveat and must not put an alert on the data pill`);
+});
+ok(()=>{ // THE THREE CAVEAT STATES, each with its OWN words - "nothing captured" and "partly captured" are
+ // different facts about the market and must never share a wording
+ const seen=new Set();
+ for(const [state,label] of [['missing_capture','F&O not captured'],
+  ['partial_capture','F&O partly captured'],['failed','F&O store unreadable']]){
+  const view=F.fnoCaptureView({state,healthy:false,state_text:CAP_TEXT,at:'2026-09-18 15:45:00'});
+  assert.ok(view,`${state} must reach the reader`);
+  assert.equal(view.label,label);
+  assert.ok(!seen.has(view.label),`${state} reuses another state's wording: ${view.label}`);
+  seen.add(view.label);
+  // the DETAIL is the server's sentence verbatim - never a paraphrase written on this side
+  assert.equal(view.detail,CAP_TEXT,'the reason is the server\'s own sentence');
+  // and the headline names WHICH reading, because a caveat with no time on it is a claim with no subject
+  assert.ok(view.headline.includes('15:45'),`${state} must name its reading: ${view.headline}`);
+ }
+});
+ok(()=>{ // the reading is OPTIONAL: a capture with no `at` says the label alone rather than an empty time
+ const view=F.fnoCaptureView({state:'failed',healthy:false,state_text:CAP_TEXT});
+ assert.equal(view.headline,'F&O store unreadable');
+ assert.ok(!/undefined|null|NaN|:/.test(view.headline),`no empty clock leaks into it: ${view.headline}`);
+});
+ok(()=>{ // AN UNKNOWN STATE IS NOT A GOOD STATE. The server's own `healthy:false` outranks this table.
+ const flagged=F.fnoCaptureView({state:'something_new',healthy:false,state_text:''});
+ assert.ok(flagged,'a state this app does not know, that the server calls unhealthy, still reaches the reader');
+ assert.ok(/unrecognised/i.test(flagged.label),`it says so plainly: ${flagged.label}`);
+ assert.ok(flagged.detail.length>0,'and it never shows an empty reason');
+ // but an unknown state the server has NOT called unhealthy is not invented into an alarm either
+ for(const v of [{state:'something_new'},{state:'something_new',healthy:true}])
+  assert.equal(F.fnoCaptureView(v),null,'an unknown state is never turned into an alarm on its own');
+});
+ok(()=>{ // THE TWO FEEDS ARE KEPT APART, in words the reader can read - this is the whole point of the route
+ const view=F.fnoCaptureView({state:'partial_capture',healthy:false,state_text:CAP_TEXT});
+ assert.ok(/F&O capture only/.test(F.FNO_SEPARATE_TEXT),'it says which feed it describes');
+ assert.ok(/[Pp]rices and patterns/.test(F.FNO_SEPARATE_TEXT),'and names the one it does NOT');
+ assert.ok(view.a11y.includes(F.FNO_SEPARATE_TEXT),'a screen reader is told the same thing');
+ assert.ok(view.a11y.includes(CAP_TEXT),'along with the server\'s reason');
+});
+ok(()=>{ // §5 over every string this file can put on screen: nothing here predicts, and nothing says "mark"
+ const banned=/\b(will|expect|expected|forecast|predict|prediction|likely|target price|breakout|momentum|bullish|bearish|buy signal|sell signal|uptrend|downtrend|rally|reversal)\b/i;
+ const said=VISIBLE(LAYOUT('fnoCapture.ts')).filter(t=>banned.test(t));
+ assert.deepEqual(said,[],`fnoCapture.ts: a string the reader can reach must not predict: ${said.join(' | ')}`);
+ const left=VISIBLE(LAYOUT('fnoCapture.ts')).filter(t=>MARK_WORD.test(t)&&!IDENTIFIER.test(t));
+ assert.deepEqual(left,[],`fnoCapture.ts: say "15-min reading(s)", not "mark": ${left.join(' | ')}`);
+ // every sentence the view can produce, whatever the route answers
+ for(const state of ['missing_capture','partial_capture','failed','something_new']){
+  const view=F.fnoCaptureView({state,healthy:false,state_text:CAP_TEXT,at:'2026-09-18 15:45:00'});
+  for(const text of [view.label,view.headline,view.detail,view.a11y]){
+   assert.ok(String(text).length>0,`${state}: every sentence must exist`);
+   assert.ok(!banned.test(String(text)),`${state}: a capture sentence must not predict: ${text}`);
+   assert.ok(!MARK_WORD.test(String(text))||IDENTIFIER.test(String(text)),
+    `${state}: a capture sentence says "mark": ${text}`);
+  }
+ }
+ assert.ok(!banned.test(F.FNO_SEPARATE_TEXT)&&!MARK_WORD.test(F.FNO_SEPARATE_TEXT));
+});
+ok(()=>{ // THE ROUTE IS ACTUALLY CALLED. This is the defect: it was built, tested and wired to nothing.
+ const src=LAYOUT('fnoCapture.ts');
+ assert.ok(/api\('\/api\/derivatives\/capture'\)/.test(src),
+  'the capture health route must be the one this reads');
+ // ONE poll for every consumer: the pill and the panel it opens are siblings and must not each run their own
+ assert.ok(/const listeners=new Set/.test(src)&&/export function useFnoCapture/.test(src),
+  'one shared subscription, not one request per component');
+ // a request that did not arrive claims NOTHING - it must never manufacture a red state out of a failed fetch
+ assert.ok(/\.catch\(\(\)=>\{/.test(src),'a failed fetch is swallowed, never turned into a verdict');
+ // and the pilot really serves it
+ assert.ok(/@app\.get\('\/api\/derivatives\/capture'\)/
+  .test(fs.readFileSync(path.join(__dirname,'..','server','kanida_pilot','app.py'),'utf8')),
+  'the pilot must serve /api/derivatives/capture');
+});
+ok(()=>{ // THE CHIP IS ON THE SURFACE, on the pill and in the panel behind it, and it is AMBER
+ const bar=fs.readFileSync(path.join(__dirname,'..','src','layout','TopBar.tsx'),'utf8');
+ assert.ok(/const fno=fnoCaptureView\(useFnoCapture\(\)\)/.test(bar),'the pill reads the capture health');
+ assert.ok(/const badge=!fno\?null:/.test(bar),'and draws nothing at all when there is no caveat');
+ assert.ok(/backgroundColor:C\.amberBg,borderWidth:1,borderColor:C\.amber/.test(bar),
+  'a caveat on the data is amber, the convention this tab already works to');
+ // THE CASH FEED'S OWN VERDICT IS UNTOUCHED. Not one of tone / col / a11y may be computed from `fno`:
+ // two feeds, two chips, and a healthy cash feed still reads as healthy.
+ for(const line of NO_COMMENTS(bar).split('\n')){
+  if(/^\s*(const|let)\s+(tone|col|bg|a11y|stale|pill)\s*=/.test(line))
+   assert.ok(!/\bfno\b/.test(line),`the cash feed's own status must not be derived from F&O capture: ${line}`);
+ }
+ const panel=fs.readFileSync(path.join(__dirname,'..','src','layout','DataStatusPanel.tsx'),'utf8');
+ assert.ok(/fno=\{fno\}/.test(panel)&&/\{!!fno&&</.test(panel),
+  'the panel behind the pill carries the full sentence, and only when there is one');
+ assert.ok(/\{FNO_SEPARATE_TEXT\}/.test(panel),'with the line that says which feed it describes');
+});
+
+
+// ================================================================================================================
+// BLOCK 1 — src/derivative/summary.ts
+//
+// The panel beside the screener writes SENTENCES, and a sentence is harder to audit than a number. These checks
+// hold the four things that would make one false: a later reading changing an earlier one, elapsed time counted
+// across an interval nobody measured, a strike named that was not moving, and a behaviour claimed with no
+// baseline behind it.
+// ================================================================================================================
+const b1SUM=load('src/derivative/summary.ts',n=>{
+ if(/\/logic$/.test(n))return L;
+ throw Error('unexpected import: '+n);
+});
+/** The summary module runs in its own vm realm, so an array it returns does not share this
+ *  file's Array.prototype. Every array that crosses the boundary is copied before it is compared. */
+const b1arr=x=>Array.prototype.slice.call(x||[]);
+
+
+/** A grid the way the server serves one: ten slots, one point per 15-minute mark. */
+const b1MARKS=['09:15','09:30','09:45','10:00','10:15','10:30','10:45','11:00'].map(t=>`2026-09-18 ${t}:00`);
+const b1CE_LADDER=[23350,23400,23450,23500,23550],b1PE_LADDER=[23300,23250,23200,23150,23100];
+const b1gslot=(k,type,row,deltas,prices)=>({
+ slot:`${type}${k}`,option_type:type,row,label:`${k} ${type}`,present:true,
+ tradingsymbol:`NIFTY${k}${type}`,instrument_token:k,strike:k,previous_close_oi:100000,
+ points:b1MARKS.map((at,i)=>({at,oi:100000+(deltas[i]||0),delta_oi:deltas[i],price:prices[i]})),
+ direction:'building',direction_detail:{},marks:b1MARKS.length,marks_with_delta:b1MARKS.length,
+ latest_delta_oi:deltas[deltas.length-1],peak_abs_delta_oi:0,marks_with_price:b1MARKS.length,
+ latest_price:prices[prices.length-1],flow:{},missing_text:null});
+const b1FLAT_D=[0,0,0,0,0,0,0,0],b1FLAT_P=[20,20,20,20,20,20,20,20];
+const b1GRID={rows:[
+ // 23,350 CE buys from 10:15 and never stops
+ b1gslot(23350,'CE','calls',[0,0,0,0,20000,40000,60000,80000],[80,80,80,80,95,110,125,140]),
+ // 23,400 CE joins at 10:30; by 11:00 its premium is back where it was an hour earlier
+ b1gslot(23400,'CE','calls',[0,0,0,0,0,25000,50000,50000],[55,55,55,55,55,66,78,56]),
+ // 23,450 CE joins at 10:45 only
+ b1gslot(23450,'CE','calls',[0,0,0,0,0,0,30000,30500],[40,40,40,40,40,40,52,40]),
+ b1gslot(23500,'CE','calls',b1FLAT_D,b1FLAT_P),
+ b1gslot(23550,'CE','calls',b1FLAT_D,b1FLAT_P),
+ ...b1PE_LADDER.map(k=>b1gslot(k,'PE','puts',b1FLAT_D,b1FLAT_P)),
+],underlying:'NIFTY',expiry:'2026-09-25',marks:b1MARKS};
+
+const b1seen=b1SUM.observe(b1GRID);
+const b1atTime=(list,t)=>list.find(o=>String(o.at).endsWith(`${t}:00`));
+
+// --- the window is the tab's own: nothing is claimed before a reading an hour back exists ------------------
+ok(()=>{
+ assert.equal(b1seen.length,b1MARKS.length,'one observation per mark');
+ for(const t of ['09:15','09:30','09:45','10:00'])
+  assert.equal(b1atTime(b1seen,t).calls.state,'no_baseline',
+   `${t} has no reading ${L.SIGNAL_WINDOW_MINUTES} minutes behind it`);
+});
+// --- the story: appeared, broadened, broadened, narrowed ----------------------------------------------------
+ok(()=>{
+ assert.equal(b1atTime(b1seen,'10:15').calls.state,'appeared');
+ assert.deepEqual(b1arr(b1atTime(b1seen,'10:15').calls.strikes),[23350]);
+ assert.equal(b1atTime(b1seen,'10:30').calls.state,'broadened');
+ assert.deepEqual(b1arr(b1atTime(b1seen,'10:30').calls.strikes),[23350,23400]);
+ assert.deepEqual(b1arr(b1atTime(b1seen,'10:30').calls.joined),[23400]);
+ assert.equal(b1atTime(b1seen,'10:45').calls.state,'broadened');
+ assert.deepEqual(b1arr(b1atTime(b1seen,'10:45').calls.strikes),[23350,23400,23450]);
+ assert.equal(b1atTime(b1seen,'11:00').calls.state,'narrowed');
+ assert.deepEqual(b1arr(b1atTime(b1seen,'11:00').calls.strikes),[23350]);
+ assert.deepEqual(b1arr(b1atTime(b1seen,'11:00').calls.left),[23400,23450]);
+});
+// --- THREE SCANS ARE 30 MINUTES, NOT 45. Elapsed time is measured between two stamps, never counted one per
+//     scan. 10:15 starts the run, so 10:45 is its third reading and its thirtieth minute. -------------------
+ok(()=>{
+ assert.equal(b1atTime(b1seen,'10:15').calls.elapsed_minutes,0,'the first reading of a run has run for nothing');
+ assert.equal(b1atTime(b1seen,'10:15').calls.scans,1);
+ assert.equal(b1atTime(b1seen,'10:45').calls.scans,3,'three readings');
+ assert.equal(b1atTime(b1seen,'10:45').calls.elapsed_minutes,30,'and thirty minutes, not forty-five');
+ assert.equal(b1SUM.minutesText(30),'30 minutes');
+ assert.equal(b1SUM.minutesText(75),'1 hour 15 minutes');
+ assert.equal(b1SUM.minutesText(0),'');
+ assert.equal(b1SUM.minutesText(null),'');
+});
+// --- the busiest strike is the one that moved most ----------------------------------------------------------
+ok(()=>{
+ const o=b1atTime(b1seen,'10:45');
+ assert.equal(o.calls.lead,23350);
+ assert.equal(o.calls.first_at,b1MARKS[4]);
+ assert.equal(o.puts.behaviour,'none','the put side carries nothing in this fixture');
+});
+// --- NOTHING AFTER THE SELECTED READING IS READ --------------------------------------------------------------
+ok(()=>{
+ const cut=b1SUM.observe(b1GRID,b1MARKS[5]);
+ assert.equal(cut.length,6);
+ assert.deepEqual(b1arr(cut.map(o=>o.at)),b1MARKS.slice(0,6));
+ for(let i=0;i<cut.length;i++)
+  assert.deepEqual(cut[i],b1seen[i],`reading ${i} repainted when the session grew past it`);
+});
+// --- AN UNOBSERVED INTERVAL IS NOT MEASURED TIME ---------------------------------------------------------------
+ok(()=>{
+ const holed=JSON.parse(JSON.stringify(b1GRID));
+ for(const row of holed.rows){row.points[7].delta_oi=null;row.points[7].price=null;}
+ const walk=b1SUM.observe(holed);
+ const last=walk[walk.length-1];
+ assert.equal(last.calls.state,'not_observed');
+ assert.equal(last.covered,false);
+ assert.equal(last.calls.measured,0);
+ assert.equal(last.calls.first_at,b1MARKS[4]);
+ assert.equal(last.calls.elapsed_minutes,30,'elapsed must not run across an interval nobody observed');
+ assert.equal(last.calls.scans,3,'an unobserved reading is not a scan of the run');
+ const said=b1SUM.narrate(last,{underlying:'NIFTY'});
+ assert.match(said.headline,/no comparable value/i);
+ assert.ok(!/continuing for/i.test(said.context),'an unobserved reading never claims a duration');
+});
+// --- the behaviour table is the tab's own, read whole ------------------------------------------------------------
+ok(()=>{
+ assert.equal(b1SUM.behaviourOf('CE','up','building'),'buying');
+ assert.equal(b1SUM.behaviourOf('CE','down','building'),'writing');
+ assert.equal(b1SUM.behaviourOf('CE','up','unwinding'),'short_covering');
+ assert.equal(b1SUM.behaviourOf('CE','down','unwinding'),'buyers_exiting');
+ assert.equal(b1SUM.behaviourOf('PE','up','building'),'buying');
+ assert.equal(b1SUM.behaviourOf('PE','down','building'),'writing');
+ assert.equal(b1SUM.behaviourOf('CE','flat','building'),'positions_added');
+ assert.equal(b1SUM.behaviourOf('CE','flat','flat'),'quiet');
+ for(const p of [L.NO_DIRECTION,'',null,undefined])assert.equal(b1SUM.behaviourOf('CE',p,'building'),'none');
+ for(const o of [L.NO_DIRECTION,'',null,undefined])assert.equal(b1SUM.behaviourOf('CE','up',o),'none');
+ assert.equal(b1SUM.DIRECTIONAL.indexOf('positions_added'),-1,'a position change alone starts no run');
+});
+// --- where the activity is, said without claiming a strike that is not in it --------------------------------------
+ok(()=>{
+ assert.equal(b1SUM.whereText([23350],'CE',b1CE_LADDER),'at 23,350 CE');
+ assert.equal(b1SUM.whereText([23350,23400,23450],'CE',b1CE_LADDER),'across 23,350–23,450 CE');
+ assert.equal(b1SUM.whereText([23350,23450],'CE',b1CE_LADDER),'at 23,350 and 23,450 CE');
+ assert.equal(b1SUM.whereText([],'CE',b1CE_LADDER),'');
+});
+// --- THE CLAIM POLICY, enforced ---------------------------------------------------------------------------------
+//
+// Three tiers with data preconditions. These checks hold the two rules that matter: a behaviour word may never
+// reach a headline, and wherever one IS written it must carry its competing explanation in the same sentence.
+// Without the second rule a caveat can sit under an overconfident line and repair nothing.
+const BEHAVIOUR_WORDS=/\b(buying|writing|short covering|buyers closing out|covering|unwinding)\b/i;
+const COMPETING=/\b(spot|underlying)\b/i;
+/** A behaviour word is also permitted when it is QUOTED and credited to the surface that wrote it —
+ *  reporting what the ΔOI tile says is not the same as saying it in our own voice. */
+const ATTRIBUTED=/labels this “[^”]+”/;
+/** Every sentence of a narrative, so each can be tested on its own. */
+const b1sentences=(said)=>[said.headline,said.observed,said.qualified,said.otherSide,said.session,
+ said.context,...said.evidence].filter(Boolean)
+ .flatMap(t=>String(t).split(/(?<=\.)\s+/)).map(t=>t.trim()).filter(Boolean);
+
+ok(()=>{
+ const spot={at:'2026-09-18 10:45:00',from:'2026-09-18 10:30:00',spot:23284,change:-18};
+ const said=b1SUM.narrate(b1atTime(b1seen,'10:45'),
+  {underlying:'NIFTY',expiry:'2026-09-25',ladder:b1CE_LADDER,spot});
+
+ // TIER 1: the headline states what the numbers did, and names no participant
+ assert.equal(said.headline,'Call positions build at another strike');
+ assert.ok(!BEHAVIOUR_WORDS.test(said.headline),`a headline may not name a behaviour: ${said.headline}`);
+ assert.ok(said.headline.split(' ').length<=10,'the headline stays inside ten words');
+
+ // the interval is named at BOTH ends — a fifteen-minute product must say which fifteen minutes
+ assert.equal(said.window,'10:30 → 10:45 IST');
+
+ // TIER 1 body: measured change only
+ assert.ok(!BEHAVIOUR_WORDS.test(said.observed),`the observation may not name a behaviour: ${said.observed}`);
+ assert.match(said.observed,/Open interest rose and premium rose/);
+ assert.match(said.observed,/23,450 CE is new this interval/);
+
+ // TIER 2: the behaviour word exists, and never without its competing explanation
+ assert.match(said.qualified,/Consistent with call buying/);
+ assert.match(said.qualified,/spot also fell 18 points/);
+ assert.match(said.qualified,/may explain some of the premium change/);
+
+ // THE RULE, applied to every sentence in the narrative
+ for(const line of b1sentences(said))
+  if(BEHAVIOUR_WORDS.test(line))
+   assert.ok(COMPETING.test(line)||ATTRIBUTED.test(line),
+    `a behaviour word must carry its competing explanation in the same sentence: "${line}"`);
+
+ // nothing forecasts, and nothing reduces the market to a direction
+ const all=b1sentences(said).join(' ');
+ for(const banned of [/\bwill\b/i,/\bexpect/i,/\btarget\b/i,/\bshould\b/i,/\bbullish\b/i,/\bbearish\b/i,
+  /\bresistance\b/i,/\bsupport\b/i])
+  assert.ok(!banned.test(all),`the summary must not say ${banned}`);
+});
+
+// --- TIER 2 is refused outright when the competing explanation cannot be stated -----------------------------------
+ok(()=>{
+ const said=b1SUM.narrate(b1atTime(b1seen,'10:45'),{underlying:'NIFTY',ladder:b1CE_LADDER});
+ assert.match(said.qualified,/was not captured/,
+  'with no spot move captured, the interpretation must say so rather than stand bare');
+ for(const line of b1sentences(said))
+  if(BEHAVIOUR_WORDS.test(line))assert.ok(COMPETING.test(line)||ATTRIBUTED.test(line),`unqualified behaviour claim: "${line}"`);
+});
+
+// --- "led throughout" is only said when every reading of the run was checked --------------------------------------
+ok(()=>{
+ const o=b1atTime(b1seen,'10:45');
+ assert.equal(o.calls.lead_stable,true,'23,350 led at every reading of this run');
+ const said=b1SUM.narrate(o,{underlying:'NIFTY',ladder:b1CE_LADDER});
+ assert.match(said.session,/has carried the largest change at every reading since/);
+
+ // now move the lead at the last reading and the claim must weaken
+ const moved=JSON.parse(JSON.stringify(b1GRID));
+ moved.rows[1].points[6].delta_oi=900000;      // 23,400 overtakes 23,350 at 10:45
+ const walk=b1SUM.observe(moved);
+ const late=walk[walk.length-2];
+ assert.equal(late.calls.lead_stable,false,'the leading strike changed, so the claim is not available');
+ const other=b1SUM.narrate(late,{underlying:'NIFTY',ladder:b1CE_LADDER});
+ assert.match(other.session,/the leading strike has changed during the episode/);
+ assert.ok(!/at every reading since/.test(other.session));
+});
+
+// --- a quiet reading does not claim the same positions are still held ---------------------------------------------
+ok(()=>{
+ const still=JSON.parse(JSON.stringify(b1GRID));
+ for(const row of still.rows)row.points=row.points.map(p=>({...p,delta_oi:0,price:20}));
+ const walk=b1SUM.observe(still);
+ const last=walk[walk.length-1];
+ assert.equal(last.calls.behaviour,'none');
+ assert.equal(last.covered,true,'a reading that carried values is covered even when nothing moved');
+ const said=b1SUM.narrate(last,{underlying:'NIFTY'});
+ assert.match(said.headline,/No material change at this reading/);
+ // outstanding open interest is a TOTAL. It is not evidence that the same positions are still held.
+ assert.match(said.observed,/which is a total rather than a statement about whose positions remain/);
+ assert.ok(!/positions from .* remain in place/i.test(said.observed));
+ assert.ok(!/not observed/i.test(said.context),'a quiet reading is not an unobserved one');
+});
+
+// --- an unobserved reading says LAST CONFIRMED, and never looks like a current measurement ------------------------
+ok(()=>{
+ const holed=JSON.parse(JSON.stringify(b1GRID));
+ for(const row of holed.rows){row.points[7].delta_oi=null;row.points[7].price=null;}
+ const walk=b1SUM.observe(holed);
+ const last=walk[walk.length-1];
+ assert.equal(last.calls.state,'not_observed');
+ assert.equal(last.calls.elapsed_minutes,30,'elapsed must not run across an interval nobody observed');
+ const said=b1SUM.narrate(last,{underlying:'NIFTY'});
+ assert.match(said.headline,/carried no comparable value/i);
+ assert.match(said.session,/Last confirmed/);
+ assert.ok(!/continuing for/i.test(said.context));
+});
+
+// --- the ladder: one mark per kind of nothing, and a stated window ------------------------------------------------
+ok(()=>{
+ const o=b1atTime(b1seen,'10:45');
+ // the ladder covers BOTH sides: the middle pane reads a call rung and a put rung on one row, and the
+ // right-hand explanation filters to the side its own story is about.
+ const all=b1arr(o.ladder);
+ assert.equal(all.length,10,'one rung per strike the grid holds, both sides');
+ assert.equal(all.filter(r=>r.row==='calls').length,5);
+ assert.equal(all.filter(r=>r.row==='puts').length,5);
+ const rungs=all.filter(r=>r.row==='calls');
+ // and every rung carries the LEVEL behind its change, so the panel can offer a value instead of a delta
+ assert.ok(rungs.every(r=>r.oi_level!==undefined&&r.price_level!==undefined));
+ const by=Object.fromEntries(rungs.map(r=>[r.strike,r]));
+ assert.equal(by[23350].status,'added');
+ assert.equal(by[23450].status,'added');
+ assert.equal(by[23450].joined,true,'23,450 joined at this reading');
+ assert.equal(by[23500].status,'no_change','measured and did not move');
+ // a strike the capture never reached is a different mark entirely
+ const holed=JSON.parse(JSON.stringify(b1GRID));
+ holed.rows[3].points[6].delta_oi=null;
+ const late=b1SUM.observe(holed)[6];
+ const gapped=b1arr(late.ladder).find(r=>r.strike===23500&&r.row==='calls');
+ assert.equal(gapped.status,'not_captured','an absent measurement is never "no change"');
+});
+
+// --- the interval baseline exists and is narrower than the episode -------------------------------------------------
+ok(()=>{
+ const o=b1atTime(b1seen,'10:45');
+ assert.ok(o.calls_interval,'every reading after the first carries an interval reading');
+ assert.equal(o.previous_at,b1MARKS[5],'measured against the reading immediately before');
+ assert.notEqual(o.previous_at,o.from,'the interval is not the hour-wide episode window');
+ const first=b1seen[0];
+ assert.equal(first.calls_interval,null,'the first reading has nothing before it');
+});
+
+// --- cross-market rows: scoped, unscored, and never crediting the wrong leg -----------------------------------------
+ok(()=>{
+ // PCR falls because CALL open interest rose, not because puts thinned. The row must say which.
+ const pcr=[{at:'2026-09-18 10:30:00',pcr_oi:1.16,total_ce_oi:1000,total_pe_oi:1160},
+            {at:'2026-09-18 10:45:00',pcr_oi:1.05,total_ce_oi:1105,total_pe_oi:1160}];
+ const rows=b1arr(b1SUM.crossMarket({puts:b1atTime(b1seen,'10:45').puts,pcr,upto:'2026-09-18 10:45:00'}));
+ const ratio=rows.find(r=>r.label==='PCR');
+ assert.match(ratio.text,/1\.05, fell from 1\.16/);
+ assert.match(ratio.text,/driven by call open interest rising, not the put side/);
+ // no row is a verdict
+ for(const r of rows){
+  assert.ok(!/✓|✗|agree|disagree|confirm/i.test(r.text),`a context row may not be a verdict: ${r.text}`);
+ }
+ // the put row appears once and only once
+ assert.equal(rows.filter(r=>r.label==='Puts').length,1);
+});
+
+// --- futures report what they did, and never declare a conflict they cannot name -------------------------------------
+ok(()=>{
+ const futures=[{at:'2026-09-18 10:30:00',oi:100,basis:4,spot:23302},
+                {at:'2026-09-18 10:45:00',oi:120,basis:9,spot:23284}];
+ const rows=b1arr(b1SUM.crossMarket({futures,upto:'2026-09-18 10:45:00'}));
+ const fut=rows.find(r=>r.label==='Futures');
+ assert.match(fut.text,/open interest rose and basis widened/);
+ assert.ok(!/does not agree|conflict|contradict/i.test(fut.text),
+  'a futures row may not declare a disagreement it cannot name');
+ // and the same series carries the competing explanation
+ const move=b1SUM.spotMove(futures,'2026-09-18 10:45:00');
+ assert.equal(move.change,-18);
+ assert.equal(move.spot,23284);
+ assert.equal(b1SUM.spotMove([],null),null);
+});
+
+// --- the phrases the panel reveals are sentences, never words ----------------------------------------------------
+ok(()=>{
+ const spot={at:null,from:null,spot:23284,change:-18};
+ const said=b1SUM.narrate(b1atTime(b1seen,'10:45'),{underlying:'NIFTY',ladder:b1CE_LADDER,spot});
+ const parts=b1arr(b1SUM.phrases(said));
+ assert.ok(parts.length>=3&&parts.length<=8,`expected a handful of phrases, got ${parts.length}`);
+ for(const p of parts)assert.ok(p.split(' ').length>2,`"${p}" is not a readable phrase`);
+ const whole=[said.observed,said.qualified,said.otherSide,said.session].join(' ');
+ for(const p of parts)assert.ok(whole.includes(p),`"${p}" is not in the summary text`);
+});
+
+
+// --- THE HEADLINE VERB FOLLOWS THE OPEN INTEREST --------------------------------------------------------------
+//
+// A headline reading "positions begin building" over a body reading "open interest fell" is the screen
+// contradicting itself. Seen live on TATASTEEL before this check existed.
+ok(()=>{
+ const shrink=JSON.parse(JSON.stringify(b1GRID));
+ // 23,350 CE: open interest falls and premium falls together — a position REDUCTION, not a build
+ shrink.rows[0].points=shrink.rows[0].points.map((pt,i)=>({...pt,
+  delta_oi:[0,0,0,0,-20000,-40000,-60000,-80000][i],
+  price:[80,80,80,80,70,60,50,40][i]}));
+ const walk=b1SUM.observe(shrink);
+ const last=walk[walk.length-1];
+ assert.equal(last.calls.behaviour,'buyers_exiting','open interest and premium both falling is an exit');
+ const said=b1SUM.narrate(last,{underlying:'NIFTY',ladder:b1CE_LADDER});
+ assert.ok(!/building|build at/i.test(said.headline),
+  `a reduction may not be headlined as a build: "${said.headline}"`);
+ assert.match(said.headline,/reduc/i);
+ // and the body must agree with it
+ assert.match(said.observed,/Open interest fell/);
+ // the two never disagree: if the body says fell, the headline may not say build
+ if(/Open interest fell/.test(said.observed))
+  assert.ok(!/\bbuild/i.test(said.headline),'headline and body disagree on the direction');
+});
+
+
+// ================================================================================================================
+// BLOCK 1, MIDDLE PANE — src/derivative/signal.ts
+//
+// THE STATE IS COMPUTED, THEN EXPLAINED — and only the MARKET is explained. These checks hold the pane to the
+// owner's live-session brief of 21 Sep 2026: State → Change → Location → Breadth → Evidence → Conflict; an
+// opening read at the first reading; the fifteen minutes speak in the first hour; persistence appears only once
+// it is established and is otherwise absent, never apologised for; MIXED means the sides contradict; and no
+// sentence describes the software instead of the market.
+// ================================================================================================================
+const SIG=load('src/derivative/signal.ts',n=>{
+ if(/\/logic$/.test(n))return L;
+ if(/\/summary$/.test(n))return b1SUM;
+ throw Error('unexpected import: '+n);
+});
+
+const SIG_INPUT={
+ grid:b1GRID,
+ pcr:{points:b1MARKS.map((at,i)=>({at,pcr_oi:[1.10,1.10,1.10,1.10,1.12,1.16,1.20,1.18][i],
+  total_ce_oi:1000+i*40,total_pe_oi:1160}))},
+ maxPain:{points:b1MARKS.map((at,i)=>({at,max_pain_strike:[23300,23300,23300,23300,23300,23350,23350,23350][i]}))},
+ iv:{points:b1MARKS.map((at,i)=>({at,
+  iv_pct:[null,null,null,null,14.1,14.8,15.4,15.2][i],
+  ce_iv_pct:[null,null,null,null,14.0,14.9,15.6,15.3][i],
+  pe_iv_pct:[null,null,null,null,14.2,14.7,15.2,15.1][i],
+  reason_text:i<4?'No traded price to solve from.':null}))},
+};
+const sigRows=SIG.states(SIG_INPUT);
+const sigAt=t=>sigRows.find(r=>String(r.timestamp).endsWith(`${t}:00`));
+const sigPeriods=SIG.periods(sigRows);
+const sigSlice=(grid,n)=>{const c=JSON.parse(JSON.stringify(grid));c.marks=c.marks.slice(0,n);
+ for(const r of c.rows){r.points=r.points.slice(0,n);r.marks=n;r.marks_with_delta=n;r.marks_with_price=n;}return c;};
+
+// THE SOFTWARE MAY NOT NARRATE ITSELF. Every headline and evidence sentence, at every reading, is checked.
+const SYSTEM_TALK=[/too early/i,/hour-wide/i,/not (yet )?full/i,/cannot (yet )?be (judged|determined)/i,
+ /need(s|ed)? (more|a second|two) reading/i,/not enough readings/i,/last fifteen minutes only/i,
+ /no baseline/i,/persistence/i,/window/i];
+const noSystemTalk=(row,where)=>{
+ const words=[row.plain_language_read,row.plain_language_detail,...b1arr(row.tags),
+  ...b1arr(row.supporting_evidence).map(e=>e.text),...b1arr(row.conflicting_evidence).map(e=>e.text),
+  SIG.persistenceText(row)].join(' | ');
+ for(const w of SYSTEM_TALK)assert.ok(!w.test(words),`${where}: system language ${w} in "${words.slice(0,160)}"`);
+};
+
+// --- NEWEST FIRST, one object per reading, both ends of the interval named ---------------------------------------
+ok(()=>{
+ assert.equal(sigRows.length,b1MARKS.length);
+ assert.equal(sigRows[0].timestamp,b1MARKS[b1MARKS.length-1],'newest reading first');
+ assert.equal(sigAt('10:45').previous_timestamp,b1MARKS[5],'measured against 10:30, not the hour-wide window');
+ for(const row of sigRows.slice(0,-1))assert.ok(row.previous_timestamp);
+ for(const row of sigRows)noSystemTalk(row,String(row.timestamp));
+});
+
+// --- THE MACHINE-READABLE OBJECT carries the fields the brief names ------------------------------------------------
+ok(()=>{
+ const r=sigAt('10:45');
+ for(const f of ['current_timestamp','previous_timestamp','market_state','state_change','call_state','put_state',
+  'strike_cluster','leading_strike','breadth_previous','breadth_current','price_change','call_oi_change',
+  'put_oi_change','call_iv_change','put_iv_change','pcr_change','max_pain_change','supporting_evidence',
+  'conflicting_evidence','persistence_status','persistence_evidence_available','plain_language_headline',
+  'plain_language_evidence'])
+  assert.ok(Object.prototype.hasOwnProperty.call(r,f),`the state object must carry ${f}`);
+ assert.equal(r.market_state,r.state);
+ assert.equal(r.plain_language_headline,r.plain_language_read);
+ assert.equal(r.call_state,'building');
+});
+
+// --- THE STATE WORD COMES FROM THE CLOSED VOCABULARY ---------------------------------------------------------------
+ok(()=>{
+ const allowed=Object.keys(SIG.STATE_LABEL);
+ for(const row of sigRows){
+  assert.ok(allowed.indexOf(row.state)>=0,`state outside the vocabulary: ${row.state}`);
+  assert.equal(row.state_change,SIG.STATE_LABEL[row.state]);
+  assert.ok(SIG.STATE_TONE[row.state]);
+ }
+ assert.equal(sigAt('09:15').state,'opening','the first reading is an opening read');
+ assert.equal(sigAt('09:45').state,'balanced','a measured interval where nothing moved is a quiet MARKET');
+ assert.equal(sigAt('10:15').state,'appeared');
+ assert.equal(sigAt('10:30').state,'broadened');
+ assert.equal(sigAt('10:45').state,'broadened');
+ assert.equal(sigAt('11:00').state,'concentrated');
+});
+
+// --- THE OPENING READ: levels, not change ----------------------------------------------------------------------------
+ok(()=>{
+ const o=sigAt('09:15');
+ assert.match(o.plain_language_read,/^Calls concentrated around [0-9,]+(–[0-9,]+)? CE; puts around [0-9,]+(–[0-9,]+)? PE$/);
+ assert.equal(o.plain_language_detail,'','no change is claimed at a reading with nothing before it');
+ assert.equal(o.persistence_evidence_available,false);
+ assert.equal(SIG.persistenceText(o),'');
+ assert.equal(o.call_state,'opening');
+});
+
+// --- A QUIET MARKET LOOKS QUIET -----------------------------------------------------------------------------------------
+ok(()=>{
+ const q=sigAt('09:45');
+ assert.equal(q.plain_language_read,'No material change in market structure');
+ assert.equal(b1arr(q.supporting_evidence).length,0,'no manufactured activity');
+ assert.equal(b1arr(q.tags).length,0);
+ assert.equal(b1arr(q.key_strikes).length,0);
+});
+
+// --- NO COLOUR IS A MARKET DIRECTION ---------------------------------------------------------------------------------
+ok(()=>{
+ assert.equal(SIG.STATE_TONE.broadened,'up');
+ assert.equal(SIG.STATE_TONE.reversing,'down');
+ assert.equal(SIG.STATE_TONE.balanced,'flat');
+ assert.equal(SIG.STATE_TONE.opening,'flat');
+ assert.equal(SIG.STATE_TONE.slowed,'warn');
+});
+
+// --- PERSISTENCE: established or absent, and time between stamps when present -------------------------------------------
+ok(()=>{
+ const appeared=sigAt('10:15');
+ assert.equal(appeared.persistence_evidence_available,false,'one reading of a behaviour is not persistence');
+ assert.equal(SIG.persistenceText(appeared),'','and nothing is said in its place');
+ const row=sigAt('10:45');
+ assert.equal(row.persistence_since,b1MARKS[4]);
+ assert.equal(row.persistence_minutes,30,'10:15 → 10:45 is THIRTY minutes');
+ assert.equal(row.consecutive_readings,3);
+ assert.equal(row.persistence_status,'established');
+ assert.equal(SIG.persistenceText(row),'Since 10:15');
+ assert.ok(!/\bpersistent\b|\d+\s*(hr|hour|min)/i.test(SIG.persistenceText(row)),'time is evidence, not a label');
+});
+
+// --- BREADTH IS COMPARED LIKE WITH LIKE, OR NOT AT ALL ---------------------------------------------------------------------
+ok(()=>{
+ assert.equal(sigAt('10:15').breadth_previous,null,'nothing earlier to be broader than');
+ assert.equal(sigAt('10:15').breadth_direction,'none');
+ assert.ok(b1arr(sigAt('10:15').tags).indexOf('Broader activity')<0,'no breadth change invented against nothing');
+ assert.equal(sigAt('10:30').breadth_previous,1);
+ assert.equal(sigAt('10:30').breadth_current,2);
+ assert.equal(sigAt('10:30').breadth_direction,'wider');
+ assert.equal(sigAt('10:45').breadth,'clustered');
+ assert.equal(sigAt('11:00').breadth_direction,'narrower');
+});
+
+// --- THE PRICE FIGURE IS ONE REAL CONTRACT ---------------------------------------------------------------------------------
+ok(()=>{
+ const row=sigAt('10:45');
+ assert.match(row.price_contract,/^[\d,]+ (CE|PE)$/);
+ assert.ok(row.price_change!=null&&row.price_level!=null);
+ assert.ok(b1arr(row.key_strikes).length<=4);
+ const notes=b1arr(row.key_strikes).map(k=>k.note);
+ for(const n of notes)assert.ok(['Highest activity','New activity','Building','Reducing'].indexOf(n)>=0,n);
+});
+
+// --- ABSENCE IS NOT ZERO ------------------------------------------------------------------------------------------------------
+ok(()=>{
+ const early=sigAt('09:45');
+ assert.equal(early.iv_level,null);
+ assert.equal(early.iv_change,null);
+ const late=sigAt('10:45');
+ assert.equal(late.iv_level,15.4);
+ assert.equal(late.iv_change,0.6);
+ assert.equal(late.call_iv_change,0.7);
+ assert.equal(late.put_iv_change,0.5);
+ assert.equal(SIG.signedNum(null),DASH);
+ assert.equal(SIG.signedLots(null),DASH);
+ assert.equal(SIG.signedMoney(null),DASH);
+ assert.equal(SIG.strikeOf(null),DASH);
+ assert.equal(SIG.signedNum(0),'0.0');
+});
+
+// --- PCR AND MAX PAIN OVER THE SAME INTERVAL ------------------------------------------------------------------------------------
+ok(()=>{
+ const row=sigAt('10:45');
+ assert.equal(row.pcr_change,0.04);
+ assert.equal(row.max_pain_change,0);
+ assert.equal(sigAt('10:30').max_pain_change,50);
+});
+
+// --- A BEHAVIOUR IS NAMED ONLY WITH ITS EVIDENCE --------------------------------------------------------------------------------
+ok(()=>{
+ const named=sigRows.filter(r=>r.regime);
+ assert.ok(named.length>0);
+ for(const row of named){
+  assert.ok(b1arr(row.supporting_evidence).length>0,`"${row.regime}" named with no evidence`);
+  assert.ok(row.plain_language_read.toLowerCase().indexOf(row.regime.toLowerCase())>=0);
+  assert.match(row.plain_language_detail,/OI (rose|fell) .* across /,'the evidence says what OI did, and where');
+ }
+});
+
+// --- THE WORDS CARRY NO DIRECTION AND STAY SHORT ------------------------------------------------------------------------------
+ok(()=>{
+ const banned=[/\bbullish\b/i,/\bbearish\b/i,/\bwill\b/i,/\bexpect/i,/\bshould\b/i,/\bsell\b/i];
+ for(const row of sigRows){
+  const all=[row.plain_language_read,row.plain_language_detail,...b1arr(row.tags),
+   ...b1arr(row.key_strikes).map(k=>k.note)].join(' ');
+  for(const word of banned)assert.ok(!word.test(all),`${word}: ${all.slice(0,140)}`);
+  assert.ok(row.plain_language_read.length>0);
+  assert.ok(row.plain_language_read.split(' ').length<=12,`short headline: ${row.plain_language_read}`);
+  assert.ok(b1arr(row.tags).length<=3);
+ }
+});
+
+// --- THE HEADLINE AGREES WITH THE OPEN INTEREST -------------------------------------------------------------------------------
+ok(()=>{
+ const shrink=JSON.parse(JSON.stringify(b1GRID));
+ shrink.rows[0].points=shrink.rows[0].points.map((pt,i)=>({...pt,
+  delta_oi:[0,0,0,0,-20000,-40000,-60000,-80000][i],price:[80,80,80,80,70,60,50,40][i]}));
+ const last=SIG.states({...SIG_INPUT,grid:shrink})[0];
+ if(/OI fell/.test(last.plain_language_detail))
+  assert.ok(!/\bbuilding\b/i.test(last.plain_language_read),`"${last.plain_language_read}" over falling OI`);
+});
+
+// --- QUIET COLLAPSES INTO ONE PERIOD, AND NOTHING IS DELETED -------------------------------------------------------------------
+ok(()=>{
+ assert.ok(sigPeriods.length<sigRows.length,'consecutive identical states collapse');
+ assert.equal(sigPeriods.filter(p=>p.latest).length,1);
+ const covered=sigPeriods.reduce((n,p)=>n+b1arr(p.readings).length,0);
+ assert.equal(covered,sigRows.length,'a collapsed period hides readings, it does not drop them');
+ for(const period of sigPeriods){
+  assert.equal(period.count,b1arr(period.readings).length);
+  assert.equal(period.minutes,period.count*15);
+  assert.equal(period.label,SIG.STATE_LABEL[period.state]);
+ }
+ const quiet=sigPeriods.find(p=>p.state==='balanced');
+ assert.ok(quiet&&quiet.count>=3,'the quiet run collapses into one period');
+});
+
+// --- A READING THAT CARRIED NOTHING IS NOT A QUIET ONE -----------------------------------------------------------------------------
+ok(()=>{
+ const holed=JSON.parse(JSON.stringify(b1GRID));
+ for(const r of holed.rows){r.points[7].delta_oi=null;r.points[7].price=null;}
+ const rows=SIG.states({...SIG_INPUT,grid:holed});
+ assert.equal(rows[0].covered,false);
+ assert.equal(rows[0].state,'not_observed');
+ assert.ok(!/balanced|no material change/i.test(rows[0].plain_language_read));
+});
+
+// --- THE FIRST HOUR OF A LIVE SESSION: the fifteen minutes speak, persistence is absent ---------------------------------------------
+const sigOpen=(()=>{
+ const g=JSON.parse(JSON.stringify(b1GRID));
+ g.rows[0].points=g.rows[0].points.map((pt,i)=>({...pt,
+  delta_oi:[15000,32000,51000,74000,96000,120000,145000,171000][i],price:[92,88,84,79,75,71,68,64][i]}));
+ g.rows[1].points=g.rows[1].points.map((pt,i)=>({...pt,
+  delta_oi:[0,0,18000,37000,58000,80000,103000,127000][i],price:[55,55,52,49,46,43,41,38][i]}));
+ return n=>SIG.states({grid:sigSlice(g,n)})[0];
+})();
+ok(()=>{
+ const first=sigOpen(1);
+ assert.equal(first.state,'opening');
+ assert.match(first.plain_language_read,/^Calls concentrated around/);
+ noSystemTalk(first,'reading 1');
+ for(const n of [2,3,4]){
+  const r=sigOpen(n);
+  assert.equal(r.state,'building',`reading ${n} reads off the fifteen minutes`);
+  assert.equal(r.regime,'Call writing','calls clearly carried the interval, so the behaviour is named');
+  assert.match(r.plain_language_read,/^Call writing building/);
+  assert.match(r.plain_language_detail,/Call OI rose .* across .* while prices declined; [0-9,]+ CE leads/);
+  assert.equal(r.persistence_evidence_available,false);
+  assert.equal(r.persistence_since,null);
+  assert.equal(SIG.persistenceText(r),'','persistence is absent, not explained');
+  noSystemTalk(r,`reading ${n}`);
+ }
+ assert.equal(sigOpen(5).persistence_evidence_available,false,'the episode has just begun');
+ const sixth=sigOpen(6);
+ assert.equal(sixth.persistence_evidence_available,true);
+ assert.equal(sixth.persistence_minutes,15);
+ assert.equal(SIG.persistenceText(sixth),'Since 10:15');
+});
+
+ok(()=>{
+ // a genuinely flat opening stays flat — the market is quiet, and says so
+ for(const n of [2,3,4]){
+  const r=SIG.states({grid:sigSlice(b1GRID,n)})[0];
+  assert.equal(r.state,'balanced');
+  assert.equal(r.plain_language_read,'No material change in market structure');
+  assert.equal(SIG.persistenceText(r),'');
+ }
+});
+
+ok(()=>{
+ // positions being closed in the first hour read as reversing, never a build
+ const g=JSON.parse(JSON.stringify(b1GRID));
+ g.rows[0].points=g.rows[0].points.map((pt,i)=>({...pt,
+  delta_oi:[-15000,-32000,-51000,-74000,-96000,-120000,-145000,-171000][i],price:[92,88,84,79,75,71,68,64][i]}));
+ const r=SIG.states({grid:sigSlice(g,3)})[0];
+ assert.equal(r.state,'reversing');
+ assert.ok(!/\bbuilding\b/i.test(r.plain_language_read));
+});
+
+// --- MIXED MEANS THE SIDES CONTRADICT; BOTH ADDING IS TWO BEHAVIOURS ------------------------------------------------------------------
+//
+// Found live 21 Sep 09:45: calls written (OI up, premium down) and puts bought (OI up, premium up), 1.16x apart,
+// labelled MIXED. That is not a conflict. The headline names the larger side — as "activity", since it did not
+// clearly dominate — and the evidence names both.
+ok(()=>{
+ const g=JSON.parse(JSON.stringify(b1GRID));
+ g.rows[0].points=g.rows[0].points.map((pt,i)=>({...pt,delta_oi:[30000,62000,95000,129000][i]||0,price:[92,88,84,79][i]||79}));
+ g.rows[5].points=g.rows[5].points.map((pt,i)=>({...pt,delta_oi:[26000,54000,83000,112000][i]||0,price:[70,74,78,83][i]||83}));
+ const r=SIG.states({grid:sigSlice(g,3)})[0];
+ assert.equal(r.state,'building','both sides adding is not MIXED');
+ assert.equal(r.regime,null,'no side clearly carried the interval, so no behaviour word');
+ assert.match(r.plain_language_read,/^Call activity building/);
+ assert.match(r.plain_language_detail,/Call OI rose/);
+ assert.match(r.plain_language_detail,/Put OI rose/);
+ noSystemTalk(r,'both adding');
+});
+ok(()=>{
+ const g=JSON.parse(JSON.stringify(b1GRID));
+ g.rows[0].points=g.rows[0].points.map((pt,i)=>({...pt,delta_oi:[30000,62000,95000,129000][i]||0,price:[92,88,84,79][i]||79}));
+ // puts CLOSING at a comparable size — this is a contradiction between the sides
+ g.rows[5].points=g.rows[5].points.map((pt,i)=>({...pt,delta_oi:[-26000,-54000,-83000,-112000][i]||0,price:[70,66,62,58][i]||58}));
+ const r=SIG.states({grid:sigSlice(g,3)})[0];
+ assert.equal(r.state,'mixed');
+ assert.equal(r.regime,null);
+ assert.equal(r.plain_language_read,'Call positions building while put positions reduce');
+});
+
+// --- WHERE POSITIONS STAND: what one reading can say ------------------------------------------------------------
+ok(()=>{
+ const body={as_of:'2026-09-21 09:30:00',expiry:'2026-09-22',spot:23402.45,max_pain_strike:23400,
+  total_ce_oi:1000000,total_pe_oi:1180000,days_to_expiry:1,
+  rows:[
+   {strike:23200,ce_oi:50000,pe_oi:420000,ce_oi_change_day:null,pe_oi_change_day:61000},
+   {strike:23300,ce_oi:90000,pe_oi:300000,ce_oi_change_day:1000,pe_oi_change_day:-5000},
+   {strike:23400,ce_oi:210000,pe_oi:200000,ce_oi_change_day:9000,pe_oi_change_day:12000},
+   {strike:23500,ce_oi:380000,pe_oi:60000,ce_oi_change_day:88000,pe_oi_change_day:null},
+   {strike:23600,ce_oi:null,pe_oi:0,ce_oi_change_day:null,pe_oi_change_day:null},
+  ]};
+ const s=SIG.standing(body);
+ assert.equal(s.calls[0].strike,23500);
+ assert.equal(s.puts[0].strike,23200);
+ assert.equal(s.atm,23400);
+ assert.equal(s.pcr,1.18);
+ assert.ok(!s.calls.some(k=>k.strike===23600),'uncaptured OI is never ranked');
+ const all=[s.headline,...s.lines].join(' ');
+ assert.match(all,/Since the previous session's close, call open interest was added most at 23,500 CE/);
+ for(const w of [/\bwriters?\b/i,/\bresistance\b/i,/\bsupport\b/i,/\bbullish\b/i,/\bwill\b/i])
+  assert.ok(!w.test(all),`one reading may not say ${w}`);
+ assert.equal(SIG.standing({rows:[]}),null);
+ assert.equal(SIG.standing(null),null);
+});
+
+// --- EVERY WORD AND COLOUR EXPLAINED IN ONE PLACE -------------------------------------------------------------------------
+ok(()=>{
+ const guide=b1arr(SIG.SIGNAL_GUIDE);
+ const text=JSON.stringify(guide);
+ const headings=guide.map(g=>g.heading);
+ for(const needed of ['What this pane is','The state words','Persistence','The colours','The five metrics',
+  'Evidence and conflict','Quiet periods'])
+  assert.ok(headings.indexOf(needed)>=0,`How to read this must explain: ${needed}`);
+ for(const state of Object.keys(SIG.STATE_LABEL)){
+  if(state==='no_baseline')continue; // a data condition the pane never prints
+  assert.ok(text.toUpperCase().indexOf(SIG.STATE_LABEL[state].toUpperCase())>=0,
+   `the state word ${SIG.STATE_LABEL[state]} must be explained`);
+ }
+ for(const word of ['GREEN','RED','GREY','AMBER'])assert.ok(text.indexOf(word)>=0);
+ assert.ok(/means bullish or bearish/.test(text));
+ assert.ok(/reading immediately before/.test(text));
+ assert.ok(/Context, not a target/i.test(text));
+ assert.ok(/a buyer and a seller/.test(text));
+ assert.ok(!/Too early to judge persistence|NO BASELINE YET/.test(text),'the guide no longer describes removed messages');
+});
+
+ok(()=>{
+ // THE BEHAVIOUR WORD MAY NOT OUTRUN ITS EVIDENCE (found live 21 Sep 10:00: "Put writing building" over
+ // "Put OI rose ... with prices little changed"). Puts dominate the OI change, premium barely moves: activity.
+ const g=JSON.parse(JSON.stringify(b1GRID));
+ g.rows[5].points=g.rows[5].points.map((pt,i)=>({...pt,delta_oi:[0,50000,120000][i]||0,price:[70,70.2,70.1][i]||70}));
+ g.rows[0].points=g.rows[0].points.map((pt,i)=>({...pt,delta_oi:[0,10000,20000][i]||0,price:[92,88,84][i]||84}));
+ const r=SIG.states({grid:sigSlice(g,3)})[0];
+ assert.equal(r.row,'puts','puts carried the larger OI change');
+ assert.equal(r.regime,null,'premium did not move enough to say writing or buying');
+ assert.match(r.plain_language_read,/^Put activity building/);
+ assert.match(r.plain_language_detail,/with prices little changed/);
+});
+
+
+// --- THE SESSION CHAIN: history from STORED snapshots, strikes matched as strikes ------------------------------
+//
+// The 21 Sep repaint: at 10:15 the ATM moved 23,400 → 23,350 and earlier readings were re-described on the new
+// contracts. These checks hold the replacement: each reading is its own snapshot; the chain adds session context
+// by comparing it with the stored previous snapshot; adding a later reading never changes an earlier one.
+const chainBase=(()=>{
+ const g=JSON.parse(JSON.stringify(b1GRID));
+ g.rows[0].points=g.rows[0].points.map((pt,i)=>({...pt,delta_oi:[15000,32000,51000,74000][i]||0,price:[92,88,84,79][i]||79}));
+ return SIG.states({grid:sigSlice(g,3)},{intervalOnly:true})[0];
+})();
+const snap=(at,o)=>({...chainBase,timestamp:`2026-09-21 ${at}:00`,previous_timestamp:null,tags:[],...o});
+const A=snap('09:45',{state:'building',row:'calls',side:'CE',behaviour:'writing',regime:'Call writing',
+ strike_range:[23300,23350,23400],leading_strike:23300,weight:1000000,location:'around ATM'});
+// ATM has moved up two strikes by B; activity is at the SAME strikes, read on a different contract set
+const B=snap('10:00',{state:'building',row:'calls',side:'CE',behaviour:'writing',regime:'Call writing',
+ strike_range:[23300,23350,23400],leading_strike:23300,weight:1050000,location:'below ATM'});
+const C=snap('10:15',{state:'building',row:'calls',side:'CE',behaviour:'writing',regime:'Call writing',
+ strike_range:[23300,23350,23400,23450],leading_strike:23300,weight:1100000,location:'around ATM'});
+
+ok(()=>{
+ assert.equal(chainBase.engine_version,SIG.ENGINE_VERSION,'every object carries the engine that wrote it');
+ assert.ok(chainBase.rules_version,'and the rules version');
+ const s=b1arr(SIG.chainSession([A,B,C]));
+ // the same strikes after an ATM move are the SAME activity — held, not "appeared"
+ assert.equal(s[1].state,'held');
+ assert.match(s[1].plain_language_read,/^Call writing holding/);
+ assert.equal(s[1].persistence_since,A.timestamp);
+ assert.equal(s[1].persistence_minutes,15);
+ assert.equal(s[2].state,'broadened');
+ assert.match(s[2].plain_language_read,/broadens into higher strikes/);
+ assert.equal(s[2].persistence_minutes,30,'09:45 → 10:15 is thirty minutes');
+ assert.equal(s[2].consecutive_readings,3);
+ assert.equal(s[2].breadth_previous,3);
+ assert.equal(s[2].breadth_current,4);
+ assert.equal(SIG.persistenceText(s[2]),'Since 09:45');
+ // ADDING A LATER READING NEVER CHANGES AN EARLIER ONE
+ const two=b1arr(SIG.chainSession([A,B]));
+ assert.deepEqual(JSON.parse(JSON.stringify(two[0])),JSON.parse(JSON.stringify(s[0])));
+ assert.deepEqual(JSON.parse(JSON.stringify(two[1])),JSON.parse(JSON.stringify(s[1])));
+ // and the first snapshot of a run claims no persistence
+ assert.equal(s[0].persistence_evidence_available,false);
+});
+
+ok(()=>{
+ const step=(p,c)=>SIG.chainStep(p,c);
+ // narrowing, a leading-strike shift, pace up and pace down
+ assert.equal(step(C,{...C,timestamp:'2026-09-21 10:30:00',strike_range:[23300,23350]}).state,'concentrated');
+ const sh=step(B,{...B,timestamp:'2026-09-21 10:15:00',leading_strike:23350});
+ assert.equal(sh.state,'shifted');
+ assert.match(sh.plain_language_read,/shifts from 23,300 to 23,350 CE/);
+ assert.equal(step(B,{...B,timestamp:'2026-09-21 10:15:00',weight:2000000}).state,'strengthened');
+ assert.match(step(B,{...B,timestamp:'2026-09-21 10:15:00',weight:500000}).plain_language_read,/losing momentum/);
+ // a different side is new behaviour, not persistence
+ const put={...B,timestamp:'2026-09-21 10:15:00',row:'puts',side:'PE',regime:'Put writing',strike_range:[23200]};
+ const ap=step(B,put);
+ assert.equal(ap.state,'appeared');
+ assert.equal(ap.persistence_evidence_available,false);
+ // calls that were building now being closed: reversing
+ const rev=step(B,{...B,timestamp:'2026-09-21 10:15:00',state:'reversing',behaviour:'buyers_exiting',regime:null});
+ assert.equal(rev.state,'reversing');
+ // quiet after a run: the run is fading — and nothing is invented after a quiet reading
+ const quiet={...B,timestamp:'2026-09-21 10:15:00',state:'balanced',plain_language_read:'No material change in market structure'};
+ const fd=step(B,quiet);
+ assert.equal(fd.state,'fading');
+ assert.match(fd.plain_language_read,/^Earlier call writing is fading$/);
+ assert.equal(step(quiet,{...quiet,timestamp:'2026-09-21 10:30:00'}).state,'balanced');
+ // the first comparable reading after the opening stays a plain build, and a MIXED reading carries no persistence
+ assert.equal(step({...A,state:'opening'},A).state,'building');
+ assert.equal(step(B,{...B,state:'mixed'}).persistence_evidence_available,false);
+ // no system language anywhere in the chain's words
+ for(const r of [sh,ap,rev,fd])noSystemTalk(r,'chain');
+});
+
+ok(()=>{
+ // key-strike labels judged against the STORED previous snapshot (found live 21 Sep 10:30)
+ const prev={...B,strike_range:[23350,23400,23450]};
+ const cur={...B,timestamp:'2026-09-21 10:15:00',strike_range:[23350,23400,23450,23500],leading_strike:23400,
+  key_strikes:[{strike:23400,side:'CE',lead:true,note:'Highest activity'},{strike:23350,side:'CE',lead:false,note:'New activity'},
+   {strike:23450,side:'CE',lead:false,note:'New activity'},{strike:23500,side:'CE',lead:false,note:'New activity'}]};
+ const notes=Object.fromEntries(b1arr(SIG.chainStep(prev,cur).key_strikes).map(k=>[k.strike,k.note]));
+ assert.equal(notes[23400],'Highest activity');
+ assert.equal(notes[23350],'Building','active at the previous snapshot is not new');
+ assert.equal(notes[23450],'Building');
+ assert.equal(notes[23500],'New activity');
+});
+
+ok(()=>{
+ // a named behaviour changing on the same side starts a new run (found live 21 Sep 10:45)
+ const w={...B,regime:'Call writing',strike_range:[23400,23500]};
+ const b={...B,timestamp:'2026-09-21 10:15:00',regime:'Call buying',behaviour:'buying',strike_range:[23400,23450]};
+ const r=SIG.chainStep(w,b);
+ assert.equal(r.state,'appeared');
+ assert.match(r.plain_language_read,/^Call buying appears/);
+ assert.equal(r.persistence_evidence_available,false);
+ // unnamed activity stays compatible with a named behaviour on the same side
+ assert.notEqual(SIG.chainStep(w,{...b,regime:null}).state,'appeared');
+});
+
+ok(()=>{
+ // positions being closed are REVERSING whatever came before (found live 21 Sep 14:00)
+ const putRun={...B,row:'puts',side:'PE',regime:'Put writing',strike_range:[23300,23350]};
+ const cover={...B,timestamp:'2026-09-21 10:15:00',state:'reversing',behaviour:'short_covering',regime:'Call short covering',
+  strike_range:[23450,23500],location:'above ATM'};
+ const r=SIG.chainStep(putRun,cover);
+ assert.equal(r.state,'reversing');
+ assert.equal(SIG.STATE_TONE[r.state],'down','a reduction is never painted as a build');
+ assert.match(r.plain_language_read,/^Call positions being reduced above ATM$/);
+ // a continuing reduction keeps its persistence and stays REVERSING
+ const again=SIG.chainStep(r,{...cover,timestamp:'2026-09-21 10:30:00'});
+ assert.equal(again.state,'reversing');
+ assert.match(again.plain_language_read,/still being reduced/);
+ assert.equal(again.persistence_since,'2026-09-21 10:15:00');
+ assert.equal(again.persistence_evidence_available,true);
+});
+
+// --- AN EMPTY PAYLOAD WRITES NOTHING ---------------------------------------------------------------------------------------------------
+ok(()=>{
+ for(const bad of [{},{grid:null},{grid:{rows:[]}}]){
+  assert.deepEqual(b1arr(SIG.states(bad)),[]);
+  assert.deepEqual(b1arr(SIG.periods(SIG.states(bad))),[]);
+ }
+});
+
+
 const SCRIPT_SHA=require('node:crypto').createHash('sha256').update(fs.readFileSync(__filename)).digest('hex').slice(0,12);
 const WEB_DIR=process.env.QA_WEB_DIRECTORY||path.join(__dirname,'..','dist-pilot');
 const BUNDLE=(()=>{try{return fs.statSync(path.join(WEB_DIR,'index.html')).mtime.toISOString();}catch{return 'unknown';}})();

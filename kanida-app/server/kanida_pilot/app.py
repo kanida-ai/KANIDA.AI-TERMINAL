@@ -18,6 +18,8 @@ from .product import Product
 from .simulation import Simulation
 from .live import Live
 from .strategies import Strategies
+from .snapshots import SnapshotStore,SnapshotWorker,events_from_snapshots,rows_for_api
+from .signal_noise import SignalNoise,markdown as sn_markdown
 from .research_store import ResearchStore
 from .research_index import ResearchIndex
 from .pattern_history import PatternHistoryService
@@ -60,6 +62,21 @@ def create_app(settings=None,http=None,evidence=None):
  # Derivative tab (docs/DERIVATIVES_SPEC.md §4). READ-ONLY on db/derivatives.db; the capture and metrics
  # workers own every write. Constructing it never touches the file, so a machine without one still boots.
  derivatives=Derivatives(settings.derivatives_database)
+ # IMMUTABLE READING SNAPSHOTS: written once per reading by a worker with its OWN reader, served by the routes below.
+ snapshot_store=SnapshotStore(settings.intelligence_database)
+ snapshot_worker=SnapshotWorker(Derivatives(settings.derivatives_database),snapshot_store)
+ # SIGNAL-TO-NOISE AUDIT on those snapshots: claims recorded once, outcomes appended, verdicts with reasons.
+ signal_noise=SignalNoise(settings.intelligence_database)
+ sn_reports=Path(settings.intelligence_database).parent/'sn_reports'
+ def audit(session):
+  engine_version,rules_version=snapshot_worker.version()
+  if not signal_noise.index_names:
+   try:signal_noise.index_names=set(derivatives.status().get('index_underlyings') or [])
+   except Exception:pass  # noqa: BLE001 - instrument type is a label, never a reason to stop the audit
+  signal_noise.record(session,engine_version,rules_version);signal_noise.evaluate(session,engine_version)
+  # the report is a VIEW over the immutable records, rewritten as outcomes accumulate; the EOD one once closed
+  sn_reports.mkdir(parents=True,exist_ok=True)
+  (sn_reports/f'SN_{session}.md').write_text(sn_markdown(signal_noise.report(session,engine_version)),encoding='utf-8')
  @asynccontextmanager
  async def lifespan(app):
   stop=threading.Event()
@@ -68,8 +85,13 @@ def create_app(settings=None,http=None,evidence=None):
     try:simulation.tick()
     except Exception:logging.getLogger('pilot').error('Simulation worker transition failed; it will reconcile on the next cycle.')
   worker=threading.Thread(target=tick,daemon=True,name='pilot-simulation');worker.start()
+  snaps=None
+  if str(settings.snapshots).lower()!='off':
+   snaps=threading.Thread(target=snapshot_worker.run,args=(stop,),kwargs={'after':audit},daemon=True,name='pilot-snapshots');snaps.start()
   yield
-  stop.set();worker.join(timeout=5);http.close();db.close()
+  stop.set();worker.join(timeout=5)
+  if snaps:snaps.join(timeout=5)
+  snapshot_worker.engine.close();http.close();db.close()
  app=FastAPI(title='KANIDA Private Pilot',docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
  app.state.db=db;app.state.auth=auth;app.state.billing=billing;app.state.kite=kite;app.state.simulation=simulation;app.state.evidence=evidence;app.state.live=live_service;app.state.strategies=registry;app.state.derivatives=derivatives;app.state.pattern_history=pattern_history
  app.add_middleware(CORSMiddleware,allow_origins=settings.origins or [settings.origin],allow_credentials=True,allow_methods=['GET','POST'],allow_headers=['Content-Type','Authorization','X-Kanida-CSRF','X-Kanida-Client'])
@@ -137,7 +159,8 @@ def create_app(settings=None,http=None,evidence=None):
   return {'ok':True,'app':'KANIDA Private Pilot','live_enabled':False}
  @app.get('/api/pilot/config')
  def config():return {'pilot':True,'google':settings.google_ready,'billing':settings.billing_ready,'kite':settings.kite_ready,'live_enabled':False,
-  'policy_version':settings.policy_version,'origin':settings.origin,'mobile_origin':settings.mobile_origin,'billing_mode':'test','invitation_required':True}
+  'policy_version':settings.policy_version,'origin':settings.origin,'mobile_origin':settings.mobile_origin,'billing_mode':'test',
+  'registration_mode':settings.registration_mode,'invitation_required':settings.invitation_required}
  @app.get('/api/auth/me')
  def me(request:Request):
   user=identity(request,False)
@@ -592,6 +615,47 @@ def create_app(settings=None,http=None,evidence=None):
   name,date,_=_derivative_query(underlying,expiry)
   if not name:raise PilotError(400,'FIELD_INVALID','underlying is required for the ΔOI strike grid.')
   return derivatives.oi_grid(name,date,at=at[:32])
+ @app.get('/api/derivatives/events')
+ def derivative_events(request:Request,at:str='',limit:int=0):
+  """What is happening across the book at one 15-min reading — one row per instrument.
+
+  Computed ONCE per reading and served to every reader, rather than a grid request per instrument per
+  browser. It adds no analytic: the walk is the tab's own (rule signal/2), and every line it returns is an
+  observation of what the numbers did between two named readings. Nothing here is a forecast (§5).
+  """
+  member(request);_derivative_query(limit=limit)
+  body=derivatives.events(at=at[:32],limit=limit or None)
+  # ONE ENGINE FOR THE LIST AND THE PANE: once every instrument's immutable snapshot for this reading exists, the
+  # list is built from them. Until then (seconds after the metrics land) the pass above stands.
+  try:
+   reading=str(body.get('as_of') or '')
+   expected=int(body.get('instruments') or len(body.get('rows') or []))
+   if reading and expected:
+    rows=events_from_snapshots(snapshot_store,reading[:10],reading,snapshot_worker.version()[0],expected)
+    if rows is not None:
+     body=dict(body);body['rows']=rows[:limit] if limit else rows
+     body['measured']=sum(1 for r in rows if r.get('live'));body['source']='snapshots'
+  except Exception as error:  # noqa: BLE001 - the list must still answer from its own pass
+   logging.getLogger('pilot').warning('derivatives: events from snapshots failed (%s)',error)
+  return body
+ @app.get('/api/derivatives/snapshots')
+ def derivative_snapshots(request:Request,underlying:str='',session:str='',upto:str=''):
+  """THE SESSION AS KANIDA SAW IT: one immutable snapshot per reading for one underlying, oldest first. Each was
+  written once, from the grid anchored at its own reading, by the engine version it names; none is ever
+  re-derived from a later reading's contracts. Readings that could not be anchored say so."""
+  member(request)
+  name=underlying.strip().upper()[:40]
+  day=(session or snapshot_worker.newest_session() or '')[:10]
+  engine_version=snapshot_worker.version()[0]
+  rows=snapshot_store.session_rows(name,day,engine_version,upto[:32] or None) if name and day else []
+  return {'underlying':name,'session':day,'engine_version':engine_version,'snapshots':rows_for_api(rows)}
+ @app.get('/api/derivatives/signal-noise')
+ def derivative_signal_noise(request:Request,session:str=''):
+  """THE SIGNAL-TO-NOISE AUDIT for a session: what KANIDA said, what held, what was noise and why. Internal."""
+  member(request)
+  day=(session or snapshot_worker.newest_session() or '')[:10]
+  report=signal_noise.report(day,snapshot_worker.version()[0]) if day else {}
+  return {**report,'markdown':sn_markdown(report) if report else ''}
  @app.get('/api/derivatives/indices')
  def derivative_indices(request:Request,points:int=0):
   member(request);_derivative_query(points=points)

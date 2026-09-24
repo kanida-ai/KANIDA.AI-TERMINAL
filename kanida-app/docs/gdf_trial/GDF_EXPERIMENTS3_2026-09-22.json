@@ -1,0 +1,63 @@
+{
+ "started_ist": "10:34:52",
+ "runs": [
+  {
+   "ttfb_ms": 518,
+   "transfer_ms": 0,
+   "bytes": 2225,
+   "label": "10 NFO, 1-min",
+   "asked": 10,
+   "total_ms": 518,
+   "rows": 10,
+   "newest_bar_ist": "10:19",
+   "at": "10:34:52"
+  },
+  {
+   "label": "50 NFO, 1-min",
+   "asked": 50,
+   "error": "gdf: no reply within the timeout",
+   "total_ms": 61426
+  },
+  {
+   "label": "100 NFO, 1-min",
+   "asked": 100,
+   "error": "gdf: no reply within the timeout",
+   "total_ms": 60530
+  },
+  {
+   "label": "100 NFO, 1-min (repeat)",
+   "asked": 100,
+   "error": "gdf: no reply within the timeout",
+   "total_ms": 60955
+  },
+  {
+   "label": "100 NFO, 15-min",
+   "asked": 100,
+   "error": "gdf: no reply within the timeout",
+   "total_ms": 60535
+  },
+  {
+   "label": "95 NSE, 1-min",
+   "asked": 95,
+   "error": "gdf: no reply within the timeout",
+   "total_ms": 60973
+  },
+  {
+   "ttfb_ms": 500,
+   "transfer_ms": 0,
+   "bytes": 1050,
+   "label": "5 NSE_IDX, 1-min",
+   "asked": 5,
+   "total_ms": 501,
+   "rows": 5,
+   "newest_bar_ist": "10:24",
+   "at": "10:39:57"
+  },
+  {
+   "label": "100 NFO, 1-min (repeat 2)",
+   "asked": 100,
+   "error": "gdf: no reply within the timeout",
+   "total_ms": 62005
+  }
+ ]
+}

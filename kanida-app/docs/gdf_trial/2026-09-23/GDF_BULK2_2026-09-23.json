@@ -1,0 +1,53 @@
+{
+ "started_ist": "10:39:48",
+ "probes": [
+  {
+   "label": "SubscribeSnapshot, identifiers as an array",
+   "request": {
+    "MessageType": "SubscribeSnapshot",
+    "Exchange": "NFO",
+    "InstrumentIdentifier": [
+     "FUTIDX_BANKNIFTY_29SEP2026_XX_0",
+     "FUTIDX_NIFTY_29SEP2026_XX_0",
+     "FUTSTK_RELIANCE_29SEP2026_XX_0"
+    ],
+    "Periodicity": "MINUTE",
+    "Period": 1
+   },
+   "messages": [
+    {
+     "after_s": 0.3,
+     "type": "RequestError",
+     "message": "Json Deserialization error. Unexpected character encountered while parsing value: [. Path 'InstrumentIdentifier', line 1, position 81.",
+     "bytes": 213,
+     "rows": 0,
+     "idents": [],
+     "bars": [],
+     "fields": [
+      "Message",
+      "MessageType",
+      "PaketID",
+      "RequestRefState"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "StreamAllSnapshots, no Exchange",
+   "request": {
+    "MessageType": "StreamAllSnapshots",
+    "Periodicity": "MINUTE",
+    "Period": 1
+   },
+   "messages": []
+  },
+  {
+   "label": "StreamAllSymbols (NFO)",
+   "request": {
+    "MessageType": "StreamAllSymbols",
+    "Exchange": "NFO"
+   },
+   "messages": []
+  }
+ ]
+}

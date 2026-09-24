@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en" data-quiet="off" data-replay="off">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KANIDA · Market story — design preview</title>
+<link rel="stylesheet" href="assets/story.css">
+</head>
+<body>
+
+<a class="sr" href="#story">Skip to the market story</a>
+
+<div class="shell">
+
+  <!-- brand + section rail. Every item here moves the page; nothing decorative. -->
+  <nav class="rail" aria-label="Sections">
+    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 2.6 13.9 9 20.4 10.9 13.9 12.8 12 19.2 10.1 12.8 3.6 10.9 10.1 9Z"
+            fill="none" stroke="#4FE0A8" stroke-width="1.3" stroke-linejoin="round"/>
+      <circle cx="12" cy="10.9" r="1.5" fill="#4FE0A8"/>
+    </svg>
+    <button class="railbtn" data-jump="story" aria-current="true" title="What matters now">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 6h16M4 11h11M4 16h7"/></svg>
+      <span class="sr">What matters now</span>
+    </button>
+    <button class="railbtn" data-jump="sides" title="Calls and puts">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 20V9M12 20V4M19 20v-7"/></svg>
+      <span class="sr">Calls and puts</span>
+    </button>
+    <button class="railbtn" data-jump="chart" title="Where it happened">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 17l5-6 4 3 6-8"/><path d="M3 21h18"/></svg>
+      <span class="sr">Where it happened</span>
+    </button>
+    <button class="railbtn" data-jump="timeline" title="How the day evolved">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>
+      <span class="sr">How the day evolved</span>
+    </button>
+    <button class="railbtn" data-jump="evidence" title="Why KANIDA said this">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
+      <span class="sr">Why KANIDA said this</span>
+    </button>
+    <span class="spacer"></span>
+    <span class="railnote">Design preview</span>
+  </nav>
+
+  <main class="main">
+
+    <!-- 1. CONTEXT -------------------------------------------------------------------------- -->
+    <header class="context">
+      <div class="wrap">
+        <p class="ctxline">
+          <span class="ctxi"><i>Instrument</i><b class="mark-inst num" id="ctxInstrument">NIFTY</b></span>
+          <span class="ctxi"><i>Expiry</i><b class="num" id="ctxExpiry">—</b></span>
+          <span class="ctxi"><i>Session</i><b class="num" id="ctxSession">—</b></span>
+          <span class="ctxi"><i>Reading</i><b class="num" id="ctxReading">—</b></span>
+          <span class="ctxi"><i>Mode</i><b id="ctxMode">—</b></span>
+        </p>
+        <span class="chip" id="ctxCapture"><span class="dot"></span><span>—</span></span>
+        <span class="grow"></span>
+        <div class="scenarios" role="group" aria-label="Illustrative scenario"><!-- built by JS --></div>
+        <button class="toggle" id="quiet" aria-pressed="false">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M5 12h14"/></svg>
+          Quiet motion
+        </button>
+        <span class="preview-tag" role="note">
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
+          Illustrative design preview — not live market data
+        </span>
+      </div>
+    </header>
+
+    <div class="wrap">
+
+      <!-- 2 + 4. WHAT MATTERS NOW, beside WHERE IT HAPPENED --------------------------------- -->
+      <section class="sec" id="story" aria-labelledby="storyH">
+        <div class="sec-head">
+          <h2 id="storyH">What matters now</h2>
+          <span class="aside" id="storyAside"></span>
+        </div>
+        <div class="stage">
+
+          <article class="panel story" aria-live="off">
+            <div class="kicker">
+              <span class="behav" id="behav"><span class="dot"></span><span>—</span></span>
+              <span class="chip" id="breadthChip">—</span>
+            </div>
+            <h1 class="headline" id="headline">—</h1>
+            <p class="lede" id="lede1"></p>
+            <p class="lede two" id="lede2"></p>
+            <div class="persist">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 1.8"/></svg>
+              <span id="persist"></span>
+            </div>
+            <p class="infer" id="infer"></p>
+            <p class="conflict" id="conflict" hidden>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M12 4.5 21 19H3Z"/><path d="M12 10v4M12 16.5h.01"/></svg>
+              <span id="conflictText"></span>
+            </p>
+            <div class="story-actions">
+              <button class="btn primary" id="replay">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 12a8 8 0 1 1 2.6 5.9"/><path d="M4 18v-5h5"/></svg>
+                Replay explanation
+              </button>
+              <button class="btn" id="skip" hidden>Skip</button>
+              <button class="btn" id="jumpEvidence">Why KANIDA said this</button>
+            </div>
+            <!-- the completed explanation, announced once, never word by word -->
+            <p class="sr" id="liveRegion" role="status" aria-live="polite"></p>
+          </article>
+
+          <section class="panel chartpanel" id="chart" aria-labelledby="chartH">
+            <div class="chart-head">
+              <h3 id="chartH">Where it happened</h3>
+              <span class="sub" id="chartSub"></span>
+            </div>
+            <svg class="plot" id="plot" viewBox="0 0 720 250" role="img" aria-labelledby="plotTitle">
+              <title id="plotTitle">Illustrative spot price through the session with the participating strike levels marked.</title>
+            </svg>
+            <p class="axis-note">Vertical axis is spot price in rupees. Premium, open interest and IV are never on it.</p>
+
+            <div class="partic">
+              <h4>Which strikes joined, reading by reading</h4>
+              <div id="particRows"></div>
+              <p class="plegend" id="particLegend"></p>
+            </div>
+          </section>
+
+        </div>
+      </section>
+
+      <!-- 3. CALLS AND PUTS ------------------------------------------------------------------ -->
+      <section class="sec" id="sides" aria-labelledby="sidesH">
+        <div class="sec-head">
+          <h2 id="sidesH">Calls and puts, read independently</h2>
+          <span class="aside">Each side is interpreted on its own before anything is combined.</span>
+        </div>
+        <div class="sidetabs" role="tablist" aria-label="Option side">
+          <button class="scn" role="tab" id="tabCalls" aria-selected="true" aria-controls="sideCalls">Calls</button>
+          <button class="scn" role="tab" id="tabPuts" aria-selected="false" aria-controls="sidePuts">Puts</button>
+        </div>
+        <div class="sides">
+          <article class="panel side calls shown" id="sideCalls" role="tabpanel" aria-labelledby="tabCalls"></article>
+          <article class="panel side puts" id="sidePuts" role="tabpanel" aria-labelledby="tabPuts"></article>
+          <article class="panel side combined" id="sideCombined"></article>
+        </div>
+      </section>
+
+      <!-- 5. HOW THE DAY EVOLVED -------------------------------------------------------------- -->
+      <section class="sec" id="timeline" aria-labelledby="tlH">
+        <div class="sec-head">
+          <h2 id="tlH">How the day evolved</h2>
+          <span class="aside">Select any reading. Everything above moves with it — no later evidence is shown at an earlier reading.</span>
+        </div>
+        <div class="rule"></div>
+        <div class="tl" id="tl" role="group" aria-label="Session readings"></div>
+        <button class="tlmore" id="tlMore" hidden></button>
+      </section>
+
+      <!-- 6. WHY KANIDA SAID THIS -------------------------------------------------------------- -->
+      <section class="sec" id="evidence" aria-labelledby="evH">
+        <div class="sec-head"><h2 id="evH">Why KANIDA said this</h2></div>
+        <div class="panel ev">
+          <button class="evbtn" id="evToggle" aria-expanded="false" aria-controls="evBody">
+            <span class="lbl">Facts, inference, baseline, uncertainty and the numbers</span>
+            <span class="hint" id="evHint"></span>
+            <span class="caret" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5l7 7-7 7"/></svg>
+            </span>
+          </button>
+          <div class="evbody" id="evBody" hidden></div>
+        </div>
+      </section>
+
+      <!-- 7. INSPECT ---------------------------------------------------------------------------- -->
+      <section class="sec" aria-labelledby="toolsH">
+        <div class="sec-head">
+          <h2 id="toolsH">Inspect</h2>
+          <span class="aside">One drawer is built in this preview. The rest are named, not faked.</span>
+        </div>
+        <div class="tools">
+          <button class="tool" id="toolChain">
+            <span class="n">Option chain</span>
+            <span class="m">Strike book at this reading — opens here</span>
+          </button>
+          <button class="tool" aria-disabled="true"><span class="n">Open interest by strike</span><span class="m">Not in this preview</span></button>
+          <button class="tool" aria-disabled="true"><span class="n">Implied volatility</span><span class="m">Not in this preview</span></button>
+          <button class="tool" aria-disabled="true"><span class="n">Futures context</span><span class="m">Not in this preview</span></button>
+        </div>
+      </section>
+
+      <footer class="foot">
+        <span>KANIDA · market story — approval prototype</span>
+        <span>All figures illustrative. No exchange, broker or pilot data is used.</span>
+        <span>All times IST.</span>
+      </footer>
+
+    </div>
+  </main>
+</div>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerH" hidden>
+  <div class="drawer-head">
+    <div>
+      <h3 id="drawerH">Option chain — strike book</h3>
+      <div class="sub" id="drawerSub"></div>
+    </div>
+    <span class="grow"></span>
+    <button class="btn" id="drawerClose">Close</button>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
+<script src="assets/scenarios.js"></script>
+<script src="assets/story.js"></script>
+</body>
+</html>

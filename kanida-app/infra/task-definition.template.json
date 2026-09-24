@@ -14,6 +14,7 @@
     "portMappings": [{"containerPort":8080,"protocol":"tcp"}],
     "environment": [
       {"name":"PILOT_ENVIRONMENT","value":"staging"},
+      {"name":"PILOT_REGISTRATION_MODE","value":"gated"},
       {"name":"PILOT_ORIGIN","value":"https://REPLACE_WITH_PILOT_HOST"},
       {"name":"PILOT_LIVE_ENABLED","value":"false"},
       {"name":"PILOT_RESEARCH_URL","value":"http://REPLACE_WITH_PRIVATE_READ_ONLY_RESEARCH_SERVICE"}

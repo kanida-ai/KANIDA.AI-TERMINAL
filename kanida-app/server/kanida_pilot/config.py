@@ -14,6 +14,7 @@ class Settings:
     origins: list[str] = field(default_factory=list)
     database_url: str = ''
     environment: str = 'local'
+    registration_mode: str = 'gated'
     owner_email: str = ''
     encryption_key: str = ''
     google_client_id: str = ''
@@ -54,6 +55,10 @@ class Settings:
     # and metrics workers in market_data/derivatives/ own every write. Absent = the tab says "No F&O data
     # captured yet" instead of failing; it is NEVER db/kanida.db.
     derivatives_database: str = str(ROOT.parent/'db'/'derivatives.db')
+    # Immutable 15-min reading snapshots (kanida_pilot/snapshots.py) - the pilot's OWN store; derivatives.db stays read-only.
+    intelligence_database: str = str(ROOT/'var'/'intelligence.db')
+    # 'on' runs the snapshot worker inside the pilot; 'off' serves stored snapshots without writing new ones.
+    snapshots: str = 'on'
     # How long one aggregate over the ledger is reused. A research pass lands every few minutes at best
     # (LIVE_DETECTION.md §7: 2m26s for 1H), so a short cache costs nothing in freshness.
     pattern_detection_cache_seconds: int = 20
@@ -65,6 +70,13 @@ class Settings:
     # PILOT_MAX_DATA_AGE_DAYS: stored market data older than this many calendar days (IST) cannot be
     # simulated or sent live. Matches DATA_STALE_DAYS in src/decision.ts.
     max_data_age_days: int = 3
+
+    def __post_init__(self):
+        if self.registration_mode not in ('gated', 'public'):
+            raise ValueError('PILOT_REGISTRATION_MODE must be gated or public')
+
+    @property
+    def invitation_required(self): return self.registration_mode != 'public'
 
     @property
     def secure(self): return self.origin.startswith('https://')

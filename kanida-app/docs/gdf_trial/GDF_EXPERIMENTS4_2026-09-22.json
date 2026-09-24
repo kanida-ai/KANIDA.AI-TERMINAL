@@ -1,0 +1,168 @@
+{
+ "started_ist": "10:48:29",
+ "cap": [
+  {
+   "ttfb_ms": 506,
+   "transfer_ms": 0,
+   "bytes": 3327,
+   "label": "15 NFO, 1-min",
+   "asked": 15,
+   "total_ms": 507,
+   "rows": 15,
+   "newest_bar_ist": "10:33",
+   "at": "10:48:29"
+  },
+  {
+   "ttfb_ms": 487,
+   "transfer_ms": 280,
+   "bytes": 4425,
+   "label": "20 NFO, 1-min",
+   "asked": 20,
+   "total_ms": 1260,
+   "rows": 20,
+   "newest_bar_ist": "10:33",
+   "at": "10:48:31"
+  },
+  {
+   "ttfb_ms": 470,
+   "transfer_ms": 329,
+   "bytes": 5522,
+   "label": "25 NFO, 1-min",
+   "asked": 25,
+   "total_ms": 1034,
+   "rows": 25,
+   "newest_bar_ist": "10:33",
+   "at": "10:48:32"
+  },
+  {
+   "label": "30 NFO, 1-min",
+   "asked": 30,
+   "error": "gdf: no reply within the timeout",
+   "total_ms": 16606
+  },
+  {
+   "label": "40 NFO, 1-min",
+   "asked": 40,
+   "error": "gdf: no reply within the timeout",
+   "total_ms": 16045
+  }
+ ],
+ "batched": [
+  {
+   "exchange": "NFO",
+   "symbols": 100,
+   "batch_size": 25,
+   "calls": 4,
+   "rows": 100,
+   "errors": 0,
+   "wall_ms": 3943,
+   "newest": [
+    "10:34"
+   ],
+   "runs": [
+    {
+     "ttfb_ms": 837,
+     "transfer_ms": 323,
+     "bytes": 5513,
+     "label": "NFO batch 1",
+     "asked": 25,
+     "total_ms": 1162,
+     "rows": 25,
+     "newest_bar_ist": "10:34",
+     "at": "10:49:05"
+    },
+    {
+     "ttfb_ms": 494,
+     "transfer_ms": 332,
+     "bytes": 5467,
+     "label": "NFO batch 2",
+     "asked": 25,
+     "total_ms": 827,
+     "rows": 25,
+     "newest_bar_ist": "10:34",
+     "at": "10:49:06"
+    },
+    {
+     "ttfb_ms": 477,
+     "transfer_ms": 89,
+     "bytes": 5388,
+     "label": "NFO batch 3",
+     "asked": 25,
+     "total_ms": 744,
+     "rows": 25,
+     "newest_bar_ist": "10:34",
+     "at": "10:49:07"
+    },
+    {
+     "ttfb_ms": 462,
+     "transfer_ms": 316,
+     "bytes": 5352,
+     "label": "NFO batch 4",
+     "asked": 25,
+     "total_ms": 1209,
+     "rows": 25,
+     "newest_bar_ist": "10:34",
+     "at": "10:49:08"
+    }
+   ]
+  },
+  {
+   "exchange": "NSE",
+   "symbols": 95,
+   "batch_size": 25,
+   "calls": 4,
+   "rows": 95,
+   "errors": 0,
+   "wall_ms": 3731,
+   "newest": [
+    "10:34"
+   ],
+   "runs": [
+    {
+     "ttfb_ms": 554,
+     "transfer_ms": 322,
+     "bytes": 4719,
+     "label": "NSE batch 1",
+     "asked": 25,
+     "total_ms": 1099,
+     "rows": 25,
+     "newest_bar_ist": "10:34",
+     "at": "10:49:09"
+    },
+    {
+     "ttfb_ms": 540,
+     "transfer_ms": 327,
+     "bytes": 4705,
+     "label": "NSE batch 2",
+     "asked": 25,
+     "total_ms": 991,
+     "rows": 25,
+     "newest_bar_ist": "10:34",
+     "at": "10:49:10"
+    },
+    {
+     "ttfb_ms": 525,
+     "transfer_ms": 77,
+     "bytes": 4670,
+     "label": "NSE batch 3",
+     "asked": 25,
+     "total_ms": 734,
+     "rows": 25,
+     "newest_bar_ist": "10:34",
+     "at": "10:49:11"
+    },
+    {
+     "ttfb_ms": 506,
+     "transfer_ms": 0,
+     "bytes": 3766,
+     "label": "NSE batch 4",
+     "asked": 20,
+     "total_ms": 905,
+     "rows": 20,
+     "newest_bar_ist": "10:34",
+     "at": "10:49:12"
+    }
+   ]
+  }
+ ]
+}

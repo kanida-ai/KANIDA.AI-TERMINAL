@@ -1102,6 +1102,10 @@ def test_the_last_live_reading_of_18_sep_still_applies_all_three_floors():
  try:
   if not reader.available() or not reader._reading_rows(LIVE_READING):
    pytest.skip('this store does not hold the 18 Sep 2026 session')
+  # A LIVE store moves on: the screener offers only its newest 40 readings, and on 21 Sep 2026 the new session's 26
+  # pushed 18 Sep 11:30 out of that window. The reading still exists; it is simply no longer offered.
+  if LIVE_READING not in {r['at'] for r in reader.screener_readings()}:
+   pytest.skip('18 Sep 11:30 has aged out of the screener window in this live store')
   force=reader._floors_in_force(LIVE_READING)
   assert force['applied']==('premium_cr','oi','last_price')
   assert force['unmeasured']==() and force['absent']==()
