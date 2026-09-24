@@ -34,7 +34,9 @@ capturing. Windows keeps capturing through steps 1–3; nothing on it is modifie
 
 ## Step 1 — Windows: export to the SSD (≈2–4 h, mostly kanida.db)
 
-SSD: ≥ 500 GB, formatted **exFAT** (both machines read and write it).
+Drive: ≥ 350 GB free. exFAT or NTFS both work: Windows writes it, and the Mac only reads it
+(macOS reads NTFS natively). An NTFS volume must be **clean**: macOS won't mount one flagged dirty,
+so run `chkdsk X: /f` first if Windows reports it.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\Users\SPS\Documents\Kanida_Falcon\migration\windows\export_to_ssd.ps1 -Ssd E:
