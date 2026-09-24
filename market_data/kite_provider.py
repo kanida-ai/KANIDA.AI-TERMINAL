@@ -30,9 +30,11 @@ On a Kite ``TokenException`` we do **not** implement a login flow.  We invoke
 the engine project's existing, tested worker exactly the way its Scheduled Task
 does — a fresh short-lived process::
 
-    <anaconda python> scripts/auth_worker.py        (cwd=<engine>/backend,
+    <engine python> scripts/auth_worker.py          (cwd=<engine>/backend,
                                                      PLAYWRIGHT_BROWSERS_PATH=
-                                                     C:\\ProgramData\\ms-playwright)
+                                                     C:\\ProgramData\\ms-playwright
+                                                     on Windows, Playwright's
+                                                     per-user cache on macOS)
 
 ...**once** per provider instance, then retry the failed call once.  The
 worker self-gates to weekdays 06:00-16:30 IST; outside that window it exits 0
@@ -77,14 +79,28 @@ log = logging.getLogger("market_data.kite")
 
 # ── engine-project locations (overridable by env, never hard-coded twice) ────
 
-DEFAULT_ENGINE_ROOT = Path(
-    r"C:\Users\SPS\Desktop\Kanida.ai Terminal Quant Intelligence Engine"
-)
+if sys.platform == "win32":
+    DEFAULT_ENGINE_ROOT = Path(
+        r"C:\Users\SPS\Desktop\Kanida.ai Terminal Quant Intelligence Engine"
+    )
+    DEFAULT_AUTH_PYTHON = Path(r"C:\Users\SPS\anaconda3\python.exe")
+    # Task Scheduler cannot see the user-profile default; ProgramData it can.
+    DEFAULT_PLAYWRIGHT_PATH = r"C:\ProgramData\ms-playwright"
+else:
+    # macOS layout from migration/MAC_MIGRATION.md. launchd agents run in the
+    # user's session, so Playwright's own per-user default is visible there.
+    DEFAULT_ENGINE_ROOT = Path.home() / "Kanida" / "engine"
+    DEFAULT_AUTH_PYTHON = DEFAULT_ENGINE_ROOT / ".venv" / "bin" / "python"
+    DEFAULT_PLAYWRIGHT_PATH = str(
+        Path.home() / ("Library/Caches" if sys.platform == "darwin" else ".cache") / "ms-playwright"
+    )
 ENGINE_ROOT = Path(os.environ.get("KANIDA_ENGINE_ROOT", str(DEFAULT_ENGINE_ROOT)))
 ENV_FILE = ENGINE_ROOT / "config" / ".env"
 AUTH_WORKER = ENGINE_ROOT / "scripts" / "auth_worker.py"
-DEFAULT_AUTH_PYTHON = Path(r"C:\Users\SPS\anaconda3\python.exe")
-PLAYWRIGHT_BROWSERS_PATH = r"C:\ProgramData\ms-playwright"
+PLAYWRIGHT_BROWSERS_PATH = (
+    DEFAULT_PLAYWRIGHT_PATH if sys.platform == "win32"
+    else os.environ.get("PLAYWRIGHT_BROWSERS_PATH", DEFAULT_PLAYWRIGHT_PATH)
+)
 
 CACHE_DIR = Path(__file__).resolve().parent / "cache"
 
