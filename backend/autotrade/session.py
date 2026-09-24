@@ -658,15 +658,28 @@ class TradingSession:
 
     @classmethod
     def list_sessions(cls, limit: int = 50,
-                      user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Recent sessions (newest first) for the operator UI session list.
+                      user_id: Optional[str] = None,
+                      owner_user_id: Optional[str] = None
+                      ) -> List[Dict[str, Any]]:
+        """Recent sessions (newest first) for the UI session list.
 
         This is what lets the panel SHOW existing sessions instead of resetting
         to a blank create form — a created session stays visible/resumable.
 
-        PHASE-2 MULTI-TENANT: when user_id is provided, ONLY that user's sessions
-        are returned (per-user isolation). When user_id is None the list is the
-        full operator view (today's behaviour) — used by the operator console.
+        Scoping params (mutually exclusive; owner_user_id wins if both set):
+
+          * owner_user_id (STRICT tenant isolation — Phase-2 multi-tenant):
+            WHERE s.user_id = ? EXACTLY. NULL-owned (operator/legacy) sessions
+            are NOT returned. Use this for a non-admin portal user so they see
+            ONLY their own sessions.
+
+          * user_id (legacy operator-console scope): same strict WHERE s.user_id
+            = ? filter, kept UNCHANGED for the operator console's existing
+            ?user_id call. When None → the full operator view (all sessions,
+            today's behaviour).
+
+        NOTE: neither path uses an 'OR user_id IS NULL' branch, so no NULL-owned
+        session ever leaks into a scoped result.
         """
         base = (
             """SELECT s.session_id, s.created_at, s.started_at, s.closed_at,
@@ -679,11 +692,12 @@ class TradingSession:
                          AND p.status = 'OPEN') AS n_open_positions
                FROM autotrade_sessions s
             """)
+        scope_id = owner_user_id if owner_user_id is not None else user_id
         with falcon_conn() as con:
-            if user_id is not None:
+            if scope_id is not None:
                 rows = con.execute(
                     base + " WHERE s.user_id = ? ORDER BY s.created_at DESC "
-                    "LIMIT ?", (user_id, int(limit)),
+                    "LIMIT ?", (str(scope_id), int(limit)),
                 ).fetchall()
             else:
                 rows = con.execute(
