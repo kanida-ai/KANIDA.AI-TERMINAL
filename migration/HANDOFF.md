@@ -13,12 +13,17 @@ session that did the move.
   - the encrypted `secrets.tar.enc` (75 files)
 - Mac step 1 (`1_setup_mac.sh`) done: tools installed, repos cloned, and the worktrees restored
   (the engine's 913 uncommitted files match the Windows snapshot exactly).
-- Mac step 2 (`2_restore_from_ssd.sh`): the owner reports the copy completed.
+- Mac steps 2, 3 and 5 are done, and `5_verify.sh` printed **ALL CHECKS PASSED** (23 Sep):
+  - 148 databases match the manifest; the live databases pass quick_check
+  - market_data: 235 tests pass; kanida-app server: 545 tests pass; the typecheck is clean
+  - Two fixes along the way:
+    - `kanida_quant.db` is git-tracked on the engine branches, so the clone's committed copy
+      had won over the Windows one. It was replaced from the drive in the engine and the 4
+      worktrees.
+    - `python-dotenv`, `matplotlib` and `scikit-learn` were added to the Falcon venv.
 
-## Next, in order
-1. `bash ~/Kanida/Kanida_Falcon/migration/mac/3_build_envs.sh`: venvs, Playwright, npm.
-2. `bash ~/Kanida/Kanida_Falcon/migration/mac/5_verify.sh`: it must print ALL CHECKS PASSED.
-3. Cutover (MAC_MIGRATION.md step 4), not yet started. **The Windows laptop is still the live
+## Next
+1. Cutover (MAC_MIGRATION.md step 4), not yet started. **The Windows laptop is still the live
    machine.** It runs capture, broker auth, backend :8001, and the Cloudflare tunnel for
    api.kanida.ai (the Vercel portal's API). Only one machine may run these. Cutover:
    - stop the Windows tasks and the Cloudflared service
