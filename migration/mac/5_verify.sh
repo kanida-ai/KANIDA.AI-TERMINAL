@@ -24,7 +24,10 @@ def where(root):                 # mirrors route() in config.sh
     return K / "archive" / Path(*parts)
 latest = {}                      # a re-snapshot at cutover appends; the last record wins
 for line in open(sys.argv[1], encoding="utf-8"):
-    r = json.loads(line); latest[(r.get("root"), r["path"])] = r
+    r = json.loads(line)
+    if Path(r["path"]).name.startswith("._"):   # macOS AppleDouble junk; the restore skips these on purpose
+        continue
+    latest[(r.get("root"), r["path"])] = r
 n = bad = 0
 for r in latest.values():
     n += 1
