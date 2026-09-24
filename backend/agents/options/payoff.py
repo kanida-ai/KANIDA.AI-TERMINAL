@@ -45,6 +45,7 @@ as LONG-unit greeks; the short negation happens here, once, alongside lots and l
 """
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from . import pricing as P
@@ -71,6 +72,26 @@ COSTS = {
 # Slippage assumed per leg, as a fraction of that leg's bid-ask spread. 0.5 == we cross half
 # the spread. Governed and deliberately pessimistic-neutral; calibrate only OOS.
 SLIPPAGE_SPREAD_FRACTION = 0.5
+
+# ── slippage when there is NO BOOK — the agent's NORMAL operating mode ──────────────────
+# This module runs post-market, and Kite returns an all-zero depth after the close; backfilled
+# rows have no book at all. So bid/ask are None for every leg on the ordinary path.
+#
+# The original code computed spread = 0.0 in that case and therefore charged ZERO slippage,
+# silently, while still stamping costs_basis="governed_table". Measured on a real 200-wide
+# NIFTY condor that understated total costs by 86% and overstated EV roughly fourfold, with
+# nothing in the output to distinguish it from a fully measured cost. That is precisely the
+# "a zero standing in for unknown" failure the platform forbids, and it also contradicted this
+# package's own governed constant (fetch_kite.BACKFILL_SLIPPAGE_POLICY), which requires a
+# labelled assumption rather than silence.
+#
+# So: when a leg has no two-sided quote we charge a GOVERNED, LABELLED assumption instead of
+# nothing, and the aggregate is stamped so a consumer can see that part of the cost is assumed.
+# The value is deliberately conservative — overpaying in the model is survivable, underpaying
+# is how a negative-expectancy strategy looks tradeable.
+ASSUMED_SLIPPAGE_PCT_OF_PREMIUM = 0.02      # governed, UNVERIFIED; calibrate OOS against fills
+SLIPPAGE_BASIS_MEASURED = "measured_half_spread"
+SLIPPAGE_BASIS_ASSUMED = "assumed_no_book_governed_pct_of_premium"
 
 
 def _sign(action: str) -> int:
@@ -132,9 +153,17 @@ def payoff_at(legs: list, S: float, include_costs: bool = False) -> float:
 
 
 def payoff_money_at(legs: list, S: float, include_costs: bool = True) -> float:
-    """Terminal P&L in rupees for the whole position."""
-    u = _units(legs[0]) if legs else 0
-    gross = payoff_at(legs, S, include_costs=False) * u
+    """Terminal P&L in rupees for the whole position.
+
+    Summed PER LEG with that leg's own lot_size*lots. The earlier version scaled the whole
+    structure by leg 0's units, which silently inverted the sign and the magnitude on any
+    structure whose legs differ (a laddered condor across strikes/DTE, or any cross-expiry
+    structure where lot_size differs even at lots=1). net_greeks was already per-leg, so the
+    greeks and the P&L disagreed with each other."""
+    gross = sum(_sign(l["action"])
+                * (intrinsic(_right(l), float(l["strike"]), S) - _px(l))
+                * _units(l)
+                for l in legs)
     return gross - (total_costs(legs)["total"] if include_costs else 0.0)
 
 
@@ -152,12 +181,17 @@ def max_profit(legs: list, include_costs: bool = True) -> float:
     return max(payoff_money_at(legs, S, include_costs) for S in _kinks(legs))
 
 
-def max_loss(legs: list, include_costs: bool = True) -> float:
-    """Max loss in rupees, returned as a NEGATIVE number. Exact — evaluated at every kink.
+def max_loss(legs: list, include_costs: bool = True) -> Optional[float]:
+    """Max loss in rupees as a NEGATIVE number, or **None** when the risk is UNBOUNDED.
 
-    For a defined-risk structure this is finite by construction. If it comes back
-    unbounded-looking (the outer evaluation point being the minimum), the structure is not
-    actually defined-risk and ``is_defined_risk`` will say so."""
+    Returning a number here for an unbounded structure was a real defect: the evaluation grid
+    ends at 1.5x the highest strike, so a naked short call reported a plausible finite
+    'max loss' of about -Rs 800,000 -- an artefact of where the grid happened to stop. The
+    brief makes max-loss/tail a decision gate, and a gate reading a fabricated bound is worse
+    than one reading None. Relying on the consumer to check a DIFFERENT key
+    (``is_defined_risk``) was not good enough."""
+    if not is_defined_risk(legs):
+        return None
     return min(payoff_money_at(legs, S, include_costs) for S in _kinks(legs))
 
 
@@ -203,15 +237,21 @@ def leg_costs(leg: dict) -> dict:
     stamp = COSTS["stamp_pct_buy_premium"] * premium_value if side > 0 else 0.0
     gst = COSTS["gst_pct"] * (brokerage + exch + sebi)
 
-    # Slippage: we cross a governed fraction of this leg's own quoted spread. A leg with no
-    # usable spread contributes 0 here and is instead caught by the liquidity gate — we do
-    # NOT invent a spread for it.
+    # Slippage: cross a governed fraction of this leg's own quoted spread when there IS a
+    # book; otherwise charge a governed, LABELLED assumption. Never zero, and never a
+    # synthesised spread. See ASSUMED_SLIPPAGE_PCT_OF_PREMIUM for why silence here was a
+    # real defect rather than a conservative simplification.
     bid, ask = leg.get("bid"), leg.get("ask")
-    spread = (float(ask) - float(bid)) if (bid is not None and ask is not None) else 0.0
-    slippage = max(0.0, spread) * SLIPPAGE_SPREAD_FRACTION * units
+    if bid is not None and ask is not None and float(ask) >= float(bid):
+        slippage = max(0.0, float(ask) - float(bid)) * SLIPPAGE_SPREAD_FRACTION * units
+        slip_basis = SLIPPAGE_BASIS_MEASURED
+    else:
+        slippage = ASSUMED_SLIPPAGE_PCT_OF_PREMIUM * abs(premium_value)
+        slip_basis = SLIPPAGE_BASIS_ASSUMED
 
     return {"brokerage": brokerage, "stt": stt, "exchange_txn": exch, "sebi": sebi,
             "stamp_duty": stamp, "gst": gst, "slippage": slippage,
+            "slippage_basis": slip_basis,
             "total": brokerage + stt + exch + sebi + stamp + gst + slippage}
 
 
@@ -233,8 +273,24 @@ def total_costs(legs: list, round_trip: bool = True) -> dict:
         out = {k: v * 2.0 for k, v in out.items()}
     out["round_trip"] = round_trip
     out["costs_version"] = COSTS_VERSION
-    out["costs_basis"] = "governed_table"      # never "measured" until calibrate_costs runs
+
+    # Whether ANY leg's slippage is assumed rather than measured must reach the consumer --
+    # an aggregate that mixes measured and assumed components while claiming to be a pure
+    # governed-table figure is exactly how an 86% cost understatement went unnoticed.
+    n_assumed = sum(1 for e in entry if e["slippage_basis"] == SLIPPAGE_BASIS_ASSUMED)
+    out["slippage_legs_assumed"] = n_assumed
+    out["slippage_legs_measured"] = len(entry) - n_assumed
+    out["costs_basis"] = ("governed_table" if n_assumed == 0
+                          else "governed_table+assumed_slippage")
+    if n_assumed:
+        out["costs_note"] = (
+            "%d of %d legs had no two-sided quote, so their slippage is a governed "
+            "assumption (%.1f%% of premium), not a measured half-spread"
+            % (n_assumed, len(entry), ASSUMED_SLIPPAGE_PCT_OF_PREMIUM * 100))
+    # per_leg is single-trip; the aggregate above is doubled when round_trip. Stated so the
+    # 2x discrepancy between sum(per_leg) and total is never mistaken for an arithmetic bug.
     out["per_leg"] = entry
+    out["per_leg_basis"] = "single_trip (aggregate is doubled when round_trip=True)"
     return out
 
 
@@ -266,7 +322,13 @@ def margin_estimate(legs: list) -> dict:
     governed buffer for the exposure component and intraday mark-to-market swings. This is
     an upper-bound-ish estimate, so it under-states capacity rather than over-stating it.
     """
-    ml = abs(max_loss(legs, include_costs=False))
+    ml_raw = max_loss(legs, include_costs=False)
+    if ml_raw is None:
+        # Unbounded risk has no defined-risk margin proxy. Refusing is the only honest answer.
+        return {"margin_est": None, "basis": "unavailable_unbounded_risk", "measured": False,
+                "note": ("structure is not defined-risk, so max-loss cannot bound the margin; "
+                         "phase 1 trades defined-risk structures only")}
+    ml = abs(ml_raw)
     buffer_pct = 0.20                     # governed; calibrate against the probe's real number
     return {"margin_est": ml * (1.0 + buffer_pct),
             "basis": "conservative_defined_risk_estimate",
@@ -292,7 +354,8 @@ def net_greeks(legs: list) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────── POP and EV
-def pop(legs: list, F: float, T: float, sigma: float, include_costs: bool = True) -> dict:
+def pop(legs: list, F: float, T: float, sigma: float, include_costs: bool = True,
+        smile: Optional[list] = None) -> dict:
     """Probability of profit under the market's own implied density.
 
     Reported two ways, because they answer different questions and quoting one while
@@ -309,62 +372,154 @@ def pop(legs: list, F: float, T: float, sigma: float, include_costs: bool = True
     which is exactly the "steamroller" the brief warns about. Expectancy decides.
     """
     bes = breakevens(legs, include_costs=include_costs)
+
+    # SMILE-AWARE: the probability of breaching a strike depends on the vol AT that strike,
+    # not on the ATM vol. On a real NIFTY chain the 16-delta put trades ~1.8 vol points above
+    # ATM, so a flat-vol POP systematically UNDERSTATES the chance the put side is breached
+    # and therefore OVERSTATES the condor's POP. Each boundary is evaluated at its own
+    # interpolated IV; we fall back to flat `sigma` only when no smile is available, and say
+    # which was used.
+    def _p_above(x: float) -> float:
+        iv = interp_iv(smile, x) if smile else None
+        return P.prob_between(F, T, iv if iv is not None else sigma, x, None)
+
     if len(bes) == 2:
-        pop_be = P.prob_between(F, T, sigma, bes[0], bes[1])
+        pop_be = max(0.0, _p_above(bes[0]) - _p_above(bes[1]))
     elif len(bes) == 1:
         # one-sided structure: profitable on whichever side currently pays
-        mid_hi = payoff_money_at(legs, bes[0] * 1.05, include_costs)
-        pop_be = (P.prob_between(F, T, sigma, bes[0], None) if mid_hi > 0
-                  else P.prob_between(F, T, sigma, None, bes[0]))
+        pays_up = payoff_money_at(legs, bes[0] * 1.05, include_costs) > 0
+        pop_be = _p_above(bes[0]) if pays_up else (1.0 - _p_above(bes[0]))
     else:
         pop_be = 1.0 if payoff_money_at(legs, F, include_costs) > 0 else 0.0
 
     shorts = sorted(float(l["strike"]) for l in legs if _sign(l["action"]) < 0)
-    pop_bd = (P.prob_between(F, T, sigma, shorts[0], shorts[-1])
+    pop_bd = (max(0.0, _p_above(shorts[0]) - _p_above(shorts[-1]))
               if len(shorts) >= 2 else None)
-    return {"pop_breakeven": pop_be, "pop_body": pop_bd, "breakevens": bes}
+    return {"pop_breakeven": pop_be, "pop_body": pop_bd, "breakevens": bes,
+            "basis": "smile_interpolated" if smile else "flat_atm_vol",
+            "smile_note": (None if smile else
+                           "no smile supplied — flat ATM vol OVERSTATES the POP of a "
+                           "put-skewed structure like a condor")}
+
+
+def build_smile(legs_or_rows: list) -> list:
+    """[(strike, iv)] from whatever rows carry a solved IV, sorted by strike, deduped.
+
+    The volatility SMILE is not optional decoration — see ``expected_value``. Measured on a
+    real NIFTY chain: 16-delta puts at 10.9-11.5% IV against 9.4-9.5% for the calls and
+    9.75% ATM. Treating that as one flat number misprices every strike away from the money.
+    """
+    by_k = {}
+    for r in legs_or_rows:
+        iv = r.get("iv")
+        k = r.get("strike")
+        if iv is None or k is None:
+            continue
+        by_k.setdefault(float(k), []).append(float(iv))
+    return [(k, sum(v) / len(v)) for k, v in sorted(by_k.items())]
+
+
+def interp_iv(smile: list, K: float) -> Optional[float]:
+    """IV at an arbitrary strike by linear interpolation across the smile, flat-extrapolated
+    beyond the ends.
+
+    Linear in strike (not in log-moneyness) is adequate here because the NIFTY ladder is
+    dense — a measured 50-point step — so adjacent knots are close together. It is stated
+    rather than hidden because on a sparse ladder it would not be adequate.
+    """
+    if not smile:
+        return None
+    K = float(K)
+    if K <= smile[0][0]:
+        return smile[0][1]
+    if K >= smile[-1][0]:
+        return smile[-1][1]
+    for i in range(len(smile) - 1):
+        k0, v0 = smile[i]
+        k1, v1 = smile[i + 1]
+        if k0 <= K <= k1:
+            if k1 == k0:
+                return v0
+            w = (K - k0) / (k1 - k0)
+            return v0 + w * (v1 - v0)
+    return smile[-1][1]
 
 
 def expected_value(legs: list, F: float, T: float, sigma: float,
-                   include_costs: bool = True, grid: int = 20001) -> dict:
-    """Risk-neutral expected P&L in rupees, plus the honest labelling around it.
+                   include_costs: bool = True, grid: int = 20001,
+                   smile: Optional[list] = None) -> dict:
+    """Risk-neutral expected P&L in rupees — computed ANALYTICALLY, plus a labelled
+    flat-vol diagnostic.
 
-    Method: the payoff is bounded and piecewise-linear, so we integrate it on a dense grid
-    across the strike region and add the two CONSTANT tails in closed form via
-    ``prob_between``. No tail mass is dropped — dropping it is a common way to flatter a
-    short-premium structure, because the tails are exactly where it loses.
+    WHY ANALYTIC, AND WHY THIS NUMBER CARRIES NO INFORMATION
+    --------------------------------------------------------
+    Under the risk-neutral measure the market itself is quoting, the undiscounted expected
+    terminal intrinsic of an option IS its market price grossed up by the discount factor:
+    E[intrinsic_K] = price_K / disc. Summing over the legs:
+
+        EV = sum_i sign_i * price_i/disc  -  sum_i sign_i * price_i
+           = (1/disc - 1) * net_premium
+           = -(1/disc - 1) * credit
+
+    So for ANY structure priced at market, risk-neutral EV is exactly a small carry term —
+    the credit is received today while the payoff settles at expiry — and it is a TAUTOLOGY.
+    It cannot show an edge for any structure, ever. It is reported only as an arithmetic
+    check and must never be fed to a decision gate as though it were a forecast.
+
+    WHY THE OLD NUMERICAL INTEGRATION WAS WRONG TO REPORT AS "EV"
+    -------------------------------------------------------------
+    Integrating the payoff against a lognormal density built from ONE flat ATM vol ignores
+    the smile. Measured on a real NIFTY 2026-09-29 condor: the analytic EV net of costs is
+    Rs -230.50, while the flat-ATM-vol integration returns Rs -540.21 — a model error of
+    Rs -309.71, LARGER than the quantity being estimated. That error is pure flat-vol
+    artefact, not signal. It is now reported as ``flat_vol_diagnostic`` with the gap made
+    explicit, and it is never the headline EV.
     """
-    ks = sorted({float(l["strike"]) for l in legs})
-    lo, hi = ks[0] * 0.60, ks[-1] * 1.40
-
-    step = (hi - lo) / (grid - 1)
-    xs = [lo + i * step for i in range(grid)]
-    dens = P.lognormal_terminal_pdf(F, T, sigma, xs)
-    body = sum(payoff_money_at(legs, S, include_costs) * d
-               for S, d in zip(xs, dens)) * step
-
-    # Constant-payoff tails, integrated exactly rather than truncated.
-    p_lo = P.prob_between(F, T, sigma, None, lo)
-    p_hi = P.prob_between(F, T, sigma, hi, None)
-    tails = (payoff_money_at(legs, lo * 0.5, include_costs) * p_lo
-             + payoff_money_at(legs, hi * 1.5, include_costs) * p_hi)
-
-    ev_rn = body + tails
+    disc = math.exp(-P.R_DEFAULT * T)
+    u = _units(legs[0]) if legs else 0
+    credit_total = net_credit(legs) * u
+    carry = -(1.0 / disc - 1.0) * credit_total
     costs = total_costs(legs)["total"] if include_costs else 0.0
+    ev_rn = carry - costs
+
+    # ── flat-vol numerical integration, kept ONLY as a labelled diagnostic ──────────
+    diag = None
+    try:
+        ks = sorted({float(l["strike"]) for l in legs})
+        lo, hi = ks[0] * 0.60, ks[-1] * 1.40
+        step = (hi - lo) / (grid - 1)
+        xs = [lo + i * step for i in range(grid)]
+        dens = P.lognormal_terminal_pdf(F, T, sigma, xs)
+        body = sum(payoff_money_at(legs, S, include_costs) * d
+                   for S, d in zip(xs, dens)) * step
+        p_lo = P.prob_between(F, T, sigma, None, lo)
+        p_hi = P.prob_between(F, T, sigma, hi, None)
+        tails = (payoff_money_at(legs, lo * 0.5, include_costs) * p_lo
+                 + payoff_money_at(legs, hi * 1.5, include_costs) * p_hi)
+        num = body + tails
+        diag = {"flat_vol_ev": num, "sigma_used": sigma,
+                "model_error_vs_analytic": num - ev_rn,
+                "tail_mass_lo": p_lo, "tail_mass_hi": p_hi,
+                "note": ("ignores the volatility smile; the gap is flat-vol model error, "
+                         "NOT signal. Never use this as EV.")}
+    except Exception:                                   # noqa: BLE001 — diagnostic only
+        diag = {"error": "flat-vol diagnostic unavailable"}
+
     return {
         "ev_riskneutral": ev_rn,
+        "ev_riskneutral_carry": carry,
         "ev_realworld": None,
         "ev_realworld_reason": (
             "requires a governed, frozen, SPEC-until-OOS variance-risk-premium assumption; "
             "none is approved, so this is unknown rather than zero"),
         "costs_charged": costs,
-        "tail_mass_lo": p_lo,
-        "tail_mass_hi": p_hi,
-        "basis": "risk_neutral_implied_density",
+        "basis": "analytic_risk_neutral_identity",
+        "smile_used_by_diagnostic_only": bool(smile),   # the analytic EV does NOT use the smile
+        "flat_vol_diagnostic": diag,
         "interpretation": (
-            "A fairly-priced structure integrates to about -costs under the market's own "
-            "density. This is a validity CHECK on the arithmetic, NOT an edge. The deciding "
-            "number is realised expectancy from tracked outcomes."),
+            "Risk-neutral EV of any market-priced structure is exactly -(1/disc-1)*credit, "
+            "a tautology that can never show an edge. It is an arithmetic check only. The "
+            "DECIDING number is realised expectancy from tracked outcomes."),
     }
 
 
@@ -387,27 +542,41 @@ def liquidity(legs: list) -> dict:
 
 
 # ───────────────────────────────────────────────────────────────────── one-shot summary
-def evaluate(legs: list, F: float, T: float, sigma: float) -> dict:
+def evaluate(legs: list, F: float, T: float, sigma: float,
+             smile: Optional[list] = None) -> dict:
     """The full per-candidate metric bundle the brief asks for, in one call.
 
     Everything real, everything from the chain, nothing invented. Where a number is not
-    knowable it is None with a reason, never a placeholder."""
+    knowable it is None with a reason, never a placeholder.
+
+    `smile` should be passed whenever the chain has per-strike IVs — without it POP falls
+    back to flat ATM vol, which overstates a condor's POP (see ``pop``). If the caller does
+    not supply one, we derive it from the legs themselves as a partial fallback."""
+    if smile is None:
+        smile = build_smile(legs) or None
     u = _units(legs[0]) if legs else 0
     credit_unit = net_credit(legs)
     mp = max_profit(legs)
     ml = max_loss(legs)
-    ev = expected_value(legs, F, T, sigma)
-    pp = pop(legs, F, T, sigma)
+    ev = expected_value(legs, F, T, sigma, smile=smile)
+    pp = pop(legs, F, T, sigma, smile=smile)
     costs = total_costs(legs)
 
-    rr = (mp / abs(ml)) if ml < 0 else None
+    rr = (mp / abs(ml)) if (ml is not None and ml < 0) else None
     return {
         "units": u,
         "credit_per_unit": credit_unit,
         "credit_total": credit_unit * u,
         "max_profit": mp,
-        "max_loss": ml,
+        "max_loss": ml,                       # None when risk is unbounded -- never a bound
+        "max_loss_reason": (None if ml is not None
+                            else "unbounded_beyond_outer_strike: no finite max loss exists"),
         "risk_reward": rr,
+        # POP provenance travels WITH the POP. Previously pop()'s basis and its
+        # flat-vol-overstates warning were computed and then dropped here, while
+        # expected_value's meaningless "smile_used" flag was what callers printed next to it.
+        "pop_basis": pp.get("basis"),
+        "pop_smile_note": pp.get("smile_note"),
         "defined_risk": is_defined_risk(legs),
         "breakevens": pp["breakevens"],
         "pop_breakeven": pp["pop_breakeven"],

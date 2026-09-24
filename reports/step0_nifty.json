@@ -1,0 +1,658 @@
+{
+  "probe": "options_step0",
+  "name": "NIFTY",
+  "run_at": "2026-08-31T18:30:13",
+  "status": "OK",
+  "spot_source": "NSE:NIFTY 50",
+  "spot": 24080.4,
+  "q1_instruments": {
+    "nfo_rows_total": 31237,
+    "option_rows_for_name": 1594,
+    "row_fields": [
+      "exchange",
+      "exchange_token",
+      "expiry",
+      "instrument_token",
+      "instrument_type",
+      "last_price",
+      "lot_size",
+      "name",
+      "segment",
+      "strike",
+      "tick_size",
+      "tradingsymbol"
+    ],
+    "expiries": [
+      {
+        "expiry": "2026-09-01",
+        "contracts": 210,
+        "distinct_strikes": 105,
+        "strike_min": 22000.0,
+        "strike_max": 27200.0,
+        "strike_steps_seen": [
+          50.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2026-09-08",
+        "contracts": 164,
+        "distinct_strikes": 82,
+        "strike_min": 22350.0,
+        "strike_max": 26400.0,
+        "strike_steps_seen": [
+          50.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2026-09-15",
+        "contracts": 156,
+        "distinct_strikes": 78,
+        "strike_min": 22350.0,
+        "strike_max": 26200.0,
+        "strike_steps_seen": [
+          50.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2026-09-22",
+        "contracts": 152,
+        "distinct_strikes": 76,
+        "strike_min": 22350.0,
+        "strike_max": 26100.0,
+        "strike_steps_seen": [
+          50.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2026-09-29",
+        "contracts": 246,
+        "distinct_strikes": 123,
+        "strike_min": 15000.0,
+        "strike_max": 34500.0,
+        "strike_steps_seen": [
+          50.0,
+          600.0,
+          1300.0,
+          1500.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2026-10-27",
+        "contracts": 200,
+        "distinct_strikes": 100,
+        "strike_min": 22250.0,
+        "strike_max": 27200.0,
+        "strike_steps_seen": [
+          50.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2026-11-23",
+        "contracts": 152,
+        "distinct_strikes": 76,
+        "strike_min": 22350.0,
+        "strike_max": 26100.0,
+        "strike_steps_seen": [
+          50.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2026-12-29",
+        "contracts": 49,
+        "distinct_strikes": 28,
+        "strike_min": 12000.0,
+        "strike_max": 34500.0,
+        "strike_steps_seen": [
+          500.0,
+          1000.0,
+          1500.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2027-03-30",
+        "contracts": 25,
+        "distinct_strikes": 13,
+        "strike_min": 15000.0,
+        "strike_max": 33000.0,
+        "strike_steps_seen": [
+          1500.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2027-06-29",
+        "contracts": 26,
+        "distinct_strikes": 13,
+        "strike_min": 16500.0,
+        "strike_max": 33000.0,
+        "strike_steps_seen": [
+          500.0,
+          1000.0,
+          1500.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2027-12-28",
+        "contracts": 34,
+        "distinct_strikes": 20,
+        "strike_min": 15000.0,
+        "strike_max": 33000.0,
+        "strike_steps_seen": [
+          500.0,
+          1000.0,
+          1500.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2028-06-27",
+        "contracts": 25,
+        "distinct_strikes": 13,
+        "strike_min": 16500.0,
+        "strike_max": 33000.0,
+        "strike_steps_seen": [
+          500.0,
+          1000.0,
+          1500.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2028-12-26",
+        "contracts": 30,
+        "distinct_strikes": 18,
+        "strike_min": 16500.0,
+        "strike_max": 33000.0,
+        "strike_steps_seen": [
+          500.0,
+          1000.0,
+          1500.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2029-06-26",
+        "contracts": 25,
+        "distinct_strikes": 13,
+        "strike_min": 16500.0,
+        "strike_max": 33000.0,
+        "strike_steps_seen": [
+          500.0,
+          1000.0,
+          1500.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2029-12-24",
+        "contracts": 28,
+        "distinct_strikes": 16,
+        "strike_min": 15000.0,
+        "strike_max": 33000.0,
+        "strike_steps_seen": [
+          500.0,
+          1000.0,
+          1500.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2030-06-25",
+        "contracts": 24,
+        "distinct_strikes": 12,
+        "strike_min": 16500.0,
+        "strike_max": 33000.0,
+        "strike_steps_seen": [
+          1500.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2030-12-31",
+        "contracts": 24,
+        "distinct_strikes": 12,
+        "strike_min": 16500.0,
+        "strike_max": 33000.0,
+        "strike_steps_seen": [
+          1500.0
+        ],
+        "lot_size": 65
+      },
+      {
+        "expiry": "2031-06-24",
+        "contracts": 24,
+        "distinct_strikes": 12,
+        "strike_min": 16500.0,
+        "strike_max": 33000.0,
+        "strike_steps_seen": [
+          1500.0
+        ],
+        "lot_size": 65
+      }
+    ],
+    "distinct_expiries": 18,
+    "sample_row": {
+      "instrument_token": "12029186",
+      "exchange_token": "46989",
+      "tradingsymbol": "NIFTY2690124100CE",
+      "name": "NIFTY",
+      "last_price": "0.0",
+      "expiry": "2026-09-01",
+      "strike": "24100.0",
+      "tick_size": "0.05",
+      "lot_size": "65",
+      "instrument_type": "CE",
+      "segment": "NFO-OPT",
+      "exchange": "NFO"
+    }
+  },
+  "q2_history": {
+    "probes": [
+      {
+        "probe": "nearest_expiry",
+        "tradingsymbol": "NIFTY2690124100CE",
+        "expiry": "2026-09-01",
+        "strike": 24100.0,
+        "instrument_token": 12029186,
+        "day_candles": {
+          "requested_from": "2025-07-27",
+          "returned": 29,
+          "earliest": "2026-07-22T00:00:00+05:30",
+          "latest": "2026-08-31T00:00:00+05:30",
+          "fields": [
+            "close",
+            "date",
+            "high",
+            "low",
+            "oi",
+            "open",
+            "volume"
+          ],
+          "oi_present": true
+        },
+        "minute_candles": {
+          "requested_from": "2026-07-07",
+          "returned": 10923,
+          "earliest": "2026-07-22T09:15:00+05:30",
+          "latest": "2026-08-31T15:39:00+05:30",
+          "fields": [
+            "close",
+            "date",
+            "high",
+            "low",
+            "oi",
+            "open",
+            "volume"
+          ],
+          "oi_present": true
+        }
+      },
+      {
+        "probe": "farthest_expiry",
+        "tradingsymbol": "NIFTY31JUN24000CE",
+        "expiry": "2031-06-24",
+        "strike": 24000.0,
+        "instrument_token": 19110146,
+        "day_candles": {
+          "requested_from": "2025-07-27",
+          "returned": 44,
+          "earliest": "2026-07-01T00:00:00+05:30",
+          "latest": "2026-08-31T00:00:00+05:30",
+          "fields": [
+            "close",
+            "date",
+            "high",
+            "low",
+            "oi",
+            "open",
+            "volume"
+          ],
+          "oi_present": true
+        },
+        "minute_candles": {
+          "requested_from": "2026-07-07",
+          "returned": 0,
+          "earliest": null,
+          "latest": null,
+          "fields": [],
+          "oi_present": false
+        }
+      }
+    ]
+  },
+  "q3_quote": {
+    "symbol": "NFO:NIFTY2690124600PE",
+    "top_level_keys": [
+      "average_price",
+      "buy_quantity",
+      "depth",
+      "high_limit_price_protection",
+      "indicative_close_price",
+      "instrument_token",
+      "last_price",
+      "last_quantity",
+      "last_trade_time",
+      "low_limit_price_protection",
+      "lower_circuit_limit",
+      "net_change",
+      "ohlc",
+      "oi",
+      "oi_day_high",
+      "oi_day_low",
+      "reference_limit_price",
+      "sell_quantity",
+      "timestamp",
+      "total_imbalance_qty",
+      "upper_circuit_limit",
+      "volume"
+    ],
+    "depth_keys": [
+      "buy",
+      "sell"
+    ],
+    "depth_levels_bid": 5,
+    "depth_levels_ask": 5,
+    "has_oi": true,
+    "has_iv": false,
+    "has_greeks": false,
+    "raw": {
+      "instrument_token": "12034562",
+      "timestamp": "1970-01-01T05:30:00",
+      "last_trade_time": "2026-08-31T15:39:45",
+      "last_price": "486.15",
+      "last_quantity": "195",
+      "buy_quantity": "0",
+      "sell_quantity": "0",
+      "volume": "0",
+      "average_price": "0",
+      "oi": "286130",
+      "oi_day_high": "0",
+      "oi_day_low": "0",
+      "net_change": "0",
+      "lower_circuit_limit": "0.05",
+      "upper_circuit_limit": "1092.05",
+      "low_limit_price_protection": "0",
+      "high_limit_price_protection": "0",
+      "reference_limit_price": "0",
+      "indicative_close_price": "0",
+      "total_imbalance_qty": "0",
+      "ohlc": "{'open': 453, 'high': 565, 'low': 412.45, 'close': 486.15}"
+    }
+  },
+  "q4q5_margin_and_charges": {
+    "legs": [
+      {
+        "exchange": "NFO",
+        "tradingsymbol": "NIFTY2690124500CE",
+        "transaction_type": "SELL",
+        "variety": "regular",
+        "product": "NRML",
+        "order_type": "MARKET",
+        "quantity": 65
+      },
+      {
+        "exchange": "NFO",
+        "tradingsymbol": "NIFTY2690124700CE",
+        "transaction_type": "BUY",
+        "variety": "regular",
+        "product": "NRML",
+        "order_type": "MARKET",
+        "quantity": 65
+      },
+      {
+        "exchange": "NFO",
+        "tradingsymbol": "NIFTY2690123700PE",
+        "transaction_type": "SELL",
+        "variety": "regular",
+        "product": "NRML",
+        "order_type": "MARKET",
+        "quantity": 65
+      },
+      {
+        "exchange": "NFO",
+        "tradingsymbol": "NIFTY2690123500PE",
+        "transaction_type": "BUY",
+        "variety": "regular",
+        "product": "NRML",
+        "order_type": "MARKET",
+        "quantity": 65
+      }
+    ],
+    "note": "READ-ONLY calculators; no order is created by either call",
+    "basket_margin": {
+      "initial": {
+        "type": "",
+        "tradingsymbol": "",
+        "exchange": "",
+        "span": 226295.55,
+        "exposure": 125218.08000000002,
+        "option_premium": 217.75,
+        "additional": 0,
+        "bo": 0,
+        "cash": 0,
+        "var": 0,
+        "mtf": 0,
+        "pnl": {
+          "realised": 0,
+          "unrealised": 0
+        },
+        "leverage": 0,
+        "charges": {
+          "transaction_tax": 0,
+          "transaction_tax_type": "",
+          "exchange_turnover_charge": 0,
+          "sebi_turnover_charge": 0,
+          "brokerage": 0,
+          "stamp_duty": 0,
+          "gst": {
+            "igst": 0,
+            "cgst": 0,
+            "sgst": 0,
+            "total": 0
+          },
+          "total": 0
+        },
+        "total": 351731.38
+      },
+      "final": {
+        "type": "",
+        "tradingsymbol": "",
+        "exchange": "",
+        "span": 12959.25,
+        "exposure": 125218.08000000002,
+        "option_premium": -198.25,
+        "additional": 0,
+        "bo": 0,
+        "cash": 0,
+        "var": 0,
+        "mtf": 0,
+        "pnl": {
+          "realised": 0,
+          "unrealised": 0
+        },
+        "leverage": 0,
+        "charges": {
+          "transaction_tax": 0,
+          "transaction_tax_type": "",
+          "exchange_turnover_charge": 0,
+          "sebi_turnover_charge": 0,
+          "brokerage": 0,
+          "stamp_duty": 0,
+          "gst": {
+            "igst": 0,
+            "cgst": 0,
+            "sgst": 0,
+            "total": 0
+          },
+          "total": 0
+        },
+        "total": 137979.08000000002
+      },
+      "orders": [
+        {
+          "type": "equity",
+          "tradingsymbol": "NIFTY2690124500CE",
+          "exchange": "NFO",
+          "span": 118392.3,
+          "exposure": 62609.04000000001,
+          "option_premium": 0,
+          "additional": 0,
+          "bo": 0,
+          "cash": 0,
+          "var": 0,
+          "mtf": 0,
+          "pnl": {
+            "realised": 0,
+            "unrealised": 0
+          },
+          "leverage": 1,
+          "charges": {
+            "transaction_tax": 0.307125,
+            "transaction_tax_type": "stt",
+            "exchange_turnover_charge": 0.072747675,
+            "sebi_turnover_charge": 0.00020475,
+            "brokerage": 20,
+            "stamp_duty": 0,
+            "gst": {
+              "igst": 3.6131314365000007,
+              "cgst": 0,
+              "sgst": 0,
+              "total": 3.6131314365000007
+            },
+            "total": 23.9932088615
+          },
+          "total": 181001.34000000003
+        },
+        {
+          "type": "equity",
+          "tradingsymbol": "NIFTY2690124700CE",
+          "exchange": "NFO",
+          "span": 0,
+          "exposure": 0,
+          "option_premium": 97.5,
+          "additional": 0,
+          "bo": 0,
+          "cash": 0,
+          "var": 0,
+          "mtf": 0,
+          "pnl": {
+            "realised": 0,
+            "unrealised": 0
+          },
+          "leverage": 1,
+          "charges": {
+            "transaction_tax": 0,
+            "transaction_tax_type": "stt",
+            "exchange_turnover_charge": 0.03464175,
+            "sebi_turnover_charge": 9.75e-05,
+            "brokerage": 20,
+            "stamp_duty": 0,
+            "gst": {
+              "igst": 3.6062530649999993,
+              "cgst": 0,
+              "sgst": 0,
+              "total": 3.6062530649999993
+            },
+            "total": 23.640992315
+          },
+          "total": 97.5
+        },
+        {
+          "type": "equity",
+          "tradingsymbol": "NIFTY2690123700PE",
+          "exchange": "NFO",
+          "span": 107903.25,
+          "exposure": 62609.04000000001,
+          "option_premium": 0,
+          "additional": 0,
+          "bo": 0,
+          "cash": 0,
+          "var": 0,
+          "mtf": 0,
+          "pnl": {
+            "realised": 0,
+            "unrealised": 0
+          },
+          "leverage": 1,
+          "charges": {
+            "transaction_tax": 0.316875,
+            "transaction_tax_type": "stt",
+            "exchange_turnover_charge": 0.075057125,
+            "sebi_turnover_charge": 0.00021124999999999998,
+            "brokerage": 20,
+            "stamp_duty": 0,
+            "gst": {
+              "igst": 3.6135483075,
+              "cgst": 0,
+              "sgst": 0,
+              "total": 3.6135483075
+            },
+            "total": 24.0056916825
+          },
+          "total": 170512.29
+        },
+        {
+          "type": "equity",
+          "tradingsymbol": "NIFTY2690123500PE",
+          "exchange": "NFO",
+          "span": 0,
+          "exposure": 0,
+          "option_premium": 120.25,
+          "additional": 0,
+          "bo": 0,
+          "cash": 0,
+          "var": 0,
+          "mtf": 0,
+          "pnl": {
+            "realised": 0,
+            "unrealised": 0
+          },
+          "leverage": 1,
+          "charges": {
+            "transaction_tax": 0,
+            "transaction_tax_type": "stt",
+            "exchange_turnover_charge": 0.042724825,
+            "sebi_turnover_charge": 0.00012025,
+            "brokerage": 20,
+            "stamp_duty": 0,
+            "gst": {
+              "igst": 3.6077121135,
+              "cgst": 0,
+              "sgst": 0,
+              "total": 3.6077121135
+            },
+            "total": 23.6505571885
+          },
+          "total": 120.25
+        }
+      ],
+      "charges": {
+        "transaction_tax": 0,
+        "transaction_tax_type": "",
+        "exchange_turnover_charge": 0,
+        "sebi_turnover_charge": 0.00063375,
+        "brokerage": 80,
+        "stamp_duty": 0,
+        "gst": {
+          "igst": 0,
+          "cgst": 0,
+          "sgst": 0,
+          "total": 0
+        },
+        "total": 0
+      }
+    },
+    "virtual_contract_note": {
+      "error": "GeneralException: error computing charges: average_price value not found"
+    }
+  }
+}

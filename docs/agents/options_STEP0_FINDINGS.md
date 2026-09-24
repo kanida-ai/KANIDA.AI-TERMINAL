@@ -1,22 +1,106 @@
 # Options Agent — STEP 0 findings: the options data reality
 
-> Status: **reported, awaiting orchestrator confirmation of the evidence approach.**
-> Rule applied throughout: nothing below is asserted unless it was measured, and every
-> unmeasured item is labelled UNVERIFIED with the exact probe that would settle it.
-> Run date: 2026-08-31. Repo: `C:\Users\SPS\Desktop\koptions`.
+> Status: **REVISED 2026-08-31 after running the probe against LIVE Kite.** The first pass
+> was written with no credentials in this checkout; a live token was then located and the
+> open questions are now **measured, not expected**. §0 is the revision and supersedes the
+> earlier conclusion where they differ. Repo: `C:\Users\SPS\Desktop\koptions`.
 
 ---
 
-## TL;DR
+## 0 · REVISION — what the live probe actually measured
+
+The first pass concluded "no historical backtest is possible, go forward-tracking only".
+**That was too strong.** Measured against live Kite (user DC2940, token dated 2026-08-31):
+
+**0.1 There is no artificial cap on option history.** `historical_data` returns candles from
+each contract's **listing date**, subject only to the documented 2000-day-per-request limit
+(confirmed by the API's own error: `interval exceeds max limit: 2000 days`). Requesting 2000,
+400 or 90 days returns the same earliest bar for a given contract — its listing date.
+
+Measured depth, NIFTY calls near ATM, `oi=True` returning open interest on every bar:
+
+| Contract | Expiry | Daily bars | Listed |
+|---|---|---|---|
+| `NIFTY2690124100CE` | 2026-09-01 | 29 | 2026-07-22 |
+| `NIFTY26SEP24100CE` | 2026-09-29 | 44 | 2026-07-01 |
+| `NIFTY26OCT24100CE` | 2026-10-27 | 24 | 2026-07-29 |
+| **`NIFTY26DEC24000CE`** | 2026-12-29 | **833** | **2022-11-28** |
+| `NIFTY28JUN24000CE` | 2028-06-27 | 787 | 2023-06-30 |
+| `NIFTY30DEC24000CE` | 2030-12-31 | 165 | 2025-12-31 |
+
+So a single long-dated contract carries nearly **four years** of real daily option history
+including OI. Minute data is also available (10,923 one-minute bars on the front weekly).
+
+**0.2 Expired tokens are rejected — this is now proven, not inferred.** Probing instrument
+tokens absent from today's NFO master returns `InputException: invalid token`, with a
+known-good live token succeeding as a control immediately before. Kite serves history
+**only** for instruments in the current master. So the enumeration problem in §3 stands, and
+is now measured rather than reasoned.
+
+**0.3 The consequence — a real backtest IS possible, inside a sharp survivorship boundary.**
+For a past date *D* we can reconstruct the chain **only from contracts still listed today**.
+Measured coverage (still-listed NIFTY contracts already listed on *D*):
+
+| D | Contracts | Live expiries | Nearest expiry still visible |
+|---|---|---|---|
+| today | 1,594 | 18 | 2026-09-01 |
+| −30 d | 970 | 14 | 2026-09-01 |
+| −60 d | 560 | 12 | **2026-09-29** |
+| −90 d | 290 | 10 | **2026-12-29** |
+| −365 d | 241 | 8 | **2026-12-29** |
+
+The last column is the one that matters. At 90 days back the nearest expiry we can still see
+is ~7 months out. **A weekly iron condor is invisible beyond about 30–40 days back** — the
+weeklies it would actually have traded have expired and are unreachable. What survives at
+longer lookbacks is long-dated LEAPS, which is a different instrument and a different
+strategy; back-testing a weekly condor on those would be both survivorship-biased and
+strategy-mismatched.
+
+**0.4 Kite gives no IV and no greeks — now measured.** A live `quote()` on
+`NFO:NIFTY2690124600PE` returns 22 keys: `last_price, oi, oi_day_high, oi_day_low, volume,
+depth (5 bid + 5 ask), ohlc, average_price, circuit limits, timestamp, last_trade_time` …
+and **no `iv`, no `delta/gamma/theta/vega`**. `pricing.py` (Black-76) is therefore mandatory,
+as expected — the expectation is now a measurement.
+
+**0.5 Live chain shape (measured).** 31,237 NFO instruments total; **1,594 NIFTY option
+contracts across 18 expiries**; strike step **50**; **lot size 65**; weekly expiries on
+Tuesdays (2026-09-01, -09-08, -09-15, -09-22), monthlies, then quarterly/half-yearly out to
+2031-06-24. Spot at probe time 24,080.4. (Lot size 65 — *not* the 75 a hardcoded constant
+would have assumed. This is exactly why `data.py` reads lot size from the as-of snapshot.)
+
+### 0.6 Revised recommendation — HYBRID, not forward-only
+
+1. **Backfill on the first snapshot run.** Because every live contract serves its full
+   history since listing, the first run can pull ~1,594 NIFTY contracts × their lifetimes
+   immediately, instead of accruing one day at a time. That yields a real dataset *today*,
+   validates the whole pipeline (IV solve → greeks → condor construction → replay) on real
+   data, and gives an immediate honest N of roughly 4–8 near-dated condor cycles.
+2. **Genuine limited historical replay** over the last ~30–60 days for weekly/near-monthly
+   condors, labelled with its survivorship boundary explicitly.
+3. **Forward-tracking remains the primary evidence path** — it is the only thing that
+   removes the survivorship boundary, and beyond ~40 days back the near-dated chain simply
+   does not exist.
+
+**Backfill honesty caveat (important).** `historical_data` returns OHLC + OI per contract per
+day — it does **not** return bid/ask. So backfilled rows have closes and OI but **no
+spreads**. Backfilled rows must therefore be marked `price_source="hist_close"`, slippage
+must fall back to a governed assumption rather than a measured spread, and the **liquidity
+gate must report `skipped` with a reason on backfilled dates** rather than silently passing.
+Only live snapshots carry real bid/ask.
+
+---
+
+## TL;DR (first pass — see §0 for the measured revision)
 
 1. **There is no options data in this repo.** None. Not a table, not a file.
-2. **There are no Kite credentials in this checkout**, so no live measurement was possible
-   from here. A read-only probe script is written and ready to run the moment there are.
-3. **A true historical point-in-time options backtest is not constructible from Kite
-   alone** — and this conclusion does *not* depend on the missing credentials. See §3.
-4. → **Recommended evidence approach: forward-tracking (live-eval + track-to-expiry),
-   honestly labelled small-N**, plus **start snapshotting the chain daily immediately**,
-   because that is the only path to ever owning a real historical chain.
+2. ~~There are no Kite credentials~~ — a live token was subsequently located at
+   `Desktop\Kanida.ai Terminal Quant Intelligence Engine\data\db\kanida_quant.db`
+   (`kite_tokens`, dated 2026-08-31). The probe has been run; see §0.
+3. **A historical point-in-time chain cannot be reconstructed for contracts that have
+   expired** — confirmed by measurement in §0.2. But contracts still listed DO serve their
+   full history, which §0.3 quantifies.
+4. → Evidence approach: **hybrid** — backfill + limited historical replay inside the
+   survivorship boundary, with forward-tracking as the primary path. See §0.6.
 
 ---
 

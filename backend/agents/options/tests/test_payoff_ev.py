@@ -154,38 +154,116 @@ def test_ev_realworld_is_none_not_zero():
     assert "variance-risk-premium" in ev["ev_realworld_reason"]
 
 
-def test_ev_integration_accounts_for_the_tails_when_they_carry_mass():
-    """Truncating the tails is the classic way to flatter a short-premium structure.
+def test_flat_vol_diagnostic_accounts_for_the_tails_when_they_carry_mass():
+    """The flat-vol integration is now only a DIAGNOSTIC, but it must still be correct.
 
     At 13% vol and 30 DTE the integration bounds sit ~14 sigma out, so the tail mass is
-    genuinely 0.0 -- correct, not a bug. To prove the tails are actually ACCOUNTED for
-    rather than silently dropped, re-run in a regime where they carry real mass (high vol,
-    long dated) and check the closed-form tail terms are non-zero and finite."""
-    calm = PO.expected_value(fair_condor(), F0, T0, SIG)
+    genuinely 0.0 -- correct, not a bug. To prove the tails are ACCOUNTED for rather than
+    silently dropped, re-run where they carry real mass (high vol, long dated)."""
+    calm = PO.expected_value(fair_condor(), F0, T0, SIG)["flat_vol_diagnostic"]
     assert calm["tail_mass_lo"] == 0.0 and calm["tail_mass_hi"] == 0.0
 
     wild = PO.expected_value(fair_condor(), F0, P.year_fraction(365), 0.60)
-    assert wild["tail_mass_lo"] > 0.0
-    assert wild["tail_mass_hi"] > 0.0
-    assert math.isfinite(wild["ev_riskneutral"])
-    # with real tail mass the structure is bounded by its wings, so EV cannot fall below
-    # the max loss -- proof the tails use the flat beyond-wing payoff, not an extrapolation
-    assert wild["ev_riskneutral"] >= PO.max_loss(fair_condor()) - 1e-6
+    d = wild["flat_vol_diagnostic"]
+    assert d["tail_mass_lo"] > 0.0 and d["tail_mass_hi"] > 0.0
+    assert math.isfinite(d["flat_vol_ev"])
+    # bounded by the wings, so the diagnostic cannot fall below max loss -- proof the tails
+    # use the flat beyond-wing payoff rather than an extrapolation
+    assert d["flat_vol_ev"] >= PO.max_loss(fair_condor()) - 1e-6
 
 
-def test_selling_above_fair_value_raises_ev_and_below_lowers_it():
-    """Directional sanity: a richer credit must improve EV, monotonically."""
-    base = PO.expected_value(fair_condor(), F0, T0, SIG)["ev_riskneutral"]
+def test_flat_vol_model_error_is_surfaced_not_hidden():
+    """The gap between the flat-vol integration and the analytic truth must be reported, so
+    nobody can mistake model error for signal."""
+    ev = PO.expected_value(fair_condor(), F0, T0, SIG)
+    d = ev["flat_vol_diagnostic"]
+    assert "model_error_vs_analytic" in d
+    assert d["model_error_vs_analytic"] == pytest.approx(
+        d["flat_vol_ev"] - ev["ev_riskneutral"])
+    assert "NOT signal" in d["note"]
 
+
+def test_risk_neutral_ev_cannot_reward_a_better_price():
+    """This test replaces one that encoded the very fallacy this module exists to prevent.
+
+    The intuition "a richer credit must mean a better EV" is FALSE under risk-neutral
+    pricing: the measure is calibrated to the prices themselves, so a larger credit is
+    exactly offset by a larger expected payout. All that changes is the CARRY on the extra
+    premium received today -- which makes EV very slightly MORE negative, not less.
+
+    The consequence, and the reason this matters: risk-neutral EV can never identify a cheap
+    or rich structure. Only realised, tracked outcomes can. Anything claiming otherwise is
+    reading model error."""
+    base = PO.expected_value(fair_condor(), F0, T0, SIG)
     rich = fair_condor()
-    for l in rich:                       # +5 points on each short, -5 on each long
+    for l in rich:                       # +5 on each short, -5 on each long => bigger credit
         l["price_used"] += 5.0 if l["action"] == "SELL" else -5.0
-    assert PO.expected_value(rich, F0, T0, SIG)["ev_riskneutral"] > base
+    richer = PO.expected_value(rich, F0, T0, SIG)
 
-    poor = fair_condor()
-    for l in poor:
-        l["price_used"] -= 5.0 if l["action"] == "SELL" else -5.0
-    assert PO.expected_value(poor, F0, T0, SIG)["ev_riskneutral"] < base
+    assert PO.net_credit(rich) > PO.net_credit(fair_condor())
+    # a bigger credit carries MORE, so EV is slightly more negative -- never a free lunch
+    assert richer["ev_riskneutral"] < base["ev_riskneutral"]
+    # and the whole difference decomposes exactly into (a) carry on the extra credit and
+    # (b) the extra percentage-based charges on the larger premium -- nothing unexplained
+    d_credit = (PO.net_credit(rich) - PO.net_credit(fair_condor())) * LOT
+    d_costs = PO.total_costs(rich)["total"] - PO.total_costs(fair_condor())["total"]
+    assert d_costs > 0.0                     # STT/exchange/GST scale with premium
+    assert (base["ev_riskneutral"] - richer["ev_riskneutral"]) == pytest.approx(
+        (1.0 / DISC - 1.0) * d_credit + d_costs, rel=1e-9)
+
+
+def test_ev_matches_the_analytic_carry_identity_exactly():
+    """EV = -(1/disc - 1) * credit - costs, exactly, for any market-priced structure."""
+    for otm, width in ((400.0, 200.0), (900.0, 300.0), (1400.0, 100.0)):
+        legs = fair_condor(short_otm=otm, width=width)
+        ev = PO.expected_value(legs, F0, T0, SIG)
+        expect = -(1.0 / DISC - 1.0) * PO.net_credit(legs) * LOT - PO.total_costs(legs)["total"]
+        assert ev["ev_riskneutral"] == pytest.approx(expect, rel=1e-12)
+        assert ev["basis"] == "analytic_risk_neutral_identity"
+        assert ev["ev_riskneutral"] < 0.0
+
+
+# ────────────────────────────────────────────────────────────────── the volatility smile
+def test_interp_iv_interpolates_and_flat_extrapolates():
+    smile = [(23000.0, 0.16), (24000.0, 0.12), (25000.0, 0.10)]
+    assert PO.interp_iv(smile, 23500.0) == pytest.approx(0.14)
+    assert PO.interp_iv(smile, 24500.0) == pytest.approx(0.11)
+    assert PO.interp_iv(smile, 22000.0) == pytest.approx(0.16)     # flat below
+    assert PO.interp_iv(smile, 26000.0) == pytest.approx(0.10)     # flat above
+    assert PO.interp_iv([], 24000.0) is None
+
+
+def test_put_skew_lowers_pop_versus_flat_vol():
+    """The measured NIFTY reality: 16-delta puts trade ~1.8 vol points ABOVE ATM. A flat-vol
+    POP therefore understates the chance the put side is breached and OVERSTATES a condor's
+    POP. The smile-aware path must report the lower, honest number."""
+    legs = fair_condor()
+    ks = sorted(l["strike"] for l in legs)
+    # a realistic downward-sloping smile: cheap calls, rich puts
+    skewed = [(ks[0], SIG + 0.030), (ks[1], SIG + 0.022),
+              (F0, SIG), (ks[2], SIG - 0.004), (ks[3], SIG - 0.006)]
+
+    flat = PO.pop(legs, F0, T0, SIG)
+    smiled = PO.pop(legs, F0, T0, SIG, smile=sorted(skewed))
+
+    assert flat["basis"] == "flat_atm_vol"
+    assert smiled["basis"] == "smile_interpolated"
+    assert smiled["pop_breakeven"] < flat["pop_breakeven"]
+    assert "OVERSTATES" in flat["smile_note"]
+
+
+def test_evaluate_derives_a_smile_from_the_legs_when_none_supplied():
+    ev = PO.evaluate(fair_condor(), F0, T0, SIG)
+    assert ev["ev"]["smile_used_by_diagnostic_only"] is True   # legs carry iv -> smile derivable
+    # and the POP's OWN provenance now travels with the POP, not borrowed from the EV object
+    assert ev["pop_basis"] == "smile_interpolated"
+
+
+def test_build_smile_from_rows():
+    rows = [{"strike": 24000.0, "iv": 0.12}, {"strike": 24000.0, "iv": 0.14},
+            {"strike": 23000.0, "iv": 0.16}, {"strike": 25000.0, "iv": None}]
+    s = PO.build_smile(rows)
+    assert s == [(23000.0, 0.16), (24000.0, pytest.approx(0.13))]   # averaged, sorted, None dropped
 
 
 # ──────────────────────────────────────────────────────────────────────────── POP
@@ -290,8 +368,58 @@ def test_missing_quotes_are_counted_not_invented():
     legs[3]["bid"] = None
     legs[3]["ask"] = None
     assert PO.liquidity(legs)["legs_missing_quote"] == 1
-    # and a leg with no spread contributes no invented slippage
-    assert PO.leg_costs(legs[3])["slippage"] == 0.0
+    # A leg with no book still must not have a spread SYNTHESISED for it...
+    assert legs[3]["bid"] is None and legs[3]["ask"] is None
+    # ...but it must still be CHARGED, from a labelled governed assumption. The previous
+    # version of this test asserted slippage == 0.0 and so locked the defect in as if it
+    # were a virtue: post-market and backfilled rows have no book, which is the agent's
+    # NORMAL mode, so "no book -> no slippage" silently zeroed most of the cost of trading.
+    c = PO.leg_costs(legs[3])
+    assert c["slippage"] > 0.0
+    assert c["slippage_basis"] == PO.SLIPPAGE_BASIS_ASSUMED
+
+
+def test_no_book_costs_are_charged_and_labelled_not_silently_zero():
+    """The 86%-understatement regression, pinned."""
+    book = fair_condor()
+    nobook = fair_condor()
+    for l in nobook:
+        l["bid"] = l["ask"] = None
+
+    cb, cn = PO.total_costs(book), PO.total_costs(nobook)
+    assert cb["slippage"] > 0.0 and cn["slippage"] > 0.0
+    # the two must be DISTINGUISHABLE by basis -- previously both said "governed_table"
+    assert cb["costs_basis"] == "governed_table"
+    assert cn["costs_basis"] == "governed_table+assumed_slippage"
+    assert cn["slippage_legs_assumed"] == 4 and cn["slippage_legs_measured"] == 0
+    assert cb["slippage_legs_assumed"] == 0
+    assert "governed assumption" in cn["costs_note"]
+
+
+def test_unbounded_structure_reports_no_max_loss_rather_than_a_fabricated_bound():
+    """A naked short call previously reported a plausible finite max loss (~ -Rs 800k) that was
+    purely an artefact of where the evaluation grid stopped."""
+    naked = [l for l in fair_condor() if l["action"] == "SELL" and l["right"] == "CE"]
+    assert PO.is_defined_risk(naked) is False
+    assert PO.max_loss(naked) is None
+    ev = PO.evaluate(naked, F0, T0, SIG)
+    assert ev["max_loss"] is None
+    assert ev["risk_reward"] is None
+    assert "unbounded" in ev["max_loss_reason"]
+    # and margin has no defined-risk proxy to lean on
+    assert ev["margin"]["margin_est"] is None
+    assert ev["margin"]["basis"] == "unavailable_unbounded_risk"
+
+
+def test_payoff_money_uses_per_leg_units_not_leg_zero():
+    """Scaling the whole structure by leg 0's units inverted the sign on non-uniform legs."""
+    legs = fair_condor()
+    legs[1]["lots"] = 2                       # one wing doubled
+    expect = sum(PO._sign(l["action"])
+                 * (PO.intrinsic(l["right"], l["strike"], 23000.0) - l["price_used"])
+                 * (l["lot_size"] * l["lots"])
+                 for l in legs)
+    assert PO.payoff_money_at(legs, 23000.0, include_costs=False) == pytest.approx(expect)
 
 
 # ────────────────────────────────────────────────────────────── one-shot evaluate()
