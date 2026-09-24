@@ -1,0 +1,31 @@
+{
+  "version": "v18_trading_session_carry",
+  "source_v14": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\research_outputs\\manual_trade_clone_2025_v14_adaptive_raw_state_teacher",
+  "leak_note": "Uses only prior manual trading sessions as teacher-feedback memory.",
+  "best_config": {
+    "lookback_sessions": 2.0,
+    "carry_slots": 15.0,
+    "carry_weight": 5.0,
+    "profitable_coverage_pct": 44.935064935064936,
+    "coverage_pct": 48.08259587020649,
+    "days_ge_70pct_profitable": 45.0
+  },
+  "summary": {
+    "tag": "v18_best",
+    "days": 154,
+    "avg_manual_n": 8.805194805194805,
+    "avg_hit_n": 4.233766233766234,
+    "avg_profitable_hit_n": 2.2467532467532467,
+    "coverage_pct": 48.08259587020649,
+    "profitable_coverage_pct": 44.935064935064936,
+    "days_ge_70pct_profitable": 45
+  },
+  "replay_summary": {
+    "tag": "v18_best",
+    "days": 155,
+    "win_pct": 52.903225806451616,
+    "ret5x_pct": 526.9004023306504,
+    "avg_day5x": 3.399357434391293,
+    "avg_names": 15.0
+  }
+}

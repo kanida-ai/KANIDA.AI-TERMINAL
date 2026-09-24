@@ -1,0 +1,32 @@
+{
+  "source": "C:\\Users\\SPS\\Downloads\\PATTERN_STOCK_CONSISTENCY_MATRIX.xlsx",
+  "consistent_pairs_rows": 46124,
+  "by_pattern_rows": 864,
+  "unique_patterns_pairs": 864,
+  "unique_patterns_by_pattern": 864,
+  "unique_symbols": 455,
+  "null_counts_pairs": {
+    "pattern": 0,
+    "symbol": 0,
+    "n": 0,
+    "avg_d1": 0
+  },
+  "null_counts_by_pattern": {
+    "pattern": 0,
+    "n_consistent": 0,
+    "stocks": 0
+  },
+  "duplicate_pair_rows": 0,
+  "duplicate_pattern_rows": 0,
+  "n_min": 3.0,
+  "n_max": 264.0,
+  "n_mean": 17.1596132165467,
+  "n_median": 11.0,
+  "avg_d1_min": 0.501,
+  "avg_d1_max": 11.583,
+  "avg_d1_mean": 1.1224804006590927,
+  "avg_d1_median": 0.882,
+  "patterns_only_in_pairs": 0,
+  "patterns_only_in_by_pattern": 0,
+  "n_consistent_mismatches": 0
+}

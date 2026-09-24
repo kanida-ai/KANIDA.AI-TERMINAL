@@ -401,9 +401,20 @@ async def lifespan(app: FastAPI):
     if IS_POSTGRES:
         _apply_postgres_schema()
 
-    t = threading.Thread(target=_schedule_daily_pipeline, daemon=True, name="pipeline-scheduler")
-    t.start()
-    log.info("Daily pipeline scheduler started (16:05 IST weekdays).")
+    # KANIDA_INPROCESS_EOD gates the in-app 16:05 IST EOD pipeline. Default "true"
+    # keeps legacy behavior. Set "false" in the cloud so the EOD chain runs via an
+    # EXTERNAL isolated task instead: the in-process ≥10-worker feature job writes
+    # falcon_features to the SAME SQLite file the live monitors write, and the
+    # concurrent writers corrupt it (2026-07-28 incident). External run = app
+    # stopped -> no live writers -> no corruption.
+    _inprocess_eod = os.environ.get("KANIDA_INPROCESS_EOD", "true").lower() == "true"
+    if _inprocess_eod:
+        t = threading.Thread(target=_schedule_daily_pipeline, daemon=True, name="pipeline-scheduler")
+        t.start()
+        log.info("Daily pipeline scheduler started (16:05 IST weekdays).")
+    else:
+        log.warning("In-app EOD pipeline DISABLED (KANIDA_INPROCESS_EOD=false) — "
+                    "EOD runs via an external isolated task (shared-SQLite corruption guard).")
 
     # Phase 2.3: pre-market deployer thread (fires QUEUED items at 9:15 IST)
     try:
@@ -544,7 +555,10 @@ async def lifespan(app: FastAPI):
         n = datetime.now(IST)
         past_1605 = (n.hour, n.minute) >= (16, 5)
         is_weekday = n.weekday() < 5
-        if past_1605 and is_weekday:
+        # Same KANIDA_INPROCESS_EOD guard as the scheduler: when the in-app EOD is
+        # disabled, boot catch-up must NOT kick the corrupting feature job either.
+        _inproc_eod = os.environ.get("KANIDA_INPROCESS_EOD", "true").lower() == "true"
+        if past_1605 and is_weekday and _inproc_eod:
             from falcon.jobs._pipeline import kick_off_v7_pipeline_if_stale
             decision = kick_off_v7_pipeline_if_stale(reason="boot_catchup")
             if decision.get("kicked_off"):

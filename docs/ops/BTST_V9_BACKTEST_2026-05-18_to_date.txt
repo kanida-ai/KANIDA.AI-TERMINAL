@@ -1,0 +1,174 @@
+==========================================================================
+V9 BTST BACKTEST  (CORRECTED universe + 1-min source)
+==========================================================================
+Signal-date window : 2026-05-18 .. 2026-07-25  (48 sessions)
+Promoted patterns  : 684  (current snapshot, load_patterns)
+High-tier filter   : ['ENTERPRISE-Dryup', 'GOLD', 'GOLD-baseline', 'PREMIUM-Compression', 'PREMIUM-Pullback']
+ohlc_daily max     : 2026-07-24   |  mkt_ohlc_1min & ohlc_1min from ENGINE db
+
+--------------------------------------------------------------------------
+CROSS-CHECK: reconstructed compute_top_n vs falcon_signals_live (07-08..07-24)
+--------------------------------------------------------------------------
+signal_date   rank-exact  set-overlap
+2026-07-08        1/15        11/15  
+2026-07-09        1/15        12/15  
+2026-07-10        1/15        12/15  
+2026-07-13        1/15         9/15  
+2026-07-14        1/15         8/15  
+2026-07-15        3/15         9/15  
+2026-07-16        3/15        12/15  
+2026-07-17        1/15        11/15  
+2026-07-20        0/15         5/15  
+2026-07-22        3/15         8/15  
+2026-07-24        0/15        11/15  
+TOTAL            15/165      108/165 
+  rank-exact match rate : 9.1%
+  set-overlap match rate: 65.5%
+  NOTE: low rank-exact rate is EXPECTED — the current promoted-pattern
+  snapshot (load_patterns) has drifted vs the 7.1.0 snapshot that emitted
+  the live July signals (n_fires differ materially). The reconstruction is
+  internally consistent across the whole window but is NOT bit-identical to
+  the historical live emission. See report notes.
+
+--------------------------------------------------------------------------
+PER-TRADE (name-level) RESULTS
+--------------------------------------------------------------------------
+  closed trades      : 256
+  win-rate           : 51.6%
+  avg net return/trade: +0.51%   (median +0.15%)
+  disaster-stops hit : 20 / 256 (7.8%)
+  entry source split : mkt_ohlc_1min=228  ohlc_1min=21  daily_open_fallback=7
+  daily-open FALLBACK trades (7) — symbol absent from BOTH 1-min
+  tables that day (NOT only 07-24/25 as assumed; these ARE in the P&L):
+    2026-07-13  WELCORP       net +4.90%
+    2026-07-15  TATATECH      net +1.77%
+    2026-07-20  MRPL          net +2.21%
+    2026-07-20  THERMAX       net +4.21%
+    2026-07-21  THERMAX       net -0.94%
+    2026-07-23  SPLPETRO      net +1.48%
+    2026-07-23  MANAPPURAM    net +1.15%
+
+--------------------------------------------------------------------------
+BASKET-SIZE DISTRIBUTION (high-tier names per traded day)
+--------------------------------------------------------------------------
+  traded baskets (days): 43
+     1 names :   4 days
+     2 names :   3 days
+     3 names :   3 days
+     4 names :   6 days
+     5 names :   4 days
+     6 names :   5 days
+     7 names :   5 days
+     8 names :   2 days
+     9 names :   4 days
+    10 names :   3 days
+    11 names :   2 days
+    12 names :   2 days
+  avg basket size: 6.0   median: 6   min/max: 1/12
+
+--------------------------------------------------------------------------
+ROLLING-SLEEVE PORTFOLIO EQUITY CURVE  (Rs 10L = 2 x Rs 5L, compounding)
+--------------------------------------------------------------------------
+  start value : Rs 1,000,000
+  end value   : Rs 1,013,460
+  net P&L     : Rs 13,460
+  return on Rs 10L : +1.35%
+
+  MONTH-BY-MONTH (realized P&L by entry month, both sleeves):
+    2026-05   pnl = Rs       71,485    cumulative = Rs       71,485
+    2026-06   pnl = Rs      -59,726    cumulative = Rs       11,759
+    2026-07   pnl = Rs        1,701    cumulative = Rs       13,460
+
+  portfolio max drawdown: -9.75%
+
+--------------------------------------------------------------------------
+MONTH-BY-MONTH  (per-trade, by entry month)
+--------------------------------------------------------------------------
+  month     trades  win-rate   avg net  sum net%
+  2026-05       42     69.0%    +2.57%   +107.7%
+  2026-06       98     42.9%    -0.32%    -31.4%
+  2026-07      116     52.6%    +0.46%    +53.9%
+
+--------------------------------------------------------------------------
+BY HIGH-TIER LABEL (per-trade)
+--------------------------------------------------------------------------
+  tier                    trades  win-rate   avg net
+  PREMIUM-Compression          4     75.0%    +5.32%
+  PREMIUM-Pullback             3    100.0%    +3.77%
+  GOLD                        20     50.0%    +1.53%
+  ENTERPRISE-Dryup           100     56.0%    +0.87%
+  GOLD-baseline              129     46.5%    -0.15%
+
+--------------------------------------------------------------------------
+HEAD-TO-HEAD  vs raw BTST-Trader forward (portfolio 485)
+--------------------------------------------------------------------------
+  metric                        raw BTST-Trader   V9 (high-tier)
+  per-trade win-rate                      44.0%            51.6%
+  per-trade avg net return          (see below)           +0.51%
+  realized return (basis)                 -4.6%           +1.35%
+      raw basis = % of Rs 5L forward log; V9 basis = % of Rs 10L rolling-sleeve.
+  win-rate delta                                           +7.6 pp
+
+--------------------------------------------------------------------------
+WORKED EXAMPLE (first fully-closed basket)
+--------------------------------------------------------------------------
+  signal_date 2026-05-18  ->  entry 2026-05-19 (09:15/09:16 blend)  ->  exit 2026-05-20 close
+  high-tier names: 10  |  sleeve capital Rs 500,000  ->  Rs 50,000 per name
+  symbol         tier                     entry              src      exit    reason    net%
+  COHANCE        ENTERPRISE-Dryup        445.32         mkt_1min    418.61  STOP_-6%  -6.30
+  CEMPRO         ENTERPRISE-Dryup        891.73         mkt_1min    851.55  D2_CLOSE  -4.81
+  NLCINDIA       GOLD-baseline           353.43         mkt_1min    354.65  D2_CLOSE  +0.05
+  ZENTEC         ENTERPRISE-Dryup       1566.45        ohlc_1min   1604.20  D2_CLOSE  +2.11
+  BHEL           ENTERPRISE-Dryup        395.10         mkt_1min    408.40  D2_CLOSE  +3.07
+  ADANIGREEN     GOLD-baseline          1398.65         mkt_1min   1363.20  D2_CLOSE  -2.83
+  MRPL           ENTERPRISE-Dryup        149.64        ohlc_1min    148.13  D2_CLOSE  -1.31
+  IKS            ENTERPRISE-Dryup       1595.10         mkt_1min   1628.60  D2_CLOSE  +1.80
+  GVT&D          ENTERPRISE-Dryup       4367.50         mkt_1min   4679.40  D2_CLOSE  +6.84
+  SAPPHIRE       ENTERPRISE-Dryup        179.92         mkt_1min    181.05  D2_CLOSE  +0.33
+  basket avg net = -0.11%   sleeve Rs 500,000 -> Rs 499,473
+
+--------------------------------------------------------------------------
+SKIPPED / EXCLUDED (6):
+--------------------------------------------------------------------------
+  open/incomplete (no D2 close yet) : 2  ['2026-07-23', '2026-07-24']
+  days with zero high-tier picks    : 3
+    2026-05-21: IDEA: missing px (entry=mkt_1min, D2close=None)
+
+==========================================================================
+NOTES / HONESTY
+==========================================================================
+(1) UNIVERSE = production ranker reconstruction. compute_top_n(con, signal_date,
+    top_n=15, patterns=load_patterns(con)) on data/db/kanida_universe.db, the same
+    function live_tier.run_cycle uses. Features (falcon_features) are the clean
+    live week-to-date values and span the full window.
+(2) CROSS-CHECK CAVEAT: for 07-08..07-24 the reconstructed top-15 only partially
+    matches falcon_signals_live (rank-exact and set-overlap reported above). The
+    gap is the promoted-pattern SNAPSHOT: load_patterns now returns 684 patterns,
+    whereas the live 7.1.0 signals fired against a different (larger) promoted set,
+    so n_fires/score and hence ranking differ. falcon_signals_live.fired_pattern_ids
+    could give a bit-exact July reconstruction but does NOT exist pre-July, so the
+    only universe reproducible across May-July is the current-snapshot compute_top_n.
+    Treat the reconstructed universe as 'what today's engine would have picked on
+    the clean historical features', NOT as a byte-replay of the live emission.
+(3) signal_tier reconstructed via signal_tier.enrich_picks (production classifier /
+    active rulebook). tier inputs use weekly-derived features flagged look-ahead
+    elsewhere in memory; tier-conditioned numbers are indicative, not certified.
+(4) ENTRY = 50:50 blend of the 09:15 and 09:16 one-minute bar OPENS from
+    mkt_ohlc_1min (universe_engine db, reaches 07-23); fallback ohlc_1min then
+    ohlc_daily open. Entry-source split: mkt_ohlc_1min 228, ohlc_1min 21, daily-open 7.
+    CORRECTION TO THE ASSUMPTION: the directive expected only 07-24/25 to need the
+    daily-open fallback, but 7 fully-closed trades on 07-13..07-23 also fell
+    back because those specific symbols were absent from BOTH 1-min tables that day
+    (listed above). They ARE in the P&L. Their entry = ohlc_daily open (not a 09:15/
+    09:16 blend); impact is small (7 of 256 trades) but flagged for honesty. The
+    07-24/25 entries never enter the P&L because their D2 close is not yet available.
+(5) EXIT = D2 close (ohlc_daily). -6% disaster stop checked against min(D1 low,
+    D2 low) from ohlc_daily (daily-low approximation; if it trips, fill at -6%).
+(6) COST = 0.30% round-trip subtracted from gross per trade.
+(7) PORTFOLIO = Rs 10L as 2 x Rs 5L sleeves alternating each traded day (2-session
+    hold => each sleeve free again on its next turn); each sleeve redeploys its
+    compounded capital equally across that day's high-tier names.
+(8) BASELINE (-4.6% / 44%) is the raw BTST-Trader forward per operator directive;
+    it is a Rs 5L single-sleeve forward log, so the return bases are not identical
+    to V9's Rs 10L rolling-sleeve figure — win-rate and avg-net/trade are the
+    cleaner apples-to-apples comparison.

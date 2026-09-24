@@ -1,0 +1,39 @@
+{
+  "version": "v22_strict_month_balance",
+  "selected_config": {
+    "name": "v22_strict_raw90_pairs15",
+    "base_top_n": 15,
+    "defensive_top_n": 8,
+    "raw_w": 0.25,
+    "prior_w": 0.45,
+    "pairs_w": 0.2,
+    "memory_w": 0.0,
+    "stale_w": 0.8,
+    "raw_floor": 0.9,
+    "prior_floor": 0.7,
+    "min_pairs": 15,
+    "defensive_prior_floor": 0.85,
+    "defensive_min_pairs": 18,
+    "loser_brake_rs": -12000,
+    "day_quality_floor": 0.55,
+    "month_stop_rs": -25000,
+    "month_recovery_prior_floor": 0.9,
+    "month_recovery_min_pairs": 18
+  },
+  "capital_per_stock_rs": 25000.0,
+  "leak_firewall": {
+    "ranking_inputs": "Day T recomputed EOD candidate fields from V20 plus prior realized own trade history only",
+    "no_stored_falcon_features_or_ranks": true,
+    "research_caveat": "Gate was selected after inspecting 2025 approximate outcomes; freeze and forward-test before production."
+  },
+  "summary": {
+    "days": 137,
+    "win_pct": 41.605839416058394,
+    "pnl_1x_rs": 126691.33551008106,
+    "pnl_5x_rs": 662498.2836257827,
+    "min_month_pnl_5x_rs": -15218.248223034298,
+    "positive_months": 8,
+    "months": 12,
+    "ret_5x_pct_on_capital": 6.450374555115834
+  }
+}

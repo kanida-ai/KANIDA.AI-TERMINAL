@@ -1,0 +1,37 @@
+{
+  "version": "v14_adaptive_raw_state_teacher",
+  "script": "C:\\Users\\SPS\\.codex\\visualizations\\2026\\07\\24\\019f94b5-e5fa-7fe2-baf3-b25bb8884553\\manual_trade_clone_2025_v14_adaptive_raw_state_teacher.py",
+  "teacher_log": "C:\\Users\\SPS\\.codex\\attachments\\2b6f16c3-a734-4d29-bc66-661d7dc634d0\\pasted-text.txt",
+  "source_db": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\universe_engine\\data\\db\\kanida_universe.db",
+  "allowed_tables_read": [
+    "ohlc_daily",
+    "ohlc_1min",
+    "universe_master"
+  ],
+  "forbidden_not_used": [
+    "falcon_features",
+    "falcon_full_ranking",
+    "Falcon registry",
+    "falcon_outcomes",
+    "stored outcomes",
+    "current-day manual labels for ranking"
+  ],
+  "summary": {
+    "tag": "v14_expanding_day",
+    "days": 154,
+    "avg_manual_n": 8.805194805194805,
+    "avg_hit_n": 2.220779220779221,
+    "avg_profitable_hit_n": 1.2077922077922079,
+    "coverage_pct": 25.221238938053098,
+    "profitable_coverage_pct": 24.155844155844157,
+    "days_ge_70pct_profitable": 15
+  },
+  "replay_summary": {
+    "tag": "v14_expanding_day",
+    "days": 155,
+    "win_pct": 47.096774193548384,
+    "ret5x_pct": 275.3502669391767,
+    "avg_day5x": 1.7764533350914626,
+    "avg_names": 15.0
+  }
+}

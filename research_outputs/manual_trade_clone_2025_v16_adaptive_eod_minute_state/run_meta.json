@@ -1,0 +1,35 @@
+{
+  "version": "v16_adaptive_eod_minute_state",
+  "script": "C:\\Users\\SPS\\.codex\\visualizations\\2026\\07\\24\\019f94b5-e5fa-7fe2-baf3-b25bb8884553\\manual_trade_clone_2025_v16_adaptive_eod_minute_state.py",
+  "source_db": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\universe_engine\\data\\db\\kanida_universe.db",
+  "allowed_tables_read": [
+    "ohlc_daily",
+    "ohlc_1min",
+    "universe_master"
+  ],
+  "forbidden_not_used": [
+    "falcon_features",
+    "falcon_full_ranking",
+    "Falcon registry",
+    "falcon_outcomes",
+    "stored outcomes"
+  ],
+  "summary": {
+    "tag": "v16_eod_minute",
+    "days": 154,
+    "avg_manual_n": 8.805194805194805,
+    "avg_hit_n": 2.2142857142857144,
+    "avg_profitable_hit_n": 1.2012987012987013,
+    "coverage_pct": 25.147492625368734,
+    "profitable_coverage_pct": 24.025974025974026,
+    "days_ge_70pct_profitable": 16
+  },
+  "replay_summary": {
+    "tag": "v16_eod_minute",
+    "days": 155,
+    "win_pct": 47.74193548387097,
+    "ret5x_pct": 276.69291788709097,
+    "avg_day5x": 1.7851155992715546,
+    "avg_names": 15.0
+  }
+}

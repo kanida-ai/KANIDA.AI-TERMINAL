@@ -1,0 +1,52 @@
+{
+  "version": "v10_wtd_pattern_union_multirank",
+  "script": "C:\\Users\\SPS\\.codex\\visualizations\\2026\\07\\24\\019f94b5-e5fa-7fe2-baf3-b25bb8884553\\manual_trade_clone_2025_v10_wtd_pattern_union_multirank.py",
+  "base_v9_script": "C:\\Users\\SPS\\.codex\\visualizations\\2026\\07\\24\\019f94b5-e5fa-7fe2-baf3-b25bb8884553\\manual_trade_clone_2025_v9_falcon_pattern_union_multirank.py",
+  "source_db": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\universe_engine\\data\\db\\kanida_universe.db",
+  "registry_db": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\arena\\agent_population\\falcon_pattern_registry.db",
+  "weekly_fields_corrected_to_wtd": [
+    "weekly_close_loc",
+    "weekly_range_pct",
+    "weekly_close_vs_sma20",
+    "weekly_breakout_20w"
+  ],
+  "registry_performance_weights_removed": [
+    "hit_pct",
+    "real_lift_pp",
+    "clean26_lift",
+    "avg_ret",
+    "cagr5L"
+  ],
+  "remaining_caveat": "Registry rule vocabulary itself was previously mined; V10 does not use its performance metrics, but pure proof needs re-mined vocabulary inside frozen train window.",
+  "parsed_patterns": 411,
+  "winner_union_min_fires": 3,
+  "winner_union_patterns": 309,
+  "dec_fit_summary": {
+    "tag": "v10_dec_fit",
+    "days": 21,
+    "avg_manual_n": 8.571428571428571,
+    "avg_hit_n": 2.1904761904761907,
+    "avg_profitable_hit_n": 1.3333333333333333,
+    "coverage_pct": 25.555555555555554,
+    "profitable_coverage_pct": 25.0,
+    "days_ge_70pct_profitable": 2
+  },
+  "jan_validation_summary": {
+    "tag": "v10_jan_validation",
+    "days": 22,
+    "avg_manual_n": 9.681818181818182,
+    "avg_hit_n": 1.8636363636363635,
+    "avg_profitable_hit_n": 0.7727272727272727,
+    "coverage_pct": 19.248826291079812,
+    "profitable_coverage_pct": 13.821138211382115,
+    "days_ge_70pct_profitable": 1
+  },
+  "replay_summary": {
+    "tag": "v10_wtd_pattern_union",
+    "days": 44,
+    "win_pct": 31.818181818181817,
+    "ret5x_pct": -31.975949551744666,
+    "avg_day5x": -0.7267261261760152,
+    "avg_names": 14.909090909090908
+  }
+}

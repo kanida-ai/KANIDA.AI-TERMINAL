@@ -1,0 +1,70 @@
+{
+  "version": "v15_adaptive_weight_sweep",
+  "source_v14": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\research_outputs\\manual_trade_clone_2025_v14_adaptive_raw_state_teacher",
+  "leak_note": "Weights selected by validation/all are diagnostic. Train-selected config is the cleaner split result.",
+  "train_selected_config": {
+    "config_id": "V15W0113",
+    "profile": 1.0,
+    "tier": 1.5,
+    "fast_mem": 10.0,
+    "slow_mem": 0.0,
+    "lane": 0.0,
+    "train_prof_capture": 29.230769230769234,
+    "train_capture": 32.122093023255815,
+    "valid_prof_capture": 24.736842105263158,
+    "valid_capture": 25.449101796407188,
+    "valid_days_ge70": 7
+  },
+  "valid_selected_config": {
+    "config_id": "V15W0162",
+    "profile": 2.0,
+    "tier": 0.0,
+    "fast_mem": 10.0,
+    "slow_mem": 0.0,
+    "lane": 0.5,
+    "train_prof_capture": 28.974358974358978,
+    "train_capture": 31.831395348837212,
+    "valid_prof_capture": 25.263157894736842,
+    "valid_capture": 25.748502994011975,
+    "valid_days_ge70": 7
+  },
+  "diagnostic_all_selected_config": {
+    "config_id": "V15W0162",
+    "profile": 2.0,
+    "tier": 0.0,
+    "fast_mem": 10.0,
+    "slow_mem": 0.0,
+    "lane": 0.5,
+    "train_prof_capture": 28.974358974358978,
+    "train_capture": 31.831395348837212,
+    "valid_prof_capture": 25.263157894736842,
+    "valid_capture": 25.748502994011975,
+    "valid_days_ge70": 7,
+    "all_prof_capture": 27.142857142857142,
+    "all_capture": 28.83480825958702
+  },
+  "train_selected_replay_summary": {
+    "tag": "v15",
+    "days": 155,
+    "win_pct": 49.67741935483871,
+    "ret5x_pct": 299.53955421361826,
+    "avg_day5x": 1.9325132529910856,
+    "avg_names": 15.0
+  },
+  "valid_selected_replay_summary": {
+    "tag": "v15",
+    "days": 155,
+    "win_pct": 49.67741935483871,
+    "ret5x_pct": 311.58165734021503,
+    "avg_day5x": 2.010204240904613,
+    "avg_names": 15.0
+  },
+  "diagnostic_all_replay_summary": {
+    "tag": "v15",
+    "days": 155,
+    "win_pct": 49.67741935483871,
+    "ret5x_pct": 311.58165734021503,
+    "avg_day5x": 2.010204240904613,
+    "avg_names": 15.0
+  }
+}

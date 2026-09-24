@@ -1,0 +1,332 @@
+[
+ {
+  "date": "2026-03-06",
+  "n_open_after": 4,
+  "deployed_after": 400000.0,
+  "realized_today": 0,
+  "cum_realized": 0.0,
+  "unrealized": 4946.4354401435585,
+  "equity": 4946.4354401435585,
+  "drawdown": 0.0
+ },
+ {
+  "date": "2026-03-09",
+  "n_open_after": 5,
+  "deployed_after": 500000.0,
+  "realized_today": 0,
+  "cum_realized": 0.0,
+  "unrealized": -2768.1289210890855,
+  "equity": -2768.1289210890855,
+  "drawdown": -7714.564361232644
+ },
+ {
+  "date": "2026-03-10",
+  "n_open_after": 8,
+  "deployed_after": 800000.0,
+  "realized_today": 0,
+  "cum_realized": 0.0,
+  "unrealized": 7219.150184197416,
+  "equity": 7219.150184197416,
+  "drawdown": 0.0
+ },
+ {
+  "date": "2026-03-11",
+  "n_open_after": 13,
+  "deployed_after": 1300000.0,
+  "realized_today": 0,
+  "cum_realized": 0.0,
+  "unrealized": 20807.258280038564,
+  "equity": 20807.258280038564,
+  "drawdown": 0.0
+ },
+ {
+  "date": "2026-03-12",
+  "n_open_after": 9,
+  "deployed_after": 900000.0,
+  "realized_today": 5846.25,
+  "cum_realized": 5846.25,
+  "unrealized": 10842.086500095378,
+  "equity": 16688.336500095378,
+  "drawdown": -4118.921779943186
+ },
+ {
+  "date": "2026-03-13",
+  "n_open_after": 11,
+  "deployed_after": 1100000.0,
+  "realized_today": -919.4,
+  "cum_realized": 4926.85,
+  "unrealized": -17767.7222885759,
+  "equity": -12840.8722885759,
+  "drawdown": -33648.13056861446
+ },
+ {
+  "date": "2026-03-16",
+  "n_open_after": 8,
+  "deployed_after": 800000.0,
+  "realized_today": -37.19000000000028,
+  "cum_realized": 4889.66,
+  "unrealized": -27191.38444451174,
+  "equity": -22301.72444451174,
+  "drawdown": -43108.982724550304
+ },
+ {
+  "date": "2026-03-17",
+  "n_open_after": 3,
+  "deployed_after": 300000.0,
+  "realized_today": -14851.769999999999,
+  "cum_realized": -9962.109999999999,
+  "unrealized": -8323.260458195105,
+  "equity": -18285.370458195102,
+  "drawdown": -39092.62873823367
+ },
+ {
+  "date": "2026-03-18",
+  "n_open_after": 3,
+  "deployed_after": 300000.0,
+  "realized_today": 0,
+  "cum_realized": -9962.109999999999,
+  "unrealized": -8844.75445726137,
+  "equity": -18806.86445726137,
+  "drawdown": -39614.122737299935
+ },
+ {
+  "date": "2026-03-19",
+  "n_open_after": 0,
+  "deployed_after": 0.0,
+  "realized_today": -13661.36,
+  "cum_realized": -23623.47,
+  "unrealized": 0.0,
+  "equity": -23623.47,
+  "drawdown": -44430.728280038566
+ },
+ {
+  "date": "2026-03-20",
+  "n_open_after": 0,
+  "deployed_after": 0.0,
+  "realized_today": 0,
+  "cum_realized": -23623.47,
+  "unrealized": 0.0,
+  "equity": -23623.47,
+  "drawdown": -44430.728280038566
+ },
+ {
+  "date": "2026-03-23",
+  "n_open_after": 0,
+  "deployed_after": 0.0,
+  "realized_today": 0,
+  "cum_realized": -23623.47,
+  "unrealized": 0.0,
+  "equity": -23623.47,
+  "drawdown": -44430.728280038566
+ },
+ {
+  "date": "2026-03-24",
+  "n_open_after": 0,
+  "deployed_after": 0.0,
+  "realized_today": 0,
+  "cum_realized": -23623.47,
+  "unrealized": 0.0,
+  "equity": -23623.47,
+  "drawdown": -44430.728280038566
+ },
+ {
+  "date": "2026-03-25",
+  "n_open_after": 2,
+  "deployed_after": 200000.0,
+  "realized_today": 0,
+  "cum_realized": -23623.47,
+  "unrealized": 1377.0477046918913,
+  "equity": -22246.42229530811,
+  "drawdown": -43053.680575346676
+ },
+ {
+  "date": "2026-03-27",
+  "n_open_after": 3,
+  "deployed_after": 300000.0,
+  "realized_today": 0,
+  "cum_realized": -23623.47,
+  "unrealized": -2181.4852794551407,
+  "equity": -25804.955279455142,
+  "drawdown": -46612.213559493706
+ },
+ {
+  "date": "2026-03-30",
+  "n_open_after": 3,
+  "deployed_after": 300000.0,
+  "realized_today": 0,
+  "cum_realized": -23623.47,
+  "unrealized": -4909.2469640729805,
+  "equity": -28532.71696407298,
+  "drawdown": -49339.97524411154
+ },
+ {
+  "date": "2026-04-01",
+  "n_open_after": 4,
+  "deployed_after": 400000.0,
+  "realized_today": 0,
+  "cum_realized": -23623.47,
+  "unrealized": -56.73882463852601,
+  "equity": -23680.20882463853,
+  "drawdown": -44487.467104677096
+ },
+ {
+  "date": "2026-04-02",
+  "n_open_after": 3,
+  "deployed_after": 300000.0,
+  "realized_today": -251.65,
+  "cum_realized": -23875.120000000003,
+  "unrealized": 6953.190337592918,
+  "equity": -16921.929662407085,
+  "drawdown": -37729.18794244565
+ },
+ {
+  "date": "2026-04-06",
+  "n_open_after": 3,
+  "deployed_after": 300000.0,
+  "realized_today": 6343.31,
+  "cum_realized": -17531.81,
+  "unrealized": 2183.3522234321545,
+  "equity": -15348.457776567848,
+  "drawdown": -36155.71605660641
+ },
+ {
+  "date": "2026-04-07",
+  "n_open_after": 3,
+  "deployed_after": 300000.0,
+  "realized_today": 0,
+  "cum_realized": -17531.81,
+  "unrealized": 3943.914878910319,
+  "equity": -13587.895121089681,
+  "drawdown": -34395.15340112825
+ },
+ {
+  "date": "2026-04-08",
+  "n_open_after": 12,
+  "deployed_after": 1200000.0,
+  "realized_today": -1950.12,
+  "cum_realized": -19481.93,
+  "unrealized": 2927.636185655837,
+  "equity": -16554.293814344164,
+  "drawdown": -37361.55209438273
+ },
+ {
+  "date": "2026-04-09",
+  "n_open_after": 14,
+  "deployed_after": 1400000.0,
+  "realized_today": 8800.09,
+  "cum_realized": -10681.84,
+  "unrealized": -6127.149578006465,
+  "equity": -16808.989578006465,
+  "drawdown": -37616.247858045026
+ },
+ {
+  "date": "2026-04-10",
+  "n_open_after": 17,
+  "deployed_after": 1700000.0,
+  "realized_today": 1.44,
+  "cum_realized": -10680.4,
+  "unrealized": -15300.916026984394,
+  "equity": -25981.316026984394,
+  "drawdown": -46788.57430702296
+ },
+ {
+  "date": "2026-04-13",
+  "n_open_after": 21,
+  "deployed_after": 2100000.0,
+  "realized_today": 0,
+  "cum_realized": -10680.4,
+  "unrealized": -15574.600883193098,
+  "equity": -26255.000883193097,
+  "drawdown": -47062.25916323166
+ },
+ {
+  "date": "2026-04-15",
+  "n_open_after": 22,
+  "deployed_after": 2200000.0,
+  "realized_today": 4896.24,
+  "cum_realized": -5784.16,
+  "unrealized": 32524.178735024543,
+  "equity": 26740.018735024543,
+  "drawdown": 0.0
+ },
+ {
+  "date": "2026-04-16",
+  "n_open_after": 29,
+  "deployed_after": 2900000.0,
+  "realized_today": 7956.87,
+  "cum_realized": 2172.71,
+  "unrealized": 40602.7576980517,
+  "equity": 42775.467698051696,
+  "drawdown": 0.0
+ },
+ {
+  "date": "2026-04-17",
+  "n_open_after": 27,
+  "deployed_after": 2700000.0,
+  "realized_today": 15757.77,
+  "cum_realized": 17930.48,
+  "unrealized": 43134.17318708527,
+  "equity": 61064.65318708526,
+  "drawdown": 0.0
+ },
+ {
+  "date": "2026-04-20",
+  "n_open_after": 31,
+  "deployed_after": 3100000.0,
+  "realized_today": 12704.67,
+  "cum_realized": 30635.15,
+  "unrealized": 35603.16861349392,
+  "equity": 66238.31861349393,
+  "drawdown": 0.0
+ },
+ {
+  "date": "2026-04-21",
+  "n_open_after": 29,
+  "deployed_after": 2900000.0,
+  "realized_today": 33523.83,
+  "cum_realized": 64158.98,
+  "unrealized": 33541.48363636399,
+  "equity": 97700.463636364,
+  "drawdown": 0.0
+ },
+ {
+  "date": "2026-04-22",
+  "n_open_after": 19,
+  "deployed_after": 1900000.0,
+  "realized_today": -5484.17,
+  "cum_realized": 58674.810000000005,
+  "unrealized": 61749.6493887973,
+  "equity": 120424.4593887973,
+  "drawdown": 0.0
+ },
+ {
+  "date": "2026-04-23",
+  "n_open_after": 17,
+  "deployed_after": 1700000.0,
+  "realized_today": 11217.18,
+  "cum_realized": 69891.99,
+  "unrealized": 39542.339161795935,
+  "equity": 109434.32916179593,
+  "drawdown": -10990.13022700137
+ },
+ {
+  "date": "2026-04-24",
+  "n_open_after": 9,
+  "deployed_after": 900000.0,
+  "realized_today": 19640.5,
+  "cum_realized": 89532.49,
+  "unrealized": 7217.304282729967,
+  "equity": 96749.79428272997,
+  "drawdown": -23674.665106067332
+ },
+ {
+  "date": "2026-04-27",
+  "n_open_after": 0,
+  "deployed_after": 0.0,
+  "realized_today": 18741.85,
+  "cum_realized": 108274.34,
+  "unrealized": 0.0,
+  "equity": 108274.34,
+  "drawdown": -12150.119388797306
+ }
+]

@@ -23,7 +23,7 @@ REM 2026-06-02: point Playwright at the machine-wide browser path so the
 REM backend's boot preflight (and any in-process Playwright use) resolves the
 REM Chromium binary regardless of how the backend was launched. The default
 REM %LOCALAPPDATA%\ms-playwright is invisible to non-interactive logon
-REM sessions (Task Scheduler auto-start) — the true root cause of the
+REM sessions (Task Scheduler auto-start) - the true root cause of the
 REM recurring BROWSER_LAUNCH_FAILED. C:\ProgramData is visible to all sessions.
 set "PLAYWRIGHT_BROWSERS_PATH=C:\ProgramData\ms-playwright"
 
@@ -40,7 +40,7 @@ REM
 REM A direct uvicorn invocation WITHOUT conda activate works perfectly
 REM (verified by spawning the same backend via raw `uvicorn main:app`
 REM from a non-conda bash shell). uvicorn.exe in anaconda3\Scripts is a
-REM self-contained shebang that doesn't need its env activated — it
+REM self-contained shebang that doesn't need its env activated - it
 REM resolves its bundled Python automatically.
 REM
 REM Keeping the `set ANACONDA=...` and `%UVICORN%` references below as-is.

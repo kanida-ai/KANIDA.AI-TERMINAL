@@ -1,0 +1,43 @@
+{
+  "version": "v9_falcon_pattern_union_multirank",
+  "script": "C:\\Users\\SPS\\.codex\\visualizations\\2026\\07\\24\\019f94b5-e5fa-7fe2-baf3-b25bb8884553\\manual_trade_clone_2025_v9_falcon_pattern_union_multirank.py",
+  "source_db": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\universe_engine\\data\\db\\kanida_universe.db",
+  "registry_db": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\arena\\agent_population\\falcon_pattern_registry.db",
+  "forbidden_not_used": [
+    "falcon_full_ranking",
+    "stored rank",
+    "nd_intraday_ret",
+    "fwd1/fwd3/fwd5/fwd10"
+  ],
+  "parsed_patterns": 411,
+  "winner_union_min_fires": 3,
+  "winner_union_patterns": 298,
+  "dec_fit_summary": {
+    "tag": "v9_dec_fit",
+    "days": 21,
+    "avg_manual_n": 8.571428571428571,
+    "avg_hit_n": 3.9523809523809526,
+    "avg_profitable_hit_n": 2.619047619047619,
+    "coverage_pct": 46.111111111111114,
+    "profitable_coverage_pct": 49.107142857142854,
+    "days_ge_70pct_profitable": 5
+  },
+  "jan_validation_summary": {
+    "tag": "v9_jan_validation",
+    "days": 22,
+    "avg_manual_n": 9.681818181818182,
+    "avg_hit_n": 3.9545454545454546,
+    "avg_profitable_hit_n": 2.3636363636363638,
+    "coverage_pct": 40.845070422535215,
+    "profitable_coverage_pct": 42.27642276422765,
+    "days_ge_70pct_profitable": 2
+  },
+  "replay_summary": {
+    "tag": "v9_pattern_union",
+    "days": 44,
+    "win_pct": 61.36363636363637,
+    "ret5x_pct": 196.47104717645078,
+    "avg_day5x": 4.465251072192063,
+    "avg_names": 14.931818181818182
+  }
+}

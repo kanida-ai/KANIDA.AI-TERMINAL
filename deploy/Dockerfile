@@ -125,6 +125,11 @@ COPY deploy/entrypoint.sh /app/entrypoint.sh
 # these at /app/deploy/migrations and applies them INSIDE the container — RDS is
 # in a private subnet, so the migration can only run from here.
 COPY deploy/migrations/ /app/deploy/migrations/
+# Isolated nightly EOD runner — the nightly-eod GitHub workflow runs this as a
+# one-off ECS task (app stopped) so daily_features' concurrent-writer corruption
+# of the shared SQLite DB can't happen. Must be in the image for the workflow's
+# `python /app/deploy/nightly_eod.py` to resolve.
+COPY deploy/nightly_eod.py /app/deploy/nightly_eod.py
 # Belt-and-suspenders: strip any CR so a Windows/autocrlf line-ending can never
 # reach dash (a stray \r makes `set`/commands fail with "Illegal option").
 RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod 0755 /app/entrypoint.sh

@@ -1,0 +1,7 @@
+# Operator-maintained NSE holiday overrides — one YYYY-MM-DD per line.
+# Merged into trading_calendar.NSE_HOLIDAYS at runtime (read per-call, no deploy/restart).
+# '#' comments and blank lines are ignored.
+# Keep this reconciled against the official NSE annual holiday circular.
+
+# Confirmed by operator (2026-06-29): 6/26 was an NSE holiday.
+2026-06-26

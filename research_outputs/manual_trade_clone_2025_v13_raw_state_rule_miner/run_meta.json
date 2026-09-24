@@ -1,0 +1,54 @@
+{
+  "version": "v13_raw_state_rule_miner",
+  "script": "C:\\Users\\SPS\\.codex\\visualizations\\2026\\07\\24\\019f94b5-e5fa-7fe2-baf3-b25bb8884553\\manual_trade_clone_2025_v13_raw_state_rule_miner.py",
+  "teacher_log": "C:\\Users\\SPS\\.codex\\attachments\\2b6f16c3-a734-4d29-bc66-661d7dc634d0\\pasted-text.txt",
+  "source_db": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\universe_engine\\data\\db\\kanida_universe.db",
+  "allowed_tables_read": [
+    "ohlc_daily",
+    "ohlc_1min",
+    "universe_master"
+  ],
+  "forbidden_not_used": [
+    "falcon_features",
+    "falcon_full_ranking",
+    "Falcon registry",
+    "falcon_outcomes",
+    "stored outcomes",
+    "current-day manual labels for ranking"
+  ],
+  "best_config": {
+    "config_id": "V13C0002",
+    "top_singles": 90,
+    "top_pairs": 60,
+    "min_winner_hits": 2,
+    "rule_w": 2.0,
+    "profile_w": 0.6,
+    "loser_w": 0.0,
+    "symbol_w": 1.2,
+    "lane_w": 0.2,
+    "day_profitable_capture": NaN,
+    "day_coverage": NaN,
+    "day_replay_ret5x": NaN,
+    "day_replay_win": NaN,
+    "month_profitable_capture": 9.129213483146067,
+    "month_coverage": 11.591836734693878,
+    "month_replay_ret5x": -29.662288785113667,
+    "month_replay_win": 34.751773049645394
+  },
+  "expanding_day_summary": {},
+  "prior_month_summary": {
+    "tag": "V13C0002_prior_months",
+    "days": 140,
+    "avg_manual_n": 8.75,
+    "avg_hit_n": 1.0142857142857142,
+    "avg_profitable_hit_n": 0.4642857142857143,
+    "coverage_pct": 11.591836734693878,
+    "profitable_coverage_pct": 9.129213483146067,
+    "days_ge_70pct_profitable": 2,
+    "replay_days": 141,
+    "replay_win_pct": 34.751773049645394,
+    "replay_ret5x_pct": -29.662288785113667,
+    "replay_avg_day5x": -0.21037084244761467,
+    "replay_avg_names": 14.950354609929079
+  }
+}

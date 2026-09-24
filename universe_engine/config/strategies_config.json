@@ -1,0 +1,63 @@
+{
+  "version": "1.0",
+  "long_only": true,
+
+  "training": {
+    "train_window_months": 18,
+    "embargo_days": 28,
+    "recency_lambda": 0.95,
+    "forward_window_days": 15,
+    "rr_target_multiple": 1.5,
+    "atr_period": 14,
+    "atr_stop_multiple": 1.5,
+    "stop_pct_min": 1.5,
+    "stop_pct_max": 8.0,
+    "hold_cap_days": 12
+  },
+
+  "blessed_thresholds": {
+    "min_trades_universe": 200,
+    "min_profit_factor": 1.20,
+    "min_win_rate_after_cost": 0.40,
+    "min_pos_months_pct": 0.55,
+    "max_consecutive_loss_months": 4
+  },
+
+  "avoid_thresholds": {
+    "min_trades_label": 60,
+    "max_profit_factor_for_avoid": 0.95
+  },
+
+  "regime": {
+    "nifty_vol_lookback_days": 60,
+    "vol_low_max_pct": 10.7,
+    "vol_high_min_pct": 13.4
+  },
+
+  "live_signal": {
+    "min_blessed_strategies_firing": 1,
+    "max_concurrent_positions": 10,
+    "min_adv_inr_cr": 100
+  },
+
+  "trading": {
+    "capital_inr": 500000,
+    "risk_per_trade_pct": 1.0,
+    "round_trip_cost_bps": 30,
+    "default_index": "in_nifty200"
+  },
+
+  "workers": {
+    "io_workers": 50,
+    "cpu_workers_min": 10,
+    "cpu_workers_max": 50,
+    "cpu_workers_factor_per_core": 4
+  },
+
+  "smart_entry": {
+    "wait_until_minutes_after_open": 15,
+    "min_price_above_open_pct": 0.0,
+    "max_price_above_open_pct": 3.0,
+    "require_volume_confirm": true
+  }
+}

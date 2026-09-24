@@ -1,0 +1,40 @@
+{
+  "version": "v23_0930_confirm",
+  "base_config": {
+    "name": "v22_strict_raw90_pairs15",
+    "base_top_n": 15,
+    "defensive_top_n": 8,
+    "raw_w": 0.25,
+    "prior_w": 0.45,
+    "pairs_w": 0.2,
+    "memory_w": 0.0,
+    "stale_w": 0.8,
+    "raw_floor": 0.9,
+    "prior_floor": 0.7,
+    "min_pairs": 15,
+    "defensive_prior_floor": 0.85,
+    "defensive_min_pairs": 18,
+    "loser_brake_rs": -12000,
+    "day_quality_floor": 0.55,
+    "month_stop_rs": -25000,
+    "month_recovery_prior_floor": 0.9,
+    "month_recovery_min_pairs": 18
+  },
+  "confirm_0915_0930_threshold_pct": 0.25,
+  "entry_time": "09:31",
+  "summary": {
+    "days": 83,
+    "win_pct": 49.39759036144578,
+    "pnl_1x_rs": 40129.8606676037,
+    "pnl_5x_rs": 212069.34419516337,
+    "min_month_pnl_5x_rs": -2782.322695436806,
+    "positive_months": 6,
+    "months": 11,
+    "ret_5x_pct_on_capital": 4.373369257034686
+  },
+  "leak_firewall": {
+    "signal": "Day T EOD V22 screener",
+    "confirmation": "Day T+1 09:30 close known before 09:31 entry",
+    "no_stored_falcon_features_or_ranks": true
+  }
+}

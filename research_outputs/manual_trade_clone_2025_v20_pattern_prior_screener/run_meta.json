@@ -1,0 +1,43 @@
+{
+  "version": "v20_pattern_stock_prior_screener",
+  "capital_per_stock_rs": 25000.0,
+  "top_n": 15,
+  "entry": "09:15 open on entry_date",
+  "exit": {
+    "hard_stop_5x_capital_pct": -3.0,
+    "arm_5x_capital_pct": 6.0,
+    "giveback_frac": 0.6,
+    "square_off": "15:29"
+  },
+  "formula": "0.45 raw_eod_state_z + 0.35 pattern_stock_prior_z + 0.20 watchlist_memory_z - 0.20 stale_loser_penalty",
+  "leak_firewall": {
+    "source_db": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\universe_engine\\data\\db\\kanida_universe.db",
+    "allowed_tables_read": [
+      "ohlc_daily",
+      "ohlc_1min",
+      "universe_master"
+    ],
+    "forbidden_not_used": [
+      "falcon_features",
+      "falcon_full_ranking",
+      "falcon_outcomes",
+      "falcon_signals_live",
+      "stored outcomes"
+    ],
+    "signal_timing": "Day T EOD features only; Day T+1 intraday simulation",
+    "matrix_caveat": "PATTERN_STOCK_CONSISTENCY_MATRIX.xlsx has no date/provenance column, so it is treated as an externally frozen prior; this script cannot prove it was mined pre-2025."
+  },
+  "pattern_eval": {
+    "usable_patterns": 609,
+    "skipped_patterns": 194,
+    "weekly_fields": "WTD-through-signal-date proxies, not full future week"
+  },
+  "summary": {
+    "days": 248,
+    "win_pct": 40.32258064516129,
+    "pnl_1x_rs": 111844.86666411199,
+    "pnl_5x_rs": 703798.2588994142,
+    "ret_1x_pct_on_deployed": 0.12433919157936857,
+    "ret_5x_pct_on_capital": 0.7634635778397637
+  }
+}

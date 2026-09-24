@@ -1,0 +1,1100 @@
+{
+  "increment": "1_weekly_close_loc",
+  "delta": 0.1,
+  "source": "production (unmodified)",
+  "note": "copy only; production patterns untouched",
+  "adjusted_patterns": [
+    {
+      "pattern_id": 7770,
+      "oos_lift": 49.2682,
+      "current_rule": "dist_sma_20<=12.344 & weekly_close_loc>0.3 & weekly_close_vs_sma20>11.171 & weekly_range_pct>17.907",
+      "adjusted_rule": "dist_sma_20<=12.344 & weekly_close_loc>0.2 & weekly_close_vs_sma20>11.171 & weekly_range_pct>17.907"
+    },
+    {
+      "pattern_id": 8584,
+      "oos_lift": 45.3047,
+      "current_rule": "atr_20_pct>3.431 & roc_5<=5.1 & weekly_close_loc>0.671 & weekly_range_pct>11.608",
+      "adjusted_rule": "atr_20_pct>3.431 & roc_5<=5.1 & weekly_close_loc>0.571 & weekly_range_pct>11.608"
+    },
+    {
+      "pattern_id": 7619,
+      "oos_lift": 45.1767,
+      "current_rule": "roc_5<=3.643 & weekly_close_loc>0.51 & weekly_range_pct>14.157",
+      "adjusted_rule": "roc_5<=3.643 & weekly_close_loc>0.41 & weekly_range_pct>14.157"
+    },
+    {
+      "pattern_id": 7759,
+      "oos_lift": 41.2697,
+      "current_rule": "dist_sma_20<=9.118 & weekly_close_loc>0.482 & weekly_range_pct>16.486",
+      "adjusted_rule": "dist_sma_20<=9.118 & weekly_close_loc>0.382 & weekly_range_pct>16.486"
+    },
+    {
+      "pattern_id": 7964,
+      "oos_lift": 40.8246,
+      "current_rule": "atr_5_vs_20<=1.204 & slope_sma_50>0.771 & weekly_close_loc>0.623 & weekly_range_pct>11.777",
+      "adjusted_rule": "atr_5_vs_20<=1.204 & slope_sma_50>0.771 & weekly_close_loc>0.523 & weekly_range_pct>11.777"
+    },
+    {
+      "pattern_id": 7740,
+      "oos_lift": 38.5043,
+      "current_rule": "roc_5<=4.115 & weekly_close_loc>0.739 & weekly_range_pct>8.64",
+      "adjusted_rule": "roc_5<=4.115 & weekly_close_loc>0.638 & weekly_range_pct>8.64"
+    },
+    {
+      "pattern_id": 8101,
+      "oos_lift": 38.247,
+      "current_rule": "atr_20_pct>3.115 & roc_5<=5.479 & weekly_close_loc>0.53 & weekly_range_pct>10.472",
+      "adjusted_rule": "atr_20_pct>3.115 & roc_5<=5.479 & weekly_close_loc>0.43 & weekly_range_pct>10.472"
+    },
+    {
+      "pattern_id": 8070,
+      "oos_lift": 37.1599,
+      "current_rule": "atr_5_vs_20<=1.585 & weekly_close_loc>0.486 & weekly_range_pct>13.881",
+      "adjusted_rule": "atr_5_vs_20<=1.585 & weekly_close_loc>0.386 & weekly_range_pct>13.881"
+    },
+    {
+      "pattern_id": 7508,
+      "oos_lift": 36.7768,
+      "current_rule": "rs_sector_20d<=-6.572 & weekly_close_loc>0.552 & weekly_range_pct>9.622",
+      "adjusted_rule": "rs_sector_20d<=-6.572 & weekly_close_loc>0.453 & weekly_range_pct>9.622"
+    },
+    {
+      "pattern_id": 8645,
+      "oos_lift": 36.1063,
+      "current_rule": "atr_20_pct>3.433 & roc_5<=7.123 & weekly_close_loc>0.608 & weekly_range_pct>11.724",
+      "adjusted_rule": "atr_20_pct>3.433 & roc_5<=7.123 & weekly_close_loc>0.508 & weekly_range_pct>11.724"
+    },
+    {
+      "pattern_id": 6757,
+      "oos_lift": 34.856,
+      "current_rule": "atr_20_pct>3.348 & close_loc<=0.394 & weekly_close_loc>0.637 & weekly_range_pct>8.515",
+      "adjusted_rule": "atr_20_pct>3.348 & close_loc<=0.394 & weekly_close_loc>0.537 & weekly_range_pct>8.515"
+    },
+    {
+      "pattern_id": 7834,
+      "oos_lift": 34.157,
+      "current_rule": "atr_20_pct>6.66 & weekly_close_loc>0.184 & weekly_range_pct>19.905",
+      "adjusted_rule": "atr_20_pct>6.66 & weekly_close_loc>0.084 & weekly_range_pct>19.905"
+    },
+    {
+      "pattern_id": 7164,
+      "oos_lift": 33.7791,
+      "current_rule": "atr_20_pct>2.228 & weekly_close_loc>0.547 & weekly_range_pct>13.298",
+      "adjusted_rule": "atr_20_pct>2.228 & weekly_close_loc>0.447 & weekly_range_pct>13.298"
+    },
+    {
+      "pattern_id": 7469,
+      "oos_lift": 33.1816,
+      "current_rule": "dist_high_20<=-3.943 & rs_sector_60d<=-5.192 & weekly_close_loc>0.595 & weekly_range_pct>10.058",
+      "adjusted_rule": "dist_high_20<=-3.943 & rs_sector_60d<=-5.192 & weekly_close_loc>0.495 & weekly_range_pct>10.058"
+    },
+    {
+      "pattern_id": 7753,
+      "oos_lift": 33.1261,
+      "current_rule": "atr_20_pct>3.508 & roc_5<=7.258 & weekly_close_loc>0.606 & weekly_range_pct>10.929",
+      "adjusted_rule": "atr_20_pct>3.508 & roc_5<=7.258 & weekly_close_loc>0.506 & weekly_range_pct>10.929"
+    },
+    {
+      "pattern_id": 8455,
+      "oos_lift": 31.5999,
+      "current_rule": "atr_20_pct>3.595 & dist_high_60<=-22.1 & slope_sma_20<=-1.301 & weekly_close_loc>0.702",
+      "adjusted_rule": "atr_20_pct>3.595 & dist_high_60<=-22.1 & slope_sma_20<=-1.301 & weekly_close_loc>0.602"
+    },
+    {
+      "pattern_id": 7618,
+      "oos_lift": 31.3947,
+      "current_rule": "roc_5<=3.643 & weekly_close_loc>0.51 & weekly_range_pct<=14.157 & weekly_range_pct>9.062",
+      "adjusted_rule": "roc_5<=3.643 & weekly_close_loc>0.41 & weekly_range_pct<=14.157 & weekly_range_pct>9.062"
+    },
+    {
+      "pattern_id": 6424,
+      "oos_lift": 29.2285,
+      "current_rule": "atr_20_pct>3.723 & roc_60<=-14.778 & weekly_close_loc>0.659",
+      "adjusted_rule": "atr_20_pct>3.723 & roc_60<=-14.778 & weekly_close_loc>0.559"
+    },
+    {
+      "pattern_id": 8408,
+      "oos_lift": 28.1894,
+      "current_rule": "roc_60>31.968 & rs_market_60d>31.077 & weekly_close_loc>0.595 & weekly_range_pct>9.474",
+      "adjusted_rule": "roc_60>31.968 & rs_market_60d>31.077 & weekly_close_loc>0.495 & weekly_range_pct>9.474"
+    },
+    {
+      "pattern_id": 7965,
+      "oos_lift": 27.9771,
+      "current_rule": "atr_5_vs_20>1.204 & dist_high_60<=-4.452 & weekly_close_loc>0.623 & weekly_range_pct>11.777",
+      "adjusted_rule": "atr_5_vs_20>1.204 & dist_high_60<=-4.452 & weekly_close_loc>0.523 & weekly_range_pct>11.777"
+    },
+    {
+      "pattern_id": 7509,
+      "oos_lift": 27.8814,
+      "current_rule": "rs_sector_20d>-6.572 & weekly_close_loc>0.552 & weekly_close_vs_sma20>9.15 & weekly_range_pct>9.622",
+      "adjusted_rule": "rs_sector_20d>-6.572 & weekly_close_loc>0.453 & weekly_close_vs_sma20>9.15 & weekly_range_pct>9.622"
+    },
+    {
+      "pattern_id": 7695,
+      "oos_lift": 27.5174,
+      "current_rule": "atr_20_pct>2.587 & weekly_close_loc>0.684 & weekly_range_pct>8.518",
+      "adjusted_rule": "atr_20_pct>2.587 & weekly_close_loc>0.584 & weekly_range_pct>8.518"
+    },
+    {
+      "pattern_id": 7085,
+      "oos_lift": 27.0266,
+      "current_rule": "atr_20_pct>2.317 & dist_high_120<=-4.809 & weekly_close_loc>0.644 & weekly_range_pct>7.997",
+      "adjusted_rule": "atr_20_pct>2.317 & dist_high_120<=-4.809 & weekly_close_loc>0.544 & weekly_range_pct>7.997"
+    },
+    {
+      "pattern_id": 8144,
+      "oos_lift": 27.0168,
+      "current_rule": "atr_20_pct>2.994 & weekly_close_loc>0.53 & weekly_close_vs_sma20>8.142 & weekly_range_pct>11.935",
+      "adjusted_rule": "atr_20_pct>2.994 & weekly_close_loc>0.43 & weekly_close_vs_sma20>8.142 & weekly_range_pct>11.935"
+    },
+    {
+      "pattern_id": 8068,
+      "oos_lift": 26.8146,
+      "current_rule": "roc_5<=0.338 & weekly_close_loc>0.486 & weekly_range_pct<=13.881 & weekly_range_pct>7.862",
+      "adjusted_rule": "roc_5<=0.338 & weekly_close_loc>0.386 & weekly_range_pct<=13.881 & weekly_range_pct>7.862"
+    },
+    {
+      "pattern_id": 8429,
+      "oos_lift": 26.6449,
+      "current_rule": "atr_20_pct>4.398 & rs_sector_60d<=27.535 & weekly_close_loc>0.464 & weekly_range_pct>9.474",
+      "adjusted_rule": "atr_20_pct>4.398 & rs_sector_60d<=27.535 & weekly_close_loc>0.364 & weekly_range_pct>9.474"
+    },
+    {
+      "pattern_id": 6758,
+      "oos_lift": 26.374,
+      "current_rule": "atr_20_pct>3.348 & close_loc>0.394 & weekly_close_loc>0.637 & weekly_range_pct>8.515",
+      "adjusted_rule": "atr_20_pct>3.348 & close_loc>0.394 & weekly_close_loc>0.537 & weekly_range_pct>8.515"
+    },
+    {
+      "pattern_id": 8143,
+      "oos_lift": 26.3449,
+      "current_rule": "atr_20_pct>2.994 & weekly_close_loc>0.53 & weekly_close_vs_sma20<=8.142 & weekly_range_pct>11.935",
+      "adjusted_rule": "atr_20_pct>2.994 & weekly_close_loc>0.43 & weekly_close_vs_sma20<=8.142 & weekly_range_pct>11.935"
+    },
+    {
+      "pattern_id": 7180,
+      "oos_lift": 26.2311,
+      "current_rule": "atr_20_pct>2.933 & weekly_close_loc>0.604 & weekly_close_vs_sma20>21.135 & weekly_range_pct>9.686",
+      "adjusted_rule": "atr_20_pct>2.933 & weekly_close_loc>0.504 & weekly_close_vs_sma20>21.135 & weekly_range_pct>9.686"
+    },
+    {
+      "pattern_id": 7394,
+      "oos_lift": 26.1546,
+      "current_rule": "atr_20_pct>2.56 & roc_20<=29.308 & weekly_close_loc>0.708 & weekly_range_pct>7.885",
+      "adjusted_rule": "atr_20_pct>2.56 & roc_20<=29.308 & weekly_close_loc>0.608 & weekly_range_pct>7.885"
+    },
+    {
+      "pattern_id": 8448,
+      "oos_lift": 26.0833,
+      "current_rule": "n_sub_3_range_7d<=1.5 & roc_5<=10.438 & weekly_close_loc>0.157 & weekly_range_pct>12.802",
+      "adjusted_rule": "n_sub_3_range_7d<=1.5 & roc_5<=10.438 & weekly_close_loc>0.057 & weekly_range_pct>12.802"
+    },
+    {
+      "pattern_id": 8406,
+      "oos_lift": 25.8361,
+      "current_rule": "roc_60<=31.968 & weekly_close_loc>0.595 & weekly_close_vs_sma20<=8.867 & weekly_range_pct>9.474",
+      "adjusted_rule": "roc_60<=31.968 & weekly_close_loc>0.495 & weekly_close_vs_sma20<=8.867 & weekly_range_pct>9.474"
+    },
+    {
+      "pattern_id": 8084,
+      "oos_lift": 25.6285,
+      "current_rule": "atr_20_pct>3.269 & weekly_close_loc>0.484 & weekly_close_vs_sma20>3.406 & weekly_range_pct>11.589",
+      "adjusted_rule": "atr_20_pct>3.269 & weekly_close_loc>0.384 & weekly_close_vs_sma20>3.406 & weekly_range_pct>11.589"
+    },
+    {
+      "pattern_id": 6427,
+      "oos_lift": 25.5588,
+      "current_rule": "roc_60>-14.778 & rs_sector_60d>-15.622 & weekly_close_loc>0.659 & weekly_range_pct>8.996",
+      "adjusted_rule": "roc_60>-14.778 & rs_sector_60d>-15.622 & weekly_close_loc>0.559 & weekly_range_pct>8.996"
+    },
+    {
+      "pattern_id": 7941,
+      "oos_lift": 25.3308,
+      "current_rule": "dist_high_10<=-3.88 & roc_60<=12.78 & weekly_close_loc>0.413 & weekly_range_pct>7.899",
+      "adjusted_rule": "dist_high_10<=-3.88 & roc_60<=12.78 & weekly_close_loc>0.313 & weekly_range_pct>7.899"
+    },
+    {
+      "pattern_id": 7472,
+      "oos_lift": 24.6445,
+      "current_rule": "rs_sector_60d>-5.192 & weekly_close_loc>0.595 & weekly_close_vs_sma20>19.489 & weekly_range_pct>10.058",
+      "adjusted_rule": "rs_sector_60d>-5.192 & weekly_close_loc>0.495 & weekly_close_vs_sma20>19.489 & weekly_range_pct>10.058"
+    },
+    {
+      "pattern_id": 8462,
+      "oos_lift": 24.6176,
+      "current_rule": "slope_sma_50<=0.445 & weekly_close_loc>0.22 & weekly_range_pct>12.802",
+      "adjusted_rule": "slope_sma_50<=0.445 & weekly_close_loc>0.12 & weekly_range_pct>12.802"
+    },
+    {
+      "pattern_id": 6697,
+      "oos_lift": 24.1482,
+      "current_rule": "atr_20_pct>3.19 & weekly_close_loc>0.736 & weekly_range_pct>5.155",
+      "adjusted_rule": "atr_20_pct>3.19 & weekly_close_loc>0.636 & weekly_range_pct>5.155"
+    },
+    {
+      "pattern_id": 8463,
+      "oos_lift": 23.9686,
+      "current_rule": "slope_sma_50>0.445 & vol_vs_20d<=1.904 & weekly_close_loc>0.22 & weekly_range_pct>12.802",
+      "adjusted_rule": "slope_sma_50>0.445 & vol_vs_20d<=1.904 & weekly_close_loc>0.12 & weekly_range_pct>12.802"
+    },
+    {
+      "pattern_id": 6819,
+      "oos_lift": 23.9329,
+      "current_rule": "atr_20_pct>2.331 & rs_market_60d<=28.941 & weekly_close_loc>0.311 & weekly_range_pct>10.117",
+      "adjusted_rule": "atr_20_pct>2.331 & rs_market_60d<=28.941 & weekly_close_loc>0.211 & weekly_range_pct>10.117"
+    },
+    {
+      "pattern_id": 6645,
+      "oos_lift": 23.8371,
+      "current_rule": "atr_20_pct>2.672 & roc_60<=-11.531 & rs_sector_60d<=-13.906 & weekly_close_loc>0.709",
+      "adjusted_rule": "atr_20_pct>2.672 & roc_60<=-11.531 & rs_sector_60d<=-13.906 & weekly_close_loc>0.609"
+    },
+    {
+      "pattern_id": 8430,
+      "oos_lift": 23.4634,
+      "current_rule": "atr_20_pct>4.398 & rs_sector_60d>27.535 & weekly_close_loc>0.464",
+      "adjusted_rule": "atr_20_pct>4.398 & rs_sector_60d>27.535 & weekly_close_loc>0.364"
+    },
+    {
+      "pattern_id": 7163,
+      "oos_lift": 23.3455,
+      "current_rule": "atr_20_pct>2.228 & weekly_close_loc>0.547 & weekly_range_pct<=13.298 & weekly_range_pct>9.686",
+      "adjusted_rule": "atr_20_pct>2.228 & weekly_close_loc>0.447 & weekly_range_pct<=13.298 & weekly_range_pct>9.686"
+    },
+    {
+      "pattern_id": 8456,
+      "oos_lift": 23.3174,
+      "current_rule": "atr_20_pct>3.595 & dist_sma_200<=49.255 & slope_sma_20>-1.301 & weekly_close_loc>0.702",
+      "adjusted_rule": "atr_20_pct>3.595 & dist_sma_200<=49.255 & slope_sma_20>-1.301 & weekly_close_loc>0.602"
+    },
+    {
+      "pattern_id": 6810,
+      "oos_lift": 22.5949,
+      "current_rule": "atr_20_pct>3.247 & weekly_close_loc>0.463 & weekly_close_vs_sma20>21.75 & weekly_range_pct>8.457",
+      "adjusted_rule": "atr_20_pct>3.247 & weekly_close_loc>0.363 & weekly_close_vs_sma20>21.75 & weekly_range_pct>8.457"
+    },
+    {
+      "pattern_id": 7600,
+      "oos_lift": 22.386,
+      "current_rule": "slope_sma_50<=-0.236 & weekly_close_loc>0.536 & weekly_range_pct<=14.982 & weekly_range_pct>11.038",
+      "adjusted_rule": "slope_sma_50<=-0.236 & weekly_close_loc>0.436 & weekly_range_pct<=14.982 & weekly_range_pct>11.038"
+    },
+    {
+      "pattern_id": 6674,
+      "oos_lift": 22.1123,
+      "current_rule": "atr_20_pct>2.673 & dist_sma_50<=-9.616 & roc_60<=-15.415 & weekly_close_loc>0.712",
+      "adjusted_rule": "atr_20_pct>2.673 & dist_sma_50<=-9.616 & roc_60<=-15.415 & weekly_close_loc>0.612"
+    },
+    {
+      "pattern_id": 7764,
+      "oos_lift": 22.0338,
+      "current_rule": "atr_20_pct>3.479 & weekly_close_loc>0.216 & weekly_close_vs_sma20<=11.171 & weekly_range_pct>13.686",
+      "adjusted_rule": "atr_20_pct>3.479 & weekly_close_loc>0.116 & weekly_close_vs_sma20<=11.171 & weekly_range_pct>13.686"
+    },
+    {
+      "pattern_id": 8211,
+      "oos_lift": 21.879,
+      "current_rule": "atr_20_pct>2.819 & slope_sma_50<=3.07 & weekly_close_loc>0.439 & weekly_range_pct>10.377",
+      "adjusted_rule": "atr_20_pct>2.819 & slope_sma_50<=3.07 & weekly_close_loc>0.339 & weekly_range_pct>10.377"
+    },
+    {
+      "pattern_id": 7713,
+      "oos_lift": 21.8581,
+      "current_rule": "atr_20_pct>2.603 & weekly_close_loc>0.58 & weekly_close_vs_sma20>17.526 & weekly_range_pct>8.526",
+      "adjusted_rule": "atr_20_pct>2.603 & weekly_close_loc>0.48 & weekly_close_vs_sma20>17.526 & weekly_range_pct>8.526"
+    },
+    {
+      "pattern_id": 7758,
+      "oos_lift": 21.683,
+      "current_rule": "roc_5<=2.591 & weekly_close_loc>0.482 & weekly_range_pct<=16.486 & weekly_range_pct>6.772",
+      "adjusted_rule": "roc_5<=2.591 & weekly_close_loc>0.382 & weekly_range_pct<=16.486 & weekly_range_pct>6.772"
+    },
+    {
+      "pattern_id": 8102,
+      "oos_lift": 21.6653,
+      "current_rule": "atr_20_pct>3.115 & roc_5>5.479 & weekly_close_loc>0.53 & weekly_range_pct>10.472",
+      "adjusted_rule": "atr_20_pct>3.115 & roc_5>5.479 & weekly_close_loc>0.43 & weekly_range_pct>10.472"
+    },
+    {
+      "pattern_id": 7553,
+      "oos_lift": 21.6536,
+      "current_rule": "atr_20_pct>2.348 & roc_20<=3.544 & weekly_close_loc>0.5 & weekly_range_pct>7.0",
+      "adjusted_rule": "atr_20_pct>2.348 & roc_20<=3.544 & weekly_close_loc>0.4 & weekly_range_pct>7.0"
+    },
+    {
+      "pattern_id": 7179,
+      "oos_lift": 21.467,
+      "current_rule": "atr_20_pct>2.933 & weekly_close_loc>0.604 & weekly_close_vs_sma20<=21.135 & weekly_range_pct>9.686",
+      "adjusted_rule": "atr_20_pct>2.933 & weekly_close_loc>0.504 & weekly_close_vs_sma20<=21.135 & weekly_range_pct>9.686"
+    },
+    {
+      "pattern_id": 6646,
+      "oos_lift": 21.2664,
+      "current_rule": "atr_20_pct>2.672 & roc_60<=-11.531 & rs_sector_60d>-13.906 & weekly_close_loc>0.709",
+      "adjusted_rule": "atr_20_pct>2.672 & roc_60<=-11.531 & rs_sector_60d>-13.906 & weekly_close_loc>0.609"
+    },
+    {
+      "pattern_id": 8364,
+      "oos_lift": 21.1117,
+      "current_rule": "roc_60<=32.961 & weekly_close_loc>0.614 & weekly_close_vs_sma20<=36.75 & weekly_range_pct>9.624",
+      "adjusted_rule": "roc_60<=32.961 & weekly_close_loc>0.513 & weekly_close_vs_sma20<=36.75 & weekly_range_pct>9.624"
+    },
+    {
+      "pattern_id": 7111,
+      "oos_lift": 20.931,
+      "current_rule": "n_sub_75v_7d<=2.5 & weekly_close_loc>0.219 & weekly_range_pct>9.964",
+      "adjusted_rule": "n_sub_75v_7d<=2.5 & weekly_close_loc>0.119 & weekly_range_pct>9.964"
+    },
+    {
+      "pattern_id": 8646,
+      "oos_lift": 20.8491,
+      "current_rule": "atr_20_pct>3.433 & roc_5>7.123 & weekly_close_loc>0.608 & weekly_range_pct>11.724",
+      "adjusted_rule": "atr_20_pct>3.433 & roc_5>7.123 & weekly_close_loc>0.508 & weekly_range_pct>11.724"
+    },
+    {
+      "pattern_id": 7872,
+      "oos_lift": 20.7379,
+      "current_rule": "range_pct>4.74 & weekly_close_loc>0.569 & weekly_range_pct>9.216",
+      "adjusted_rule": "range_pct>4.74 & weekly_close_loc>0.469 & weekly_range_pct>9.216"
+    },
+    {
+      "pattern_id": 6793,
+      "oos_lift": 20.7334,
+      "current_rule": "atr_20_pct>3.778 & weekly_close_loc>0.628 & weekly_close_vs_sma20<=9.422",
+      "adjusted_rule": "atr_20_pct>3.778 & weekly_close_loc>0.528 & weekly_close_vs_sma20<=9.422"
+    },
+    {
+      "pattern_id": 7861,
+      "oos_lift": 20.3835,
+      "current_rule": "dist_high_10<=-2.524 & dist_high_252>-15.599 & weekly_close_loc>0.5 & weekly_range_pct>7.503",
+      "adjusted_rule": "dist_high_10<=-2.524 & dist_high_252>-15.599 & weekly_close_loc>0.4 & weekly_range_pct>7.503"
+    },
+    {
+      "pattern_id": 8504,
+      "oos_lift": 19.9688,
+      "current_rule": "atr_20_pct>3.596 & dist_sma_50<=-1.756 & rs_market_20d>-9.092 & weekly_close_loc>0.679",
+      "adjusted_rule": "atr_20_pct>3.596 & dist_sma_50<=-1.756 & rs_market_20d>-9.092 & weekly_close_loc>0.58"
+    },
+    {
+      "pattern_id": 7871,
+      "oos_lift": 19.8654,
+      "current_rule": "range_pct<=4.74 & weekly_close_loc>0.569 & weekly_range_pct>9.216",
+      "adjusted_rule": "range_pct<=4.74 & weekly_close_loc>0.469 & weekly_range_pct>9.216"
+    },
+    {
+      "pattern_id": 7621,
+      "oos_lift": 19.7413,
+      "current_rule": "dist_sma_50>14.898 & roc_5>3.643 & weekly_close_loc>0.51 & weekly_range_pct>9.062",
+      "adjusted_rule": "dist_sma_50>14.898 & roc_5>3.643 & weekly_close_loc>0.41 & weekly_range_pct>9.062"
+    },
+    {
+      "pattern_id": 8386,
+      "oos_lift": 19.6949,
+      "current_rule": "dist_sma_20>-0.16 & rs_market_60d>63.683 & weekly_close_loc>0.411 & weekly_close_vs_sma20>17.208",
+      "adjusted_rule": "dist_sma_20>-0.16 & rs_market_60d>63.683 & weekly_close_loc>0.311 & weekly_close_vs_sma20>17.208"
+    },
+    {
+      "pattern_id": 7603,
+      "oos_lift": 19.644,
+      "current_rule": "roc_5>11.752 & weekly_close_loc>0.536 & weekly_range_pct>14.982",
+      "adjusted_rule": "roc_5>11.752 & weekly_close_loc>0.436 & weekly_range_pct>14.982"
+    },
+    {
+      "pattern_id": 6245,
+      "oos_lift": 19.4378,
+      "current_rule": "n_sub_3_range_7d<=2.5 & weekly_close_loc>0.712",
+      "adjusted_rule": "n_sub_3_range_7d<=2.5 & weekly_close_loc>0.612"
+    },
+    {
+      "pattern_id": 8248,
+      "oos_lift": 19.2833,
+      "current_rule": "atr_20_pct>3.475 & weekly_close_loc>0.53 & weekly_close_vs_sma20>8.132 & weekly_range_pct>11.961",
+      "adjusted_rule": "atr_20_pct>3.475 & weekly_close_loc>0.43 & weekly_close_vs_sma20>8.132 & weekly_range_pct>11.961"
+    },
+    {
+      "pattern_id": 7754,
+      "oos_lift": 19.1216,
+      "current_rule": "atr_20_pct>3.508 & roc_5>7.258 & weekly_close_loc>0.606 & weekly_range_pct>10.929",
+      "adjusted_rule": "atr_20_pct>3.508 & roc_5>7.258 & weekly_close_loc>0.506 & weekly_range_pct>10.929"
+    },
+    {
+      "pattern_id": 8644,
+      "oos_lift": 18.7321,
+      "current_rule": "atr_20_pct>4.933 & weekly_close_loc>0.608 & weekly_range_pct<=11.724",
+      "adjusted_rule": "atr_20_pct>4.933 & weekly_close_loc>0.508 & weekly_range_pct<=11.724"
+    },
+    {
+      "pattern_id": 6150,
+      "oos_lift": 18.6496,
+      "current_rule": "atr_20_pct>2.381 & dist_high_252<=-5.37 & weekly_close_loc>0.742 & weekly_range_pct>4.478",
+      "adjusted_rule": "atr_20_pct>2.381 & dist_high_252<=-5.37 & weekly_close_loc>0.642 & weekly_range_pct>4.478"
+    },
+    {
+      "pattern_id": 6932,
+      "oos_lift": 18.424,
+      "current_rule": "atr_20_pct>2.439 & weekly_close_loc>0.718 & weekly_close_vs_sma20>0.122 & weekly_range_pct>5.151",
+      "adjusted_rule": "atr_20_pct>2.439 & weekly_close_loc>0.618 & weekly_close_vs_sma20>0.122 & weekly_range_pct>5.151"
+    },
+    {
+      "pattern_id": 7784,
+      "oos_lift": 18.0808,
+      "current_rule": "atr_20_pct>2.754 & n_sub_75v_20d<=12.5 & weekly_close_loc>0.691 & weekly_close_vs_sma20>3.055",
+      "adjusted_rule": "atr_20_pct>2.754 & n_sub_75v_20d<=12.5 & weekly_close_loc>0.591 & weekly_close_vs_sma20>3.055"
+    },
+    {
+      "pattern_id": 7112,
+      "oos_lift": 17.9868,
+      "current_rule": "dist_high_10<=-8.105 & n_sub_75v_7d>2.5 & weekly_close_loc>0.219 & weekly_range_pct>5.843",
+      "adjusted_rule": "dist_high_10<=-8.105 & n_sub_75v_7d>2.5 & weekly_close_loc>0.119 & weekly_range_pct>5.843"
+    },
+    {
+      "pattern_id": 7739,
+      "oos_lift": 17.9653,
+      "current_rule": "weekly_close_loc<=0.739 & weekly_close_loc>0.445 & weekly_range_pct>9.447",
+      "adjusted_rule": "weekly_close_loc<=0.739 & weekly_close_loc>0.344 & weekly_range_pct>9.447"
+    },
+    {
+      "pattern_id": 6809,
+      "oos_lift": 17.8681,
+      "current_rule": "atr_20_pct>3.247 & weekly_close_loc>0.463 & weekly_close_vs_sma20<=21.75 & weekly_range_pct>8.457",
+      "adjusted_rule": "atr_20_pct>3.247 & weekly_close_loc>0.363 & weekly_close_vs_sma20<=21.75 & weekly_range_pct>8.457"
+    },
+    {
+      "pattern_id": 7709,
+      "oos_lift": 17.8161,
+      "current_rule": "atr_20_pct>2.603 & weekly_close_loc>0.488 & weekly_close_vs_sma20<=17.526 & weekly_range_pct>9.389",
+      "adjusted_rule": "atr_20_pct>2.603 & weekly_close_loc>0.388 & weekly_close_vs_sma20<=17.526 & weekly_range_pct>9.389"
+    },
+    {
+      "pattern_id": 7976,
+      "oos_lift": 17.7301,
+      "current_rule": "atr_20_pct>2.981 & n_sub_3_range_7d<=3.5 & weekly_close_loc>0.726 & weekly_close_vs_sma20<=-3.683",
+      "adjusted_rule": "atr_20_pct>2.981 & n_sub_3_range_7d<=3.5 & weekly_close_loc>0.625 & weekly_close_vs_sma20<=-3.683"
+    },
+    {
+      "pattern_id": 6438,
+      "oos_lift": 17.3364,
+      "current_rule": "atr_5_vs_20>0.917 & rs_sector_20d<=-2.802 & weekly_close_loc>0.732 & weekly_range_pct>6.249",
+      "adjusted_rule": "atr_5_vs_20>0.917 & rs_sector_20d<=-2.802 & weekly_close_loc>0.632 & weekly_range_pct>6.249"
+    },
+    {
+      "pattern_id": 8450,
+      "oos_lift": 17.2335,
+      "current_rule": "roc_5>10.438 & weekly_close_loc>0.157 & weekly_range_pct>12.802",
+      "adjusted_rule": "roc_5>10.438 & weekly_close_loc>0.057 & weekly_range_pct>12.802"
+    },
+    {
+      "pattern_id": 7997,
+      "oos_lift": 17.2284,
+      "current_rule": "n_sub_3_range_7d<=3.5 & n_sub_75v_20d<=13.5 & slope_sma_50<=1.668 & weekly_close_loc>0.587",
+      "adjusted_rule": "n_sub_3_range_7d<=3.5 & n_sub_75v_20d<=13.5 & slope_sma_50<=1.668 & weekly_close_loc>0.486"
+    },
+    {
+      "pattern_id": 8247,
+      "oos_lift": 17.103,
+      "current_rule": "atr_20_pct>3.475 & weekly_close_loc>0.53 & weekly_close_vs_sma20<=8.132 & weekly_range_pct>11.961",
+      "adjusted_rule": "atr_20_pct>3.475 & weekly_close_loc>0.43 & weekly_close_vs_sma20<=8.132 & weekly_range_pct>11.961"
+    },
+    {
+      "pattern_id": 7998,
+      "oos_lift": 16.7022,
+      "current_rule": "n_sub_3_range_7d<=3.5 & n_sub_75v_20d>13.5 & slope_sma_50<=1.668 & weekly_close_loc>0.587",
+      "adjusted_rule": "n_sub_3_range_7d<=3.5 & n_sub_75v_20d>13.5 & slope_sma_50<=1.668 & weekly_close_loc>0.486"
+    },
+    {
+      "pattern_id": 7559,
+      "oos_lift": 16.6515,
+      "current_rule": "atr_20_pct>3.417 & weekly_close_loc>0.664",
+      "adjusted_rule": "atr_20_pct>3.417 & weekly_close_loc>0.564"
+    },
+    {
+      "pattern_id": 6648,
+      "oos_lift": 16.512,
+      "current_rule": "atr_20_pct>2.672 & roc_60>-11.531 & rs_market_60d>3.557 & weekly_close_loc>0.709",
+      "adjusted_rule": "atr_20_pct>2.672 & roc_60>-11.531 & rs_market_60d>3.557 & weekly_close_loc>0.609"
+    },
+    {
+      "pattern_id": 6677,
+      "oos_lift": 16.4331,
+      "current_rule": "atr_20_pct>2.673 & roc_60>-15.415 & weekly_close_loc>0.712 & weekly_range_pct>7.249",
+      "adjusted_rule": "atr_20_pct>2.673 & roc_60>-15.415 & weekly_close_loc>0.612 & weekly_range_pct>7.249"
+    },
+    {
+      "pattern_id": 7348,
+      "oos_lift": 16.2635,
+      "current_rule": "atr_20_pct>2.543 & dist_sma_20<=4.013 & weekly_close_loc>0.75 & weekly_close_vs_sma20<=13.702",
+      "adjusted_rule": "atr_20_pct>2.543 & dist_sma_20<=4.013 & weekly_close_loc>0.65 & weekly_close_vs_sma20<=13.702"
+    },
+    {
+      "pattern_id": 6721,
+      "oos_lift": 16.2275,
+      "current_rule": "atr_20_pct>3.042 & vol_5d_vs_20d<=1.585 & weekly_close_loc>0.689 & weekly_range_pct>5.682",
+      "adjusted_rule": "atr_20_pct>3.042 & vol_5d_vs_20d<=1.585 & weekly_close_loc>0.589 & weekly_range_pct>5.682"
+    },
+    {
+      "pattern_id": 7554,
+      "oos_lift": 16.2222,
+      "current_rule": "atr_20_pct>2.348 & roc_20>3.544 & weekly_close_loc>0.5 & weekly_range_pct>7.0",
+      "adjusted_rule": "atr_20_pct>2.348 & roc_20>3.544 & weekly_close_loc>0.4 & weekly_range_pct>7.0"
+    },
+    {
+      "pattern_id": 7999,
+      "oos_lift": 16.2195,
+      "current_rule": "n_sub_3_range_7d<=3.5 & slope_sma_50>1.668 & weekly_close_loc<=0.841 & weekly_close_loc>0.587",
+      "adjusted_rule": "n_sub_3_range_7d<=3.5 & slope_sma_50>1.668 & weekly_close_loc<=0.841 & weekly_close_loc>0.486"
+    },
+    {
+      "pattern_id": 7694,
+      "oos_lift": 16.1049,
+      "current_rule": "atr_20_pct>2.587 & weekly_close_loc<=0.684 & weekly_close_loc>0.498 & weekly_range_pct>8.518",
+      "adjusted_rule": "atr_20_pct>2.587 & weekly_close_loc<=0.684 & weekly_close_loc>0.398 & weekly_range_pct>8.518"
+    },
+    {
+      "pattern_id": 7435,
+      "oos_lift": 16.0778,
+      "current_rule": "atr_20_pct>3.61 & dist_high_60<=-4.806 & weekly_close_loc>0.25 & weekly_close_vs_sma20>-0.595",
+      "adjusted_rule": "atr_20_pct>3.61 & dist_high_60<=-4.806 & weekly_close_loc>0.15 & weekly_close_vs_sma20>-0.595"
+    },
+    {
+      "pattern_id": 8505,
+      "oos_lift": 16.0322,
+      "current_rule": "atr_20_pct>3.596 & dist_sma_50>-1.756 & rs_market_20d>-9.092 & weekly_close_loc>0.679",
+      "adjusted_rule": "atr_20_pct>3.596 & dist_sma_50>-1.756 & rs_market_20d>-9.092 & weekly_close_loc>0.58"
+    },
+    {
+      "pattern_id": 6201,
+      "oos_lift": 15.9075,
+      "current_rule": "atr_20_pct>3.786 & dist_sma_200>-1.47 & rs_market_20d<=4.603 & weekly_close_loc>0.441",
+      "adjusted_rule": "atr_20_pct>3.786 & dist_sma_200>-1.47 & rs_market_20d<=4.603 & weekly_close_loc>0.341"
+    },
+    {
+      "pattern_id": 6696,
+      "oos_lift": 15.7919,
+      "current_rule": "atr_20_pct>3.19 & weekly_close_loc<=0.736 & weekly_close_loc>0.689 & weekly_range_pct>5.155",
+      "adjusted_rule": "atr_20_pct>3.19 & weekly_close_loc<=0.736 & weekly_close_loc>0.589 & weekly_range_pct>5.155"
+    },
+    {
+      "pattern_id": 8324,
+      "oos_lift": 15.7105,
+      "current_rule": "rs_market_60d<=26.735 & weekly_close_loc>0.701 & weekly_close_vs_sma20<=39.284 & weekly_range_pct>5.137",
+      "adjusted_rule": "rs_market_60d<=26.735 & weekly_close_loc>0.601 & weekly_close_vs_sma20<=39.284 & weekly_range_pct>5.137"
+    },
+    {
+      "pattern_id": 7977,
+      "oos_lift": 15.7088,
+      "current_rule": "atr_20_pct>2.981 & n_sub_3_range_7d<=3.5 & weekly_close_loc>0.726 & weekly_close_vs_sma20>-3.683",
+      "adjusted_rule": "atr_20_pct>2.981 & n_sub_3_range_7d<=3.5 & weekly_close_loc>0.625 & weekly_close_vs_sma20>-3.683"
+    },
+    {
+      "pattern_id": 7799,
+      "oos_lift": 15.5021,
+      "current_rule": "atr_20_pct>2.619 & rsi_14<=75.362 & weekly_close_loc>0.508 & weekly_range_pct>10.943",
+      "adjusted_rule": "atr_20_pct>2.619 & rsi_14<=75.362 & weekly_close_loc>0.408 & weekly_range_pct>10.943"
+    },
+    {
+      "pattern_id": 7471,
+      "oos_lift": 15.3052,
+      "current_rule": "rs_sector_60d>-5.192 & weekly_close_loc>0.595 & weekly_close_vs_sma20<=19.489 & weekly_range_pct>10.058",
+      "adjusted_rule": "rs_sector_60d>-5.192 & weekly_close_loc>0.495 & weekly_close_vs_sma20<=19.489 & weekly_range_pct>10.058"
+    },
+    {
+      "pattern_id": 8162,
+      "oos_lift": 14.893,
+      "current_rule": "atr_20_pct>3.08 & n_sub_75v_20d<=12.5 & roc_60<=9.151 & weekly_close_loc>0.409",
+      "adjusted_rule": "atr_20_pct>3.08 & n_sub_75v_20d<=12.5 & roc_60<=9.151 & weekly_close_loc>0.309"
+    },
+    {
+      "pattern_id": 7200,
+      "oos_lift": 14.846,
+      "current_rule": "dist_sma_50<=31.38 & weekly_close_loc>0.246 & weekly_close_vs_sma20>21.495 & weekly_range_pct>10.736",
+      "adjusted_rule": "dist_sma_50<=31.38 & weekly_close_loc>0.146 & weekly_close_vs_sma20>21.495 & weekly_range_pct>10.736"
+    },
+    {
+      "pattern_id": 8621,
+      "oos_lift": 14.7863,
+      "current_rule": "atr_20_pct>3.523 & weekly_close_loc<=0.783 & weekly_close_loc>0.348 & weekly_range_pct>12.829",
+      "adjusted_rule": "atr_20_pct>3.523 & weekly_close_loc<=0.783 & weekly_close_loc>0.248 & weekly_range_pct>12.829"
+    },
+    {
+      "pattern_id": 8464,
+      "oos_lift": 14.4631,
+      "current_rule": "slope_sma_50>0.445 & vol_vs_20d>1.904 & weekly_close_loc>0.22 & weekly_range_pct>12.802",
+      "adjusted_rule": "slope_sma_50>0.445 & vol_vs_20d>1.904 & weekly_close_loc>0.12 & weekly_range_pct>12.802"
+    },
+    {
+      "pattern_id": 8583,
+      "oos_lift": 14.1716,
+      "current_rule": "atr_20_pct>3.431 & close_loc>0.438 & weekly_close_loc>0.671 & weekly_range_pct<=11.608",
+      "adjusted_rule": "atr_20_pct>3.431 & close_loc>0.438 & weekly_close_loc>0.571 & weekly_range_pct<=11.608"
+    },
+    {
+      "pattern_id": 8581,
+      "oos_lift": 14.0431,
+      "current_rule": "atr_20_pct>4.276 & weekly_close_loc<=0.671 & weekly_close_loc>0.355",
+      "adjusted_rule": "atr_20_pct>4.276 & weekly_close_loc<=0.671 & weekly_close_loc>0.255"
+    },
+    {
+      "pattern_id": 8642,
+      "oos_lift": 13.9195,
+      "current_rule": "atr_20_pct>4.627 & weekly_close_loc<=0.608 & weekly_close_loc>0.377",
+      "adjusted_rule": "atr_20_pct>4.627 & weekly_close_loc<=0.608 & weekly_close_loc>0.277"
+    },
+    {
+      "pattern_id": 8163,
+      "oos_lift": 13.5686,
+      "current_rule": "atr_20_pct>3.08 & n_sub_75v_20d>12.5 & weekly_close_loc>0.409",
+      "adjusted_rule": "atr_20_pct>3.08 & n_sub_75v_20d>12.5 & weekly_close_loc>0.309"
+    },
+    {
+      "pattern_id": 7919,
+      "oos_lift": 13.4196,
+      "current_rule": "atr_20_pct>2.539 & weekly_close_loc>0.259 & weekly_close_vs_sma20>-1.734 & weekly_range_pct>8.03",
+      "adjusted_rule": "atr_20_pct>2.539 & weekly_close_loc>0.159 & weekly_close_vs_sma20>-1.734 & weekly_range_pct>8.03"
+    },
+    {
+      "pattern_id": 8337,
+      "oos_lift": 13.2482,
+      "current_rule": "dist_high_60>-24.045 & dist_sma_200>6.416 & weekly_close_loc>0.508 & weekly_range_pct>5.97",
+      "adjusted_rule": "dist_high_60>-24.045 & dist_sma_200>6.416 & weekly_close_loc>0.408 & weekly_range_pct>5.97"
+    },
+    {
+      "pattern_id": 8258,
+      "oos_lift": 13.1838,
+      "current_rule": "atr_20_pct<=4.476 & weekly_close_loc>0.714 & weekly_close_vs_sma20<=5.523 & weekly_range_pct>6.074",
+      "adjusted_rule": "atr_20_pct<=4.476 & weekly_close_loc>0.614 & weekly_close_vs_sma20<=5.523 & weekly_range_pct>6.074"
+    },
+    {
+      "pattern_id": 6647,
+      "oos_lift": 12.8831,
+      "current_rule": "atr_20_pct>2.672 & roc_60>-11.531 & rs_market_60d<=3.557 & weekly_close_loc>0.709",
+      "adjusted_rule": "atr_20_pct>2.672 & roc_60>-11.531 & rs_market_60d<=3.557 & weekly_close_loc>0.609"
+    },
+    {
+      "pattern_id": 7383,
+      "oos_lift": 12.6826,
+      "current_rule": "atr_20_pct>2.463 & roc_20<=30.201 & weekly_close_loc>0.267 & weekly_range_pct>7.596",
+      "adjusted_rule": "atr_20_pct>2.463 & roc_20<=30.201 & weekly_close_loc>0.167 & weekly_range_pct>7.596"
+    },
+    {
+      "pattern_id": 8405,
+      "oos_lift": 12.4879,
+      "current_rule": "dist_high_20<=-3.925 & weekly_close_loc>0.595 & weekly_range_pct<=9.474 & weekly_range_pct>5.466",
+      "adjusted_rule": "dist_high_20<=-3.925 & weekly_close_loc>0.495 & weekly_range_pct<=9.474 & weekly_range_pct>5.466"
+    },
+    {
+      "pattern_id": 7412,
+      "oos_lift": 12.3453,
+      "current_rule": "atr_20_pct>2.451 & rs_sector_20d<=10.627 & weekly_close_loc>0.319 & weekly_range_pct>10.518",
+      "adjusted_rule": "atr_20_pct>2.451 & rs_sector_20d<=10.627 & weekly_close_loc>0.219 & weekly_range_pct>10.518"
+    },
+    {
+      "pattern_id": 6796,
+      "oos_lift": 12.2553,
+      "current_rule": "rs_market_60d<=81.893 & weekly_close_loc>0.374 & weekly_close_vs_sma20>9.422 & weekly_range_pct>4.765",
+      "adjusted_rule": "rs_market_60d<=81.893 & weekly_close_loc>0.275 & weekly_close_vs_sma20>9.422 & weekly_range_pct>4.765"
+    },
+    {
+      "pattern_id": 6962,
+      "oos_lift": 11.9279,
+      "current_rule": "atr_20_pct>2.441 & weekly_close_loc>0.722 & weekly_close_vs_sma20>0.122 & weekly_range_pct>5.176",
+      "adjusted_rule": "atr_20_pct>2.441 & weekly_close_loc>0.622 & weekly_close_vs_sma20>0.122 & weekly_range_pct>5.176"
+    },
+    {
+      "pattern_id": 7633,
+      "oos_lift": 11.782,
+      "current_rule": "rsi_14>44.968 & weekly_close_loc>0.445 & weekly_close_vs_sma20>9.694 & weekly_range_pct>9.963",
+      "adjusted_rule": "rsi_14>44.968 & weekly_close_loc>0.345 & weekly_close_vs_sma20>9.694 & weekly_range_pct>9.963"
+    },
+    {
+      "pattern_id": 7790,
+      "oos_lift": 11.6875,
+      "current_rule": "atr_20_pct>2.865 & rs_sector_60d<=31.827 & weekly_close_loc>0.698 & weekly_close_vs_sma20>3.055",
+      "adjusted_rule": "atr_20_pct>2.865 & rs_sector_60d<=31.827 & weekly_close_loc>0.598 & weekly_close_vs_sma20>3.055"
+    },
+    {
+      "pattern_id": 6953,
+      "oos_lift": 11.681,
+      "current_rule": "atr_20_pct>2.444 & dist_sma_50>-2.936 & weekly_close_loc>0.703 & weekly_range_pct>10.026",
+      "adjusted_rule": "atr_20_pct>2.444 & dist_sma_50>-2.936 & weekly_close_loc>0.603 & weekly_range_pct>10.026"
+    },
+    {
+      "pattern_id": 7649,
+      "oos_lift": 11.6335,
+      "current_rule": "atr_20_pct>2.67 & weekly_close_loc>0.375 & weekly_close_vs_sma20>17.488 & weekly_range_pct>8.581",
+      "adjusted_rule": "atr_20_pct>2.67 & weekly_close_loc>0.275 & weekly_close_vs_sma20>17.488 & weekly_range_pct>8.581"
+    },
+    {
+      "pattern_id": 6439,
+      "oos_lift": 11.6125,
+      "current_rule": "roc_60<=-5.882 & rs_sector_20d>-2.802 & weekly_close_loc>0.732 & weekly_range_pct>6.249",
+      "adjusted_rule": "roc_60<=-5.882 & rs_sector_20d>-2.802 & weekly_close_loc>0.632 & weekly_range_pct>6.249"
+    },
+    {
+      "pattern_id": 8200,
+      "oos_lift": 11.5209,
+      "current_rule": "atr_20_pct>2.975 & dist_high_120>-26.16 & rs_sector_60d>-21.31 & weekly_close_loc>0.443",
+      "adjusted_rule": "atr_20_pct>2.975 & dist_high_120>-26.16 & rs_sector_60d>-21.31 & weekly_close_loc>0.343"
+    },
+    {
+      "pattern_id": 7905,
+      "oos_lift": 11.3863,
+      "current_rule": "atr_20_pct>2.552 & slope_sma_50>1.007 & weekly_close_loc>0.429 & weekly_close_vs_sma20>8.425",
+      "adjusted_rule": "atr_20_pct>2.552 & slope_sma_50>1.007 & weekly_close_loc>0.329 & weekly_close_vs_sma20>8.425"
+    },
+    {
+      "pattern_id": 7631,
+      "oos_lift": 11.285,
+      "current_rule": "dist_sma_200<=7.123 & weekly_close_loc>0.445 & weekly_close_vs_sma20<=9.694 & weekly_range_pct>9.963",
+      "adjusted_rule": "dist_sma_200<=7.123 & weekly_close_loc>0.345 & weekly_close_vs_sma20<=9.694 & weekly_range_pct>9.963"
+    },
+    {
+      "pattern_id": 6440,
+      "oos_lift": 11.2786,
+      "current_rule": "roc_60>-5.882 & rs_sector_20d>-2.802 & weekly_close_loc>0.732 & weekly_range_pct>6.249",
+      "adjusted_rule": "roc_60>-5.882 & rs_sector_20d>-2.802 & weekly_close_loc>0.632 & weekly_range_pct>6.249"
+    },
+    {
+      "pattern_id": 8042,
+      "oos_lift": 11.2142,
+      "current_rule": "n_sub_3_range_7d<=3.5 & slope_sma_50>1.672 & weekly_close_loc<=0.841 & weekly_close_loc>0.587",
+      "adjusted_rule": "n_sub_3_range_7d<=3.5 & slope_sma_50>1.672 & weekly_close_loc<=0.841 & weekly_close_loc>0.486"
+    },
+    {
+      "pattern_id": 6467,
+      "oos_lift": 11.1338,
+      "current_rule": "atr_20_pct>3.876 & roc_60<=-13.065 & rs_market_60d>-19.076 & weekly_close_loc>0.511",
+      "adjusted_rule": "atr_20_pct>3.876 & roc_60<=-13.065 & rs_market_60d>-19.076 & weekly_close_loc>0.411"
+    },
+    {
+      "pattern_id": 7972,
+      "oos_lift": 11.1108,
+      "current_rule": "n_sub_75v_20d<=10.5 & weekly_close_loc<=0.726 & weekly_close_loc>0.279 & weekly_range_pct>9.188",
+      "adjusted_rule": "n_sub_75v_20d<=10.5 & weekly_close_loc<=0.726 & weekly_close_loc>0.179 & weekly_range_pct>9.188"
+    },
+    {
+      "pattern_id": 7751,
+      "oos_lift": 10.8242,
+      "current_rule": "atr_20_pct>3.508 & dist_high_60<=-6.852 & weekly_close_loc>0.606 & weekly_range_pct<=10.929",
+      "adjusted_rule": "atr_20_pct>3.508 & dist_high_60<=-6.852 & weekly_close_loc>0.506 & weekly_range_pct<=10.929"
+    },
+    {
+      "pattern_id": 8618,
+      "oos_lift": 10.6984,
+      "current_rule": "atr_20_pct>4.59 & weekly_close_loc>0.391 & weekly_range_pct<=12.829",
+      "adjusted_rule": "atr_20_pct>4.59 & weekly_close_loc>0.29 & weekly_range_pct<=12.829"
+    },
+    {
+      "pattern_id": 6823,
+      "oos_lift": 10.5914,
+      "current_rule": "atr_20_pct>2.277 & slope_sma_20<=0.214 & weekly_close_loc>0.799",
+      "adjusted_rule": "atr_20_pct>2.277 & slope_sma_20<=0.214 & weekly_close_loc>0.699"
+    },
+    {
+      "pattern_id": 8315,
+      "oos_lift": 10.5369,
+      "current_rule": "atr_20_pct>3.2 & dist_sma_200<=19.123 & weekly_close_loc>0.418",
+      "adjusted_rule": "atr_20_pct>3.2 & dist_sma_200<=19.123 & weekly_close_loc>0.319"
+    },
+    {
+      "pattern_id": 8099,
+      "oos_lift": 10.3536,
+      "current_rule": "atr_20_pct>3.115 & dist_sma_200<=10.571 & weekly_close_loc>0.53 & weekly_range_pct<=10.472",
+      "adjusted_rule": "atr_20_pct>3.115 & dist_sma_200<=10.571 & weekly_close_loc>0.43 & weekly_range_pct<=10.472"
+    },
+    {
+      "pattern_id": 7055,
+      "oos_lift": 10.2858,
+      "current_rule": "atr_20_pct>2.141 & rs_sector_60d<=10.056 & weekly_close_loc>0.094 & weekly_range_pct>8.01",
+      "adjusted_rule": "atr_20_pct>2.141 & rs_sector_60d<=10.056 & weekly_close_loc>-0.006 & weekly_range_pct>8.01"
+    },
+    {
+      "pattern_id": 7056,
+      "oos_lift": 10.2575,
+      "current_rule": "atr_20_pct>2.141 & rs_sector_60d>10.056 & weekly_close_loc>0.094 & weekly_range_pct>8.01",
+      "adjusted_rule": "atr_20_pct>2.141 & rs_sector_60d>10.056 & weekly_close_loc>-0.006 & weekly_range_pct>8.01"
+    },
+    {
+      "pattern_id": 8428,
+      "oos_lift": 10.2224,
+      "current_rule": "atr_20_pct>4.398 & rs_sector_60d<=27.535 & weekly_close_loc>0.464 & weekly_range_pct<=9.474",
+      "adjusted_rule": "atr_20_pct>4.398 & rs_sector_60d<=27.535 & weekly_close_loc>0.364 & weekly_range_pct<=9.474"
+    },
+    {
+      "pattern_id": 6663,
+      "oos_lift": 10.1618,
+      "current_rule": "atr_20_pct>3.227 & rs_sector_60d>-8.796 & slope_sma_50>-2.14 & weekly_close_loc>0.81",
+      "adjusted_rule": "atr_20_pct>3.227 & rs_sector_60d>-8.796 & slope_sma_50>-2.14 & weekly_close_loc>0.71"
+    },
+    {
+      "pattern_id": 7943,
+      "oos_lift": 9.9585,
+      "current_rule": "roc_60>12.78 & weekly_close_loc>0.648",
+      "adjusted_rule": "roc_60>12.78 & weekly_close_loc>0.548"
+    },
+    {
+      "pattern_id": 6756,
+      "oos_lift": 9.9468,
+      "current_rule": "atr_20_pct>3.348 & weekly_close_loc>0.637 & weekly_range_pct<=8.134",
+      "adjusted_rule": "atr_20_pct>3.348 & weekly_close_loc>0.537 & weekly_range_pct<=8.134"
+    },
+    {
+      "pattern_id": 8037,
+      "oos_lift": 9.7021,
+      "current_rule": "atr_20_pct>2.53 & slope_sma_20<=-1.632 & weekly_close_loc>0.573 & weekly_range_pct>5.546",
+      "adjusted_rule": "atr_20_pct>2.53 & slope_sma_20<=-1.632 & weekly_close_loc>0.473 & weekly_range_pct>5.546"
+    },
+    {
+      "pattern_id": 7304,
+      "oos_lift": 9.4931,
+      "current_rule": "dist_sma_200>24.751 & rs_sector_20d>-5.308 & weekly_close_loc>0.415 & weekly_range_pct>4.886",
+      "adjusted_rule": "dist_sma_200>24.751 & rs_sector_20d>-5.308 & weekly_close_loc>0.315 & weekly_range_pct>4.886"
+    },
+    {
+      "pattern_id": 7413,
+      "oos_lift": 9.4922,
+      "current_rule": "atr_20_pct>3.667 & rs_sector_20d>10.627 & weekly_close_loc>0.319",
+      "adjusted_rule": "atr_20_pct>3.667 & rs_sector_20d>10.627 & weekly_close_loc>0.219"
+    },
+    {
+      "pattern_id": 8546,
+      "oos_lift": 9.3612,
+      "current_rule": "atr_20_pct>3.434 & weekly_close_loc<=0.78 & weekly_close_loc>0.282 & weekly_range_pct>13.953",
+      "adjusted_rule": "atr_20_pct>3.434 & weekly_close_loc<=0.78 & weekly_close_loc>0.182 & weekly_range_pct>13.953"
+    },
+    {
+      "pattern_id": 8316,
+      "oos_lift": 9.2944,
+      "current_rule": "atr_20_pct>3.2 & dist_sma_200<=47.159 & dist_sma_200>19.123 & weekly_close_loc>0.418",
+      "adjusted_rule": "atr_20_pct>3.2 & dist_sma_200<=47.159 & dist_sma_200>19.123 & weekly_close_loc>0.319"
+    },
+    {
+      "pattern_id": 7324,
+      "oos_lift": 9.2378,
+      "current_rule": "dist_sma_200<=64.041 & dist_sma_200>24.118 & rs_sector_20d>-5.308 & weekly_close_loc>0.415",
+      "adjusted_rule": "dist_sma_200<=64.041 & dist_sma_200>24.118 & rs_sector_20d>-5.308 & weekly_close_loc>0.315"
+    },
+    {
+      "pattern_id": 7693,
+      "oos_lift": 9.2063,
+      "current_rule": "atr_20_pct>3.42 & weekly_close_loc>0.498 & weekly_range_pct<=8.518",
+      "adjusted_rule": "atr_20_pct>3.42 & weekly_close_loc>0.398 & weekly_range_pct<=8.518"
+    },
+    {
+      "pattern_id": 6329,
+      "oos_lift": 8.9055,
+      "current_rule": "dist_sma_200<=-9.438 & n_sub_75v_7d>2.5 & weekly_close_loc>0.455 & weekly_range_pct>5.389",
+      "adjusted_rule": "dist_sma_200<=-9.438 & n_sub_75v_7d>2.5 & weekly_close_loc>0.355 & weekly_range_pct>5.389"
+    },
+    {
+      "pattern_id": 8643,
+      "oos_lift": 8.843,
+      "current_rule": "atr_20_pct<=4.933 & atr_20_pct>3.433 & weekly_close_loc>0.608 & weekly_range_pct<=11.724",
+      "adjusted_rule": "atr_20_pct<=4.933 & atr_20_pct>3.433 & weekly_close_loc>0.508 & weekly_range_pct<=11.724"
+    },
+    {
+      "pattern_id": 6335,
+      "oos_lift": 8.8373,
+      "current_rule": "dist_high_252>-29.289 & dist_sma_200>-21.097 & rs_market_20d>-3.647 & weekly_close_loc>0.8",
+      "adjusted_rule": "dist_high_252>-29.289 & dist_sma_200>-21.097 & rs_market_20d>-3.647 & weekly_close_loc>0.7"
+    },
+    {
+      "pattern_id": 7113,
+      "oos_lift": 8.8163,
+      "current_rule": "dist_high_10>-8.105 & n_sub_75v_7d>2.5 & weekly_close_loc>0.219 & weekly_range_pct>5.843",
+      "adjusted_rule": "dist_high_10>-8.105 & n_sub_75v_7d>2.5 & weekly_close_loc>0.119 & weekly_range_pct>5.843"
+    },
+    {
+      "pattern_id": 6270,
+      "oos_lift": 8.8055,
+      "current_rule": "dist_high_120>-15.833 & rs_market_20d>-5.402 & weekly_close_loc>0.364 & weekly_range_pct>5.571",
+      "adjusted_rule": "dist_high_120>-15.833 & rs_market_20d>-5.402 & weekly_close_loc>0.264 & weekly_range_pct>5.571"
+    },
+    {
+      "pattern_id": 7246,
+      "oos_lift": 8.7975,
+      "current_rule": "atr_20_pct>3.616 & weekly_close_loc>0.219 & weekly_range_pct>5.029",
+      "adjusted_rule": "atr_20_pct>3.616 & weekly_close_loc>0.119 & weekly_range_pct>5.029"
+    },
+    {
+      "pattern_id": 6299,
+      "oos_lift": 8.1268,
+      "current_rule": "dist_high_120<=-6.418 & dist_sma_200>-7.867 & rs_market_60d>-3.837 & weekly_close_loc>0.486",
+      "adjusted_rule": "dist_high_120<=-6.418 & dist_sma_200>-7.867 & rs_market_60d>-3.837 & weekly_close_loc>0.386"
+    },
+    {
+      "pattern_id": 8321,
+      "oos_lift": 8.0496,
+      "current_rule": "atr_20_pct>3.131 & rs_sector_60d>-21.464 & weekly_close_loc<=0.701 & weekly_close_loc>0.355",
+      "adjusted_rule": "atr_20_pct>3.131 & rs_sector_60d>-21.464 & weekly_close_loc<=0.701 & weekly_close_loc>0.255"
+    },
+    {
+      "pattern_id": 7221,
+      "oos_lift": 7.9441,
+      "current_rule": "weekly_close_loc>0.228 & weekly_close_vs_sma20>21.495 & weekly_range_pct>9.705",
+      "adjusted_rule": "weekly_close_loc>0.128 & weekly_close_vs_sma20>21.495 & weekly_range_pct>9.705"
+    },
+    {
+      "pattern_id": 6470,
+      "oos_lift": 7.6102,
+      "current_rule": "roc_60>-13.065 & slope_sma_50>0.992 & weekly_close_loc>0.511 & weekly_range_pct>6.641",
+      "adjusted_rule": "roc_60>-13.065 & slope_sma_50>0.992 & weekly_close_loc>0.411 & weekly_range_pct>6.641"
+    },
+    {
+      "pattern_id": 7763,
+      "oos_lift": 7.2862,
+      "current_rule": "atr_20_pct>3.479 & weekly_close_loc>0.216 & weekly_close_vs_sma20<=11.171 & weekly_range_pct<=13.686",
+      "adjusted_rule": "atr_20_pct>3.479 & weekly_close_loc>0.116 & weekly_close_vs_sma20<=11.171 & weekly_range_pct<=13.686"
+    },
+    {
+      "pattern_id": 8508,
+      "oos_lift": 7.1719,
+      "current_rule": "dist_high_60<=-3.645 & n_sub_75v_20d>9.5 & weekly_close_loc>0.218 & weekly_range_pct>3.683",
+      "adjusted_rule": "dist_high_60<=-3.645 & n_sub_75v_20d>9.5 & weekly_close_loc>0.118 & weekly_range_pct>3.683"
+    },
+    {
+      "pattern_id": 7121,
+      "oos_lift": 6.9736,
+      "current_rule": "atr_20_pct>2.445 & dist_high_20<=-2.03 & weekly_close_loc>0.166 & weekly_range_pct>5.024",
+      "adjusted_rule": "atr_20_pct>2.445 & dist_high_20<=-2.03 & weekly_close_loc>0.066 & weekly_range_pct>5.024"
+    },
+    {
+      "pattern_id": 8142,
+      "oos_lift": 6.7438,
+      "current_rule": "atr_20_pct>2.994 & weekly_close_loc>0.53 & weekly_close_vs_sma20>2.06 & weekly_range_pct<=11.935",
+      "adjusted_rule": "atr_20_pct>2.994 & weekly_close_loc>0.43 & weekly_close_vs_sma20>2.06 & weekly_range_pct<=11.935"
+    },
+    {
+      "pattern_id": 6199,
+      "oos_lift": 6.692,
+      "current_rule": "dist_sma_20>-2.875 & dist_sma_200<=-1.47 & rs_market_60d>-13.488 & weekly_close_loc>0.815",
+      "adjusted_rule": "dist_sma_20>-2.875 & dist_sma_200<=-1.47 & rs_market_60d>-13.488 & weekly_close_loc>0.715"
+    },
+    {
+      "pattern_id": 7176,
+      "oos_lift": 6.6302,
+      "current_rule": "atr_20_pct>2.933 & slope_sma_20<=-0.665 & weekly_close_loc<=0.604 & weekly_close_loc>0.525",
+      "adjusted_rule": "atr_20_pct>2.933 & slope_sma_20<=-0.665 & weekly_close_loc<=0.604 & weekly_close_loc>0.425"
+    },
+    {
+      "pattern_id": 7805,
+      "oos_lift": 6.5098,
+      "current_rule": "weekly_breakout_20w<=0.5 & weekly_close_loc>0.498 & weekly_close_vs_sma20>18.917",
+      "adjusted_rule": "weekly_breakout_20w<=0.5 & weekly_close_loc>0.399 & weekly_close_vs_sma20>18.917"
+    },
+    {
+      "pattern_id": 7162,
+      "oos_lift": 6.4757,
+      "current_rule": "atr_20_pct>2.228 & weekly_close_loc>0.547 & weekly_range_pct<=9.686 & weekly_range_pct>4.239",
+      "adjusted_rule": "atr_20_pct>2.228 & weekly_close_loc>0.447 & weekly_range_pct<=9.686 & weekly_range_pct>4.239"
+    },
+    {
+      "pattern_id": 7444,
+      "oos_lift": 6.4402,
+      "current_rule": "atr_20_pct>3.276 & n_sub_75v_20d<=11.5 & rs_market_60d<=39.754 & weekly_close_loc>0.323",
+      "adjusted_rule": "atr_20_pct>3.276 & n_sub_75v_20d<=11.5 & rs_market_60d<=39.754 & weekly_close_loc>0.223"
+    },
+    {
+      "pattern_id": 7446,
+      "oos_lift": 6.3472,
+      "current_rule": "atr_20_pct>3.276 & n_sub_75v_20d>11.5 & roc_60<=4.386 & weekly_close_loc>0.323",
+      "adjusted_rule": "atr_20_pct>3.276 & n_sub_75v_20d>11.5 & roc_60<=4.386 & weekly_close_loc>0.223"
+    },
+    {
+      "pattern_id": 7252,
+      "oos_lift": 6.1069,
+      "current_rule": "atr_20_pct>2.152 & rs_sector_60d>13.714 & weekly_close_loc<=0.83 & weekly_close_loc>0.265",
+      "adjusted_rule": "atr_20_pct>2.152 & rs_sector_60d>13.714 & weekly_close_loc<=0.83 & weekly_close_loc>0.165"
+    },
+    {
+      "pattern_id": 8141,
+      "oos_lift": 6.1031,
+      "current_rule": "atr_20_pct>2.994 & weekly_close_loc>0.53 & weekly_close_vs_sma20<=2.06 & weekly_range_pct<=11.935",
+      "adjusted_rule": "atr_20_pct>2.994 & weekly_close_loc>0.43 & weekly_close_vs_sma20<=2.06 & weekly_range_pct<=11.935"
+    },
+    {
+      "pattern_id": 6226,
+      "oos_lift": 6.0172,
+      "current_rule": "dist_sma_200<=14.169 & rs_market_60d>-4.03 & vol_5d_vs_20d<=1.166 & weekly_close_loc>0.703",
+      "adjusted_rule": "dist_sma_200<=14.169 & rs_market_60d>-4.03 & vol_5d_vs_20d<=1.166 & weekly_close_loc>0.603"
+    },
+    {
+      "pattern_id": 7645,
+      "oos_lift": 5.9816,
+      "current_rule": "atr_20_pct>3.189 & weekly_close_loc>0.485 & weekly_close_vs_sma20<=17.488",
+      "adjusted_rule": "atr_20_pct>3.189 & weekly_close_loc>0.385 & weekly_close_vs_sma20<=17.488"
+    },
+    {
+      "pattern_id": 7251,
+      "oos_lift": 5.9678,
+      "current_rule": "atr_20_pct>2.152 & dist_sma_50<=4.852 & rs_sector_60d<=13.714 & weekly_close_loc>0.265",
+      "adjusted_rule": "atr_20_pct>2.152 & dist_sma_50<=4.852 & rs_sector_60d<=13.714 & weekly_close_loc>0.165"
+    },
+    {
+      "pattern_id": 7447,
+      "oos_lift": 5.8429,
+      "current_rule": "atr_20_pct>3.276 & n_sub_75v_20d>11.5 & roc_60>4.386 & weekly_close_loc>0.323",
+      "adjusted_rule": "atr_20_pct>3.276 & n_sub_75v_20d>11.5 & roc_60>4.386 & weekly_close_loc>0.223"
+    },
+    {
+      "pattern_id": 7075,
+      "oos_lift": 5.7439,
+      "current_rule": "atr_20_pct>2.101 & dist_sma_200<=34.864 & weekly_close_loc>0.102 & weekly_range_pct>8.316",
+      "adjusted_rule": "atr_20_pct>2.101 & dist_sma_200<=34.864 & weekly_close_loc>0.002 & weekly_range_pct>8.316"
+    },
+    {
+      "pattern_id": 7313,
+      "oos_lift": 5.5826,
+      "current_rule": "dist_high_252>-13.784 & vol_5d_vs_20d>0.635 & weekly_close_loc>0.448 & weekly_close_vs_sma20>19.326",
+      "adjusted_rule": "dist_high_252>-13.784 & vol_5d_vs_20d>0.635 & weekly_close_loc>0.348 & weekly_close_vs_sma20>19.326"
+    },
+    {
+      "pattern_id": 6788,
+      "oos_lift": 5.5338,
+      "current_rule": "atr_20_pct>2.241 & rs_market_60d<=79.538 & weekly_close_loc>0.259 & weekly_close_vs_sma20>9.422",
+      "adjusted_rule": "atr_20_pct>2.241 & rs_market_60d<=79.538 & weekly_close_loc>0.159 & weekly_close_vs_sma20>9.422"
+    },
+    {
+      "pattern_id": 8038,
+      "oos_lift": 5.5306,
+      "current_rule": "atr_20_pct>2.53 & slope_sma_20>-1.632 & weekly_close_loc>0.573 & weekly_range_pct>5.546",
+      "adjusted_rule": "atr_20_pct>2.53 & slope_sma_20>-1.632 & weekly_close_loc>0.473 & weekly_range_pct>5.546"
+    },
+    {
+      "pattern_id": 6483,
+      "oos_lift": 5.4919,
+      "current_rule": "atr_20_pct>3.277 & dist_high_20>-16.87 & rsi_14<=55.679 & weekly_close_loc>0.244",
+      "adjusted_rule": "atr_20_pct>3.277 & dist_high_20>-16.87 & rsi_14<=55.679 & weekly_close_loc>0.144"
+    },
+    {
+      "pattern_id": 8246,
+      "oos_lift": 5.3128,
+      "current_rule": "atr_20_pct>3.475 & dist_high_252>-41.208 & weekly_close_loc>0.53 & weekly_range_pct<=11.961",
+      "adjusted_rule": "atr_20_pct>3.475 & dist_high_252>-41.208 & weekly_close_loc>0.43 & weekly_range_pct<=11.961"
+    },
+    {
+      "pattern_id": 6328,
+      "oos_lift": 5.2268,
+      "current_rule": "dist_sma_200<=-9.438 & n_sub_75v_7d<=2.5 & weekly_close_loc>0.455 & weekly_range_pct>5.389",
+      "adjusted_rule": "dist_sma_200<=-9.438 & n_sub_75v_7d<=2.5 & weekly_close_loc>0.355 & weekly_range_pct>5.389"
+    },
+    {
+      "pattern_id": 8157,
+      "oos_lift": 5.1537,
+      "current_rule": "atr_20_pct>2.761 & roc_20<=13.064 & rs_sector_60d>10.947 & weekly_close_loc>0.073",
+      "adjusted_rule": "atr_20_pct>2.761 & roc_20<=13.064 & rs_sector_60d>10.947 & weekly_close_loc>-0.027"
+    },
+    {
+      "pattern_id": 6318,
+      "oos_lift": 5.0809,
+      "current_rule": "dist_sma_200<=-7.528 & rs_market_60d>-13.382 & slope_sma_50<=-0.911 & weekly_close_loc>0.455",
+      "adjusted_rule": "dist_sma_200<=-7.528 & rs_market_60d>-13.382 & slope_sma_50<=-0.911 & weekly_close_loc>0.355"
+    },
+    {
+      "pattern_id": 8171,
+      "oos_lift": 5.0628,
+      "current_rule": "atr_20_pct>3.37 & slope_sma_50<=-1.327 & weekly_close_loc>0.567 & weekly_close_vs_sma20<=-0.524",
+      "adjusted_rule": "atr_20_pct>3.37 & slope_sma_50<=-1.327 & weekly_close_loc>0.467 & weekly_close_vs_sma20<=-0.524"
+    }
+  ]
+}

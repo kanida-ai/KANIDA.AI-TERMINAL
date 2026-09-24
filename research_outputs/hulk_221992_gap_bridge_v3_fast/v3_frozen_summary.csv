@@ -1,0 +1,2 @@
+tag,baskets,avg_positions,win_pct,avg_basket_pct,total_ret_pct,end_equity,max_dd_pct,negative_months,min_month_pct,pattern_mode,basket_n,min_n,regime_name,regime_threshold,min_patterns,sizing,blacklist_name
+short0915_top10_avg_5d_le5_mp1_score_sqrt_cap15_blmedium,148,10.0,59.45945945945946,0.3109778294807541,56.480603319356916,1564806.0331935692,10.297050271911973,4,-5.001327628911123,short_0915,10,10,avg_5d_le,5.0,1,score_sqrt_cap15,medium

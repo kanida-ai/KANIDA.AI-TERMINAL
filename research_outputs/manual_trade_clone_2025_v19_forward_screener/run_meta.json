@@ -1,0 +1,22 @@
+{
+  "version": "v19_forward_screener",
+  "train_manual_log_through": "2025-05-31",
+  "forward_start": "2025-06-01",
+  "forward_end": "2025-12-31",
+  "top_n": 15,
+  "lookback_sessions": 2,
+  "carry_weight": 5.0,
+  "source_db": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\universe_engine\\data\\db\\kanida_universe.db",
+  "allowed_tables_read": [
+    "ohlc_daily",
+    "ohlc_1min",
+    "universe_master"
+  ],
+  "forbidden_not_used": [
+    "falcon_features",
+    "falcon_full_ranking",
+    "Falcon registry",
+    "falcon_outcomes",
+    "stored outcomes"
+  ]
+}

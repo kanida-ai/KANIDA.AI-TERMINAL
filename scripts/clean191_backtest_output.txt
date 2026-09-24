@@ -1,0 +1,110 @@
+RESEARCH BACKTEST — clean-191 (leak-free) Falcon signal, 2026
+Serving DB : C:\Users\SPS\Desktop\Kanida.ai Terminal Quant Intelligence Engine\data\db\kanida_universe.db
+1-min DB   : C:\Users\SPS\Desktop\Kanida.ai Terminal Quant Intelligence Engine\universe_engine\data\db\kanida_universe.db
+
+Clean patterns loaded: 191 (expected 191)
+Weekly-feature references across the 191 rules: 0 (must be 0)
+
+============================================================================================
+COVERAGE (2026 signal-days, clean-191 signal)
+============================================================================================
+Total 2026 signal-days (feature dates): 139
+  days with >=1 name : 139 (100%)
+  days with 0 names  : 0 (0%)
+  days with full 15  : 139 (100%)
+  basket-size distribution (size: #days):
+     15: 139
+
+Magnifier is limited to signal-days whose D+1 <= 2026-07-10 (1-min data cutoff).
+BTST baskets: 137   |   Magnifier baskets: 127
+
+============================================================================================
+BTST OSCILLATOR — 1x CNC, 2-session hold   (leverage x1)
+============================================================================================
+Month       Return%    MaxDD%  #baskets  AvgSize  %full15
+2026-01      -28.59    -34.08        20     13.6       85
+2026-02      -13.29    -17.73        21     15.0       95
+2026-03      -11.94    -16.52        19     15.0      100
+2026-04       57.10     -4.19        20     14.9       90
+2026-05       -0.99     -8.93        19     15.0      100
+2026-06        6.28     -7.50        21     15.0      100
+2026-07        4.22     -6.80        17     15.0      100
+---------------------------------------------------------
+Total 2026 return: -6.05%   |   Mean monthly: +1.83%   |   Worst month: -28.59%
+
+============================================================================================
+MAGNIFIER — intraday MIS   (leverage x1)
+============================================================================================
+Month       Return%    MaxDD%  #baskets  AvgSize  %full15
+2026-01      -13.10    -17.81        19     15.0      100
+2026-02      -11.56    -12.17        21     15.0      100
+2026-03       -8.56    -11.18        19     15.0      100
+2026-04       24.12     -4.32        20     15.0      100
+2026-05       -2.08     -6.03        19     15.0      100
+2026-06       -0.39     -4.49        21     15.0      100
+2026-07        3.20     -2.82         8     15.0      100
+---------------------------------------------------------
+Total 2026 return: -12.20%   |   Mean monthly: -1.20%   |   Worst month: -13.10%
+
+============================================================================================
+MAGNIFIER — intraday MIS   (leverage x5)
+============================================================================================
+Month       Return%    MaxDD%  #baskets  AvgSize  %full15
+2026-01      -53.81    -64.27        19     15.0      100
+2026-02      -49.47    -51.02        21     15.0      100
+2026-03      -39.65    -47.47        19     15.0      100
+2026-04      171.72    -20.96        20     15.0      100
+2026-05      -12.26    -27.88        19     15.0      100
+2026-06       -4.15    -21.77        21     15.0      100
+2026-07       15.25    -13.85         8     15.0      100
+---------------------------------------------------------
+Total 2026 return: -62.90%   |   Mean monthly: +3.95%   |   Worst month: -53.81%
+
+============================================================================================
+WORKED EXAMPLE — BTST Oscillator
+============================================================================================
+Signal day D = 2026-04-15  -> entry D+1 = 2026-04-16  (hold to D+2 close)
+symbol            score   openD+1  closeD+2     ret%
+NEWGEN           611.51    478.00    483.50     1.15
+MAPMYINDIA       602.31    945.00    955.85     1.15
+CARTRADE         573.73   1807.90   1858.00     2.77
+SAPPHIRE         534.80    175.64    172.34    -1.88
+INOXWIND         526.51     94.73     97.90     3.35
+CONCORDBIO       521.84   1046.80   1081.70     3.33
+COHANCE          497.24    360.00    390.55     8.49
+FSL              492.42    223.00    239.28     7.30
+RPOWER           481.22     29.45     28.68    -2.61
+JYOTICNC         471.40    703.00    707.30     0.61
+ECLERX           470.88   1520.00   1631.10     7.31
+BLUEJET          470.53    416.00    422.65     1.60
+INTELLECT        456.96    700.00    694.55    -0.78
+SONATSOFTW       439.47    264.20    280.34     6.11
+DEVYANI          432.58    108.43    107.70    -0.67
+basket size 15, disaster-stop no
+BASKET RETURN = mean(per-name) = +2.481%
+
+============================================================================================
+WORKED EXAMPLE — Magnifier (intraday MIS 1-min trail)
+============================================================================================
+Signal day D = 2026-04-07  -> entry D+1 = 2026-04-08 @ 09:15 open
+exit reason: squareoff_1512   armed: False   peak basket P&L: +1.23%
+symbol          entry@0915  close@1512     ret%
+INOXWIND             85.00       86.59     1.87
+SAPPHIRE            166.49      167.50     0.61
+NEWGEN              464.50      459.80    -1.01
+BLUEJET             370.00      375.30     1.43
+MAPMYINDIA          926.10      937.50     1.23
+LODHA               754.80      779.50     3.27
+FIVESTAR            395.20      407.15     3.02
+RPOWER               24.45       24.83     1.55
+COHANCE             311.00      309.50    -0.48
+CARTRADE           1830.00     1874.80     2.45
+CONCORDBIO         1070.00     1050.00    -1.87
+DEVYANI             104.49      106.30     1.73
+OLAELEC              30.00       30.44     1.47
+SONATSOFTW          244.95      246.00     0.43
+PGEL                471.10      482.80     2.48
+basket size 15
+BASKET RETURN (1x) = +1.212%   |  (5x) = +6.062%
+  NOTE: table shows @15:12 marks for illustration; the engine may have
+        exited earlier via 'squareoff_1512' at basket P&L +1.21%.

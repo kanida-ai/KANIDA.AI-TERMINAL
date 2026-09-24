@@ -1,0 +1,49 @@
+{
+  "version": "v11_raw_return_state_multirank",
+  "script": "C:\\Users\\SPS\\.codex\\visualizations\\2026\\07\\24\\019f94b5-e5fa-7fe2-baf3-b25bb8884553\\manual_trade_clone_2025_v11_raw_return_state_multirank.py",
+  "source_db": "C:\\Users\\SPS\\Desktop\\Kanida.ai Terminal Quant Intelligence Engine\\universe_engine\\data\\db\\kanida_universe.db",
+  "forbidden_not_used": [
+    "falcon_features",
+    "falcon_full_ranking",
+    "falcon registry",
+    "stored outcomes"
+  ],
+  "best_config": {
+    "config_id": "V11C0006",
+    "continuation_w": 2.0,
+    "breakout_w": 0.75,
+    "pullback_w": 1.0,
+    "dryup_w": 0.75,
+    "recovery_w": 0.75,
+    "teacher_profile_w": 1.5,
+    "loser_penalty_w": 0.75
+  },
+  "dec_fit_summary": {
+    "tag": "v11_dec_fit",
+    "days": 21,
+    "avg_manual_n": 8.571428571428571,
+    "avg_hit_n": 1.0476190476190477,
+    "avg_profitable_hit_n": 0.6666666666666666,
+    "coverage_pct": 12.222222222222221,
+    "profitable_coverage_pct": 12.5,
+    "days_ge_70pct_profitable": 1
+  },
+  "jan_validation_summary": {
+    "tag": "v11_jan_validation",
+    "days": 22,
+    "avg_manual_n": 9.681818181818182,
+    "avg_hit_n": 1.1818181818181819,
+    "avg_profitable_hit_n": 0.4090909090909091,
+    "coverage_pct": 12.206572769953052,
+    "profitable_coverage_pct": 7.317073170731707,
+    "days_ge_70pct_profitable": 1
+  },
+  "replay_summary": {
+    "tag": "v11_raw_return_state",
+    "days": 44,
+    "win_pct": 36.36363636363637,
+    "ret5x_pct": -17.26306974744623,
+    "avg_day5x": -0.3923424942601416,
+    "avg_names": 14.977272727272727
+  }
+}
