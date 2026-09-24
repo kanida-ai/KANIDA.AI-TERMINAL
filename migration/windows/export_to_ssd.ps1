@@ -42,6 +42,8 @@ foreach ($side in 'Desktop', 'Documents') {
         $Mapped[$_.FullName] = "files\archive\$side\$($_.Name)"
     }
 }
+# Downloads goes whole (its secret-named files go into the encrypted bundle like the rest)
+$Mapped["$U\Downloads"] = 'files\archive\Downloads'
 
 $XD = @('node_modules', '.venv', '.pilot-venv', 'venv', '__pycache__', '.pytest_cache', '.expo', 'worktrees')
 $DbFiles = @('*.db', '*.sqlite', '*.sqlite3', '*.db-wal', '*.db-shm', '*-wal', '*-shm', '*-journal')

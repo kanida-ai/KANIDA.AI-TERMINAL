@@ -40,8 +40,17 @@ say "Data -> checkouts"
 "${RS[@]}" "$SRC/files/Kanida_Falcon/" "$FALCON/"
 "${RS[@]}" "$SRC/files/engine/"        "$ENGINE/"
 for d in KANIDA.AI_TERMINAL _kanida_deploy; do "${RS[@]}" "$SRC/files/$d/" "$K/$d/"; done
-say "Archive (everything else from Desktop/Documents) -> $K/archive"
-"${RS[@]}" "$SRC/files/archive/" "$K/archive/"
+say "Everything else from Desktop / Documents / Downloads"
+# Kanida folders -> ~/Kanida/archive; personal folders -> ~/Desktop, ~/Documents; see route() in config.sh
+for side in Desktop Documents; do
+  for d in "$SRC/files/archive/$side"/*/; do
+    [ -d "$d" ] || continue; name="$(basename "$d")"; dst="$(route "archive/$side/$name")"
+    mkdir -p "$dst"; "${RS[@]}" "$d" "$dst/"; echo "   $side/$name -> ${dst/#$HOME/~}"
+  done
+done
+if [ -d "$SRC/files/archive/Downloads" ]; then
+  dst="$(route archive/Downloads)"; mkdir -p "$dst"; "${RS[@]}" "$SRC/files/archive/Downloads/" "$dst/"; echo "   Downloads -> ${dst/#$HOME/~}"
+fi
 # Windows worktrees' untracked files, if any, land beside the new worktrees
 for pair in $WORKTREES; do n="${pair%%:*}"; [ -d "$K/archive/Desktop/$n" ] && "${RS[@]}" "$K/archive/Desktop/$n/" "$WT/$n/" || true; done
 cp -R "$SRC/env-freeze" "$SRC/manifest" "$MIG/"
@@ -56,7 +65,7 @@ if [ -f "$SRC/secrets.tar.enc" ]; then
   mkdir "$stage/x"; tar -xf "$stage/s.tar" -C "$stage/x"
   # the bundle mirrors the SSD layout: Kanida_Falcon/, engine/, archive/..., _home/
   (cd "$stage/x" && find . -type f ! -path './_home/*') | while read -r f; do
-    f="${f#./}"; case "$f" in Kanida_Falcon/*|engine/*|KANIDA.AI_TERMINAL/*|_kanida_deploy/*|archive/*) dst="$K/$f";; *) continue;; esac
+    f="${f#./}"; case "$f" in Kanida_Falcon/*|engine/*|KANIDA.AI_TERMINAL/*|_kanida_deploy/*) dst="$K/$f";; archive/*) dst="$(route "$f")";; *) continue;; esac
     mkdir -p "$(dirname "$dst")"; [ -e "$dst" ] || cp "$stage/x/$f" "$dst"; chmod 600 "$dst"
   done
   if [ -d "$stage/x/_home" ]; then

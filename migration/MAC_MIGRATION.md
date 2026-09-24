@@ -12,7 +12,10 @@ one is re-runnable.
 | `Desktop\koptions`, `kanida-dev`, `_kanida_autotrade`, `_kanida_persona` | `~/Kanida/worktrees/<name>` | same |
 | other worktrees (`kagents`, `kbuilder`, `_kanida_*`) | not recreated | branches are on GitHub; `git worktree add` when needed |
 | `Desktop\KANIDA.AI_TERMINAL`, `Desktop\_kanida_deploy` | `~/Kanida/<same>` | SSD |
-| everything else on Desktop / Documents | `~/Kanida/archive/Desktop/*`, `.../Documents/*` | SSD, as-is (includes local-only repos AIScreener, App for Kids, Kanida Ai) |
+| other Kanida folders on Desktop / Documents (`kanida-seed`, `Kanida Ai`, `AIScreener`, worktrees …) | `~/Kanida/archive/Desktop/*`, `.../Documents/*` | SSD, as-is |
+| non-Kanida folders (`App for Kids`, `Trading log`, `ML Model` … list in `config.sh` `PERSONAL`) | the Mac's own `~/Desktop/<name>`, `~/Documents/<name>` | SSD, as-is |
+| loose files on Desktop / Documents | `~/Desktop/From Windows`, `~/Documents/From Windows` | SSD |
+| `Downloads` (3.9 GB) | `~/Downloads/From Windows` | SSD; its secret-named files go in the encrypted bundle |
 | ~265 GB of SQLite (`db\kanida.db` 150 GB, `market15.db` 19 GB, `outcomes.sqlite3` 37 GB …) | same relative paths | SSD, **consistent online snapshots** + per-table rowid manifest |
 | `.env` files, `pilot.key`, `~\.aws`, `~\.cloudflared`, `Password Manager.txt`, key files | same relative paths, `chmod 600` | one AES-256 bundle `secrets.tar.enc`, passphrase only in your head |
 | anaconda / miniconda / codex-runtime Python | `uv` venvs: Falcon 3.12, engine 3.13, terminal 3.13 | rebuilt from requirement files + exact Windows versions for anything missing |

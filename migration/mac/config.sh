@@ -15,6 +15,28 @@ FALCON_BRANCH="wip/mac-move-2026-09-23"
 ENGINE_BRANCH="feat/cloud-rupeezy-token-sync"
 SNAP="wip/mac-move-terminal"               # origin/$SNAP/branch/<b> and origin/$SNAP/worktree-<name>
 
+# Non-Kanida folders from the Windows Desktop/Documents: they go to the Mac's own
+# ~/Desktop and ~/Documents, not ~/Kanida (owner's choice, 23 Sep). '|'-separated.
+export PERSONAL="App for Shyam|App for Kids|Backup|BG for retail Traders|MCF ML|ML Model|Trading log|Webapp creation|Codex|New project|ScreenRecorder"
+
+# Where a path under the drive's files/archive/ lands on the Mac.
+#   archive/<Desktop|Documents>/<personal folder>/...  -> ~/<Desktop|Documents>/<folder>/...
+#   archive/<Desktop|Documents>/_loose_files/...       -> ~/<Desktop|Documents>/From Windows/...
+#   archive/Downloads/...                              -> ~/Downloads/From Windows/...
+#   anything else (Kanida)                             -> ~/Kanida/archive/...
+route() {
+  local p="${1#archive/}" side top rest
+  side="${p%%/*}"; rest="${p#"$side"}"; rest="${rest#/}"; top="${rest%%/*}"
+  case "$side" in
+    Downloads) echo "$HOME/Downloads/From Windows${rest:+/$rest}" ;;
+    Desktop|Documents)
+      if [ "$top" = "_loose_files" ]; then r="${rest#_loose_files}"; echo "$HOME/$side/From Windows${r}"
+      elif [ -n "$top" ] && printf '%s' "|$PERSONAL|" | grep -Fq "|$top|"; then echo "$HOME/$side/$rest"
+      else echo "$K/archive/$side${rest:+/$rest}"; fi ;;
+    *) echo "$K/archive/$p" ;;
+  esac
+}
+
 # worktree name on Windows -> branch it had checked out
 WORKTREES="koptions:agent/options kanida-dev:feat/self-improving-engine _kanida_autotrade:feat/per-account-egress-proxy _kanida_persona:feat/persona-expansion"
 

@@ -13,10 +13,15 @@ from pathlib import Path
 K = Path.home() / "Kanida"
 ROOTS = {"files/Kanida_Falcon": K / "Kanida_Falcon", "files/engine": K / "engine",
          "files/KANIDA.AI_TERMINAL": K / "KANIDA.AI_TERMINAL", "files/_kanida_deploy": K / "_kanida_deploy"}
-def where(root):
+PERSONAL = set(os.environ.get("PERSONAL", "").split("|"))
+def where(root):                 # mirrors route() in config.sh
     if root in ROOTS: return ROOTS[root]
-    if root.startswith("files/archive/"): return K / "archive" / root[len("files/archive/"):]
-    return None
+    if not root.startswith("files/archive/"): return None
+    parts = root[len("files/archive/"):].split("/")
+    if parts[0] == "Downloads": return Path.home() / "Downloads" / "From Windows" / Path(*parts[1:]) if parts[1:] else Path.home() / "Downloads" / "From Windows"
+    if parts[0] in ("Desktop", "Documents") and len(parts) > 1 and parts[1] in PERSONAL:
+        return Path.home() / Path(*parts)
+    return K / "archive" / Path(*parts)
 latest = {}                      # a re-snapshot at cutover appends; the last record wins
 for line in open(sys.argv[1], encoding="utf-8"):
     r = json.loads(line); latest[(r.get("root"), r["path"])] = r
