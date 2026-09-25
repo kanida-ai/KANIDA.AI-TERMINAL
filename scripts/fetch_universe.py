@@ -25,6 +25,9 @@ END = date.today()
 AUTH_WORKER = F.ENGINE_ROOT / "scripts" / "auth_worker.py"
 
 
+FAILED = []
+
+
 def log(msg):
     print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
 
@@ -79,15 +82,22 @@ def run():
     log(f"universe: {len(uni)} instruments "
         f"({sum(1 for _,_,t in uni if t=='STOCK')} stocks, {sum(1 for _,_,t in uni if t=='INDEX')} indices)")
     holder = [build_client()]
-    rl = F.RateLimiter(rps=3.0)
+    rl = F.RateLimiter(rps=float(os.environ.get('KITE_RPS', '3')))  # lower it when another Kite loop runs alongside
 
     # ---- forward fetch: daily (fast) first, then 5-min, then 1-min ----
     for interval, table, maxd in F.PLAN:
         log(f"=== forward fetch {table} ({interval}) ===")
         for i, (sym, token, _typ) in enumerate(uni):
-            with_auth_retry(
-                lambda k, s=sym, t=token: F.forward_fetch(con, k, s, t, interval, table, maxd, START, END, rl),
-                holder)
+            try:
+                with_auth_retry(
+                    lambda k, s=sym, t=token: F.forward_fetch(con, k, s, t, interval, table, maxd, START, END, rl),
+                    holder)
+            except F.KiteAuthError:
+                raise
+            except RuntimeError as e:
+                # one bad instrument (e.g. a stale kite instrument token -> Kite says "invalid token") must not stop
+                # the other 600+ symbols; it is logged and listed at the end
+                FAILED.append((table, sym, str(e)[:160])); log(f"  SKIP {sym} {table}: {str(e)[:160]}")
             if i % 25 == 0 or i == len(uni) - 1:
                 log(f"  {table}: {i+1}/{len(uni)} (last {sym})")
 
@@ -100,16 +110,25 @@ def run():
             ref = F._days_present(con, "ohlc_daily", sym)
             if not ref:
                 continue
-            left = with_auth_retry(
-                lambda k, s=sym, t=token, r=ref: F.repair(con, k, s, t, interval, table, maxd, r, rl),
-                holder)
+            try:
+                left = with_auth_retry(
+                    lambda k, s=sym, t=token, r=ref: F.repair(con, k, s, t, interval, table, maxd, r, rl),
+                    holder)
+            except F.KiteAuthError:
+                raise
+            except RuntimeError as e:
+                FAILED.append((table + ' repair', sym, str(e)[:160])); log(f"  SKIP repair {sym} {table}: {str(e)[:160]}"); continue
             if left and len(left) > 3:  # >3 missing after repair may = suspension/no-data
                 log(f"  {sym} {table}: {len(left)} day(s) still missing (likely no Kite data)")
             if i % 50 == 0 or i == len(uni) - 1:
                 log(f"  repair {table}: {i+1}/{len(uni)}")
 
     con.close()
-    log("UNIVERSE FETCH COMPLETE")
+    if FAILED:
+        log(f"SKIPPED {len(FAILED)} instrument-table(s) - check their kite tokens in instrument_labels:")
+        for t_, s_, e_ in FAILED:
+            log(f"  {s_} {t_}: {e_}")
+    log("UNIVERSE FETCH COMPLETE" + (f" with {len(FAILED)} skipped" if FAILED else ""))
 
 
 if __name__ == "__main__":

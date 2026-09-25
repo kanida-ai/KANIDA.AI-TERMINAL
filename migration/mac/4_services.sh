@@ -26,6 +26,8 @@ backend|keepalive|$ENGINE/backend|( for i in \$(seq 60); do curl -sf -m 2 -o /de
 api-tunnel|keepalive|$HOME|exec cloudflared --config "$HOME/.cloudflared/config.yml" tunnel run kanida-api
 keep-awake|keepalive|$K|exec /usr/bin/caffeinate -i -s
 capture-watchdog|every:600|$FALCON|exec "$FPY" -u "$HERE/capture_watchdog.py"
+catchup-once|at:Asia/Kolkata:07:15:1-5|$FALCON|exec "$RUNAT" Asia/Kolkata 07:15 1-5 catchup-once -- /bin/bash "$HERE/catchup_once.sh" >> "$LOGS/catchup-once.log" 2>&1
+falcon-ohlc|at:Asia/Kolkata:16:15:1-5|$FALCON/scripts|exec "$RUNAT" Asia/Kolkata 16:15 1-5 falcon-ohlc -- /usr/bin/env KANIDA_NO_AUTH_MINT=1 "$FPY" -u fetch_universe.py >> "$FALCON/logs/fetch_universe_daily.log" 2>&1
 zerodha-auth|every:1800|$ENGINE/backend|exec "$EPY" "$ENGINE/scripts/auth_worker.py" >> "$EL/auth_worker.log" 2>&1
 vortex-auth|every:1800|$ENGINE/backend|exec "$EPY" "$ENGINE/scripts/vortex_auth_worker.py" >> "$EL/vortex_auth.log" 2>&1
 mkt-poller|every:1800|$ENGINE/backend|exec "$EPY" -u "$ENGINE/scripts/mkt_poller.py" >> "$EL/mkt_poller.log" 2>&1
