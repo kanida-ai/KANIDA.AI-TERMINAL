@@ -94,7 +94,7 @@ def run():
                     holder)
             except F.KiteAuthError:
                 raise
-            except RuntimeError as e:
+            except Exception as e:  # noqa: BLE001 - one bad instrument/bar never stops the run
                 # one bad instrument (e.g. a stale kite instrument token -> Kite says "invalid token") must not stop
                 # the other 600+ symbols; it is logged and listed at the end
                 FAILED.append((table, sym, str(e)[:160])); log(f"  SKIP {sym} {table}: {str(e)[:160]}")
@@ -103,8 +103,8 @@ def run():
 
     # ---- gap repair for intraday, vs each symbol's own daily calendar ----
     for interval, table, maxd in F.PLAN:
-        if table not in F.INTRADAY:
-            continue
+        if table not in F.INTRADAY or os.environ.get("KANIDA_SKIP_REPAIR") == "1":
+            continue                      # the daily job skips the slow historical gap repair (run it by hand, weekly)
         log(f"=== repair {table} ===")
         for i, (sym, token, _typ) in enumerate(uni):
             ref = F._days_present(con, "ohlc_daily", sym)
@@ -116,7 +116,7 @@ def run():
                     holder)
             except F.KiteAuthError:
                 raise
-            except RuntimeError as e:
+            except Exception as e:  # noqa: BLE001 - one bad instrument/bar never stops the run
                 FAILED.append((table + ' repair', sym, str(e)[:160])); log(f"  SKIP repair {sym} {table}: {str(e)[:160]}"); continue
             if left and len(left) > 3:  # >3 missing after repair may = suspension/no-data
                 log(f"  {sym} {table}: {len(left)} day(s) still missing (likely no Kite data)")

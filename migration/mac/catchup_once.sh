@@ -14,7 +14,7 @@ cd "$FALCON" || exit 1
 echo "[catchup] start $(date)"
 "$FPY" -u -m market_data.derivatives.cli --log-file logs/derivatives_backfill_catchup.log backfill --rate 1 ; rc1=$?
 for d in 2026-09-24 2026-09-25; do "$FPY" -u -m market_data.derivatives.cli seed --date "$d" > "logs/seed_$d.json" 2>&1; echo "[catchup] seed $d rc=$?"; done
-cd "$FALCON/scripts" && KANIDA_NO_AUTH_MINT=1 "$FPY" -u fetch_universe.py >> "$FALCON/logs/fetch_universe_catchup.log" 2>&1 ; rc2=$?
+cd "$FALCON/scripts" && KANIDA_NO_AUTH_MINT=1 KANIDA_SKIP_REPAIR=1 "$FPY" -u fetch_universe.py >> "$FALCON/logs/fetch_universe_catchup.log" 2>&1 ; rc2=$?
 echo "[catchup] backfill rc=$rc1 ohlc rc=$rc2 $(date)"
 [ "$rc1" = 0 ] && [ "$rc2" = 0 ] && date +%F > "$DONE"
 exit 0
