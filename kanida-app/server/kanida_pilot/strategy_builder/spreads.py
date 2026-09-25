@@ -18,7 +18,7 @@ from . import charges as CH
 
 KINDS = {('CE', 'debit'): ('bull_call_spread', 'Bull Call Spread'), ('CE', 'credit'): ('bear_call_spread', 'Bear Call Spread'),
          ('PE', 'debit'): ('bear_put_spread', 'Bear Put Spread'), ('PE', 'credit'): ('bull_put_spread', 'Bull Put Spread')}
-MAX_ROWS = 30
+MAX_ROWS = 16      # the strikes nearest the money; the table opens where decisions are made
 
 
 class SpreadsError(Exception):

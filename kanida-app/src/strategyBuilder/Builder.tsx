@@ -379,7 +379,7 @@ function GreeksTable({a}:{a:Analysis|null}){
    <Chip label="At the what-if" active={at==='whatif'} onPress={()=>setAt('whatif')}/>
    {at==='whatif'&&a.greeks_scenario?.status!=='available'&&<T style={{fontSize:11,color:C.muted}}>{a.greeks_scenario?.reason==='AT_EXPIRY'?'Not defined at expiry - the position is settled.':'Unavailable'}</T>}</View>
   <Table head={['Leg','Delta','Gamma','Theta ₹/day','Vega ₹/IV pt']} right={[1,2,3,4]}
-  rows={[...a.legs.map(l=>{const g=w?(l as any).greeks_scenario:l.greeks;return [l.label,num(g?.delta,1),num(g?.gamma,3),num(g?.theta,0),num(g?.vega,0)];}),['Strategy total',num(G.delta,1),num(G.gamma,3),num(G.theta,0),num(G.vega,0)]]}/>
+  rows={at==='whatif'&&!w?a.legs.map(l=>[l.label,'—','—','—','—']):[...a.legs.map(l=>{const g=w?(l as any).greeks_scenario:l.greeks;return [l.label,num(g?.delta,1),num(g?.gamma,3),num(g?.theta,0),num(g?.vega,0)];}),['Strategy total',num(G.delta,1),num(G.gamma,3),num(G.theta,0),num(G.vega,0)]]}/>
   {w&&<T style={{fontSize:11,color:C.muted}}>{`At ${num(a.greeks_scenario.spot,2)} on ${istStamp(a.greeks_scenario.at)}${a.greeks_scenario.iv_shift?`, IV ${a.greeks_scenario.iv_shift>0?'+':''}${a.greeks_scenario.iv_shift} pts`:''}.`}</T>}
   <T style={{fontSize:11,color:C.muted}}>Whole-strategy units (lots × lot size). Delta in underlying units per 1 point; theta per calendar day; vega per 1 percentage point of IV. {w?'Model values at the what-if point.':'Model values at the reading.'}</T></View>;
 }
