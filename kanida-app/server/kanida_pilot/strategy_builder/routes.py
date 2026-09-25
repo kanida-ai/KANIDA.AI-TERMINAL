@@ -99,6 +99,15 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
    rows.append(nr)
   return {**ch,'rows':rows,'greeks_basis':'model BSM per unit, each option at its own IV, at the reading'}
 
+ @r.get('/api/sb/spreads')
+ def spreads(request:Request,underlying:str='',expiry:str='',type:str='CE',side:str='debit',width:int=2,lots:int=1):
+  me(request)
+  from . import spreads as SP
+  got=guard(market.chain,_symbol(underlying),_date(expiry))
+  if not got:raise PilotError(404,'NO_READING','The option store has no reading for this underlying.')
+  try:return SP.build(got,type,side,int(width),int(lots))
+  except SP.SpreadsError as e:raise PilotError(400,'FIELD_INVALID',e.message)
+
  @r.get('/api/sb/templates')
  def templates(request:Request):
   me(request);return public()

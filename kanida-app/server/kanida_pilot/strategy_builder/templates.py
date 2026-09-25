@@ -155,9 +155,40 @@ LATER=[
 BY_KEY={t['key']:t for t in TEMPLATES}
 
 
+MONITOR={
+ 'bullish':'Watch the underlying against your breakeven and the short strike (if any); time decay works against a debit position every day.',
+ 'bearish':'Watch the underlying against your breakeven and the short strike (if any); a sharp rally is the risk.',
+ 'range':'Watch how close the underlying is to each short strike; the position gains as time passes if it stays inside the range.',
+ 'volatility':'You need a move: time decay costs you every day the underlying stays still - decide early how long you will wait.'}
+LEGGING=('Normally no - the maximum loss shown assumes every leg is held together to expiry. You CAN lose more if you close one leg '
+ 'and leave the other open, if you exit before expiry at poor prices (wide spreads), or if a short leg is left open and the market '
+ 'gaps. Charges and slippage are on top. Index options settle in cash at expiry.')
+
+
+def _sketch(t):
+ """A qualitative expiry-payoff shape for the template card: priced at a synthetic chain (spot 100, 1-point strikes,
+ 18% IV, 7 days), normalised to -1..1 over 21 points. Illustrative only - not this market's prices."""
+ import math as _m
+ from . import analytics as _A
+ spot=100.0;step=1.0;sig=0.18;tt=7/365
+ rows=[]
+ for k in range(70,131):
+  rows.append({'strike':float(k),'CE':{'ltp':max(0.05,_A.bs_price(spot,k,tt,sig,'CE')),'token':0,'symbol':'X'},'PE':{'ltp':max(0.05,_A.bs_price(spot,k,tt,sig,'PE')),'token':0,'symbol':'X'}})
+ ch={'strike_step':step,'spot':spot,'atm_strike':100.0,'atm_iv':sig*100,'days_to_expiry':7,'rows':rows,'lot_size':1,'expiry':'2099-01-01'}
+ try:legs=resolve(t['key'],ch)['legs']
+ except Exception:return None
+ xs=[88+i*1.2 for i in range(21)];ys=[_A.expiry_pnl(legs,x) for x in xs];m=max(abs(y) for y in ys) or 1
+ return [round(y/m,3) for y in ys]
+
+
+_PUBLIC=None
 def public():
- keep=('key','name','intent','risk','tier','complexity','param','recipe','use','loses')
- return {'templates':[{k:t[k] for k in keep}|{'legs':len(t['legs'])} for t in TEMPLATES],'later':LATER}
+ global _PUBLIC
+ if _PUBLIC is None:
+  keep=('key','name','intent','risk','tier','complexity','param','recipe','use','loses')
+  _PUBLIC={'templates':[{k:t[k] for k in keep}|{'legs':len(t['legs']),'sketch':_sketch(t),'monitor':MONITOR.get(t['intent'],''),
+   'intro_required':t['tier']=='advanced' or t['complexity']>=3} for t in TEMPLATES],'later':LATER,'legging':LEGGING}
+ return _PUBLIC
 
 
 class ResolveError(Exception):

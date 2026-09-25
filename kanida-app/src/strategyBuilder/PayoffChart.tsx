@@ -51,7 +51,7 @@ export function PayoffChart({curve,spot,scenarioSpot,breakevens,bands,height=300
   </Svg>
   <View style={[s.row,{gap:16,flexWrap:'wrap',minHeight:20}]}>
    <Legend color={C.green} label="At expiry" solid/><Legend color={C.mint} label={scenarioLabel}/><Legend color={C.amber} label="Breakeven"/>
-   {hover&&<T style={{fontSize:11,color:C.ink,fontVariant:['tabular-nums'] as any}}>{`${num(hover.s,0)} · expiry ${signed(hover.expiry)} · scenario ${signed(hover.target)}`}</T>}
+   {hover&&<T style={{fontSize:11,color:C.ink,fontVariant:['tabular-nums'] as any}}>{`${num(hover.s,0)} (${spot?`${hover.s>=spot?'+':''}${((hover.s/spot-1)*100).toFixed(2)}% from spot`:''}) · expiry ${signed(hover.expiry)} · scenario ${signed(hover.target)}`}</T>}
   </View>
  </View>;
 }

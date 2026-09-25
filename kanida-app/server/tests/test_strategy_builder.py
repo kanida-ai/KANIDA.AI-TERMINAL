@@ -1358,3 +1358,56 @@ def test_every_template_is_offered_in_the_chooser():
  """Regression (Robinhood review 25 Sep): the chooser groups bullish / bearish / range / volatility - a template with any
  other intent is silently never shown."""
  assert {t['intent'] for t in TEMPLATES}<={'bullish','bearish','range','volatility'}
+
+
+# --- Robinhood gaps: spreads mode, tick validation, template education data ------------------------------------------
+def test_spreads_mode_rows_are_correct_and_priced_to_execute(live):
+ _a,owner,_o,_f=live
+ r=owner.get(f'/api/sb/spreads?underlying=NIFTY&expiry={EXP}&type=CE&side=debit&width=2').json()
+ assert r['template']=='bull_call_spread' and r['rows']
+ for row in r['rows']:
+  k1,k2=row['strikes'];assert k2>k1
+  buy=next(l for l in row['legs'] if l['side']=='B');sell=next(l for l in row['legs'] if l['side']=='S')
+  assert buy['strike']==k1 and sell['strike']==k2 and row['direction']=='debit'
+  debit=(buy['price']-sell['price'])*LOT
+  assert row['net']==pytest.approx(-debit,abs=0.01) and row['max_loss']==pytest.approx(-debit,abs=0.5)
+  assert row['max_profit']==pytest.approx((k2-k1)*LOT-debit,abs=0.5)
+ assert sum(1 for row in r['rows'] if row['atm'])==1
+ c=owner.get(f'/api/sb/spreads?underlying=NIFTY&expiry={EXP}&type=PE&side=credit&width=4&lots=2').json()
+ assert c['template']=='bull_put_spread' and all(row['direction']=='credit' and row['max_profit']>0 for row in c['rows'])
+ assert all(next(l for l in row['legs'] if l['side']=='S')['strike']>next(l for l in row['legs'] if l['side']=='B')['strike'] for row in c['rows'])
+ assert owner.get(f'/api/sb/spreads?underlying=NIFTY&expiry={EXP}&type=XX').status_code==400
+ # a picked row is an ordinary strategy that recognises as the same structure
+ row=r['rows'][len(r['rows'])//2]
+ s=owner.post('/api/sb/strategies',json={'body':{'underlying':'NIFTY','expiry':EXP,'legs':[{**l,'price_basis':'exec','price':None} for l in row['legs']]}}).json()
+ assert recognise(s['draft']['body']['legs'])['key']=='bull_call_spread'
+
+
+def test_manual_price_off_the_tick_is_warned_not_blocking(pilot):
+ _a,owner,_o=pilot
+ s=strategy(owner)
+ body=s['draft']['body'];body['legs'][0]={**body['legs'][0],'price_basis':'manual','price':101.03}
+ a=owner.post('/api/sb/analyze',json={'body':body}).json()
+ assert a['status']=='ok' and any(i['key']=='off_tick' and '101.05' in i['text'] for i in a['insights'])
+ body['legs'][0]['price']=101.05
+ a=owner.post('/api/sb/analyze',json={'body':body}).json()
+ assert not any(i['key']=='off_tick' for i in a['insights'])
+
+
+def test_templates_carry_sketch_monitoring_and_intro_flags(pilot):
+ _a,owner,_o=pilot
+ t=owner.get('/api/sb/templates').json()
+ assert 'lose more' not in t['legging'] or 'held together' in t['legging']
+ by={x['key']:x for x in t['templates']}
+ assert all(x['sketch'] and len(x['sketch'])==21 for x in t['templates'])
+ assert by['long_call']['sketch'][0]<0<by['long_call']['sketch'][-1]                 # loses below, gains above
+ assert by['iron_condor']['intro_required'] and not by['long_call']['intro_required']
+ assert by['long_straddle']['monitor'].startswith('You need a move')
+
+
+def test_spreads_never_show_impossible_prices(live):
+ _a,owner,_o,_f=live
+ for t,sd in (('CE','debit'),('CE','credit'),('PE','debit'),('PE','credit')):
+  r=owner.get(f'/api/sb/spreads?underlying=NIFTY&expiry={EXP}&type={t}&side={sd}&width=2').json()
+  assert all(row['max_profit']>0 and row['max_loss']<0 for row in r['rows']),(t,sd)
+  assert 'excluded_inconsistent' in r

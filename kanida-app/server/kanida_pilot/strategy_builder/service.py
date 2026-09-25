@@ -79,10 +79,14 @@ def hydrate(market,body):
    problems.append(f"{int(l['strike'])} {l['type']} is not listed for {body['expiry']} - it may have expired or never existed.")
    continue
   price,used=leg_price(l,row)
+  tick=chain.get('tick_size') or 0.05
+  # a typed research price off the exchange tick is WARNED (insights), never blocking; fill averages are exempt
+  off_tick=(round(round(price/tick)*tick,2) if (used=='manual' and price is not None and not l.get('entry_from_fills')
+            and abs(round(price/tick)*tick-price)>1e-6) else None)
   out.append({**l,'basis_used':used,'lot_size':chain['lot_size'],'ltp':row['ltp'],'bid':row.get('bid'),'ask':row.get('ask'),'price':price,'token':row['token'],'symbol':row['symbol'],
    # IV is solved by the analytics from THIS leg's own entry price (so the scenario at the reading reprices the leg
    # at exactly its entry); the chain's rounded display IV is not reused as a model input.
-   'iv':None,'flags':row['flags']})
+   'iv':None,'flags':row['flags'],'off_tick':off_tick,'tick':tick})
  return chain,out,problems
 
 

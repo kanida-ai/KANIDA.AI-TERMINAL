@@ -98,7 +98,7 @@ def position_body(deployment) -> Dict[str, Any]:
   m = meta.get(p['leg_id'])
   if not m:
    raise AssistError(409, 'UNKNOWN_LEG', 'A held leg is missing from the deployment revisions.')
-  legs.append({**m, 'side': 'B' if p['units'] > 0 else 'S', 'lots': abs(p['units']) // lot, 'price_basis': 'manual',
+  legs.append({**m, 'side': 'B' if p['units'] > 0 else 'S', 'lots': abs(p['units']) // lot, 'price_basis': 'manual', 'entry_from_fills': True,
                'price': p['avg'], 'include': True})
  if not legs:
   raise AssistError(409, 'NOTHING_HELD', 'This deployment holds no open position.')

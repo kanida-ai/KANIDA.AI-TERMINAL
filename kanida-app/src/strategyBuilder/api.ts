@@ -24,7 +24,7 @@ export type PaperRun={id:string;strategy_id:string;strategy_name:string|null;sta
  fills:{leg_id:string;action:string;side:Side;units:number;price:number;basis:string;fees:number;reading_at:string}[];rows:{leg_id:string;label:string;units:number;entry:number;exit:number|null;mark:number|null;pnl:number|null}[];
  as_of:string|null;realised:number;unrealised:number|null;fees:number;net:number|null;close_now_estimate:number|null;warnings:string[]};
 export type Detail=Strategy&{snapshots:Snapshot[];activity:{kind:string;detail:string;created_at:number}[];paper:{id:string;status:string;opened_reading:string;created_at:number}[]};
-export type Template={key:string;name:string;intent:string;risk:'defined'|'unhedged';tier:string;complexity:number;legs:number;param:{name:string;label:string;default:number;variants:number[]}|null;recipe:string;use:string;loses:string};
+export type Template={key:string;name:string;intent:string;risk:'defined'|'unhedged';tier:string;complexity:number;legs:number;param:{name:string;label:string;default:number;variants:number[]}|null;recipe:string;use:string;loses:string;sketch?:number[]|null;monitor?:string;intro_required?:boolean};
 export type Candidate={template:string;name:string;recipe:string;risk:string;param:number|null;param_label:string|null;legs:any[];max_profit:Metric;max_loss:Metric;breakevens:number[];premium:number;
  capital_at_risk:number|null;pop:number|null;pnl_at_view:number;return_on_risk:number|null;profit_zone_share:number|null;evidence:{status:string;label:string;note?:string;runs_tried?:number;n_oos?:number;mean_oos?:number|null;ror_low?:number|null;tests?:number;runs_of_rule?:number};why:string[]};
 export type DiscoverResult={evidence?:{tests:number;survivors:number;fdr_q:number;min_oos:number};view:string;view_label:string;as_of:string;spot:number;expiry:string;inputs:any;considered:number;candidates:Candidate[];excluded:{reason:string;label:string;count:number}[];
@@ -37,6 +37,7 @@ export type AdjustCandidate={rule:string;k:number|null;name:string;explain:strin
 export type AdjustResult={as_of:string;spot:number;lot_size:number;structure:string;template:string|null;param:number|null;held:boolean;tested:{leg_id:string;label:string;distance_pct:number}|null;
  current:{worst:number|null;unlimited_loss:boolean;breakevens:number[];delta:number|null;margin:number|null};entry_basis:string;candidates:AdjustCandidate[];notes:string[];deployment_id:string|null;draft_version:number};
 export const sb={
+ spreads:(u:string,e:string,type:string,side:string,width:number,lots=1)=>api(`/api/sb/spreads?underlying=${encodeURIComponent(u)}&expiry=${e}&type=${type}&side=${side}&width=${width}&lots=${lots}`) as Promise<any>,
  adjustCandidates:(id:string,deploymentId?:string)=>api(`/api/sb/strategies/${id}/adjust/candidates`,{deployment_id:deploymentId||null}) as Promise<AdjustResult>,
  adjustApply:(id:string,o:{rule:string;k:number|null;version:number;deployment_id?:string})=>api(`/api/sb/strategies/${id}/adjust/apply`,o) as Promise<{strategy:any;adjustment:AdjustCandidate;deployment_id:string|null}>,
  underlyings:()=>api('/api/sb/underlyings') as Promise<{underlyings:{symbol:string}[]}>,

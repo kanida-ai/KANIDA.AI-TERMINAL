@@ -12,6 +12,7 @@ import {ApiError} from '../model';
 import {exec,sb,type Analysis,type Basis,type Body,type Chain,type Deployment,type Detail,type Expiry,type Kind,type Leg,type PaperRun,type Side,type Status,type Template} from './api';
 import {DeploymentCard,OrderReview} from './OrderReview';
 import {AdjustSheet} from './Adjust';
+import {AboutSheet,Sketch,SpreadsSheet,TemplateIntro} from './Learn';
 import {AlertsPanel,useAlertNotifications} from './Alerts';
 import {ChainDrawer} from './ChainDrawer';
 import {PayoffChart} from './PayoffChart';
@@ -36,6 +37,7 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
  const [st,setSt]=useState<Status|null>(null);const [tick,setTick]=useState(0);const [deps,setDeps]=useState<Deployment[]>([]);
  const [review,setReview]=useState<{open:boolean;closing?:Deployment|null;adjusting?:Deployment|null}>({open:false});
  const [adjustFor,setAdjustFor]=useState<{open:boolean;deployment?:Deployment|null}>({open:false});
+ const [spreadsOpen,setSpreadsOpen]=useState(false);const [aboutOpen,setAboutOpen]=useState(false);
  const adjustDeep=useRef(openAdjust);
  const bell=useAlertNotifications();
  const seq=useRef(0);const saveTimer=useRef<any>(null);const anTimer=useRef<any>(null);const ctl=useRef<AbortController|null>(null);
@@ -149,6 +151,9 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
    </View>
   </View>
   <DataBanner reading={reading} live={!!chain?.quality.live} status={st}/>
+  {chain&&body.legs.length>0&&chain.days_to_expiry<1&&<View style={{backgroundColor:chain.days_to_expiry<=0?'#2A1519':'#2A2210',borderRadius:10,padding:10}} accessibilityRole="alert">
+   <T style={{fontSize:12,color:chain.days_to_expiry<=0?C.red:C.amber}}>{chain.days_to_expiry<=0?`Expired: the ${dayMonth(body.expiry)} contracts have settled and can no longer be traded. Pick a later expiry.`:
+    `Expiry day: these contracts settle today at 15:30 IST. Premiums and Greeks move very fast now - small moves swing the P&L sharply.`}</T></View>}
 
   {/* market context */}
   <ChipRow wrap={wide}>
@@ -163,8 +168,10 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
    {/* LEFT: legs */}
    <View style={[panel,{flex:wide?45:undefined,width:wide?undefined:'100%'}]}>
     <View style={[s.between,{flexWrap:'wrap'}]}><View style={{gap:2}}><T style={label}>Legs</T>
-     <T style={{fontFamily:'InterSemi',fontSize:14}}>{a?.structure?.name||'—'}{a?.structure&&!a.structure.exact&&body.legs.length?'':''}</T></View>
-     <View style={[s.row,{gap:8,flexWrap:'wrap'}]}><Button label="Template" icon="layout" kind="outline" onPress={()=>setTplOpen(true)} disabled={!body.expiry}/><Button label="Add from chain" icon="plus" kind="soft" onPress={()=>setChainOpen(true)} disabled={!chain}/></View></View>
+     <View style={[s.row,{gap:6}]}><T style={{fontFamily:'InterSemi',fontSize:14}}>{a?.structure?.name||'—'}</T>
+      {body.legs.length>0&&<Pressable accessibilityRole="button" accessibilityLabel="About this strategy" onPress={()=>setAboutOpen(true)}><Icon name="info" size={15} color={C.green}/></Pressable>}</View></View>
+     <View style={[s.row,{gap:8,flexWrap:'wrap'}]}><Button label="Template" icon="layout" kind="outline" onPress={()=>setTplOpen(true)} disabled={!body.expiry}/>
+      <Button label="Spreads" icon="list" kind="outline" onPress={()=>setSpreadsOpen(true)} disabled={!body.expiry||!chain}/><Button label="Add from chain" icon="plus" kind="soft" onPress={()=>setChainOpen(true)} disabled={!chain}/></View></View>
     {!body.legs.length?<View style={{paddingVertical:26,alignItems:'center',gap:8}}><Icon name="layers" size={22} color={C.green}/>
       <T style={{fontFamily:'InterSemi'}}>No legs yet</T><T style={{fontSize:12,color:C.muted,textAlign:'center',maxWidth:340}}>Pick a template for a ready structure, or add exact contracts from the chain.</T></View>:
      body.legs.map(l=>{const row=a?.legs?.find(r=>r.id===l.id);const ltp=priceOf(l.strike,l.type);
@@ -187,6 +194,8 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
         <Mini k="Units" v={row?String(row.units):String(l.lots*(chain?.lot_size||0))}/>
        </View>
       </View>;})}
+    {!!a?.legs?.length&&<T style={{fontSize:11,color:C.muted,fontVariant:['tabular-nums'] as any}} accessibilityLabel="Cost formula">
+     {`${a.legs.map((l,i)=>`${i?(l.units>0?' − ':' + '):(l.units>0?'−':'+')}${num(l.entry)} × ${Math.abs(l.units)}`).join('')} = ${inr(Math.abs(a.premium?.value||0))} ${(a.premium?.value||0)>=0?'credit':'debit'} · charges ~${inr(a.charges?.value)}`}</T>}
     {undo&&<View style={[s.between,{backgroundColor:C.paper,borderRadius:10,padding:10}]}><T style={{fontSize:12}}>{`Removed ${strikeText(undo.leg.strike)} ${undo.leg.type}`}</T>
      <Button label="Undo" kind="outline" onPress={()=>{const u=undo;setUndo(null);edit(b=>{const legs=[...b.legs];legs.splice(Math.min(u.index,legs.length),0,u.leg);return {...b,legs};});}}/></View>}
     {body.legs.length>0&&<View style={[s.row,{flexWrap:'wrap',gap:10,borderTopWidth:1,borderColor:C.line,paddingTop:10}]}>
@@ -228,6 +237,10 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
   </View>
 
   <ChainDrawer visible={chainOpen} chain={chain} legs={body.legs} onClose={()=>setChainOpen(false)} onToggle={(k,kind,side)=>toggleFromChain(k,kind,side)}/>
+  <SpreadsSheet visible={spreadsOpen} onClose={()=>setSpreadsOpen(false)} underlying={body.underlying} expiry={body.expiry} lots={Math.max(1,Math.min(...(body.legs.length?body.legs.map(l=>l.lots):[1])))}
+   onPick={(legs,tpl,w)=>{setSpreadsOpen(false);edit(b=>({...b,template:tpl,param:[2,4,6,8].includes(w)?w:null,
+    legs:legs.map((l,i)=>({id:uid(),type:l.type,side:l.side,strike:l.strike,lots:l.lots,expiry:l.expiry,price_basis:'exec' as const,price:null,include:true}))}));flash('Spread loaded - every leg stays editable.');}}/>
+  <AboutSheet visible={aboutOpen} onClose={()=>setAboutOpen(false)} a={a} templateKey={a?.structure?.exact?a.structure.key:null}/>
   <AdjustSheet visible={adjustFor.open} strategyId={id} version={version} deployment={adjustFor.deployment||null} onClose={()=>setAdjustFor({open:false})}
    onApplied={async(r)=>{const dep=adjustFor.deployment;setAdjustFor({open:false});await reload();
     flash(`${r.adjustment.name} saved as a new version.${dep?' Review the delta orders next.':''}`);if(dep)setReview({open:true,adjusting:dep});}}/>
@@ -391,21 +404,23 @@ function PaperList({runs,onClose,onOpen}:{runs:PaperRun[];onClose:(id:string)=>v
 }
 
 function TemplateSheet({visible,onClose,onPick,replacing}:{visible:boolean;onClose:()=>void;onPick:(t:Template,p:number|null)=>void;replacing:number}){
- const [data,setData]=useState<{templates:Template[];later:any[]}|null>(null);const [adv,setAdv]=useState(false);const [param,setParam]=useState<Record<string,number>>({});
+ const [data,setData]=useState<{templates:Template[];later:any[];legging?:string}|null>(null);const [adv,setAdv]=useState(false);const [param,setParam]=useState<Record<string,number>>({});
+ const [intro,setIntro]=useState<Template|null>(null);
  useEffect(()=>{if(visible&&!data)sb.templates().then(setData).catch(()=>{});},[visible,data]);
  const groups=[['bullish','Bullish'],['bearish','Bearish'],['range','Range'],['volatility','Big move']] as const;
  return <Sheet visible={visible} onClose={onClose} wide title="Choose a template" subtitle={replacing?`Using a template replaces the ${replacing} current leg${replacing>1?'s':''} (undo with a snapshot restore).`:'A template is a recipe; it becomes exact contracts from the current chain, all editable.'}>
   {!data?<Loading/>:<>
    {groups.map(([k,title])=>{const list=data.templates.filter(t=>t.intent===k&&(adv||t.risk==='defined'));if(!list.length)return null;
     return <View key={k} style={{gap:8}}><T style={label}>{title}</T>{list.map(t=><View key={t.key} style={[panel,{gap:6}]}>
-     <View style={s.between}><T style={{fontFamily:'InterSemi'}}>{t.name}</T><Badge label={t.risk==='defined'?'Defined risk':'UNHEDGED'} tone={t.risk==='defined'?'green':'red'}/></View>
+     <View style={s.between}><View style={[s.row,{gap:10}]}><Sketch pts={t.sketch}/><T style={{fontFamily:'InterSemi'}}>{t.name}</T></View><Badge label={t.risk==='defined'?'Defined risk':'UNHEDGED'} tone={t.risk==='defined'?'green':'red'}/></View>
      <T style={{fontSize:12,color:C.muted}}>{t.recipe}</T><T style={{fontSize:12}}>{`Use: ${t.use}`}</T><T style={{fontSize:12,color:C.amber}}>{`Loses when: ${t.loses}`}</T>
      <View style={[s.row,{flexWrap:'wrap',gap:6}]}>
       {t.param&&<><T style={{fontSize:11,color:C.muted}}>{t.param.label}</T>{t.param.variants.map(v=><Chip key={v} label={String(v)} active={(param[t.key]??t.param!.default)===v} onPress={()=>setParam(p=>({...p,[t.key]:v}))}/>)}</>}
-      <View style={{flex:1}}/><Button label="Use" icon="arrow-right" onPress={()=>onPick(t,t.param?(param[t.key]??t.param.default):null)}/></View>
+      <View style={{flex:1}}/><Button label="Use" icon="arrow-right" onPress={()=>t.intro_required?setIntro(t):onPick(t,t.param?(param[t.key]??t.param.default):null)}/></View>
     </View>)}</View>;})}
    <Pressable accessibilityRole="button" onPress={()=>setAdv(!adv)}><T style={{fontSize:12,color:C.green}}>{adv?'Hide unhedged structures':'Show unhedged structures (short options - large or unlimited loss)'}</T></Pressable>
    <View style={{gap:4}}><T style={label}>Later</T>{data.later.map(l=><T key={l.key} style={{fontSize:12,color:C.muted}}>{`${l.name} - ${l.reason}`}</T>)}</View>
+   <TemplateIntro t={intro} legging={data.legging||''} onCancel={()=>setIntro(null)} onConfirm={()=>{const t=intro!;setIntro(null);onPick(t,t.param?(param[t.key]??t.param.default):null);}}/>
   </>}
  </Sheet>;
 }

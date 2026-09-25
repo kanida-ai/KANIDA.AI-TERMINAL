@@ -93,6 +93,8 @@ def insights(active,spot,t_now,sigma,out):
    add('wide_spread','warn',f"{lab}: the bid-ask spread is {(ask-bid)/((ask+bid)/2)*100:.0f}% of the price - fills will cost more than the mid.")
   elif l.get('price_basis')!='manual' and not (bid and ask) and l.get('ltp') is not None:
    add('no_quote','info',f"{lab}: no live bid/ask - priced at the last trade, which may be stale for an illiquid strike.")
+  if l.get('off_tick') is not None:
+   add('off_tick','warn',f"{lab}: the typed price {l['price']} is not on the {l.get('tick') or 0.05} tick - an exchange order would be rejected; the nearest valid price is {l['off_tick']}.")
   if 'stale' in (l.get('flags') or []) or 'no_trade' in (l.get('flags') or []):
    add('illiquid','warn',f"{lab}: the price is stale or the strike did not trade - it may be illiquid.")
  for l in shorts:
