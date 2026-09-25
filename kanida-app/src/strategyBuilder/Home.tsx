@@ -32,6 +32,7 @@ export function Home(){
   <View style={[s.between,{flexWrap:'wrap',gap:10}]}>
    <View style={[s.row,{gap:8,flexWrap:'wrap'}]}>
     {(['research','paper','archived'] as Filter[]).map(f=><Chip key={f} label={{research:'All active',paper:'Paper traded',archived:'Archived'}[f]} active={filter===f} onPress={()=>setFilter(f)}/>)}
+    <Chip label="Lab" icon="activity" onPress={()=>router.push({pathname:'/strategies',params:{view:'lab'}} as any)}/>
     <Chip label="Paper runs" icon="play" onPress={()=>router.push({pathname:'/strategies',params:{view:'paper'}} as any)}/>
     <Chip label={bell.count?`Alerts (${bell.count})`:'Alerts'} icon="bell" active={bell.count>0} onPress={()=>router.push({pathname:'/strategies',params:{view:'alerts'}} as any)}/>
    </View>

@@ -1,6 +1,6 @@
 """The Strategy Builder: exact payoff maths on known structures, recognition, template resolution, the library with
 versioned autosave and immutable snapshots, paper fills, Discover, owner scoping, and the expiry-date invariant."""
-import math,sqlite3
+import json,math,sqlite3,time
 from datetime import datetime
 import pytest
 from kanida_pilot.app import create_app
@@ -533,3 +533,175 @@ def test_live_alerts_fire_on_the_position_and_can_be_acknowledged(live,monkeypat
  with app.state.db.tx() as c:assert c.execute(select(func.count()).select_from(orders)).scalar()==0
  with app.state.strategy_builder_store.lock:
   assert app.state.strategy_builder_store.c.execute("select count(*) from intents where deployment_id=? and kind='close'",(d['id'],)).fetchone()[0]==0  # an alert never trades
+
+
+# --- slice 6: the Lab -----------------------------------------------------------------------------------------------
+import math as _m
+from datetime import date as _date,timedelta as _td
+import kanida_pilot.strategy_builder.lab as LB
+
+
+def daily_series(start='2019-01-01',n=900,drift=0.0002,seed=7):
+ import random as _r
+ rng=_r.Random(seed);d=_date.fromisoformat(start);days=[];o=[];c=[];vix=[];px=11000.0
+ while len(days)<n:
+  if d.weekday()<5:
+   op=px*(1+rng.gauss(0,0.003));px=op*(1+drift+rng.gauss(0,0.009))
+   days.append(d.isoformat());o.append(round(op,2));c.append(round(px,2));vix.append(round(13+3*_m.sin(len(days)/40),2))
+  d+=_td(days=1)
+ nifty={'days':days,'open':o,'close':c,'high':c,'low':c,'sources':{'kanida.db':(days[0],days[-1],n)}}
+ v={'days':days,'open':vix,'close':vix,'high':vix,'low':vix,'sources':{'kanida.db':(days[0],days[-1],n)}}
+ return nifty,v
+
+
+def lab_spec(**kw):
+ base={'underlying':'NIFTY','template':'iron_condor','param':4,'weekday':2,'dte_min':1,'dte_max':7,'target_pct':None,'stop_pct':None,'exit_dte':None,
+  'slippage':0.005,'from':'2019-01-01','to':'2023-12-31','split':'2021-06-01'}
+ return {**base,**kw}
+
+
+def test_expiry_calendar_thursday_then_tuesday_and_holidays_move_earlier():
+ days=[d.isoformat() for d in (_date(2025,8,1)+_td(i) for i in range(60)) if d.weekday()<5 and d!=_date(2025,8,14)]
+ ex=LB.weekly_expiries(days)
+ assert '2025-08-07' in ex and '2025-08-13' in ex and '2025-08-21' in ex        # 14 Aug is a holiday -> Wed 13 Aug
+ assert '2025-09-02' in ex and '2025-09-04' not in ex                          # Tuesdays from September 2025
+
+
+def test_backtest_is_point_in_time_costed_and_closed_trades_only():
+ nifty,vix=daily_series()
+ trades,skipped=LB.simulate(lab_spec(),nifty,vix,65)
+ assert len(trades)>50
+ idx={d:i for i,d in enumerate(nifty['days'])}
+ for t in trades:
+  assert idx[t['entry']]==idx[t['decision']]+1                                # entry is the NEXT trading day's open
+  assert t['exit']<=nifty['days'][-1] and t['exit']>=t['entry'] and t['exit']<=t['expiry']
+  assert t['fees']>0
+  assert t['spot_entry']==nifty['open'][idx[t['entry']]]
+ for a,b in zip(trades,trades[1:]):assert b['entry']>a['exit'] or b['decision']>=a['exit']   # one position at a time
+
+
+def test_future_data_cannot_change_earlier_trades():
+ nifty,vix=daily_series()
+ base,_=LB.simulate(lab_spec(),nifty,vix,65)
+ cut=nifty['days'].index('2021-06-01')
+ shocked={**nifty,'open':nifty['open'][:cut]+[x*1.3 for x in nifty['open'][cut:]],'close':nifty['close'][:cut]+[x*1.3 for x in nifty['close'][cut:]]}
+ again,_=LB.simulate(lab_spec(),shocked,vix,65)
+ early=lambda ts:[t for t in ts if t['exit']<'2021-06-01']
+ assert early(base)==early(again) and early(base)
+ # an unchanged past with a truncated future: the last trade that could not close is excluded, not guessed
+ short={k:(v[:cut] if isinstance(v,list) else v) for k,v in nifty.items()}
+ tr,sk=LB.simulate(lab_spec(),short,{k:(v[:cut] if isinstance(v,list) else v) for k,v in vix.items()},65)
+ assert all(t['exit']<=short['days'][-1] for t in tr)
+
+
+def test_backtest_reports_honestly():
+ nifty,vix=daily_series()
+ r=LB.backtest(lab_spec(split='2023-10-01'),nifty,vix,65)
+ assert r['provenance']['label']=='Model-priced - not traded prices' and r['provenance']['price_source']=='model'
+ assert r['badge']['status']=='insufficient' and 'n=' in r['badge']['label']                 # few out-of-sample trades
+ s=r['stats']['all']
+ assert s['ci95'][0]<=s['expectancy']<=s['ci95'][1] and 'win_rate' in s and s['per_100_capital'] is not None
+ assert r['control']['reps']>0 and len(r['equity'])==s['n']
+ assert LB.backtest(lab_spec(split='2023-10-01'),nifty,vix,65)['stats']==r['stats']            # reproducible
+
+
+def test_lab_api_runs_a_job_validates_and_feeds_discover(pilot,monkeypatch):
+ app,owner,_o=pilot
+ nifty,vix=daily_series(start='2023-01-02',n=700)
+ lab=app.state.strategy_builder_lab
+ monkeypatch.setattr(lab.daily,'series',lambda sym:nifty if sym=='NIFTY 50' else vix)
+ bad=owner.post('/api/sb/lab/backtests',json={'template':'iron_condor','underlying':'BANKNIFTY'})
+ assert bad.status_code==400 and 'NIFTY only' in bad.json()['error']
+ assert owner.post('/api/sb/lab/backtests',json={'template':'iron_condor','slippage_pct':0.1}).status_code==400   # never less slippage
+ run=owner.post('/api/sb/lab/backtests',json={'template':'bull_call_spread','param':4,'from':'2023-01-02','to':'2025-09-01'}).json()
+ assert run['status'] in ('running','completed')
+ for _ in range(100):
+  got=owner.get(f"/api/sb/lab/runs/{run['id']}").json()
+  if got['status']!='running':break
+  time.sleep(0.1)
+ assert got['status']=='completed',got.get('error')
+ assert got['result']['provenance']['label'].startswith('Model-priced') and got['result']['stats']['all']['n']>0
+ assert owner.get('/api/sb/lab/runs').json()['runs'][0]['id']==run['id']
+ d=owner.post('/api/sb/discover',json={'underlying':'NIFTY','expiry':EXP,'view':'up','target':23300}).json()
+ bcs=[c for c in d['candidates'] if c['template']=='bull_call_spread' and c['param']==4]
+ if bcs:assert bcs[0]['evidence']['run_id']==run['id'] and bcs[0]['evidence']['label'].startswith('Model-tested')
+
+
+def test_audit_c1_no_weeklies_before_feb_2019():
+ days=[d.isoformat() for d in (_date(2018,10,1)+_td(i) for i in range(200)) if d.weekday()<5]
+ ex=LB.weekly_expiries(days)
+ pre=[e for e in ex if e<'2019-02-11']
+ assert pre==['2018-10-25','2018-11-29','2018-12-27','2019-01-31']            # last Thursday only
+ assert '2019-02-14' in ex and '2019-02-21' in ex                              # weeklies from then
+
+
+def test_audit_c2_stop_and_target_rejected_when_undefined(pilot):
+ app,owner,_o=pilot
+ r=owner.post('/api/sb/lab/backtests',json={'template':'short_straddle','stop_pct':50})
+ assert r.status_code==400 and 'no defined maximum loss' in r.json()['error']
+ r=owner.post('/api/sb/lab/backtests',json={'template':'long_call','target_pct':50})
+ assert r.status_code==400 and 'no capped maximum profit' in r.json()['error']
+
+
+def test_audit_c3_random_control_spans_the_whole_period(monkeypatch):
+ nifty,vix=daily_series()
+ seen=[]
+ real=LB.simulate
+ def spy(spec,n,v,lot,entry_days=None):
+  tr,sk=real(spec,n,v,lot,entry_days)
+  if entry_days is not None:seen.extend(t['entry'] for t in tr)
+  return tr,sk
+ monkeypatch.setattr(LB,'simulate',spy)
+ r=LB.backtest(lab_spec(),nifty,vix,65)
+ assert min(seen)<'2020-01-01' and max(seen)>'2022-06-01'
+ assert r['control']['oos_mean_expectancy'] is not None and r['control']['oos_actual_percentile'] is not None
+
+
+def test_audit_p4_trades_straddling_the_split_are_in_neither_set():
+ nifty,vix=daily_series()
+ trades,_=LB.simulate(lab_spec(),nifty,vix,65)
+ t=next(t for t in trades if t['entry']<t['exit'])
+ split=t['exit']                                     # entry < split <= exit
+ r=LB.backtest(lab_spec(split=split),nifty,vix,65)
+ assert r['skipped']['straddled_split']>=1
+ assert r['stats']['all']['n']==r['stats']['discovery']['n']+r['stats']['oos']['n']==len(trades)-r['skipped']['straddled_split']
+
+
+def test_audit_p2_special_sessions_and_weekends_are_dropped():
+ nifty,_=daily_series(n=30)
+ sp=nifty['days'][5]
+ got=LB.clean_series({**nifty,'days':nifty['days']+['2019-03-02'],**{k:nifty[k]+[1.0] for k in ('open','high','low','close')}},{sp})
+ assert sp not in got['days'] and '2019-03-02' not in got['days'] and got['excluded_special']==2
+ assert len(got['days'])==len(got['open'])==len(got['close'])
+
+
+def test_audit_p3_today_is_not_complete_before_the_close(monkeypatch):
+ monkeypatch.setattr(LB,'_now_ist',lambda:datetime(2026,9,24,11,0))
+ assert LB._last_complete_day()=='2026-09-23'
+ monkeypatch.setattr(LB,'_now_ist',lambda:datetime(2026,9,24,16,0))
+ assert LB._last_complete_day()=='2026-09-24'
+
+
+def test_audit_p1_evidence_only_for_the_same_held_to_expiry_rule(pilot):
+ app,owner,_o=pilot
+ lab=app.state.strategy_builder_lab
+ res={'badge':{'status':'insufficient','label':'x'},'stats':{'oos':{'n':3,'ci95':[1,2]}}}
+ def put(rid,**kw):
+  spec=lab_spec(template='bull_call_spread',param=4,**kw)
+  with lab.lock:
+   lab.c.execute("insert into lab_runs(id,user_id,kind,status,spec,result,created_at) values(?,?,?,?,?,?,?)",
+    (rid,'u1','backtest','completed',json.dumps(spec),json.dumps(res),time.time()));lab.c.commit()
+  time.sleep(0.01)
+ put('with-stop',stop_pct=50)
+ assert lab.evidence_for('u1','bull_call_spread',4) is None                    # a stop run is a different rule
+ put('plain')
+ ev=lab.evidence_for('u1','bull_call_spread',4)
+ assert ev['run_id']=='plain' and ev['runs_tried']==1 and 'Held to expiry' in ev['note']
+
+
+def test_replay_uses_real_bars_and_skips_gaps():
+ legs=[{'symbol':'A','side':'B','units':65},{'symbol':'B','side':'S','units':-65}]
+ c={'A':[('t1',100),('t2',110),('t3',120)],'B':[('t1',50),('t3',40)]}
+ r=LB.replay(legs,c)
+ assert [p['t'] for p in r['points']]==['t1','t3'] and r['skipped_bars']==1
+ assert r['points'][-1]['pnl']==65*(120-100)-65*(40-50)

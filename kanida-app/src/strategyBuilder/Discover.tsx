@@ -67,6 +67,7 @@ export function Discover(){
    <View style={{flexDirection:wide?'row':'column',flexWrap:'wrap',gap:12}}>
     {res.candidates.map((c,i)=><View key={c.template} style={{flexBasis:wide?'31%':'auto',flexGrow:1,backgroundColor:C.paper,borderWidth:1,borderColor:pick.includes(c.template)?C.green:C.line,borderRadius:14,padding:14,gap:8}}>
      <View style={s.between}><T style={{fontFamily:'InterSemi',fontSize:15}}>{c.name}</T><Badge label={c.evidence.label} tone="amber"/></View>
+     {!!c.evidence.note&&<T style={{fontSize:11,color:C.muted}}>{c.evidence.note}</T>}
      <T style={{fontSize:12,color:C.muted}}>{c.recipe}{c.param!=null?` · ${c.param_label} ${c.param}`:''}</T>
      {c.legs.map((l:any,j:number)=><T key={j} style={{fontSize:12,fontVariant:['tabular-nums'] as any}}>{`${l.side==='B'?'Buy':'Sell'} ${l.lots} × ${strikeText(l.strike)} ${l.type} @ ${num(l.price)}`}</T>)}
      {c.why.map((w,j)=><View key={j} style={[s.row,{gap:6,alignItems:'flex-start'}]}><Icon name={j?'check':'target'} size={12} color={j?C.green:C.mint}/><T style={{fontSize:12,flex:1}}>{w}</T></View>)}

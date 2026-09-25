@@ -125,6 +125,7 @@ export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean
     <SaveBadge state={save} version={version}/>
    </View>
    <View style={[s.row,{flexWrap:'wrap',gap:8,width:wide?undefined:'100%'}]}>
+    <Button label="Prove in Lab" icon="activity" kind="outline" disabled={!body.legs.length} onPress={()=>router.push({pathname:'/strategies',params:{view:'lab',strategy:id,...(a?.structure?.exact&&a.structure.key?{template:a.structure.key}:{mode:'replay'})}} as any)}/>
     <Button label="Save snapshot" icon="bookmark" kind="outline" onPress={snapshot} disabled={!body.legs.length}/>
     <Button label={bell.count?`Alerts (${bell.count})`:'Alerts'} icon="bell" kind="outline" onPress={()=>router.push({pathname:'/strategies',params:{view:'alerts'}} as any)}/>
     <Button label="Duplicate" icon="copy" kind="outline" onPress={duplicate}/>

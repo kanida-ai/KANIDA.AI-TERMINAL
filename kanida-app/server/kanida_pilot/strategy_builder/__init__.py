@@ -26,7 +26,7 @@ def _beside_pilot_db(settings):
  return None
 
 
-def mount(app,settings,path=None,derivatives_path=None,live=None):
+def mount(app,settings,path=None,derivatives_path=None,live=None,kanida_db=None):
  try:
   from .market import Market
   from .routes import build_router
@@ -44,13 +44,16 @@ def mount(app,settings,path=None,derivatives_path=None,live=None):
   alerts=Alerts(store,market,execution)
   if live:execution.start()
   if os.getenv('PILOT_SB_ALERTS','on').lower()!='off':alerts.start()
+  from .lab import Lab
+  lab=Lab(store,market,kanida_db or os.getenv('PILOT_SB_KANIDA_DB') or str(Path(__file__).resolve().parents[4]/'db'/'kanida.db'),
+   derivatives_path or settings.derivatives_database)
   before=len(app.router.routes)
-  app.include_router(build_router(app,market,store,execution,alerts))
+  app.include_router(build_router(app,market,store,execution,alerts,lab))
   # the pilot's catch-all GET /api/{path} and web routes are registered first; put ours ahead of them
   added=app.router.routes[before:]
   del app.router.routes[before:]
   app.router.routes[0:0]=added
-  app.state.strategy_builder_store=store;app.state.strategy_builder_market=market;app.state.strategy_builder_execution=execution;app.state.strategy_builder_alerts=alerts
+  app.state.strategy_builder_store=store;app.state.strategy_builder_market=market;app.state.strategy_builder_execution=execution;app.state.strategy_builder_alerts=alerts;app.state.strategy_builder_lab=lab
   return store
  except Exception:
   log.exception('The strategy builder could not start; the pilot runs without it.')

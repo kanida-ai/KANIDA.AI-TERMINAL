@@ -35,6 +35,7 @@ from .store import Conflict
 from .templates import ResolveError,public,recognise,resolve
 from .execution import ExecError
 from .alerts import AlertError,TYPES as ALERT_TYPES
+from .lab import LabError
 
 SYMBOL=re.compile(r'^[A-Z0-9&-]{1,20}$');DATE=re.compile(r'^\d{4}-\d{2}-\d{2}$')
 NAME_MAX=80
@@ -53,7 +54,7 @@ def _name(v,fallback):
  return t or fallback
 
 
-def build_router(app,market,store,execution=None,alerts=None):
+def build_router(app,market,store,execution=None,alerts=None,lab=None):
  r=APIRouter()
  def me(request):return _identity(app,request)
  def own(user,sid):
@@ -104,8 +105,14 @@ def build_router(app,market,store,execution=None,alerts=None):
   me(request)
   got=guard(market.chain,_symbol(data.get('underlying')),_date(data.get('expiry')))
   if not got:raise PilotError(404,'NO_READING','The option store has no reading for this underlying.')
-  try:return D.run(got,data)
+  try:out=D.run(got,data)
   except D.DiscoverError as e:raise PilotError(400,'DISCOVER_INVALID',e.message)
+  if lab and got['underlying']=='NIFTY':
+   user=me(request)
+   for c in out['candidates']:
+    ev=lab.evidence_for(user['id'],c['template'],c['param'])
+    if ev:c['evidence']={**ev,'label':ev['label']}
+  return out
 
  # --- library ---------------------------------------------------------------------------------------------------
  @r.get('/api/sb/strategies')
@@ -345,6 +352,36 @@ def build_router(app,market,store,execution=None,alerts=None):
  @r.post('/api/sb/alert-events/ack')
  def alert_ack(request:Request,data:dict=Body(default={})):
   user=me(request);return al(alerts.ack,user['id'],str(data['event_id']) if data.get('event_id') else None)
+
+ # --- slice 6: the Lab -------------------------------------------------------------------------------------------------
+ def lb(fn,*a,**k):
+  if not lab:raise PilotError(503,'LAB_UNAVAILABLE','The Lab is not available on this server.')
+  try:return guard(fn,*a,**k)
+  except LabError as e:raise PilotError(e.status,e.code,e.message)
+
+ @r.post('/api/sb/lab/backtests')
+ def lab_backtest(request:Request,data:dict=Body(default={})):
+  user=me(request);sid=data.get('strategy_id')
+  if sid:own(user,str(sid))
+  return lb(lab.start_backtest,user['id'],data,str(sid) if sid else None)
+
+ @r.get('/api/sb/lab/runs')
+ def lab_runs(request:Request,strategy_id:str=''):
+  user=me(request);return {'runs':lb(lab.runs,user['id'],strategy_id or None)}
+
+ @r.get('/api/sb/lab/runs/{rid}')
+ def lab_run(request:Request,rid:str):
+  user=me(request);run=lb(lab.run,user['id'],rid)
+  if not run:raise PilotError(404,'RUN_NOT_FOUND','There is no such Lab run.')
+  return run
+
+ @r.post('/api/sb/strategies/{sid}/replay')
+ def lab_replay(request:Request,sid:str,data:dict=Body(default={})):
+  user=me(request);s=own(user,sid)
+  interval=data.get('interval') if data.get('interval') in ('5minute','15minute','60minute','day') else '15minute'
+  try:days=max(1,min(60,int(data.get('days') or 10)))
+  except (TypeError,ValueError):raise PilotError(400,'FIELD_INVALID','days must be a whole number.')
+  return lb(lab.replay_strategy,user['id'],s,interval,days)
 
  return r
 

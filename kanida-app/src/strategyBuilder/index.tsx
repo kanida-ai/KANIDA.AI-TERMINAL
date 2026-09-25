@@ -13,6 +13,7 @@ import {Builder} from './Builder';
 import {Discover} from './Discover';
 import {Home} from './Home';
 import {AlertsCenter} from './Alerts';
+import {LabPage} from './Lab';
 import {inr,istStamp,num,signed} from './format';
 
 export function StrategiesTab(){
@@ -21,6 +22,7 @@ export function StrategiesTab(){
  if(view==='discover')return <Discover/>;
  if(view==='paper')return <PaperRuns/>;
  if(view==='alerts')return <AlertsCenter/>;
+ if(view==='lab')return <LabPage/>;
  return <Home/>;
 }
 

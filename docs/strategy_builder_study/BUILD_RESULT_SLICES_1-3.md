@@ -153,3 +153,64 @@ kanida-app pilot.
   - 6 new tests: fire once, hysteresis re-arm, cooldown, data unavailable → recovered, reminder expiry, validation/scope/version, no live data → unavailable, and live position alerts with acknowledgement.
   - Full suite: 587 passed, 1 skipped.
   - **Browser against live Kite** (25 Sep, 10:35–10:37 IST): a price alert and a breakeven alert each fired exactly once on the next cycle, the badges updated, and acknowledge worked in the tab and in the centre.
+
+---
+
+# Slice 6 — the Lab (25 Sep 2026)
+
+`strategy_builder/lab.py`, routes `/api/sb/lab/*` and `/api/sb/strategies/{id}/replay`, UI `src/strategyBuilder/Lab.tsx`. Open it at `/strategies?view=lab`, or from any strategy with **Prove in Lab**.
+
+## What data exists (the scope this sets)
+- **NIFTY 50 and India VIX daily** from 2013-01-01 in `db/kanida.db` (read-only). It ends 2026-07-29, so the Lab tops up later days from **Kite historical** (read-only) into `lab_daily` in its own store.
+- **Option prices:** only about 3 weeks of captured 15-minute candles (31 Aug to 18 Sep) plus the 17–23 Sep snapshots. Kite serves history for **listed** contracts only, not expired ones.
+- **As a result:** replay uses real prices for current contracts. A multi-year rule backtest must use **modelled** option prices.
+
+## Replay: how did these exact contracts trade?
+- The strategy's own contracts, using Kite historical candles (5-minute, 15-minute, 1-hour or daily; 2–30 days back), falling back to the captured candles.
+- It starts from the first bar where **every** leg traded. A bar missing for any leg is **skipped and counted, never filled in**.
+- Results are gross of charges and slippage, and say so.
+
+## Rule backtest: would this rule have made money? (model-priced)
+- **Scope:** NIFTY only. The expiry calendar is derived and stated: **monthly only** (last Thursday) before weekly options began on 2019-02-11, weekly Thursday from then, weekly Tuesday from 2025-09-01, with holidays moving to the previous trading day.
+- **Sessions:** special sessions (Muhurat, special Saturdays, the Feb-2021 outage day; found as days with fewer than 300 one-minute NIFTY bars) and weekend dates are excluded. A daily bar for today counts only after 15:45 IST.
+- **Timing (point in time):**
+  - Decide at a day's close, using that day's close and VIX.
+  - Enter at the **next open**. Strikes come from the rule at the entry-open spot and the decision-day VIX.
+  - Exits (take-profit % of max profit, stop % of max loss, exit at N days to expiry, or hold) are checked at closes and **filled at the next open**.
+  - Expiry settles at its close, intrinsic only.
+  - One position at a time.
+  - **Only closed trades count**; trades still open at the end are excluded and counted.
+  - A stop is only accepted on defined-risk structures, and a target only where max profit is capped. Anything else is rejected with a reason, never silently ignored.
+- **Costs:** the F&O charges estimate on every fill, **slippage** of at least 0.5% of the model price against you (it can only be raised), and STT on exercise of in-the-money longs.
+- **Statistics:**
+  - Discovery, out-of-sample and all trades, split by entry date (default: the midpoint of the period).
+  - **Expectancy per trade with a bootstrap 95% CI**, expectancy per ₹100 at risk, total, max drawdown, worst trade, average hold.
+  - Win rate is shown as context only.
+  - A **random-entry control**: the same rule on random days across the whole period, 40 runs, reported for all trades and out of sample only.
+  - A trade open across the discovery/out-of-sample boundary is in **neither** set, and is counted.
+  - An equity curve, a trade list and CSV download.
+  - Reproducible (fixed seed).
+- **Badge:** reads the **out-of-sample 95% lower bound** only, needs 30 or more out-of-sample trades, and never says more than *Model-tested*. Every result carries **"Model-priced — not traded prices"** and the full assumptions: one IV for all strikes (no skew), a constant rate, and today's lot size used for every year.
+- **Discover:** a card shows Lab evidence only for the **same rule** it displays: NIFTY, the same template and width, held to expiry (no stop, target or time exit). The card states the schedule and how many runs of that rule were tried. Otherwise it shows "Model only".
+
+## Quant audit (dev-quant-auditor) and fixes
+| # | Finding | Fix |
+|---|---|---|
+| C1 | Weekly expiries were fabricated before 2019 (NIFTY weeklies began 11 Feb 2019) | Monthly-only calendar before 2019-02-11 |
+| C2 | Stop/target were silently ignored for structures without a defined max loss/profit | Rejected at validation with a reason |
+| C3 | The random control only sampled the early part of the period | Random subset across the whole period; out-of-sample control added |
+| P1 | Discover evidence matched on template and width only (could show a stop/target run's result) | Matches the exact held-to-expiry NIFTY rule; states the schedule and the number of runs tried |
+| P2 | Special sessions were treated as normal days | Excluded (fewer than 300 one-minute bars, or a weekend date) |
+| P3 | A partial bar for today could enter; the clock was not IST | IST clock; today only after 15:45 IST |
+| P4 | Trades straddling the split counted as discovery | In neither set, counted as `straddled_split` |
+
+Seven regression tests were added (`test_audit_*`). The full server suite passes: 600 passed, 1 skipped.
+
+## First real results after the fixes (kanida.db 2016-01-01 → 2026-07-29, Wednesday decisions, 1–7 days to expiry, split 2021-04-15)
+**None of the tested rules is significant out of sample.** For example, an iron condor (wings 4, take-profit 50%, stop 100%):
+- 313 closed trades, an **80.5% win rate**.
+- Out of sample: n=200, expectancy +₹244 per trade, 95% CI −₹381 to +₹813. The badge is *not significant*.
+- 105 Wednesdays before 2019 had no monthly expiry within 1–7 days, so they were skipped. One trade straddled the split.
+- Against the random-entry control, the rule beat 97.5% of runs over the full period but only 70% out of sample.
+
+Before the fixes, this run reported 403 trades (a CI of −₹265 to +₹865). The extra trades came from the fabricated pre-2019 weeklies.
