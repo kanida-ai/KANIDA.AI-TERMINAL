@@ -767,6 +767,17 @@ app.include_router(autotrade_router,             prefix="/api", tags=["AutoTrade
 app.include_router(autotrade_pnl_router,          tags=["Power-User"])    # AutoTrade Performance dashboard P&L (power_jwt-gated, read-only) — /api/power/autotrade/pnl/*
 app.include_router(autotrade_config_edit_router,  tags=["Power-User"])    # AutoTrade LIVE CONFIG EDIT (power_jwt-gated) — PATCH /api/power/autotrade/{session|ladder}/{id}/config
 app.include_router(sysagents_health_router,      prefix="/api", tags=["SysAgents"])    # System-Engineering Agent Hierarchy Phase 1 — GET /api/health/system (operator-token gated, read-only) — DISABLED unless SYSAGENTS_ENABLED=true
+# Strategy intents (2026-09-24): external strategy baskets -> autotrade. Additive, DRY-RUN by default; live needs
+# every gate + an operator arm (separate FALCON_OPERATOR_ARM_TOKEN). Guarded: a failure here never blocks boot.
+try:
+    from autotrade.api.intents_routes import router as autotrade_intents_router
+    app.include_router(autotrade_intents_router, prefix="/api", tags=["AutoTrade-Intents"])
+    from autotrade.intents.dispatcher import sweep_stale as _sweep_intents
+    _swept = _sweep_intents()   # baskets a restart left mid-dispatch -> attention_required (operator reconciles)
+    if _swept:
+        log.warning("strategy intents: %d interrupted basket(s) moved to attention_required", _swept)
+except Exception as _intents_err:  # pragma: no cover - boot must survive
+    log.error("strategy intents router NOT mounted: %s", _intents_err)
 
 # Power User schema init — idempotent, creates tables on first boot.
 # Uses POWER_DB_PATH resolver — same DB as the engine read-only tables
