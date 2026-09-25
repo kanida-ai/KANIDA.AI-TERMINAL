@@ -18,7 +18,12 @@ from .templates import TEMPLATES
 log=logging.getLogger('strategy_builder.experiments')
 
 GRIDS={
- 'nifty_v1':{'name':'NIFTY defined-risk grid v1','underlying':'NIFTY','templates':'defined','weekdays':[0,1,2,3,4],
+ 'stocks_v1':{'name':'F&O stocks defined-risk grid v1','underlying':'STOCKS','templates':['long_call','long_put','bull_call_spread','bear_put_spread','bull_put_spread','bear_call_spread','long_straddle','long_strangle','iron_condor','iron_butterfly'],'weekdays':[2],
+  'dte':[[5,14],[15,35]],'from':'2016-01-01','to':'2026-07-29','split':'2022-01-03','slippage_pct':1.0,'exit_dte':2,'min_history_from':'2016-06-30',
+  'why':'Every defined-risk template x width on every F&O stock (today\'s list) with daily history from mid-2016, Wednesday decisions, two '
+        'days-to-expiry windows, exit at the open of the session before expiry (physical settlement), 1% slippage. Out of sample from '
+        '2022-01-03. All stock rules form ONE evidence family.'},
+ 'nifty_v1':{'name':'NIFTY defined-risk grid v1','underlying':'NIFTY','templates':['long_call','long_put','bull_call_spread','bear_put_spread','bull_put_spread','bear_call_spread','long_straddle','long_strangle','iron_condor','iron_butterfly'],'weekdays':[0,1,2,3,4],
   'dte':[[1,7],[8,14],[15,35]],'from':'2019-03-01','to':None,'split':'2023-01-02','slippage_pct':0.5,
   'why':'Every defined-risk template x width x decision weekday x days-to-expiry window, held to expiry. Weekly options '
         'exist for the whole period (from 2019-02-11); out of sample from 2023-01-02.'},
@@ -36,26 +41,70 @@ def plan(lab,grid:Dict[str,Any])->List[Dict[str,Any]]:
  """The exact rule list (validated specs) a grid expands to - deterministic order."""
  tpls=[t for t in TEMPLATES if (grid['templates']=='defined' and t['risk']=='defined') or (isinstance(grid['templates'],list) and t['key'] in grid['templates'])]
  out=[]
+ unders=universe(lab,grid) if grid['underlying']=='STOCKS' else [grid['underlying']]
+ for u in unders:
+  out+=_plan_one(lab,grid,tpls,u)
+ return out
+
+
+def universe(lab,grid)->List[str]:
+ """Today's F&O stocks that have kanida.db daily history starting on/before grid['min_history_from']."""
+ import sqlite3
+ c=sqlite3.connect(f'file:{lab.daily.kanida_db}?mode=ro',uri=True,timeout=20)
+ have={r[0] for r in c.execute("select symbol from ohlc_daily group by symbol having min(substr(bar_time,1,10))<=?",(grid.get('min_history_from','2016-06-30'),))}
+ c.close()
+ return sorted(lab.stocks()&have)
+
+
+def _plan_one(lab,grid,tpls,u):
+ out=[]
  for t in tpls:
   for v in ((t['param'] or {}).get('variants') or [None]):
    for wd in grid['weekdays']:
     for lo,hi in grid['dte']:
-     out.append(lab.validate({'underlying':grid['underlying'],'template':t['key'],'param':v,'weekday':wd,'dte_min':lo,'dte_max':hi,
-      'from':grid['from'],'to':grid.get('to') or None,'split':grid['split'],'slippage_pct':grid['slippage_pct']}))
+     out.append(lab.validate({'underlying':u,'template':t['key'],'param':v,'weekday':wd,'dte_min':lo,'dte_max':hi,
+      'from':grid['from'],'to':grid.get('to') or None,'split':grid['split'],'slippage_pct':grid['slippage_pct'],'exit_dte':grid.get('exit_dte')}))
  return out
 
 
 # --- worker processes: the series are sent ONCE per process, not per rule -------------------------------------------
 _W={}
-def _init(series,vix,lot):
- _W['s']=series;_W['v']=vix;_W['lot']=lot
+def _init(kanida_db,nifty,vix):
+ _W['k']=kanida_db;_W['n']=nifty;_W['v']=vix
 
 
-def _one(spec):
+def _series(u,special):
+ """Worker-side data: the underlying's cleaned daily series and its volatility series (NIFTY: India VIX)."""
+ from .lab import Daily,clean_series,scaled_vol
+ if u=='NIFTY':return _W['n'],_W['v']
+ d=Daily(_W['k'],None,None);s=clean_series(d.series(u),special)
+ return s,scaled_vol(s,_W['n'],_W['v'])
+
+
+def _group(args):
+ """All rules of ONE underlying in one task: its data is loaded once."""
+ u,specs,lot,special=args
  from .lab import backtest
- try:return spec,backtest(spec,_W['s'],_W['v'],_W['lot']),None
- except Exception as e:  # noqa: BLE001 - a failed rule is reported, never dropped
-  return spec,None,f'{type(e).__name__}: {e}'[:300]
+ try:s,v=_series(u,set(special))
+ except Exception as e:  # noqa: BLE001
+  return [(uuid.uuid4().hex[:16],sp,None,f'NO_DATA {type(e).__name__}: {e}'[:300],None) for sp in specs]
+ from .evidence import entry
+ out=[]
+ for sp in specs:
+  rid=uuid.uuid4().hex[:16]
+  try:
+   res=compact(backtest(sp,s,v,lot))
+   out.append((rid,sp,res,None,entry(rid,sp,res,time.time())))
+  except Exception as e:  # noqa: BLE001 - a failed rule is reported, never dropped
+   out.append((rid,sp,None,f'{type(e).__name__}: {e}'[:300],None))
+ return out
+
+
+def compact(res):
+ """A batch run keeps everything the evidence and the summary need - stats, badge, control, provenance and per-trade
+ entry/exit/net/risk - and drops per-leg detail and the equity curve (ten thousand full results would be ~0.5 GB)."""
+ return {**{k:v for k,v in res.items() if k not in ('trades','equity')},'compact':True,
+  'trades':[{k:t.get(k) for k in ('decision','entry','exit','expiry','reason','net','fees','capital_at_risk','hold_days')} for t in res.get('trades') or []]}
 
 
 def run_batch(lab,user_id:str,grid_key:str,workers:Optional[int]=None,on_progress=None)->Dict[str,Any]:
@@ -69,20 +118,30 @@ def run_batch(lab,user_id:str,grid_key:str,workers:Optional[int]=None,on_progres
  with lab.lock:                                                    # pre-registration: written before anything runs
   lab.c.execute('insert into lab_batches values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(bid,user_id,grid_key,grid['name'],json.dumps({**grid,'rules':len(specs)}),ph,
    len(specs),0,0,'running',t0,t0,None,None));lab.c.commit()
- series,vix=lab.series_for(grid['underlying'])
- lot=lab.lot_size() if hasattr(lab,'lot_size') else 65
+ nifty,vix=lab.series_for('NIFTY')
+ special=sorted(lab.daily.special_sessions())
+ by_u={}
+ for sp in specs:by_u.setdefault(sp['underlying'],[]).append(sp)
+ lots={u:(lab.lot_size(u) if hasattr(lab,'lot_size') else 65) for u in by_u}
  done=failed=0
- with ProcessPoolExecutor(max_workers=workers or max(1,(os.cpu_count() or 2)-1),initializer=_init,initargs=(series,vix,lot)) as ex:
-  futs=[ex.submit(_one,s) for s in specs]
+ # NIFTY has one underlying: split its rules into chunks so every worker gets some; stocks are one task per stock
+ tasks=[]
+ for u,sps in by_u.items():
+  n=max(1,len(sps)//((os.cpu_count() or 2)*2)) if len(by_u)==1 else len(sps)
+  for i in range(0,len(sps),n):tasks.append((u,sps[i:i+n],lots[u],special))
+ with ProcessPoolExecutor(max_workers=workers or max(1,(os.cpu_count() or 2)-1),initializer=_init,initargs=(lab.daily.kanida_db,nifty,vix)) as ex:
+  futs=[ex.submit(_group,tk) for tk in tasks]
   for f in as_completed(futs):
-   spec,res,err=f.result();rid=uuid.uuid4().hex[:16];t=time.time()
-   with lab.lock:
-    lab.c.execute('insert into lab_runs values(?,?,?,?,?,?,?,?,?,?,?)',(rid,user_id,None,'backtest',json.dumps(spec),'failed' if err else 'completed',
-     1.0,json.dumps(res) if res else None,err,t,t))
-    if err:failed+=1
-    else:done+=1
-    lab.c.execute('update lab_batches set done=?,failed=? where id=?',(done,failed,bid));lab.c.commit()
-   if on_progress:on_progress(done+failed,len(specs))
+   for rid,spec,res,err,ev in f.result():
+    t=time.time()
+    with lab.lock:
+     lab.c.execute('insert into lab_runs values(?,?,?,?,?,?,?,?,?,?,?)',(rid,user_id,None,'backtest',json.dumps(spec),'failed' if err else 'completed',
+      1.0,json.dumps(res) if res else None,err,t,t))
+     if ev:lab.c.execute('insert or replace into lab_evidence values(?,?)',(rid,json.dumps({**ev,'created_at':t})))
+     if err:failed+=1
+     else:done+=1
+    if on_progress:on_progress(done+failed,len(specs))
+   with lab.lock:lab.c.execute('update lab_batches set done=?,failed=? where id=?',(done,failed,bid));lab.c.commit()
  with lab.lock:
   lab.c.execute("update lab_batches set status=?,finished_at=? where id=?",('completed' if not failed else 'completed_with_failures',time.time(),bid));lab.c.commit()
  return batch(lab,user_id,bid)
@@ -105,7 +164,8 @@ def batch(lab,user_id:str,bid:str)->Optional[Dict[str,Any]]:
  board=lab.evidence_board(user_id)
  ids={r['id'] for r in runs}
  rules=[r for r in board['rules'] if set(r['run_ids'])&ids]
- fam=board['families'].get(json.loads(b['grid'])['underlying'],{})
+ from .evidence import family_of
+ fam=board['families'].get(family_of(json.loads(b['grid'])['underlying']),{})
  order={'tested_significant':0,'tested_not_significant':1,'insufficient':2}
  rules.sort(key=lambda r:(order[r['status']],r['p'] if r['p'] is not None else 2))
  return {**dict(b),'grid':json.loads(b['grid']),'family':fam,'failed_runs':[{'id':r['id'],'error':r['error']} for r in runs if r['status']=='failed'],

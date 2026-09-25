@@ -35,6 +35,11 @@ MODEL='lab-bsm-vix-v1'
 STEP={'NIFTY':50.0}
 INDEX_SYMBOL={'NIFTY':'NIFTY 50'}
 KITE_INDEX_TOKEN={'NIFTY 50':256265,'INDIA VIX':264969}
+INDICES={'NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY','NIFTYNXT50'}
+STOCK_EXIT_DTE=2          # stock options are PHYSICALLY settled: every stock rule exits at the open of the day before expiry or earlier
+STOCK_MIN_SLIP=0.01       # stock option spreads are wider than NIFTY's: at least 1% of the model price per fill
+STOCK_FROM='2016-01-01'
+MONTHLY_TUESDAY_FROM=date(2025,9,1)   # NSE equity-derivative expiries moved to Tuesday (monthly: last Tuesday) from Sep 2025
 TUESDAY_FROM=date(2025,9,1)       # NSE moved NIFTY weekly expiry from Thursday to Tuesday (derived calendar, stated)
 WEEKLY_FROM=date(2019,2,11)       # NIFTY weekly options began 11 Feb 2019; before that only the monthly (last Thursday) existed
 SHORT_SESSION_BARS=300            # a day with fewer 1-minute NIFTY bars than this is a special/short session (Muhurat etc.)
@@ -45,6 +50,7 @@ create table if not exists lab_runs(
  id text primary key, user_id text not null, strategy_id text, kind text not null, spec text not null, status text not null,
  progress real not null default 0, result text, error text, created_at real not null, finished_at real);
 create index if not exists ix_lab_user on lab_runs(user_id, created_at);
+create table if not exists lab_evidence(run_id text primary key, entry text not null);
 create table if not exists lab_daily(symbol text not null, day text not null, open real, high real, low real, close real, source text not null,
  primary key(symbol, day));
 '''
@@ -80,7 +86,7 @@ class Daily:
   return out
  def _topup(self,symbol,after):
   live=getattr(self.market,'live_market',None)
-  if not live:return []
+  if not live or symbol not in KITE_INDEX_TOKEN or self.store is None:return []     # stocks: kanida.db only (it is corporate-action adjusted; Kite bars may not be)
   ok,_=live.available()
   if not ok:return []
   today=datetime.fromisoformat(_now_ist().strftime('%Y-%m-%d'))
@@ -99,8 +105,10 @@ class Daily:
   if symbol in self._mem and time.time()-self._mem[symbol][0]<3600:return self._mem[symbol][1]
   base=self._kanida(symbol)
   last=base[-1][0] if base else '2012-12-31'
-  with self.store.lock:
-   cached=self.store.c.execute('select day,open,high,low,close from lab_daily where symbol=? and day>? order by day',(symbol,last)).fetchall()
+  cached=[]
+  if self.store is not None:                                   # a batch worker has no store: kanida.db only
+   with self.store.lock:
+    cached=self.store.c.execute('select day,open,high,low,close from lab_daily where symbol=? and day>? order by day',(symbol,last)).fetchall()
   cached=[tuple(r) for r in cached]
   newest=cached[-1][0] if cached else last
   extra=self._topup(symbol,newest)
@@ -148,6 +156,51 @@ def weekly_expiries(days):
  return sorted(set(out))
 
 
+def monthly_expiries(days):
+ """Stock option expiries: the LAST Thursday of each month until 2025-08-31, the last Tuesday from 2025-09-01; an expiry on
+ a non-trading day moves to the previous trading day. DERIVED from the stated rule, not read from an exchange archive."""
+ have=set(days);out=[]
+ d0=date.fromisoformat(days[0]).replace(day=1);end=date.fromisoformat(days[-1])+timedelta(days=45)
+ m=d0
+ while m<=end:
+  nxt=(m.replace(day=28)+timedelta(days=4)).replace(day=1)
+  last=nxt-timedelta(days=1)
+  wd=1 if last>=MONTHLY_TUESDAY_FROM else 3
+  x=last
+  while x.weekday()!=wd:x-=timedelta(days=1)
+  k=x
+  while k.isoformat() not in have and k>date.fromisoformat(days[0]) and k<=date.fromisoformat(days[-1]):k-=timedelta(days=1)
+  out.append(k.isoformat() if k<=date.fromisoformat(days[-1]) else x.isoformat())
+  m=nxt
+ return sorted(set(out))
+
+
+def stock_step(spot):
+ """A strike interval of about 1% of spot on a 1/2.5/5 ladder - an APPROXIMATION of NSE's price-banded intervals (stated)."""
+ for s_ in (1,2.5,5,10,20,50,100,250,500,1000):
+  if s_>=spot*0.01:return float(s_)
+ return 1000.0
+
+
+def scaled_vol(u,nifty,vix,window=20):
+ """Point-in-time volatility for a stock: its own trailing realised vol (20 closes up to and including the day) scaled
+ by the index's implied/realised ratio that day (India VIX / NIFTY realised), clipped. A MODEL, stated on every result."""
+ def rv(days,closes):
+  out={};lr=[None]+[math.log(closes[i]/closes[i-1]) if closes[i-1] and closes[i] else None for i in range(1,len(closes))]
+  for i in range(window,len(closes)):
+   w=[x for x in lr[i-window+1:i+1] if x is not None]
+   if len(w)>=window-2:
+    m=sum(w)/len(w);out[days[i]]=math.sqrt(sum((x-m)**2 for x in w)/(len(w)-1))*math.sqrt(252)*100
+  return out
+ ru=rv(u['days'],u['close']);rn=rv(nifty['days'],nifty['close']);vx=dict(zip(vix['days'],vix['close']))
+ days=[];vals=[]
+ for d in u['days']:
+  if d in ru and d in rn and d in vx and rn[d]>0:
+   ratio=min(2.5,max(0.6,vx[d]/rn[d]))
+   days.append(d);vals.append(round(min(150.0,max(8.0,ru[d]*ratio)),3))
+ return {'days':days,'open':vals,'close':vals,'high':vals,'low':vals,'sources':{'model':'stock 20-day realised vol x (India VIX / NIFTY 20-day realised vol), clipped 0.6-2.5x, 8-150%'}}
+
+
 # --- the rule backtest -------------------------------------------------------------------------------------------------
 def _years(entry_day,expiry,at_open=True):
  start=datetime.fromisoformat(entry_day)+(timedelta(hours=9,minutes=15) if at_open else timedelta(hours=15,minutes=30))
@@ -164,7 +217,7 @@ def _strikes(tpl,param,spot,sigma,t,step):
   rule=spec['strike'];off=(rule['steps']+rule['per']*(param or 0))*step
   if rule['ref']=='atm':k=atm+off
   else:k=round(spot*math.exp(rule['sd']*sigma*math.sqrt(max(t,1/365)))/step)*step+off
-  out.append({'side':spec['side'],'type':spec['type'],'strike':k})
+  out.append({'side':spec['side'],'type':spec['type'],'strike':k,'mult':int(spec.get('mult',1))})
  return out
 
 
@@ -228,9 +281,12 @@ def _adjusted_walk(spec,legs,nifty,vmap,days,n,e,x,sig,lot_size,slip,step):
 
 def simulate(spec,nifty,vix,lot_size,entry_days=None,rng=None):
  """Run the rule once. entry_days: a set of decision days to use instead of the schedule (the random control)."""
- tpl=BY_KEY[spec['template']];param=spec.get('param');step=STEP['NIFTY'];slip=spec['slippage']
+ tpl=BY_KEY[spec['template']];param=spec.get('param');slip=spec['slippage']
+ stock=spec.get('underlying','NIFTY') not in INDICES
+ step=None if stock else STEP['NIFTY']
  days=nifty['days'];vmap=dict(zip(vix['days'],vix['close']))
- expiries=weekly_expiries(days);last=days[-1]
+ expiries=monthly_expiries(days) if stock else weekly_expiries(days);last=days[-1]
+ pos_of={d:i for i,d in enumerate(days)}
  lo=spec['from'];hi=spec['to']
  trades=[];skipped={'no_expiry':0,'no_vix':0,'open_at_end':0};i=0;n=len(days)
  def decision_ok(d):
@@ -245,13 +301,13 @@ def simulate(spec,nifty,vix,lot_size,entry_days=None,rng=None):
   cands=[x for x in expiries if x>=ed and spec['dte_min']<=(date.fromisoformat(x)-date.fromisoformat(ed)).days<=spec['dte_max']]
   if not cands:skipped['no_expiry']+=1;i+=1;continue
   x=cands[0];t=_years(ed,x);sigma=sig/100.0
-  legs=_strikes(tpl,param,spot,sigma,t,step)
+  legs=_strikes(tpl,param,spot,sigma,t,step or stock_step(spot))
   if len({(l['type'],l['strike'],l['side']) for l in legs})<len(legs):skipped['no_expiry']+=1;i+=1;continue
   for l in legs:
-   l['units']=(1 if l['side']=='B' else -1)*lot_size
+   l['units']=(1 if l['side']=='B' else -1)*lot_size*l.get('mult',1)
    l['entry']=_fill(_price(spot,l['strike'],t,sigma,l['type']),l['side'],True,slip)
-  fees=sum(CH.leg_charges(l['side'],l['entry'],lot_size)['total'] for l in legs)
-  prof=A.expiry_profile([{**l,'lots':1,'lot_size':lot_size,'price':l['entry']} for l in legs])
+  fees=sum(CH.leg_charges(l['side'],l['entry'],abs(l['units']))['total'] for l in legs)
+  prof=A.expiry_profile([{**l,'lots':l.get('mult',1),'lot_size':lot_size,'price':l['entry']} for l in legs])
   max_loss=None if prof['unlimited_loss'] else -prof['max_loss'];max_profit=None if prof['unlimited_profit'] else prof['max_profit']
   if spec.get('adjust'):
    w=_adjusted_walk(spec,legs,nifty,vmap,days,n,e,x,sig,lot_size,slip,step)
@@ -264,6 +320,12 @@ def simulate(spec,nifty,vix,lot_size,entry_days=None,rng=None):
    i=days.index(w['exit']) if w['exit'] in days else i+1
    continue
   # walk forward: check at each close, exit next open; settle at expiry close
+  xi=pos_of.get(x)
+  def sess_exit(jj):
+   # stocks (physical settlement): exit at the open of the session BEFORE expiry, counted in trading sessions so a
+   # weekend or holiday can never push the exit onto the expiry day itself
+   left=(xi-jj) if xi is not None else (date.fromisoformat(x)-date.fromisoformat(days[jj])).days
+   return left<=spec['exit_dte']
   j=e;exit_day=None;exit_px=None;reason=None
   while True:
    cd=days[j] if j<n else None
@@ -276,7 +338,7 @@ def simulate(spec,nifty,vix,lot_size,entry_days=None,rng=None):
    hit=None
    if spec.get('target_pct') and max_profit and mark>=max_profit*spec['target_pct']/100:hit='target'
    elif spec.get('stop_pct') and max_loss and mark<=-max_loss*spec['stop_pct']/100:hit='stop'
-   elif spec.get('exit_dte') is not None and dte<=spec['exit_dte']:hit='time'
+   elif spec.get('exit_dte') is not None and (sess_exit(j) if stock else dte<=spec['exit_dte']):hit='time'
    if hit:
     if j+1>=n:break                                # the next open is not in the data yet - trade still open
     nd=days[j+1];no=nifty['open'][j+1];tn=_years(nd,x)
@@ -284,8 +346,8 @@ def simulate(spec,nifty,vix,lot_size,entry_days=None,rng=None):
    j+=1
   if exit_day is None:skipped['open_at_end']+=1;break
   gross=sum(l['units']*(p-l['entry']) for l,p in zip(legs,exit_px))
-  if reason!='expiry':fees+=sum(CH.leg_charges('S' if l['side']=='B' else 'B',p,lot_size)['total'] for l,p in zip(legs,exit_px))
-  else:fees+=sum(0.00125*p*lot_size for l,p in zip(legs,exit_px) if l['side']=='B' and p>0)   # STT on exercise of ITM longs
+  if reason!='expiry':fees+=sum(CH.leg_charges('S' if l['side']=='B' else 'B',p,abs(l['units']))['total'] for l,p in zip(legs,exit_px))
+  else:fees+=sum(0.00125*p*abs(l['units']) for l,p in zip(legs,exit_px) if l['side']=='B' and p>0)   # STT on exercise of ITM longs
   net=gross-fees
   trades.append({'decision':d,'entry':ed,'exit':exit_day,'expiry':x,'reason':reason,'spot_entry':spot,'vix':sig,
    'legs':[{'side':l['side'],'type':l['type'],'strike':l['strike'],'entry':l['entry'],'exit':round(p,2)} for l,p in zip(legs,exit_px)],
@@ -393,8 +455,15 @@ def backtest(spec,nifty,vix,lot_size,progress=lambda p:None):
  return {'kind':'backtest','model':MODEL,'badge':badge,'stats':stats,'control':control,'adjustment':adjustment,'equity':eq,'trades':trades,'skipped':skipped,
   'lot_size':lot_size,'spec':spec,
   'provenance':{'price_source':'model','label':'Model-priced - not traded prices',
-   'underlying':nifty['sources'],'volatility':{'series':'INDIA VIX close (decision day for entry, each close for marks)',**{k:v for k,v in vix['sources'].items()}},
-   'expiry_calendar':'Derived NIFTY expiries: monthly (last Thursday) only before 2019-02-11, weekly Thursday from then, weekly Tuesday from 2025-09-01; holidays move to the previous trading day',
+   'underlying':nifty['sources'],
+   'volatility':({'series':'STOCK MODEL: its 20-day realised vol x (India VIX / NIFTY 20-day realised vol) that day, clipped - weaker than an implied-vol history','sources':vix['sources']}
+    if spec.get('underlying','NIFTY') not in INDICES else {'series':'INDIA VIX close (decision day for entry, each close for marks)',**{k:v for k,v in vix['sources'].items()}}),
+   'expiry_calendar':('Derived stock expiries: last Thursday monthly until 2025-08-31, last Tuesday from 2025-09-01; holidays move to the previous trading day'
+    if spec.get('underlying','NIFTY') not in INDICES else 'Derived NIFTY expiries: monthly (last Thursday) only before 2019-02-11, weekly Thursday from then, weekly Tuesday from 2025-09-01; holidays move to the previous trading day'),
+   'stock_caveats':(['Physically settled: every trade exits at the open of the trading session before expiry (counted in sessions) - never held into delivery',
+    "Universe = today's F&O list (survivorship: stocks that left F&O are absent; a stock may not have had options in the early years)",
+    'Strike interval approximated at ~1% of spot on a 1/2.5/5 ladder; today\'s lot size for every year',
+    'Prices from kanida.db (corporate-action adjusted); no Kite top-up for stocks'] if spec.get('underlying','NIFTY') not in INDICES else None),
    'special_sessions_excluded':nifty.get('excluded_special',0),
    'assumptions':['Black-Scholes, European, no dividend, 6.5% constant rate; one IV (VIX) for every strike - no skew, so wings are mispriced',
     f"Slippage {spec['slippage']*100:.1f}% of the model price per fill (min 0.05), against you; F&O charges on every fill; STT on exercise of ITM longs at expiry",
@@ -436,7 +505,9 @@ class Lab:
   tpl=BY_KEY.get(str(raw.get('template') or ''))
   if not tpl:raise LabError(400,'TEMPLATE_NOT_FOUND','Choose a template to test.')
   u=str(raw.get('underlying') or 'NIFTY').upper()
-  if u!='NIFTY':raise LabError(400,'UNSUPPORTED_UNDERLYING','The Lab backtests NIFTY only in this release (its weekly expiry calendar is the one derived and stated).')
+  stock=u!='NIFTY'
+  if stock and (u in INDICES or u not in self.stocks()):
+   raise LabError(400,'UNSUPPORTED_UNDERLYING','The Lab backtests NIFTY and F&O stocks in this release. BANKNIFTY/FINNIFTY wait for a verified expiry calendar.')
   p=tpl['param'];param=raw.get('param',p['default'] if p else None)
   if p and param not in p['variants']:raise LabError(400,'FIELD_INVALID',f"{p['label']} must be one of {p['variants']}.")
   wd=raw.get('weekday',2)
@@ -451,7 +522,7 @@ class Lab:
    except (TypeError,ValueError):raise LabError(400,'FIELD_INVALID',f'{k} must be a number.')
    if not lo<=v<=hi:raise LabError(400,'FIELD_INVALID',f'{k} must be between {lo} and {hi}.')
    return v
-  f=str(raw.get('from') or '2016-01-01');t=str(raw.get('to') or date.today().isoformat())
+  f=str(raw.get('from') or ('2016-01-01'));t=str(raw.get('to') or date.today().isoformat())
   for x in (f,t):
    try:date.fromisoformat(x)
    except ValueError:raise LabError(400,'FIELD_INVALID','from/to must be YYYY-MM-DD.')
@@ -468,6 +539,14 @@ class Lab:
   if raw.get('target_pct') not in (None,'') and tpl['key'] in UNBOUNDED_PROFIT:
    raise LabError(400,'TARGET_UNDEFINED',f"{tpl['name']} has no capped maximum profit, so a target at a % of it cannot be applied.")
   if dmin>dmax:raise LabError(400,'FIELD_INVALID','dte_min must not exceed dte_max.')
+  exit_dte=(int(num('exit_dte',None,0,30,True)) if raw.get('exit_dte') not in (None,'') else None)
+  slip=max(0.005,num('slippage_pct',0.5,0.5,10)/100)
+  if stock:
+   if exit_dte is None:exit_dte=STOCK_EXIT_DTE
+   if exit_dte<STOCK_EXIT_DTE:raise LabError(400,'PHYSICAL_SETTLEMENT',f'Stock options are physically settled: exit at least {STOCK_EXIT_DTE} days before expiry.')
+   if dmin<=exit_dte:raise LabError(400,'FIELD_INVALID',f'Min days to expiry must be above the exit ({exit_dte}).')
+   if slip<STOCK_MIN_SLIP:slip=STOCK_MIN_SLIP
+   if raw.get('adjust') not in (None,'',{}):raise LabError(400,'NOT_SUPPORTED','Adjustment backtests are NIFTY-only in this release.')
   adj=None;ra=raw.get('adjust')
   if ra not in (None,'',{}):
    if not isinstance(ra,dict) or ra.get('rule') not in ADJ.RULES:
@@ -486,12 +565,12 @@ class Lab:
     if not 1<=kk<=10:raise LabError(400,'FIELD_INVALID','adjust.k must be 1-10 strikes.')
    adj={'rule':ra['rule'],'k':kk,'trigger_pct':trig}
   return {'adjust':adj,'underlying':u,'template':tpl['key'],'param':param,'weekday':wd,'dte_min':dmin,'dte_max':dmax,
-   'target_pct':num('target_pct',None,1,100,True),'stop_pct':num('stop_pct',None,1,100,True),'exit_dte':(int(num('exit_dte',None,0,30,True)) if raw.get('exit_dte') not in (None,'') else None),
-   'slippage':max(0.005,num('slippage_pct',0.5,0.5,10)/100),'from':f,'to':t,'split':split}
+   'target_pct':num('target_pct',None,1,100,True),'stop_pct':num('stop_pct',None,1,100,True),'exit_dte':exit_dte,
+   'slippage':slip,'from':f,'to':t,'split':split}
 
- def lot_size(self):
+ def lot_size(self,underlying='NIFTY'):
   try:
-   ex=self.market.expiries('NIFTY')['expiries']
+   ex=self.market.expiries(underlying)['expiries']
    return int(ex[0]['lot_size']) if ex else 65
   except Exception:return 65  # noqa: BLE001
 
@@ -502,7 +581,7 @@ class Lab:
   def work():
    try:
     nifty,vix=self.series_for(spec.get('underlying','NIFTY'))
-    res=backtest(spec,nifty,vix,self.lot_size(),progress=lambda p:self._save(rid,progress=round(p,2)))
+    res=backtest(spec,nifty,vix,self.lot_size(spec.get('underlying','NIFTY')),progress=lambda p:self._save(rid,progress=round(p,2)))
     self._save(rid,status='completed',progress=1.0,result=res,finished_at=time.time())
    except Exception as e:  # noqa: BLE001 - a failed run is a state with its reason, never a partial 'result'
     log.exception('lab run failed');self._save(rid,status='failed',error=getattr(e,'message',None) or type(e).__name__,finished_at=time.time())
@@ -514,7 +593,19 @@ class Lab:
   special=self.daily.special_sessions()
   nifty=clean_series(self.daily.series('NIFTY 50'),special);vix=clean_series(self.daily.series('INDIA VIX'),special)
   if not nifty['days']:raise LabError(503,'NO_HISTORY','No NIFTY 50 daily history is readable on this machine.')
-  return nifty,vix
+  if underlying=='NIFTY':return nifty,vix
+  s=clean_series(self.daily.series(underlying),special)
+  if len(s['days'])<60:raise LabError(503,'NO_HISTORY',f'Not enough daily history for {underlying} in kanida.db.')
+  return s,scaled_vol(s,nifty,vix)
+
+ def stocks(self):
+  """F&O stocks: TODAY's list from the option store (survivorship: past members that left are not in it - stated)."""
+  if getattr(self,'_stocks',None) is None:
+   try:
+    c=sqlite3.connect(f'file:{self.derivatives_db}?mode=ro',uri=True,timeout=10)
+    self._stocks={r[0] for r in c.execute('select distinct underlying from contracts')}-INDICES;c.close()
+   except sqlite3.Error:self._stocks=set()
+  return self._stocks
 
  def run(self,user_id,rid,full=True):
   with self.lock:r=self.c.execute('select * from lab_runs where id=? and user_id=?',(rid,user_id)).fetchone()
@@ -543,11 +634,29 @@ class Lab:
    'note':f"Held to expiry; decisions on {'every day' if s['weekday']=='daily' else ['Mon','Tue','Wed','Thu','Fri'][int(s['weekday'])]}, {s['dte_min']}-{s['dte_max']} days to expiry; {len(same)} run(s) of this rule tried"}
 
  def evidence_board(self,user_id):
-  """Every completed plain backtest of this user, one BH-corrected family (slice 9)."""
+  """Every completed plain backtest of this user, BH-corrected per family. Per-run evidence entries are computed once
+  and persisted (lab_evidence); only runs without one are read in full."""
   from . import evidence as EV
   with self.lock:
-   rows=self.c.execute("select id,spec,result,created_at from lab_runs where user_id=? and kind='backtest' and status='completed' order by created_at",(user_id,)).fetchall()
-  return EV.board([(r['id'],r['spec'],r['result'],r['created_at']) for r in rows])
+   rows=self.c.execute("""select r.id,r.spec,r.created_at,e.entry from lab_runs r left join lab_evidence e on e.run_id=r.id
+     where r.user_id=? and r.kind='backtest' and r.status='completed' order by r.created_at""",(user_id,)).fetchall()
+  entries=[];new=[]
+  for r in rows:
+   if r['entry']:
+    e=json.loads(r['entry'])
+    if not e.get('adjust'):entries.append(e)
+    continue
+   s=json.loads(r['spec'])
+   if s.get('adjust'):
+    new.append((r['id'],json.dumps({'adjust':True})));continue
+   with self.lock:res=self.c.execute('select result from lab_runs where id=?',(r['id'],)).fetchone()['result']
+   res=json.loads(res) if res else None
+   if not res or res.get('kind')!='backtest':continue
+   e=EV.entry(r['id'],s,res,r['created_at']);entries.append(e);new.append((r['id'],json.dumps(e)))
+  if new:
+   with self.lock:
+    self.c.executemany('insert or replace into lab_evidence values(?,?)',new);self.c.commit()
+  return EV.board_entries(entries)
 
  def adjust_evidence_for(self,user_id,template,param,rule,k):
   """The newest completed Lab run of EXACTLY this adjustment (rule and k) on EXACTLY this structure (template and

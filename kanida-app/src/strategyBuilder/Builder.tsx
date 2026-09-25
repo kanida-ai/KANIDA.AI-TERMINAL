@@ -95,6 +95,12 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
  const setLeg=(lid:string,patch:Partial<Leg>)=>edit(b=>({...b,template:null,legs:b.legs.map(l=>l.id===lid?{...l,...patch}:l)}));
  function removeLeg(lid:string){if(!body)return;const index=body.legs.findIndex(l=>l.id===lid);const leg=body.legs[index];setUndo({leg,index});
   edit(b=>({...b,legs:b.legs.filter(l=>l.id!==lid)}));setTimeout(()=>setUndo(u=>u?.leg.id===lid?null:u),6000);}
+ // Size ×: step the strategy multiplier up or down, keeping every leg's ratio (a 1:2:1 fly stays 1:2:1)
+ function resize(dir:1|-1){edit(b=>{const g=b.legs.reduce((x,l)=>{let a=x,c=l.lots;while(c){[a,c]=[c,a%c];}return a;},0)||1;
+  const base=b.legs.map(l=>l.lots/g);const next=Math.max(1,g+dir);if(next===g||base.some(x=>x*next>500))return b;
+  return {...b,legs:b.legs.map((l,i)=>({...l,lots:base[i]*next}))};});}
+ function clearAll(){if(typeof window!=='undefined'&&window.confirm&&!window.confirm('Remove every leg? A snapshot keeps anything you want to restore.'))return;
+  edit(b=>({...b,template:null,param:null,legs:[]}));}
  function adjust(kind:'shift'|'width'|'wings',k:number){
   edit(b=>{const act=b.legs;if(!act.length)return b;
    const shorts=act.filter(l=>l.side==='S');const ref=(shorts.length?shorts:act).map(l=>l.strike);const centre=ref.reduce((a,x)=>a+x,0)/ref.length;
@@ -186,6 +192,8 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
      <Stepper label="Shift" a11y="Shift all strikes" onMinus={()=>adjust('shift',-1)} onPlus={()=>adjust('shift',1)}/>
      <Stepper label="Width" a11y="Width between legs" onMinus={()=>adjust('width',-1)} onPlus={()=>adjust('width',1)}/>
      <Stepper label="Wings" a11y="Hedge wing distance" onMinus={()=>adjust('wings',-1)} onPlus={()=>adjust('wings',1)}/>
+     <Stepper label="Size ×" a11y="Multiply or divide every leg's lots, keeping the ratios" onMinus={()=>resize(-1)} onPlus={()=>resize(1)}/>
+     <Button label="Clear all" icon="x" kind="outline" onPress={clearAll}/>
     </View>}
    </View>
 
@@ -194,7 +202,7 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
     <RiskStrip a={a} dim={dim}/>
     <View style={panel}>
      <View style={s.between}><T style={label}>Payoff</T>{pending&&<T style={{fontSize:11,color:C.amber}}>{a?'Updating…':'Calculating…'}</T>}</View>
-     <PayoffChart curve={a?.curve||[]} spot={a?.spot||chain?.spot||0} scenarioSpot={a?.scenario?.spot} breakevens={a?.breakevens?.value||[]} bands={a?.sd?.bands||[]} dim={dim}
+     <PayoffChart curve={a?.curve||[]} spot={a?.spot||chain?.spot||0} scenarioSpot={a?.scenario?.spot} breakevens={a?.breakevens?.value||[]} bands={(a?.scenario?.active&&a?.sd?.bands_to_date?.length?a.sd.bands_to_date:a?.sd?.bands)||[]} dim={dim}
       scenarioLabel={a?.scenario?.is_expiry?'Scenario (expiry)':`Scenario ${a?.scenario?istStamp(a.scenario.at):''}`}/>
      <ScenarioBar body={body} chain={chain} expiry={body.expiry} onChange={sc=>edit(b=>({...b,scenario:sc}))} result={a}/>
     </View>
@@ -279,16 +287,23 @@ function RiskStrip({a,dim}:{a:Analysis|null;dim:boolean}){
  const items=[
   ['Max loss',money(a.max_loss),a.max_loss?.unlimited?C.red:C.red,'At expiry, gross of charges'],
   ['Max profit',money(a.max_profit),C.green,'At expiry, gross of charges'],
-  ['Breakeven',a.breakevens?.status==='available'?(a.breakevens.value.length?a.breakevens.value.map((b:number)=>num(b,0)).join(' · '):'None'):'—',C.ink,'At expiry'],
+  ['Breakeven',a.breakevens?.status==='available'?(a.breakevens.value.length?a.breakevens.value.map((b:number)=>num(b,0)).join(' · '):'None'):'—',C.ink,
+   a.scenario?.active&&a.breakevens_target?.status==='available'?`At expiry · on the what-if date: ${a.breakevens_target.value.length?a.breakevens_target.value.map((b:number)=>num(b,0)).join(' · '):'none in range'}`:'At expiry'],
+  ['Reward : risk',a.reward_risk?.status==='available'&&a.reward_risk.value!=null?`${num(a.reward_risk.value,2)} : 1`:'—',C.ink,a.reward_risk?.status==='available'?'Max profit ÷ max loss, at expiry':'Unbounded on one side'],
   ['Capital at risk',a.capital_at_risk?.unlimited?'Unlimited':inr(a.capital_at_risk?.value),C.ink,'Structural max loss - not exchange margin'],
   [a.premium?.direction==='credit'?'Net credit':'Net debit',inr(Math.abs(a.premium?.value||0)),C.ink,'At entry prices'],
-  ['POP (model)',a.pop?.status==='available'?`${a.pop.value}%`:'—',C.ink,a.pop?.sigma?`Lognormal at ${a.pop.sigma}% ATM IV`:'Model value'],
+  ['POP (model)',a.scenario?.active&&a.pop_scenario?.status==='available'?`${a.pop_scenario.value}%`:a.pop?.status==='available'?`${a.pop.value}%`:'—',C.ink,
+   a.scenario?.active&&a.pop_scenario?.status==='available'?`From the what-if point · ${a.pop?.status==='available'?`${a.pop.value}% from now`:''}`:a.pop?.sigma?`Lognormal at ${a.pop.sigma}% ATM IV`:'Model value'],
   ['Charges (est.)',inr(a.charges?.value),C.ink,'Entry orders, published rates'],
   ['Margin',a.margin?.status==='available'?inr(a.margin.value):'Needs live data',a.margin?.status==='available'?C.ink:C.muted,a.margin?.status==='available'?`Kite SPAN+exposure · hedge benefit ${inr(a.margin.hedge_benefit)}`:'Exchange margin comes from Kite when live'],
  ] as const;
- return <View style={[panel,{flexDirection:'row',flexWrap:'wrap',gap:14,opacity:dim?.5:1}]}>
+ return <View style={[panel,{gap:10,opacity:dim?.5:1}]}><View style={{flexDirection:'row',flexWrap:'wrap',gap:14}}>
   {items.map(([k,v,col,help])=><View key={k} style={{minWidth:130,flex:1,gap:2}} accessibilityLabel={`${k}: ${v}. ${help}`}>
    <T style={{fontSize:11,color:C.muted}}>{k}</T><T style={{fontFamily:'InterSemi',fontSize:16,color:col,fontVariant:['tabular-nums'] as any}}>{v}</T><T style={{fontSize:10,color:C.muted}}>{help}</T></View>)}
+ </View>
+  {!!a.insights?.length&&<View style={{gap:4,borderTopWidth:1,borderColor:C.line,paddingTop:8}} accessibilityLabel="Risk warnings">
+   {a.insights.map((w,i)=><View key={i} style={[s.row,{gap:6,alignItems:'flex-start'}]}><Icon name={w.level==='warn'?'alert-triangle':'info'} size={13} color={w.level==='warn'?C.amber:C.muted}/>
+    <T style={{fontSize:12,flex:1,color:w.level==='warn'?C.ink:C.muted}}>{w.text}</T></View>)}</View>}
  </View>;
 }
 
@@ -335,16 +350,23 @@ function Table({head,rows,right=[]}:{head:string[];rows:(string|number)[][];righ
 function LegTable({a}:{a:Analysis|null}){
  if(!a?.legs?.length)return <T style={{fontSize:12,color:C.muted}}>No legs to value.</T>;
  const tot=a.legs.reduce((x,l)=>x+(l.target_pnl||0),0);
- return <View style={{gap:6}}><Table head={['Leg','Units','Entry','Scenario price','Scenario P&L']} right={[1,2,3,4]}
-  rows={[...a.legs.map(l=>[l.label,l.units,num(l.entry),num(l.target_price),signed(l.target_pnl)]),['Total (gross)','','','',signed(tot)]]}/>
+ return <View style={{gap:6}}><Table head={['Leg','Units','Entry','Intrinsic','Time value','Scenario price','Scenario P&L']} right={[1,2,3,4,5,6]}
+  rows={[...a.legs.map(l=>[l.label,l.units,num(l.entry),num((l as any).intrinsic),num((l as any).time_value),num(l.target_price),signed(l.target_pnl)]),['Total (gross)','','','','','',signed(tot)]]}/>
   <T style={{fontSize:11,color:C.muted}}>{`Scenario: ${a.scenario?num(a.scenario.spot,2):''} on ${a.scenario?istStamp(a.scenario.at):''}. Entry = last traded price unless marked manual. Charges ${inr(a.charges?.value)} not included.`}</T></View>;
 }
 function GreeksTable({a}:{a:Analysis|null}){
+ const [at,setAt]=useState<'now'|'whatif'>('now');
  if(!a?.legs?.length)return <T style={{fontSize:12,color:C.muted}}>No legs.</T>;
  if(a.greeks?.status!=='available')return <T style={{fontSize:12,color:C.amber}}>{`Greeks unavailable: ${a.greeks?.reason||''}`}</T>;
- return <View style={{gap:6}}><Table head={['Leg','Delta','Gamma','Theta ₹/day','Vega ₹/IV pt']} right={[1,2,3,4]}
-  rows={[...a.legs.map(l=>[l.label,num(l.greeks?.delta,1),num(l.greeks?.gamma,3),num(l.greeks?.theta,0),num(l.greeks?.vega,0)]),['Strategy total',num(a.greeks.delta,1),num(a.greeks.gamma,3),num(a.greeks.theta,0),num(a.greeks.vega,0)]]}/>
-  <T style={{fontSize:11,color:C.muted}}>Whole-strategy units (lots × lot size). Delta in underlying units per 1 point; theta per calendar day; vega per 1 percentage point of IV. Model values at the reading.</T></View>;
+ const w=at==='whatif'&&a.greeks_scenario?.status==='available';const G=w?a.greeks_scenario:a.greeks;
+ return <View style={{gap:6}}>
+  <View style={[s.row,{gap:6,flexWrap:'wrap'}]}><Chip label="At the reading" active={at==='now'} onPress={()=>setAt('now')}/>
+   <Chip label="At the what-if" active={at==='whatif'} onPress={()=>setAt('whatif')}/>
+   {at==='whatif'&&a.greeks_scenario?.status!=='available'&&<T style={{fontSize:11,color:C.muted}}>{a.greeks_scenario?.reason==='AT_EXPIRY'?'Not defined at expiry - the position is settled.':'Unavailable'}</T>}</View>
+  <Table head={['Leg','Delta','Gamma','Theta ₹/day','Vega ₹/IV pt']} right={[1,2,3,4]}
+  rows={[...a.legs.map(l=>{const g=w?(l as any).greeks_scenario:l.greeks;return [l.label,num(g?.delta,1),num(g?.gamma,3),num(g?.theta,0),num(g?.vega,0)];}),['Strategy total',num(G.delta,1),num(G.gamma,3),num(G.theta,0),num(G.vega,0)]]}/>
+  {w&&<T style={{fontSize:11,color:C.muted}}>{`At ${num(a.greeks_scenario.spot,2)} on ${istStamp(a.greeks_scenario.at)}${a.greeks_scenario.iv_shift?`, IV ${a.greeks_scenario.iv_shift>0?'+':''}${a.greeks_scenario.iv_shift} pts`:''}.`}</T>}
+  <T style={{fontSize:11,color:C.muted}}>Whole-strategy units (lots × lot size). Delta in underlying units per 1 point; theta per calendar day; vega per 1 percentage point of IV. {w?'Model values at the what-if point.':'Model values at the reading.'}</T></View>;
 }
 function PayoffTable({a}:{a:Analysis|null}){
  if(!a?.table?.length)return <T style={{fontSize:12,color:C.muted}}>No payoff table yet.</T>;

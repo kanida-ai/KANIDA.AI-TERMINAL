@@ -38,6 +38,9 @@ def build_client():
 
 
 def refresh_token():
+    if os.environ.get("KANIDA_NO_AUTH_MINT") == "1":
+        # one machine mints broker tokens at a time: never start a Zerodha login from here unless allowed
+        raise SystemExit("AUTH: token rejected and KANIDA_NO_AUTH_MINT=1 - stopping without minting a new token")
     log("AUTH: token rejected -> running auth_worker to re-mint ...")
     try:
         subprocess.run([sys.executable, str(AUTH_WORKER)], timeout=300,

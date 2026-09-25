@@ -30,6 +30,7 @@ from ..errors import PilotError
 from ..screener.routes import _identity
 from datetime import date
 from . import discover as D
+from . import analytics as A
 from . import service as S
 from .market import MarketUnavailable
 from .store import Conflict
@@ -81,7 +82,22 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
  def chain(request:Request,underlying:str='',expiry:str=''):
   me(request);got=guard(market.chain,_symbol(underlying),_date(expiry))
   if not got:raise PilotError(404,'NO_READING','The option store has no reading for this underlying.')
-  return got
+  return _with_greeks(got)
+
+ def _with_greeks(ch):
+  """Per-strike model Greeks (per unit) from each option's own solved IV at the reading - the chain's Greeks view."""
+  t=max(float(ch.get('days_to_expiry') or 0),0.0)/365.0;spot=ch.get('spot')
+  if not spot or t<=0:return {**ch,'greeks_basis':'unavailable at expiry'}
+  rows=[]
+  for r in ch['rows']:
+   nr=dict(r)
+   for k in ('CE','PE'):
+    x=r.get(k)
+    if x and x.get('iv'):
+     g=A.bs_greeks(spot,r['strike'],t,x['iv']/100.0,k)
+     nr[k]={**x,'greeks':{'delta':round(g['delta'],3),'gamma':round(g['gamma'],5),'theta':round(g['theta'],2),'vega':round(g['vega'],2)}}
+   rows.append(nr)
+  return {**ch,'rows':rows,'greeks_basis':'model BSM per unit, each option at its own IV, at the reading'}
 
  @r.get('/api/sb/templates')
  def templates(request:Request):
@@ -108,14 +124,14 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
   if not got:raise PilotError(404,'NO_READING','The option store has no reading for this underlying.')
   try:out=D.run(got,data)
   except D.DiscoverError as e:raise PilotError(400,'DISCOVER_INVALID',e.message)
-  if lab and got['underlying']=='NIFTY':
+  if lab and (got['underlying']=='NIFTY' or got['underlying'] in lab.stocks()):
    from . import evidence as EV
    b=lab.evidence_board(me(request)['id'])
    for c in out['candidates']:
     ev=EV.for_candidate(b,c['template'],c['param'],EV.next_session_dte(got['expiry'],got['as_of']),got['underlying'])   # counted as the Lab counts: from the next session
     if ev:c['evidence']=ev
    out['candidates']=EV.rank(out['candidates'])
-   fam=b['families'].get(got['underlying'],{'tests':0,'survivors':0})
+   fam=b['families'].get(EV.family_of(got['underlying']),{'tests':0,'survivors':0})
    out['evidence']={'tests':fam['tests'],'survivors':fam['survivors'],'fdr_q':b['fdr_q'],'min_oos':b['min_oos']}
    out['basis']=('Tier 1: "Tested ✓" defined-risk rules (surviving Benjamini-Hochberg FDR 10% across every distinct rule you tested) whose out-of-sample '
     '95% low return per ₹100 of maximum model loss is above zero, by that low. Tier 2: everything else by expiry P&L at your view divided by capital '

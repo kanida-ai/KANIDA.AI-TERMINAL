@@ -2,6 +2,7 @@
 # Step 4: the Windows scheduled tasks as launchd agents (com.kanida.*).
 #   bash 4_services.sh plan        show what would be installed (writes nothing)
 #   bash 4_services.sh install     write ~/Library/LaunchAgents/com.kanida.*.plist and start them
+#   bash 4_services.sh install-only <name...>   install just these jobs (e.g. the capture set; no broker-auth mint, no tunnel)
 #   bash 4_services.sh status      what's loaded, last exit code
 #   bash 4_services.sh uninstall   stop and remove every com.kanida.* agent
 #   bash 4_services.sh logs <name> tail one job's log
@@ -24,6 +25,7 @@ fno-metrics|keepalive|$FALCON|exec "$FPY" -u scripts/metrics_loop.py logs/metric
 backend|keepalive|$ENGINE/backend|( for i in \$(seq 60); do curl -sf -m 2 -o /dev/null http://127.0.0.1:8001/openapi.json && break; sleep 1; done; "$EPY" "$ENGINE/scripts/warm_cache.py" >> "$EL/warmer.log" 2>&1 ) & exec "$EPY" -m uvicorn main:app --port 8001 --host 127.0.0.1 >> "$EL/backend.log" 2>&1
 api-tunnel|keepalive|$HOME|exec cloudflared --config "$HOME/.cloudflared/config.yml" tunnel run kanida-api
 keep-awake|keepalive|$K|exec /usr/bin/caffeinate -i -s
+capture-watchdog|every:600|$FALCON|exec "$FPY" -u "$HERE/capture_watchdog.py"
 zerodha-auth|every:1800|$ENGINE/backend|exec "$EPY" "$ENGINE/scripts/auth_worker.py" >> "$EL/auth_worker.log" 2>&1
 vortex-auth|every:1800|$ENGINE/backend|exec "$EPY" "$ENGINE/scripts/vortex_auth_worker.py" >> "$EL/vortex_auth.log" 2>&1
 mkt-poller|every:1800|$ENGINE/backend|exec "$EPY" -u "$ENGINE/scripts/mkt_poller.py" >> "$EL/mkt_poller.log" 2>&1
@@ -56,6 +58,7 @@ plist() {  # name sched cwd cmd
   <key>WorkingDirectory</key><string>$(printf '%s' "$cwd" | xml)</string>
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>TZ</key><string>Asia/Kolkata</string>
     <key>PYTHONIOENCODING</key><string>utf-8</string>
     <key>PYTHONUNBUFFERED</key><string>1</string>
     <key>KANIDA_ENGINE_ROOT</key><string>$ENGINE</string>
@@ -84,6 +87,18 @@ case "${1:-plan}" in
               launchctl bootout "gui/$UIDN/com.kanida.$1" 2>/dev/null || true
               launchctl bootstrap "gui/$UIDN" "$LA/com.kanida.$1.plist" && echo "   loaded com.kanida.$1"; }
     each write ;;
+  install-only)
+    shift; [ $# -gt 0 ] || die "name the jobs: $0 install-only fno-capture fno-metrics ..."
+    for f in "$FPY" "$EPY"; do [ -x "$f" ] || die "missing $f - run 3_build_envs.sh first"; done
+    for w in "$@"; do case "$w" in zerodha-auth|vortex-auth|api-tunnel|backend)
+      read -r -p "$w mints broker tokens or takes live traffic. Is the Windows copy of it disabled? [y/N] " ok
+      [ "$ok" = "y" ] || die "Disable it on Windows first.";; esac; done
+    mkdir -p "$LA" "$LOGS" "$EL" "$FALCON/logs"; chmod +x "$RUNAT"
+    printf '%s\n' "$JOBS" | while IFS='|' read -r n s_ c cmd; do
+      for w in "$@"; do [ "$n" = "$w" ] || continue
+        plist "$n" "$s_" "$c" "$cmd" > "$LA/com.kanida.$n.plist"; plutil -lint -s "$LA/com.kanida.$n.plist"
+        launchctl bootout "gui/$UIDN/com.kanida.$n" 2>/dev/null || true
+        launchctl bootstrap "gui/$UIDN" "$LA/com.kanida.$n.plist" && echo "   loaded com.kanida.$n"; done; done ;;
   status)
     launchctl list | awk 'NR==1 || /com\.kanida\./' ;;
   uninstall)

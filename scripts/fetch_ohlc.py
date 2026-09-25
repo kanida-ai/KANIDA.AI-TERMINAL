@@ -25,13 +25,14 @@ import os, sys, sqlite3, time, argparse
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
-ENGINE_ROOT = Path(r"C:\Users\SPS\Desktop\Kanida.ai Terminal Quant Intelligence Engine")
+# Paths follow the machine (2026-09-25 Mac move): KANIDA_ENGINE_ROOT, else ~/Kanida/engine; the DB sits beside this repo.
+ENGINE_ROOT = Path(os.environ.get("KANIDA_ENGINE_ROOT", str(Path.home() / "Kanida" / "engine")))
 sys.path.insert(0, str(ENGINE_ROOT / "universe_engine"))
 sys.path.insert(0, str(ENGINE_ROOT / "backend"))
 from engine.data_fetch import get_latest_access_token, RateLimiter  # noqa: E402
 from kiteconnect import KiteConnect  # noqa: E402
 
-DB = Path(r"C:\Users\SPS\Documents\Kanida_Falcon\db\kanida.db")
+DB = Path(os.environ.get("KANIDA_DB", str(Path(__file__).resolve().parents[1] / "db" / "kanida.db")))
 DEFAULT_SYMBOLS = ["ADANIENT", "NETWEB", "FORCEMOT"]
 START = date(2022, 1, 1)
 END = date.today()

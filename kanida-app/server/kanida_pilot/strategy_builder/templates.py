@@ -86,10 +86,68 @@ TEMPLATES=[
   'legs':[{'side':'S','type':'PE','strike':_sd(-1)},{'side':'S','type':'CE','strike':_sd(1)}],
   'param':None,'recipe':'Sell 1 put and 1 call about 1 standard deviation out','use':'The underlying stays inside a range.',
   'loses':'A move beyond either strike - the call side is unlimited.'},
+ # --- slice 10 (competitor gap): ratio and debit structures. 'mult' = lots of this leg per strategy lot ---
+ {'key':'long_call_butterfly','name':'Long Call Butterfly','intent':'range','risk':'defined','tier':'core','complexity':3,
+  'legs':[{'side':'B','type':'CE','strike':_atm(0,-1),'mult':1},{'side':'S','type':'CE','strike':_atm(0),'mult':2},{'side':'B','type':'CE','strike':_atm(0,1),'mult':1}],
+  'param':{'name':'wings','label':'Wing width (strikes)','default':4,'variants':[2,4,6]},
+  'recipe':'Buy 1 call width below ATM · Sell 2 ATM calls · Buy 1 call width above',
+  'use':'The underlying finishes near the centre strike; a small debit with the loss capped.','loses':'A move beyond either wing, or no pinning near the centre.'},
+ {'key':'long_put_butterfly','name':'Long Put Butterfly','intent':'range','risk':'defined','tier':'core','complexity':3,
+  'legs':[{'side':'B','type':'PE','strike':_atm(0,1),'mult':1},{'side':'S','type':'PE','strike':_atm(0),'mult':2},{'side':'B','type':'PE','strike':_atm(0,-1),'mult':1}],
+  'param':{'name':'wings','label':'Wing width (strikes)','default':4,'variants':[2,4,6]},
+  'recipe':'Buy 1 put width above ATM · Sell 2 ATM puts · Buy 1 put width below',
+  'use':'Same view as the call butterfly, built with puts.','loses':'A move beyond either wing.'},
+ {'key':'long_iron_butterfly','name':'Reverse Iron Butterfly','intent':'big_move','risk':'defined','tier':'core','complexity':3,
+  'legs':[{'side':'S','type':'PE','strike':_atm(0,-1)},{'side':'B','type':'PE','strike':_atm(0)},{'side':'B','type':'CE','strike':_atm(0)},{'side':'S','type':'CE','strike':_atm(0,1)}],
+  'param':{'name':'wings','label':'Wing width (strikes)','default':4,'variants':[2,4,6]},
+  'recipe':'Buy 1 ATM call and 1 ATM put · Sell wings width strikes out',
+  'use':'A big move either way, cheaper than a straddle because the wings cap the profit.','loses':'The underlying stays near the centre.'},
+ {'key':'long_iron_condor','name':'Reverse Iron Condor','intent':'big_move','risk':'defined','tier':'core','complexity':3,
+  'legs':[{'side':'S','type':'PE','strike':_sd(-1,0,-1)},{'side':'B','type':'PE','strike':_sd(-1)},{'side':'B','type':'CE','strike':_sd(1)},{'side':'S','type':'CE','strike':_sd(1,0,1)}],
+  'param':{'name':'wings','label':'Wing width (strikes)','default':4,'variants':[2,4,6]},
+  'recipe':'Buy 1 put and 1 call about 1 standard deviation out · Sell wings a further width strikes out',
+  'use':'A move beyond a range either way, for a capped debit.','loses':'The underlying stays inside the long strikes.'},
+ {'key':'strip','name':'Strip','intent':'big_move','risk':'defined','tier':'core','complexity':2,
+  'legs':[{'side':'B','type':'CE','strike':_atm(0),'mult':1},{'side':'B','type':'PE','strike':_atm(0),'mult':2}],
+  'param':None,'recipe':'Buy 1 ATM call · Buy 2 ATM puts',
+  'use':'A big move, with a larger payoff if it is down.','loses':'The underlying stays near the strike; the premium decays.'},
+ {'key':'strap','name':'Strap','intent':'big_move','risk':'defined','tier':'core','complexity':2,
+  'legs':[{'side':'B','type':'CE','strike':_atm(0),'mult':2},{'side':'B','type':'PE','strike':_atm(0),'mult':1}],
+  'param':None,'recipe':'Buy 2 ATM calls · Buy 1 ATM put',
+  'use':'A big move, with a larger payoff if it is up.','loses':'The underlying stays near the strike; the premium decays.'},
+ {'key':'call_backspread','name':'Call Backspread','intent':'bullish','risk':'defined','tier':'advanced','complexity':3,
+  'legs':[{'side':'S','type':'CE','strike':_atm(0),'mult':1},{'side':'B','type':'CE','strike':_atm(0,1),'mult':2}],
+  'param':{'name':'width','label':'Width (strikes)','default':2,'variants':[1,2,4]},
+  'recipe':'Sell 1 ATM call · Buy 2 calls width strikes above',
+  'use':'A sharp rally; the worst case is a finish at the long strike.','loses':'A modest rise to the long strike - the loss is largest there.'},
+ {'key':'put_backspread','name':'Put Backspread','intent':'bearish','risk':'defined','tier':'advanced','complexity':3,
+  'legs':[{'side':'S','type':'PE','strike':_atm(0),'mult':1},{'side':'B','type':'PE','strike':_atm(0,-1),'mult':2}],
+  'param':{'name':'width','label':'Width (strikes)','default':2,'variants':[1,2,4]},
+  'recipe':'Sell 1 ATM put · Buy 2 puts width strikes below',
+  'use':'A sharp fall; the worst case is a finish at the long strike.','loses':'A modest fall to the long strike - the loss is largest there.'},
+ {'key':'call_ratio_spread','name':'Call Ratio Spread','intent':'bullish','risk':'unhedged','tier':'advanced','complexity':3,
+  'legs':[{'side':'B','type':'CE','strike':_atm(0),'mult':1},{'side':'S','type':'CE','strike':_atm(0,1),'mult':2}],
+  'param':{'name':'width','label':'Width (strikes)','default':2,'variants':[1,2,4]},
+  'recipe':'Buy 1 ATM call · Sell 2 calls width strikes above (one short is UNCOVERED)',
+  'use':'A mild rise to the short strike.','loses':'A strong rally - above the upper breakeven the loss is unlimited.'},
+ {'key':'put_ratio_spread','name':'Put Ratio Spread','intent':'bearish','risk':'unhedged','tier':'advanced','complexity':3,
+  'legs':[{'side':'B','type':'PE','strike':_atm(0),'mult':1},{'side':'S','type':'PE','strike':_atm(0,-1),'mult':2}],
+  'param':{'name':'width','label':'Width (strikes)','default':2,'variants':[1,2,4]},
+  'recipe':'Buy 1 ATM put · Sell 2 puts width strikes below (one short is UNCOVERED)',
+  'use':'A mild fall to the short strike.','loses':'A sharp fall - below the lower breakeven the loss grows all the way to a zero spot.'},
+ {'key':'risk_reversal_bullish','name':'Risk Reversal (bullish)','intent':'bullish','risk':'unhedged','tier':'advanced','complexity':2,
+  'legs':[{'side':'S','type':'PE','strike':_atm(0,-1)},{'side':'B','type':'CE','strike':_atm(0,1)}],
+  'param':{'name':'width','label':'Strikes out','default':2,'variants':[1,2,4]},
+  'recipe':'Sell 1 put below · Buy 1 call above (the short put is UNCOVERED)',
+  'use':'A rise, financed by selling a put.','loses':'A fall below the put strike - the loss grows to a zero spot.'},
+ {'key':'risk_reversal_bearish','name':'Risk Reversal (bearish)','intent':'bearish','risk':'unhedged','tier':'advanced','complexity':2,
+  'legs':[{'side':'S','type':'CE','strike':_atm(0,1)},{'side':'B','type':'PE','strike':_atm(0,-1)}],
+  'param':{'name':'width','label':'Strikes out','default':2,'variants':[1,2,4]},
+  'recipe':'Sell 1 call above · Buy 1 put below (the short call is UNCOVERED)',
+  'use':'A fall, financed by selling a call.','loses':'A rally above the call strike - the loss is unlimited.'},
 ]
 LATER=[
- {'key':'call_butterfly','name':'Call / Put Butterfly','reason':'1:-2:1 ratio analytics and asymmetric wings are not validated yet.'},
- {'key':'ratio_spread','name':'Ratio spreads / back-spreads','reason':'Uncovered tail disclosure is not built yet.'},
+ {'key':'broken_wing','name':'Broken-wing butterflies and condors (asymmetric wings)','reason':'Asymmetric-wing variants are not in this release.'},
  {'key':'calendar','name':'Calendar / diagonal','reason':'Needs multi-expiry valuation - blocked until validated.'},
  {'key':'synthetic_future','name':'Futures & synthetics','reason':'Futures valuation, margin and settlement are not built yet.'},
  {'key':'jade_lizard','name':'Jade Lizard, Batman and other named combinations','reason':'Kept out of the initial catalogue on purpose.'},
@@ -128,14 +186,35 @@ def resolve(key,chain,param=None,lots=1):
   if not pool:raise ResolveError('NO_PRICES',f"No {spec['type']} in this expiry has a price in the stored reading.")
   strike=min(pool,key=lambda k:abs(k-target))
   row=next(r for r in chain['rows'] if r['strike']==strike)[spec['type']]
-  legs.append({'id':f'L{i+1}','type':spec['type'],'side':spec['side'],'strike':strike,'lots':lots,'lot_size':chain['lot_size'],
+  legs.append({'id':f'L{i+1}','type':spec['type'],'side':spec['side'],'strike':strike,'lots':lots*int(spec.get('mult',1)),'lot_size':chain['lot_size'],
    'expiry':chain['expiry'],'price':row['ltp'],'price_basis':'exec','ltp':row['ltp'],'bid':row.get('bid'),'ask':row.get('ask'),'include':True,'token':row['token'],'symbol':row['symbol']})
  # a snapped recipe that collapses two legs onto one strike is no longer the structure it names
  shape=[(l['type'],l['strike'],l['side']) for l in legs]
  if len(set(shape))<len(shape) or (key not in ('long_straddle','short_straddle','iron_butterfly') and
-   len({(l['type'],l['strike']) for l in legs})<len(legs)):
+   len({(l['type'],l['strike']) for l in legs})<len(legs)) or (key in ('long_call_butterfly','long_put_butterfly') and len({l['strike'] for l in legs})<3):
   raise ResolveError('NOT_ENOUGH_STRIKES','This expiry does not list enough priced strikes for that width.')
  return {'template':key,'param':value,'legs':legs}
+
+
+def _recognise_ratio(act):
+ """Structures whose legs have different sizes: butterflies 1:2:1, strip/strap, backspreads and ratio spreads."""
+ lots=[int(l['lots']) for l in act];g=min(lots)
+ if any(x%g for x in lots):return None
+ m={id(l):int(l['lots'])//g for l in act}
+ if len(act)==3 and len({l['type'] for l in act})==1:
+  a,b,c=sorted(act,key=lambda l:l['strike'])
+  if a['side']=='B' and b['side']=='S' and c['side']=='B' and (m[id(a)],m[id(b)],m[id(c)])==(1,2,1) and a['strike']<b['strike']<c['strike']:
+   return 'long_call_butterfly' if a['type']=='CE' else 'long_put_butterfly'
+ if len(act)==2:
+  a,b=sorted(act,key=lambda l:(l['strike'],l['type']))
+  if a['type']!=b['type'] and a['side']==b['side']=='B' and a['strike']==b['strike'] and sorted([m[id(a)],m[id(b)]])==[1,2]:
+   pe=a if a['type']=='PE' else b
+   return 'strip' if m[id(pe)]==2 else 'strap'
+  if a['type']==b['type'] and a['side']!=b['side'] and a['strike']!=b['strike']:
+   near,far=(a,b) if a['type']=='CE' else (b,a)          # near = closer to ATM for the direction of the spread
+   if near['side']=='S' and m[id(near)]==1 and m[id(far)]==2:return 'call_backspread' if a['type']=='CE' else 'put_backspread'
+   if near['side']=='B' and m[id(near)]==1 and m[id(far)]==2:return 'call_ratio_spread' if a['type']=='CE' else 'put_ratio_spread'
+ return None
 
 
 def recognise(legs):
@@ -144,8 +223,11 @@ def recognise(legs):
  n=len(act)
  name=lambda k:{'key':k,'name':BY_KEY[k]['name'] if k in BY_KEY else k.replace('_',' ').title(),'exact':True}
  if n==0:return {'key':None,'name':'Empty','exact':False}
- if len({int(l['lots']) for l in act})!=1 or len({l['expiry'] for l in act})!=1:
+ if len({l['expiry'] for l in act})!=1:
   return {'key':'custom','name':f'Custom ({n} legs)','exact':False}
+ if len({int(l['lots']) for l in act})!=1:
+  r=_recognise_ratio(act)
+  return name(r) if r else {'key':'custom','name':f'Custom ({n} legs)','exact':False}
  if n==1:
   l=act[0];return name(('long_' if l['side']=='B' else 'short_')+('call' if l['type']=='CE' else 'put'))
  if n==2:
@@ -158,9 +240,16 @@ def recognise(legs):
    ce=a if a['type']=='CE' else b;pe=b if ce is a else a
    if ce['strike']==pe['strike']:return name('long_straddle' if a['side']=='B' else 'short_straddle')
    if ce['strike']>pe['strike']:return name('long_strangle' if a['side']=='B' else 'short_strangle')
+ if n==2:
+  a,b=sorted(act,key=lambda l:(l['strike'],l['type']))
+  if a['type']!=b['type'] and a['side']!=b['side'] and a['strike']<b['strike']:
+   lo_pe,hi_ce=(a['type']=='PE'),(b['type']=='CE')
+   if lo_pe and hi_ce:return name('risk_reversal_bullish' if a['side']=='S' else 'risk_reversal_bearish')
  if n==4:
   ces=sorted([l for l in act if l['type']=='CE'],key=lambda l:l['strike']);pes=sorted([l for l in act if l['type']=='PE'],key=lambda l:l['strike'])
   if len(ces)==2 and len(pes)==2:
    if pes[0]['side']=='B' and pes[1]['side']=='S' and ces[0]['side']=='S' and ces[1]['side']=='B' and pes[1]['strike']<=ces[0]['strike']:
     return name('iron_butterfly' if pes[1]['strike']==ces[0]['strike'] else 'iron_condor')
+   if pes[0]['side']=='S' and pes[1]['side']=='B' and ces[0]['side']=='B' and ces[1]['side']=='S' and pes[1]['strike']<=ces[0]['strike']:
+    return name('long_iron_butterfly' if pes[1]['strike']==ces[0]['strike'] else 'long_iron_condor')
  return {'key':'custom','name':f'Custom ({n} legs)','exact':False}

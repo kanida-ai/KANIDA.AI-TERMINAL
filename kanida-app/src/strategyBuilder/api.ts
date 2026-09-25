@@ -13,9 +13,9 @@ export type Chain={underlying:string;expiry:string;as_of:string;spot:number;lot_
 export type Expiry={expiry:string;lot_size:number;contracts:number;monthly:boolean;days_to_expiry:number};
 export type LegRow={id:string;label:string;units:number;entry:number;ltp:number|null;iv:number|null;iv_source:string;target_price:number|null;target_pnl:number|null;greeks:Record<string,number>|null};
 export type Analysis={status:string;input_hash:string;underlying?:string;structure:{key:string|null;name:string;exact:boolean};model_version?:string;as_of?:string;spot?:number;expiry?:string;lot_size?:number;
- scenario?:{spot:number;at:string;iv_shift:number;days_to_expiry:number;is_expiry:boolean};premium?:Metric;charges?:Metric;max_profit?:Metric;max_loss?:Metric;breakevens?:Metric;
+ scenario?:{spot:number;at:string;iv_shift:number;days_to_expiry:number;is_expiry:boolean;active?:boolean};greeks_scenario?:any;pop_scenario?:Metric;breakevens_target?:Metric;insights?:{key:string;level:'warn'|'info';text:string}[];premium?:Metric;charges?:Metric;max_profit?:Metric;max_loss?:Metric;breakevens?:Metric;
  reward_risk?:Metric;capital_at_risk?:Metric;pop?:Metric;margin?:Metric;scenario_pnl?:Metric;greeks?:any;legs?:LegRow[];curve?:{s:number;expiry:number|null;target:number|null}[];
- legs_quotes?:{id:string;bid:number|null;ask:number|null;ltp:number|null;basis_used:string}[];sd?:{sigma:number|null;bands:{k:number;low:number;high:number}[]};table?:{s:number;pct:number;target:number|null;expiry:number|null}[];warnings:string[];quality?:any;price_basis?:string[]};
+ legs_quotes?:{id:string;bid:number|null;ask:number|null;ltp:number|null;basis_used:string}[];sd?:{sigma:number|null;bands:{k:number;low:number;high:number}[];bands_to_date?:{k:number;low:number;high:number}[]};table?:{s:number;pct:number;target:number|null;expiry:number|null}[];warnings:string[];quality?:any;price_basis?:string[]};
 export type Draft={version:number;body:Body;updated_at:number};
 export type Strategy={id:string;name:string;thesis:string;tags:string[];underlying:string|null;created_at:number;updated_at:number;archived_at:number|null;source_strategy_id:string|null;draft:Draft|null};
 export type LibraryRow=Strategy&{draft_version:number;snapshots:number;paper_open:number;paper_total:number;legs:number;expiry:string|null;structure:string};

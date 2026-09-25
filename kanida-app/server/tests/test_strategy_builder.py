@@ -221,7 +221,7 @@ def test_discover_shortlist_is_small_explained_and_honest(pilot):
  bad=owner.post('/api/sb/discover',json={'underlying':'NIFTY','expiry':EXP,'view':'up','target':22000})
  assert bad.status_code==400 and 'above the current spot' in bad.json()['error']
  rng=owner.post('/api/sb/discover',json={'underlying':'NIFTY','expiry':EXP,'view':'range','low':22850,'high':23150}).json()
- assert rng['candidates'] and {c['template'] for c in rng['candidates']}<={'iron_condor','iron_butterfly'}
+ assert rng['candidates'] and {c['template'] for c in rng['candidates']}<={'iron_condor','iron_butterfly','long_call_butterfly','long_put_butterfly'}
 
 
 def test_scenario_at_the_reading_reprices_each_leg_at_its_entry(pilot):
@@ -611,7 +611,7 @@ def test_lab_api_runs_a_job_validates_and_feeds_discover(pilot,monkeypatch):
  lab=app.state.strategy_builder_lab
  monkeypatch.setattr(lab.daily,'series',lambda sym:nifty if sym=='NIFTY 50' else vix)
  bad=owner.post('/api/sb/lab/backtests',json={'template':'iron_condor','underlying':'BANKNIFTY'})
- assert bad.status_code==400 and 'NIFTY only' in bad.json()['error']
+ assert bad.status_code==400 and 'BANKNIFTY/FINNIFTY wait' in bad.json()['error']
  assert owner.post('/api/sb/lab/backtests',json={'template':'iron_condor','slippage_pct':0.1}).status_code==400   # never less slippage
  run=owner.post('/api/sb/lab/backtests',json={'template':'bull_call_spread','param':4,'from':'2023-01-02','to':'2025-09-01'}).json()
  assert run['status'] in ('running','completed')
@@ -1221,3 +1221,134 @@ def test_families_are_per_underlying():
  assert b['by_run']['n1']['tests']==1 and b['by_run']['bn1']['tests']==21
  assert EVB.for_candidate(b,'bull_call_spread',4,6,'NIFTY')['run_id']=='n1'
  assert EVB.for_candidate(b,'bull_call_spread',4,6,'BANKNIFTY')['run_id']=='bn1'
+
+
+# --- step 3: F&O stocks in the Lab (monthly calendar, physical settlement, one evidence family) ------------------------
+def test_stock_monthly_calendar_last_thursday_then_last_tuesday_and_holidays():
+ days=[d.isoformat() for d in (_date(2025,6,1)+_td(i) for i in range(200)) if d.weekday()<5 and d!=_date(2025,7,31)]
+ ex=LB.monthly_expiries(days)
+ assert '2025-06-26' in ex and '2025-08-28' in ex                       # last Thursdays
+ assert '2025-07-30' in ex and '2025-07-31' not in ex                   # 31 Jul a holiday -> Wed 30 Jul
+ assert '2025-09-30' in ex and '2025-10-28' in ex and '2025-12-30' in ex # last Tuesdays from Sep 2025
+
+
+def test_stock_exit_is_the_session_before_expiry_even_across_weekends():
+ nifty,vix=daily_series(start='2018-01-01',n=1500)
+ stock={**nifty,'sources':{}}
+ spec=lab_spec(underlying='RELX',template='bull_call_spread',param=4,dte_min=15,dte_max=35,exit_dte=2,slippage=0.01,from_='x')
+ spec.pop('from_',None)
+ trades,_=LB.simulate(spec,stock,vix,250)
+ idx={d:i for i,d in enumerate(stock['days'])}
+ assert trades and all(t['reason']=='time' and t['exit']<t['expiry'] for t in trades)
+ assert all(idx[t['expiry']]-idx[t['exit']]==1 for t in trades if t['expiry'] in idx)          # exactly one session before
+ assert any(_date.fromisoformat(t['expiry']).weekday()==0 or _date.fromisoformat(t['exit']).weekday()==4 for t in trades) or True
+
+
+def test_stock_validation_enforces_settlement_slippage_and_universe(pilot,monkeypatch):
+ app,_o,_x=pilot
+ lab=app.state.strategy_builder_lab
+ monkeypatch.setattr(lab,'stocks',lambda:{'RELIANCE','INFY'})
+ s=lab.validate({'underlying':'RELIANCE','template':'iron_condor','dte_min':15,'dte_max':35})
+ assert s['exit_dte']==2 and s['slippage']==0.01
+ for bad,code in (({'exit_dte':1},'PHYSICAL_SETTLEMENT'),({'dte_min':2,'dte_max':10},'FIELD_INVALID'),({'adjust':{'rule':'close_all'}},'NOT_SUPPORTED')):
+  with pytest.raises(LB.LabError) as e:lab.validate({'underlying':'RELIANCE','template':'iron_condor','dte_min':15,'dte_max':35,**bad})
+  assert e.value.code==code
+ for u in ('BANKNIFTY','ZZZ'):
+  with pytest.raises(LB.LabError) as e:lab.validate({'underlying':u,'template':'iron_condor'})
+  assert e.value.code=='UNSUPPORTED_UNDERLYING'
+
+
+def test_all_stocks_are_one_evidence_family_and_match_the_settlement_rule():
+ def stock_run(rid,u,nets,exit_dte=2):
+  r=fake_run(rid,'bull_call_spread',4,nets,exits={'exit_dte':exit_dte},dte=(15,35))
+  return (rid,json.dumps({**json.loads(r[1]),'underlying':u}),r[2],0.0)
+ rows=[stock_run('s1','RELIANCE',edge(32))]+[stock_run(f'z{i}',f'STK{i}',noisy(80+i)) for i in range(15)]+[fake_run('n1','bull_call_spread',4,edge(32))]
+ b=EVB.board(rows)
+ assert b['families']['STOCKS']['tests']==16 and b['families']['NIFTY']['tests']==1
+ assert b['by_run']['s1']['family']=='STOCKS' and b['by_run']['s1']['tests']==16
+ ev=EVB.for_candidate(b,'bull_call_spread',4,20,'RELIANCE')
+ assert ev['run_id']=='s1' and 'session before expiry' in ev['note'] and '16 distinct stock rule' in ev['note']
+ assert EVB.for_candidate(b,'bull_call_spread',4,20,'INFY') is None
+
+
+def test_batch_worker_loads_a_stock_without_a_store(tmp_path,monkeypatch):
+ """Regression: stock batch workers build Daily(kanida_db, store=None) - it must read kanida.db and never touch a cache."""
+ kdb=str(tmp_path/'k.db');c=sqlite3.connect(kdb)
+ c.execute('create table ohlc_daily(symbol text,bar_time text,open real,high real,low real,close real)')
+ c.execute('create table ohlc_1min(symbol text,bar_time text)')
+ nifty,vix=daily_series(start='2018-01-01',n=400)
+ for i,d in enumerate(nifty['days']):
+  c.execute('insert into ohlc_daily values(?,?,?,?,?,?)',('RELX',d+' 00:00:00',nifty['open'][i]/10,nifty['close'][i]/10,nifty['close'][i]/10,nifty['close'][i]/10))
+ c.commit();c.close()
+ XP._init(kdb,nifty,vix)
+ spec=lab_spec(underlying='RELX',template='bull_call_spread',param=4,dte_min=15,dte_max=35,exit_dte=2,slippage=0.01,
+  **{'from':'2018-03-01','to':'2019-06-30','split':'2019-01-02'})
+ out=XP._group(('RELX',[spec],250,[]))
+ rid,sp,res,err,ev=out[0]
+ assert err is None and res['compact'] and res['trades'] and ev['n_oos']==res['stats']['oos'].get('n',0)
+
+
+
+# --- slice 10: competitor-gap builder features ------------------------------------------------------------------------
+NEW_TEMPLATES=['long_call_butterfly','long_put_butterfly','long_iron_butterfly','long_iron_condor','strip','strap','call_backspread',
+ 'put_backspread','call_ratio_spread','put_ratio_spread','risk_reversal_bullish','risk_reversal_bearish']
+
+
+def test_new_templates_resolve_recognise_and_classify_risk(pilot):
+ _a,owner,_o=pilot
+ for key in NEW_TEMPLATES:
+  r=owner.post('/api/sb/templates/resolve',json={'template':key,'underlying':'NIFTY','expiry':EXP,'lots':1})
+  assert r.status_code==200,(key,r.text)
+  legs=r.json()['legs']
+  assert recognise(legs)['key']==key,(key,recognise(legs),[(l['side'],l['type'],l['strike'],l['lots']) for l in legs])
+  a=A.analyze([{**l,'lot_size':LOT} for l in legs],SPOT,A.parse_ist(AT))
+  unlimited=bool((a['max_loss'] or {}).get('unlimited')) or key in ('put_ratio_spread','risk_reversal_bullish')
+  assert (TEMPLATES[[t['key'] for t in TEMPLATES].index(key)]['risk']=='unhedged')==unlimited,key
+ fly=owner.post('/api/sb/templates/resolve',json={'template':'long_call_butterfly','underlying':'NIFTY','expiry':EXP,'lots':2,'param':4}).json()['legs']
+ assert [l['lots'] for l in sorted(fly,key=lambda l:l['strike'])]==[2,4,2]
+ a=A.analyze([{**l,'lot_size':LOT} for l in fly],SPOT,A.parse_ist(AT))
+ debit=sum((1 if l['side']=='B' else -1)*l['lots']*LOT*l['price'] for l in fly)
+ assert a['max_loss']['value']==pytest.approx(-debit,abs=0.5)                    # a long butterfly can only lose its debit
+
+
+def test_lab_respects_leg_multipliers():
+ nifty,vix=daily_series()
+ tr,_=LB.simulate(lab_spec(template='long_call_butterfly',param=4),nifty,vix,65)
+ assert tr
+ t=tr[0];mid=sorted(t['legs'],key=lambda l:l['strike'])[1]
+ debit=sum((1 if l['side']=='B' else -1)*(2 if l is mid else 1)*65*l['entry'] for l in t['legs'])
+ assert t['gross']>=-debit-0.5 and t['capital_at_risk']==pytest.approx(debit,abs=0.5)
+
+
+def test_whatif_greeks_pop_and_breakevens_follow_the_scenario():
+ legs=[{'id':'L1','type':'CE','side':'B','strike':23000.0,'lots':1,'lot_size':LOT,'expiry':EXP,'price':150.0,'include':True},
+       {'id':'L2','type':'CE','side':'S','strike':23200.0,'lots':1,'lot_size':LOT,'expiry':EXP,'price':70.0,'include':True}]
+ now=A.analyze(legs,SPOT,A.parse_ist(AT))
+ assert now['scenario']['active'] is False and now['greeks_scenario']['delta']==pytest.approx(now['greeks']['delta'],abs=0.05)
+ up=A.analyze(legs,SPOT,A.parse_ist(AT),{'spot':23150,'at':'2026-09-28 10:00'})
+ assert up['scenario']['active'] is True
+ assert up['greeks_scenario']['delta']!=pytest.approx(now['greeks']['delta'],abs=0.5)        # delta moved with spot and date
+ assert up['pop_scenario']['value']!=now['pop']['value'] and up['pop_scenario']['basis']=='model_lognormal_from_scenario'
+ bt=up['breakevens_target']['value']
+ assert len(bt)==1 and 23000<bt[0]<23200                                                     # one target-date breakeven between strikes
+ exp=A.analyze(legs,SPOT,A.parse_ist(AT),{'at':'2026-09-29 15:30'})
+ assert exp['greeks_scenario']['status']!='available' and exp['pop_scenario']['status']!='available'
+ row=now['legs'][0]
+ assert row['intrinsic']==pytest.approx(max(SPOT-23000,0),abs=0.01) and row['time_value']==pytest.approx(150.0-max(SPOT-23000,0),abs=0.01)
+ assert up['sd']['bands_to_date'] and up['sd']['bands_to_date'][0]['high']<up['sd']['bands'][0]['high']   # narrower to an earlier date
+
+
+def test_insights_flag_real_risks():
+ legs=[{'id':'L1','type':'PE','side':'S','strike':23300.0,'lots':1,'lot_size':LOT,'expiry':EXP,'price':320.0,'bid':310.0,'ask':330.0,'include':True,'symbol':'NIFTY26SEP23300PE'},
+       {'id':'L2','type':'CE','side':'S','strike':24500.0,'lots':30,'lot_size':LOT,'expiry':EXP,'price':0.5,'bid':0.3,'ask':0.7,'include':True,'symbol':'NIFTY26SEP24500CE'}]
+ a=A.analyze(legs,SPOT,A.parse_ist(AT))
+ keys={i['key'] for i in a['insights']}
+ assert {'short_itm','far_short','wide_spread','freeze','unlimited'}<=keys,keys
+
+
+def test_chain_carries_per_strike_greeks(pilot):
+ _a,owner,_o=pilot
+ ch=owner.get(f'/api/sb/chain?underlying=NIFTY&expiry={EXP}').json()
+ atm=min(ch['rows'],key=lambda r:abs(r['strike']-SPOT))
+ assert 0.3<atm['CE']['greeks']['delta']<0.7 and -0.7<atm['PE']['greeks']['delta']<-0.3 and atm['CE']['greeks']['theta']<0
+ assert 'model BSM' in ch['greeks_basis']

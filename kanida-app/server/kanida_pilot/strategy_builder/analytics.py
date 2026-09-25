@@ -79,6 +79,47 @@ def bs_greeks(s,k,t,sigma,kind,r=RATE):
 
 
 # --- the expiry payoff: exact, piecewise linear ---------------------------------------------------------------
+FREEZE_UNITS={'NIFTY':1800,'BANKNIFTY':900,'FINNIFTY':1800,'MIDCPNIFTY':2800,'NIFTYNXT50':600}
+
+
+def insights(active,spot,t_now,sigma,out):
+ """Plain-language risk warnings for the structure as it stands (Blueprint A insights list). Each: key, level, text."""
+ res=[];add=lambda k,lv,tx:res.append({'key':k,'level':lv,'text':tx})
+ shorts=[l for l in active if l['side']=='S']
+ for l in active:
+  bid,ask=l.get('bid'),l.get('ask')
+  lab=f"{int(l['strike']) if float(l['strike']).is_integer() else l['strike']} {l['type']}"
+  if bid and ask and (ask+bid)>0 and (ask-bid)/((ask+bid)/2)>0.05:
+   add('wide_spread','warn',f"{lab}: the bid-ask spread is {(ask-bid)/((ask+bid)/2)*100:.0f}% of the price - fills will cost more than the mid.")
+  elif l.get('price_basis')!='manual' and not (bid and ask) and l.get('ltp') is not None:
+   add('no_quote','info',f"{lab}: no live bid/ask - priced at the last trade, which may be stale for an illiquid strike.")
+  if 'stale' in (l.get('flags') or []) or 'no_trade' in (l.get('flags') or []):
+   add('illiquid','warn',f"{lab}: the price is stale or the strike did not trade - it may be illiquid.")
+ for l in shorts:
+  lab=f"{int(l['strike']) if float(l['strike']).is_integer() else l['strike']} {l['type']}"
+  itm=(spot>l['strike']) if l['type']=='CE' else (spot<l['strike'])
+  if itm:add('short_itm','warn',f"Short {lab} is in the money: it carries its full intrinsic loss now and is likely to be exercised at expiry.")
+  if sigma and t_now>0:
+   z=math.log(l['strike']/spot)/(sigma*math.sqrt(t_now))
+   if (l['type']=='CE' and z>2) or (l['type']=='PE' and z<-2):
+    add('far_short','info',f"Short {lab} is beyond 2 standard deviations: a small credit against a rare but large move.")
+ if shorts and t_now*365<1:
+  add('expiry_gamma','warn','Expiry day with short options: gamma is at its highest, so small moves swing the P&L sharply.')
+ lot=next((int(l.get('lot_size') or 0) for l in active if l.get('lot_size')),0)
+ for l in active:
+  u=int(l['lots'])*int(l.get('lot_size') or lot or 0)
+  for k,v in FREEZE_UNITS.items():
+   if str(l.get('symbol') or '').startswith(k) and not str(l.get('symbol') or '').startswith(k+'NXT') and u>v:
+    add('freeze','info',f"{int(l['strike'])} {l['type']}: {u} units exceeds the {v}-unit exchange freeze quantity - it will be sent as several orders.")
+    break
+ if (out.get('max_loss') or {}).get('unlimited'):
+  add('unlimited','warn','Unlimited loss on at least one side: add a hedge leg to cap it.')
+ seen=set();uniq=[]
+ for r in res:
+  if (r['key'],r['text']) not in seen:seen.add((r['key'],r['text']));uniq.append(r)
+ return uniq
+
+
 def expiry_pnl(legs,s):
  return sum(units(l)*(intrinsic(l['type'],l['strike'],s)-l['price']) for l in legs)
 
@@ -235,7 +276,7 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
  else:
   out['scenario_pnl']=na('IV_UNAVAILABLE',detail=iv_notes)
  # the leg table and Greeks
- rows=[];tot={'delta':0.0,'gamma':0.0,'theta':0.0,'vega':0.0}
+ rows=[];tot={'delta':0.0,'gamma':0.0,'theta':0.0,'vega':0.0};tot_s={'delta':0.0,'gamma':0.0,'theta':0.0,'vega':0.0}
  for l in active:
   sigma,src=ivs[l['id']]
   q=units(l)
@@ -244,7 +285,13 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
   row={'id':l['id'],'label':f"{'Buy' if l['side']=='B' else 'Sell'} {l['lots']} x {int(l['strike']) if float(l['strike']).is_integer() else l['strike']} {l['type']}",
    'units':q,'entry':l['price'],'ltp':l.get('ltp'),'iv':round(sigma*100,2) if sigma is not None else None,'iv_source':src,
    'target_price':round(tv,2) if tv is not None else None,'target_pnl':round(q*(tv-l['price']),2) if tv is not None else None,
-   'greeks':({k:round(v*q,4) for k,v in g.items()} if g else None),'greeks_per_unit':({k:round(v,6) for k,v in g.items()} if g else None)}
+   'greeks':({k:round(v*q,4) for k,v in g.items()} if g else None),'greeks_per_unit':({k:round(v,6) for k,v in g.items()} if g else None),
+   # premium split at the reading: intrinsic (what exercising now is worth) and time value (the rest, which decays)
+   'intrinsic':round(intrinsic(l['type'],l['strike'],spot),2),'time_value':round(l['price']-intrinsic(l['type'],l['strike'],spot),2)}
+  gs=bs_greeks(target_spot,l['strike'],t_target,max(0.0001,sigma+iv_shift),l['type']) if (sigma is not None and t_target>0) else None
+  row['greeks_scenario']={k:round(v*q,4) for k,v in gs.items()} if gs else None
+  if gs:
+   for k in tot_s:tot_s[k]+=gs[k]*q
   rows.append(row)
   if g:
    for k in tot:tot[k]+=g[k]*q
@@ -252,6 +299,34 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
  out['greeks']=({'status':'available','delta':round(tot['delta'],2),'gamma':round(tot['gamma'],4),'theta':round(tot['theta'],2),
   'vega':round(tot['vega'],2),'units':{'delta':'units per 1 point','gamma':'delta per 1 point','theta':'INR per calendar day',
   'vega':'INR per 1 IV point'},'basis':'model_bsm_at_reading'} if iv_ready else na('IV_UNAVAILABLE',detail=iv_notes))
+ # Greeks, POP and breakevens AT THE WHAT-IF (spot, date, IV shift) - Rupeezy recomputes nothing when the date moves;
+ # these follow the scenario. At expiry the Greeks are not defined (the position is settled), so they are unavailable.
+ scen=(abs(target_spot-spot)>1e-9 or target_at!=reading_at or iv_shift!=0.0)
+ out['scenario']['active']=scen
+ if iv_ready and t_target>0:
+  out['greeks_scenario']={'status':'available','delta':round(tot_s['delta'],2),'gamma':round(tot_s['gamma'],4),'theta':round(tot_s['theta'],2),
+   'vega':round(tot_s['vega'],2),'basis':'model_bsm_at_scenario','at':out['scenario']['at'],'spot':target_spot,'iv_shift':iv_shift*100}
+ else:
+  out['greeks_scenario']=na('AT_EXPIRY' if t_target<=0 else 'IV_UNAVAILABLE')
+ if same_expiry and sigma_ref and t_target>0:
+  ps=pop(active,target_spot,max(0.0001,sigma_ref+iv_shift),t_target,prof)
+  out['pop_scenario']=ok(round(ps*100,1),unit='percent',basis='model_lognormal_from_scenario',sigma=round((sigma_ref+iv_shift)*100,2)) if ps is not None else na('NO_IV')
+ else:
+  out['pop_scenario']=na('AT_EXPIRY' if t_target<=0 else ('MULTI_EXPIRY' if not same_expiry else 'NO_IV'))
+ # breakevens of the target-date curve (where the model P&L at the what-if date crosses zero), from a dense grid
+ if iv_ready and t_target>0:
+  gx=[lo+(hi-lo)*i/400 for i in range(401)];gv=[value_at(x,t_target) for x in gx];bt=[]
+  for (x0,v0),(x1,v1) in zip(zip(gx,gv),zip(gx[1:],gv[1:])):
+   if v0==0:bt.append(x0)
+   elif (v0<0)!=(v1<0):bt.append(x0+(x1-x0)*(-v0)/(v1-v0))
+  out['breakevens_target']=ok(sorted({round(b,2) for b in bt}),unit='points',basis='model_bsm_at_scenario_date',range=[round(lo,2),round(hi,2)])
+ else:
+  out['breakevens_target']=na('AT_EXPIRY' if t_target<=0 else 'IV_UNAVAILABLE')
+ # standard-deviation bands to the what-if date (Dynamic) alongside the bands to expiry (Fixed)
+ dt=max(0.0,t_now-t_target)
+ out['sd']['bands_to_date']=[{'k':k,'low':round(spot*math.exp(-k*(sigma_ref or 0)*math.sqrt(dt)),2),
+  'high':round(spot*math.exp(k*(sigma_ref or 0)*math.sqrt(dt)),2)} for k in (1,2)] if sigma_ref and dt>0 else []
+ out['insights']=insights(active,spot,t_now,sigma_ref,out)
  # the payoff table: spot levels around the current spot, target-date and expiry P&L from the SAME maths
  if table_step:
   step=float(table_step);base=round(spot/step)*step

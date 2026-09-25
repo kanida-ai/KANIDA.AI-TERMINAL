@@ -32,6 +32,21 @@ MIN_OOS=30
 BOOT=2000
 _CACHE:Dict[str,Dict[str,Any]]={}          # completed runs never change: their per-run entry is cached by id
 WEEKDAYS=['Mon','Tue','Wed','Thu','Fri']
+INDEX_FAMILIES={'NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY','NIFTYNXT50'}
+STOCK_EXIT_DTE=2
+
+
+def family_of(underlying:str)->str:
+ """Each index is its own family; ALL stocks form ONE family. 200 per-stock families would each let ~10% of pure chance
+ through (~20 false 'Tested ✓' stocks); one family keeps the false-discovery rate at 10% across the whole stock list."""
+ return underlying if underlying in INDEX_FAMILIES else 'STOCKS'
+
+
+def _held_rule(r)->bool:
+ """The rule Discover shows: held to expiry for an index; for a stock, the physical-settlement exit and nothing else."""
+ ex=r['exits']
+ if r['underlying'] in INDEX_FAMILIES:return not any(v is not None for v in ex.values())
+ return ex.get('target_pct') is None and ex.get('stop_pct') is None and ex.get('exit_dte')==STOCK_EXIT_DTE
 
 
 def _block_boot(xs:List[float],seed:int)->List[float]:
@@ -95,6 +110,11 @@ def board(rows)->Dict[str,Any]:
   r=json.loads(res) if isinstance(res,str) else res
   if not r or r.get('kind')!='backtest':continue
   runs.append(entry(rid,s,r,at))
+ return board_entries(runs)
+
+
+def board_entries(runs:List[Dict[str,Any]])->Dict[str,Any]:
+ """The same board from precomputed per-run entries (the Lab persists them, so ten thousand runs need no recompute)."""
  rules={}
  for e in runs:rules.setdefault(e['rule'],[]).append(e)
  out=[]
@@ -109,8 +129,8 @@ def board(rows)->Dict[str,Any]:
    'mean_oos':worst['mean_oos'] if worst else None,'defined_risk':worst['defined_risk'] if worst else base['defined_risk'],
    'unit':(worst or base)['unit'],'latest':max(e['created_at'] for e in rs)})
  passed=set();fam_m={}
- for u in sorted({r['underlying'] for r in out}):              # one family per underlying: NIFTY rules never lift stock rules
-  tests=sorted([r for r in out if r['p'] is not None and r['underlying']==u],key=lambda r:r['p']);m=len(tests);k=0
+ for u in sorted({family_of(r['underlying']) for r in out}):   # one family per index, one for all stocks
+  tests=sorted([r for r in out if r['p'] is not None and family_of(r['underlying'])==u],key=lambda r:r['p']);m=len(tests);k=0
   for i,r in enumerate(tests,1):
    if r['p']<=i/m*FDR_Q:k=i                                    # BH step-up: the largest rank that passes
   passed|={id(r) for r in tests[:k]};fam_m[u]=m
@@ -121,9 +141,9 @@ def board(rows)->Dict[str,Any]:
   elif not r['defined_risk']:r['status']='tested_not_significant';r['reason']='tail_undefined'
   elif (r['stress'] or 0)<=0:r['status']='tested_not_significant';r['reason']='tail_stress'
   else:r['status']='tested_significant'
-  r['tests']=fam_m.get(r['underlying'],0)
+  r['tests']=fam_m.get(family_of(r['underlying']),0);r['family']=family_of(r['underlying'])
  by_run={rid:r for r in out for rid in r['run_ids']}
- fams={u:{'tests':fam_m.get(u,0),'rules':sum(1 for r in out if r['underlying']==u),'survivors':sum(1 for r in out if r['underlying']==u and r['status']=='tested_significant')} for u in {r['underlying'] for r in out}}
+ fams={u:{'tests':fam_m.get(u,0),'rules':sum(1 for r in out if family_of(r['underlying'])==u),'survivors':sum(1 for r in out if family_of(r['underlying'])==u and r['status']=='tested_significant')} for u in {family_of(r['underlying']) for r in out}}
  n=fams.get('NIFTY',{'tests':0,'survivors':0})
  return {'rules':out,'by_run':by_run,'families':fams,'tests':n['tests'],'runs':len(runs),'survivors':n['survivors'],'fdr_q':FDR_Q,'min_oos':MIN_OOS}
 
@@ -139,14 +159,14 @@ def next_session_dte(expiry:str,as_of:str)->int:
 def for_candidate(b:Dict[str,Any],template:str,param,dte:Optional[int],underlying:str='NIFTY')->Optional[Dict[str,Any]]:
  """Evidence for the rule Discover shows (template, width, held to expiry). Several schedules may match; only those
  whose DTE range covers this expiry apply, and the most conservative of them decides."""
- same=[r for r in b['rules'] if r['underlying']==underlying and r['template']==template and r['param']==param and not any(v is not None for v in r['exits'].values())]
+ same=[r for r in b['rules'] if r['underlying']==underlying and r['template']==template and r['param']==param and _held_rule(r)]
  if not same:return None
  fits=[r for r in same if dte is not None and r['dte'][0]<=dte<=r['dte'][1]]
- m=(b.get('families') or {}).get(underlying,{}).get('tests',0)
+ m=(b.get('families') or {}).get(family_of(underlying),{}).get('tests',0)
  def note(r):
   wd='every day' if r['weekday']=='daily' else WEEKDAYS[int(r['weekday'])]
-  return (f"Lab rule: decisions on {wd}, {r['dte'][0]}-{r['dte'][1]} days to expiry, held to expiry, slippage {(r['slippage'] or 0)*100:.1f}%; "
-          f"{r['runs']} run(s) of it, the most conservative decides; {m} distinct {underlying} rule(s) in your Lab corrected together (Benjamini-Hochberg, FDR {int(FDR_Q*100)}%). "
+  return (f"Lab rule: decisions on {wd}, {r['dte'][0]}-{r['dte'][1]} days to expiry, {'held to expiry' if r['underlying'] in INDEX_FAMILIES else 'exit the session before expiry (physical settlement)'}, slippage {(r['slippage'] or 0)*100:.1f}%; "
+          f"{r['runs']} run(s) of it, the most conservative decides; {m} distinct {'stock' if family_of(underlying)=='STOCKS' else underlying} rule(s) in your Lab corrected together (Benjamini-Hochberg, FDR {int(FDR_Q*100)}%). "
           "The Lab placed strikes by India VIX; this card uses today's chain.")
  if not fits:
   r=max(same,key=lambda x:x['latest'])

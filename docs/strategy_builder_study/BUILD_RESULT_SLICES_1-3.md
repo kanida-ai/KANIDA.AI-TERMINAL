@@ -444,3 +444,48 @@ The verdict was "not approvable as is", with two false-"Tested ✓" routes repro
   - The best rule, iron condor width 6 with Thursday decisions and 8–14 DTE, has n = 89, p = 0.014. Rank 1 needs p ≤ 0.1/480 ≈ 0.0002.
   - About 15 rules have p < 0.1, against about 48 expected by chance. On average these rules lose after costs; this is not a hidden edge.
 - **Discover** still shows "Model only / not significant" everywhere, which is the honest outcome.
+
+---
+
+# Slice 10 — competitor-gap builder features, batch 1 (25 Sep 2026)
+
+This closes builder gaps from the Sensibull, 5paisa and Rupeezy reconciliation (`docs/KANIDA_Requirements_Master_2026-09-25.xlsx`, Competitor PRDs tab) that need no platform decision.
+
+- **What-if now drives the numbers.** This fixes the Rupeezy defect our blueprint named; 5paisa and Sensibull recompute on the what-if too.
+  - Greeks at the what-if spot, date and IV (Greeks tab: "At the reading" / "At the what-if"; not defined at expiry, which is stated).
+  - POP from the what-if point, shown with the "from now" POP beside it.
+  - Target-date breakevens, alongside the expiry ones.
+  - SD bands to the what-if date on the chart.
+- **Premium split per leg:** intrinsic value and time value, in the P&L-by-leg table.
+- **Reward : risk** in the risk strip.
+- **Risk warnings list:**
+  - a wide bid-ask spread (above 5%);
+  - no live quote, or a stale / untraded strike;
+  - a short in the money;
+  - a short beyond 2σ;
+  - expiry day with shorts (gamma);
+  - above the freeze quantity (sent as several orders);
+  - unlimited loss.
+- **12 new templates** (catalogue: 14 → 26):
+  - **Defined risk:** long call and put butterfly (1:2:1), reverse iron butterfly and reverse iron condor, strip, strap, call and put backspread.
+  - **UNHEDGED (labelled):** call and put ratio spread, bullish and bearish risk reversal.
+  - Recipes support a per-leg lot multiplier, and the recogniser identifies ratio shapes.
+  - The Lab prices multipliers correctly (units, charges, max loss).
+  - Discover families include them.
+  - The two pre-registered experiment grids are frozen to the original 10 templates, so the recorded batches stay reproducible.
+- **Size ×:** multiplies or divides every leg's lots while keeping the ratios (1:2:1 → 2:4:2). **Clear all**, with a confirmation.
+- **Option chain "Greeks" view:** delta and theta per unit per strike, each option at its own IV. The chain endpoint now returns per-strike model Greeks.
+- **Verified:**
+  - The pilot suite passes: 638 passed, 1 skipped (6 new tests: template resolve/recognise/risk class for all 12, Lab multipliers, what-if Greeks/POP/breakevens/intrinsic/bands, insights, chain Greeks).
+  - Browser, on the stored reading: the butterfly's max loss equals its debit; reward:risk shows; Size × doubles the risk; moving the date changes POP (51.6% vs 43.2% from now) and shows target-date breakevens; the Greeks switch works; the chain Greeks view works.
+- **Still open from the competitor list:**
+  - live basket orders, and live prices and margin for all users (platform decisions);
+  - calendars, diagonals and futures legs;
+  - per-strike IV override;
+  - OI overlay on the payoff;
+  - straddle-premium chart;
+  - share links;
+  - broker trade import;
+  - push and email alerts;
+  - notes screen;
+  - export.

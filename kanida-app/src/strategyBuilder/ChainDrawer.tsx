@@ -11,7 +11,7 @@ const WINDOW=12;
 export function ChainDrawer({visible,chain,legs,onToggle,onClose}:{visible:boolean;chain:Chain|null;legs:Leg[];
  onToggle:(strike:number,kind:Kind,side:Side,price:number)=>void;onClose:()=>void}){
  const narrow=useWindowDimensions().width<600;
- const [all,setAll]=useState(false);const [view,setView]=useState<'price'|'oi'>('price');
+ const [all,setAll]=useState(false);const [view,setView]=useState<'price'|'oi'|'greeks'>('price');
  const rows=useMemo(()=>{
   if(!chain)return [];
   if(all)return chain.rows;
@@ -27,24 +27,24 @@ export function ChainDrawer({visible,chain,legs,onToggle,onClose}:{visible:boole
   subtitle={chain?`${chain.underlying} · expiry ${dayMonth(chain.expiry)} · spot ${num(chain.spot,2)} · ${istStamp(chain.as_of)} · last traded prices (no bid/ask in this store)`:'Loading…'}
   footer={<View style={[s.between,{flexWrap:'wrap'}]}><T style={{fontSize:12,color:C.muted}}>{`${legs.length} leg${legs.length===1?'':'s'} in this strategy`}</T><Button label="Done" icon="check" onPress={onClose}/></View>}>
   <View style={[s.row,{flexWrap:'wrap',gap:8}]}>
-   <Chip label="Price & IV" active={view==='price'} onPress={()=>setView('price')}/><Chip label="Open interest" active={view==='oi'} onPress={()=>setView('oi')}/>
+   <Chip label="Price & IV" active={view==='price'} onPress={()=>setView('price')}/><Chip label="Open interest" active={view==='oi'} onPress={()=>setView('oi')}/><Chip label="Greeks" active={view==='greeks'} onPress={()=>setView('greeks')}/>
    <Chip label={all?'Near the money':'All strikes'} active={all} onPress={()=>setAll(!all)} icon="list"/>
   </View>
   {!chain?<T style={{color:C.muted}}>Loading the chain…</T>:
   <View style={{borderWidth:1,borderColor:C.line,borderRadius:12,overflow:'hidden'}}>
    <View style={[s.row,{backgroundColor:C.paper,paddingVertical:8,paddingHorizontal:8,gap:0}]}>
-    {!narrow&&<H flex={1.2}>{view==='price'?'IV':'OI'}</H>}<H flex={1.2}>Call LTP</H><H flex={1.6}> </H><H flex={1.3} center>Strike</H><H flex={1.6}> </H><H flex={1.2} right>Put LTP</H>{!narrow&&<H flex={1.2} right>{view==='price'?'IV':'OI'}</H>}
+    {!narrow&&<H flex={1.2}>{view==='price'?'IV':view==='oi'?'OI':'Δ · Θ/day'}</H>}<H flex={1.2}>Call LTP</H><H flex={1.6}> </H><H flex={1.3} center>Strike</H><H flex={1.6}> </H><H flex={1.2} right>Put LTP</H>{!narrow&&<H flex={1.2} right>{view==='price'?'IV':view==='oi'?'OI':'Δ · Θ/day'}</H>}
    </View>
    <ScrollView ref={scroller} style={{maxHeight:520}}>
     {rows.map(r=>{const atm=r.strike===chain.atm_strike;const itmCall=r.strike<chain.spot;
      return <View key={r.strike} style={[s.row,{gap:0,paddingHorizontal:8,height:ROW,borderTopWidth:1,borderColor:C.line,backgroundColor:atm?C.soft:'transparent'}]}>
-      {!narrow&&<Cell flex={1.2} tone={itmCall}>{view==='price'?(r.CE?.iv!=null?`${r.CE.iv}%`:'—'):compactOi(r.CE?.oi)}</Cell>}
+      {!narrow&&<Cell flex={1.2} tone={itmCall}>{view==='price'?(r.CE?.iv!=null?`${r.CE.iv}%`:'—'):view==='oi'?compactOi(r.CE?.oi):greek((r.CE as any)?.greeks)}</Cell>}
       <Cell flex={1.2} tone={itmCall} strong>{r.CE?.ltp!=null?num(r.CE.ltp,2):'—'}</Cell>
       <Pair flex={1.6} side={r.CE} picked={picked(r.strike,'CE')} label={`${strikeText(r.strike)} call`} onPress={(sd)=>r.CE?.ltp!=null&&onToggle(r.strike,'CE',sd,r.CE.ltp)}/>
       <View style={{flex:1.3,alignItems:'center'}}><T style={{fontFamily:'InterSemi',fontSize:13,fontVariant:['tabular-nums'] as any}}>{strikeText(r.strike)}</T>{atm&&<T style={{fontSize:9,color:C.green}}>ATM</T>}</View>
       <Pair flex={1.6} side={r.PE} picked={picked(r.strike,'PE')} label={`${strikeText(r.strike)} put`} onPress={(sd)=>r.PE?.ltp!=null&&onToggle(r.strike,'PE',sd,r.PE.ltp)}/>
       <Cell flex={1.2} right tone={!itmCall&&!atm} strong>{r.PE?.ltp!=null?num(r.PE.ltp,2):'—'}</Cell>
-      {!narrow&&<Cell flex={1.2} right tone={!itmCall&&!atm}>{view==='price'?(r.PE?.iv!=null?`${r.PE.iv}%`:'—'):compactOi(r.PE?.oi)}</Cell>}
+      {!narrow&&<Cell flex={1.2} right tone={!itmCall&&!atm}>{view==='price'?(r.PE?.iv!=null?`${r.PE.iv}%`:'—'):view==='oi'?compactOi(r.PE?.oi):greek((r.PE as any)?.greeks)}</Cell>}
      </View>;})}
    </ScrollView>
   </View>}
@@ -63,3 +63,6 @@ function Pair({flex,side,picked,label,onPress}:{flex:number;side:ChainSide|null;
    <T style={{fontSize:11,fontFamily:'InterSemi',color:on?'#041B12':disabled?C.muted:col}}>{sd}</T></Pressable>;};
  return <View style={[s.row,{flex,gap:6,justifyContent:'center'}]}>{btn('B')}{btn('S')}</View>;
 }
+
+/** Per-unit model Greeks at the reading (each option at its own IV): delta · theta per calendar day. */
+function greek(g?:{delta:number;theta:number}|null){return g?`${g.delta.toFixed(2)} · ${g.theta.toFixed(1)}`:'—';}

@@ -97,7 +97,7 @@ function Result({run}:{run:LabRun}){
  const r=run.result!;const pv=r.provenance||{};
  const tone=r.badge.status==='model_positive'?'green':r.badge.status==='insufficient'?'amber':'neutral';
  const csv=()=>{if(Platform.OS!=='web'||!r.trades)return;const head='decision,entry,exit,expiry,reason,spot_entry,vix,legs,gross,fees,net,capital_at_risk\n';
-  const rows=r.trades.map((t:any)=>[t.decision,t.entry,t.exit,t.expiry,t.reason,t.spot_entry,t.vix,'"'+t.legs.map((l:any)=>`${l.side}${l.strike}${l.type}@${l.entry}->${l.exit}`).join(' ')+'"',t.gross,t.fees,t.net,t.capital_at_risk??''].join(',')).join('\n');
+  const rows=r.trades.map((t:any)=>[t.decision,t.entry,t.exit,t.expiry,t.reason,t.spot_entry,t.vix,'"'+(t.legs||[]).map((l:any)=>`${l.side}${l.strike}${l.type}@${l.entry}->${l.exit}`).join(' ')+'"',t.gross,t.fees,t.net,t.capital_at_risk??''].join(',')).join('\n');
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([head+rows],{type:'text/csv'}));a.download=`kanida-backtest-${run.id}.csv`;a.click();};
  return <View style={{gap:12}}>
   <View style={{backgroundColor:C.amberBg,borderRadius:10,padding:12,gap:4}}>
@@ -118,7 +118,7 @@ function Result({run}:{run:LabRun}){
   </View>
   {r.trades&&<View style={{backgroundColor:C.paper,borderWidth:1,borderColor:C.line,borderRadius:14,padding:14,gap:4}}>
    <T style={{fontFamily:'InterSemi'}}>{`Last ${Math.min(25,r.trades.length)} of ${r.trades.length} trades`}</T>
-   {[['Entry','Exit','Why','Legs','Net'],...r.trades.slice(-25).reverse().map((t:any)=>[t.entry,t.exit,t.reason,t.legs.map((l:any)=>`${l.side}${num(l.strike,0)}${l.type}`).join(' ')+(t.adjustment?.applied?` · adj ${t.adjustment.day}`:''),signed(t.net)])]
+   {[['Entry','Exit','Why','Legs','Net'],...r.trades.slice(-25).reverse().map((t:any)=>[t.entry,t.exit,t.reason,(t.legs||[]).map((l:any)=>`${l.side}${num(l.strike,0)}${l.type}`).join(' ')+(t.adjustment?.applied?` · adj ${t.adjustment.day}`:''),signed(t.net)])]
     .map((row,i)=><View key={i} style={[s.row,{gap:6,borderTopWidth:i?1:0,borderColor:C.line,paddingVertical:4}]}>{row.map((c,j)=><T key={j} style={{flex:j===3?3:1,fontSize:i?11:10,color:i?C.ink:C.muted,textAlign:j===4?'right':'left',fontVariant:['tabular-nums'] as any}}>{c}</T>)}</View>)}
   </View>}
   <View style={{backgroundColor:C.paper,borderWidth:1,borderColor:C.line,borderRadius:14,padding:14,gap:4}}>

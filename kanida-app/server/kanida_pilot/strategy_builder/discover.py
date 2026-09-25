@@ -14,10 +14,10 @@ from __future__ import annotations
 from . import analytics as A
 from .templates import BY_KEY,ResolveError,resolve
 
-FAMILIES={'up':['long_call','bull_call_spread','bull_put_spread','short_put'],
- 'down':['long_put','bear_put_spread','bear_call_spread','short_call'],
- 'range':['iron_condor','iron_butterfly','short_strangle','short_straddle'],
- 'big_move':['long_straddle','long_strangle']}
+FAMILIES={'up':['long_call','bull_call_spread','bull_put_spread','call_backspread','short_put','call_ratio_spread','risk_reversal_bullish'],
+ 'down':['long_put','bear_put_spread','bear_call_spread','put_backspread','short_call','put_ratio_spread','risk_reversal_bearish'],
+ 'range':['iron_condor','iron_butterfly','long_call_butterfly','long_put_butterfly','short_strangle','short_straddle'],
+ 'big_move':['long_straddle','long_strangle','long_iron_butterfly','long_iron_condor','strip','strap']}
 VIEWS={'up':'Rise','down':'Fall','range':'Stay in a range','big_move':'Big move either way'}
 EXCLUDED={'unhedged':'unhedged (naked short) structures are off - defined-risk only','over_max_loss':'maximum loss above your limit',
  'over_budget':'capital at risk above your budget','margin_unknown':'unlimited-risk structure with a budget set (its margin is not computable here)',
