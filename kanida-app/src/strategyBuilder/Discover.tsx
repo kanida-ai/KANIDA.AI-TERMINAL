@@ -1,5 +1,6 @@
 // K04 Discover and Compare: the user's own thesis and limits -> 3-6 explained structures, never a long list, never a
-// silent relaxation. Every card says 'Model only' until the Lab can attach tested evidence.
+// silent relaxation. Slice 9: cards carry Lab evidence corrected for everything the user tested (BH FDR 10%);
+// 'Tested ✓' rules rank first by their out-of-sample 95% low, everything else keeps the model order.
 import React,{useEffect,useMemo,useState} from 'react';
 import {TextInput,View,useWindowDimensions} from 'react-native';
 import Svg,{Line,Path} from 'react-native-svg';
@@ -30,7 +31,7 @@ export function Discover(){
   catch(x:any){setError(x.message);setRes(null);}finally{setBusy(false);}}
  async function use(c:Candidate){
   try{const legs:Leg[]=c.legs.map((l:any,i:number)=>({id:`L${i+1}`,type:l.type,side:l.side,strike:l.strike,lots:l.lots,expiry:l.expiry,price_basis:'ltp' as const,price:null,include:true}));
-   const s=await sb.create({underlying:u,expiry:e,legs,scenario:view==='up'||view==='down'?{spot:Number(target)}:{},template:c.template},`${u} ${c.name} ${dayMonth(e)}`,`Discover: ${res?.view_label} ${view==='up'||view==='down'?target:`${low}-${high}`}`);
+   const s=await sb.create({underlying:u,expiry:e,legs,scenario:view==='up'||view==='down'?{spot:Number(target)}:{},template:c.template,param:c.param??null},`${u} ${c.name} ${dayMonth(e)}`,`Discover: ${res?.view_label} ${view==='up'||view==='down'?target:`${low}-${high}`}`);
    router.push({pathname:'/strategies',params:{id:s.id}} as any);}catch(x:any){setError(x.message);}}
  const compared=useMemo(()=>(res?.candidates||[]).filter(c=>pick.includes(c.template)),[res,pick]);
  const field=(l:string,v:string,set:(x:string)=>void,ph='')=><View style={{gap:4,minWidth:130,flex:1}}><T style={{fontSize:11,color:C.muted}}>{l}</T>
@@ -60,14 +61,16 @@ export function Discover(){
 
   {res&&<View style={{gap:12}}>
    <T style={{fontSize:13}}>{res.candidates.length?`${res.candidates.length} of ${res.considered} structures match - ${res.view_label.toLowerCase()} ${res.view==='up'||res.view==='down'?`to ${num(res.inputs.target,0)}`:`${num(res.inputs.low,0)}-${num(res.inputs.high,0)}`} by ${dayMonth(res.expiry)}.`:'Nothing matches these limits.'}</T>
+   {res.evidence&&<T style={{fontSize:12}}>{res.evidence.tests?`${res.evidence.tests} rule test${res.evidence.tests===1?'':'s'} in your Lab (n ≥ ${res.evidence.min_oos} out of sample); ${res.evidence.survivors} survive the ${Math.round(res.evidence.fdr_q*100)}% false-discovery correction.`:'No rule in your Lab has enough out-of-sample trades yet - every card is Model only. Prove one in the Lab to rank by evidence.'}</T>}
    <T style={{fontSize:11,color:C.muted}}>{res.basis}</T>
    {!res.candidates.length&&res.binding&&<View style={{backgroundColor:C.amberBg,borderRadius:12,padding:14,gap:6}}>
     <T style={{color:C.amber,fontFamily:'InterSemi'}}>{`Most were excluded for: ${res.binding.label}`}</T><T style={{color:C.amber,fontSize:12}}>{res.binding.suggestion}</T>
     <T style={{color:C.muted,fontSize:11}}>{res.excluded.map(x=>`${x.count} × ${x.label}`).join(' · ')}</T></View>}
    <View style={{flexDirection:wide?'row':'column',flexWrap:'wrap',gap:12}}>
     {res.candidates.map((c,i)=><View key={c.template} style={{flexBasis:wide?'31%':'auto',flexGrow:1,backgroundColor:C.paper,borderWidth:1,borderColor:pick.includes(c.template)?C.green:C.line,borderRadius:14,padding:14,gap:8}}>
-     <View style={s.between}><T style={{fontFamily:'InterSemi',fontSize:15}}>{c.name}</T><Badge label={c.evidence.label} tone="amber"/></View>
+     <View style={s.between}><T style={{fontFamily:'InterSemi',fontSize:15}}>{c.name}</T><Badge label={c.evidence.label} tone={({tested_significant:'green',tested_not_significant:'neutral'} as any)[c.evidence.status]||'amber'}/></View>
      {!!c.evidence.note&&<T style={{fontSize:11,color:C.muted}}>{c.evidence.note}</T>}
+     <T style={{fontSize:10,color:C.muted}}>{c.evidence.status==='tested_significant'?'Model-priced Lab history (one IV, no skew). Past results do not guarantee future results.':c.evidence.status==='tested_not_significant'?'Tested in your Lab; the out-of-sample result does not survive the correction for everything tested.':'Model only - no reliable history for this structure. Numbers are model values at this reading.'}</T>
      <T style={{fontSize:12,color:C.muted}}>{c.recipe}{c.param!=null?` · ${c.param_label} ${c.param}`:''}</T>
      {c.legs.map((l:any,j:number)=><T key={j} style={{fontSize:12,fontVariant:['tabular-nums'] as any}}>{`${l.side==='B'?'Buy':'Sell'} ${l.lots} × ${strikeText(l.strike)} ${l.type} @ ${num(l.price)}`}</T>)}
      {c.why.map((w,j)=><View key={j} style={[s.row,{gap:6,alignItems:'flex-start'}]}><Icon name={j?'check':'target'} size={12} color={j?C.green:C.mint}/><T style={{fontSize:12,flex:1}}>{w}</T></View>)}

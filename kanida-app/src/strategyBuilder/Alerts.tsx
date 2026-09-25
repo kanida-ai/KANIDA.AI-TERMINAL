@@ -109,6 +109,7 @@ export function EventList({events,onChanged,showStrategy}:{events:AlertEvent[];o
    <View style={{flex:1,gap:2}}><T style={{fontSize:12}}>{e.message}</T>
     <T style={{fontSize:11,color:C.muted}}>{`${showStrategy&&e.strategy_name?e.strategy_name+' · ':''}${e.occurred_at.slice(0,16)} IST · ${e.kind.replace('_',' ')}`}</T></View>
    {showStrategy&&<Pressable onPress={()=>router.push({pathname:'/strategies',params:{id:e.strategy_id}} as any)}><T style={{fontSize:11,color:C.green}}>Open</T></Pressable>}
+   <Pressable accessibilityRole="button" accessibilityLabel="Adjust this strategy" onPress={()=>router.push({pathname:'/strategies',params:{id:e.strategy_id,open:'adjust'}} as any)}><T style={{fontSize:11,color:C.green}}>Adjust</T></Pressable>
    {!e.acked_at&&<Pressable accessibilityRole="button" onPress={async()=>{await alerts.ack(e.id);onChanged();}}><T style={{fontSize:11,color:C.green}}>Acknowledge</T></Pressable>}
   </View>)}
  </View>;

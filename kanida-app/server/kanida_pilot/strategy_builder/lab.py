@@ -537,6 +537,13 @@ class Lab:
    'period':[s['from'],s['to']],'schedule':{'weekday':s['weekday'],'dte':[s['dte_min'],s['dte_max']]},'runs_tried':len(same),
    'note':f"Held to expiry; decisions on {'every day' if s['weekday']=='daily' else ['Mon','Tue','Wed','Thu','Fri'][int(s['weekday'])]}, {s['dte_min']}-{s['dte_max']} days to expiry; {len(same)} run(s) of this rule tried"}
 
+ def evidence_board(self,user_id):
+  """Every completed plain backtest of this user, one BH-corrected family (slice 9)."""
+  from . import evidence as EV
+  with self.lock:
+   rows=self.c.execute("select id,spec,result,created_at from lab_runs where user_id=? and kind='backtest' and status='completed' order by created_at",(user_id,)).fetchall()
+  return EV.board([(r['id'],r['spec'],r['result'],r['created_at']) for r in rows])
+
  def adjust_evidence_for(self,user_id,template,param,rule,k):
   """The newest completed Lab run of EXACTLY this adjustment (rule and k) on EXACTLY this structure (template and
   width), held to expiry on NIFTY. Different triggers are different runs; all of them are counted."""

@@ -28,6 +28,7 @@ from fastapi import APIRouter,Body,Request
 from fastapi.responses import JSONResponse
 from ..errors import PilotError
 from ..screener.routes import _identity
+from datetime import date
 from . import discover as D
 from . import service as S
 from .market import MarketUnavailable
@@ -108,11 +109,22 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
   try:out=D.run(got,data)
   except D.DiscoverError as e:raise PilotError(400,'DISCOVER_INVALID',e.message)
   if lab and got['underlying']=='NIFTY':
-   user=me(request)
+   from . import evidence as EV
+   b=lab.evidence_board(me(request)['id'])
    for c in out['candidates']:
-    ev=lab.evidence_for(user['id'],c['template'],c['param'])
-    if ev:c['evidence']={**ev,'label':ev['label']}
+    ev=EV.for_candidate(b,c['template'],c['param'],EV.next_session_dte(got['expiry'],got['as_of']))   # counted as the Lab counts: from the next session
+    if ev:c['evidence']=ev
+   out['candidates']=EV.rank(out['candidates'])
+   out['evidence']={'tests':b['tests'],'survivors':b['survivors'],'fdr_q':b['fdr_q'],'min_oos':b['min_oos']}
+   out['basis']=('Tier 1: "Tested ✓" defined-risk rules (surviving Benjamini-Hochberg FDR 10% across every distinct rule you tested) whose out-of-sample '
+    '95% low return per ₹100 of maximum model loss is above zero, by that low. Tier 2: everything else by expiry P&L at your view divided by capital '
+    'at risk (model, at this reading). Not a forecast.')
   return out
+
+ @r.get('/api/sb/lab/evidence')
+ def evidence_board(request:Request):
+  if not lab:return {'rules':[],'tests':0,'survivors':0}
+  b=lab.evidence_board(me(request)['id']);b.pop('by_run',None);return b
 
  # --- library ---------------------------------------------------------------------------------------------------
  @r.get('/api/sb/strategies')
@@ -471,7 +483,12 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
 
  @r.get('/api/sb/lab/runs')
  def lab_runs(request:Request,strategy_id:str=''):
-  user=me(request);return {'runs':lb(lab.runs,user['id'],strategy_id or None)}
+  user=me(request);runs=lb(lab.runs,user['id'],strategy_id or None)
+  st=lab.evidence_board(user['id'])['by_run']
+  for x in runs:
+   e=st.get(x['id'])
+   if e:x['evidence']={'status':e['status'],'p':e['p'],'tests':e['tests'],'n_oos':e['n_oos'],'low':e['low'],'runs_of_rule':e['runs'],'decides':e['deciding_run']==x['id']}
+  return {'runs':runs}
 
  @r.get('/api/sb/lab/runs/{rid}')
  def lab_run(request:Request,rid:str):

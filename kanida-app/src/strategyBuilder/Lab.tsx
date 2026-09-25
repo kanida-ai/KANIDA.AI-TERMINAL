@@ -82,6 +82,7 @@ function Backtest({strategyId,preset}:{strategyId:string;preset:{template:string
    {history.map(h=><View key={h.id} style={[s.between,{borderTopWidth:1,borderColor:C.line,paddingTop:6,flexWrap:'wrap'}]}>
     <T style={{fontSize:12,flex:1}}>{`${h.spec.template}${h.spec.param!=null?` (${h.spec.param})`:''} · ${h.spec.from}→${h.spec.to} · ${istEpoch(h.created_at)}`}</T>
     <T style={{fontSize:11,color:h.result?.badge.status==='model_positive'?C.green:C.muted}}>{h.status==='completed'?h.result?.badge.label:h.status}</T>
+    {h.evidence&&<Badge label={h.evidence.status==='tested_significant'?`Tested ✓ (${h.evidence.tests} rule${h.evidence.tests===1?'':'s'} corrected)`:h.evidence.status==='tested_not_significant'?`Not significant (p=${h.evidence.p?.toFixed(3)}, ${h.evidence.tests} rules)`:`not a test (n=${h.evidence.n_oos} < 30)`} tone={h.evidence.status==='tested_significant'?'green':'neutral'}/>}
     {h.status==='completed'&&<Button label="Open" kind="outline" onPress={()=>lab.run(h.id).then(setRun)}/>}
    </View>)}</View>}
  </View>;

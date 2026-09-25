@@ -23,7 +23,7 @@ const msg=(e:any)=>e?.message||'KANIDA could not complete that.';
 type SaveState='saved'|'dirty'|'saving'|'conflict'|'error';
 type Tab='pnl'|'greeks'|'table'|'snapshots'|'paper'|'alerts'|'activity';
 
-export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean}){
+export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;openTemplate?:boolean;openAdjust?:boolean}){
  const {width}=useWindowDimensions();const wide=width>=1100;
  const [detail,setDetail]=useState<Detail|null>(null);const [error,setError]=useState('');
  const [body,setBody]=useState<Body|null>(null);const [version,setVersion]=useState(0);const [save,setSave]=useState<SaveState>('saved');
@@ -36,6 +36,7 @@ export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean
  const [st,setSt]=useState<Status|null>(null);const [tick,setTick]=useState(0);const [deps,setDeps]=useState<Deployment[]>([]);
  const [review,setReview]=useState<{open:boolean;closing?:Deployment|null;adjusting?:Deployment|null}>({open:false});
  const [adjustFor,setAdjustFor]=useState<{open:boolean;deployment?:Deployment|null}>({open:false});
+ const adjustDeep=useRef(openAdjust);
  const bell=useAlertNotifications();
  const seq=useRef(0);const saveTimer=useRef<any>(null);const anTimer=useRef<any>(null);const ctl=useRef<AbortController|null>(null);
  const versionRef=useRef(0);versionRef.current=version;
@@ -50,6 +51,10 @@ export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean
  useEffect(()=>{let live=true;const poll=()=>exec.status().then(x=>{if(live)setSt(x);}).catch(()=>{});poll();const t=setInterval(()=>{poll();setTick(n=>n+1);},10000);return()=>{live=false;clearInterval(t);};},[]);
  useEffect(()=>{if(deps.some(d=>!['closed','cancelled'].includes(d.status)))loadRuns();},[tick]);// eslint-disable-line react-hooks/exhaustive-deps
  useEffect(()=>{reload();loadRuns();sb.underlyings().then(r=>setUnderlyings(r.underlyings.map(u=>u.symbol))).catch(()=>{});},[reload,loadRuns]);
+
+ // an alert's "Adjust" link lands here: open the assistant once the strategy (and its deployments) have loaded
+ useEffect(()=>{if(!adjustDeep.current||!detail||!body?.legs?.length)return;adjustDeep.current=false;
+  setAdjustFor({open:true,deployment:deps.find(d=>d.status==='active')||null});},[detail,deps]);// eslint-disable-line react-hooks/exhaustive-deps
 
  // expiries and chain follow the draft's underlying/expiry
  useEffect(()=>{if(!body?.underlying)return;let live=true;

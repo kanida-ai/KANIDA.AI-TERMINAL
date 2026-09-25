@@ -26,8 +26,8 @@ export type PaperRun={id:string;strategy_id:string;strategy_name:string|null;sta
 export type Detail=Strategy&{snapshots:Snapshot[];activity:{kind:string;detail:string;created_at:number}[];paper:{id:string;status:string;opened_reading:string;created_at:number}[]};
 export type Template={key:string;name:string;intent:string;risk:'defined'|'unhedged';tier:string;complexity:number;legs:number;param:{name:string;label:string;default:number;variants:number[]}|null;recipe:string;use:string;loses:string};
 export type Candidate={template:string;name:string;recipe:string;risk:string;param:number|null;param_label:string|null;legs:any[];max_profit:Metric;max_loss:Metric;breakevens:number[];premium:number;
- capital_at_risk:number|null;pop:number|null;pnl_at_view:number;return_on_risk:number|null;profit_zone_share:number|null;evidence:{status:string;label:string;note?:string;runs_tried?:number};why:string[]};
-export type DiscoverResult={view:string;view_label:string;as_of:string;spot:number;expiry:string;inputs:any;considered:number;candidates:Candidate[];excluded:{reason:string;label:string;count:number}[];
+ capital_at_risk:number|null;pop:number|null;pnl_at_view:number;return_on_risk:number|null;profit_zone_share:number|null;evidence:{status:string;label:string;note?:string;runs_tried?:number;n_oos?:number;mean_oos?:number|null;ror_low?:number|null;tests?:number;runs_of_rule?:number};why:string[]};
+export type DiscoverResult={evidence?:{tests:number;survivors:number;fdr_q:number;min_oos:number};view:string;view_label:string;as_of:string;spot:number;expiry:string;inputs:any;considered:number;candidates:Candidate[];excluded:{reason:string;label:string;count:number}[];
  binding:{reason:string;label:string;suggestion:string}|null;basis:string};
 
 export type AdjustOrder={id:string;type:Kind;strike:number;side:Side;lots:number;qty:number;symbol:string;price:number;basis:string;charges:number;effect:'open'|'close'};
@@ -108,7 +108,7 @@ export const alerts={
 };
 
 export type LabStats={n:number;expectancy?:number;ci95?:[number,number];per_100_capital?:number|null;total?:number;max_drawdown?:number;worst?:number;best?:number;win_rate?:number;avg_win?:number|null;avg_loss?:number|null;avg_hold_days?:number};
-export type LabRun={id:string;strategy_id:string|null;kind:string;spec:any;status:'running'|'completed'|'failed';progress:number;error:string|null;created_at:number;finished_at:number|null;
+export type LabRun={evidence?:{status:string;p:number|null;tests:number;n_oos:number;low:number|null;runs_of_rule:number;decides:boolean};id:string;strategy_id:string|null;kind:string;spec:any;status:'running'|'completed'|'failed';progress:number;error:string|null;created_at:number;finished_at:number|null;
  result:null|{kind:string;model?:string;badge:{status:string;label:string};stats:{all:LabStats;discovery:LabStats;oos:LabStats};adjustment?:any;control:{reps:number;mean_expectancy:number|null;actual_percentile:number|null;oos_mean_expectancy?:number|null;oos_actual_percentile?:number|null};
   equity?:{day:string;equity:number;split:string}[];trades?:any[];skipped?:Record<string,number>;lot_size?:number;provenance?:any}};
 export type Replay={kind:string;entry_at?:string;points:{t:string;pnl:number}[];skipped_bars:number;last?:number;best?:number;worst?:number;coverage:Record<string,number>;note?:string;source:string;legs:{symbol:string;label:string}[];interval:string;problems:string[]};

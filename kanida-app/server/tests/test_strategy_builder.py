@@ -624,7 +624,7 @@ def test_lab_api_runs_a_job_validates_and_feeds_discover(pilot,monkeypatch):
  assert owner.get('/api/sb/lab/runs').json()['runs'][0]['id']==run['id']
  d=owner.post('/api/sb/discover',json={'underlying':'NIFTY','expiry':EXP,'view':'up','target':23300}).json()
  bcs=[c for c in d['candidates'] if c['template']=='bull_call_spread' and c['param']==4]
- if bcs:assert bcs[0]['evidence']['run_id']==run['id'] and bcs[0]['evidence']['label'].startswith('Model-tested')
+ if bcs:assert bcs[0]['evidence']['run_id']==run['id'] and bcs[0]['evidence']['status'] in ('insufficient','tested_significant','tested_not_significant','model_only')
 
 
 def test_audit_c1_no_weeklies_before_feb_2019():
@@ -1056,3 +1056,132 @@ def test_audit_adjusted_runs_do_not_report_per_100_capital():
  r=LB.backtest(lab_spec(template='short_strangle',param=p['default'] if p else None,adjust={'rule':'add_hedge_wing','k':2,'trigger_pct':0.3}),nifty,vix,65)
  assert all(v.get('per_100_capital') is None for v in r['stats'].values() if v.get('n'))
  assert 'no skew' in r['adjustment']['badge']['label'] or r['adjustment']['badge']['status']=='insufficient'
+
+
+# --- slice 9: evidence-ranked Discover (one hypothesis per rule, block bootstrap, BH FDR 10%) -------------------------
+from kanida_pilot.strategy_builder import evidence as EVB
+
+
+@pytest.fixture(autouse=True)
+def _fresh_evidence_cache():
+ EVB._CACHE.clear();yield;EVB._CACHE.clear()
+
+
+def fake_run(rid,template,param,nets,split='2024-01-01',dte=(1,7),exits=None,at=0.0,adjust=None,weekday=2,capital=5000.0,period=('2019-01-01','2026-01-01')):
+ trades=[{'entry':'2024-02-01','net':x,'capital_at_risk':capital} for x in nets]
+ trades+=[{'entry':'2023-06-01','net':-999.0,'capital_at_risk':capital}]                   # a discovery trade: never in the test
+ spec={'template':template,'param':param,'weekday':weekday,'dte_min':dte[0],'dte_max':dte[1],'target_pct':None,'stop_pct':None,'exit_dte':None,
+  'slippage':0.005,'from':period[0],'to':period[1],'split':split,'adjust':adjust,**(exits or {})}
+ return (rid,json.dumps(spec),json.dumps({'kind':'backtest','trades':trades}),at)
+
+
+def noisy(seed,n=40,mu=0.0,sd=300.0):
+ import random as _r
+ g=_r.Random(seed);return [round(g.gauss(mu,sd),2) for _ in range(n)]
+
+
+def edge(wins,n=40,win=4000.0,loss=-5000.0,seed=0):
+ """Debit-spread-like P&L on 5000 max loss: `wins` of n trades win, the rest lose the maximum (a well-observed tail)."""
+ import random as _r
+ xs=[win]*wins+[loss]*(n-wins);_r.Random(seed).shuffle(xs);return xs
+
+
+MARGINAL=edge(29)                       # p about 0.03 on its own
+
+
+def test_board_one_hypothesis_per_rule_and_corrects_for_every_rule():
+ strong=fake_run('strong','bull_call_spread',4,edge(32))
+ marginal=fake_run('marginal','iron_condor',4,MARGINAL)
+ alone=EVB.board([strong,marginal])
+ assert alone['by_run']['strong']['status']=='tested_significant' and alone['by_run']['strong']['n_oos']==40   # discovery trade excluded
+ assert alone['by_run']['marginal']['status']=='tested_significant'
+ nulls=[fake_run(f'null{i}','bear_put_spread',i,noisy(10+i)) for i in range(30)]
+ b=EVB.board([strong,marginal]+nulls)
+ assert b['tests']==32 and b['by_run']['strong']['status']=='tested_significant'
+ assert b['by_run']['marginal']['status']=='tested_not_significant'                    # not after 30 more rules
+ assert b['survivors']<=2
+ few=EVB.board([fake_run('few','bull_call_spread',4,noisy(3,n=12,mu=500))])
+ assert few['rules'][0]['status']=='insufficient' and few['tests']==0
+ assert EVB.board([fake_run('adj','short_strangle',None,noisy(4,mu=500),adjust={'rule':'add_hedge_wing','k':2,'trigger_pct':0.3})])['rules']==[]
+
+
+def test_audit_rerunning_a_rule_never_pads_the_family_or_improves_it():
+ nulls=[fake_run(f'n{i}','bear_put_spread',i,noisy(40+i)) for i in range(9)]
+ base=EVB.board([fake_run('m0','iron_condor',4,MARGINAL)]+nulls)
+ dup=EVB.board([fake_run(f'm{j}','iron_condor',4,MARGINAL,at=j) for j in range(10)]+nulls)
+ assert dup['tests']==base['tests']==10 and dup['survivors']==base['survivors']                           # 9 copies change nothing
+ assert dup['by_run']['m9']['runs']==10
+ # moving the split/period until one run looks great: the most conservative run still decides
+ hack=EVB.board([fake_run('first','iron_condor',4,noisy(5,mu=0)),fake_run('lucky','iron_condor',4,edge(34),split='2025-01-01',period=('2021-01-01','2026-01-01'),at=9)])
+ r=hack['by_run']['lucky']
+ assert r['deciding_run']=='first' and r['status']=='tested_not_significant'
+
+
+def test_audit_skewed_short_premium_pnl_is_not_a_false_positive():
+ # mean ~0: +100 most of the time, a large loss 1 time in 20 (short-premium shape)
+ import random as _r
+ fp=0
+ for sd in range(40):
+  g=_r.Random(sd);nets=[100.0+g.gauss(0,20) if g.random()>0.05 else -1900.0 for _ in range(40)]
+  EVB._CACHE.clear()
+  if EVB.board([fake_run(f's{sd}','iron_condor',4,nets,capital=2000.0)])['rules'][0]['status']=='tested_significant':fp+=1
+ assert fp<=4                                                                               # about the nominal rate, not 13%
+
+
+def test_bh_step_up_is_rank_based_and_p_never_zero():
+ b=EVB.board([fake_run('allplus','bull_call_spread',4,[5.0]*40)])
+ r=b['rules'][0]
+ assert r['p']==0.0 and r['status']=='tested_not_significant' and r['reason']=='tail_stress'   # rank-based BH passes p=0; the unseen tail does not
+ naked=EVB.board([fake_run('nk','short_straddle',None,edge(34),capital=None)])['rules'][0]
+ assert naked['status']=='tested_not_significant' and naked['reason']=='tail_undefined'
+ def fake(pv):
+  return {'rule':f'r{pv}','template':'x','param':pv,'weekday':2,'dte':[1,7],'exits':{},'slippage':0.005,'period':['a','b'],'split':'s',
+   'created_at':0,'n_oos':40,'mean_oos':1.0,'defined_risk':True,'unit':'u','p':pv,'low':1.0,'mean_stat':1.0,'stress':1.0,'run_id':f'r{pv}'}
+ orig=EVB.entry
+ try:
+  EVB.entry=lambda rid,spec,res,at:fake(float(rid))
+  b=EVB.board([(str(p),{'template':'x'},{'kind':'backtest'},0) for p in (0.001,0.02,0.03,0.5)])
+ finally:EVB.entry=orig
+ # m=4, q=0.1: thresholds .025 .05 .075 .1 -> ranks 1-3 pass (step-up)
+ assert {r['p']:r['status'] for r in b['rules']}=={0.001:'tested_significant',0.02:'tested_significant',0.03:'tested_significant',0.5:'tested_not_significant'}
+
+
+def test_audit_dte_is_counted_from_the_next_session():
+ assert EVB.next_session_dte('2026-10-01','2026-09-30 11:00:00')==0                         # Wed reading, Thu expiry: the Lab would enter Thu
+ assert EVB.next_session_dte('2026-09-29','2026-09-25 11:00:00')==1                         # Fri reading -> Mon session
+ b=EVB.board([fake_run('w','bull_call_spread',4,edge(32))])
+ assert EVB.for_candidate(b,'bull_call_spread',4,0)['status']=='model_only'
+
+
+def test_candidate_evidence_and_tiers():
+ b=EVB.board([fake_run('wed','bull_call_spread',4,edge(32)),fake_run('stopped','bull_call_spread',4,noisy(6,mu=900),exits={'stop_pct':50}),
+  fake_run('ic','iron_condor',4,noisy(7,mu=-50)),fake_run('naked','short_straddle',None,edge(34),capital=None)])
+ ev=EVB.for_candidate(b,'bull_call_spread',4,6)
+ assert ev['run_id']=='wed' and ev['status']=='tested_significant' and 'Wed decisions' in ev['label'] and 'per ₹100' in ev['label']
+ far=EVB.for_candidate(b,'bull_call_spread',4,20)
+ assert far['status']=='model_only' and 'conditions differ' in far['label']
+ naked=EVB.for_candidate(b,'short_straddle',None,6)
+ assert naked['defined_risk'] is False
+ cards=[{'template':'long_call','evidence':{'status':'model_only'}},{'template':'iron_condor','evidence':EVB.for_candidate(b,'iron_condor',4,6)},
+  {'template':'short_straddle','evidence':naked},{'template':'bull_call_spread','evidence':ev}]
+ assert [c['template'] for c in EVB.rank(cards)][0]=='bull_call_spread'
+ assert [c['template'] for c in EVB.rank(cards)][1:]==['long_call','iron_condor','short_straddle']   # undefined risk never tier 1
+
+
+def test_discover_ranks_by_corrected_evidence(live):
+ app,owner,_o,_f=live
+ lab=app.state.strategy_builder_lab
+ uid=owner.get('/api/sb/autotrade/capability').json()['engine_user'].split(':',1)[1]
+ d0=owner.post('/api/sb/discover',json={'underlying':'NIFTY','expiry':EXP,'view':'up','target':23300}).json()
+ assert d0['evidence']['tests']==0 and all(c['evidence']['status']=='model_only' for c in d0['candidates'])
+ last=d0['candidates'][-1]
+ with lab.lock:
+  r=fake_run('win',last['template'],last['param'],edge(32),at=time.time())
+  lab.c.execute("insert into lab_runs(id,user_id,kind,spec,status,result,created_at) values(?,?,?,?,?,?,?)",(r[0],uid,'backtest',r[1],'completed',r[2],r[3]));lab.c.commit()
+ d1=owner.post('/api/sb/discover',json={'underlying':'NIFTY','expiry':EXP,'view':'up','target':23300}).json()
+ assert d1['evidence']=={'tests':1,'survivors':1,'fdr_q':0.1,'min_oos':30}
+ assert d1['candidates'][0]['template']==last['template'] and d1['candidates'][0]['evidence']['status']=='tested_significant'
+ assert 'Tier 1' in d1['basis']
+ runs=owner.get('/api/sb/lab/runs').json()['runs']
+ assert any(x['id']=='win' and x['evidence']['status']=='tested_significant' and x['evidence']['decides'] for x in runs)
+ assert owner.get('/api/sb/lab/evidence').json()['survivors']==1

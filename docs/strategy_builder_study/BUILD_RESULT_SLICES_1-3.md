@@ -374,3 +374,56 @@ All three are **not significant** out of sample:
   - "Model only" badges;
   - the roll fix on a bull call spread.
 - The deployment adjust flow (delta orders, fills, positions, then close only what is held) is covered by API tests. I didn't click through it on your live pilot data.
+
+---
+
+# Slice 9 — Evidence-ranked Discover (25 Sep 2026)
+
+Owner decision: **"Evidence-ranked Discover"** (blueprint A §7.3), plus the alert → Adjust deep link.
+
+## How evidence is decided (`strategy_builder/evidence.py`)
+- **One hypothesis per rule.** A rule is (template, width, decision weekday, DTE range, exits, slippage). Its p is the **maximum** over all its runs, so re-running or moving the split can't improve it, and duplicates can't pad the family.
+- **The test:** H0 is "out-of-sample expectancy after costs ≤ 0", on each run's stored OOS trades; n_oos ≥ 30 is required to count as a test.
+- **The p-value:** Johnson's skew-adjusted t. A plain t-test and even a block bootstrap over-reject on skewed option P&L: in simulation, 13–17% at a nominal 5–10%.
+- **Tail stress** (defined risk only): when losses of at least 50% of the maximum loss appear fewer than 5 times, their frequency is raised to its 95% upper bound (Wilson), and the mean must stay above zero. A sample that simply never saw the rare max-loss trade can't earn a badge.
+  - Simulated null pass rates with both guards stay at or below 11% at FDR 10%, for credit structures with 2–5% tails, debit 50/50 and normal P&L.
+- **Undefined-risk** structures are never "Tested ✓".
+- **Correction:** Benjamini–Hochberg at FDR 10% (rank-based step-up) across **every distinct rule** the user tested. Adjustment runs are their own Bonferroni family (slice 8).
+- **Ranking statistic:** return per ₹100 of maximum model loss. The ranking uses its moving-block-bootstrap 95% low, which keeps the autocorrelation of sequential trades.
+
+## Discover
+- **Card evidence:** the rule Discover shows (template, width, held to expiry). Only schedules whose DTE range covers this expiry apply, with DTE counted **from the next session**, as the Lab counts it. The most conservative of them decides.
+- **Labels:** the label names the decision weekday. The note gives the runs, the number of rules corrected together, and "the Lab placed strikes by India VIX; this card uses today's chain".
+- **Ranking — a stated deviation from the blueprint's single sort:**
+  - **Tier 1:** "Tested ✓" defined-risk rules with an OOS 95% low above zero, by that low.
+  - **Tier 2:** everything else, in the model order.
+  - This way, weak or negative evidence never outranks the model order.
+- **Summary line:** "N rule tests in your Lab; k survive the 10% false-discovery correction". The cards carry fixed honesty copy (§7.5).
+- **Lab:** the run history shows each run's board status. `GET /api/sb/lab/evidence` returns the whole board.
+- **Templates:** a Discover-created strategy now keeps its template width, so its evidence can match later.
+
+## Alert → Adjust
+Each fired alert has an **Adjust** link. It opens the strategy with the adjustment assistant already open (using its active paper deployment when there is one).
+
+## Quant audit (dev-quant-auditor) and fixes
+The verdict was "not approvable as is", with two false-"Tested ✓" routes reproduced. All nine findings are fixed:
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 HIGH | Re-running the same rule inflated BH (9 copies turned 1 null into 12 survivors) | One hypothesis per rule; m = distinct rules |
+| 2 HIGH | "Newest run" allowed p-hacking via split/period | The most conservative run of the rule decides |
+| 3 HIGH | The t-test over-rejects on skewed short-premium P&L | Johnson skew-adjusted t, plus a tail stress for under-observed max-loss events; undefined risk is never badged |
+| 4 MED | The badge and the ranking used different statistics | One per-trade series (return per ₹100 of max loss); tier 1 needs a positive low |
+| 5 MED | DTE counted from the reading, not the Lab's next-session entry | `next_session_dte` |
+| 6 MED | Undefined-risk rows sat in tier 1 with no normalised figure | Excluded from tier 1; the copy says "per ₹100 of maximum model loss" |
+| 7 MED | Weekday and strike placement differences were hidden | The weekday is in the label; the strike-placement note is on every card |
+| 8 LOW | `cut > 0` rejected p = 0 survivors | Rank-based BH |
+| 9 LOW | The board was recomputed per request | Per-run cache (completed runs never change) |
+
+## Verified
+- The pilot suite passes: 625 passed, 1 skipped (9 new evidence tests: per-rule grouping, re-run immunity, skew false-positive guard, exact BH step-up, p = 0, next-session DTE, tiers, Discover integration).
+- **Browser (live Kite, 11:59 IST):**
+  - the Discover summary ("1 rule test… 0 survive") and the tier basis;
+  - the honest "Model only" copy;
+  - the alert "Adjust" link opens the assistant.
+- **Real Lab:** the one existing run (iron condor 50%/100%, n_oos = 207) is **not significant** (p = 0.16, 95% low −2.7 per ₹100). It doesn't attach to Discover cards anyway, because its exits make it a different rule.

@@ -18,7 +18,7 @@ import {inr,istStamp,num,signed} from './format';
 
 export function StrategiesTab(){
  const p=useLocalSearchParams();const id=String(p.id||'');const view=String(p.view||'');
- if(id)return <Builder key={id} id={id} openTemplate={p.open==='template'}/>;
+ if(id)return <Builder key={id} id={id} openTemplate={p.open==='template'} openAdjust={p.open==='adjust'}/>;
  if(view==='discover')return <Discover/>;
  if(view==='paper')return <PaperRuns/>;
  if(view==='alerts')return <AlertsCenter/>;
