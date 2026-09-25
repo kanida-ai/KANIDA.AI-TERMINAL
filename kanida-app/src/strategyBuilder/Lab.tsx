@@ -18,7 +18,7 @@ const msg=(e:any)=>e?.message||'KANIDA could not complete that.';
 export function LabPage(){
  const p=useLocalSearchParams();const strategyId=String(p.strategy||'');
  const {width}=useWindowDimensions();const wide=width>=1000;
- const [mode,setMode]=useState<'backtest'|'replay'>(String(p.mode||'')==='replay'&&strategyId?'replay':'backtest');
+ const [mode,setMode]=useState<'backtest'|'replay'|'experiments'>(String(p.mode||'')==='replay'&&strategyId?'replay':String(p.mode||'')==='experiments'?'experiments':'backtest');
  return <View style={{padding:wide?24:14,gap:16,maxWidth:1200,width:'100%',alignSelf:'center'}}>
   <View style={[s.row,{gap:8,flexWrap:'wrap'}]}>
    <Button label={strategyId?'Back to strategy':'My Strategies'} icon="chevron-left" kind="outline" onPress={()=>router.replace((strategyId?{pathname:'/strategies',params:{id:strategyId}}:'/strategies') as any)}/></View>
@@ -26,8 +26,9 @@ export function LabPage(){
    <T style={{fontSize:13,color:C.muted}}>Replay shows how exact contracts traded. A backtest asks whether a rule would have made money - with modelled option prices, costs on every fill, and an out-of-sample check.</T></View>
   <View style={[s.row,{gap:8}]}><Chip label="Rule backtest (model-priced)" active={mode==='backtest'} onPress={()=>setMode('backtest')}/>
    <Chip label="Replay this strategy's contracts" active={mode==='replay'} onPress={()=>strategyId&&setMode('replay')}/>
+   <Chip label="Experiments (pre-registered grids)" active={mode==='experiments'} onPress={()=>setMode('experiments')}/>
    {!strategyId&&<T style={{fontSize:11,color:C.muted}}>Open the Lab from a strategy to replay its contracts.</T>}</View>
-  {mode==='backtest'?<Backtest strategyId={strategyId} preset={{template:String(p.template||''),param:p.param!=null&&p.param!==''?Number(p.param):undefined}}/>:<ReplayView strategyId={strategyId}/>}
+  {mode==='experiments'?<Experiments/>:mode==='backtest'?<Backtest strategyId={strategyId} preset={{template:String(p.template||''),param:p.param!=null&&p.param!==''?Number(p.param):undefined}}/>:<ReplayView strategyId={strategyId}/>}
  </View>;
 }
 
@@ -186,5 +187,29 @@ function AdjustmentBlock({a}:{a:any}){
   <View>{[['','Triggered','Improvement / triggered trade','95% CI','Helped / hurt'],row('Discovery',imp.discovery),row('Out-of-sample',imp.oos),row('All',imp.all)]
    .map((rw,i)=><View key={i} style={[s.row,{gap:6,borderTopWidth:i?1:0,borderColor:C.line,paddingVertical:5}]}>{rw.map((c,j)=><T key={j} style={{flex:j===3?2:j?1:1.2,fontSize:i?12:10,color:i?C.ink:C.muted,textAlign:j?'right':'left',fontVariant:['tabular-nums'] as any}}>{c}</T>)}</View>)}</View>
   <T style={{fontSize:11,color:C.muted}}>Paired: each adjusted trade against its twin without the adjustment (same entry and exit days). Untriggered trades are identical, so only triggered trades are compared. The badge reads the out-of-sample 95% interval and needs 30 out-of-sample triggers.</T>
+ </View>;
+}
+
+const WD=['Mon','Tue','Wed','Thu','Fri'];
+const ST:Record<string,[string,any]>={tested_significant:['Tested ✓','green'],tested_not_significant:['Not significant','neutral'],insufficient:['Too few trades','amber']};
+function Experiments(){
+ const [list,setList]=useState<any[]|null>(null);const [b,setB]=useState<any>(null);const [error,setError]=useState('');const [show,setShow]=useState(60);
+ useEffect(()=>{lab.batches().then(r=>{setList(r.batches);if(r.batches[0])lab.batch(r.batches[0].id).then(setB).catch(e=>setError(msg(e)));}).catch(e=>setError(msg(e)));},[]);
+ if(error)return <T style={{color:C.red}}>{error}</T>;
+ if(!list)return <Loading/>;
+ if(!list.length)return <T style={{color:C.muted,fontSize:12}}>No experiment batch has run yet.</T>;
+ return <View style={{gap:12}}>
+  <View style={[s.row,{gap:6,flexWrap:'wrap'}]}>{list.map(x=><Chip key={x.id} label={`${x.name} · ${x.planned} rules`} active={b?.id===x.id} onPress={()=>lab.batch(x.id).then(setB)}/>)}</View>
+  {b&&<View style={{backgroundColor:C.paper,borderWidth:1,borderColor:C.line,borderRadius:14,padding:14,gap:8}}>
+   <T style={{fontFamily:'InterSemi',fontSize:15}}>{b.name}</T>
+   <T style={{fontSize:12,color:C.muted}}>{b.grid.why}</T>
+   <T style={{fontSize:12}}>{`Pre-registered ${istEpoch(b.created_at)} · plan hash ${b.plan_hash.slice(0,12)} · ${b.planned} rules planned, ${b.done} completed, ${b.failed} failed · ${b.grid.underlying} ${b.grid.from}→${b.grid.to||'latest'}, out of sample from ${b.grid.split}, slippage ${b.grid.slippage_pct}%`}</T>
+   <View style={[s.row,{gap:8,flexWrap:'wrap'}]}>{Object.entries(b.counts).map(([k,v])=><Badge key={k} label={`${ST[k][0]}: ${v}`} tone={ST[k][1]}/>)}</View>
+   <T style={{fontSize:11,color:C.muted}}>{`Every rule of the batch is listed. Each is one hypothesis in the ${b.grid.underlying} family (${b.family?.tests??0} rules tested in your Lab), corrected together with Benjamini-Hochberg at FDR 10%, with Johnson's skew-adjusted test and a tail stress for rarely-seen maximum losses. Model-priced (India VIX, no skew).`}</T>
+   <View>{[['Status','Structure','Decide','DTE','OOS n','Mean ₹/trade','p','95% low','Why'],...b.rules.slice(0,show).map((r:any)=>[ST[r.status][0],`${r.template.replace(/_/g,' ')}${r.param!=null?` ${r.param}`:''}`,r.weekday==='daily'?'daily':WD[r.weekday],`${r.dte[0]}-${r.dte[1]}`,String(r.n_oos),r.mean_oos==null?'—':signed(r.mean_oos),r.p==null?'—':r.p.toFixed(4),r.low==null?'—':`${r.low>0?'+':''}${r.low.toFixed(2)}`,r.reason?String(r.reason).replace(/_/g,' '):''])]
+    .map((row:string[],i:number)=><View key={i} style={[s.row,{gap:6,borderTopWidth:i?1:0,borderColor:C.line,paddingVertical:4}]}>{row.map((c:string,j:number)=><T key={j} style={{flex:[1.1,1.8,.6,.6,.6,1,.7,.8,1.2][j],fontSize:i?11:10,color:i?(j===0&&c==='Tested ✓'?C.green:C.ink):C.muted,textAlign:j>=4&&j<=7?'right':'left',fontVariant:['tabular-nums'] as any}}>{c}</T>)}</View>)}</View>
+   {b.rules.length>show&&<Button label={`Show all ${b.rules.length}`} kind="outline" onPress={()=>setShow(10000)}/>}
+   {!!b.failed_runs.length&&<T style={{fontSize:11,color:C.red}}>{`Failed runs: ${b.failed_runs.map((f:any)=>f.error).join('; ')}`}</T>}
+  </View>}
  </View>;
 }

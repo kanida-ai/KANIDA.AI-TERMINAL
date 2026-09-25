@@ -112,14 +112,28 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
    from . import evidence as EV
    b=lab.evidence_board(me(request)['id'])
    for c in out['candidates']:
-    ev=EV.for_candidate(b,c['template'],c['param'],EV.next_session_dte(got['expiry'],got['as_of']))   # counted as the Lab counts: from the next session
+    ev=EV.for_candidate(b,c['template'],c['param'],EV.next_session_dte(got['expiry'],got['as_of']),got['underlying'])   # counted as the Lab counts: from the next session
     if ev:c['evidence']=ev
    out['candidates']=EV.rank(out['candidates'])
-   out['evidence']={'tests':b['tests'],'survivors':b['survivors'],'fdr_q':b['fdr_q'],'min_oos':b['min_oos']}
+   fam=b['families'].get(got['underlying'],{'tests':0,'survivors':0})
+   out['evidence']={'tests':fam['tests'],'survivors':fam['survivors'],'fdr_q':b['fdr_q'],'min_oos':b['min_oos']}
    out['basis']=('Tier 1: "Tested ✓" defined-risk rules (surviving Benjamini-Hochberg FDR 10% across every distinct rule you tested) whose out-of-sample '
     '95% low return per ₹100 of maximum model loss is above zero, by that low. Tier 2: everything else by expiry P&L at your view divided by capital '
     'at risk (model, at this reading). Not a forecast.')
   return out
+
+ @r.get('/api/sb/lab/batches')
+ def lab_batches(request:Request):
+  if not lab:return {'batches':[]}
+  from . import experiments as XP
+  return {'batches':XP.batches(lab,me(request)['id']),'grids':{k:{kk:v[kk] for kk in ('name','underlying','why')} for k,v in XP.GRIDS.items()}}
+
+ @r.get('/api/sb/lab/batches/{bid}')
+ def lab_batch(request:Request,bid:str):
+  from . import experiments as XP
+  b=XP.batch(lab,me(request)['id'],bid) if lab else None
+  if not b:raise PilotError(404,'BATCH_NOT_FOUND','There is no such experiment batch.')
+  return b
 
  @r.get('/api/sb/lab/evidence')
  def evidence_board(request:Request):

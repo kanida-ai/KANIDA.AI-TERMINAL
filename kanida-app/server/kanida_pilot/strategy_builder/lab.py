@@ -501,15 +501,20 @@ class Lab:
    self.c.execute('insert into lab_runs values(?,?,?,?,?,?,?,?,?,?,?)',(rid,user_id,strategy_id,'backtest',json.dumps(spec),'running',0,None,None,time.time(),None));self.c.commit()
   def work():
    try:
-    special=self.daily.special_sessions()
-    nifty=clean_series(self.daily.series('NIFTY 50'),special);vix=clean_series(self.daily.series('INDIA VIX'),special)
-    if not nifty['days']:raise LabError(503,'NO_HISTORY','No NIFTY 50 daily history is readable on this machine.')
+    nifty,vix=self.series_for(spec.get('underlying','NIFTY'))
     res=backtest(spec,nifty,vix,self.lot_size(),progress=lambda p:self._save(rid,progress=round(p,2)))
     self._save(rid,status='completed',progress=1.0,result=res,finished_at=time.time())
    except Exception as e:  # noqa: BLE001 - a failed run is a state with its reason, never a partial 'result'
     log.exception('lab run failed');self._save(rid,status='failed',error=getattr(e,'message',None) or type(e).__name__,finished_at=time.time())
   threading.Thread(target=work,daemon=True,name=f'lab-{rid}').start()
   return self.run(user_id,rid)
+
+ def series_for(self,underlying):
+  """(underlying daily series, volatility series in VIX points) - both special-session cleaned, point in time."""
+  special=self.daily.special_sessions()
+  nifty=clean_series(self.daily.series('NIFTY 50'),special);vix=clean_series(self.daily.series('INDIA VIX'),special)
+  if not nifty['days']:raise LabError(503,'NO_HISTORY','No NIFTY 50 daily history is readable on this machine.')
+  return nifty,vix
 
  def run(self,user_id,rid,full=True):
   with self.lock:r=self.c.execute('select * from lab_runs where id=? and user_id=?',(rid,user_id)).fetchone()

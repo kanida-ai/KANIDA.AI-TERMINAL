@@ -114,6 +114,8 @@ export type LabRun={evidence?:{status:string;p:number|null;tests:number;n_oos:nu
 export type Replay={kind:string;entry_at?:string;points:{t:string;pnl:number}[];skipped_bars:number;last?:number;best?:number;worst?:number;coverage:Record<string,number>;note?:string;source:string;legs:{symbol:string;label:string}[];interval:string;problems:string[]};
 export const lab={
  start:(spec:any)=>api('/api/sb/lab/backtests',spec) as Promise<LabRun>,
+ batches:()=>api('/api/sb/lab/batches') as Promise<{batches:any[];grids:Record<string,{name:string;underlying:string;why:string}>}>,
+ batch:(id:string)=>api(`/api/sb/lab/batches/${id}`) as Promise<any>,
  runs:(strategyId?:string)=>api(`/api/sb/lab/runs${strategyId?`?strategy_id=${strategyId}`:''}`) as Promise<{runs:LabRun[]}>,
  run:(id:string)=>api(`/api/sb/lab/runs/${id}`) as Promise<LabRun>,
  replay:(strategyId:string,interval:string,days:number)=>api(`/api/sb/strategies/${strategyId}/replay`,{interval,days}) as Promise<Replay>,

@@ -63,7 +63,7 @@ def tail_stress(ror:List[float])->float:
 
 
 def rule_key(spec:Dict[str,Any])->str:
- return json.dumps([spec['template'],spec.get('param'),spec['weekday'],spec['dte_min'],spec['dte_max'],
+ return json.dumps([spec.get('underlying','NIFTY'),spec['template'],spec.get('param'),spec['weekday'],spec['dte_min'],spec['dte_max'],
   spec.get('target_pct'),spec.get('stop_pct'),spec.get('exit_dte'),spec.get('slippage')],default=str)
 
 
@@ -72,7 +72,7 @@ def entry(run_id:str,spec:Dict[str,Any],result:Dict[str,Any],created_at:float)->
  split=spec['split'];oos=[t for t in (result.get('trades') or []) if t['entry']>=split]
  defined=bool(oos) and all(t.get('capital_at_risk') for t in oos)
  series=[t['net']/t['capital_at_risk']*100 for t in oos] if defined else [t['net'] for t in oos]
- e={'run_id':run_id,'rule':rule_key(spec),'template':spec['template'],'param':spec.get('param'),'weekday':spec['weekday'],
+ e={'run_id':run_id,'rule':rule_key(spec),'underlying':spec.get('underlying','NIFTY'),'template':spec['template'],'param':spec.get('param'),'weekday':spec['weekday'],
   'dte':[spec['dte_min'],spec['dte_max']],'exits':{k:spec.get(k) for k in ('target_pct','stop_pct','exit_dte')},
   'slippage':spec.get('slippage'),'period':[spec['from'],spec['to']],'split':split,'created_at':created_at,
   'n_oos':len(oos),'mean_oos':round(sum(t['net'] for t in oos)/len(oos),2) if oos else None,
@@ -102,16 +102,18 @@ def board(rows)->Dict[str,Any]:
   tested=[e for e in rs if e['p'] is not None]
   worst=max(tested,key=lambda e:(e['p'],-(e['low'] if e['low'] is not None else 0))) if tested else None   # the most conservative run decides
   base=rs[0]
-  out.append({'rule':key,'template':base['template'],'param':base['param'],'weekday':base['weekday'],'dte':base['dte'],'exits':base['exits'],
+  out.append({'rule':key,'underlying':base['underlying'],'template':base['template'],'param':base['param'],'weekday':base['weekday'],'dte':base['dte'],'exits':base['exits'],
    'slippage':base['slippage'],'runs':len(rs),'tested_runs':len(tested),'run_ids':[e['run_id'] for e in rs],
    'deciding_run':worst['run_id'] if worst else None,'p':worst['p'] if worst else None,'low':worst['low'] if worst else None,
    'mean_stat':worst['mean_stat'] if worst else None,'stress':worst['stress'] if worst else None,'n_oos':worst['n_oos'] if worst else max(e['n_oos'] for e in rs),
    'mean_oos':worst['mean_oos'] if worst else None,'defined_risk':worst['defined_risk'] if worst else base['defined_risk'],
    'unit':(worst or base)['unit'],'latest':max(e['created_at'] for e in rs)})
- tests=sorted([r for r in out if r['p'] is not None],key=lambda r:r['p']);m=len(tests);k=0
- for i,r in enumerate(tests,1):
-  if r['p']<=i/m*FDR_Q:k=i                                     # BH step-up: the largest rank that passes
- passed={id(r) for r in tests[:k]}
+ passed=set();fam_m={}
+ for u in sorted({r['underlying'] for r in out}):              # one family per underlying: NIFTY rules never lift stock rules
+  tests=sorted([r for r in out if r['p'] is not None and r['underlying']==u],key=lambda r:r['p']);m=len(tests);k=0
+  for i,r in enumerate(tests,1):
+   if r['p']<=i/m*FDR_Q:k=i                                    # BH step-up: the largest rank that passes
+  passed|={id(r) for r in tests[:k]};fam_m[u]=m
  for r in out:
   r['reason']=None
   if r['p'] is None:r['status']='insufficient'
@@ -119,9 +121,11 @@ def board(rows)->Dict[str,Any]:
   elif not r['defined_risk']:r['status']='tested_not_significant';r['reason']='tail_undefined'
   elif (r['stress'] or 0)<=0:r['status']='tested_not_significant';r['reason']='tail_stress'
   else:r['status']='tested_significant'
-  r['tests']=m
+  r['tests']=fam_m.get(r['underlying'],0)
  by_run={rid:r for r in out for rid in r['run_ids']}
- return {'rules':out,'by_run':by_run,'tests':m,'runs':len(runs),'survivors':sum(1 for r in out if r['status']=='tested_significant'),'fdr_q':FDR_Q,'min_oos':MIN_OOS}
+ fams={u:{'tests':fam_m.get(u,0),'rules':sum(1 for r in out if r['underlying']==u),'survivors':sum(1 for r in out if r['underlying']==u and r['status']=='tested_significant')} for u in {r['underlying'] for r in out}}
+ n=fams.get('NIFTY',{'tests':0,'survivors':0})
+ return {'rules':out,'by_run':by_run,'families':fams,'tests':n['tests'],'runs':len(runs),'survivors':n['survivors'],'fdr_q':FDR_Q,'min_oos':MIN_OOS}
 
 
 def next_session_dte(expiry:str,as_of:str)->int:
@@ -132,17 +136,17 @@ def next_session_dte(expiry:str,as_of:str)->int:
  return (date.fromisoformat(expiry)-d).days
 
 
-def for_candidate(b:Dict[str,Any],template:str,param,dte:Optional[int])->Optional[Dict[str,Any]]:
+def for_candidate(b:Dict[str,Any],template:str,param,dte:Optional[int],underlying:str='NIFTY')->Optional[Dict[str,Any]]:
  """Evidence for the rule Discover shows (template, width, held to expiry). Several schedules may match; only those
  whose DTE range covers this expiry apply, and the most conservative of them decides."""
- same=[r for r in b['rules'] if r['template']==template and r['param']==param and not any(v is not None for v in r['exits'].values())]
+ same=[r for r in b['rules'] if r['underlying']==underlying and r['template']==template and r['param']==param and not any(v is not None for v in r['exits'].values())]
  if not same:return None
  fits=[r for r in same if dte is not None and r['dte'][0]<=dte<=r['dte'][1]]
- m=b['tests']
+ m=(b.get('families') or {}).get(underlying,{}).get('tests',0)
  def note(r):
   wd='every day' if r['weekday']=='daily' else WEEKDAYS[int(r['weekday'])]
   return (f"Lab rule: decisions on {wd}, {r['dte'][0]}-{r['dte'][1]} days to expiry, held to expiry, slippage {(r['slippage'] or 0)*100:.1f}%; "
-          f"{r['runs']} run(s) of it, the most conservative decides; {m} distinct rule(s) in your Lab corrected together (Benjamini-Hochberg, FDR {int(FDR_Q*100)}%). "
+          f"{r['runs']} run(s) of it, the most conservative decides; {m} distinct {underlying} rule(s) in your Lab corrected together (Benjamini-Hochberg, FDR {int(FDR_Q*100)}%). "
           "The Lab placed strikes by India VIX; this card uses today's chain.")
  if not fits:
   r=max(same,key=lambda x:x['latest'])

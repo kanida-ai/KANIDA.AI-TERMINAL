@@ -427,3 +427,20 @@ The verdict was "not approvable as is", with two false-"Tested ✓" routes repro
   - the honest "Model only" copy;
   - the alert "Adjust" link opens the assistant.
 - **Real Lab:** the one existing run (iron condor 50%/100%, n_oos = 207) is **not significant** (p = 0.16, 95% low −2.7 per ₹100). It doesn't attach to Discover cards anyway, because its exits make it a different rule.
+
+---
+
+# Evidence expansion, step 1 — the pre-registered NIFTY experiment (25 Sep 2026)
+
+- **`experiments.py`:** a grid is expanded into its exact rule list, **hashed and written before anything runs**, then run once in parallel. Every rule is reported, including failures.
+  - A new grid is a new batch; nothing is re-run to replace results.
+  - CLI: `python -m kanida_pilot.strategy_builder.experiments --db var/strategy_builder.db --user <id> --grid nifty_v1`.
+  - The Lab has an **Experiments** tab: pre-registration details, counts, and every rule with its n, mean ₹/trade, p and 95% low.
+- **Evidence families are now per underlying**, so NIFTY, BANKNIFTY and each stock are corrected separately and one can never lift another.
+- **Grid `nifty_v1`:** every defined-risk template × width (32 structures) × decision weekday (5) × DTE window (1–7, 8–14, 15–35) = **480 rules**.
+  - Held to expiry, from 2019-03-01 (weekly-option era) to the end of the data, out of sample from 2023-01-02, slippage 0.5%.
+- **Result (the owner's pilot Lab, `kanida.db` to 2026-07-29):**
+  - 480 done, 0 failed in 42 s; **0 survive** the FDR 10% correction across 480 rules.
+  - The best rule, iron condor width 6 with Thursday decisions and 8–14 DTE, has n = 89, p = 0.014. Rank 1 needs p ≤ 0.1/480 ≈ 0.0002.
+  - About 15 rules have p < 0.1, against about 48 expected by chance. On average these rules lose after costs; this is not a hidden edge.
+- **Discover** still shows "Model only / not significant" everywhere, which is the honest outcome.

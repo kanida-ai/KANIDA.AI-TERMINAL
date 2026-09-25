@@ -1135,7 +1135,7 @@ def test_bh_step_up_is_rank_based_and_p_never_zero():
  naked=EVB.board([fake_run('nk','short_straddle',None,edge(34),capital=None)])['rules'][0]
  assert naked['status']=='tested_not_significant' and naked['reason']=='tail_undefined'
  def fake(pv):
-  return {'rule':f'r{pv}','template':'x','param':pv,'weekday':2,'dte':[1,7],'exits':{},'slippage':0.005,'period':['a','b'],'split':'s',
+  return {'rule':f'r{pv}','underlying':'NIFTY','template':'x','param':pv,'weekday':2,'dte':[1,7],'exits':{},'slippage':0.005,'period':['a','b'],'split':'s',
    'created_at':0,'n_oos':40,'mean_oos':1.0,'defined_risk':True,'unit':'u','p':pv,'low':1.0,'mean_stat':1.0,'stress':1.0,'run_id':f'r{pv}'}
  orig=EVB.entry
  try:
@@ -1185,3 +1185,39 @@ def test_discover_ranks_by_corrected_evidence(live):
  runs=owner.get('/api/sb/lab/runs').json()['runs']
  assert any(x['id']=='win' and x['evidence']['status']=='tested_significant' and x['evidence']['decides'] for x in runs)
  assert owner.get('/api/sb/lab/evidence').json()['survivors']==1
+
+
+# --- experiment batches (pre-registered grids) + per-underlying evidence families ---------------------------------------
+from kanida_pilot.strategy_builder import experiments as XP
+
+
+def test_nifty_grid_plan_is_the_full_preregistered_grid(pilot):
+ app,_o,_x=pilot
+ specs=XP.plan(app.state.strategy_builder_lab,XP.GRIDS['nifty_v1'])
+ assert len(specs)==480 and len({EVB.rule_key(s) for s in specs})==480                # 32 structures x 5 weekdays x 3 DTE windows, all distinct
+ assert all(s['target_pct'] is None and s['stop_pct'] is None and s['exit_dte'] is None for s in specs)   # held to expiry
+
+
+def test_run_batch_preregisters_and_reports_every_rule(pilot,monkeypatch):
+ app,owner,_x=pilot
+ lab=app.state.strategy_builder_lab
+ nifty,vix=daily_series(start='2019-01-01',n=1400)
+ monkeypatch.setattr(lab,'series_for',lambda u:(nifty,vix))
+ monkeypatch.setitem(XP.GRIDS,'tiny',{'name':'tiny','underlying':'NIFTY','templates':['bull_call_spread','iron_condor'],'weekdays':[2],
+  'dte':[[1,7]],'from':'2019-03-01','to':'2024-06-30','split':'2022-01-03','slippage_pct':0.5,'why':'test'})
+ uid=next(iter(app.state.strategy_builder_store.c.execute("select 'u-batch'")))[0]
+ out=XP.run_batch(lab,uid,'tiny',workers=2)
+ assert out['planned']==7 and out['done']+out['failed']==7 and out['status'].startswith('completed')
+ assert len(out['rules'])+len(out['failed_runs'])==7 and out['plan_hash']
+ assert sum(out['counts'].values())==len(out['rules'])
+ assert XP.batches(lab,uid)[0]['id']==out['id']
+
+
+def test_families_are_per_underlying():
+ b=EVB.board([fake_run('n1','bull_call_spread',4,edge(32)),
+  ('bn1',json.dumps({**json.loads(fake_run('x','bull_call_spread',4,edge(32))[1]),'underlying':'BANKNIFTY'}),fake_run('x','bull_call_spread',4,edge(32))[2],0.0)]+
+  [(f'bnull{i}',json.dumps({**json.loads(fake_run('y','bear_put_spread',i,noisy(60+i))[1]),'underlying':'BANKNIFTY'}),fake_run('y','bear_put_spread',i,noisy(60+i))[2],0.0) for i in range(20)])
+ assert b['families']['NIFTY']['tests']==1 and b['families']['BANKNIFTY']['tests']==21
+ assert b['by_run']['n1']['tests']==1 and b['by_run']['bn1']['tests']==21
+ assert EVB.for_candidate(b,'bull_call_spread',4,6,'NIFTY')['run_id']=='n1'
+ assert EVB.for_candidate(b,'bull_call_spread',4,6,'BANKNIFTY')['run_id']=='bn1'
