@@ -21,6 +21,7 @@ from . import analytics as A
 from . import charges as CH
 from . import service as S
 from .templates import recognise
+from . import adjust as ADJ
 
 log=logging.getLogger('strategy_builder.execution')
 IST=ZoneInfo('Asia/Kolkata')
@@ -49,6 +50,7 @@ create table if not exists intents(
  state text not null, filled_qty integer not null default 0, avg_price real, fees real not null default 0, reason text,
  created_at real not null, updated_at real not null);
 create index if not exists ix_int_dep on intents(deployment_id, state);
+create table if not exists deployment_revisions(deployment_id text not null, revision_id text not null, cause text not null, created_at real not null);
 create table if not exists dfills(
  id text primary key, intent_id text not null, deployment_id text not null, leg_id text not null, side text not null, qty integer not null,
  price real not null, fees real not null, basis text not null, quote_ts text, created_at real not null);
@@ -85,7 +87,9 @@ class Execution:
   if not status['live']:
    raise ExecError(409,'MARKET_DATA_NOT_LIVE','Paper orders fill against live quotes, and live data is unavailable: '+(status.get('reason') or ''))
   body=strategy['draft']['body']
+  target=None
   if kind=='close':body=self._close_body(deployment)
+  if kind=='adjust':target=body;body=self._adjust_body(deployment,target)
   chain,legs,problems=S.hydrate(self.market,body)
   if problems:raise ExecError(400,'UNRESOLVED_CONTRACT',problems[0])
   legs=[l for l in legs if l.get('include',True)]
@@ -132,16 +136,34 @@ class Execution:
   if kind=='close':
    st={'name':'Close: '+recognise(deployment['revision_body'].get('legs',[]))['name']}
    check('risk','Closing orders reduce exposure','pass','Buys back shorts first, then sells longs')
+  elif kind=='adjust':
+   _c,tlegs,tprob=S.hydrate(self.market,target)
+   if tprob:raise ExecError(400,'UNRESOLVED_CONTRACT',tprob[0])
+   tlegs=[l for l in tlegs if l.get('include',True)]
+   st={'name':'Adjust to: '+(recognise(tlegs)['name'] if tlegs else 'Flat')}
+   if tlegs:
+    ta=A.analyze(tlegs,chain['spot'],A.parse_ist(chain['as_of']),grid_points=3)
+    unlimited=bool((ta.get('max_loss') or {}).get('unlimited'))
+   check('risk','The adjusted position has a defined maximum loss' if not unlimited else 'The adjusted position has unlimited loss','pass' if not unlimited else 'warn',
+    'Needs explicit acknowledgement' if unlimited else 'Buys (hedges, buy-backs) are sent first; sells only after every buy fills')
+   try:
+    margin=self.market.basket_margin([{'symbol':l['symbol'],'side':l['side'],'qty':int(l['lots'])*int(l['lot_size']),'price':l['price'],'product':product} for l in tlegs]) if tlegs else {'final':0,'initial':0,'per_leg':[]}
+   except Exception as e:  # noqa: BLE001
+    check('margin','Exchange margin','warn',f'Margin unavailable ({type(e).__name__})')
+   if margin:
+    held=(deployment.get('margin') or {}).get('final') or 0
+    free=self.paper_capital(user_id)['available']+held
+    check('margin','Paper capital covers the adjusted position\'s margin','pass' if (margin['final'] or 0)<=free else 'block',f"Needs {(margin['final'] or 0):,.0f}; available {free:,.0f} (including this deployment's {held:,.0f})")
   else:
    a=A.analyze(legs,chain['spot'],A.parse_ist(chain['as_of']),grid_points=3)
    unlimited=bool((a.get('max_loss') or {}).get('unlimited'))
    check('risk','Maximum loss is defined' if not unlimited else 'Unlimited-loss structure','pass' if not unlimited else 'warn',
     'Needs explicit acknowledgement' if unlimited else f"Structural max loss {-(a.get('max_loss') or {}).get('value',0):,.0f}")
   try:
-   margin=self.market.basket_margin([{'symbol':o['symbol'],'side':o['side'],'qty':o['qty'],'price':o['limit'],'product':product} for o in orders]) if (orders and kind=='open') else None
+   if kind!='adjust':margin=self.market.basket_margin([{'symbol':o['symbol'],'side':o['side'],'qty':o['qty'],'price':o['limit'],'product':product} for o in orders]) if (orders and kind=='open') else None
   except Exception as e:  # noqa: BLE001 - margin unavailable is a stated state, never a zero
    check('margin','Exchange margin','warn',f'Margin unavailable ({type(e).__name__})')
-  if margin:
+  if margin and kind!='adjust':
    free=self.paper_capital(user_id)['available']
    need=margin['final'] or 0
    if kind=='open':check('margin','Paper capital covers the exchange margin','pass' if need<=free else 'block',f'Needs {need:,.0f}; available {free:,.0f}')
@@ -159,7 +181,7 @@ class Execution:
    'net_premium':round(sum((-1 if o['side']=='B' else 1)*o['limit']*o['qty'] for o in orders),2)}
   with self.lock:
    self.c.execute('insert into previews values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(pid,user_id,strategy['id'],strategy['draft']['version'],kind,
-    out['deployment_id'],product,json.dumps(body),json.dumps(orders),json.dumps(checks),json.dumps(margin),h,t,t+PREVIEW_TTL));self.c.commit()
+    out['deployment_id'],product,json.dumps(target if kind=='adjust' else body),json.dumps(orders),json.dumps(checks),json.dumps(margin),h,t,t+PREVIEW_TTL));self.c.commit()
   return out
 
  # --- confirm ------------------------------------------------------------------------------------------------------
@@ -176,7 +198,7 @@ class Execution:
   if not p:raise ExecError(404,'PREVIEW_NOT_FOUND','There is no such order preview.')
   if p['hash']!=preview_hash:raise ExecError(409,'PREVIEW_CHANGED','The order plan changed. Review it again.')
   if time.time()>p['expires_at']:raise ExecError(409,'PREVIEW_EXPIRED','This preview has expired - quotes move. Refresh it and review again.')
-  if p['kind']=='open' and strategy['draft']['version']!=p['draft_version']:raise ExecError(409,'PREVIEW_CHANGED','The strategy was edited after this preview. Review it again.')
+  if p['kind'] in ('open','adjust') and strategy['draft']['version']!=p['draft_version']:raise ExecError(409,'PREVIEW_CHANGED','The strategy was edited after this preview. Review it again.')
   checks=json.loads(p['checks'])
   if any(c['status']=='block' for c in checks):raise ExecError(409,'CHECKS_FAILED','A pre-trade check blocks these orders.')
   if any(c['key']=='risk' and c['status']=='warn' for c in checks) and not ack_unlimited:
@@ -191,6 +213,20 @@ class Execution:
      p['product'],preview_id,idem_key,p['margin'],t,None))
     self._intents(did,preview_id,'open',orders,t)
     self.store._log(user_id,strategy['id'],'paper_deploy',f'Paper deployment: {sum(len(o["slices"]) for o in orders)} orders created')
+    self.c.commit()
+  elif p['kind']=='adjust':
+   did=p['deployment_id']
+   with self.lock:
+    d=self.c.execute('select * from deployments where id=? and user_id=?',(did,user_id)).fetchone()
+    if not d or d['status']!='active':raise ExecError(409,'NOT_ACTIVE','Only an active deployment (no resting orders) can be adjusted.')
+   rev=self.store.snapshot(user_id,strategy['id'],'Adjustment',json.loads(p['body']),None,{})
+   with self.lock:
+    if not self.c.execute('select 1 from deployment_revisions where deployment_id=? and revision_id=?',(did,d['revision_id'])).fetchone():
+     self.c.execute('insert into deployment_revisions values(?,?,?,?)',(did,d['revision_id'],'entry',d['opened_at']))   # keep the contracts it held before
+    self.c.execute("update deployments set status='adjusting',revision_id=?,margin=? where id=? and status='active'",(rev['id'],p['margin'],did))
+    self.c.execute('insert into deployment_revisions values(?,?,?,?)',(did,rev['id'],'adjust',t))
+    self._intents(did,preview_id,'adjust',orders,t)
+    self.store._log(user_id,strategy['id'],'paper_adjust',f'Adjustment orders created for paper deployment {did[:6]}: {sum(len(o["slices"]) for o in orders)} orders')
     self.c.commit()
   else:
    did=p['deployment_id']
@@ -220,7 +256,7 @@ class Execution:
   filled earlier group stops the sequence for good - a hedge that did not complete never lets the short go out.
   Every state change is guarded by the state it expects, so a concurrent cancel is never overwritten.
   """
-  for kind in ('open','close'):
+  for kind in ('open','adjust','close'):
    with self.lock:
     groups=[r[0] for r in self.c.execute('select distinct grp from intents where deployment_id=? and kind=? order by grp',(did,kind)).fetchall()]
    for g in groups:
@@ -259,13 +295,18 @@ class Execution:
  def _roll_up(self,did):
   with self.lock:
    d=self.c.execute('select status from deployments where id=?',(did,)).fetchone()
-   rows=self.c.execute('select kind,state from intents where deployment_id=?',(did,)).fetchall()
+   rows=self.c.execute('select kind,state,preview_id from intents where deployment_id=? order by created_at,seq',(did,)).fetchall()
    if not d:return
    status=d['status']
    opens=[r['state'] for r in rows if r['kind']=='open'];closes=[r['state'] for r in rows if r['kind']=='close']
+   adjs=[r['state'] for r in rows if r['kind']=='adjust']
+   lp=[r['preview_id'] for r in rows if r['kind']=='adjust']
+   last_adj=[r['state'] for r in rows if r['kind']=='adjust' and lp and r['preview_id']==lp[-1]]
    if closes and all(s=='filled' for s in closes):status='closed'
    elif closes and any(s in OPEN_STATES for s in closes):status='closing'
    elif closes:status='attention_required'     # a close stopped part-way: a residual position remains
+   elif adjs and any(s in OPEN_STATES for s in adjs):status='adjusting'
+   elif adjs and any(s=='filled' for s in last_adj) and not all(s=='filled' for s in last_adj):status='attention_required'   # adjustment stopped part-way
    elif opens and all(s=='filled' for s in opens):status='active'
    elif any(s=='filled' for s in opens):status='partially_filled' if any(s in OPEN_STATES for s in opens) else 'attention_required'
    elif any(s in OPEN_STATES for s in opens):status='working'
@@ -289,7 +330,7 @@ class Execution:
   for f in deployment['fills']:
    p=pos.setdefault(f['leg_id'],0);pos[f['leg_id']]=p+(f['qty'] if f['side']=='B' else -f['qty'])
   body=dict(deployment['revision_body']);legs=[]
-  for l in body['legs']:
+  for l in deployment.get('leg_meta') or body['legs']:
    u=pos.get(l['id'],0)
    if not u:continue
    if not deployment.get('lot_size'):raise ExecError(409,'MARKET_DATA_NOT_LIVE','The lot size could not be read from live data.')
@@ -299,6 +340,25 @@ class Execution:
   return {**body,'legs':legs}
 
  # --- reads ------------------------------------------------------------------------------------------------------------
+ def _adjust_body(self,deployment,target):
+  """Delta legs that turn what this deployment HOLDS into the target body. No resting orders allowed."""
+  if any(i['state'] in OPEN_STATES for i in deployment['intents']):raise ExecError(409,'RESTING_ORDERS','Cancel or wait for the resting orders before adjusting.')
+  if deployment['status']!='active':raise ExecError(409,'NOT_ACTIVE','Only an active deployment can be adjusted.')
+  rb=deployment['revision_body']
+  if target.get('underlying')!=rb.get('underlying') or target.get('expiry')!=rb.get('expiry'):
+   raise ExecError(409,'NOT_SUPPORTED','An adjustment keeps the underlying and expiry (rolling out is not in this release).')
+  lot=deployment.get('lot_size')
+  if not lot:raise ExecError(409,'MARKET_DATA_NOT_LIVE','The lot size could not be read from live data.')
+  meta={l['id']:l for l in deployment['leg_meta']};held=[]
+  for p in deployment['positions']:
+   if not p['units']:continue
+   if p['units']%lot:raise ExecError(409,'PART_LOT_POSITION','The deployment holds a part-lot position; adjust it manually.')
+   m=meta[p['leg_id']];held.append({**m,'side':'B' if p['units']>0 else 'S','lots':abs(p['units'])//lot})
+  orders=ADJ.delta_orders(held,[l for l in target['legs'] if l.get('include',True)])
+  if not orders:raise ExecError(409,'NOTHING_TO_CHANGE','The strategy already matches what this deployment holds.')
+  return {**target,'legs':[{'id':o['id'],'type':o['type'],'side':o['side'],'strike':o['strike'],'lots':o['lots'],'expiry':target['expiry'],
+   'price_basis':'exec','price':None,'include':True} for o in orders]}
+
  def deployment(self,user_id,did,mark=True):
   with self.lock:
    d=self.c.execute('select * from deployments where id=? and user_id=?',(did,user_id)).fetchone()
@@ -307,6 +367,13 @@ class Execution:
    fills=[dict(r) for r in self.c.execute('select * from dfills where deployment_id=? order by created_at',(did,)).fetchall()]
   out=dict(d);out['margin']=json.loads(out['margin'] or 'null');out['intents']=intents;out['fills']=fills
   rev=self.store.revision(user_id,d['revision_id']);out['revision_body']=rev['body'] if rev else {}
+  with self.lock:
+   rids=[r[0] for r in self.c.execute('select revision_id from deployment_revisions where deployment_id=? order by created_at',(did,)).fetchall()]
+  meta_all={}
+  for rid in [d['revision_id']]+rids+[d['revision_id']]:     # every contract this deployment ever held; the current version wins
+   rb=self.store.revision(user_id,rid) if rid!=d['revision_id'] else rev
+   for l in ((rb or {}).get('body') or {}).get('legs',[]):meta_all[l['id']]=l
+  out['leg_meta']=list(meta_all.values())
   out['revision']={'id':rev['id'],'n':rev['n'],'name':rev['name']} if rev else None
   out['lot_size']=None;out['live']=LIVE_CAPABILITY
   # positions from fills, marked at live quotes
@@ -325,13 +392,13 @@ class Execution:
     chain=self.market.chain(out['revision_body']['underlying'],out['revision_body']['expiry'])
     out['lot_size']=chain['lot_size'] if chain else None
     rows={(r['strike']):r for r in (chain or {}).get('rows',[])}
-    for l in out['revision_body']['legs']:
+    for l in out['leg_meta']:
      q=(rows.get(l['strike']) or {}).get(l['type']) or {}
      marks[l['id']]={'bid':q.get('bid'),'ask':q.get('ask'),'ltp':q.get('ltp')}
    except Exception:  # noqa: BLE001
     chain=None
   legs=[];unreal=0.0;realised=0.0;fees=0.0;missing=False
-  meta={l['id']:l for l in out['revision_body'].get('legs',[])}
+  meta={l['id']:l for l in out['leg_meta']}
   for lid,p in pos.items():
    m=marks.get(lid,{});realised+=p['realised'];fees+=p['fees']
    liq=(m.get('bid') if p['units']>0 else m.get('ask')) or m.get('ltp')
@@ -357,7 +424,7 @@ class Execution:
 
  def paper_capital(self,user_id):
   with self.lock:
-   rows=self.c.execute("select margin from deployments where user_id=? and status in ('submitting','working','partially_filled','active','closing','attention_required')",(user_id,)).fetchall()
+   rows=self.c.execute("select margin from deployments where user_id=? and status in ('submitting','working','partially_filled','active','adjusting','closing','attention_required')",(user_id,)).fetchall()
   used=sum((json.loads(r['margin'] or 'null') or {}).get('final') or 0 for r in rows)
   return {'capital':PAPER_CAPITAL,'blocked':round(used,2),'available':round(PAPER_CAPITAL-used,2)}
 

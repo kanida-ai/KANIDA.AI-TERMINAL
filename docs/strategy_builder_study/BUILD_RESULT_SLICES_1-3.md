@@ -295,3 +295,82 @@ The instrument master (lot size) is not checked yet: the broker rejects wrong mu
 2. Certify Zerodha for baskets (`AUTOTRADE_STRATEGY_INTENTS_CERTIFIED=zerodha`), options (`FALCON_AUTOTRADE_OPTIONS_ENABLED=true`) and the path (`AUTOTRADE_STRATEGY_INTENTS_LIVE=true`). `FALCON_AUTOTRADE_ENABLED` is the existing master switch.
 3. Set `FALCON_OPERATOR_ARM_TOKEN` on the engine. On the pilot, set `PILOT_AUTOTRADE_URL` / `PILOT_AUTOTRADE_TOKEN` / `PILOT_AUTOTRADE_ACCOUNT`.
 4. Arm one account for a short window with 1 basket and a small max-loss cap, then send a 1-lot debit spread first.
+
+---
+
+# Slice 8 — Adjustment assistant (K12) with Lab evidence (25 Sep 2026)
+
+Owner decision: **"Adjust + Lab evidence"**. This is blueprint A's P7: each rule has a Lab run attached or shows "Model only".
+
+## Rules catalogue (`strategy_builder/adjust.py`, shared by the assistant and the Lab)
+- **The rules:**
+  - roll the tested short k strikes away (a long wing it would cross moves with it; an inner long never moves);
+  - add a hedge wing k strikes beyond each uncovered short (strangle → condor, straddle → iron butterfly);
+  - close the tested side;
+  - halve the lots (even lots only);
+  - close all.
+- **Shown as unavailable, with the reason:**
+  - roll out to the next expiry: multi-expiry is not analysed or executed;
+  - convert to a butterfly: covered by adding a wing to a straddle.
+- **"Tested"** is deterministic: the short leg closest to or furthest past the money, as a % of spot.
+
+## Assistant (`assistant.py`, the Adjust sheet from the Builder header and from each paper deployment)
+- **Inputs:** the draft, or what a paper deployment **holds**: whole lots from fills, entry prices at the fill averages.
+- **Per candidate:**
+  - the **delta orders only**, priced where they would execute (buy at the ask, sell at the bid; an LTP fallback is labelled), with charges;
+  - an **exact expiry overlay**: current position vs after = current + the delta orders at today's prices − their charges;
+  - the worst case and breakevens after;
+  - the model Δ change (shown as "Unavailable" when a leg's IV can't be solved);
+  - the Kite margin change.
+- **Evidence:**
+  - It is attached only when today matches the Lab run: the tested short is within the run's trigger, days to expiry is inside its range, and the position wasn't already adjusted.
+  - The legs must *be* the template (a stale template tag doesn't count).
+  - Otherwise the label reads "Model only – Lab conditions differ", with the reason.
+- **Applying:** the server recomputes the candidate (the client never sends legs) and writes it as a **new draft version**, with optimistic concurrency.
+- **For a deployment:** Order Review opens in **adjust mode** and shows only the delta orders.
+  - Buys (buy-backs and hedges) go first, and sells only after they fill.
+  - This needs an active deployment with no resting orders.
+  - Its position book follows every contract across revisions.
+
+## Lab (`lab.py`)
+- **What's tested:** one adjustment per trade (`adjust = {rule, k, trigger_pct}`).
+- **Timing:** the trigger is read at a close; the tested leg is **pinned** at that close; the adjustment is filled at the **next open** at model prices, with slippage and charges on every delta order.
+- **Pairing:**
+  - Adjustments are only allowed with hold-to-expiry or a time exit, so every trade has a **baseline twin** with the same entry and exit days.
+  - The evidence is the **paired improvement per triggered trade**, with a bootstrap CI, split into discovery and OOS.
+  - Untriggered trades reproduce the baseline exactly (tested).
+- **Badge:**
+  - It reads the OOS interval, needs ≥30 OOS triggers, and is **Bonferroni-corrected** for every adjustment run on that structure.
+  - It carries the "model prices, one IV – no skew" caveat.
+  - Per ₹100 at risk is suppressed for adjusted runs.
+
+## Quant audit (dev-quant-auditor) and fixes
+The audit found no look-ahead in the trigger. It confirmed that untriggered trades reproduce the baseline and that the paired, trigger-conditioned comparison is valid.
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 HIGH | Evidence was attached regardless of trigger, DTE or a prior adjustment | Evidence applies only when conditions match; otherwise "Model only – Lab conditions differ" with the reason |
+| 2 HIGH | No multiple-testing control (newest run wins) | Bonferroni across all adjustment runs on the structure; the label says "corrected for N runs tried" |
+| 3 MED | The roll also moved an inner long (a bull call spread's long) | Only a wing between the old and new short strike moves (also confirmed in the live UI) |
+| 4 MED | The tested leg was re-picked at the next open | Pinned to the close's decision |
+| 5 MED | No-skew bias, and an unrealistic strike grid | Caveat on the badge itself; the grid is capped at ±15% of spot |
+| 6 LOW | Per ₹100 at risk used the pre-adjustment risk | Suppressed for adjusted runs |
+| 7 LOW | A stale template tag could earn evidence | The legs must be exactly the template |
+| 8 LOW | A breakeven exactly at the last evaluated point was missed | Fixed |
+
+## First real results (kanida.db 2019-03-01 → 2026-07-29; Wednesday decisions, 1–7 DTE; trigger 0.3%; OOS from 2023-01-02)
+All three are **not significant** out of sample:
+- **Short strangle, add wing +2:** 84 of 213 trades triggered (46 OOS). OOS mean +₹441 per triggered trade, CI −₹1,858…+₹2,785; helped 13, hurt 33.
+- **Short strangle, roll +2:** OOS mean +₹194, CI −₹535…+₹908 (24 helped / 22 hurt).
+- **Iron condor, close the tested side:** OOS mean +₹533, CI −₹682…+₹1,837.
+
+## Verified
+- The pilot suite passes: 618 passed, 1 skipped (20 new adjustment and audit tests).
+- **In the browser against live Kite (11:45 IST):**
+  - tested-leg detection;
+  - the overlay;
+  - bid/ask delta orders with charges;
+  - the Kite margin change;
+  - "Model only" badges;
+  - the roll fix on a bull call spread.
+- The deployment adjust flow (delta orders, fills, positions, then close only what is held) is covered by API tests. I didn't click through it on your live pilot data.

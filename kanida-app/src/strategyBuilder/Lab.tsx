@@ -35,6 +35,7 @@ function Backtest({strategyId,preset}:{strategyId:string;preset:{template:string
  const [tpls,setTpls]=useState<Template[]>([]);const [tpl,setTpl]=useState(preset.template||'iron_condor');const [param,setParam]=useState<number|null>(preset.param??null);
  const [weekday,setWeekday]=useState('2');const [f,setF]=useState<Record<string,string>>({dte_min:'1',dte_max:'7',target_pct:'',stop_pct:'',exit_dte:'',from:'2016-01-01',to:'',split:'',slippage_pct:'0.5'});
  const [run,setRun]=useState<LabRun|null>(null);const [error,setError]=useState('');const [history,setHistory]=useState<LabRun[]>([]);
+ const [adj,setAdj]=useState({rule:'',k:'2',trigger_pct:'0.3'});
  useEffect(()=>{sb.templates().then(r=>setTpls(r.templates)).catch(()=>{});lab.runs(strategyId||undefined).then(r=>setHistory(r.runs)).catch(()=>{});},[strategyId]);
  const t=tpls.find(x=>x.key===tpl);
  useEffect(()=>{if(t&&t.param&&(param==null||!t.param.variants.includes(param)))setParam(t.param.default);if(t&&!t.param)setParam(null);},[t]);// eslint-disable-line react-hooks/exhaustive-deps
@@ -42,6 +43,7 @@ function Backtest({strategyId,preset}:{strategyId:string;preset:{template:string
  async function start(){setError('');
   try{const body:any={template:tpl,param,weekday,strategy_id:strategyId||undefined};
    for(const [k,v] of Object.entries(f))if(v.trim()!=='')body[k]=['from','to','split'].includes(k)?v:Number(v);
+   if(adj.rule)body.adjust={rule:adj.rule,k:ADJ_K.includes(adj.rule)?Number(adj.k):null,trigger_pct:Number(adj.trigger_pct)};
    setRun(await lab.start(body));}catch(e:any){setError(msg(e));}}
  const field=(k:string,label:string,w=90,ph='')=><View style={{gap:3}}><T style={{fontSize:11,color:C.muted}}>{label}</T>
   <TextInput value={f[k]} onChangeText={v=>setF(x=>({...x,[k]:v}))} placeholder={ph} placeholderTextColor={C.muted} accessibilityLabel={label}
@@ -56,6 +58,14 @@ function Backtest({strategyId,preset}:{strategyId:string;preset:{template:string
    <View style={[s.row,{gap:12,flexWrap:'wrap',alignItems:'flex-end'}]}>
     {field('dte_min','Min days to expiry')}{field('dte_max','Max days to expiry')}
     {field('target_pct','Take profit at % of max profit',110,'hold')}{field('stop_pct','Stop at % of max loss',110,'hold')}{field('exit_dte','Exit at days to expiry',110,'hold')}
+   </View>
+   <View style={{gap:6}}>
+    <View style={[s.row,{gap:6,flexWrap:'wrap'}]}><T style={{fontSize:11,color:C.muted}}>Adjustment (one per trade)</T>
+     {ADJ_RULES.map(([k,l])=><Chip key={k} label={l} active={adj.rule===k} onPress={()=>setAdj(a=>({...a,rule:k}))}/>)}</View>
+    {!!adj.rule&&<View style={[s.row,{gap:12,flexWrap:'wrap',alignItems:'flex-end'}]}>
+     <AdjField label="Trigger: tested short within % of spot (at a close)" value={adj.trigger_pct} onChange={v=>setAdj(a=>({...a,trigger_pct:v}))}/>
+     {ADJ_K.includes(adj.rule)&&<AdjField label="Strikes (k)" value={adj.k} onChange={v=>setAdj(a=>({...a,k:v}))}/>}
+     <T style={{fontSize:11,color:C.muted,maxWidth:420}}>Applied at the next open with slippage and charges. Tested with hold-to-expiry or a time exit only, paired with the same rule without the adjustment.</T></View>}
    </View>
    <View style={[s.row,{gap:12,flexWrap:'wrap',alignItems:'flex-end'}]}>
     {field('from','From',110)}{field('to','To',110,'latest')}{field('split','Out-of-sample from',120,'midpoint')}{field('slippage_pct','Slippage % (min 0.5)')}
@@ -99,13 +109,14 @@ function Result({run}:{run:LabRun}){
      fontFamily:i===2&&j<4?'InterSemi':'Inter',textAlign:j?'right':'left',fontVariant:['tabular-nums'] as any}}>{c}</T>)}</View>)}</View>
    <T style={{fontSize:11,color:C.muted}}>Expectancy after charges and slippage decides; win rate is context only. The badge reads only the out-of-sample 95% lower bound and needs at least 30 out-of-sample trades.</T>
    <T style={{fontSize:12}}>{`Random-entry control (${r.control.reps} runs of the same rule on random days): mean expectancy ${signed(r.control.mean_expectancy)} per trade; this rule beat ${r.control.actual_percentile??'—'}% of them.${r.control.oos_mean_expectancy!=null?` Out of sample only: control ${signed(r.control.oos_mean_expectancy)}; this rule beat ${r.control.oos_actual_percentile??'—'}%.`:''}`}</T>
+   {r.adjustment&&<AdjustmentBlock a={r.adjustment}/>}
    {r.equity&&r.equity.length>1&&<Equity points={r.equity}/>}
    <View style={[s.row,{gap:8,flexWrap:'wrap'}]}><Button label="Download trades (CSV)" icon="download" kind="outline" onPress={csv}/>
     {r.skipped&&<T style={{fontSize:11,color:C.muted}}>{`Skipped: ${Object.entries(r.skipped).map(([k,v])=>`${v} ${k.replace(/_/g,' ')}`).join(' · ')}`}</T>}</View>
   </View>
   {r.trades&&<View style={{backgroundColor:C.paper,borderWidth:1,borderColor:C.line,borderRadius:14,padding:14,gap:4}}>
    <T style={{fontFamily:'InterSemi'}}>{`Last ${Math.min(25,r.trades.length)} of ${r.trades.length} trades`}</T>
-   {[['Entry','Exit','Why','Legs','Net'],...r.trades.slice(-25).reverse().map((t:any)=>[t.entry,t.exit,t.reason,t.legs.map((l:any)=>`${l.side}${num(l.strike,0)}${l.type}`).join(' '),signed(t.net)])]
+   {[['Entry','Exit','Why','Legs','Net'],...r.trades.slice(-25).reverse().map((t:any)=>[t.entry,t.exit,t.reason,t.legs.map((l:any)=>`${l.side}${num(l.strike,0)}${l.type}`).join(' ')+(t.adjustment?.applied?` · adj ${t.adjustment.day}`:''),signed(t.net)])]
     .map((row,i)=><View key={i} style={[s.row,{gap:6,borderTopWidth:i?1:0,borderColor:C.line,paddingVertical:4}]}>{row.map((c,j)=><T key={j} style={{flex:j===3?3:1,fontSize:i?11:10,color:i?C.ink:C.muted,textAlign:j===4?'right':'left',fontVariant:['tabular-nums'] as any}}>{c}</T>)}</View>)}
   </View>}
   <View style={{backgroundColor:C.paper,borderWidth:1,borderColor:C.line,borderRadius:14,padding:14,gap:4}}>
@@ -157,5 +168,22 @@ function ReplayView({strategyId}:{strategyId:string}){
     </View>
     <T style={{fontSize:11,color:C.muted}}>{r.note}</T></>}
   </>}
+ </View>;
+}
+
+const ADJ_RULES:[string,string][]=[['','None'],['roll_tested_short','Roll tested short'],['add_hedge_wing','Add hedge wing'],['close_tested_side','Close tested side'],['reduce_half','Halve'],['close_all','Close all']];
+const ADJ_K=['roll_tested_short','add_hedge_wing'];
+function AdjField({label,value,onChange}:{label:string;value:string;onChange:(v:string)=>void}){return <View style={{gap:3}}><T style={{fontSize:11,color:C.muted}}>{label}</T>
+ <TextInput value={value} onChangeText={onChange} accessibilityLabel={label} keyboardType="decimal-pad" style={{width:110,height:34,borderWidth:1,borderColor:C.line,borderRadius:8,paddingHorizontal:8,color:C.ink,fontFamily:'Inter',fontSize:12,backgroundColor:C.bg}}/></View>;}
+function AdjustmentBlock({a}:{a:any}){
+ const tone=({adjust_helped:'green',adjust_hurt:'red',adjust_not_significant:'neutral',insufficient:'amber'} as any)[a.badge?.status]||'amber';
+ const row=(label:string,x:any)=>[label,String(x?.n??0),x?.n?signed(x.mean):'—',x?.n?`${signed(x.ci95[0])} … ${signed(x.ci95[1])}`:'—',x?.n?`${x.helped} / ${x.hurt}`:'—'];
+ const imp=a.improvement_per_triggered_trade||{};
+ return <View style={{borderWidth:1,borderColor:C.line,borderRadius:12,padding:12,gap:6}}>
+  <View style={[s.row,{gap:8,flexWrap:'wrap'}]}><T style={{fontFamily:'InterSemi'}}>Adjustment vs the same rule without it</T><Badge label={a.badge?.label||'—'} tone={tone}/></View>
+  <T style={{fontSize:11,color:C.muted}}>{`${a.rule.rule.replace(/_/g,' ')}${a.rule.k?` +${a.rule.k}`:''} · trigger ${a.rule.trigger_pct}% · triggered in ${a.triggered.all} of ${a.pairs} trades (${a.triggered.oos} out of sample)${a.not_applicable?` · ${a.not_applicable} triggers could not apply`:''}`}</T>
+  <View>{[['','Triggered','Improvement / triggered trade','95% CI','Helped / hurt'],row('Discovery',imp.discovery),row('Out-of-sample',imp.oos),row('All',imp.all)]
+   .map((rw,i)=><View key={i} style={[s.row,{gap:6,borderTopWidth:i?1:0,borderColor:C.line,paddingVertical:5}]}>{rw.map((c,j)=><T key={j} style={{flex:j===3?2:j?1:1.2,fontSize:i?12:10,color:i?C.ink:C.muted,textAlign:j?'right':'left',fontVariant:['tabular-nums'] as any}}>{c}</T>)}</View>)}</View>
+  <T style={{fontSize:11,color:C.muted}}>Paired: each adjusted trade against its twin without the adjustment (same entry and exit days). Untriggered trades are identical, so only triggered trades are compared. The badge reads the out-of-sample 95% interval and needs 30 out-of-sample triggers.</T>
  </View>;
 }

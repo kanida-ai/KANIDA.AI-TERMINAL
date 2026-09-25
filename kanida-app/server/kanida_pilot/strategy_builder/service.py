@@ -57,7 +57,12 @@ def normalize_body(raw):
  if sc.get('iv_shift') not in (None,''):
   try:scenario['iv_shift']=max(-50.0,min(50.0,float(sc['iv_shift'])))
   except (TypeError,ValueError):raise Invalid('IV shift must be a number of percentage points.')
- return {'underlying':u,'expiry':e,'legs':legs,'scenario':scenario,'template':str(raw.get('template') or '')[:40] or None}
+ tpl=str(raw.get('template') or '')[:40] or None
+ param=raw.get('param') if tpl else None
+ if param is not None:
+  try:param=int(param)
+  except (TypeError,ValueError):raise Invalid('param must be a whole number.')
+ return {'underlying':u,'expiry':e,'legs':legs,'scenario':scenario,'template':tpl,'param':param}
 
 
 def hydrate(market,body):

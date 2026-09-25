@@ -342,6 +342,70 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
   s=own(user,d['strategy_id']);out=ex(execution.confirm,user['id'],s,str(data.get('preview_id') or ''),str(data.get('preview_hash') or ''),
    str(data.get('idempotency_key') or ''));out.pop('revision_body',None);return out
 
+ # --- slice 8: the adjustment assistant (K12) - candidates, apply as a new version, delta orders for a deployment ------
+ def _adjust_base(user,s,did):
+  from . import assistant as AS
+  if did:
+   d=execution.deployment(user['id'],did) if execution else None
+   if not d or d['strategy_id']!=s['id']:raise PilotError(404,'DEPLOYMENT_NOT_FOUND','There is no such deployment for this strategy.')
+   try:return AS.position_body(d),True,d
+   except AS.AssistError as e:raise PilotError(e.status,e.code,e.message)
+  return s['draft']['body'],False,None
+
+ def _candidates(user,s,did):
+  from . import assistant as AS
+  body,held,d=_adjust_base(user,s,did)
+  ev=(lambda t,p,rule,k:lab.adjust_evidence_for(user['id'],t,p,rule,k)) if lab else None
+  with store.lock:
+   if d:before=bool(store.c.execute("select 1 from deployment_revisions where deployment_id=? and cause='adjust'",(d['id'],)).fetchone())
+   else:before=bool(store.c.execute("select 1 from activity where strategy_id=? and kind='adjust'",(s['id'],)).fetchone())
+  try:out=guard(AS.candidates,market,body,ev,held,before)
+  except AS.AssistError as e:raise PilotError(e.status,e.code,e.message)
+  out['deployment_id']=did or None;out['draft_version']=s['draft']['version']
+  return out
+
+ @r.post('/api/sb/strategies/{sid}/adjust/candidates')
+ def adjust_candidates(request:Request,sid:str,data:dict=Body(default={})):
+  user=me(request);s=own(user,sid)
+  out=_candidates(user,s,str(data.get('deployment_id') or '') or None)
+  for c in out['candidates']:c.pop('body',None)          # the server recomputes on apply; the client never sends legs
+  return out
+
+ @r.post('/api/sb/strategies/{sid}/adjust/apply')
+ def adjust_apply(request:Request,sid:str,data:dict=Body(default={})):
+  user=me(request);s=own(user,sid);did=str(data.get('deployment_id') or '') or None
+  try:version=int(data.get('version'))
+  except (TypeError,ValueError):raise PilotError(400,'FIELD_INVALID','version is required.')
+  rule=str(data.get('rule') or '');k=data.get('k')
+  out=_candidates(user,s,did)
+  c=next((c for c in out['candidates'] if c['rule']==rule and (c.get('k') or None)==(int(k) if k not in (None,'') else None)),None)
+  if not c:raise PilotError(404,'ADJUSTMENT_NOT_FOUND','There is no such adjustment for this strategy now.')
+  if not c.get('available'):raise PilotError(409,'ADJUSTMENT_NOT_APPLICABLE',c.get('reason') or 'Not applicable now.')
+  body=body_of(c['body'])
+  try:st=store.save_draft(user['id'],sid,version,body)
+  except Conflict as cf:
+   return JSONResponse({'error':'This strategy was changed in another window. Review the adjustment again.','code':'VERSION_CONFLICT','current':cf.current},status_code=409)
+  store._log(user['id'],sid,'adjust',f"{c['name']}: {c['note']}"+(f" (paper deployment {did[:6]} - review the delta orders)" if did else ''))
+  c.pop('body',None);c.pop('overlay',None)
+  return {'strategy':st,'adjustment':c,'deployment_id':did}
+
+ @r.post('/api/sb/deployments/{did}/adjust-preview')
+ def adjust_preview(request:Request,did:str,data:dict=Body(default={})):
+  user=me(request);d=execution.deployment(user['id'],did) if execution else None
+  if not d:raise PilotError(404,'DEPLOYMENT_NOT_FOUND','There is no such deployment.')
+  s=own(user,d['strategy_id'])
+  out=ex(execution.preview,user['id'],s,{'product':d['product'],'price_policy':data.get('price_policy'),'limits':data.get('limits') or {}},kind='adjust',deployment=d)
+  if isinstance(out,dict):out['live']=_live(user['id'])
+  return out
+
+ @r.post('/api/sb/deployments/{did}/adjust')
+ def adjust_confirm(request:Request,did:str,data:dict=Body(default={})):
+  user=me(request);d=execution.deployment(user['id'],did,mark=False) if execution else None
+  if not d:raise PilotError(404,'DEPLOYMENT_NOT_FOUND','There is no such deployment.')
+  if data.get('confirm') is not True:raise PilotError(400,'CONFIRM_REQUIRED','Confirm the exact adjustment orders.')
+  s=own(user,d['strategy_id']);out=ex(execution.confirm,user['id'],s,str(data.get('preview_id') or ''),str(data.get('preview_hash') or ''),
+   str(data.get('idempotency_key') or ''),bool(data.get('ack_unlimited')));out.pop('revision_body',None);return out
+
  # --- slice 5: alerts (notify only) --------------------------------------------------------------------------------------
  def al(fn,*a,**k):
   if not alerts:raise PilotError(503,'ALERTS_UNAVAILABLE','Alerts are not available on this server.')

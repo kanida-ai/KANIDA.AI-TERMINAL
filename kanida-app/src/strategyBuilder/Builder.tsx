@@ -11,6 +11,7 @@ import {Badge,Button,C,Chip,Icon,Loading,Sheet,T,s} from '../ui';
 import {ApiError} from '../model';
 import {exec,sb,type Analysis,type Basis,type Body,type Chain,type Deployment,type Detail,type Expiry,type Kind,type Leg,type PaperRun,type Side,type Status,type Template} from './api';
 import {DeploymentCard,OrderReview} from './OrderReview';
+import {AdjustSheet} from './Adjust';
 import {AlertsPanel,useAlertNotifications} from './Alerts';
 import {ChainDrawer} from './ChainDrawer';
 import {PayoffChart} from './PayoffChart';
@@ -33,7 +34,8 @@ export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean
  const [tab,setTab]=useState<Tab>('pnl');const [toast,setToast]=useState('');const [undo,setUndo]=useState<{leg:Leg;index:number}|null>(null);
  const [runs,setRuns]=useState<PaperRun[]>([]);const [name,setName]=useState('');
  const [st,setSt]=useState<Status|null>(null);const [tick,setTick]=useState(0);const [deps,setDeps]=useState<Deployment[]>([]);
- const [review,setReview]=useState<{open:boolean;closing?:Deployment|null}>({open:false});
+ const [review,setReview]=useState<{open:boolean;closing?:Deployment|null;adjusting?:Deployment|null}>({open:false});
+ const [adjustFor,setAdjustFor]=useState<{open:boolean;deployment?:Deployment|null}>({open:false});
  const bell=useAlertNotifications();
  const seq=useRef(0);const saveTimer=useRef<any>(null);const anTimer=useRef<any>(null);const ctl=useRef<AbortController|null>(null);
  const versionRef=useRef(0);versionRef.current=version;
@@ -102,7 +104,7 @@ export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean
   if(!body?.underlying||!body.expiry)return;
   try{const r=await sb.resolve(t.key,body.underlying,body.expiry,param);
    const legs:Leg[]=r.legs.map((l:any)=>({id:uid(),type:l.type,side:l.side,strike:l.strike,lots:l.lots,expiry:l.expiry,price_basis:'exec',price:null,include:true}));
-   edit(b=>({...b,template:t.key,legs}));setTplOpen(false);flash(`${t.name} loaded - ${legs.length} legs. Everything stays editable.`);}
+   edit(b=>({...b,template:t.key,param:param??null,legs}));setTplOpen(false);flash(`${t.name} loaded - ${legs.length} legs. Everything stays editable.`);}
   catch(e:any){flash(msg(e));}
  }
  async function snapshot(){try{const r=await sb.snapshot(id);flash(`Saved snapshot ${r.n}. It will never change.`);reload();setTab('snapshots');}catch(e:any){flash(msg(e));}}
@@ -126,6 +128,7 @@ export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean
    </View>
    <View style={[s.row,{flexWrap:'wrap',gap:8,width:wide?undefined:'100%'}]}>
     <Button label="Prove in Lab" icon="activity" kind="outline" disabled={!body.legs.length} onPress={()=>router.push({pathname:'/strategies',params:{view:'lab',strategy:id,...(a?.structure?.exact&&a.structure.key?{template:a.structure.key}:{mode:'replay'})}} as any)}/>
+    <Button label="Adjust" icon="sliders" kind="outline" disabled={!body.legs.length} onPress={()=>setAdjustFor({open:true,deployment:deps.find(d=>d.status==='active')||null})}/>
     <Button label="Save snapshot" icon="bookmark" kind="outline" onPress={snapshot} disabled={!body.legs.length}/>
     <Button label={bell.count?`Alerts (${bell.count})`:'Alerts'} icon="bell" kind="outline" onPress={()=>router.push({pathname:'/strategies',params:{view:'alerts'}} as any)}/>
     <Button label="Duplicate" icon="copy" kind="outline" onPress={duplicate}/>
@@ -201,7 +204,7 @@ export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean
      {tab==='table'&&<PayoffTable a={a}/>}
      {tab==='snapshots'&&<Snapshots detail={detail} onRestore={async(rid)=>{try{const s=await sb.restore(id,rid,versionRef.current);setBody(s.draft!.body);setVersion(s.draft!.version);flash('Snapshot restored as a new draft version.');}catch(e:any){flash(msg(e));reload();}}}
       onDuplicate={async(rid)=>{try{const c=await sb.duplicate(id,rid);router.replace({pathname:'/strategies',params:{id:c.id}} as any);}catch(e:any){flash(msg(e));}}}/>}
-     {tab==='paper'&&<View style={{gap:10}}>{deps.map(d=><DeploymentCard key={d.id} d={d} onChanged={loadRuns} onClose={(x)=>setReview({open:true,closing:x})}/>)}{!deps.length&&st?.live&&<T style={{fontSize:12,color:C.muted}}>No paper deployments yet. "Review paper orders" builds the exact plan from live quotes.</T>}</View>}
+     {tab==='paper'&&<View style={{gap:10}}>{deps.map(d=><DeploymentCard key={d.id} d={d} onChanged={loadRuns} onClose={(x)=>setReview({open:true,closing:x})} onAdjust={(x)=>setAdjustFor({open:true,deployment:x})}/>)}{!deps.length&&st?.live&&<T style={{fontSize:12,color:C.muted}}>No paper deployments yet. "Review paper orders" builds the exact plan from live quotes.</T>}</View>}
      {tab==='paper'&&<PaperList runs={runs} onClose={async(run)=>{try{await sb.paperClose(run);flash('Paper run closed at the stored reading.');loadRuns();reload();}catch(e:any){flash(msg(e));}}} onOpen={()=>router.push({pathname:'/strategies',params:{view:'paper'}} as any)}/>}
      {tab==='alerts'&&<AlertsPanel strategyId={id} analysis={a} deployments={deps} expiry={body.expiry} onChanged={reload}/>}
      {tab==='activity'&&<View style={{gap:6}}>{detail.activity.map((x,i)=><View key={i} style={[s.between,{borderTopWidth:1,borderColor:C.line,paddingTop:6}]}><T style={{fontSize:12,flex:1}}>{x.detail}</T><T style={{fontSize:11,color:C.muted}}>{istEpoch(x.created_at)}</T></View>)}</View>}
@@ -210,8 +213,11 @@ export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean
   </View>
 
   <ChainDrawer visible={chainOpen} chain={chain} legs={body.legs} onClose={()=>setChainOpen(false)} onToggle={(k,kind,side)=>toggleFromChain(k,kind,side)}/>
-  <OrderReview visible={review.open} strategyId={id} deployment={review.closing||null} onClose={()=>setReview({open:false})}
-   onPlaced={(d)=>{setReview({open:false});flash(`Paper ${review.closing?'close':'orders'} placed - deployment ${d.status.replace('_',' ')}. No order reached a broker.`);loadRuns();reload();setTab('paper');}}/>
+  <AdjustSheet visible={adjustFor.open} strategyId={id} version={version} deployment={adjustFor.deployment||null} onClose={()=>setAdjustFor({open:false})}
+   onApplied={async(r)=>{const dep=adjustFor.deployment;setAdjustFor({open:false});await reload();
+    flash(`${r.adjustment.name} saved as a new version.${dep?' Review the delta orders next.':''}`);if(dep)setReview({open:true,adjusting:dep});}}/>
+  <OrderReview visible={review.open} strategyId={id} deployment={review.closing||null} adjusting={review.adjusting||null} onClose={()=>setReview({open:false})}
+   onPlaced={(d)=>{setReview({open:false});flash(`Paper ${review.closing?'close':review.adjusting?'adjustment':'orders'} placed - deployment ${d.status.replace('_',' ')}. No order reached a broker.`);loadRuns();reload();setTab('paper');}}/>
   <TemplateSheet visible={tplOpen} onClose={()=>setTplOpen(false)} onPick={applyTemplate} replacing={body.legs.length}/>
   <PaperSheet visible={paperOpen} onClose={()=>setPaperOpen(false)} a={a} body={body} chain={chain}
    onStart={async()=>{try{await persist(body);const r=await sb.paperStart(id);setPaperOpen(false);flash(`Paper run started - ${r.fills.length} simulated fills. No order was sent.`);loadRuns();reload();setTab('paper');}catch(e:any){flash(msg(e));}}}/>

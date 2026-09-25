@@ -27,6 +27,7 @@ from datetime import date,datetime,timedelta
 from . import analytics as A
 from . import charges as CH
 from .templates import BY_KEY
+from . import adjust as ADJ
 from .. import implied_vol as IV
 
 log=logging.getLogger('strategy_builder.lab')
@@ -173,6 +174,58 @@ def _fill(model,side,opening,slip):
  return round(px+move if buying else max(0.05,px-move),2)
 
 
+def _adjusted_walk(spec,legs,nifty,vmap,days,n,e,x,sig,lot_size,slip,step):
+ """Walk one trade with ONE adjustment allowed (spec['adjust'] = {rule, k, trigger_pct}).
+
+ Point in time: the trigger is read at a close (the tested short's distance to the money, as % of that close); the
+ adjustment is filled at the NEXT open at model prices with slippage and charges on every order. Exits are exactly
+ the baseline's (expiry settle, or exit_dte at the next open) - targets/stops are not allowed with an adjustment - so
+ every adjusted trade has a baseline twin with the same entry and exit days (a paired comparison)."""
+ adj=spec['adjust'];trigger=adj['trigger_pct']/100.0
+ pos={(l['type'],l['strike']):l['units'] for l in legs}               # signed units per contract
+ cash=-sum(l['units']*l['entry'] for l in legs);fees=0.0;info=None
+ def generic():
+  return [{'id':f"{t}{k:g}",'type':t,'side':'B' if u>0 else 'S','strike':k,'lots':abs(u)//lot_size,'include':True} for (t,k),u in pos.items() if u]
+ j=e
+ while True:
+  cd=days[j] if j<n else None
+  if cd is None:return None
+  if cd>=x:
+   s=nifty['close'][j]
+   gross=cash+sum(u*A.intrinsic(t,k,s) for (t,k),u in pos.items())
+   fees+=sum(0.00125*A.intrinsic(t,k,s)*u for (t,k),u in pos.items() if u>0 and A.intrinsic(t,k,s)>0)
+   return {'exit':cd,'reason':'expiry','gross':gross,'fees':fees,'adjustment':info}
+  cs=nifty['close'][j];cv=vmap.get(cd,sig)/100.0
+  dte=(date.fromisoformat(x)-date.fromisoformat(cd)).days
+  if spec.get('exit_dte') is not None and dte<=spec['exit_dte']:
+   if j+1>=n:return None
+   no=nifty['open'][j+1];tn=_years(days[j+1],x)
+   for (t,k),u in pos.items():
+    if not u:continue
+    side='S' if u>0 else 'B';px=_fill(_price(no,k,tn,cv,t),'B' if u>0 else 'S',False,slip)
+    cash+=u*px;fees+=CH.leg_charges(side,px,abs(u))['total']
+   return {'exit':days[j+1],'reason':'time','gross':cash,'fees':fees,'adjustment':info}
+  g=generic();tst=ADJ.tested(g,cs) if g else None
+  if info is None and tst and tst[1]<=trigger and j+1<n and days[j+1]<=x:
+   no=nifty['open'][j+1];tn=_years(days[j+1],x)
+   grid=sorted({step*i for i in range(int(no*0.85/step),int(no*1.15/step)+2)}|{k for (_t,k) in pos})   # a realistic weekly strike range
+   try:
+    new,note=ADJ.apply(adj['rule'],g,no,grid,adj.get('k') or 1,tested_key=(tst[0]['type'],tst[0]['strike']))   # decided at the close
+   except ADJ.NotApplicable as ex:
+    info={'day':days[j+1],'trigger_day':cd,'applied':False,'reason':str(ex)}
+   else:
+    orders=ADJ.delta_orders(g,new);done=[]
+    for o in orders:
+     u=o['lots']*lot_size*(1 if o['side']=='B' else -1)
+     model=_price(no,o['strike'],tn,cv,o['type']);px=max(0.05,model);mv=max(0.05,px*slip)
+     px=round(px+mv if o['side']=='B' else max(0.05,px-mv),2)
+     cash-=u*px;fees+=CH.leg_charges(o['side'],px,abs(u))['total']
+     pos[(o['type'],o['strike'])]=pos.get((o['type'],o['strike']),0)+u
+     done.append({'side':o['side'],'type':o['type'],'strike':o['strike'],'lots':o['lots'],'price':px})
+    info={'day':days[j+1],'trigger_day':cd,'applied':True,'note':note,'distance_pct':round(tst[1]*100,2),'orders':done}
+  j+=1
+
+
 def simulate(spec,nifty,vix,lot_size,entry_days=None,rng=None):
  """Run the rule once. entry_days: a set of decision days to use instead of the schedule (the random control)."""
  tpl=BY_KEY[spec['template']];param=spec.get('param');step=STEP['NIFTY'];slip=spec['slippage']
@@ -200,6 +253,16 @@ def simulate(spec,nifty,vix,lot_size,entry_days=None,rng=None):
   fees=sum(CH.leg_charges(l['side'],l['entry'],lot_size)['total'] for l in legs)
   prof=A.expiry_profile([{**l,'lots':1,'lot_size':lot_size,'price':l['entry']} for l in legs])
   max_loss=None if prof['unlimited_loss'] else -prof['max_loss'];max_profit=None if prof['unlimited_profit'] else prof['max_profit']
+  if spec.get('adjust'):
+   w=_adjusted_walk(spec,legs,nifty,vmap,days,n,e,x,sig,lot_size,slip,step)
+   if w is None:skipped['open_at_end']+=1;break
+   fees+=w['fees'];net=w['gross']-fees
+   trades.append({'decision':d,'entry':ed,'exit':w['exit'],'expiry':x,'reason':w['reason'],'spot_entry':spot,'vix':sig,
+    'legs':[{'side':l['side'],'type':l['type'],'strike':l['strike'],'entry':l['entry']} for l in legs],
+    'gross':round(w['gross'],2),'fees':round(fees,2),'net':round(net,2),'capital_at_risk':round(max_loss,2) if max_loss else None,
+    'hold_days':(date.fromisoformat(w['exit'])-date.fromisoformat(ed)).days,'adjustment':w['adjustment']})
+   i=days.index(w['exit']) if w['exit'] in days else i+1
+   continue
   # walk forward: check at each close, exit next open; settle at expiry close
   j=e;exit_day=None;exit_px=None;reason=None
   while True:
@@ -249,6 +312,48 @@ def _stats(trades,rng):
   'avg_hold_days':round(sum(t['hold_days'] for t in trades)/n,2)}
 
 
+def _diff_stats(diffs,rng):
+ n=len(diffs)
+ if not n:return {'n':0}
+ mean=sum(diffs)/n
+ boot=sorted(sum(rng.choice(diffs) for _ in range(n))/n for _ in range(BOOT))
+ return {'n':n,'mean':round(mean,2),'ci95':[round(boot[int(0.025*BOOT)],2),round(boot[int(0.975*BOOT)-1],2)],
+  'helped':sum(1 for x in diffs if x>0),'hurt':sum(1 for x in diffs if x<0)}
+
+
+def _adjustment_block(spec,trades,nifty,vix,lot_size,split,rng):
+ """Paired: each adjusted trade vs its baseline twin (same rule without the adjustment, same entry and exit days).
+ The improvement per TRIGGERED trade decides; untriggered trades are identical by construction (difference 0)."""
+ base,_=simulate({**spec,'adjust':None},nifty,vix,lot_size)
+ twin={b['entry']:b for b in base}
+ pairs=[(t,twin[t['entry']]) for t in trades if t['entry'] in twin and twin[t['entry']]['exit']==t['exit']]
+ unpaired=len(trades)-len(pairs)
+ trig=[(t,b) for t,b in pairs if (t.get('adjustment') or {}).get('applied')]
+ diff=lambda ps:[round(t['net']-b['net'],2) for t,b in ps]
+ d_disc=[p for p in trig if p[0]['entry']<split];d_oos=[p for p in trig if p[0]['entry']>=split]
+ out={'rule':spec['adjust'],'pairs':len(pairs),'unpaired':unpaired,'oos_diffs':diff(d_oos),
+  'triggered':{'all':len(trig),'discovery':len(d_disc),'oos':len(d_oos)},
+  'not_applicable':sum(1 for t,_b in pairs if (t.get('adjustment') or {}).get('applied') is False),
+  'improvement_per_triggered_trade':{'all':_diff_stats(diff(trig),rng),'discovery':_diff_stats(diff(d_disc),rng),'oos':_diff_stats(diff(d_oos),rng)},
+  'baseline':{'oos':_stats([b for t,b in pairs if t['entry']>=split],rng)}}
+ o=out['improvement_per_triggered_trade']['oos']
+ out['badge']=adjust_badge(diff(d_oos),1,rng)
+ return out
+
+
+def adjust_badge(oos_diffs,m,rng):
+ """Badge from the out-of-sample paired improvement, Bonferroni-corrected for m runs tried (alpha = 5%/m)."""
+ n=len(oos_diffs);caveat=' (model prices, one IV - no skew)'
+ if n<30:return {'status':'insufficient','label':f"Adjustment model-tested - too few out-of-sample triggers (n={n}, need 30)",'tests':m}
+ a=0.05/max(1,m)
+ boot=sorted(sum(rng.choice(oos_diffs) for _ in range(n))/n for _ in range(BOOT))
+ lo=boot[max(0,int(a/2*BOOT))];hi=boot[min(BOOT-1,int((1-a/2)*BOOT))]
+ tag=f' - corrected for {m} runs tried' if m>1 else ''
+ if lo>0:return {'status':'adjust_helped','label':f"Adjustment model-tested - improved out-of-sample results (low +₹{lo:,.0f} per triggered trade{tag}){caveat}",'ci':[round(lo,2),round(hi,2)],'tests':m}
+ if hi<0:return {'status':'adjust_hurt','label':f"Adjustment model-tested - made out-of-sample results worse (high ₹{hi:,.0f} per triggered trade{tag}){caveat}",'ci':[round(lo,2),round(hi,2)],'tests':m}
+ return {'status':'adjust_not_significant','label':f'Adjustment model-tested - no significant out-of-sample difference{tag}{caveat}','ci':[round(lo,2),round(hi,2)],'tests':m}
+
+
 def backtest(spec,nifty,vix,lot_size,progress=lambda p:None):
  rng=random.Random(20260925)
  trades,skipped=simulate(spec,nifty,vix,lot_size);progress(0.4)
@@ -275,13 +380,17 @@ def backtest(spec,nifty,vix,lot_size,progress=lambda p:None):
   'actual_percentile':round(sum(1 for m in means if m<(stats['all'].get('expectancy') or 0))/len(means)*100,1) if means else None,
   'oos_mean_expectancy':round(sum(oos_means)/len(oos_means),2) if oos_means else None,
   'oos_actual_percentile':round(sum(1 for m in oos_means if m<(stats['oos'].get('expectancy') or 0))/len(oos_means)*100,1) if oos_means else None}
+ adjustment=_adjustment_block(spec,trades,nifty,vix,lot_size,split,rng) if spec.get('adjust') else None
+ if adjustment:        # capital at risk changes mid-trade when an adjustment applies; a per-₹100 figure would mislead
+  for v in stats.values():
+   if v.get('n'):v['per_100_capital']=None
  o=stats['oos']
  if o.get('n',0)<30:badge={'status':'insufficient','label':f"Model-tested - insufficient out-of-sample trades (n={o.get('n',0)}, need 30)"}
  elif o['ci95'][0]>0:badge={'status':'model_positive','label':f"Model-tested - out-of-sample expectancy positive (95% low ₹{o['ci95'][0]:,.0f}/trade)"}
  else:badge={'status':'model_not_significant','label':'Model-tested - out-of-sample expectancy not significantly positive'}
  eq=[];c=0
  for t in trades:c+=t['net'];eq.append({'day':t['exit'],'equity':round(c,2),'split':'oos' if t['entry']>=split else 'discovery'})
- return {'kind':'backtest','model':MODEL,'badge':badge,'stats':stats,'control':control,'equity':eq,'trades':trades,'skipped':skipped,
+ return {'kind':'backtest','model':MODEL,'badge':badge,'stats':stats,'control':control,'adjustment':adjustment,'equity':eq,'trades':trades,'skipped':skipped,
   'lot_size':lot_size,'spec':spec,
   'provenance':{'price_source':'model','label':'Model-priced - not traded prices',
    'underlying':nifty['sources'],'volatility':{'series':'INDIA VIX close (decision day for entry, each close for marks)',**{k:v for k,v in vix['sources'].items()}},
@@ -359,7 +468,24 @@ class Lab:
   if raw.get('target_pct') not in (None,'') and tpl['key'] in UNBOUNDED_PROFIT:
    raise LabError(400,'TARGET_UNDEFINED',f"{tpl['name']} has no capped maximum profit, so a target at a % of it cannot be applied.")
   if dmin>dmax:raise LabError(400,'FIELD_INVALID','dte_min must not exceed dte_max.')
-  return {'underlying':u,'template':tpl['key'],'param':param,'weekday':wd,'dte_min':dmin,'dte_max':dmax,
+  adj=None;ra=raw.get('adjust')
+  if ra not in (None,'',{}):
+   if not isinstance(ra,dict) or ra.get('rule') not in ADJ.RULES:
+    raise LabError(400,'FIELD_INVALID','adjust.rule must be one of: '+', '.join(ADJ.RULES)+'.')
+   if raw.get('target_pct') not in (None,'') or raw.get('stop_pct') not in (None,''):
+    raise LabError(400,'ADJUST_WITH_EXITS','An adjustment is tested with hold-to-expiry or a time exit only, so each trade has an exact baseline twin. Remove the target/stop.')
+   if ADJ.RULES[ra['rule']]['needs_short'] and not any(l['side']=='S' for l in tpl['legs']):
+    raise LabError(400,'ADJUST_NOT_APPLICABLE',f"{tpl['name']} has no short leg, so '{ADJ.RULES[ra['rule']]['name']}' can never apply.")
+   try:trig=float(ra.get('trigger_pct',0.5))
+   except (TypeError,ValueError):raise LabError(400,'FIELD_INVALID','adjust.trigger_pct must be a number.')
+   if not -5<=trig<=10:raise LabError(400,'FIELD_INVALID','adjust.trigger_pct must be between -5 and 10 (% of spot).')
+   kk=None
+   if ADJ.RULES[ra['rule']]['k']:
+    try:kk=int(ra.get('k',1))
+    except (TypeError,ValueError):raise LabError(400,'FIELD_INVALID','adjust.k must be a whole number.')
+    if not 1<=kk<=10:raise LabError(400,'FIELD_INVALID','adjust.k must be 1-10 strikes.')
+   adj={'rule':ra['rule'],'k':kk,'trigger_pct':trig}
+  return {'adjust':adj,'underlying':u,'template':tpl['key'],'param':param,'weekday':wd,'dte_min':dmin,'dte_max':dmax,
    'target_pct':num('target_pct',None,1,100,True),'stop_pct':num('stop_pct',None,1,100,True),'exit_dte':(int(num('exit_dte',None,0,30,True)) if raw.get('exit_dte') not in (None,'') else None),
    'slippage':max(0.005,num('slippage_pct',0.5,0.5,10)/100),'from':f,'to':t,'split':split}
 
@@ -404,12 +530,28 @@ class Lab:
   same=[(r,json.loads(r['spec'])) for r in rows]
   # the same rule Discover shows: this template and width, held to expiry (no stop/target/time exit), on NIFTY
   same=[(r,s) for r,s in same if s['template']==template and s.get('param')==param and s.get('underlying')=='NIFTY'
-   and s.get('target_pct') is None and s.get('stop_pct') is None and s.get('exit_dte') is None]
+   and s.get('target_pct') is None and s.get('stop_pct') is None and s.get('exit_dte') is None and not s.get('adjust')]
   if not same:return None
   r,s=same[0];res=json.loads(r['result']);o=res['stats']['oos']
   return {'run_id':r['id'],'status':res['badge']['status'],'label':res['badge']['label'],'n_oos':o.get('n',0),'oos_ci95':o.get('ci95'),
    'period':[s['from'],s['to']],'schedule':{'weekday':s['weekday'],'dte':[s['dte_min'],s['dte_max']]},'runs_tried':len(same),
    'note':f"Held to expiry; decisions on {'every day' if s['weekday']=='daily' else ['Mon','Tue','Wed','Thu','Fri'][int(s['weekday'])]}, {s['dte_min']}-{s['dte_max']} days to expiry; {len(same)} run(s) of this rule tried"}
+
+ def adjust_evidence_for(self,user_id,template,param,rule,k):
+  """The newest completed Lab run of EXACTLY this adjustment (rule and k) on EXACTLY this structure (template and
+  width), held to expiry on NIFTY. Different triggers are different runs; all of them are counted."""
+  with self.lock:
+   rows=self.c.execute("select id,spec,result from lab_runs where user_id=? and kind='backtest' and status='completed' order by created_at desc limit 100",(user_id,)).fetchall()
+  specs=[(r,json.loads(r['spec'])) for r in rows]
+  # every adjustment run on this structure counts as a test (any rule, k, trigger or schedule) - the multiple-testing base
+  family=[(r,s) for r,s in specs if s.get('adjust') and s['template']==template and s.get('param')==param and s.get('underlying')=='NIFTY']
+  same=[(r,s) for r,s in family if s['adjust']['rule']==rule and (s['adjust'].get('k') or None)==(k or None) and s.get('exit_dte') is None]
+  if not same:return None
+  r,s=same[0];res=json.loads(r['result']);a=res.get('adjustment') or {}
+  m=len(family);b=adjust_badge(a.get('oos_diffs') or [],m,random.Random(20260925))
+  return {'run_id':r['id'],'status':b['status'],'label':b['label'],'n_oos_triggered':len(a.get('oos_diffs') or []),'ci_corrected':b.get('ci'),
+   'trigger_pct':s['adjust']['trigger_pct'],'dte':[s['dte_min'],s['dte_max']],'weekday':s['weekday'],'runs_tried':m,'period':[s['from'],s['to']],
+   'note':f"Lab: triggered when the tested short was within {s['adjust']['trigger_pct']:g}% of spot at a close ({s['dte_min']}-{s['dte_max']} days to expiry at entry), applied at the next open, once per trade; {m} adjustment run(s) on this structure counted as tests"}
 
  # --- replay -----------------------------------------------------------------------------------------------------
  def replay_strategy(self,user_id,strategy,interval='15minute',days=10):

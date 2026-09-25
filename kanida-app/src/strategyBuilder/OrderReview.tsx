@@ -10,39 +10,39 @@ import {inr,istEpoch,istStamp,num,signed,strikeText} from './format';
 
 const key=()=>'k'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
 
-export function OrderReview({visible,onClose,strategyId,deployment,onPlaced}:{visible:boolean;onClose:()=>void;strategyId:string;
- deployment?:Deployment|null;onPlaced:(d:Deployment)=>void}){
- const closing=!!deployment;
+export function OrderReview({visible,onClose,strategyId,deployment,adjusting,onPlaced}:{visible:boolean;onClose:()=>void;strategyId:string;
+ deployment?:Deployment|null;adjusting?:Deployment|null;onPlaced:(d:Deployment)=>void}){
+ const closing=!!deployment;const adj=!closing&&!!adjusting;
  const [p,setP]=useState<Preview|null>(null);const [error,setError]=useState('');const [busy,setBusy]=useState(false);
  const [product,setProduct]=useState('NRML');const [policy,setPolicy]=useState('marketable');const [limits,setLimits]=useState<Record<string,string>>({});const [committed,setCommitted]=useState<Record<string,string>>({});
  const [ack,setAck]=useState(false);const [left,setLeft]=useState(0);const idem=useRef(key());
  const load=useCallback(async()=>{setError('');setP(null);
   try{const lim=Object.fromEntries(Object.entries(committed).filter(([,v])=>v.trim()!=='').map(([k,v])=>[k,Number(v)]));
-   const r=closing?await exec.closePreview(deployment!.id,policy):await exec.preview(strategyId,{product,price_policy:policy,limits:lim});
+   const r=closing?await exec.closePreview(deployment!.id,policy):adj?await exec.adjustPreview(adjusting!.id,policy,lim):await exec.preview(strategyId,{product,price_policy:policy,limits:lim});
    setP(r);idem.current=key();}
-  catch(e:any){setError(e.message);}},[closing,deployment,strategyId,product,policy,committed]);
+  catch(e:any){setError(e.message);}},[closing,adj,adjusting,deployment,strategyId,product,policy,committed]);
  useEffect(()=>{if(visible)load();},[visible,product,policy,committed]);// eslint-disable-line react-hooks/exhaustive-deps
  useEffect(()=>{if(!visible){setLimits({});setCommitted({});}},[visible]);
  useEffect(()=>{if(!p)return;const t=setInterval(()=>setLeft(Math.max(0,Math.round(p.expires_at-Date.now()/1000))),500);return()=>clearInterval(t);},[p]);
  const expired=!!p&&left<=0;
  async function place(){if(!p)return;setBusy(true);setError('');
-  try{const d=closing?await exec.close(deployment!.id,p,idem.current):await exec.deploy(strategyId,p,idem.current,ack);onPlaced(d);}
+  try{const d=closing?await exec.close(deployment!.id,p,idem.current):adj?await exec.adjust(adjusting!.id,p,idem.current,ack):await exec.deploy(strategyId,p,idem.current,ack);onPlaced(d);}
   catch(e:any){setError(e.message);if(/expired|changed/i.test(e.message))load();}finally{setBusy(false);}}
  const n=p?.orders.reduce((a,o)=>a+o.slices.length,0)||0;
- return <Sheet visible={visible} onClose={onClose} wide title={closing?'Close paper deployment':'Review paper orders'}
+ return <Sheet visible={visible} onClose={onClose} wide title={closing?'Close paper deployment':adj?'Review adjustment orders':'Review paper orders'}
   subtitle={p?`${p.structure} · quotes ${istStamp(p.as_of)} · spot ${num(p.spot,2)} · PAPER - no order reaches a broker`:'Building the exact order plan from live quotes…'}
   footer={<View style={[s.between,{flexWrap:'wrap',gap:10}]}>
    <View style={{gap:2,flex:1,minWidth:220}}>{p&&<T style={{fontSize:12,color:expired?C.red:C.muted}}>{expired?'Preview expired - quotes move. Refresh to review again.':`This plan is valid for ${left}s · hash ${p.hash.slice(0,10)}`}</T>}</View>
    <View style={[s.row,{gap:8,flexWrap:'wrap'}]}>
     <Button label="Refresh" icon="refresh-cw" kind="outline" onPress={load}/>
-    <Button label={closing?`Place ${n} close order${n===1?'':'s'} (paper)`:`Place ${n} paper order${n===1?'':'s'}`} icon="check" loading={busy}
+    <Button label={closing?`Place ${n} close order${n===1?'':'s'} (paper)`:adj?`Place ${n} adjustment order${n===1?'':'s'} (paper)`:`Place ${n} paper order${n===1?'':'s'}`} icon="check" loading={busy}
      disabled={!p||!p.can_submit||expired||(p.requires_ack&&!ack)} onPress={place}/>
    </View></View>}>
-  {!closing&&<View style={[s.row,{flexWrap:'wrap',gap:8}]}>
+  {!closing&&!adj&&<View style={[s.row,{flexWrap:'wrap',gap:8}]}>
    <T style={{fontSize:11,color:C.muted}}>Product</T>{['NRML','MIS'].map(x=><Chip key={x} label={x==='NRML'?'NRML (carry)':'MIS (intraday)'} active={product===x} onPress={()=>setProduct(x)}/>)}
    <T style={{fontSize:11,color:C.muted,marginLeft:8}}>Limit price</T>{[['marketable','At the quote (ask/bid)'],['mid','At the mid']].map(([k,l])=><Chip key={k} label={l} active={policy===k} onPress={()=>setPolicy(k)}/>)}
   </View>}
-  {closing&&<View style={[s.row,{gap:8}]}>{[['marketable','At the quote'],['mid','At the mid']].map(([k,l])=><Chip key={k} label={l} active={policy===k} onPress={()=>setPolicy(k)}/>)}</View>}
+  {(closing||adj)&&<View style={[s.row,{gap:8}]}>{[['marketable','At the quote'],['mid','At the mid']].map(([k,l])=><Chip key={k} label={l} active={policy===k} onPress={()=>setPolicy(k)}/>)}</View>}
   {!!error&&<View style={{backgroundColor:'#2A1519',borderRadius:10,padding:12}}><T style={{color:C.red,fontSize:13}}>{error}</T></View>}
   {!p&&!error&&<Loading/>}
   {p&&<>
@@ -62,7 +62,7 @@ export function OrderReview({visible,onClose,strategyId,deployment,onPlaced}:{vi
      <T style={{flex:.9,fontSize:12,textAlign:'right'}}>{inr(o.charges)}</T>
     </View>)}
    </View>
-   <T style={{fontSize:12,color:C.muted}}>{p.kind==='close'?'Sequence: buy back shorts first; sell longs only after every buy-back has filled.':`Sequence: ${p.sequence} Group 1 is sent first.`}</T>
+   <T style={{fontSize:12,color:C.muted}}>{p.kind==='close'?'Sequence: buy back shorts first; sell longs only after every buy-back has filled.':p.kind==='adjust'?`Only the delta orders that turn what this deployment holds into the new version. ${p.sequence}`:`Sequence: ${p.sequence} Group 1 is sent first.`}</T>
    <View style={[s.row,{flexWrap:'wrap',gap:18}]}>
     <Kv k={p.net_premium>=0?'Net credit':'Net debit'} v={inr(Math.abs(p.net_premium))}/>
     {p.kind==='open'&&<Kv k="Exchange margin (Kite)" v={p.margin?inr(p.margin.final):'Unavailable'} note={p.margin?`Before hedge benefit ${inr(p.margin.initial)}`:'Stated, not guessed'}/>}
@@ -72,7 +72,7 @@ export function OrderReview({visible,onClose,strategyId,deployment,onPlaced}:{vi
     <Icon name={c.status==='pass'?'check-circle':c.status==='warn'?'alert-triangle':'x-octagon'} size={14} color={c.status==='pass'?C.green:c.status==='warn'?C.amber:C.red}/>
     <View style={{flex:1}}><T style={{fontSize:12}}>{c.label}</T><T style={{fontSize:11,color:C.muted}}>{c.detail}</T></View></View>)}</View>
    {p.requires_ack&&<Checkbox checked={ack} onChange={setAck} tone={C.red} label="I understand this structure has unlimited loss" detail="Even on paper, this is how an unhedged short behaves."/>}
-   {!closing&&<AutotradePanel p={p} strategyId={strategyId} expired={expired}/>}
+   {!closing&&!adj&&<AutotradePanel p={p} strategyId={strategyId} expired={expired}/>}
    <View style={{backgroundColor:C.paper,borderRadius:10,padding:12,gap:4}}>
     <T style={{fontSize:12}}>Fill rule (paper): a BUY fills at the ask once the ask is at or below your limit; a SELL fills at the bid once the bid is at or above your limit. Resting orders are re-checked against live quotes every few seconds while the market is open.</T>
     <T style={{fontSize:11,color:C.muted}}>Pressing Place sends this exact plan once. Pressing it again cannot create a second set of orders.</T>
@@ -121,7 +121,7 @@ function AutotradePanel({p,strategyId,expired}:{p:Preview;strategyId:string;expi
 function Kv({k,v,note}:{k:string;v:string;note?:string}){return <View style={{gap:1,minWidth:140}}><T style={{fontSize:11,color:C.muted}}>{k}</T><T style={{fontSize:15,fontFamily:'InterSemi'}}>{v}</T>{note&&<T style={{fontSize:10,color:C.muted}}>{note}</T>}</View>;}
 
 /** K12 Monitor for one paper deployment: positions marked at liquidation prices, orders and their states, actions. */
-export function DeploymentCard({d,onChanged,onClose}:{d:Deployment;onChanged:()=>void;onClose:(d:Deployment)=>void}){
+export function DeploymentCard({d,onChanged,onClose,onAdjust}:{d:Deployment;onChanged:()=>void;onClose:(d:Deployment)=>void;onAdjust?:(d:Deployment)=>void}){
  const [busy,setBusy]=useState(false);const [open,setOpen]=useState(d.status!=='closed'&&d.status!=='cancelled');
  const resting=d.intents.filter(i=>['created','acknowledged','partially_filled'].includes(i.state)).length;
  const tone=d.status==='active'?'green':d.status==='closed'||d.status==='cancelled'?'neutral':'amber';
@@ -140,6 +140,7 @@ export function DeploymentCard({d,onChanged,onClose}:{d:Deployment;onChanged:()=
     {`${i.kind==='close'?'close':'open'} · g${i.grp} · ${i.side==='B'?'BUY':'SELL'} ${i.qty} ${i.symbol} @ ${num(i.limit_price)} limit · ${i.state}${i.avg_price?` @ ${num(i.avg_price)}`:''}`}</T>)}</View>
    <View style={[s.row,{gap:8,flexWrap:'wrap'}]}>
     {resting>0&&<Button label={`Cancel ${resting} resting`} kind="outline" icon="x" loading={busy} onPress={async()=>{setBusy(true);try{await exec.cancel(d.id);onChanged();}finally{setBusy(false);}}}/>}
+    {d.status==='active'&&onAdjust&&<Button label="Adjust" kind="outline" icon="sliders" onPress={()=>onAdjust(d)}/>}
     {(d.status==='active'||d.status==='attention_required')&&<Button label="Close position" kind="outline" icon="log-out" onPress={()=>onClose(d)}/>}
    </View>
   </>}

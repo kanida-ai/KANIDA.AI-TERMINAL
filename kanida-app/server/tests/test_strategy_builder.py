@@ -823,3 +823,236 @@ def test_marketable_limits_are_always_on_the_tick(live):
  for o in p['orders']:
   assert abs(round(o['limit']/0.05)*0.05-o['limit'])<1e-9                 # autotrade refuses off-tick limits
   assert (o['limit']>=o['ask']) if o['side']=='B' else (o['limit']<=o['bid'])   # and it still crosses
+
+
+# --- slice 8: the adjustment assistant + Lab adjustment evidence -------------------------------------------------------
+from kanida_pilot.strategy_builder import adjust as ADJ
+GRID=[float(k) for k in STRIKES]
+
+
+def sleg(t,side,k,lots=1,i=None):return {'id':i or f'{side}{t}{k}','type':t,'side':side,'strike':float(k),'lots':lots,'expiry':EXP,'price_basis':'exec','price':None,'include':True}
+
+
+def test_tested_short_is_the_one_closest_to_the_money():
+ legs=[sleg('CE','S',23150),sleg('PE','S',22750)]
+ t,d=ADJ.tested(legs,23000.0)
+ assert t['type']=='CE' and d==pytest.approx(150/23000)
+ t,d=ADJ.tested(legs,22800.0)
+ assert t['type']=='PE' and d==pytest.approx(50/22800)
+ assert ADJ.tested([sleg('CE','B',23000)],23000.0) is None
+
+
+def test_rules_roll_wing_close_reduce():
+ strangle=[sleg('CE','S',23150),sleg('PE','S',22750)]
+ new,note=ADJ.apply('roll_tested_short',strangle,23000.0,GRID,2)
+ assert sorted((l['type'],l['strike']) for l in new)==[('CE',23250.0),('PE',22750.0)] and '23150' in note
+ assert new[1] is strangle[1]                                               # untouched legs keep their identity
+ condor=[sleg('CE','B',23250),sleg('CE','S',23150),sleg('PE','S',22750),sleg('PE','B',22650)]
+ new,_=ADJ.apply('roll_tested_short',condor,23000.0,GRID,2)
+ assert ('CE',23350.0) in {(l['type'],l['strike']) for l in new} and ('CE',23250.0) in {(l['type'],l['strike']) for l in new if l['side']=='S'}
+ new,_=ADJ.apply('add_hedge_wing',strangle,23000.0,GRID,2)
+ assert {(l['type'],l['side'],l['strike']) for l in new}>={('CE','B',23250.0),('PE','B',22650.0)}
+ fly,_=ADJ.apply('add_hedge_wing',[sleg('CE','S',23000),sleg('PE','S',23000)],23000.0,GRID,4)
+ assert {(l['type'],l['side'],l['strike']) for l in fly if l['side']=='B'}=={('CE','B',23200.0),('PE','B',22800.0)}
+ with pytest.raises(ADJ.NotApplicable):ADJ.apply('add_hedge_wing',condor,23000.0,GRID,2)
+ rest,_=ADJ.apply('close_tested_side',condor,23000.0,GRID)
+ assert {l['type'] for l in rest}=={'PE'} and len(rest)==2
+ with pytest.raises(ADJ.NotApplicable):ADJ.apply('reduce_half',strangle,23000.0,GRID)       # odd lots
+ half,_=ADJ.apply('reduce_half',[{**l,'lots':4} for l in strangle],23000.0,GRID)
+ assert {l['lots'] for l in half}=={2}
+ with pytest.raises(ADJ.NotApplicable):ADJ.apply('roll_out',strangle,23000.0,GRID)
+ with pytest.raises(ADJ.NotApplicable):ADJ.apply('roll_tested_short',strangle,23000.0,GRID,20)   # off the strike list
+
+
+def test_delta_orders_buy_first_and_keep_held_ids():
+ cur=[sleg('CE','S',23150,i='L1'),sleg('PE','S',22750,i='L2')]
+ tgt=[sleg('CE','S',23250,i='N1'),sleg('PE','S',22750,i='X2')]
+ o=ADJ.delta_orders(cur,tgt)
+ assert [(x['side'],x['type'],x['strike'],x['id']) for x in o]==[('B','CE',23150.0,'L1'),('S','CE',23250.0,'N1')]
+
+
+def adjust_strategy(owner,legs):
+ return owner.post('/api/sb/strategies',json={'body':{'underlying':'NIFTY','expiry':EXP,'legs':legs}}).json()
+
+
+def test_candidates_price_delta_orders_and_overlay_exactly(live):
+ _a,owner,_o,_f=live
+ s=adjust_strategy(owner,[sleg('CE','S',23150),sleg('PE','S',22750)])
+ r=owner.post(f"/api/sb/strategies/{s['id']}/adjust/candidates",json={}).json()
+ assert r['tested']['label'].startswith('23150 CE') and r['held'] is False
+ by={(c['rule'],c.get('k')):c for c in r['candidates']}
+ assert by[('roll_out',None)]['available'] is False and by[('reduce_half',None)]['available'] is False
+ wing=by[('add_hedge_wing',2)]
+ assert wing['available'] and all(o['side']=='B' for o in wing['orders']) and wing['after']['unlimited_loss'] is False
+ assert r['current']['unlimited_loss'] is True and wing['evidence']['status']=='model_only'
+ roll=by[('roll_tested_short',1)]
+ assert [o['side'] for o in roll['orders']]==['B','S']                      # buy back first
+ buyback=roll['orders'][0];new=roll['orders'][1]
+ assert buyback['price']==buyback.get('price') and buyback['basis']=='exec'
+ # overlay invariant: after(x) = current(x) + delta orders' expiry P&L - their charges
+ for pt in roll['overlay'][::7]:
+  x=pt['s'];intr=lambda t,k:max(x-k,0) if t=='CE' else max(k-x,0)
+  extra=sum((1 if o['side']=='B' else -1)*o['qty']*(intr(o['type'],o['strike'])-o['price']) for o in roll['orders'])
+  assert pt['after']==pytest.approx(pt['current']+extra-roll['charges'],abs=0.05)
+ flat=by[('close_all',None)]
+ assert len({p['after'] for p in flat['overlay']})==1                     # closed: the same result at every spot
+ assert 'body' not in roll                                                 # the client never gets (or sends) legs
+
+
+def test_apply_writes_a_new_version_and_is_guarded(live):
+ _a,owner,_o,_f=live
+ s=adjust_strategy(owner,[sleg('CE','S',23150),sleg('PE','S',22750)])
+ v=s['draft']['version']
+ bad=owner.post(f"/api/sb/strategies/{s['id']}/adjust/apply",json={'rule':'reduce_half','version':v})
+ assert bad.status_code==409 and 'even number' in bad.json()['error']
+ ok=owner.post(f"/api/sb/strategies/{s['id']}/adjust/apply",json={'rule':'add_hedge_wing','k':2,'version':v}).json()
+ legs=ok['strategy']['draft']['body']['legs']
+ assert ok['strategy']['draft']['version']==v+1 and len(legs)==4 and sum(1 for l in legs if l['side']=='B')==2
+ stale=owner.post(f"/api/sb/strategies/{s['id']}/adjust/apply",json={'rule':'close_all','version':v})
+ assert stale.status_code==409 and stale.json()['code']=='VERSION_CONFLICT'
+ acts=owner.get(f"/api/sb/strategies/{s['id']}").json().get('activity') or []
+ assert not acts or any(a['kind']=='adjust' for a in acts)
+
+
+def test_deployment_adjust_sends_only_delta_orders_and_books_positions(live):
+ _a,owner,_o,_f=live
+ s=adjust_strategy(owner,[sleg('CE','B',23350),sleg('CE','S',23150),sleg('PE','S',22750),sleg('PE','B',22550)])
+ p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ d=owner.post(f"/api/sb/strategies/{s['id']}/deployments",json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'adj-open','confirm':True}).json()
+ assert d['status']=='active'
+ r=owner.post(f"/api/sb/strategies/{s['id']}/adjust/candidates",json={'deployment_id':d['id']}).json()
+ assert r['held'] is True and r['entry_basis'].startswith('deployment fills')
+ v=owner.get(f"/api/sb/strategies/{s['id']}").json()['draft']['version']
+ ap=owner.post(f"/api/sb/strategies/{s['id']}/adjust/apply",json={'rule':'close_tested_side','version':v,'deployment_id':d['id']}).json()
+ assert {l['type'] for l in ap['strategy']['draft']['body']['legs']}=={'PE'}
+ pv=owner.post(f"/api/sb/deployments/{d['id']}/adjust-preview",json={}).json()
+ assert pv['kind']=='adjust' and len(pv['orders'])==2 and {o['type'] for o in pv['orders']}=={'CE'}
+ assert pv['orders'][0]['side']=='B' and pv['orders'][0]['group']==1 and pv['orders'][1]['group']==2   # buy back the short first
+ done=owner.post(f"/api/sb/deployments/{d['id']}/adjust",json={'preview_id':pv['id'],'preview_hash':pv['hash'],'idempotency_key':'adj-1','confirm':True}).json()
+ assert done['status']=='active'
+ held={x['label']:x['units'] for x in done['positions']}
+ assert held['23150 CE']==0 and held['23350 CE']==0 and held['22750 PE']==-65 and held['22550 PE']==65
+ assert done['unrealised'] is not None
+ again=owner.post(f"/api/sb/deployments/{d['id']}/adjust-preview",json={})
+ assert again.status_code==409 and again.json()['code']=='NOTHING_TO_CHANGE'
+ cp=owner.post(f"/api/sb/deployments/{d['id']}/close-preview",json={}).json()
+ assert {o['type'] for o in cp['orders']}=={'PE'} and len(cp['orders'])==2    # only what is still held
+
+
+def test_lab_adjustment_is_paired_point_in_time_and_costed():
+ nifty,vix=daily_series()
+ spec=lab_spec(template='short_strangle',param=None,adjust={'rule':'add_hedge_wing','k':2,'trigger_pct':0.3})
+ from kanida_pilot.strategy_builder.templates import BY_KEY
+ if BY_KEY['short_strangle']['param']:spec['param']=BY_KEY['short_strangle']['param']['default']
+ adj,_=LB.simulate(spec,nifty,vix,65)
+ base,_=LB.simulate({**spec,'adjust':None},nifty,vix,65)
+ assert [(t['entry'],t['exit']) for t in adj]==[(t['entry'],t['exit']) for t in base]       # same schedule: paired
+ trig=[(a,b) for a,b in zip(adj,base) if (a.get('adjustment') or {}).get('applied')]
+ untrig=[(a,b) for a,b in zip(adj,base) if not (a.get('adjustment') or {}).get('applied')]
+ assert trig and untrig
+ for a,b in untrig:assert a['net']==pytest.approx(b['net'],abs=0.02)          # no adjustment -> identical result
+ idx={d:i for i,d in enumerate(nifty['days'])}
+ for a,_b in trig:
+  x=a['adjustment']
+  assert idx[x['day']]==idx[x['trigger_day']]+1 and a['entry']<=x['trigger_day']<a['exit']     # read at a close, filled next open
+  assert x['distance_pct']<=0.3 and all(o['side']=='B' for o in x['orders'])
+  assert a['fees']>b['fees']                                                                    # the adjustment pays charges
+ # the future cannot change an earlier adjusted trade
+ cut=len(nifty['days'])//2
+ short={k:(v[:cut] if isinstance(v,list) else v) for k,v in nifty.items()};vs={k:(v[:cut] if isinstance(v,list) else v) for k,v in vix.items()}
+ early,_=LB.simulate(spec,short,vs,65)
+ for e in early:
+  full=next(t for t in adj if t['entry']==e['entry'])
+  assert e['net']==full['net'] and e.get('adjustment')==full.get('adjustment')
+ r=LB.backtest(spec,nifty,vix,65)
+ a=r['adjustment']
+ assert a['pairs']==r['stats']['all']['n'] and a['triggered']['all']==a['triggered']['discovery']+a['triggered']['oos']
+ assert a['badge']['status'] in ('insufficient','adjust_helped','adjust_hurt','adjust_not_significant')
+
+
+def test_lab_adjust_validation_and_evidence(pilot):
+ app,owner,_o=pilot
+ lab=app.state.strategy_builder_lab
+ with pytest.raises(Exception) as e:lab.validate({'template':'iron_condor','adjust':{'rule':'roll_tested_short'},'stop_pct':50})
+ assert 'target/stop' in str(e.value.message if hasattr(e.value,'message') else e.value)
+ with pytest.raises(Exception) as e:lab.validate({'template':'long_call','adjust':{'rule':'roll_tested_short'}})
+ assert 'no short leg' in str(e.value.message if hasattr(e.value,'message') else e.value)
+ spec=lab.validate({'template':'short_strangle','adjust':{'rule':'add_hedge_wing','k':2,'trigger_pct':0.3}})
+ assert spec['adjust']=={'rule':'add_hedge_wing','k':2,'trigger_pct':0.3}
+ res={'badge':{'status':'insufficient','label':'x'},'stats':{'oos':{'n':1}},'adjustment':{'badge':{'status':'insufficient','label':'Adjustment model-tested - too few'},'improvement_per_triggered_trade':{'oos':{'n':4,'ci95':[-1,2]}}}}
+ uid=owner.get('/api/me').json().get('id') if owner.get('/api/me').status_code==200 else None
+ with lab.lock:
+  lab.c.execute("insert into lab_runs(id,user_id,kind,spec,status,result,created_at) values(?,?,?,?,?,?,?)",('adjrun','u-x','backtest',json.dumps(spec),'completed',json.dumps(res),time.time()));lab.c.commit()
+ ev=lab.adjust_evidence_for('u-x','short_strangle',spec['param'],'add_hedge_wing',2)
+ assert ev['run_id']=='adjrun' and ev['trigger_pct']==0.3 and ev['runs_tried']==1
+ assert lab.adjust_evidence_for('u-x','short_strangle',spec['param'],'add_hedge_wing',1) is None     # another k is another rule
+ assert lab.adjust_evidence_for('u-x','iron_condor',spec['param'],'add_hedge_wing',2) is None
+ assert lab.evidence_for('u-x','short_strangle',spec['param']) is None                               # an adjusted run is not the plain rule's evidence
+
+
+# --- slice 8 quant-audit regressions ------------------------------------------------------------------------------------
+def test_audit_roll_moves_only_a_crossed_wing_never_the_inner_long():
+ bcs=[sleg('CE','B',23000),sleg('CE','S',23200)]
+ new,note=ADJ.apply('roll_tested_short',bcs,23150.0,GRID,1)
+ assert {(l['side'],l['strike']) for l in new}=={('B',23000.0),('S',23250.0)} and 'wing' not in note
+ bps=[sleg('PE','B',23000),sleg('PE','S',22800)]
+ new,_=ADJ.apply('roll_tested_short',bps,22850.0,GRID,1)
+ assert {(l['side'],l['strike']) for l in new}=={('B',23000.0),('S',22750.0)}
+ condor=[sleg('CE','B',23250),sleg('CE','S',23200),sleg('PE','S',22750),sleg('PE','B',22650)]
+ new,note=ADJ.apply('roll_tested_short',condor,23150.0,GRID,1)     # the call wing at 23250 is crossed -> moves
+ assert ('B',23300.0) in {(l['side'],l['strike']) for l in new if l['type']=='CE'} and 'wing' in note
+
+
+def test_audit_the_tested_leg_is_pinned_to_the_trigger_decision():
+ strangle=[sleg('CE','S',23150),sleg('PE','S',22750)]
+ # at the open the put is closest, but the close decided the call: act on the call
+ new,note=ADJ.apply('close_tested_side',strangle,22760.0,GRID,tested_key=('CE',23150.0))
+ assert {l['type'] for l in new}=={'PE'}
+ with pytest.raises(ADJ.NotApplicable):ADJ.apply('roll_tested_short',strangle,23000.0,GRID,1,tested_key=('CE',23500.0))
+
+
+def test_audit_evidence_needs_matching_conditions_and_is_corrected_for_runs(live):
+ app,owner,_o,_f=live
+ lab=app.state.strategy_builder_lab
+ s=adjust_strategy(owner,[sleg('CE','S',23150),sleg('PE','S',22750)])
+ uid=app.state.strategy_builder_store.get  # noqa - owner id from the store below
+ with app.state.strategy_builder_store.lock:
+  owner_id=app.state.strategy_builder_store.c.execute('select user_id from strategies where id=?',(s['id'],)).fetchone()[0]
+ good=[500.0+i for i in range(40)]                                     # a clearly positive OOS improvement
+ def put(rid,trigger,rule='add_hedge_wing',k=2):
+  spec=lab.validate({'template':'short_strangle','adjust':{'rule':rule,'k':k,'trigger_pct':trigger}})
+  res={'badge':{'status':'x','label':'x'},'stats':{'oos':{'n':40}},'adjustment':{'oos_diffs':good,'badge':{}}}
+  with lab.lock:
+   lab.c.execute("insert into lab_runs(id,user_id,kind,spec,status,result,created_at) values(?,?,?,?,?,?,?)",(rid,owner_id,'backtest',json.dumps(spec),'completed',json.dumps(res),time.time()));lab.c.commit()
+  time.sleep(0.01);return spec
+ spec=put('r1',0.3)
+ ev=lab.adjust_evidence_for(owner_id,'short_strangle',spec['param'],'add_hedge_wing',2)
+ assert ev['status']=='adjust_helped' and ev['runs_tried']==1 and 'no skew' in ev['label']
+ put('r2',1.0,'roll_tested_short',1);put('r3',2.0)
+ ev=lab.adjust_evidence_for(owner_id,'short_strangle',spec['param'],'add_hedge_wing',2)
+ assert ev['runs_tried']==3 and 'corrected for 3 runs' in ev['label'] and ev['run_id']=='r3'
+ # live: the strangle's call is 150/23000 = 0.65% from the money; the newest run (r3) triggers at 2%, days to expiry 6 > 7? -> within
+ body={**s['draft']['body'],'template':'short_strangle','param':spec['param']}
+ v=s['draft']['version'];owner.post(f"/api/sb/strategies/{s['id']}/draft",json={'version':v,'body':body})
+ r=owner.post(f"/api/sb/strategies/{s['id']}/adjust/candidates",json={}).json()
+ wing=next(c for c in r['candidates'] if c['rule']=='add_hedge_wing')
+ assert wing['evidence']['status']=='adjust_helped', wing['evidence']
+ put('r4',0.1)                                                          # newest run now triggers at 0.1%: conditions differ
+ r=owner.post(f"/api/sb/strategies/{s['id']}/adjust/candidates",json={}).json()
+ wing=next(c for c in r['candidates'] if c['rule']=='add_hedge_wing')
+ assert wing['evidence']['status']=='model_only' and 'conditions differ' in wing['evidence']['label'] and '0.1%' in wing['evidence']['note']
+ # after one adjustment, Lab evidence (one adjustment per trade) no longer applies
+ put('r5',2.0)
+ cur=owner.get(f"/api/sb/strategies/{s['id']}").json()['draft']['version']
+ owner.post(f"/api/sb/strategies/{s['id']}/adjust/apply",json={'rule':'roll_tested_short','k':1,'version':cur})
+ r=owner.post(f"/api/sb/strategies/{s['id']}/adjust/candidates",json={}).json()
+ assert all(c['evidence']['status']=='model_only' for c in r['candidates'] if c.get('available'))
+
+
+def test_audit_adjusted_runs_do_not_report_per_100_capital():
+ nifty,vix=daily_series()
+ from kanida_pilot.strategy_builder.templates import BY_KEY
+ p=BY_KEY['short_strangle']['param']
+ r=LB.backtest(lab_spec(template='short_strangle',param=p['default'] if p else None,adjust={'rule':'add_hedge_wing','k':2,'trigger_pct':0.3}),nifty,vix,65)
+ assert all(v.get('per_100_capital') is None for v in r['stats'].values() if v.get('n'))
+ assert 'no skew' in r['adjustment']['badge']['label'] or r['adjustment']['badge']['status']=='insufficient'
