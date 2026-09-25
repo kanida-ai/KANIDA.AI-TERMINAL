@@ -262,7 +262,8 @@ def test_a_stuck_running_batch_is_swept_to_abandoned(pilot):
   lab.c.execute("insert into lab_batches values('Bold','u-s','g','g','{\"underlying\": \"NIFTY\"}','h',10,0,0,'running',0,0,null,null)");lab.c.commit()
  assert XP.sweep_stale(lab)==1
  assert XP.batches(lab,'u-s')[0]['status']=='abandoned'
- assert lab.evidence_board('u-s')['families']['NIFTY']['tests']==10          # its planned rules still count
+ # it produced NO result, so nothing was seen and nothing is added to m (a partly-run batch does count - see above)
+ assert lab.evidence_board('u-s')['families'].get('NIFTY',{}).get('tests',0)==0
 
 
 def test_repeated_snapshot_request_is_one_revision_even_via_the_store(pilot):

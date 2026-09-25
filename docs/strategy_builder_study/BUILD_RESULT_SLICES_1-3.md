@@ -682,3 +682,20 @@ Scope: `SLICE_12_PLAN.md` (all four themes; the NSE bhavcopy download was approv
 - **A look-ahead I introduced.** The strengthened A9 test caught it in the new guard (a trade that exited was dropped by a later break); fixed.
 
 Tests: `test_slice12.py` has 45 tests. The full pilot suite is 737 passed; the 6 older `test_derivatives.py` failures are unchanged.
+
+## Slice 12 results — the corrected, verified-calendar grids (26 Sep 2026, pre-registered before running)
+
+| Grid | Rules | Failed | Survivors after BH (FDR 10%) | Nearest miss |
+|---|---|---|---|---|
+| NIFTY v2 (verified expiries; the same 480 rules as v1, so each rule now has 2 runs and the conservative one decides) | 480 | 0 | **0** | iron condor, width 6, Thursday decisions, 8–14 DTE: p = 0.018 (the threshold for rank 1 is ≈ 0.0002) |
+| BANKNIFTY v1 (verified calendar; vol = NIFTY BANK realised × VIX ratio) | 480 | 0 | **0** | bear call spread, Monday decisions, 1–7 DTE: p ≈ 0.0013–0.0023, positive 95% low (+₹6–9 per ₹100 of max loss) - still 6–10× above the threshold |
+| FINNIFTY v1 (from Feb 2021) | 480 | 0 | **0** | iron condor, width 4, Wednesday decisions, 8–14 DTE: p = 0.045 |
+
+**Honest reading.**
+- None of the 1,440 new rules is evidence. The multiple-testing verdict matches every earlier study: a model-priced, defined-risk, hold-to-expiry rule on these indices shows no edge after correction.
+- Two patterns are stated as observations, not evidence:
+  - Short-dated bearish rules on BANKNIFTY came nearest.
+  - Narrow-wing iron butterflies 15–35 days out lose significantly on every index. The fixed charges and slippage exceed their tiny maximum loss (the 95% low is below -₹100 per ₹100 of max model loss).
+- The stocks v2 grid waits for NSE's symbol-change list (owner approval), so renamed stocks keep their pre-rename F&O history.
+
+**Also fixed before these runs.** A quarantined batch that produced NO result at all (`stocks_v1`, which crashed on a code error before any rule ran) no longer adds its 9,856 planned rules to the stock family's m. Nothing was seen from it. A batch with any results still counts every unfinished rule.

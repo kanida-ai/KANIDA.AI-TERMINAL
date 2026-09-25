@@ -936,6 +936,9 @@ class Lab:
     self.c.executemany('insert or replace into lab_evidence values(?,?)',new);self.c.commit()
   extra={}
   for bid,(planned,und) in bad.items():
+   # a batch that produced NO result at all (e.g. crashed on a code error before any rule ran) showed nothing to
+   # anyone, so its planned rules add nothing to m; once any of its results exist, every unfinished rule counts
+   if not seen_bad.get(bid):continue
    miss=max(0,int(planned)-seen_bad.get(bid,0))
    if miss:f=EV.family_of(und);extra[f]=extra.get(f,0)+miss
   return EV.board_entries(entries,extra)
