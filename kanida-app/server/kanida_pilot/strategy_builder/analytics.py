@@ -10,8 +10,10 @@ Conventions (docs/strategy_builder_study/BUILD_PLAN_MERGED.md ยง1, blueprint B ย
     rate as kanida_pilot/implied_vol.py, which is reused, not re-implemented.
   * Every metric is an envelope {status, value, unit, basis, reason?}. A metric that cannot be computed is
     'unavailable' or 'unsupported' with a reason - never a zero.
-  * Only same-expiry strategies are analysed in this release. Mixed expiries return 'unsupported' for the expiry
-    metrics instead of applying a terminal formula that would be wrong.
+  * Multi-expiry (calendars, diagonals - slice 12): the "expiry" payoff is the value AT THE NEAR EXPIRY - near legs at
+    intrinsic, later legs repriced by BSM at their own market IV for their remaining time. That is a MODEL, labelled
+    'model_at_near_expiry'; its extremes, breakevens and POP come from a fine grid, never a terminal formula. Each
+    leg's Greeks use its own time to expiry.
 """
 from __future__ import annotations
 import math
@@ -83,8 +85,10 @@ FREEZE_UNITS={'NIFTY':1800,'BANKNIFTY':900,'FINNIFTY':1800,'MIDCPNIFTY':2800,'NI
 
 
 def insights(active,spot,t_now,sigma,out):
- """Plain-language risk warnings for the structure as it stands (Blueprint A insights list). Each: key, level, text."""
- res=[];add=lambda k,lv,tx:res.append({'key':k,'level':lv,'text':tx})
+ """Plain-language risk warnings for the structure as it stands (Blueprint A insights list). Each: key, level, text,
+ and leg_id/fix when a one-tap fix exists (slice 12: add a hedge, snap to tick, change expiry)."""
+ res=[];cur={}
+ def add(k,lv,tx,**x):res.append({'key':k,'level':lv,'text':tx,**cur,**x})
  shorts=[l for l in active if l['side']=='S']
  for l in active:
   bid,ask=l.get('bid'),l.get('ask')
@@ -94,19 +98,21 @@ def insights(active,spot,t_now,sigma,out):
   elif l.get('price_basis')!='manual' and not (bid and ask) and l.get('ltp') is not None:
    add('no_quote','info',f"{lab}: no live bid/ask - priced at the last trade, which may be stale for an illiquid strike.")
   if l.get('off_tick') is not None:
-   add('off_tick','warn',f"{lab}: the typed price {l['price']} is not on the {l.get('tick') or 0.05} tick - an exchange order would be rejected; the nearest valid price is {l['off_tick']}.")
+   add('off_tick','warn',f"{lab}: the typed price {l['price']} is not on the {l.get('tick') or 0.05} tick - an exchange order would be rejected; the nearest valid price is {l['off_tick']}.",
+    fix={'action':'snap_tick','leg_id':l['id'],'price':l['off_tick'],'label':f"Use {l['off_tick']}"})
   if 'stale' in (l.get('flags') or []) or 'no_trade' in (l.get('flags') or []):
    add('illiquid','warn',f"{lab}: the price is stale or the strike did not trade - it may be illiquid.")
  for l in shorts:
   lab=f"{int(l['strike']) if float(l['strike']).is_integer() else l['strike']} {l['type']}"
   itm=(spot>l['strike']) if l['type']=='CE' else (spot<l['strike'])
-  if itm:add('short_itm','warn',f"Short {lab} is in the money: it carries its full intrinsic loss now and is likely to be exercised at expiry.")
+  if itm:add('short_itm','warn',f"Short {lab} is in the money: it carries its full intrinsic loss now and is likely to be exercised at expiry.",
+   fix={'action':'open_adjust','leg_id':l['id'],'label':'See adjustments'})
   if sigma and t_now>0:
    z=math.log(l['strike']/spot)/(sigma*math.sqrt(t_now))
    if (l['type']=='CE' and z>2) or (l['type']=='PE' and z<-2):
     add('far_short','info',f"Short {lab} is beyond 2 standard deviations: a small credit against a rare but large move.")
  if shorts and t_now*365<1:
-  add('expiry_gamma','warn','Expiry day with short options: gamma is at its highest, so small moves swing the P&L sharply.')
+  add('expiry_gamma','warn','Expiry day with short options: gamma is at its highest, so small moves swing the P&L sharply.',fix={'action':'change_expiry','label':'Choose a later expiry'})
  lot=next((int(l.get('lot_size') or 0) for l in active if l.get('lot_size')),0)
  for l in active:
   u=int(l['lots'])*int(l.get('lot_size') or lot or 0)
@@ -115,7 +121,8 @@ def insights(active,spot,t_now,sigma,out):
     add('freeze','info',f"{int(l['strike'])} {l['type']}: {u} units exceeds the {v}-unit exchange freeze quantity - it will be sent as several orders.")
     break
  if (out.get('max_loss') or {}).get('unlimited'):
-  add('unlimited','warn','Unlimited loss on at least one side: add a hedge leg to cap it.')
+  naked=[k for k in ('CE','PE') if sum(int(l['lots'])*(1 if l['side']=='B' else -1) for l in active if l['type']==k)<0]
+  add('unlimited','warn','Unlimited loss on at least one side: add a hedge leg to cap it.',fix={'action':'add_hedge','types':naked or ['CE'],'label':'Add a hedge'})
  seen=set();uniq=[]
  for r in res:
   if (r['key'],r['text']) not in seen:seen.add((r['key'],r['text']));uniq.append(r)
@@ -178,6 +185,62 @@ def _lognormal_cdf(x,spot,sigma,t,r=RATE):
  return IV._norm_cdf((math.log(x)-mu)/sd)
 
 
+def outcome_probabilities(legs,spot,sigma,t,profile):
+ """Model probabilities (lognormal, drift r) of the EXPIRY outcome: profit, loss, and hitting the capped max profit /
+ max loss (the flat extremes of a defined-risk payoff). Integrated over a fine grid of the terminal distribution."""
+ if not sigma or t<=0:return None
+ sd=sigma*math.sqrt(t);mu=math.log(spot)+(RATE-0.5*sigma*sigma)*t
+ lo=math.exp(mu-7*sd);hi=math.exp(mu+7*sd);N=4000
+ mp=profile.get('max_profit');ml=profile.get('max_loss')
+ tol_p=abs(mp)*1e-6+0.5 if mp is not None else None;tol_l=abs(ml)*1e-6+0.5 if ml is not None else None
+ pr=ls=pmax=pmin=0.0;prev=_lognormal_cdf(lo,spot,sigma,t)
+ for i in range(1,N+1):
+  x1=lo+(hi-lo)*i/N;c=_lognormal_cdf(x1,spot,sigma,t);w=c-prev;prev=c
+  v=expiry_pnl(legs,x1-(hi-lo)/(2*N))
+  if v>0:pr+=w
+  elif v<0:ls+=w
+  if mp is not None and abs(v-mp)<=tol_p:pmax+=w
+  if ml is not None and abs(v-ml)<=tol_l:pmin+=w
+ return {'profit':round(pr*100,1),'loss':round(ls*100,1),'max_profit':round(pmax*100,1) if mp is not None else None,
+  'max_loss':round(pmin*100,1) if ml is not None else None}
+
+
+def grid_probabilities(f,spot,sigma,t,profile):
+ """outcome_probabilities for any payoff function f(S) at horizon t (used for the near-expiry model value)."""
+ if not sigma or t<=0:return {'profit':None,'loss':None,'max_profit':None,'max_loss':None}
+ sd=sigma*math.sqrt(t);mu=math.log(spot)+(RATE-0.5*sigma*sigma)*t
+ lo=math.exp(mu-7*sd);hi=math.exp(mu+7*sd);N=2000
+ mp=profile.get('max_profit');ml=profile.get('max_loss');pr=ls=pmax=pmin=0.0;prev=_lognormal_cdf(lo,spot,sigma,t)
+ for i in range(1,N+1):
+  x1=lo+(hi-lo)*i/N;c=_lognormal_cdf(x1,spot,sigma,t);w=c-prev;prev=c;v=f(x1-(hi-lo)/(2*N))
+  if v>0:pr+=w
+  elif v<0:ls+=w
+  if mp is not None and abs(v-mp)<=abs(mp)*0.01+1:pmax+=w
+  if ml is not None and abs(v-ml)<=abs(ml)*0.01+1:pmin+=w
+ # a multi-expiry payoff peaks at a POINT (not a flat plateau), so "hits max profit/loss" has no meaning there
+ return {'profit':round(pr*100,1),'loss':round(ls*100,1),'max_profit':None,'max_loss':None,'note':'Hitting the exact max profit/loss is not meaningful for a curved (multi-expiry) payoff.'}
+
+
+def near_expiry_profile(legs,spot,sigma,t,f,n=1600):
+ """Extremes and breakevens of the model value at the near expiry, on a grid from ~0 to far beyond +-6 SD; the tails'
+ boundedness comes from the exact slopes (every call's delta -> 1 as S -> inf, every put's -> 0), not from the grid."""
+ left,right=_slopes(legs)
+ span=max(0.5,6*sigma*math.sqrt(max(t,1/365)))
+ lo=max(0.01,spot*math.exp(-span));hi=spot*math.exp(span)
+ xs=[0.01]+[lo+(hi-lo)*i/n for i in range(n+1)]
+ vs=[f(x) for x in xs]
+ roots=[]
+ for (a,va),(b,vb) in zip(zip(xs,vs),zip(xs[1:],vs[1:])):
+  if va==0:roots.append(a)
+  elif (va<0)!=(vb<0):roots.append(a+(b-a)*(-va)/(vb-va))
+ # the exact far-spot limit (quant C9): with a flat right slope the value keeps changing beyond any grid as the far
+ # legs' time value vanishes; evaluate far out (every far call -> S - K e^-rt) so the extremes include the limit
+ far=[f(spot*math.exp(span*m)) for m in (2,4,8)]
+ vs_ext=vs+far
+ return {'max_profit':None if right>1e-9 else max(vs_ext),'max_loss':None if right<-1e-9 else min(vs_ext),'unlimited_profit':right>1e-9,'unlimited_loss':right<-1e-9,
+  'breakevens':sorted({round(r,2) for r in roots if r>0}),'slope_right':right}
+
+
 def pop(legs,spot,sigma,t,profile):
  """P(expiry P&L > 0) under a lognormal at `sigma`, drift r. A MODEL value, labelled so by the caller."""
  if not sigma or t<=0:return None
@@ -211,6 +274,8 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
  same_expiry=len(expiries)==1
  expiry=expiries[0]
  t_now=years_between(reading_at,expiry)
+ # each leg's extra time beyond the NEAR expiry (0 for same-expiry strategies)
+ off={l['id']:max(0.0,(expiry_moment(l['expiry'])-expiry_moment(expiry)).total_seconds()/SECONDS_PER_YEAR) for l in active}
  target_at=parse_ist(scenario.get('at')) or reading_at
  if target_at>expiry_moment(expiry):target_at=expiry_moment(expiry)
  if target_at<reading_at:target_at=reading_at
@@ -220,7 +285,7 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
 
  ivs={};iv_notes=[]
  for l in active:
-  sigma,src=leg_iv(l,spot,t_now)
+  sigma,src=leg_iv(l,spot,t_now+off[l['id']])
   if sigma is None:iv_notes.append(f"{int(l['strike'])} {l['type']}: IV unavailable ({src})")
   ivs[l['id']]=(sigma,src)
  iv_ready=all(v[0] is not None for v in ivs.values())
@@ -233,8 +298,8 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
  def value_at(s,t):
   total=0.0
   for l in active:
-   sigma=ivs[l['id']][0]
-   v=intrinsic(l['type'],l['strike'],s) if t<=0 else bs_price(s,l['strike'],t,max(0.0001,sigma+iv_shift),l['type'])
+   sigma=ivs[l['id']][0];tt=t+off[l['id']]
+   v=intrinsic(l['type'],l['strike'],s) if tt<=0 else bs_price(s,l['strike'],tt,max(0.0001,sigma+iv_shift),l['type'])
    total+=units(l)*(v-l['price'])
   return total
 
@@ -260,11 +325,29 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
   out['capital_at_risk']=ok(round(-prof['max_loss'],2),basis='structural_max_loss') if not prof['unlimited_loss'] else ok(None,unlimited=True,basis='structural_max_loss')
   p=pop(active,spot,sigma_ref,t_now,prof) if sigma_ref else None
   out['pop']=ok(round(p*100,1),unit='percent',basis='model_lognormal_at_'+ref_basis,sigma=round(sigma_ref*100,2),sigma_basis=ref_basis) if p is not None else na('NO_IV')
+  od=outcome_probabilities(active,spot,sigma_ref,t_now,prof) if sigma_ref else None
+  out['outcomes']=ok(od,unit='percent',basis='model_lognormal_at_'+ref_basis) if od else na('NO_IV')
   if prof['unlimited_loss']:warnings.append('Unlimited loss: this structure has no hedge on one side.')
- else:
+ elif not iv_ready:
   for key in ('max_profit','max_loss','breakevens','reward_risk','capital_at_risk','pop'):
-   out[key]=na('MULTI_EXPIRY',status='unsupported')
-  warnings.append('Mixed expiries are not analysed in this release.')
+   out[key]=na('IV_UNAVAILABLE',detail=iv_notes)
+  warnings.append('A later-expiry leg has no implied volatility, so the value at the near expiry cannot be modelled.')
+ else:
+  prof=near_expiry_profile(active,spot,sigma_ref or 0.15,t_now,lambda x:value_at(x,0.0))
+  B='model_at_near_expiry'
+  out['max_profit']=ok(round(prof['max_profit'],2),basis=B) if not prof['unlimited_profit'] else ok(None,basis=B,unlimited=True)
+  out['max_loss']=ok(round(prof['max_loss'],2),basis=B) if not prof['unlimited_loss'] else ok(None,basis=B,unlimited=True)
+  out['breakevens']=ok(prof['breakevens'],unit='points',basis=B)
+  rr=round(prof['max_profit']/abs(prof['max_loss']),2) if (not prof['unlimited_profit'] and not prof['unlimited_loss'] and prof['max_loss']<0) else None
+  out['reward_risk']=ok(rr,unit='ratio',basis=B) if rr is not None else na('UNBOUNDED_OR_NO_LOSS')
+  out['capital_at_risk']=ok(round(-prof['max_loss'],2),basis=B) if not prof['unlimited_loss'] else ok(None,unlimited=True,basis=B)
+  if sigma_ref:
+   od=grid_probabilities(lambda x:value_at(x,0.0),spot,sigma_ref,t_now,prof)
+   out['pop']=ok(od['profit'],unit='percent',basis=f'{B}_lognormal_at_'+ref_basis,sigma=round(sigma_ref*100,2),sigma_basis=ref_basis)
+   out['outcomes']=ok(od,unit='percent',basis=f'{B}_lognormal_at_'+ref_basis)
+  else:out['pop']=na('NO_IV');out['outcomes']=na('NO_IV')
+  if prof['unlimited_loss']:warnings.append('Unlimited loss: this structure has no hedge on one side.')
+  warnings.append(f"Multi-expiry: the payoff shown for {expiry} values the later legs by Black-Scholes at today's implied volatility - a model, not a certain result.")
  out['margin']=na('BROKER_NOT_CONNECTED',note='Exchange (SPAN + exposure) margin needs a connected broker. Not estimated here.')
 
  # the curves: exact kinks + a grid wide enough to show both tails
@@ -274,7 +357,7 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
   {float(l['strike']) for l in active if lo<=l['strike']<=hi}|{round(target_spot,2),round(spot,2)})
  curve=[]
  for x in xs:
-  point={'s':x,'expiry':round(expiry_pnl(active,x),2) if same_expiry else None}
+  point={'s':x,'expiry':round(expiry_pnl(active,x),2) if same_expiry else (round(value_at(x,0.0),2) if iv_ready else None)}
   point['target']=round(value_at(x,t_target),2) if iv_ready else None
   curve.append(point)
  out['curve']=curve
@@ -291,8 +374,9 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
  for l in active:
   sigma,src=ivs[l['id']]
   q=units(l)
-  tv=(intrinsic(l['type'],l['strike'],target_spot) if t_target<=0 else bs_price(target_spot,l['strike'],t_target,max(0.0001,(sigma or 0)+iv_shift),l['type'])) if sigma is not None or t_target<=0 else None
-  g=bs_greeks(spot,l['strike'],t_now,sigma,l['type']) if sigma is not None else None
+  tt=t_target+off[l['id']]
+  tv=(intrinsic(l['type'],l['strike'],target_spot) if tt<=0 else bs_price(target_spot,l['strike'],tt,max(0.0001,(sigma or 0)+iv_shift),l['type'])) if sigma is not None or tt<=0 else None
+  g=bs_greeks(spot,l['strike'],t_now+off[l['id']],sigma,l['type']) if sigma is not None else None
   row={'id':l['id'],'label':f"{'Buy' if l['side']=='B' else 'Sell'} {l['lots']} x {int(l['strike']) if float(l['strike']).is_integer() else l['strike']} {l['type']}",
    'units':q,'entry':l['price'],'ltp':l.get('ltp'),'mark':l.get('mark'),'mark_basis':l.get('mark_basis'),'iv':round(sigma*100,2) if sigma is not None else None,'iv_source':src,
    'target_price':round(tv,2) if tv is not None else None,'target_pnl':round(q*(tv-l['price']),2) if tv is not None else None,
@@ -300,7 +384,7 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
    # premium split at the reading: intrinsic (what exercising now is worth) and time value (the rest, which decays)
    # time value is a MARKET quantity: the mark (not the cost basis) minus intrinsic; a pure hypothetical falls back to its price
    'intrinsic':round(intrinsic(l['type'],l['strike'],spot),2),'time_value':round((l['mark'] if l.get('mark') is not None else l['price'])-intrinsic(l['type'],l['strike'],spot),2)}
-  gs=bs_greeks(target_spot,l['strike'],t_target,max(0.0001,sigma+iv_shift),l['type']) if (sigma is not None and t_target>0) else None
+  gs=bs_greeks(target_spot,l['strike'],tt,max(0.0001,sigma+iv_shift),l['type']) if (sigma is not None and t_target>0) else None
   row['greeks_scenario']={k:round(v*q,4) for k,v in gs.items()} if gs else None
   if gs:
    for k in tot_s:tot_s[k]+=gs[k]*q
@@ -343,7 +427,7 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
  if table_step:
   step=float(table_step);base=round(spot/step)*step
   out['table']=[{'s':x,'pct':round((x/spot-1)*100,2),'target':round(value_at(x,t_target),2) if iv_ready else None,
-   'expiry':round(expiry_pnl(active,x),2) if same_expiry else None}
+   'expiry':round(expiry_pnl(active,x),2) if same_expiry else (round(value_at(x,0.0),2) if iv_ready else None)}
    for x in (base+i*step for i in range(-table_rows,table_rows+1)) if x>0]
  out['warnings']=warnings+iv_notes
  return out

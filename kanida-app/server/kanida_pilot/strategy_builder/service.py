@@ -63,29 +63,41 @@ def normalize_body(raw):
  if param is not None:
   try:param=int(param)
   except (TypeError,ValueError):raise Invalid('param must be a whole number.')
- return {'underlying':u,'expiry':e,'legs':legs,'scenario':scenario,'template':tpl,'param':param}
+ return {'underlying':u,'expiry':e,'legs':legs,'scenario':scenario,'template':tpl,'param':param,'linked':bool(raw.get('linked',False))}
 
 
 def hydrate(market,body):
  """Legs with the contract's own lot size and the stored reading's last price attached. Returns (chain, legs, problems)."""
  if not body['underlying'] or not body['expiry']:return None,[],[]
  chain=market.chain(body['underlying'],body['expiry'])
+ if not chain:
+  # the strategy expiry has passed but later legs remain (a calendar's far leg, a rolled position): reference the
+  # nearest leg expiry that still has a chain (review H2)
+  for e in sorted({l['expiry'] for l in body['legs'] if l.get('expiry') and l['expiry']!=body['expiry']}):
+   chain=market.chain(body['underlying'],e)
+   if chain:body={**body,'expiry':e};break
  if not chain:return None,[],['The option store has no reading for this underlying.']
- rows={r['strike']:r for r in chain['rows']}
+ # multi-expiry (slice 12): each leg resolves in ITS OWN expiry's chain; the strategy expiry's chain is the reference
+ chains={body['expiry']:chain}
  out=[];problems=[]
  for l in body['legs']:
-  if l['expiry']!=body['expiry']:problems.append('Mixed expiries are not supported in this release.')
+  ch=chains.get(l['expiry'])
+  if ch is None:
+   ch=chains[l['expiry']]=market.chain(body['underlying'],l['expiry'])
+  if not ch:
+   problems.append(f"No reading for the {l['expiry']} expiry of {body['underlying']}.");continue
+  rows={r['strike']:r for r in ch['rows']}
   row=(rows.get(l['strike']) or {}).get(l['type'])
   if not row:
-   problems.append(f"{int(l['strike'])} {l['type']} is not listed for {body['expiry']} - it may have expired or never existed.")
+   problems.append(f"{int(l['strike'])} {l['type']} is not listed for {l['expiry']} - it may have expired or never existed.")
    continue
   price,used=leg_price(l,row)
-  tick=chain.get('tick_size') or 0.05
+  tick=ch.get('tick_size') or chain.get('tick_size') or 0.05
   # a typed research price off the exchange tick is WARNED (insights), never blocking; fill averages are exempt
   off_tick=(round(round(price/tick)*tick,2) if (used=='manual' and price is not None and not l.get('entry_from_fills')
             and abs(round(price/tick)*tick-price)>1e-6) else None)
   mark,mark_basis=market_mark(row)
-  out.append({**l,'basis_used':used,'lot_size':chain['lot_size'],'ltp':row['ltp'],'bid':row.get('bid'),'ask':row.get('ask'),'price':price,'token':row['token'],'symbol':row['symbol'],
+  out.append({**l,'basis_used':used,'lot_size':ch['lot_size'] or chain['lot_size'],'ltp':row['ltp'],'bid':row.get('bid'),'ask':row.get('ask'),'price':price,'token':row['token'],'symbol':row['symbol'],
    # Cost basis and market valuation are SEPARATE (GTM audit P04): `price` is what the leg cost (entry / fill /
    # typed), `mark` is what the market says it is worth now, and `iv` is the market's implied volatility solved from
    # that mark - never from the entry. A custom entry moves P&L and breakevens, not the Greeks.
@@ -148,6 +160,12 @@ def analysis(market,body,table=True):
  ref=reference_iv(chain)
  a=A.analyze(legs,chain['spot'],reading,body.get('scenario'),charges=CH.estimate,table_step=chain['strike_step'] if table else None,ref_iv=ref)
  a['warnings']=problems+(a.get('warnings') or [])
+ from .market import INDEX_UNDERLYINGS
+ if chain['underlying'] not in INDEX_UNDERLYINGS and a.get('insights') is not None:
+  # stock options are PHYSICALLY settled: an ITM leg held into expiry becomes a delivery obligation, not cash
+  d=chain.get('days_to_expiry') or 0
+  a['insights'].insert(0,{'key':'physical','level':'warn' if d<=4 else 'info','text':(f'Stock option, physically settled: an in-the-money leg held into expiry means taking or giving delivery of {chain["underlying"]} shares ({d:.0f} days left). Brokers square off or ask for full margin in the last days - plan to exit before expiry.' if d<=4 else
+   f'Stock option, physically settled: in-the-money legs held into expiry become delivery of {chain["underlying"]} shares. The Lab exits stock rules the session before expiry for this reason.')})
  if a.get('status') in ('ok','partial') and chain['quality'].get('live') and hasattr(market,'basket_margin'):
   a['margin']=margin(market,legs)
  if problems and a.get('status')=='ok':a['status']='partial'

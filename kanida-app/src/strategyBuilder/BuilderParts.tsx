@@ -10,8 +10,8 @@ import {LoadState} from './States';
 const BASES:[Basis,string][]=[['exec','Buy at ask / sell at bid'],['mid','Mid'],['ltp','Last traded'],['manual','Type a price']];
 
 /** One leg, edited on its own sheet (phones): nothing changes until Apply; Cancel leaves the strategy untouched. */
-export function LegSheet({leg,chain,moveStrike,onApply,onClose,onRemove}:{leg:Leg|null;chain:Chain|null;moveStrike:(k:number,n:number)=>number;
- onApply:(l:Leg)=>void;onClose:()=>void;onRemove:(id:string)=>void}){
+export function LegSheet({leg,chain,moveStrike,onApply,onClose,onRemove,expiries=[]}:{leg:Leg|null;chain:Chain|null;moveStrike:(k:number,n:number)=>number;
+ onApply:(l:Leg)=>void;onClose:()=>void;onRemove:(id:string)=>void;expiries?:Expiry[]}){
  const [d,setD]=useState<Leg|null>(leg);const [price,setPrice]=useState('');const [err,setErr]=useState('');
  useEffect(()=>{setD(leg);setPrice(leg?.price_basis==='manual'&&leg.price!=null?String(leg.price):'');setErr('');},[leg]);
  if(!leg||!d)return null;
@@ -35,6 +35,9 @@ export function LegSheet({leg,chain,moveStrike,onApply,onClose,onRemove}:{leg:Le
     <Button label="−" accessibilityLabel="Lower strike" kind="outline" onPress={()=>setD({...d,strike:moveStrike(d.strike,-1)})}/>
     <T style={{fontFamily:'InterSemi',fontSize:16,minWidth:70,textAlign:'center'}}>{strikeText(d.strike)}</T>
     <Button label="+" accessibilityLabel="Higher strike" kind="outline" onPress={()=>setD({...d,strike:moveStrike(d.strike,1)})}/></View>
+   {expiries.length>1&&<View style={{gap:6}}><T style={{fontSize:12,color:C.muted}}>Expiry (a leg in another expiry makes a calendar or diagonal)</T>
+    <View style={[s.row,{gap:8,flexWrap:'wrap'}]}>{expiries.slice(0,8).map(x=><Chip key={x.expiry} label={`${dayMonth(x.expiry)} · ${Math.max(0,Math.round(x.days_to_expiry))}d`} active={d.expiry===x.expiry} onPress={()=>setD({...d,expiry:x.expiry})}/>)}</View>
+    {d.expiry!==leg.expiry&&<T style={{fontSize:11,color:C.amber}}>The strike must be listed in that expiry - it is checked when the strategy is analysed.</T>}</View>}
    <View style={[s.row,{gap:8,alignItems:'center'}]}><T style={{fontSize:12,color:C.muted,width:60}}>Lots</T>
     <Button label="−" accessibilityLabel="Fewer lots" kind="outline" onPress={()=>setD({...d,lots:Math.max(1,d.lots-1)})}/>
     <T style={{fontFamily:'InterSemi',fontSize:16,minWidth:70,textAlign:'center'}}>{d.lots}</T>
@@ -73,12 +76,15 @@ export function ExpirySheet({visible,onClose,expiries,current,underlying,legs,on
    for(const l of legs){const q=ch.rows.find(r=>r.strike===l.strike)?.[l.type];(q&&q.ltp!=null?ok:missing).push(`${l.side==='B'?'Buy':'Sell'} ${strikeText(l.strike)} ${l.type}`);}
    setCheck({ok,missing,for:e} as any);}
   catch(x:any){if(mine===seq.current)setErr(x.message);}finally{if(mine===seq.current)setBusy(false);}}
- const canApply=!!pick&&pick!==current&&(!legs.length||(!!check&&(check as any).for===pick&&!check.missing.length));
+ // a calendar/diagonal must never be flattened by moving every leg to one expiry (review M5)
+ const multi=new Set(legs.map(l=>l.expiry)).size>1;
+ const canApply=!multi&&!!pick&&pick!==current&&(!legs.length||(!!check&&(check as any).for===pick&&!check.missing.length));
  return <Sheet visible={visible} onClose={onClose} title="Choose an expiry" subtitle={legs.length?'Every leg moves to the new expiry at the same strike. Nothing changes until you apply, and only if every leg is listed there.':'Pick any listed expiry.'}
   footer={<View style={[s.row,{justifyContent:'flex-end',gap:8}]}><Button label="Cancel" kind="outline" onPress={onClose}/>
    <Button label={pick?`Move to ${dayMonth(pick)}`:'Move'} icon="check" disabled={!canApply} loading={busy} onPress={()=>{onApply(pick);onClose();}}/></View>}>
   <View style={[s.row,{flexWrap:'wrap',gap:8}]}>{expiries.map(x=><Chip key={x.expiry} active={(pick||current)===x.expiry}
    label={`${dayMonth(x.expiry)} ${x.monthly?'M':'W'} · ${Math.max(0,Math.round(x.days_to_expiry))}d${x.expiry===current?' (now)':''}`} onPress={()=>choose(x.expiry)}/>)}</View>
+  {multi&&<T accessibilityRole="alert" style={{color:C.amber,fontSize:12}}>This strategy spans expiries (a calendar or diagonal). Moving every leg to one expiry would collapse it - change each leg's expiry in its own editor.</T>}
   {!!err&&<T accessibilityRole="alert" style={{color:C.red,fontSize:12}}>{err}</T>}
   {check&&<View style={{gap:4}}>
    {check.ok.map(x=><T key={x} style={{fontSize:12,color:C.green}}>{`✓ ${x} is listed`}</T>)}
@@ -118,4 +124,22 @@ export function SnapshotSheet({rid,onClose,onSaved}:{rid:string|null;onClose:()=
    </View>}
   </LoadState>
  </Sheet>;
+}
+
+/** Indices as chips; F&O stocks through a search (216 names never become a wall of chips). Stocks are physically settled. */
+export function UnderlyingPicker({list,value,onPick}:{list:{symbol:string;kind?:string}[];value:string;onPick:(u:string)=>void}){
+ const [q,setQ]=useState('');
+ const idx=list.filter(x=>x.kind!=='stock');const stocks=list.filter(x=>x.kind==='stock');
+ const hits=q.trim()?stocks.filter(x=>x.symbol.includes(q.trim().toUpperCase())).slice(0,12):[];
+ const isStock=stocks.some(x=>x.symbol===value);
+ return <View style={{gap:8}}>
+  <View style={[s.row,{flexWrap:'wrap',gap:8}]}>{idx.map(x=><Chip key={x.symbol} label={x.symbol} active={value===x.symbol} onPress={()=>onPick(x.symbol)}/>)}
+   {isStock&&<Chip label={`${value} · stock`} active onPress={()=>{}}/>}</View>
+  {stocks.length>0&&<View style={{gap:6}}>
+   <TextInput value={q} onChangeText={setQ} placeholder={`Search ${stocks.length} F&O stocks (physically settled)`} placeholderTextColor={C.muted} autoCapitalize="characters"
+    accessibilityLabel="Search F&O stocks" style={{minHeight:44,borderWidth:1,borderColor:C.line,borderRadius:10,paddingHorizontal:12,color:C.ink,fontFamily:'Inter',fontSize:13,backgroundColor:C.paper,maxWidth:420}}/>
+   {hits.length>0&&<View style={[s.row,{flexWrap:'wrap',gap:6}]}>{hits.map(x=><Chip key={x.symbol} label={x.symbol} active={value===x.symbol} onPress={()=>{setQ('');onPick(x.symbol);}}/>)}</View>}
+   {!!q.trim()&&!hits.length&&<T style={{fontSize:11,color:C.muted}}>No F&O stock matches.</T>}
+  </View>}
+ </View>;
 }

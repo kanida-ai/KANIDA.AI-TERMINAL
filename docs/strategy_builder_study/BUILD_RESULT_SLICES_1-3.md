@@ -621,3 +621,64 @@ Scope: `SLICE_11_PLAN.md`, all 13 remaining GTM items, as the owner chose. The s
 - **Left open, stated.** The engine intake needs an exact lookup-by-key endpoint; its list is capped at 200. That is why unknown hand-offs wait for a human release rather than a timer.
 
 Tests: `test_slice11.py` has 19 tests. The full pilot suite is 692 passed; the same 6 `test_derivatives.py` failures predate this slice.
+
+# Slice 12 — trustworthy evidence, faster building, closing partials, multi-expiry (26 Sep 2026)
+
+Scope: `SLICE_12_PLAN.md` (all four themes; the NSE bhavcopy download was approved).
+
+**A. Evidence**
+- **NSE F&O bhavcopy archive.** `market_data/bhavcopy/` loads it into `db/fo_bhavcopy.db`: both file formats, idempotent, every missing day logged with its reason, about 2,800 weekdays from 2016.
+- **Verified expiries (A2).** The Lab picks each trade's expiry from the options NSE listed on the entry day, falling back to the derived rule only on days the archive doesn't cover; each trade records which it used. BANKNIFTY and FINNIFTY run on the verified calendar only.
+- **Point-in-time membership (A3).** A stock trades only on days it had listed options. The `stocks_v2` universe is every stock with options in the period, including leavers that have a recorded lot size. A renamed stock needs NSE's symbol-change list (supported; the download is pending approval).
+- **Slippage (A4).** Stock fills pay at least the measured median half-spread, bucketed by premium as a % of spot. It comes from one morning of captured quotes, labelled as a small sample.
+- **Data guard (A5).** Breaks are recorded, never truncated. A >40% jump is a break unless the stock's own futures confirm it, so real crashes stay in; a gap over 15 days is always a break. A trade whose actual holding period crosses a break is dropped (later decisions are unchanged), and so is an entry within 25 sessions after a break.
+- **Evidence versioning (A6).** `EVIDENCE_VERSION` is derived from the statistics settings. Stale stock-model runs are quarantined but still count in the multiple-testing total.
+- **A7.** Strike width is 1% of spot; entries too close to expiry are skipped.
+- **Evidence on the strategy (A8).** The builder shows the Lab evidence for the strategy's structure, with its version and the deciding run's date.
+- **Leakage tests (A9).** Property tests on the NIFTY path, and end to end on the stock pipeline including the guard, targets and stops.
+
+**B. Faster building**
+- Stock options in the builder (a stock search, and a physical-settlement warning).
+- Linked strikes (one stepper moves every leg, the same move as Shift).
+- Probability of loss and of hitting max profit/loss.
+- One-tap fixes on warnings (add a hedge in the short's own expiry, snap to the tick, a later expiry, adjustments).
+- A chain filter (go to strike, a range around spot, liquid only).
+- Paper exit rules. A target or stop goes through the normal reviewed close; a rule that can never fire, or one on a multi-expiry position, is refused.
+- Per-leg expiry settlement at intrinsic value, using a reading from 15:15–15:30 IST on expiry day. It runs once, with a compare-and-set.
+
+**C. Partials**
+- **Engine:** exact `GET /intents/by-key` (engine branch commit `3328458`, not pushed). The pilot marks `not_received` only on autotrade's authoritative `INTENT_NOT_FOUND`.
+- **Isolation:** a two-user test covers every unique `/api/sb` route that takes an id.
+- **Backup and restore:** `scripts/sb_backup.py` (online backup, verify, restore-to-new-path, drill). The real drill passed: 23 tables, every row count matching.
+- **Keyboard:** a keyboard-only path with focus return, verified.
+- **iOS Simulator:** blocked. This Mac has only the Xcode command-line tools; a full Xcode install is needed.
+
+**D. Multi-expiry**
+- **Analytics:** each leg uses its own time to expiry. The value at the near expiry is modelled (later legs by BSM at their market IV). Extremes come from a grid plus the exact far-spot limit; unlimited sides come from the exact slopes.
+- **Templates:** calendars and diagonals, with the far expiry auto-picked or validated.
+- **Legs:** a per-leg expiry editor. A multi-expiry strategy can't be flattened by the whole-strategy expiry move.
+- **Adjustments:** roll-out for single-expiry positions; the expiry follows the rolled legs.
+- **Plumbing:** hydrate, marks, close and adjust all work per leg expiry.
+- **Lab:** calendar rules are not simulated yet (stated).
+
+## Independent audit (dev-reviewer: FAIL; dev-quant-auditor: 10 confirmed) — all fixed or stated
+
+- **Multi-expiry settlement (H1, C5).** Settlement is per leg.
+- **Rolled positions (H2).** A rolled or post-near-expiry position can be valued and closed: the reference expiry falls back to live legs, and the lot size comes from any chain that resolves.
+- **Double settlement and reopen (M1).** Settlement is a compare-and-set, and `_roll_up` leaves a settled deployment alone.
+- **Log spam (M2).** Removed.
+- **Exit rules that couldn't fire (M3, C7).** Refused.
+- **Kite list (M4).** Indexed once a day.
+- **Calendar flattening (M5).** Blocked in the expiry sheet.
+- **Calendar roll-out (C8).** Refused.
+- **Diagonal far-spot limit (C9).** Now included.
+- **BANKNIFTY/FINNIFTY (C10).** Honest provenance and a `lab-bsm-scaledvol-v1-index` model tag.
+- **stocks_v2 blocker and leavers (C1).** Fixed.
+- **Renames (C2).** The symbol-change list is supported.
+- **Guard look-ahead (C3).** Replaced by per-trade exclusion, with futures confirming genuine crashes.
+- **Split look-ahead in the slippage bucket (C4).** Bucketed by % of spot.
+- **Settlement spot age (C6).** Only a 15:15–15:30 reading counts.
+- **Plausible findings.** One consistent calendar snapshot; a verified expiry missing from the price series is skipped; no meaningless probabilities on a pointed peak; a derived evidence version; a stronger A9.
+- **A look-ahead I introduced.** The strengthened A9 test caught it in the new guard (a trade that exited was dropped by a later break); fixed.
+
+Tests: `test_slice12.py` has 45 tests. The full pilot suite is 737 passed; the 6 older `test_derivatives.py` failures are unchanged.

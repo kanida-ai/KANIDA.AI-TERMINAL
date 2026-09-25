@@ -47,8 +47,11 @@ class Market:
   if self._c:self._c.close();self._c=None
 
  def underlyings(self):
+  """Indices first, then F&O stocks (physically settled - the builder says so near expiry)."""
   have={r['underlying'] for r in self._q('select distinct underlying from underlying_snapshots where spot is not null')}
-  return [{'symbol':u,'kind':'index','supported':True} for u in INDEX_UNDERLYINGS if u in have]
+  opts={r['underlying'] for r in self._q("select distinct underlying from contracts where instrument_type in ('CE','PE')")}
+  return ([{'symbol':u,'kind':'index','supported':True} for u in INDEX_UNDERLYINGS if u in have]+
+   [{'symbol':u,'kind':'stock','supported':True,'settlement':'physical'} for u in sorted(have&opts) if u not in INDEX_UNDERLYINGS])
 
  def reading(self,underlying):
   """The newest reading of this underlying that carries a spot: (captured_at text, spot)."""

@@ -133,7 +133,18 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
   if not got:raise PilotError(404,'NO_READING','The option store has no reading for this underlying.')
   try:lots=max(1,min(500,int(data.get('lots') or 1)))
   except (TypeError,ValueError):raise PilotError(400,'FIELD_INVALID','lots must be a whole number.')
-  try:return {**resolve(str(data.get('template') or ''),got,data.get('param'),lots),'as_of':got['as_of']}
+  key=str(data.get('template') or '');far=None
+  from .templates import BY_KEY as _TB
+  if (_TB.get(key) or {}).get('multi_expiry'):
+   fe=data.get('far_expiry')
+   if fe and str(fe)<=got['expiry']:raise PilotError(400,'FIELD_INVALID','far_expiry must be later than the near expiry.')
+   if not fe:
+    exps=guard(market.expiries,got['underlying'])['expiries']
+    from datetime import date as _d
+    later=[x['expiry'] for x in exps if (_d.fromisoformat(x['expiry'])-_d.fromisoformat(got['expiry'])).days>=6]
+    fe=later[0] if later else None
+   far=guard(market.chain,got['underlying'],_date(fe)) if fe else None
+  try:return {**resolve(key,got,data.get('param'),lots,far),'as_of':got['as_of']}
   except ResolveError as e:raise PilotError(400,e.code,e.message)
 
  @r.post('/api/sb/analyze')
@@ -172,6 +183,28 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
   try:s=store.create(user['id'],_name(f"{body['underlying']} {c['name']} {dm(body['expiry'])}",c['name']),nb,thesis=thesis)
   except ValueError as e:raise PilotError(409,'STRATEGY_LIMIT',str(e))
   return {**s,'candidate_id':c['candidate_id']}
+
+ @r.get('/api/sb/strategies/{sid}/evidence')
+ def strategy_evidence(request:Request,sid:str):
+  """The Lab evidence behind THIS strategy's structure (GTM/A8): the same matching rules as Discover, plus the
+  evidence version and the deciding run's date, so a stale or mismatched result is visible where the strategy is built."""
+  user=me(request);s=own(user,sid);body=s['draft']['body'];legs=[l for l in body.get('legs',[]) if l.get('include',True)]
+  from . import evidence as EV
+  if not legs:return {'status':'none','label':'No legs yet'}
+  st=recognise([{**l,'lot_size':1} for l in legs])
+  if not st.get('exact') or not st.get('key'):return {'status':'none','label':'Custom structure - no Lab rule describes it','structure':st.get('name')}
+  u=body.get('underlying') or 'NIFTY'
+  if not lab or not (u=='NIFTY' or u in lab.stocks()):return {'status':'none','label':f'The Lab does not test {u} yet','structure':st['name']}
+  try:got=market.reading(u);as_of=got[0] if got else None
+  except Exception:as_of=None  # noqa: BLE001
+  dte=EV.next_session_dte(body['expiry'],as_of) if as_of and body.get('expiry') else None
+  param=body.get('param') if body.get('template')==st['key'] else None
+  b=lab.evidence_board(user['id'])
+  ev=EV.for_candidate(b,st['key'],param,dte,u)
+  if not ev:return {'status':'model_only','label':'Not tested in your Lab yet','structure':st['name'],'template':st['key'],'param':param,'evidence_version':EV.EVIDENCE_VERSION}
+  run=lab.run(user['id'],ev['run_id'],full=False) if ev.get('run_id') else None
+  return {**ev,'structure':st['name'],'template':st['key'],'param':param,'dte':dte,'evidence_version':EV.EVIDENCE_VERSION,
+   'deciding_run_at':run['created_at'] if run else None}
 
  @r.get('/api/sb/lab/universe')
  def lab_universe(request:Request):
@@ -448,6 +481,16 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
   user=me(request);d=ex(execution.deployment,user['id'],did)
   if not d:raise PilotError(404,'DEPLOYMENT_NOT_FOUND','There is no such deployment.')
   d.pop('revision_body',None);return d
+
+ @r.post('/api/sb/deployments/{did}/exit-rules')
+ def deployment_exit_rules(request:Request,did:str,data:dict=Body(default={})):
+  user=me(request)
+  def num(k):
+   v=data.get(k)
+   if v in (None,''):return None
+   try:return float(v)
+   except (TypeError,ValueError):raise PilotError(400,'FIELD_INVALID',f'{k} must be a number.')
+  return ex(execution.set_exit_rules,user['id'],did,num('target_pct'),num('stop_pct'))
 
  @r.post('/api/sb/deployments/{did}/cancel')
  def cancel(request:Request,did:str,data:dict=Body(default={})):

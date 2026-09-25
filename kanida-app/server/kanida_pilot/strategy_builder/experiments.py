@@ -27,6 +27,28 @@ GRIDS={
   'dte':[[1,7],[8,14],[15,35]],'from':'2019-03-01','to':None,'split':'2023-01-02','slippage_pct':0.5,
   'why':'Every defined-risk template x width x decision weekday x days-to-expiry window, held to expiry. Weekly options '
         'exist for the whole period (from 2019-02-11); out of sample from 2023-01-02.'},
+ # slice 12 - after the stock-Lab audit fixes: measured half-spread floor, 1%-of-spot strikes, data guard, verified
+ # expiries and POINT-IN-TIME F&O membership from NSE's bhavcopy (A2-A5). Pre-registered before any run.
+ 'stocks_v2':{'name':'F&O stocks defined-risk grid v2 (point-in-time)','underlying':'STOCKS','universe':'pit',
+  'templates':['long_call','long_put','bull_call_spread','bear_put_spread','bull_put_spread','bear_call_spread','long_straddle','long_strangle','iron_condor','iron_butterfly'],'weekdays':[2],
+  'dte':[[5,14],[15,35]],'from':'2016-01-01','to':'2026-07-29','split':'2022-01-03','slippage_pct':1.0,'exit_dte':2,'min_history_from':'2016-06-30',
+  'why':'The v1 grid re-run on the corrected Lab: every stock that had listed options at any time in the period (bhavcopy), traded only on days it '
+        'actually had options; slippage never below the measured median half-spread of the premium bucket; strikes 1% of spot; bad-price windows excluded; '
+        'verified expiries. Stocks absent from kanida.db (delisted names) are still missing - stated. One evidence family with v1 (both count).'},
+ 'nifty_v2':{'name':'NIFTY defined-risk grid v2 (verified calendar)','underlying':'NIFTY',
+  'templates':['long_call','long_put','bull_call_spread','bear_put_spread','bull_put_spread','bear_call_spread','long_straddle','long_strangle','iron_condor','iron_butterfly'],'weekdays':[0,1,2,3,4],
+  'dte':[[1,7],[8,14],[15,35]],'from':'2019-03-01','to':None,'split':'2023-01-02','slippage_pct':0.5,
+  'why':'nifty_v1 re-run with expiries taken from the options NSE listed each day (bhavcopy) instead of the derived rule. Its rules are the SAME rules as v1: '
+        'each rule now has two runs and the more conservative decides.'},
+ 'banknifty_v1':{'name':'BANKNIFTY defined-risk grid v1','underlying':'BANKNIFTY',
+  'templates':['long_call','long_put','bull_call_spread','bear_put_spread','bull_put_spread','bear_call_spread','long_straddle','long_strangle','iron_condor','iron_butterfly'],'weekdays':[0,1,2,3,4],
+  'dte':[[1,7],[8,14],[15,35]],'from':'2019-03-01','to':None,'split':'2023-01-02','slippage_pct':0.5,
+  'why':'Every defined-risk template x width x weekday x DTE window on BANKNIFTY, expiries strictly from the NSE bhavcopy listing (its expiry day moved '
+        'several times and weeklies ended in Nov 2024). Volatility = NIFTY BANK realised vol scaled by India VIX (no BANKNIFTY IV history here).'},
+ 'finnifty_v1':{'name':'FINNIFTY defined-risk grid v1','underlying':'FINNIFTY',
+  'templates':['long_call','long_put','bull_call_spread','bear_put_spread','bull_put_spread','bear_call_spread','long_straddle','long_strangle','iron_condor','iron_butterfly'],'weekdays':[0,1,2,3,4],
+  'dte':[[1,7],[8,14],[15,35]],'from':'2021-02-01','to':None,'split':'2024-01-01','slippage_pct':0.5,
+  'why':'As BANKNIFTY v1 for FINNIFTY (options from Jan 2021). Volatility = NIFTY FIN SERVICE realised vol scaled by India VIX.'},
 }
 
 SCHEMA='''
@@ -39,7 +61,7 @@ create table if not exists lab_batches(
 
 def plan(lab,grid:Dict[str,Any])->List[Dict[str,Any]]:
  """The exact rule list (validated specs) a grid expands to - deterministic order."""
- tpls=[t for t in TEMPLATES if (grid['templates']=='defined' and t['risk']=='defined') or (isinstance(grid['templates'],list) and t['key'] in grid['templates'])]
+ tpls=[t for t in TEMPLATES if not t.get('multi_expiry') and ((grid['templates']=='defined' and t['risk']=='defined') or (isinstance(grid['templates'],list) and t['key'] in grid['templates']))]
  out=[]
  unders=universe(lab,grid) if grid['underlying']=='STOCKS' else [grid['underlying']]
  for u in unders:
@@ -48,9 +70,22 @@ def plan(lab,grid:Dict[str,Any])->List[Dict[str,Any]]:
 
 
 def universe(lab,grid)->List[str]:
- """Today's F&O stocks that have kanida.db daily history starting on/before grid['min_history_from']."""
+ """v1: today's F&O stocks with kanida.db history from grid['min_history_from'].
+ 'pit' (v2): every stock that had listed options at ANY time in the grid period (NSE bhavcopy) and has kanida.db history
+ - trading days are then restricted to days it actually had options (fo_calendar), so later entrants add no early trades."""
  import sqlite3
  c=sqlite3.connect(f'file:{lab.daily.kanida_db}?mode=ro',uri=True,timeout=20)
+ if grid.get('universe')=='pit':
+  have={r[0] for r in c.execute('select distinct symbol from ohlc_daily')};c.close()
+  members=lab.cal.ever_members(grid['from'],grid.get('to') or '2099-12-31') if lab.cal.available() else set()
+  if not members:raise ValueError('The point-in-time universe needs db/fo_bhavcopy.db')
+  today=lab.stocks()
+  # a leaver needs a RECORDED lot size (NSE UDiFF files carry it); none on record = excluded and counted, never guessed
+  out=sorted(u for u in members&have if u in today or lab.cal.lot_size(u))
+  grid['_universe_note']={'members_in_period':len(members),'with_kanida_history':len(members&have),'tested':len(out),
+   'excluded_no_lot_size':sorted(u for u in members&have if u not in today and not lab.cal.lot_size(u))[:50],
+   'missing_from_kanida_db':len(members-have)}
+  return out
  have={r[0] for r in c.execute("select symbol from ohlc_daily group by symbol having min(substr(bar_time,1,10))<=?",(grid.get('min_history_from','2016-06-30'),))}
  c.close()
  return sorted(lab.stocks()&have)
@@ -62,7 +97,7 @@ def _plan_one(lab,grid,tpls,u):
   for v in ((t['param'] or {}).get('variants') or [None]):
    for wd in grid['weekdays']:
     for lo,hi in grid['dte']:
-     out.append(lab.validate({'underlying':u,'template':t['key'],'param':v,'weekday':wd,'dte_min':lo,'dte_max':hi,
+     out.append(lab.validate({**({'pit':True} if grid.get('universe')=='pit' else {}),'underlying':u,'template':t['key'],'param':v,'weekday':wd,'dte_min':lo,'dte_max':hi,
       'from':grid['from'],'to':grid.get('to') or None,'split':grid['split'],'slippage_pct':grid['slippage_pct'],'exit_dte':grid.get('exit_dte')}))
  return out
 
@@ -75,9 +110,14 @@ def _init(kanida_db,nifty,vix):
 
 def _series(u,special):
  """Worker-side data: the underlying's cleaned daily series and its volatility series (NIFTY: India VIX)."""
- from .lab import Daily,clean_series,scaled_vol
+ from .lab import Daily,clean_series,guard_series,scaled_vol,INDEX_SERIES,VERIFIED_ONLY
  if u=='NIFTY':return _W['n'],_W['v']
- d=Daily(_W['k'],None,None);s=clean_series(d.series(u),special)
+ d=Daily(_W['k'],None,None)
+ if u in VERIFIED_ONLY:
+  s=clean_series(d.series(INDEX_SERIES[u]),special);return s,scaled_vol(s,_W['n'],_W['v'])
+ from .fo_calendar import FoCalendar
+ fc=FoCalendar()
+ s=guard_series(clean_series(d.series(u),special),fc if fc.available() else None,u)
  return s,scaled_vol(s,_W['n'],_W['v'])
 
 
@@ -88,12 +128,14 @@ def _group(args):
  try:s,v=_series(u,set(special))
  except Exception as e:  # noqa: BLE001
   return [(uuid.uuid4().hex[:16],sp,None,f'NO_DATA {type(e).__name__}: {e}'[:300],None) for sp in specs]
+ from .fo_calendar import FoCalendar
+ fc=FoCalendar();cal=fc.lookup(u) if fc.available() else None      # verified expiries + point-in-time F&O membership
  from .evidence import entry
  out=[]
  for sp in specs:
   rid=uuid.uuid4().hex[:16]
   try:
-   res=compact(backtest(sp,s,v,lot))
+   res=compact(backtest(sp,s,v,lot,cal=cal))
    out.append((rid,sp,res,None,entry(rid,sp,res,time.time())))
   except Exception as e:  # noqa: BLE001 - a failed rule is reported, never dropped
    out.append((rid,sp,None,f'{type(e).__name__}: {e}'[:300],None))
@@ -116,7 +158,7 @@ def run_batch(lab,user_id:str,grid_key:str,workers:Optional[int]=None,on_progres
  ph=hashlib.sha256(json.dumps([{k:v for k,v in s.items() if k!='batch'} for s in specs],sort_keys=True).encode()).hexdigest()
  t0=time.time()
  with lab.lock:                                                    # pre-registration: written before anything runs
-  lab.c.execute('insert into lab_batches values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(bid,user_id,grid_key,grid['name'],json.dumps({**grid,'rules':len(specs)}),ph,
+  lab.c.execute('insert into lab_batches values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(bid,user_id,grid_key,grid['name'],json.dumps({**grid,'rules':len(specs)},default=str),ph,
    len(specs),0,0,'running',t0,t0,None,None));lab.c.commit()
  nifty,vix=lab.series_for('NIFTY')
  special=sorted(lab.daily.special_sessions())

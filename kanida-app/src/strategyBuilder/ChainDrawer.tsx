@@ -1,7 +1,7 @@
 // Contract picker: calls left, puts right, strike in the centre. Buy/Sell are always visible on every priced strike
 // (no hover needed). A strike with no price in the stored reading cannot be added - an absent price is never a zero.
 import React,{useEffect,useMemo,useRef,useState} from 'react';
-import {Pressable,ScrollView,View,useWindowDimensions} from 'react-native';
+import {Pressable,ScrollView,TextInput,View,useWindowDimensions} from 'react-native';
 import {Button,C,Chip,Sheet,T,s} from '../ui';
 import type {Chain,ChainSide,Kind,Leg,Side} from './api';
 import {dayMonth,istStamp,num,strikeText} from './format';
@@ -12,12 +12,22 @@ export function ChainDrawer({visible,chain,legs,onToggle,onClose}:{visible:boole
  onToggle:(strike:number,kind:Kind,side:Side,price:number)=>void;onClose:()=>void}){
  const narrow=useWindowDimensions().width<600;
  const [all,setAll]=useState(false);const [view,setView]=useState<'price'|'oi'|'greeks'>('price');
+ // B3 chain filter: a strike search, a range around spot, and "liquid only" (a priced side with open interest; on live
+ // data also a two-sided book) - hiding illiquid strikes, never altering prices
+ const [q,setQ]=useState('');const [liquid,setLiquid]=useState(false);const [range,setRange]=useState(0);
  const rows=useMemo(()=>{
   if(!chain)return [];
-  if(all)return chain.rows;
-  const i=chain.rows.findIndex(r=>r.strike===chain.atm_strike);
-  return chain.rows.slice(Math.max(0,i-WINDOW),i+WINDOW+1);
- },[chain,all]);
+  const live=!!chain.quality?.live;
+  const ok=(x:ChainSide|null)=>!!x&&x.ltp!=null&&(x.oi||0)>0&&(!live||(!!x.bid&&!!x.ask&&x.bid<=x.ask));
+  let rs=chain.rows;
+  if(liquid)rs=rs.filter(r=>ok(r.CE)||ok(r.PE));
+  if(range)rs=rs.filter(r=>Math.abs(r.strike/chain.spot-1)<=range/100);
+  const qq=q.trim();
+  if(qq){const n=Number(qq);if(Number.isFinite(n)&&n>0){const near=[...rs].sort((a,b)=>Math.abs(a.strike-n)-Math.abs(b.strike-n)).slice(0,9).map(r=>r.strike);rs=rs.filter(r=>near.includes(r.strike));}}
+  if(all||range||qq)return rs;
+  const i=rs.findIndex(r=>r.strike>=chain.atm_strike);
+  return rs.slice(Math.max(0,i-WINDOW),Math.max(0,i)+WINDOW+1);
+ },[chain,all,liquid,range,q]);
  const scroller=useRef<any>(null);const ROW=narrow?56:45;
  const second=(x:ChainSide|null)=>view==='price'?(x?.iv!=null?`IV ${x.iv}%`:'IV —'):view==='oi'?`OI ${compactOi(x?.oi)}`:greek((x as any)?.greeks);
  const fl=narrow?{ltp:1.3,pair:2.5,strike:1.1}:{ltp:1.2,pair:1.6,strike:1.3};
@@ -31,6 +41,13 @@ export function ChainDrawer({visible,chain,legs,onToggle,onClose}:{visible:boole
   <View style={[s.row,{flexWrap:'wrap',gap:8}]}>
    <Chip label="Price & IV" active={view==='price'} onPress={()=>setView('price')}/><Chip label="Open interest" active={view==='oi'} onPress={()=>setView('oi')}/><Chip label="Greeks" active={view==='greeks'} onPress={()=>setView('greeks')}/>
    <Chip label={all?'Near the money':'All strikes'} active={all} onPress={()=>setAll(!all)} icon="list"/>
+  </View>
+  <View style={[s.row,{flexWrap:'wrap',gap:8,alignItems:'center'}]}>
+   <TextInput value={q} onChangeText={setQ} keyboardType="numeric" placeholder="Go to strike" placeholderTextColor={C.muted} accessibilityLabel="Go to strike"
+    style={{minHeight:40,width:130,borderWidth:1,borderColor:C.line,borderRadius:10,paddingHorizontal:10,color:C.ink,fontFamily:'Inter',fontSize:13,backgroundColor:C.paper}}/>
+   {([[0,'Any range'],[2,'±2%'],[5,'±5%'],[10,'±10%']] as [number,string][]).map(([v,l])=><Chip key={v} label={l} active={range===v} onPress={()=>setRange(v)}/>)}
+   <Chip label="Liquid only" icon="droplet" active={liquid} onPress={()=>setLiquid(!liquid)}/>
+   <T style={{fontSize:11,color:C.muted}} accessibilityLiveRegion="polite">{`${rows.length} strikes shown`}</T>
   </View>
   {!chain?<T style={{color:C.muted}}>Loading the chain…</T>:
   <View style={{borderWidth:1,borderColor:C.line,borderRadius:12,overflow:'hidden'}}>

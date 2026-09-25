@@ -33,6 +33,11 @@ QUOTE_BATCH=400      # Kite accepts up to 500 instruments per /quote call
 class KiteUnavailable(Exception):pass
 
 
+def spot_key(underlying):
+ """The Kite quote key of an underlying: an index's NSE name, or the stock's own NSE symbol."""
+ return SPOT_SYMBOL.get(underlying) or f'NSE:{underlying}'
+
+
 def _env(path=ENGINE_ENV):
  out={}
  try:
@@ -81,11 +86,19 @@ class KiteMarket:
   with self.lock:
    if self._instruments is not None and self._inst_day==today:return self._instruments
   text=self._get('/instruments/NFO').text
-  rows=[r for r in csv.DictReader(io.StringIO(text)) if r['name'] in INDEX_UNDERLYINGS and r['instrument_type'] in ('CE','PE')]
+  rows=[r for r in csv.DictReader(io.StringIO(text)) if r['instrument_type'] in ('CE','PE') and (r['name'] in INDEX_UNDERLYINGS or r.get('segment')=='NFO-OPT')]
   for r in rows:
    r['strike']=float(r['strike']);r['lot_size']=int(r['lot_size']);r['tick_size']=float(r['tick_size']);r['instrument_token']=int(r['instrument_token'])
-  with self.lock:self._instruments=rows;self._inst_day=today
+  # indexed once a day (review M4): every NFO option is ~100k rows; chain/expiries/underlyings read the index, not a scan
+  idx={};by_name={}
+  for r in rows:idx.setdefault((r['name'],r['expiry']),[]).append(r);by_name.setdefault(r['name'],set()).add(r['expiry'])
+  with self.lock:self._instruments=rows;self._inst_day=today;self._idx=idx;self._by_name=by_name
   return rows
+
+ def _rows(self,name,expiry=None):
+  self.instruments()
+  if expiry is not None:return self._idx.get((name,expiry),[])
+  return [r for e in sorted(self._by_name.get(name,())) for r in self._idx.get((name,e),[])]
 
  def quotes(self,keys):
   out={}
@@ -95,16 +108,17 @@ class KiteMarket:
 
  # --- the Market interface the builder uses ----------------------------------------------------------------------
  def underlyings(self):
-  names={r['name'] for r in self.instruments()}
-  return [{'symbol':u,'kind':'index','supported':True} for u in INDEX_UNDERLYINGS if u in names and u in SPOT_SYMBOL]
+  self.instruments();names=set(self._by_name)
+  return ([{'symbol':u,'kind':'index','supported':True} for u in INDEX_UNDERLYINGS if u in names and u in SPOT_SYMBOL]+
+   [{'symbol':u,'kind':'stock','supported':True,'settlement':'physical'} for u in sorted(names) if u not in INDEX_UNDERLYINGS])
 
  def reading(self,underlying):
-  q=self.quotes([SPOT_SYMBOL[underlying]]).get(SPOT_SYMBOL[underlying])
+  key=spot_key(underlying);q=self.quotes([key]).get(key)
   if not q or not q.get('timestamp'):return None      # never invent a sample time from the host clock (quant audit F3)
   return str(q['timestamp'])[:19],float(q['last_price'])
 
  def expiries(self,underlying):
-  rows=[r for r in self.instruments() if r['name']==underlying]
+  rows=self._rows(underlying)
   got=self.reading(underlying);at=got[0] if got else XC.now_ist().strftime('%Y-%m-%d %H:%M:%S')   # only filters past expiries
   by={}
   for r in rows:by.setdefault(r['expiry'],[]).append(r)
@@ -118,11 +132,11 @@ class KiteMarket:
   key=(underlying,expiry)
   hit=self._chains.get(key)
   if hit and time.time()-hit[0]<CHAIN_TTL:return hit[1]
-  rows=[r for r in self.instruments() if r['name']==underlying and r['expiry']==expiry]
+  rows=self._rows(underlying,expiry)
   if not rows:return None
-  spot_key=SPOT_SYMBOL[underlying]
-  data=self.quotes([spot_key]+[f"NFO:{r['tradingsymbol']}" for r in rows])
-  sq=data.get(spot_key)
+  spot_key_=spot_key(underlying)
+  data=self.quotes([spot_key_]+[f"NFO:{r['tradingsymbol']}" for r in rows])
+  sq=data.get(spot_key_)
   if not sq:return None
   if not sq.get('timestamp'):raise KiteUnavailable('Kite returned the index quote without a time stamp.')   # router falls back, honestly
   spot=float(sq['last_price']);at=str(sq.get('timestamp'))[:19];reading_at=parse_ist(at);t=years_between(reading_at,expiry)

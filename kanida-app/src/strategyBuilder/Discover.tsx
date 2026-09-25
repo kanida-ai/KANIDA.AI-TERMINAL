@@ -7,6 +7,7 @@ import Svg,{Line,Path} from 'react-native-svg';
 import {router} from 'expo-router';
 import {Badge,Button,C,Checkbox,Chip,Icon,T,s} from '../ui';
 import {sb,type Candidate,type DiscoverResult,type Expiry} from './api';
+import {UnderlyingPicker} from './BuilderParts';
 import {dayMonth,inr,istStamp,num,signed,strikeText} from './format';
 
 const VIEWS=[['up','Rise'],['down','Fall'],['range','Stay in a range'],['big_move','Big move either way']] as const;
@@ -14,13 +15,13 @@ const COLORS=['#39E5A3','#EBC66B','#8FB7FF'];
 
 export function Discover(){
  const {width}=useWindowDimensions();const wide=width>=1000;
- const [unds,setUnds]=useState<string[]>([]);const [u,setU]=useState('NIFTY');const [exps,setExps]=useState<Expiry[]>([]);const [e,setE]=useState('');
+ const [unds,setUnds]=useState<{symbol:string;kind?:string}[]>([]);const [u,setU]=useState('NIFTY');const [exps,setExps]=useState<Expiry[]>([]);const [e,setE]=useState('');
  const [spot,setSpot]=useState<number|null>(null);const [asOf,setAsOf]=useState<string|null>(null);
  const [view,setView]=useState<'up'|'down'|'range'|'big_move'>('up');
  const [target,setTarget]=useState('');const [low,setLow]=useState('');const [high,setHigh]=useState('');const [maxLoss,setMaxLoss]=useState('');const [budget,setBudget]=useState('');
  const [hedged,setHedged]=useState(true);const [lots,setLots]=useState(1);
  const [res,setRes]=useState<DiscoverResult|null>(null);const [error,setError]=useState('');const [busy,setBusy]=useState(false);const [pick,setPick]=useState<string[]>([]);
- useEffect(()=>{sb.underlyings().then(r=>setUnds(r.underlyings.map(x=>x.symbol))).catch(()=>{});},[]);
+ useEffect(()=>{sb.underlyings().then(r=>setUnds(r.underlyings)).catch(()=>{});},[]);
  // GTM audit P03: a result belongs to the inputs that produced it. Any material change makes it STALE at once (Use and
  // Compare disabled), and a late reply to a superseded request is dropped.
  const reqSeq=useRef(0);const inputsKey=JSON.stringify([u,e,view,target,low,high,maxLoss,budget,hedged,lots]);const [resKey,setResKey]=useState('');
@@ -48,7 +49,7 @@ export function Discover(){
   <View style={{gap:4}}><T style={{fontFamily:'ManropeBold',fontSize:22}}>Find a strategy</T>
    <T style={{fontSize:13,color:C.muted}}>Your view and your limits in; a short list of structures that match them out. It is a matching tool, not a forecast or advice.</T></View>
   <View style={{backgroundColor:C.paper,borderWidth:1,borderColor:C.line,borderRadius:14,padding:16,gap:14}}>
-   <View style={[s.row,{flexWrap:'wrap',gap:8}]}>{unds.map(x=><Chip key={x} label={x} active={u===x} onPress={()=>setU(x)}/>)}</View>
+   <UnderlyingPicker list={unds} value={u} onPick={setU}/>
    <View style={[s.row,{flexWrap:'wrap',gap:8}]}>{exps.slice(0,8).map(x=><Chip key={x.expiry} label={`${dayMonth(x.expiry)} ${x.monthly?'M':'W'} · ${Math.round(x.days_to_expiry)}d`} active={e===x.expiry} onPress={()=>setE(x.expiry)}/>)}</View>
    <T style={{fontSize:12,color:src?.live?C.green:C.amber}}>{src?.live?`Live · Zerodha Kite · ${istStamp(src.as_of)} · spot ${num(spot,2)}`:`Stored reading · ${istStamp(src?.as_of||asOf)} · spot ${num(spot,2)} · not live`}</T>
    <View style={{gap:6}}><T style={{fontSize:12,color:C.muted}}>{`Where do you think ${u} goes by ${dayMonth(e)}?`}</T>

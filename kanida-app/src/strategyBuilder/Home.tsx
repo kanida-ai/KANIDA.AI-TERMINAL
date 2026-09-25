@@ -5,6 +5,7 @@ import {router} from 'expo-router';
 import {Badge,Button,C,Chip,Empty,Icon,Loading,Sheet,T,s} from '../ui';
 import {sb,type Expiry,type LibraryRow,type Template} from './api';
 import {TemplateSheet} from './Templates';
+import {UnderlyingPicker} from './BuilderParts';
 import {ErrorRetry} from './States';
 import {dayMonth,istEpoch} from './format';
 import {useAlertNotifications} from './Alerts';
@@ -77,13 +78,13 @@ export function Home(){
 /** K02 start (GTM audit P17): the underlying is chosen deliberately first. Scratch creates the draft and opens the
  *  chain; a template creates nothing until a recipe is picked - browsing recipes never leaves an empty draft behind. */
 function StartSheet({kind,onClose,onError}:{kind:'scratch'|'template'|null;onClose:()=>void;onError:(e:string)=>void}){
- const [unds,setUnds]=useState<string[]>([]);const [u,setU]=useState('NIFTY');const [exps,setExps]=useState<Expiry[]>([]);const [e,setE]=useState('');
+ const [unds,setUnds]=useState<{symbol:string;kind?:string}[]>([]);const [u,setU]=useState('NIFTY');const [exps,setExps]=useState<Expiry[]>([]);const [e,setE]=useState('');
  const [err,setErr]=useState('');const [busy,setBusy]=useState(false);
- useEffect(()=>{if(!kind)return;setErr('');sb.underlyings().then(r=>setUnds(r.underlyings.map(x=>x.symbol))).catch(x=>setErr(x.message));},[kind]);
+ useEffect(()=>{if(!kind)return;setErr('');sb.underlyings().then(r=>setUnds(r.underlyings)).catch(x=>setErr(x.message));},[kind]);
  useEffect(()=>{if(!kind)return;let live=true;setExps([]);setE('');sb.expiries(u).then(r=>{if(!live)return;setExps(r.expiries);setE((r.expiries.find(x=>(x.days_to_expiry??0)>=1)||r.expiries[0])?.expiry||'');}).catch(x=>{if(live)setErr(x.message);});return()=>{live=false};},[kind,u]);
  const context=<View style={{gap:10}}>
   <T style={{fontSize:12,color:C.muted}}>Underlying</T>
-  <View style={[s.row,{flexWrap:'wrap',gap:8}]}>{unds.map(x=><Chip key={x} label={x} active={u===x} onPress={()=>setU(x)}/>)}</View>
+  <UnderlyingPicker list={unds} value={u} onPick={setU}/>
   <T style={{fontSize:12,color:C.muted}}>Expiry (the first with at least one full day left is chosen for you)</T>
   <View style={[s.row,{flexWrap:'wrap',gap:8}]}>{exps.map(x=><Chip key={x.expiry} label={`${dayMonth(x.expiry)} ${x.monthly?'M':'W'} · ${Math.max(0,Math.round(x.days_to_expiry))}d`} active={e===x.expiry} onPress={()=>setE(x.expiry)}/>)}</View>
   {!!err&&<ErrorRetry what="Market context" error={err}/>}

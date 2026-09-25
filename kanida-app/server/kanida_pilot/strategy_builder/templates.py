@@ -145,10 +145,30 @@ TEMPLATES=[
   'param':{'name':'width','label':'Strikes out','default':2,'variants':[1,2,4]},
   'recipe':'Sell 1 call above · Buy 1 put below (the short call is UNCOVERED)',
   'use':'A fall, financed by selling a call.','loses':'A rally above the call strike - the loss is unlimited.'},
+
+ # multi-expiry (slice 12): 'far':True legs resolve in a LATER expiry's chain (the first listed at least 6 days after
+ # the near expiry, unless one is chosen). Valued at the near expiry by model - stated on every analysis.
+ {'key':'long_call_calendar','name':'Long Call Calendar','intent':'range','risk':'defined','tier':'advanced','complexity':3,'multi_expiry':True,
+  'legs':[{'side':'S','type':'CE','strike':_atm(0)},{'side':'B','type':'CE','strike':_atm(0),'far':True}],'param':None,
+  'recipe':'Sell 1 ATM call (near expiry) · Buy 1 ATM call (later expiry)',
+  'use':'The underlying stays near the strike into the near expiry, while the later call keeps its time value.','loses':'A large move either way, or implied volatility falling (the later call loses more value).'},
+ {'key':'long_put_calendar','name':'Long Put Calendar','intent':'range','risk':'defined','tier':'advanced','complexity':3,'multi_expiry':True,
+  'legs':[{'side':'S','type':'PE','strike':_atm(0)},{'side':'B','type':'PE','strike':_atm(0),'far':True}],'param':None,
+  'recipe':'Sell 1 ATM put (near expiry) · Buy 1 ATM put (later expiry)',
+  'use':'The underlying stays near the strike into the near expiry.','loses':'A large move either way, or implied volatility falling.'},
+ {'key':'call_diagonal','name':'Call Diagonal','intent':'bullish','risk':'defined','tier':'advanced','complexity':3,'multi_expiry':True,
+  'legs':[{'side':'S','type':'CE','strike':_atm(0,1)},{'side':'B','type':'CE','strike':_atm(0,-1),'far':True}],
+  'param':{'name':'width','label':'Width (strikes)','default':2,'variants':[2,4,6]},
+  'recipe':'Sell 1 call above ATM (near expiry) · Buy 1 call below ATM (later expiry)',
+  'use':'A steady rise towards the short strike; the later, lower call covers the short one.','loses':'A fall, or a very sharp rise far beyond the short strike.'},
+ {'key':'put_diagonal','name':'Put Diagonal','intent':'bearish','risk':'defined','tier':'advanced','complexity':3,'multi_expiry':True,
+  'legs':[{'side':'S','type':'PE','strike':_atm(0,-1)},{'side':'B','type':'PE','strike':_atm(0,1),'far':True}],
+  'param':{'name':'width','label':'Width (strikes)','default':2,'variants':[2,4,6]},
+  'recipe':'Sell 1 put below ATM (near expiry) · Buy 1 put above ATM (later expiry)',
+  'use':'A steady fall towards the short strike.','loses':'A rise, or a very sharp fall far beyond the short strike.'},
 ]
 LATER=[
  {'key':'broken_wing','name':'Broken-wing butterflies and condors (asymmetric wings)','reason':'Asymmetric-wing variants are not in this release.'},
- {'key':'calendar','name':'Calendar / diagonal','reason':'Needs multi-expiry valuation - blocked until validated.'},
  {'key':'synthetic_future','name':'Futures & synthetics','reason':'Futures valuation, margin and settlement are not built yet.'},
  {'key':'jade_lizard','name':'Jade Lizard, Batman and other named combinations','reason':'Kept out of the initial catalogue on purpose.'},
 ]
@@ -175,9 +195,15 @@ def _sketch(t):
  for k in range(70,131):
   rows.append({'strike':float(k),'CE':{'ltp':max(0.05,_A.bs_price(spot,k,tt,sig,'CE')),'token':0,'symbol':'X'},'PE':{'ltp':max(0.05,_A.bs_price(spot,k,tt,sig,'PE')),'token':0,'symbol':'X'}})
  ch={'strike_step':step,'spot':spot,'atm_strike':100.0,'atm_iv':sig*100,'days_to_expiry':7,'rows':rows,'lot_size':1,'expiry':'2099-01-01'}
- try:legs=resolve(t['key'],ch)['legs']
+ far=None
+ if t.get('multi_expiry'):   # later legs 14 days beyond: shape at the near expiry, far legs by the same model
+  frows=[{'strike':float(k),'CE':{'ltp':max(0.05,_A.bs_price(spot,k,21/365,sig,'CE')),'token':0,'symbol':'X'},'PE':{'ltp':max(0.05,_A.bs_price(spot,k,21/365,sig,'PE')),'token':0,'symbol':'X'}} for k in range(70,131)]
+  far={**ch,'rows':frows,'days_to_expiry':21,'expiry':'2099-01-15'}
+ try:legs=resolve(t['key'],ch,None,1,far)['legs']
  except Exception:return None
- xs=[88+i*1.2 for i in range(21)];ys=[_A.expiry_pnl(legs,x) for x in xs];m=max(abs(y) for y in ys) or 1
+ def val(x):
+  return sum((1 if l['side']=='B' else -1)*((_A.bs_price(x,l['strike'],14/365,sig,l['type']) if l['expiry']!=ch['expiry'] else _A.intrinsic(l['type'],l['strike'],x))-l['price']) for l in legs)
+ xs=[88+i*1.2 for i in range(21)];ys=[val(x) for x in xs];m=max(abs(y) for y in ys) or 1
  return [round(y/m,3) for y in ys]
 
 
@@ -195,10 +221,11 @@ class ResolveError(Exception):
  def __init__(self,code,message):super().__init__(message);self.code=code;self.message=message
 
 
-def resolve(key,chain,param=None,lots=1):
- """Concrete legs for template `key` against `chain` (market.Market.chain output)."""
+def resolve(key,chain,param=None,lots=1,far_chain=None):
+ """Concrete legs for template `key` against `chain` (market.Market.chain output); far legs use `far_chain`."""
  t=BY_KEY.get(key)
  if not t:raise ResolveError('TEMPLATE_NOT_FOUND','There is no such template.')
+ if t.get('multi_expiry') and not far_chain:raise ResolveError('NO_FAR_EXPIRY','This structure needs a later expiry with priced strikes.')
  p=t['param']
  value=param if param is not None else (p['default'] if p else 0)
  if p and value not in p['variants']:value=min(p['variants'],key=lambda v:abs(v-float(value)))
@@ -213,16 +240,17 @@ def resolve(key,chain,param=None,lots=1):
   else:
    if not sigma:raise ResolveError('NO_IV','The ATM implied volatility is unavailable, so a 1-standard-deviation strike cannot be placed.')
    target=spot*math.exp(rule['sd']*sigma*math.sqrt(t_years))+offset
-  pool=priced[spec['type']]
-  if not pool:raise ResolveError('NO_PRICES',f"No {spec['type']} in this expiry has a price in the stored reading.")
+  ch=far_chain if spec.get('far') else chain
+  pool=sorted(r['strike'] for r in ch['rows'] if r.get(spec['type']) and r[spec['type']].get('ltp') is not None) if spec.get('far') else priced[spec['type']]
+  if not pool:raise ResolveError('NO_PRICES',f"No {spec['type']} in the {ch['expiry']} expiry has a price in the stored reading.")
   strike=min(pool,key=lambda k:abs(k-target))
-  row=next(r for r in chain['rows'] if r['strike']==strike)[spec['type']]
-  legs.append({'id':f'L{i+1}','type':spec['type'],'side':spec['side'],'strike':strike,'lots':lots*int(spec.get('mult',1)),'lot_size':chain['lot_size'],
-   'expiry':chain['expiry'],'price':row['ltp'],'price_basis':'exec','ltp':row['ltp'],'bid':row.get('bid'),'ask':row.get('ask'),'include':True,'token':row['token'],'symbol':row['symbol']})
+  row=next(r for r in ch['rows'] if r['strike']==strike)[spec['type']]
+  legs.append({'id':f'L{i+1}','type':spec['type'],'side':spec['side'],'strike':strike,'lots':lots*int(spec.get('mult',1)),'lot_size':ch['lot_size'],
+   'expiry':ch['expiry'],'price':row['ltp'],'price_basis':'exec','ltp':row['ltp'],'bid':row.get('bid'),'ask':row.get('ask'),'include':True,'token':row['token'],'symbol':row['symbol']})
  # a snapped recipe that collapses two legs onto one strike is no longer the structure it names
- shape=[(l['type'],l['strike'],l['side']) for l in legs]
+ shape=[(l['type'],l['strike'],l['side'],l['expiry']) for l in legs]
  if len(set(shape))<len(shape) or (key not in ('long_straddle','short_straddle','iron_butterfly') and
-   len({(l['type'],l['strike']) for l in legs})<len(legs)) or (key in ('long_call_butterfly','long_put_butterfly') and len({l['strike'] for l in legs})<3):
+   len({(l['type'],l['strike'],l['expiry']) for l in legs})<len(legs)) or (key in ('long_call_butterfly','long_put_butterfly') and len({l['strike'] for l in legs})<3):
   raise ResolveError('NOT_ENOUGH_STRIKES','This expiry does not list enough priced strikes for that width.')
  return {'template':key,'param':value,'legs':legs}
 
@@ -255,7 +283,15 @@ def recognise(legs):
  name=lambda k:{'key':k,'name':BY_KEY[k]['name'] if k in BY_KEY else k.replace('_',' ').title(),'exact':True}
  if n==0:return {'key':None,'name':'Empty','exact':False}
  if len({l['expiry'] for l in act})!=1:
-  return {'key':'custom','name':f'Custom ({n} legs)','exact':False}
+  # two legs, same type and size, near short + later long: a calendar (same strike) or a diagonal
+  if n==2 and act[0]['type']==act[1]['type'] and int(act[0]['lots'])==int(act[1]['lots']):
+   near,far=sorted(act,key=lambda l:l['expiry'])
+   if near['side']=='S' and far['side']=='B':
+    k=near['type']
+    if near['strike']==far['strike']:return name('long_call_calendar' if k=='CE' else 'long_put_calendar')
+    if (k=='CE' and far['strike']<near['strike']):return name('call_diagonal')
+    if (k=='PE' and far['strike']>near['strike']):return name('put_diagonal')
+  return {'key':'custom','name':f'Custom ({n} legs, multi-expiry)','exact':False}
  if len({int(l['lots']) for l in act})!=1:
   r=_recognise_ratio(act)
   return name(r) if r else {'key':'custom','name':f'Custom ({n} legs)','exact':False}

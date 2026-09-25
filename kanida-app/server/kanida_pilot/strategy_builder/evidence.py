@@ -30,7 +30,10 @@ from typing import Any,Dict,List,Optional
 FDR_Q=0.10
 MIN_OOS=30
 BOOT=2000
-_CACHE:Dict[str,Dict[str,Any]]={}          # completed runs never change: their per-run entry is cached by id
+_CACHE:Dict[str,Dict[str,Any]]={}          # completed runs never change: their per-run entry is cached by (id, version)
+# Audit #4: every stored entry names the statistics it was computed with. Changing MIN_OOS, BOOT, the block bootstrap,
+# johnson_p or tail_stress MUST bump this; any entry with another version is recomputed from its result, never reused.
+EVIDENCE_VERSION=f'ev2:minoos{MIN_OOS}:boot{BOOT}:fdr{FDR_Q}:johnson:tail:blockboot'   # derived from the settings it depends on
 WEEKDAYS=['Mon','Tue','Wed','Thu','Fri']
 INDEX_FAMILIES={'NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY','NIFTYNXT50'}
 STOCK_EXIT_DTE=2
@@ -83,11 +86,11 @@ def rule_key(spec:Dict[str,Any])->str:
 
 
 def entry(run_id:str,spec:Dict[str,Any],result:Dict[str,Any],created_at:float)->Dict[str,Any]:
- if run_id in _CACHE:return _CACHE[run_id]
+ if (run_id,EVIDENCE_VERSION) in _CACHE:return _CACHE[(run_id,EVIDENCE_VERSION)]
  split=spec['split'];oos=[t for t in (result.get('trades') or []) if t['entry']>=split]
  defined=bool(oos) and all(t.get('capital_at_risk') for t in oos)
  series=[t['net']/t['capital_at_risk']*100 for t in oos] if defined else [t['net'] for t in oos]
- e={'run_id':run_id,'rule':rule_key(spec),'underlying':spec.get('underlying','NIFTY'),'template':spec['template'],'param':spec.get('param'),'weekday':spec['weekday'],
+ e={'ev':EVIDENCE_VERSION,'model':result.get('model'),'run_id':run_id,'rule':rule_key(spec),'underlying':spec.get('underlying','NIFTY'),'template':spec['template'],'param':spec.get('param'),'weekday':spec['weekday'],
   'dte':[spec['dte_min'],spec['dte_max']],'exits':{k:spec.get(k) for k in ('target_pct','stop_pct','exit_dte')},
   'slippage':spec.get('slippage'),'period':[spec['from'],spec['to']],'split':split,'created_at':created_at,
   'n_oos':len(oos),'mean_oos':round(sum(t['net'] for t in oos)/len(oos),2) if oos else None,
@@ -97,7 +100,7 @@ def entry(run_id:str,spec:Dict[str,Any],result:Dict[str,Any],created_at:float)->
   e['p']=johnson_p(series)
   e['low']=round(boot[int(0.025*BOOT)],3);e['mean_stat']=round(sum(series)/len(series),3)
   e['stress']=round(tail_stress(series),3) if defined else None
- _CACHE[run_id]=e
+ _CACHE[(run_id,EVIDENCE_VERSION)]=e
  return e
 
 

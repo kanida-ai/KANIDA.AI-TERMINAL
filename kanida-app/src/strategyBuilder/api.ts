@@ -5,7 +5,7 @@ export type Side='B'|'S';export type Kind='CE'|'PE';
 export type Basis='exec'|'mid'|'ltp'|'manual';
 export type Leg={id:string;type:Kind;side:Side;strike:number;lots:number;expiry:string;price_basis:Basis;price:number|null;include:boolean};
 export type Scenario={spot?:number;at?:string;iv_shift?:number};
-export type Body={underlying:string;expiry:string;legs:Leg[];scenario:Scenario;template?:string|null;param?:number|null};
+export type Body={underlying:string;expiry:string;legs:Leg[];scenario:Scenario;template?:string|null;param?:number|null;linked?:boolean};
 export type Metric={status:'available'|'unavailable'|'unsupported';value?:any;unit?:string;basis?:string;reason?:string;unlimited?:boolean;[k:string]:any};
 export type ChainSide={token:number;symbol:string;ltp:number|null;bid:number|null;ask:number|null;oi:number|null;volume:number|null;iv:number|null;iv_reason:string|null;flags:string[];basis:string;last_trade_time:string|null};
 export type ChainRow={strike:number;CE:ChainSide|null;PE:ChainSide|null};
@@ -40,7 +40,7 @@ export const sb={
  spreads:(u:string,e:string,type:string,side:string,width:number,lots=1)=>api(`/api/sb/spreads?underlying=${encodeURIComponent(u)}&expiry=${e}&type=${type}&side=${side}&width=${width}&lots=${lots}`) as Promise<any>,
  adjustCandidates:(id:string,deploymentId?:string)=>api(`/api/sb/strategies/${id}/adjust/candidates`,{deployment_id:deploymentId||null}) as Promise<AdjustResult>,
  adjustApply:(id:string,o:{rule:string;k:number|null;version:number;deployment_id?:string})=>api(`/api/sb/strategies/${id}/adjust/apply`,o) as Promise<{strategy:any;adjustment:AdjustCandidate;deployment_id:string|null}>,
- underlyings:()=>api('/api/sb/underlyings') as Promise<{underlyings:{symbol:string}[]}>,
+ underlyings:()=>api('/api/sb/underlyings') as Promise<{underlyings:{symbol:string;kind?:string;settlement?:string}[]}>,
  expiries:(u:string)=>api(`/api/sb/expiries?underlying=${encodeURIComponent(u)}`) as Promise<{underlying:string;as_of:string|null;expiries:Expiry[]}>,
  chain:(u:string,e:string,signal?:AbortSignal)=>api(`/api/sb/chain?underlying=${encodeURIComponent(u)}&expiry=${e}`,undefined,{},signal) as Promise<Chain>,
  templates:()=>api('/api/sb/templates') as Promise<{templates:Template[];later:{key:string;name:string;reason:string}[]}>,
@@ -58,6 +58,7 @@ export const sb={
  revisionMeta:(rid:string,m:{name?:string;notes?:string})=>api(`/api/sb/revisions/${rid}`,m) as Promise<any>,
  restore:(id:string,revision_id:string,version:number)=>api(`/api/sb/strategies/${id}/restore`,{revision_id,version}) as Promise<Strategy>,
  duplicate:(id:string,revision_id?:string,guard?:{expected_version:number;input_hash?:string})=>api(`/api/sb/strategies/${id}/duplicate`,{revision_id,...(guard||{})}) as Promise<Strategy>,
+ evidence:(id:string)=>api(`/api/sb/strategies/${id}/evidence`) as Promise<{status:string;label:string;note?:string;structure?:string;run_id?:string;deciding_run_at?:number|null;evidence_version?:string;n_oos?:number;tests?:number}>,
  calendar:()=>api('/api/sb/calendar') as Promise<{version:string|null;years:number[];holidays:{date:string;description:string}[];note:string|null}>,
  archive:(id:string,archived:boolean)=>api(`/api/sb/strategies/${id}/archive`,{archived}) as Promise<Strategy>,
  paperStart:(id:string,guard?:{expected_version:number;input_hash?:string})=>api(`/api/sb/strategies/${id}/paper`,{confirm:true,...(guard||{})}) as Promise<PaperRun>,
@@ -81,6 +82,7 @@ export type Deployment={id:string;strategy_id:string;strategy_name?:string;statu
  realised:number;unrealised:number|null;fees:number;net:number|null;marked_at:string|null;mark_basis:string;revision:{id:string;n:number;name:string}|null;live:{enabled:boolean;reason:string}};
 export type Status={live:boolean;source:string;reason:string|null;market_open:boolean;now_ist:string;live_orders:{enabled:boolean;reason:string};paper_capital:{capital:number;blocked:number;available:number}|null};
 export const exec={
+ exitRules:(did:string,target_pct:number|null,stop_pct:number|null)=>api(`/api/sb/deployments/${did}/exit-rules`,{target_pct,stop_pct}) as Promise<Deployment>,
  autotradeRelease:(rid:string)=>api(`/api/sb/autotrade/routes/${rid}/release`,{confirm:true}) as Promise<AutotradeRoute>,
  status:()=>api('/api/sb/status') as Promise<Status>,
  preview:(id:string,o:{product?:string;price_policy?:string;limits?:Record<string,number>;expected_version?:number;input_hash?:string})=>api(`/api/sb/strategies/${id}/preview`,o) as Promise<Preview>,

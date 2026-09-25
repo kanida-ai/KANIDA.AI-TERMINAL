@@ -159,11 +159,13 @@ def test_an_unanswered_handoff_stays_unknown_until_found_or_released_by_the_user
  import kanida_pilot.strategy_builder.autotrade_bridge as AB
  real=AB.time.time
  monkeypatch.setattr(AB.time,'time',lambda:real()+3600)
+ engine.silent=True                                                      # the lookup itself gets no answer: stays unknown
  got=owner.get(f"/api/sb/autotrade/routes/{r['id']}").json()
- assert got['state']=='unknown'                                          # absence from a bounded list proves nothing (quant F4)
+ assert got['state']=='unknown'
  assert owner.post(f"/api/sb/autotrade/routes/{r['id']}/release",json={}).status_code==400
  rel=owner.post(f"/api/sb/autotrade/routes/{r['id']}/release",json={'confirm':True}).json()
  assert rel['state']=='released_by_user' and 'never confirmed' in rel['reason']
+ engine.silent=False
  p3=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
  again=owner.post(f"/api/sb/strategies/{s['id']}/autotrade",json={'preview_id':p3['id'],'preview_hash':p3['hash'],'idempotency_key':'k-unk-0004'})
  assert again.status_code==200                                           # the block lifts only by the user's explicit release
@@ -261,3 +263,15 @@ def test_a_sending_handoff_left_by_a_crash_becomes_unknown_on_restart(bridged):
  from kanida_pilot.strategy_builder.autotrade_bridge import AutotradeRoutes
  AutotradeRoutes(st,engine and app.state.strategy_builder_autotrade.bridge)
  assert st.c.execute("select state from autotrade_routes where id='rx'").fetchone()[0]=='unknown'
+
+
+def test_an_authoritative_no_record_from_autotrade_resolves_unknown_to_not_received(bridged):
+ _a,owner,_f,engine=bridged
+ engine.silent=True
+ s=strategy(owner,'iron_condor',param=4);p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ r=owner.post(f"/api/sb/strategies/{s['id']}/autotrade",json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'k-nr-1'}).json()
+ assert r['state']=='unknown'
+ engine.silent=False                                                      # exact lookup: 404 INTENT_NOT_FOUND
+ got=owner.get(f"/api/sb/autotrade/routes/{r['id']}").json()
+ assert got['state']=='not_received' and 'exact lookup' in got['reason']
+ assert [c for c in engine.calls if c[0]=='GET' and c[1].endswith('/by-key')] and len([c for c in engine.calls if c[0]=='POST'])==1

@@ -67,7 +67,8 @@ def test_analyze_never_reports_zero_for_what_it_cannot_compute():
  a=A.analyze([leg('CE',23000,'B',None)],SPOT,at)
  assert a['status']=='invalid'
  a=A.analyze([leg('CE',23000,'B',150,expiry=EXP),leg('CE',23000,'S',100,expiry='2026-10-27',id='x')],SPOT,at)
- assert a['max_loss']['status']=='unsupported' and a['max_loss']['reason']=='MULTI_EXPIRY'
+ # slice 12: multi-expiry is analysed as a labelled MODEL at the near expiry - or stated unavailable, never a zero
+ assert (a['max_loss']['status']=='available' and a['max_loss']['basis']=='model_at_near_expiry') or a['max_loss'].get('reason')
  assert a['margin']['status']=='unavailable'
 
 
@@ -138,6 +139,7 @@ def test_every_core_template_resolves_to_its_own_structure():
  d=tempfile.mkdtemp();p=store(os.path.join(d,'d.db'));m=Market(p)
  ch=m.chain('NIFTY',EXP)
  for t in TEMPLATES:
+  if t.get('multi_expiry'):continue            # needs a later expiry: test_slice12 covers calendars and diagonals
   for v in ((t['param'] or {}).get('variants') or [None]):
    got=resolve(t['key'],ch,v)
    assert recognise(got['legs'])['key']==t['key'],(t['key'],v,got['legs'])
@@ -611,7 +613,7 @@ def test_lab_api_runs_a_job_validates_and_feeds_discover(pilot,monkeypatch):
  lab=app.state.strategy_builder_lab
  monkeypatch.setattr(lab.daily,'series',lambda sym:nifty if sym=='NIFTY 50' else vix)
  bad=owner.post('/api/sb/lab/backtests',json={'template':'iron_condor','underlying':'BANKNIFTY'})
- assert bad.status_code==400 and 'BANKNIFTY/FINNIFTY wait' in bad.json()['error']
+ assert bad.status_code==400 and 'verified NSE expiry calendar' in bad.json()['error']
  assert owner.post('/api/sb/lab/backtests',json={'template':'iron_condor','slippage_pct':0.1}).status_code==400   # never less slippage
  run=owner.post('/api/sb/lab/backtests',json={'template':'bull_call_spread','param':4,'from':'2023-01-02','to':'2025-09-01'}).json()
  assert run['status'] in ('queued','running','completed')
@@ -647,7 +649,7 @@ def test_audit_c3_random_control_spans_the_whole_period(monkeypatch):
  nifty,vix=daily_series()
  seen=[]
  real=LB.simulate
- def spy(spec,n,v,lot,entry_days=None):
+ def spy(spec,n,v,lot,entry_days=None,cal=None):
   tr,sk=real(spec,n,v,lot,entry_days)
   if entry_days is not None:seen.extend(t['entry'] for t in tr)
   return tr,sk
@@ -728,6 +730,9 @@ class FakeEngine:
   path=url.split('/api/autotrade/intents',1)[1]
   if path=='/capability':
    return _Resp(200,{'live_allowed':self.live_allowed,'gates':[{'gate':'armed','label':'Operator armed this account','pass':self.live_allowed,'detail':'x'}],'arm':None})
+  if method=='GET' and path=='/by-key':
+   it=self.intents.get(params['key'])
+   return _Resp(200,{'intent':it}) if it else _Resp(404,{'error':'no intent with that source and key','code':'INTENT_NOT_FOUND'})
   if method=='GET' and path=='':
    return _Resp(200,{'intents':[{**v,'idempotency_key':k} for k,v in self.intents.items()]})
   if method=='POST' and path=='':

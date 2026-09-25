@@ -19,7 +19,7 @@ from . import service as S
 from .templates import recognise
 
 CANDIDATES = [('roll_tested_short', 1), ('roll_tested_short', 2), ('add_hedge_wing', 2), ('close_tested_side', None),
-              ('reduce_half', None), ('close_all', None)]
+              ('reduce_half', None), ('close_all', None), ('roll_out', None)]
 
 
 class AssistError(Exception):
@@ -119,6 +119,19 @@ def candidates(market, body: Dict[str, Any], evidence=None, held=False, adjusted
  spot, lot = chain['spot'], chain['lot_size']
  rows = {r['strike']: r for r in chain['rows']}
  grid = sorted(r['strike'] for r in chain['rows'])
+ # the next listed expiry after the position's, for "roll out" (its own chain prices the new legs)
+ cur_exp = max(l['expiry'] for l in legs)
+ try:
+  nxt = next((x['expiry'] for x in market.expiries(body['underlying'])['expiries'] if x['expiry'] > cur_exp), None)
+ except Exception:  # noqa: BLE001
+  nxt = None
+ chains_rows = {chain['expiry']: rows}
+ def rows_for(e):
+  e = e or chain['expiry']
+  if e not in chains_rows:
+   ch = market.chain(body['underlying'], e)
+   chains_rows[e] = {r['strike']: r for r in (ch or {}).get('rows', [])}
+  return chains_rows[e]
  cur = [{'type': l['type'], 'strike': l['strike'], 'units': (1 if l['side'] == 'B' else -1) * int(l['lots']), 'price': l['price']} for l in legs]
  if any(c['price'] is None for c in cur):
   raise AssistError(409, 'NO_PRICE', 'A leg has no price in the reading, so its entry cannot be valued.')
@@ -133,15 +146,15 @@ def candidates(market, body: Dict[str, Any], evidence=None, held=False, adjusted
  out = []
  for rule, k in CANDIDATES:
   meta = ADJ.RULES[rule]
-  cand = {'rule': rule, 'k': k, 'name': meta['name'] + (f' +{k}' if k else ''), 'explain': meta['explain'].format(k=k or '')}
+  cand = {'rule': rule, 'k': k, 'name': meta['name'] + (f' +{k}' if k else ''), 'explain': meta['explain'].format(k=k or '', to=nxt or 'the next expiry')}
   try:
-   new_legs, note = ADJ.apply(rule, legs, spot, grid, k or 1)
+   new_legs, note = ADJ.apply(rule, legs, spot, grid, k or 1, to_expiry=nxt)
   except ADJ.NotApplicable as e:
    out.append({**cand, 'available': False, 'reason': str(e)});continue
   orders = ADJ.delta_orders(legs, new_legs)
   priced, basis, fees, cash, missing = [], set(), 0.0, 0.0, []
   for o in orders:
-   row = (rows.get(o['strike']) or {}).get(o['type'])
+   row = (rows_for(o.get('expiry')).get(o['strike']) or {}).get(o['type'])
    if not row:
     missing.append(f"{o['strike']:g} {o['type']}");continue
    px, b = _exec_price(row, o['side'])
@@ -158,6 +171,8 @@ def candidates(market, body: Dict[str, Any], evidence=None, held=False, adjusted
   new_body = {**body, 'legs': [{k2: v for k2, v in l.items() if k2 in ('id', 'type', 'side', 'strike', 'lots', 'expiry', 'price_basis', 'price', 'include')}
                                | ({'price_basis': 'exec', 'price': None} if not held else {}) for l in new_legs],
               'template': None, 'param': None, 'scenario': {}}
+  if new_legs:   # the strategy's expiry is its nearest leg's (a roll-out moves it; review H1/H2)
+   new_body['expiry'] = min(l.get('expiry') or body['expiry'] for l in new_legs)
   if held:        # the draft that records a deployment's adjusted position uses live prices for its analysis
    new_body['legs'] = [{**l, 'price_basis': 'exec', 'price': None} for l in new_body['legs']]
   a_new = S.analysis(market, new_body, table=False) if new_legs else None

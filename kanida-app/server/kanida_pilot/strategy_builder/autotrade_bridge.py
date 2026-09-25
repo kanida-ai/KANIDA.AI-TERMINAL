@@ -26,7 +26,7 @@ create table if not exists autotrade_routes(
  unique(user_id, idem_key));
 create index if not exists ix_atr_user on autotrade_routes(user_id, strategy_id, created_at);
 '''
-TERMINAL={'completed','dry_run_complete','blocked','failed','cancelled','attention_required','refused','released_by_user'}
+TERMINAL={'completed','dry_run_complete','blocked','failed','cancelled','attention_required','refused','released_by_user','not_received'}
 # GTM audit P15: a transport failure AFTER the request left says nothing about whether autotrade accepted it. Those
 # errors put the hand-off in 'unknown'; it is reconciled by looking up its idempotency key - never by re-sending.
 UNKNOWN_CODES={'AUTOTRADE_NO_RESPONSE'}   # 5xx from the engine also counts: it answered after receiving it
@@ -79,10 +79,16 @@ class Bridge:
    'Dry run only until every gate below passes. Live needs the operator to arm this account.'}
 
  def submit(self,basket:Dict[str,Any])->Dict[str,Any]:return self._call('POST','',json=basket)
- def find(self,idempotency_key:str)->Optional[Dict[str,Any]]:
-  """The intent autotrade holds for this key, or None if it has none. Read-only: never re-sends anything."""
-  d=self._call('GET','',params={'source':SOURCE,'limit':200})
-  return next((i for i in (d.get('intents') or []) if i.get('idempotency_key')==idempotency_key),None)
+ def find(self,idempotency_key:str)->Dict[str,Any]:
+  """Exact lookup by (source, key) on autotrade's intake: {'found': intent} | {'absent': True} (an AUTHORITATIVE
+  "no such record", only on autotrade's own INTENT_NOT_FOUND) | {'unknown': reason}. Read-only: never re-sends."""
+  try:
+   d=self._call('GET','/by-key',params={'source':SOURCE,'key':idempotency_key})
+   it=d.get('intent')
+   return {'found':it} if isinstance(it,dict) and it.get('id') else {'unknown':'unexpected lookup answer'}
+  except BridgeError as e:
+   if e.code=='INTENT_NOT_FOUND':return {'absent':True}
+   return {'unknown':f'{e.code}: {e.message}'}
  def get(self,iid:str)->Dict[str,Any]:return self._call('GET',f'/{iid}')
  def cancel(self,iid:str)->Dict[str,Any]:return self._call('POST',f'/{iid}/cancel',json={})
 
@@ -180,9 +186,14 @@ class AutotradeRoutes:
    try:
     # found by its key = adopt it. NOT found is never taken as "not received": the engine list is bounded, so absence
     # proves nothing (quant audit F4). It stays unknown until found, or until the user explicitly releases it.
-    it=self.bridge.find(f"{user_id}:{d['idem_key']}"[:128])
-    if it:self._set(rid,intent_id=it.get('id'),state=it.get('state') or 'accepted',reason=it.get('reason'),intent=json.dumps(it))
+    got=self.bridge.find(f"{user_id}:{d['idem_key']}"[:128])
+    if got.get('found'):
+     it=got['found'];self._set(rid,intent_id=it.get('id'),state=it.get('state') or 'accepted',reason=it.get('reason'),intent=json.dumps(it))
+    elif got.get('absent'):
+     # autotrade answered authoritatively: it holds NO record of this key, so nothing was accepted and nothing can fill
+     self._set(rid,state='not_received',reason='AutoTrade confirmed it has no record of this hand-off (exact lookup by its key), so no order was created. Review and send again if you still want it.')
     with self.lock:d=self._row(self.c.execute('select * from autotrade_routes where id=?',(rid,)).fetchone())
+    if got.get('unknown'):d['refresh_error']=got['unknown']
    except BridgeError as e:
     d['refresh_error']=e.message
    return d

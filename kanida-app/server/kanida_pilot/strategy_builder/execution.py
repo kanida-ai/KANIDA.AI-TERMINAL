@@ -55,6 +55,8 @@ create index if not exists ix_int_dep on intents(deployment_id, state);
 create table if not exists deployment_revisions(deployment_id text not null, revision_id text not null, cause text not null, created_at real not null);
 create table if not exists deployment_marks(
  deployment_id text primary key, marked_at text not null, unrealised real, net real, positions text not null, saved_at real not null);
+create table if not exists deployment_exit_rules(
+ deployment_id text primary key, target_pct real, stop_pct real, set_at real not null, last_note text);
 create table if not exists dfills(
  id text primary key, intent_id text not null, deployment_id text not null, leg_id text not null, side text not null, qty integer not null,
  price real not null, fees real not null, basis text not null, quote_ts text, created_at real not null);
@@ -87,7 +89,7 @@ class Execution:
    if 'fills' not in {r[1] for r in self.c.execute('pragma table_info(deployment_marks)').fetchall()}:
     self.c.execute('alter table deployment_marks add column fills integer')
    self.c.commit()
-  self._stop=threading.Event();self._worker=None
+  self._stop=threading.Event();self._worker=None;self._pending_logged=set();self._rule_notes={}
 
  # --- preview ------------------------------------------------------------------------------------------------------
  def preview(self,user_id,strategy,options,kind='open',deployment=None):
@@ -312,6 +314,7 @@ class Execution:
    d=self.c.execute('select status from deployments where id=?',(did,)).fetchone()
    rows=self.c.execute('select kind,state,preview_id from intents where deployment_id=? order by created_at,seq',(did,)).fetchall()
    if not d:return
+   if d['status']=='closed' and self.c.execute("select 1 from dfills where deployment_id=? and intent_id='settle' limit 1",(did,)).fetchone():return
    status=d['status']
    opens=[r['state'] for r in rows if r['kind']=='open'];closes=[r['state'] for r in rows if r['kind']=='close']
    adjs=[r['state'] for r in rows if r['kind']=='adjust']
@@ -360,8 +363,8 @@ class Execution:
   if any(i['state'] in OPEN_STATES for i in deployment['intents']):raise ExecError(409,'RESTING_ORDERS','Cancel or wait for the resting orders before adjusting.')
   if deployment['status']!='active':raise ExecError(409,'NOT_ACTIVE','Only an active deployment can be adjusted.')
   rb=deployment['revision_body']
-  if target.get('underlying')!=rb.get('underlying') or target.get('expiry')!=rb.get('expiry'):
-   raise ExecError(409,'NOT_SUPPORTED','An adjustment keeps the underlying and expiry (rolling out is not in this release).')
+  if target.get('underlying')!=rb.get('underlying'):
+   raise ExecError(409,'NOT_SUPPORTED','An adjustment keeps the underlying.')
   lot=deployment.get('lot_size')
   if not lot:raise ExecError(409,'MARKET_DATA_NOT_LIVE','The lot size could not be read from live data.')
   meta={l['id']:l for l in deployment['leg_meta']};held=[]
@@ -371,10 +374,13 @@ class Execution:
    m=meta[p['leg_id']];held.append({**m,'side':'B' if p['units']>0 else 'S','lots':abs(p['units'])//lot})
   orders=ADJ.delta_orders(held,[l for l in target['legs'] if l.get('include',True)])
   if not orders:raise ExecError(409,'NOTHING_TO_CHANGE','The strategy already matches what this deployment holds.')
-  return {**target,'legs':[{'id':o['id'],'type':o['type'],'side':o['side'],'strike':o['strike'],'lots':o['lots'],'expiry':target['expiry'],
+  return {**target,'legs':[{'id':o['id'],'type':o['type'],'side':o['side'],'strike':o['strike'],'lots':o['lots'],'expiry':o.get('expiry') or target['expiry'],
    'price_basis':'exec','price':None,'include':True} for o in orders]}
 
  def deployment(self,user_id,did,mark=True):
+  if mark:
+   try:self.settle_expired(user_id,did)
+   except Exception:log.exception('paper settlement check failed')
   with self.lock:
    d=self.c.execute('select * from deployments where id=? and user_id=?',(did,user_id)).fetchone()
    if not d:return None
@@ -404,12 +410,17 @@ class Execution:
   marks={};chain=None
   if mark and out['revision_body'].get('underlying'):
    try:
-    chain=self.market.chain(out['revision_body']['underlying'],out['revision_body']['expiry'])
-    out['lot_size']=chain['lot_size'] if chain else None
-    rows={(r['strike']):r for r in (chain or {}).get('rows',[])}
+    rb=out['revision_body'];chain=self.market.chain(rb['underlying'],rb['expiry'])
+    chains={rb['expiry']:chain}                         # multi-expiry: every leg is marked in its own expiry's chain
     for l in out['leg_meta']:
+     e=l.get('expiry') or rb['expiry']
+     if e not in chains:chains[e]=self.market.chain(rb['underlying'],e)
+     rows={(r['strike']):r for r in (chains[e] or {}).get('rows',[])}
      q=(rows.get(l['strike']) or {}).get(l['type']) or {}
      marks[l['id']]={'bid':q.get('bid'),'ask':q.get('ask'),'ltp':q.get('ltp')}
+    live_ch=[c for c in chains.values() if c]            # an expired reference expiry must not blank the lot size (review H2)
+    out['lot_size']=live_ch[0]['lot_size'] if live_ch else None
+    chain=chain or (live_ch[0] if live_ch else None)
    except Exception:  # noqa: BLE001
     chain=None
   legs=[];unreal=0.0;realised=0.0;fees=0.0;missing=False
@@ -458,11 +469,132 @@ class Execution:
   out['exposure']=[{'leg_id':i,'label':(meta.get(i) or {}).get('strike') and f"{int(meta[i]['strike'])} {meta[i]['type']}",'planned':planned.get(i,0),'held':held.get(i,0),
    'residual':held.get(i,0)-planned.get(i,0)} for i in ids] if out['status'] not in ('closed','cancelled') else []
   out['exposure_mismatch']=any(e['residual'] for e in out['exposure'])
+  out['exit_rules']=self.exit_rules(did)
   bases={x['mark_basis'] for x in legs if x['mark_basis']}
   out['mark_basis']=('liquidation: longs at the bid, shorts at the ask' if bases<= {'bid','ask'} else
    'mixed: some legs at the last trade (no valid bid/ask) - indicative, not a liquidation value' if bases&{'bid','ask'} else
    'last traded price (no valid bid/ask) - indicative, not a liquidation value') if bases else 'no open position'
   return out
+
+ # --- B5 paper exits: rule-based exits and expiry settlement -------------------------------------------------------
+ def set_exit_rules(self,user_id,did,target_pct=None,stop_pct=None):
+  d=self.deployment(user_id,did)
+  if not d:raise ExecError(404,'DEPLOYMENT_NOT_FOUND','There is no such deployment.')
+  if (target_pct is not None or stop_pct is not None):
+   if d['status']!='active':raise ExecError(409,'NOT_ACTIVE','Exit rules can be set on an active deployment only.')
+   if len({(l.get('expiry') or '') for l in d['leg_meta']})>1:
+    raise ExecError(409,'NOT_SUPPORTED','Exit rules use the payoff at one expiry; this position spans expiries, so they are not offered for it.')
+   prof=self._profile(d)
+   if target_pct is not None and (not prof or prof['max_profit'] is None):raise ExecError(409,'TARGET_UNDEFINED','This position has no capped maximum profit, so a target at a % of it can never fire.')
+   if stop_pct is not None and (not prof or prof['max_loss'] is None):raise ExecError(409,'STOP_UNDEFINED','This position has no capped maximum loss, so a stop at a % of it can never fire. Hedge it first.')
+  for v,nm in ((target_pct,'target'),(stop_pct,'stop')):
+   if v is not None and not (1<=float(v)<=100):raise ExecError(400,'FIELD_INVALID',f'{nm} must be 1-100 (% of the position\'s max profit / max loss).')
+  with self.lock:
+   if target_pct is None and stop_pct is None:self.c.execute('delete from deployment_exit_rules where deployment_id=?',(did,))
+   else:self.c.execute('insert or replace into deployment_exit_rules values(?,?,?,?,?)',(did,target_pct,stop_pct,time.time(),None))
+   self.store._log(user_id,d['strategy_id'],'paper_exit_rules',f'Paper exit rules for {did[:6]}: target {target_pct or "-"}%, stop {stop_pct or "-"}%')
+   self.c.commit()
+  return self.deployment(user_id,did)
+
+ def exit_rules(self,did):
+  with self.lock:r=self.c.execute('select * from deployment_exit_rules where deployment_id=?',(did,)).fetchone()
+  return dict(r) if r else None
+
+ def _profile(self,d):
+  """Max profit / max loss of what the deployment HOLDS, at its fill averages (gross, at expiry)."""
+  meta={l['id']:l for l in d['leg_meta']};legs=[]
+  for p in d['positions']:
+   if not p['units'] or p['avg'] is None:continue
+   m=meta.get(p['leg_id'],{})
+   legs.append({'type':m.get('type'),'strike':m.get('strike'),'side':'B' if p['units']>0 else 'S','lots':abs(p['units']),'lot_size':1,'price':p['avg'],'include':True})
+  return A.expiry_profile(legs) if legs else None
+
+ def check_exit_rules(self,user_id,did):
+  """Paper only: when a rule is met, run the NORMAL reviewed close (preview + confirm). A blocked close (market shut,
+  stale quotes) is recorded and retried on the next cycle - it never forces a fill."""
+  rule=self.exit_rules(did)
+  if not rule or not market_open():return None
+  d=self.deployment(user_id,did)
+  if not d or d['status']!='active' or d['unrealised'] is None:return None
+  prof=self._profile(d)
+  if not prof:return None
+  hit=None;u=d['unrealised']
+  if rule['target_pct'] and prof['max_profit'] and u>=prof['max_profit']*rule['target_pct']/100:hit='target'
+  elif rule['stop_pct'] and prof['max_loss'] and u<=prof['max_loss']*rule['stop_pct']/100:hit='stop'
+  if not hit:return None
+  strategy=self.store.get(user_id,d['strategy_id'])
+  try:
+   p=self.preview(user_id,strategy,{'price_policy':'marketable'},kind='close',deployment=d)
+   if not p['can_submit']:raise ExecError(409,'CHECKS_FAILED','; '.join(c['label'] for c in p['checks'] if c['status']=='block'))
+   self.confirm(user_id,strategy,p['id'],p['hash'],f'exit-{hit}-{did}')
+   note=f"{hit} rule met (unrealised {u:,.0f}); close orders placed (paper)"
+  except ExecError as e:
+   note=f"{hit} rule met (unrealised {u:,.0f}) but the close is blocked: {e.message} - retried next cycle"
+  with self.lock:
+   self.c.execute('update deployment_exit_rules set last_note=? where deployment_id=?',(note,did))
+   short=note.split(' (unrealised')[0]+(' - blocked' if 'blocked' in note else '')
+   if self._rule_notes.get(did)!=short:          # the activity log records a CHANGE, not every retry (review M2)
+    self._rule_notes[did]=short;self.store._log(user_id,d['strategy_id'],'paper_exit_rule',f'Deployment {did[:6]}: {note}')
+   self.c.commit()
+  return note
+
+ def _expiry_spot(self,underlying,expiry):
+  """The underlying's reading at or before the expiry session close (stored capture), or None."""
+  stored=getattr(self.market,'stored',self.market)
+  try:r=stored._q('select captured_at,spot from underlying_snapshots where underlying=? and spot is not null and captured_at between ? and ? order by captured_at desc limit 1',
+   (underlying,f'{expiry} 15:15:00',f'{expiry} 15:30:59'))
+  except Exception:return None  # noqa: BLE001
+  return (r[0]['captured_at'],float(r[0]['spot'])) if r else None
+
+ def settle_expired(self,user_id,did):
+  """Paper expiry settlement, PER LEG (review H1 / quant C5): a held leg whose OWN expiry has closed settles at
+  intrinsic value at that expiry's spot; later legs (a calendar's far leg, a rolled position) stay open. The
+  deployment closes only when nothing is held. The spot must be a reading from 15:15-15:30 IST on expiry day (quant C6)
+  - an older or missing reading leaves the leg pending (stated once), never settled on a guess. Compare-and-set under
+  the lock: two readers can never settle twice (review M1)."""
+  d=self.deployment(user_id,did,mark=False)
+  if not d or d['status'] in ('closed','cancelled'):return None
+  u=d['revision_body'].get('underlying');meta={l['id']:l for l in d['leg_meta']};now=now_ist()
+  from .market import INDEX_UNDERLYINGS
+  due={}
+  for p in d['positions']:
+   if not p['units']:continue
+   e=(meta.get(p['leg_id']) or {}).get('expiry') or d['revision_body'].get('expiry')
+   if e and now>=A.expiry_moment(e):due.setdefault(e,[]).append(p)
+  if not due:return None
+  settled=False
+  for e,ps in sorted(due.items()):
+   got=self._expiry_spot(u,e)
+   if not got:
+    key=(did,e)
+    if key not in self._pending_logged:
+     self._pending_logged.add(key)
+     with self.lock:self.store._log(user_id,d['strategy_id'],'paper_settle_pending',f'Deployment {did[:6]}: the {e} legs expired, but there is no {u} reading between 15:15 and 15:30 IST that day - not settled');self.c.commit()
+    continue
+   at,spot=got;t=time.time()
+   with self.lock:
+    # re-read what is held FROM THE FILLS under the lock: nothing can fill or settle in between
+    held={}
+    for f in self.c.execute('select leg_id,side,qty from dfills where deployment_id=?',(did,)).fetchall():
+     held[f['leg_id']]=held.get(f['leg_id'],0)+(f['qty'] if f['side']=='B' else -f['qty'])
+    if self.c.execute("select status from deployments where id=?",(did,)).fetchone()['status'] in ('closed','cancelled'):return self.deployment(user_id,did,mark=False)
+    legs=[l for l in (p['leg_id'] for p in ps) if held.get(l)]
+    if not legs:continue
+    self.c.execute("update intents set state='cancelled',reason='expired',updated_at=? where deployment_id=? and leg_id in (%s) and state in ('created','acknowledged','partially_filled')"%','.join('?'*len(legs)),(t,did,*legs))
+    for lid in legs:
+     units=held[lid];m=meta.get(lid,{});px=A.intrinsic(m['type'],m['strike'],spot);side='S' if units>0 else 'B';q=abs(units)
+     fees=round(0.00125*px*q,2) if (units>0 and px>0) else 0.0      # STT on exercise of ITM longs
+     self.c.execute('insert into dfills values(?,?,?,?,?,?,?,?,?,?,?)',(uid(),'settle',did,lid,side,q,px,fees,
+      'expiry_settlement' if u in INDEX_UNDERLYINGS else 'expiry_settlement_physical_standin',at,t))
+     held[lid]=0
+    open_left=any(v for v in held.values())
+    if not open_left:
+     self.c.execute("update intents set state='cancelled',reason='expired',updated_at=? where deployment_id=? and state in ('created','acknowledged','partially_filled')",(t,did))
+     self.c.execute("update deployments set status='closed',closed_at=? where id=? and status not in ('closed','cancelled')",(t,did))
+    self.store._log(user_id,d['strategy_id'],'paper_settled',f'Deployment {did[:6]}: {len(legs)} leg(s) of the {e} expiry settled at intrinsic, {u} {spot:,.2f} at {at}'+
+     ('' if u in INDEX_UNDERLYINGS else ' (stock options are physically settled - this paper settlement stands in for delivery)')+('' if not open_left else '; later-expiry legs stay open'))
+    self.c.commit();settled=True
+  return self.deployment(user_id,did,mark=False) if settled else None
 
  def summaries(self,user_id):
   """Per strategy: counts of open / needing attention / closed paper deployments (no market reads - library use)."""
@@ -497,6 +629,11 @@ class Execution:
      with self.lock:
       ids=[r[0] for r in self.c.execute("select distinct deployment_id from intents where state in ('acknowledged','partially_filled','created')").fetchall()]
      for did in ids:self.dispatch(did)
+     with self.lock:
+      ruled=[(r[0],r[1]) for r in self.c.execute("select d.user_id,d.id from deployments d join deployment_exit_rules x on x.deployment_id=d.id where d.status='active'").fetchall()]
+     for uid_,did in ruled:
+      try:self.check_exit_rules(uid_,did)
+      except Exception:log.exception('exit rule check failed for %s',did)
     except Exception:log.exception('paper worker cycle failed; it retries next cycle')
   self._worker=threading.Thread(target=run,daemon=True,name='sb-paper-broker');self._worker.start()
 

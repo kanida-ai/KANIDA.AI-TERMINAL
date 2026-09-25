@@ -1,0 +1,30 @@
+{
+ "version": "stock-half-spread-pct-2026-09-18",
+ "measured_on": "2026-09-18 09:30-11:30 IST (one session morning)",
+ "quotes": 205665,
+ "source": "db/derivatives.db snapshots: stock options (CE/PE, non-index) with bid>0, ask>=bid, joined to the underlying spot at the same capture; half-spread = (ask-bid)/2/mid",
+ "bucket_by": "premium as a % of the underlying spot (point-in-time: independent of later splits/bonuses - quant audit C4)",
+ "caveat": "One morning of captured bid/ask - a small, recent sample. Applied as a FLOOR on stock slippage (never lowers it). Re-measure as capture accumulates.",
+ "buckets": [
+  {
+   "max_premium_pct_of_spot": 0.25,
+   "median_half_spread": 0.1429,
+   "quotes": 43496
+  },
+  {
+   "max_premium_pct_of_spot": 1.0,
+   "median_half_spread": 0.0966,
+   "quotes": 33748
+  },
+  {
+   "max_premium_pct_of_spot": 3.0,
+   "median_half_spread": 0.0217,
+   "quotes": 27195
+  },
+  {
+   "max_premium_pct_of_spot": null,
+   "median_half_spread": 0.0448,
+   "quotes": 101226
+  }
+ ]
+}

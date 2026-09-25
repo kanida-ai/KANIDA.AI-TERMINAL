@@ -23,9 +23,10 @@ RULES = {
   'explain': 'Halve every leg, keeping the structure; half the risk, half the reward.'},
  'close_all': {'name': 'Close all', 'needs_short': False, 'k': False,
   'explain': 'Close every leg and take the current result.'},
+ 'roll_out': {'name': 'Roll out to the next expiry', 'needs_short': False, 'k': False, 'lab': False,
+  'explain': 'Close every leg and reopen the same strikes in the next expiry ({to}) - more time, at the cost of paying the spread twice.'},
 }
 UNAVAILABLE = {
- 'roll_out': ('Roll out to the next expiry', 'Multi-expiry positions are not analysed or executed in this release (their payoff needs a scenario valuation at each expiry, not a single-expiry curve).'),
  'convert_to_butterfly': ('Convert to a butterfly', 'Covered by "Add a hedge wing" for a short straddle (it becomes an iron butterfly); ratio butterflies are not in this release.'),
 }
 
@@ -67,7 +68,7 @@ def _new_id() -> str:
 
 
 def apply(rule: str, legs: List[Dict[str, Any]], spot: float, grid: List[float], k: int = 1,
-          tested_key: Optional[Tuple[str, float]] = None) -> Tuple[List[Dict[str, Any]], str]:
+          tested_key: Optional[Tuple[str, float]] = None, to_expiry: Optional[str] = None) -> Tuple[List[Dict[str, Any]], str]:
  """The adjusted leg list and a one-line description. Unchanged legs are returned as the SAME dicts (ids kept);
  a changed contract is a new leg with a new id. Raises NotApplicable with the reason.
 
@@ -85,6 +86,14 @@ def apply(rule: str, legs: List[Dict[str, Any]], spot: float, grid: List[float],
  k = int(k or 1)
  if rule == 'close_all':
   return [], 'Close every leg'
+ if rule == 'roll_out':
+  if len({l.get('expiry') for l in act}) > 1:
+   raise NotApplicable('the position spans expiries (a calendar or diagonal) - rolling every leg to one expiry would collapse it; roll legs individually')
+  if not to_expiry:
+   raise NotApplicable('no later expiry is listed to roll into')
+  if any(l.get('expiry') == to_expiry for l in act):
+   raise NotApplicable('the position is already in that expiry')
+  return [{**l, 'id': _new_id(), 'expiry': to_expiry} for l in act], f'Close every leg and reopen the same strikes in {to_expiry}'
  if rule == 'reduce_half':
   if any(int(l['lots']) < 2 or int(l['lots']) % 2 for l in act):
    raise NotApplicable('every leg needs an even number of lots (2 or more) to halve without changing the structure')
@@ -141,20 +150,22 @@ def apply(rule: str, legs: List[Dict[str, Any]], spot: float, grid: List[float],
 
 def delta_orders(current: List[Dict[str, Any]], target: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
  """Orders (in lots) that turn `current` into `target`, per contract (type, strike). Buys first."""
+ # a contract is (type, strike, expiry): with multi-expiry the same strike in two expiries is two contracts (slice 12)
+ def key(l):return (l['type'], float(l['strike']), l.get('expiry') or '')
  def book(legs):
   b = {}
   for l in legs:
    if l.get('include', True):
-    b[(l['type'], float(l['strike']))] = b.get((l['type'], float(l['strike'])), 0) + _units(l)
+    b[key(l)] = b.get(key(l), 0) + _units(l)
   return b
  cur, tgt = book(current), book(target)
- ids = {(l['type'], float(l['strike'])): l['id'] for l in list(target) + list(current) if l.get('id')}
+ ids = {key(l): l['id'] for l in list(target) + list(current) if l.get('id')}
  # a contract already held keeps the id its fills are booked under (so one contract is never split across two ids);
  # a new contract takes the target's id
  out = []
- for key in sorted(set(cur) | set(tgt)):
+ for key in sorted(set(cur) | set(tgt), key=lambda k: (k[0], k[1], k[2])):
   d = tgt.get(key, 0) - cur.get(key, 0)
   if d:
-   out.append({'id': ids.get(key) or _new_id(), 'type': key[0], 'strike': key[1], 'side': 'B' if d > 0 else 'S', 'lots': abs(d),
+   out.append({'id': ids.get(key) or _new_id(), 'type': key[0], 'strike': key[1], 'expiry': key[2] or None, 'side': 'B' if d > 0 else 'S', 'lots': abs(d),
                'effect': 'close' if abs(tgt.get(key, 0)) < abs(cur.get(key, 0)) and (tgt.get(key, 0) * cur.get(key, 0) >= 0) else 'open'})
  return sorted(out, key=lambda o: (o['side'] != 'B', o['type'], o['strike']))

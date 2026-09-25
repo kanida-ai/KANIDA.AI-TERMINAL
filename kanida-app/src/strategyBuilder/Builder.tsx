@@ -14,7 +14,7 @@ import {DeploymentCard,OrderReview} from './OrderReview';
 import {AdjustSheet} from './Adjust';
 import {AboutSheet,SpreadsSheet} from './Learn';
 import {TemplateSheet} from './Templates';
-import {ActionsSheet,ExpirySheet,LegSheet,SnapshotSheet} from './BuilderParts';
+import {ActionsSheet,ExpirySheet,LegSheet,SnapshotSheet,UnderlyingPicker} from './BuilderParts';
 import {ErrorRetry,Scrollable} from './States';
 import {AlertsPanel,useAlertNotifications} from './Alerts';
 import {ChainDrawer} from './ChainDrawer';
@@ -31,7 +31,7 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
  const {width}=useWindowDimensions();const wide=width>=1100;const coarse=width<700;
  const [detail,setDetail]=useState<Detail|null>(null);const [error,setError]=useState('');
  const [body,setBody]=useState<Body|null>(null);const [version,setVersion]=useState(0);const [save,setSave]=useState<SaveState>('saved');
- const [expiries,setExpiries]=useState<Expiry[]>([]);const [underlyings,setUnderlyings]=useState<string[]>([]);
+ const [expiries,setExpiries]=useState<Expiry[]>([]);const [underlyings,setUnderlyings]=useState<{symbol:string;kind?:string}[]>([]);
  const [chain,setChain]=useState<Chain|null>(null);
  const [analysis,setAnalysis]=useState<Analysis|null>(null);const [pending,setPending]=useState(false);
  const [chainOpen,setChainOpen]=useState(openChain);const [tplOpen,setTplOpen]=useState(openTemplate);const [paperOpen,setPaperOpen]=useState(false);
@@ -81,7 +81,7 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
   try{const d=await exec.list();setDeps(d.deployments.filter(x=>x.strategy_id===id));}catch{}},[id]);
  useEffect(()=>{let live=true;const poll=()=>exec.status().then(x=>{if(live)setSt(x);}).catch(()=>{});poll();const t=setInterval(()=>{poll();setTick(n=>n+1);},10000);return()=>{live=false;clearInterval(t);};},[]);
  useEffect(()=>{if(deps.some(d=>!['closed','cancelled'].includes(d.status)))loadRuns();},[tick]);// eslint-disable-line react-hooks/exhaustive-deps
- useEffect(()=>{reload();loadRuns();sb.underlyings().then(r=>setUnderlyings(r.underlyings.map(u=>u.symbol))).catch(()=>{});},[reload,loadRuns]);
+ useEffect(()=>{reload();loadRuns();sb.underlyings().then(r=>setUnderlyings(r.underlyings)).catch(()=>{});},[reload,loadRuns]);
 
  // an alert's "Adjust" link lands here: open the assistant once the strategy (and its deployments) have loaded
  useEffect(()=>{if(!adjustDeep.current||!detail||!body?.legs?.length)return;adjustDeep.current=false;
@@ -183,6 +183,31 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
   if(kind==='width'&&shorts.length){const ss=legs.filter(l=>l.side==='S');const bs=legs.filter(l=>l.side==='B');
    if(ss.some(x=>bs.some(y=>y.type===x.type&&y.strike===x.strike)))return {error:'The legs would cross - nothing was changed.'};}
   return {legs};}
+ /** B1 linked strikes: with the link on, stepping one strike moves every leg together (the same move as Shift). */
+ function stepStrike(l:Leg,k:number){
+  const b=bodyRef.current;if(!b)return;
+  if(!b.linked){const i=strikes.indexOf(l.strike);const j=i+k;if(i<0||j<0||j>=strikes.length){flash(`${strikeText(l.strike)} ${l.type} is at the edge of the listed strikes.`);return;}setLeg(l.id,{strike:strikes[j]});return;}
+  const r=propose('shift',k,b);if('error' in r){flash(r.error);return;}
+  edit(x=>({...x,template:null,legs:r.legs}));}
+ /** B6: a warning's one-tap fix, always as a previewed change (undoable). */
+ function applyFix(f:any){
+  const b=bodyRef.current;if(!b||!f)return;
+  if(f.action==='snap_tick'){setLeg(f.leg_id,{price_basis:'manual',price:f.price});flash(`Price set to ${f.price}, on the exchange tick.`);return;}
+  if(f.action==='change_expiry'){setExpiryOpen(true);return;}
+  if(f.action==='open_adjust'){afterSave(()=>setAdjustFor({open:true,deployment:deps.find(d=>d.status==='active')||null}));return;}
+  if(f.action==='add_hedge'){
+   const adds:Leg[]=[];
+   for(const k of (f.types as Kind[])){
+    const net=b.legs.filter(l=>l.type===k).reduce((x,l)=>x+(l.side==='B'?1:-1)*l.lots,0);if(net>=0)continue;
+    const shortLegs=b.legs.filter(l=>l.type===k&&l.side==='S');const shorts=shortLegs.map(l=>l.strike);
+    const far=k==='CE'?Math.max(...shorts):Math.min(...shorts);const i=strikes.indexOf(far);const j=k==='CE'?i+2:i-2;
+    if(i<0||j<0||j>=strikes.length){flash(`No listed strike two steps beyond ${strikeText(far)} ${k} to hedge with.`);return;}
+    // the hedge lives in the SAME expiry as the short it covers (a near hedge would expire before a far short - review)
+    const hedgeExp=shortLegs.map(l=>l.expiry).sort().reverse()[0]||b.expiry;
+    adds.push({id:uid(),type:k,side:'B',strike:strikes[j],lots:-net,expiry:hedgeExp,price_basis:'exec',price:null,include:true});}
+   if(!adds.length){flash('Nothing to hedge.');return;}
+   setPendingChange({title:'Add a hedge',lines:adds.map(l=>`Add: Buy ${l.lots} × ${strikeText(l.strike)} ${l.type} (two strikes beyond the furthest short)`),apply:x=>({...x,template:null,legs:[...x.legs,...adds]})});
+  }}
  function adjust(kind:'shift'|'width'|'wings',k:number){
   const b=bodyRef.current;if(!b)return;
   const block=transformBlock(kind,b);if(block){flash(block);return;}
@@ -234,6 +259,7 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
  if(error)return <View style={{padding:24}}><T style={{color:C.red}}>{error}</T><Button label="Back to strategies" kind="outline" onPress={()=>router.replace('/strategies' as any)}/></View>;
  if(!detail||!body)return <Loading/>;
  const a=analysis;const dim=(pending||!!anFailed)&&!!a;
+ const multiExp=new Set(body.legs.map(l=>l.expiry)).size>1;
  const scenario=body.scenario||{};const reading=chain?.as_of||a?.as_of;
  const expiryInfo=expiries.find(e=>e.expiry===body.expiry);
 
@@ -275,12 +301,10 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
     `Expiry day: these contracts settle today at 15:30 IST. Premiums and Greeks move very fast now - small moves swing the P&L sharply.`}</T></View>}
 
   {/* market context */}
-  <ChipRow wrap={wide}>
-   {underlyings.map(u=><Chip key={u} label={u} active={body.underlying===u} onPress={()=>{if(u!==body.underlying){if(body.legs.length&&!confirmSwitch())return;edit(b=>({...b,underlying:u,expiry:'',legs:[],template:null,scenario:{}}));}}}/>)}
-  </ChipRow>
+  <UnderlyingPicker list={underlyings} value={body.underlying} onPick={u=>{if(u!==body.underlying){if(body.legs.length&&!confirmSwitch())return;edit(b=>({...b,underlying:u,expiry:'',legs:[],template:null,scenario:{}}));}}}/>
   <ChipRow wrap={wide}>
    {expiries.slice(0,6).map(e=><Chip key={e.expiry} active={body.expiry===e.expiry} label={`${dayMonth(e.expiry)} ${e.monthly?'M':'W'} · ${Math.max(0,Math.round(e.days_to_expiry))}d`}
-    onPress={()=>e.expiry===body.expiry?null:body.legs.length?setExpiryOpen(true):edit(b=>({...b,expiry:e.expiry,scenario:{...b.scenario,at:undefined}}))}/>)}
+    onPress={()=>e.expiry===body.expiry?null:multiExp?flash('This strategy spans expiries - change each leg\'s expiry in its editor.'):body.legs.length?setExpiryOpen(true):edit(b=>({...b,expiry:e.expiry,scenario:{...b.scenario,at:undefined}}))}/>)}
    <Chip label={expiries.length>1?`All expiries (${expiries.length})`:'Expiry details'} icon="calendar" onPress={()=>setExpiryOpen(true)}/>
   </ChipRow>
 
@@ -316,7 +340,9 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
         <Pressable accessibilityRole="button" accessibilityLabel={`Side: ${l.side==='B'?'Buy':'Sell'}. Switch`} onPress={()=>setLeg(l.id,{side:l.side==='B'?'S':'B'})}
          style={{paddingHorizontal:10,height:coarse?44:28,minWidth:coarse?52:undefined,alignItems:'center',borderRadius:7,justifyContent:'center',backgroundColor:l.side==='B'?C.soft:'#2A1519',borderWidth:1,borderColor:l.side==='B'?C.green:C.red}}>
          <T style={{fontSize:11,fontFamily:'InterSemi',color:l.side==='B'?C.green:C.red}}>{l.side==='B'?'BUY':'SELL'}</T></Pressable>
-        <Stepper label={`${strikeText(l.strike)}`} a11y={`Strike ${strikeText(l.strike)}`} onMinus={()=>setLeg(l.id,{strike:moveStrike(l.strike,-1)})} onPlus={()=>setLeg(l.id,{strike:moveStrike(l.strike,1)})}/>
+        <Stepper label={`${body.linked?'🔗 ':''}${strikeText(l.strike)}`} a11y={`Strike ${strikeText(l.strike)}${body.linked?' (linked: moves every leg)':''}`} onMinus={()=>stepStrike(l,-1)} onPlus={()=>stepStrike(l,1)}/>
+        <Pressable accessibilityRole="button" accessibilityLabel={`Expiry ${dayMonth(l.expiry)}. Change`} onPress={()=>setLegEdit(l)} style={[tag,l.expiry!==body.expiry&&{borderColor:C.amber}]}>
+         <T style={{fontSize:11,fontFamily:'InterSemi',color:l.expiry!==body.expiry?C.amber:C.muted}}>{dayMonth(l.expiry)}</T></Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={`Type ${l.type}. Switch to ${l.type==='CE'?'PE':'CE'}`} onPress={()=>setLeg(l.id,{type:l.type==='CE'?'PE':'CE'})} style={[tag,coarse&&{height:44,minWidth:44,alignItems:'center'}]}><T style={{fontSize:11,fontFamily:'InterSemi'}}>{l.type}</T></Pressable>
         <Stepper label={`${l.lots} lot${l.lots>1?'s':''}`} a11y={`${l.lots} lots`} onMinus={()=>l.lots>1&&setLeg(l.id,{lots:l.lots-1})} onPlus={()=>l.lots<500&&setLeg(l.id,{lots:l.lots+1})}/>
         <View style={{flex:1}}/>
@@ -338,13 +364,15 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
      <Stepper label="Width" a11y="Width between legs" onMinus={()=>adjust('width',-1)} onPlus={()=>adjust('width',1)}/>
      <Stepper label="Wings" a11y="Hedge wing distance" onMinus={()=>adjust('wings',-1)} onPlus={()=>adjust('wings',1)}/>
      <Stepper label="Size ×" a11y="Multiply or divide every leg's lots, keeping the ratios" onMinus={()=>resize(-1)} onPlus={()=>resize(1)}/>
+     <Chip label={body.linked?'Strikes linked':'Link strikes'} icon="link" active={!!body.linked} onPress={()=>edit(b=>({...b,linked:!b.linked}))}/>
      <Button label="Clear all" icon="x" kind="outline" onPress={clearAll}/>
     </View>}
    </View>
 
    {/* RIGHT: analysis */}
    <View style={{flex:wide?55:undefined,width:wide?undefined:'100%',gap:16}}>
-    <RiskStrip a={a} dim={dim}/>
+    <RiskStrip a={a} dim={dim} onFix={applyFix}/>
+    <EvidenceLine id={id} version={version} onOpen={(rid)=>router.push({pathname:'/strategies',params:{view:'lab',strategy:id}} as any)}/>
     <View style={panel}>
      <View style={s.between}><T style={label}>Payoff</T>{pending&&<T style={{fontSize:11,color:C.amber}}>{a?'Updating…':'Calculating…'}</T>}
       {!pending&&!!anFailed&&<View style={[s.row,{gap:8}]}><T style={{fontSize:11,color:C.red}}>{a?'Not updated - these numbers are for an earlier version':'Could not calculate'}{` (${anFailed})`}</T><Button label="Retry" kind="outline" onPress={()=>setAnRetry(n=>n+1)}/></View>}</View>
@@ -388,8 +416,10 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
    draft={{expected_version:versionRef.current,input_hash:checksumRef.current}}
    onPlaced={(d)=>{setReview({open:false});flash(`Paper ${review.closing?'close':review.adjusting?'adjustment':'orders'} placed - deployment ${d.status.replace('_',' ')}. No order reached a broker.`);loadRuns();reload();setTab('paper');}}/>
   <TemplateSheet visible={tplOpen} onClose={()=>setTplOpen(false)} onPick={applyTemplate} replacing={body.legs.length}/>
-  <LegSheet leg={legEdit} chain={chain} moveStrike={moveStrike} onClose={()=>setLegEdit(null)} onRemove={removeLeg}
-   onApply={l=>{setLegEdit(null);edit(b=>({...b,template:null,legs:b.legs.map(x=>x.id===l.id?l:x)}));}}/>
+  <LegSheet leg={legEdit} chain={chain} moveStrike={moveStrike} onClose={()=>setLegEdit(null)} onRemove={removeLeg} expiries={expiries}
+   onApply={l=>{setLegEdit(null);edit(b=>{const legs=b.legs.map(x=>x.id===l.id?l:x);
+    // the strategy's expiry is always its NEAREST leg's (the chain, scenario dates and settlement follow it)
+    const near=legs.map(x=>x.expiry).sort()[0]||b.expiry;return {...b,template:null,legs,expiry:near,scenario:near!==b.expiry?{...b.scenario,at:undefined}:b.scenario};});}}/>
   <ExpirySheet visible={expiryOpen} onClose={()=>setExpiryOpen(false)} expiries={expiries} current={body.expiry} underlying={body.underlying} legs={body.legs}
    onApply={e=>edit(b=>({...b,expiry:e,legs:b.legs.map(l=>({...l,expiry:e})),scenario:{...b.scenario,at:undefined}}))}/>
   <SnapshotSheet rid={snapView} onClose={()=>setSnapView(null)} onSaved={reload}/>
@@ -457,7 +487,7 @@ function PriceField({leg,ltp,quote,onManual,onBasis}:{leg:Leg;ltp:number|null;qu
  </View>;
 }
 
-function RiskStrip({a,dim}:{a:Analysis|null;dim:boolean}){
+function RiskStrip({a,dim,onFix}:{a:Analysis|null;dim:boolean;onFix?:(f:any)=>void}){
  const [more,setMore]=useState(false);
  if(!a||a.status==='no_market'||a.status==='empty')return <View style={[panel,{minHeight:84,justifyContent:'center'}]}><T style={{color:C.muted,fontSize:12}}>{a?.warnings?.[0]||'Risk numbers appear once the strategy has legs.'}</T></View>;
  if(a.status==='invalid')return <View style={panel}><T style={{color:C.red,fontSize:12}}>{a.warnings[0]}</T></View>;
@@ -474,6 +504,8 @@ function RiskStrip({a,dim}:{a:Analysis|null;dim:boolean}){
   [a.scenario?.active&&a.pop_scenario?.status==='available'?'POP (model) · Scenario':'POP (model)',a.scenario?.active&&a.pop_scenario?.status==='available'?`${a.pop_scenario.value}%`:a.pop?.status==='available'?`${a.pop.value}%`:'—',C.ink,
    a.scenario?.active&&a.pop_scenario?.status==='available'?`From the what-if point · ${a.pop?.status==='available'?`${a.pop.value}% from now`:''}`:a.pop?.sigma?`Lognormal at ${a.pop.sigma}% ${a.pop.sigma_basis==='chain_atm_iv'?'chain ATM IV':'IV of the leg nearest spot (proxy)'}`:'Model value'],
   ['Charges (est.)',inr(a.charges?.value),C.ink,'Entry orders, published rates'],
+  ['Chance of loss (model)',(a as any).outcomes?.status==='available'?`${(a as any).outcomes.value.loss}%`:'—',C.ink,(a as any).outcomes?.status==='available'?
+   `Profit ${(a as any).outcomes.value.profit}% · loss ${(a as any).outcomes.value.loss}%${(a as any).outcomes.value.max_loss!=null?` · max loss ${(a as any).outcomes.value.max_loss}%`:''}${(a as any).outcomes.value.max_profit!=null?` · max profit ${(a as any).outcomes.value.max_profit}%`:''} at expiry`:'Model value'],
  ] as const;
  return <View style={[panel,{gap:10,opacity:dim?.5:1}]}><View style={{flexDirection:'row',flexWrap:'wrap',gap:14}}>
   {items.slice(0,more?items.length:4).map(([k,v,col,help])=><View key={k} style={{minWidth:130,flex:1,gap:2}} accessibilityLabel={`${k}: ${v}. ${help}`}>
@@ -483,7 +515,9 @@ function RiskStrip({a,dim}:{a:Analysis|null;dim:boolean}){
    <T style={{fontSize:12,color:C.green}}>{more?'Fewer numbers':'More numbers: reward:risk, capital at risk, premium, probability, charges'}</T></Pressable>
   {!!a.insights?.length&&<View style={{gap:4,borderTopWidth:1,borderColor:C.line,paddingTop:8}} accessibilityLabel="Risk warnings">
    {a.insights.map((w,i)=><View key={i} style={[s.row,{gap:6,alignItems:'flex-start'}]}><Icon name={w.level==='warn'?'alert-triangle':'info'} size={13} color={w.level==='warn'?C.amber:C.muted}/>
-    <T style={{fontSize:12,flex:1,color:w.level==='warn'?C.ink:C.muted}}>{w.text}</T></View>)}</View>}
+    <T style={{fontSize:12,flex:1,color:w.level==='warn'?C.ink:C.muted}}>{w.text}</T>
+    {(w as any).fix&&onFix&&<Pressable accessibilityRole="button" accessibilityLabel={`${(w as any).fix.label}: ${w.text}`} onPress={()=>onFix((w as any).fix)} style={{minHeight:28,justifyContent:'center'}}>
+     <T style={{fontSize:12,color:C.green}}>{(w as any).fix.label}</T></Pressable>}</View>)}</View>}
  </View>;
 }
 
@@ -602,3 +636,18 @@ function useHolidays(){const [h,setH]=useState(_hol||{set:new Set<string>(),vers
   let live=true;_holP.then(x=>{if(live&&x)setH(x);});return()=>{live=false};},[]);
  return h;}
 const BASIS_TAG:Record<string,string>={exec:'(ask/bid)',mid:'(mid)',ltp:'(LTP)',manual:'(manual)'};
+
+/** A8: the Lab evidence behind this strategy's structure, where it is built - with its version and the deciding run's date. */
+function EvidenceLine({id,version,onOpen}:{id:string;version:number;onOpen:(rid:string)=>void}){
+ const [e,setE]=useState<any>(null);const [err,setErr]=useState('');
+ useEffect(()=>{let live=true;const t=setTimeout(()=>sb.evidence(id).then(x=>{if(live){setE(x);setErr('');}}).catch(x=>{if(live)setErr(x.message);}),600);return()=>{live=false;clearTimeout(t);};},[id,version]);
+ if(err)return <T style={{fontSize:11,color:C.muted}}>{`Lab evidence could not be read (${err}).`}</T>;
+ if(!e||e.status==='none')return e?<T style={{fontSize:11,color:C.muted}}>{`Lab evidence: ${e.label}.`}</T>:null;
+ const tone=e.status==='tested_significant'?'green':e.status==='tested_not_significant'?'neutral':'amber';
+ return <View style={[panel,{gap:4,paddingVertical:10}]} accessibilityLabel={`Lab evidence: ${e.label}`}>
+  <View style={[s.row,{gap:8,flexWrap:'wrap'}]}><T style={label}>Lab evidence</T><Badge label={e.label} tone={tone as any}/></View>
+  {!!e.note&&<T style={{fontSize:11,color:C.muted}}>{e.note}</T>}
+  <View style={[s.row,{gap:10,flexWrap:'wrap'}]}><T style={{fontSize:10,color:C.muted}}>{`${e.deciding_run_at?`Deciding run ${istEpoch(e.deciding_run_at)} · `:''}statistics ${(e.evidence_version||'?').split(':')[0]} · model-priced, not a forecast`}</T>
+   {!!e.run_id&&<Pressable accessibilityRole="button" onPress={()=>onOpen(e.run_id)}><T style={{fontSize:11,color:C.green}}>Open the Lab</T></Pressable>}</View>
+ </View>;
+}
