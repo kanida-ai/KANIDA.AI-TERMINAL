@@ -786,4 +786,8 @@ def create_app(settings=None,http=None,evidence=None):
   if not file.is_file():file=root/'index.html'
   if not file.is_file():raise PilotError(503,'WEB_BUILD','The pilot web build is not available yet.')
   return FileResponse(file)
+ # Strategy Builder (docs/strategy_builder_study/BUILD_PLAN_MERGED.md). Mounted guarded and ahead of the catch-alls;
+ # a builder that fails to start is logged and the pilot runs without it.
+ from .strategy_builder import mount as mount_strategy_builder
+ mount_strategy_builder(app,settings)
  return app
