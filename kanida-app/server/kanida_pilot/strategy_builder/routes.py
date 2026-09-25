@@ -71,6 +71,14 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
   try:return fn(*a,**k)
   except MarketUnavailable as e:raise PilotError(503,'MARKET_UNAVAILABLE',str(e))
 
+ @r.get('/api/sb/ops/metrics')
+ def ops_metrics(request:Request,days:int=7):
+  user=me(request)
+  if user.get('role')!='owner':raise PilotError(403,'OWNER_ONLY','Release metrics are visible to the owner only.')
+  ops=getattr(app.state,'strategy_builder_ops',None)
+  if not ops:raise PilotError(503,'OPS_UNAVAILABLE','Metrics are not available on this server.')
+  return ops.metrics(max(1,min(90,days)))
+
  @r.get('/api/sb/calendar')
  def exchange_calendar(request:Request):
   me(request);from . import exchange as XC
@@ -190,12 +198,21 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
 
  # --- library ---------------------------------------------------------------------------------------------------
  @r.get('/api/sb/strategies')
- def strategies(request:Request):
+ def strategies(request:Request,sort:str='updated'):
   user=me(request);rows=store.list(user['id'])
+  from .exchange import now_ist
+  today=now_ist().strftime('%Y-%m-%d');deps=execution.summaries(user['id']) if execution else {}
   for row in rows:
    s=store.get(user['id'],row['id']);legs=(s['draft'] or {}).get('body',{}).get('legs') or []
    row['structure']=recognise(legs)['name'] if legs else 'Empty'
-  return {'strategies':rows}
+   # badges (GTM P18): what state the saved terms are in, and whether paper money is riding on them
+   row['badges']=(['expired'] if row.get('expiry') and row['expiry']<today else [])+(['empty'] if not legs else [])
+   row['deployments']=deps.get(row['id'],{'open':0,'attention':0,'closed':0})
+  key={'name':lambda r:(r['name'] or '').lower(),'expiry':lambda r:r.get('expiry') or '9999','created':lambda r:-(r.get('created_at') or 0),
+   'updated':lambda r:-(r.get('updated_at') or 0)}.get(sort)
+  if not key:raise PilotError(400,'FIELD_INVALID','sort must be one of updated, created, name, expiry.')
+  rows.sort(key=key)
+  return {'strategies':rows,'sort':sort}
 
  @r.post('/api/sb/strategies')
  def create(request:Request,data:dict=Body(default={})):
@@ -254,6 +271,16 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
   a.pop('curve',None)
   snap=store.snapshot(user['id'],sid,_name(data.get('name'),''),body,a.get('as_of'),a,req)
   return snap if snap.get('repeated') else {**snap,'draft_version':s['draft']['version']}
+
+ @r.post('/api/sb/revisions/{rid}')
+ def revision_meta(request:Request,rid:str,data:dict=Body(default={})):
+  user=me(request)
+  name=_name(data.get('name'),'') if 'name' in data else None
+  if name is not None and not name:raise PilotError(400,'FIELD_INVALID','A snapshot name cannot be empty.')
+  notes=str(data.get('notes'))[:2000] if data.get('notes') is not None else None
+  rev=store.update_revision(user['id'],rid,name,notes)
+  if not rev:raise PilotError(404,'SNAPSHOT_NOT_FOUND','There is no such snapshot.')
+  return rev
 
  @r.get('/api/sb/revisions/{rid}')
  def revision(request:Request,rid:str):
@@ -362,6 +389,12 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
  @r.get('/api/sb/autotrade/routes/{rid}')
  def at_get(request:Request,rid:str):
   d=autotrade.get(me(request)['id'],rid) if autotrade else None
+  if not d:raise PilotError(404,'ROUTE_NOT_FOUND','There is no such AutoTrade hand-off.')
+  return d
+
+ @r.post('/api/sb/autotrade/routes/{rid}/release')
+ def at_release(request:Request,rid:str,data:dict=Body(default={})):
+  d=ex(autotrade.release,me(request)['id'],rid,data.get('confirm') is True) if autotrade else None
   if not d:raise PilotError(404,'ROUTE_NOT_FOUND','There is no such AutoTrade hand-off.')
   return d
 
@@ -570,6 +603,10 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
    e=st.get(x['id'])
    if e:x['evidence']={'status':e['status'],'p':e['p'],'tests':e['tests'],'n_oos':e['n_oos'],'low':e['low'],'runs_of_rule':e['runs'],'decides':e['deciding_run']==x['id']}
   return {'runs':runs}
+
+ @r.post('/api/sb/lab/runs/{rid}/cancel')
+ def lab_cancel(request:Request,rid:str):
+  user=me(request);return lb(lab.cancel,user['id'],rid)
 
  @r.get('/api/sb/lab/runs/{rid}')
  def lab_run(request:Request,rid:str):

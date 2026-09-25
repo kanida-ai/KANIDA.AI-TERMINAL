@@ -6,11 +6,12 @@
 //  * TemplateIntro - the introduction a complex/advanced template shows before it is used (explicit confirmation).
 //  * Sketch - the qualitative payoff shape on a template card.
 import React,{useEffect,useState} from 'react';
-import {Pressable,View} from 'react-native';
+import {Pressable,View,useWindowDimensions} from 'react-native';
 import Svg,{Line,Path} from 'react-native-svg';
 import {Badge,Button,C,Checkbox,Chip,Loading,Sheet,T,s} from '../ui';
 import {sb,type Analysis,type Template} from './api';
 import {inr,num,signed,strikeText} from './format';
+import {ErrorRetry,Scrollable} from './States';
 
 type SpreadRow={anchor:number;strikes:[number,number];distance_pct:number;atm:boolean;net:number;net_per_unit:number;direction:string;
  max_profit:number|null;max_loss:number|null;breakevens:number[]|null;pop:number|null;return_on_risk:number|null;delta:number|null;theta:number|null;
@@ -21,19 +22,21 @@ const KINDS:[string,string,string][]=[['CE','debit','Bull call (debit)'],['PE','
 export function SpreadsSheet({visible,onClose,underlying,expiry,lots,onPick}:{visible:boolean;onClose:()=>void;underlying:string;expiry:string;lots:number;
  onPick:(legs:SpreadRow['legs'],template:string,width:number)=>void}){
  const [kind,setKind]=useState(0);const [width,setWidth]=useState(2);const [data,setData]=useState<any>(null);const [error,setError]=useState('');const [sel,setSel]=useState<number|null>(null);
- useEffect(()=>{if(!visible||!underlying||!expiry)return;setData(null);setError('');setSel(null);const [t,sd]=KINDS[kind];
-  sb.spreads(underlying,expiry,t,sd,width,lots).then(setData).catch(e=>setError(e.message));},[visible,underlying,expiry,kind,width,lots]);
+ const narrow=useWindowDimensions().width<700;const [retry,setRetry]=useState(0);
+ // only the answer to the newest kind/width request is shown (a fast change can never show the wrong spread family)
+ useEffect(()=>{if(!visible||!underlying||!expiry)return;let live=true;setData(null);setError('');setSel(null);const [t,sd]=KINDS[kind];
+  sb.spreads(underlying,expiry,t,sd,width,lots).then(d=>{if(live)setData(d);}).catch(e=>{if(live)setError(e.message);});return()=>{live=false};},[visible,underlying,expiry,kind,width,lots,retry]);
  const row:SpreadRow|null=data&&sel!=null?data.rows[sel]:null;
  return <Sheet visible={visible} onClose={onClose} wide title="Spreads" subtitle={data?`${data.name} · ${underlying} ${expiry} · spot ${num(data.spot,2)} · ${lots} lot${lots>1?'s':''}`:'Every vertical spread of one kind and width, priced to execute'}
   footer={<View style={[s.between,{flexWrap:'wrap',gap:8}]}><T style={{fontSize:11,color:C.muted,flex:1,minWidth:240}}>{data?.basis||''}</T>
    <Button label={row?`Use ${strikeText(row.strikes[0])} / ${strikeText(row.strikes[1])}`:'Pick a row'} icon="check" disabled={!row} onPress={()=>row&&onPick(row.legs,data.template,width)}/></View>}>
   <View style={[s.row,{gap:6,flexWrap:'wrap'}]}>{KINDS.map(([_t,_s,l],i)=><Chip key={l} label={l} active={kind===i} onPress={()=>setKind(i)}/>)}</View>
   <View style={[s.row,{gap:6,flexWrap:'wrap'}]}><T style={{fontSize:11,color:C.muted}}>Width (strikes)</T>{[1,2,4,6,8].map(w=><Chip key={w} label={String(w)} active={width===w} onPress={()=>setWidth(w)}/>)}</View>
-  {!!error&&<T style={{color:C.red,fontSize:12}}>{error}</T>}
+  {!!error&&<ErrorRetry what="Spreads" error={error} onRetry={()=>setRetry(n=>n+1)}/>}
   {!data&&!error&&<Loading/>}
   {data&&!data.rows.length&&<T style={{fontSize:12,color:C.muted}}>No priced spreads of this kind and width in this expiry.</T>}
   {data?.excluded_inconsistent>0&&<T style={{fontSize:11,color:C.muted}}>{`${data.excluded_inconsistent} spread${data.excluded_inconsistent>1?'s':''} left out: their prices cost more than the spread can ever pay (stale last-traded prices on illiquid strikes).`}</T>}
-  {data&&!!data.rows.length&&<View style={{borderWidth:1,borderColor:C.line,borderRadius:10,overflow:'hidden'}}>
+  {data&&!!data.rows.length&&<Scrollable narrow={narrow} min={760}><View style={{borderWidth:1,borderColor:C.line,borderRadius:10,overflow:'hidden'}}>
    <View style={[s.row,{backgroundColor:C.paper,paddingHorizontal:10,paddingVertical:6}]}>{['Strikes','From spot',data.side==='debit'?'Debit':'Credit','Max profit','Max loss','Breakeven','POP','Return on risk'].map((h,i)=>
     <T key={h} style={{flex:i===0?1.4:1,fontSize:10,color:C.muted,textAlign:i?'right':'left'}}>{h}</T>)}</View>
    {data.rows.map((r:SpreadRow,i:number)=><Pressable key={r.anchor} accessibilityRole="button" accessibilityState={{selected:sel===i}} accessibilityLabel={`${r.strikes.join(' / ')} spread`}
@@ -42,19 +45,20 @@ export function SpreadsSheet({visible,onClose,underlying,expiry,lots,onPick}:{vi
     {[`${r.distance_pct>0?'+':''}${r.distance_pct}%`,inr(Math.abs(r.net)),signed(r.max_profit),signed(r.max_loss),(r.breakevens||[]).map(b=>num(b,0)).join(' · ')||'—',
      r.pop!=null?`${r.pop}%`:'—',r.return_on_risk!=null?`${r.return_on_risk}%`:'—'].map((c,j)=><T key={j} style={{flex:1,fontSize:12,textAlign:'right',fontVariant:['tabular-nums'] as any}}>{c}</T>)}
    </Pressable>)}
-  </View>}
+  </View></Scrollable>}
   {row&&<View style={{gap:3}}>{row.legs.map((l,i)=><T key={i} style={{fontSize:12,color:l.side==='B'?C.green:C.red}}>{`${l.side==='B'?'Buy':'Sell'} ${l.lots} × ${strikeText(l.strike)} ${l.type} @ ${num(l.price)}`}</T>)}
    <T style={{fontSize:11,color:C.muted}}>{`Net delta ${num(row.delta,1)} · theta ${num(row.theta,0)}/day · charges ~${inr(row.charges)}${row.price_basis.includes('ltp')?' · some legs priced at the last trade (no live quote)':''}`}</T></View>}
  </Sheet>;
 }
 
 export function AboutSheet({visible,onClose,a,templateKey}:{visible:boolean;onClose:()=>void;a:Analysis|null;templateKey:string|null}){
- const [data,setData]=useState<{templates:any[];legging:string}|null>(null);
- useEffect(()=>{if(visible&&!data)sb.templates().then(setData as any).catch(()=>{});},[visible,data]);
+ const [data,setData]=useState<{templates:any[];legging:string}|null>(null);const [err,setErr]=useState('');
+ const load=()=>{setErr('');sb.templates().then(setData as any).catch(e=>setErr(e.message));};
+ useEffect(()=>{if(visible&&!data)load();},[visible,data]);// eslint-disable-line react-hooks/exhaustive-deps
  const t=data?.templates.find(x=>x.key===templateKey)||null;
  const prem=a?.premium?.value;const ml=a?.max_loss;const mp=a?.max_profit;
  return <Sheet visible={visible} onClose={onClose} wide title={`About: ${a?.structure?.name||'this strategy'}`} subtitle="Plain-language basics, this strategy's own numbers, and what to watch">
-  {!data?<Loading/>:<>
+  {err?<ErrorRetry what="The strategy explanations" error={err} onRetry={load}/>:!data?<Loading/>:<>
    <Section title="Basics">{t?<><T style={{fontSize:13}}>{t.recipe}</T><T style={{fontSize:13}}>{`Use: ${t.use}`}</T><T style={{fontSize:13,color:C.amber}}>{`Loses when: ${t.loses}`}</T></>:
     <T style={{fontSize:13,color:C.muted}}>A custom combination - it does not match a named structure, so read the payoff chart and the numbers below.</T>}</Section>
    <Section title="Calculations (this strategy, at the reading)">

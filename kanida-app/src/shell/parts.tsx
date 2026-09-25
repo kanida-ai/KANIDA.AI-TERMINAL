@@ -41,11 +41,14 @@ export function WatchToggle({match}:{match?:Match}){
  * refused at simulate and live submission by the server (kanida_pilot/evidence.require_current_evidence). */
 export function ResearchBanner(){
  const {error,state,refresh}=useProduct();
+ // scoped to scanner-backed pages: the strategy product does not read the scanner, so its screens never show a
+ // "nothing has changed" line about it (GTM audit P11 - one status, where it applies)
+ const path=usePathname()||'';
  // `error` only counts as "no scan at all" when there is genuinely no state in hand. With a state already
  // loaded, a failed poll means the screen is a moment behind - which is worth a quiet line, not an error.
  const view=connectionView(state,{error:state?'':error});
  const text=view?view.text:error?'Could not refresh just now — showing what loaded a moment ago.':'';
- if(!text)return null;
+ if(!text||path.startsWith('/strategies'))return null;
  const red=view?.tone==='very-stale';
  const label=view?view.a11y:text;
  return <View role="status" accessibilityLiveRegion="polite" accessibilityLabel={label} style={[s.between,{padding:12,backgroundColor:red?'#2A1519':C.amberBg}]}>

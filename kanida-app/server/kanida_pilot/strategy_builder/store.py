@@ -52,9 +52,17 @@ class Store:
   Path(path).parent.mkdir(parents=True,exist_ok=True)
   self.lock=threading.RLock()
   self.c=sqlite3.connect(str(path),check_same_thread=False,timeout=15);self.c.row_factory=sqlite3.Row
-  with self.lock:self.c.execute('pragma journal_mode=wal');self.c.executescript(SCHEMA);self.c.commit()
+  with self.lock:
+   self.c.execute('pragma journal_mode=wal');self.c.executescript(SCHEMA)
+   if 'notes' not in {r[1] for r in self.c.execute('pragma table_info(revisions)').fetchall()}:
+    self.c.execute("alter table revisions add column notes text not null default ''")
+   self.c.commit()
 
- def close(self):self.c.close()
+ def close(self):
+  for fn in getattr(self,'closers',[]):
+   try:fn()
+   except Exception:pass  # noqa: BLE001
+  self.c.close()
 
  def _log(self,user_id,sid,kind,detail):
   self.c.execute('insert into activity values(?,?,?,?,?,?)',(uid(),user_id,sid,kind,detail,time.time()))
@@ -150,7 +158,7 @@ class Store:
   with self.lock:
    n=(self.c.execute('select max(n) from revisions where strategy_id=?',(sid,)).fetchone()[0] or 0)+1
    rid=uid()
-   self.c.execute('insert into revisions values(?,?,?,?,?,?,?,?,?)',(rid,sid,n,name or f'Snapshot {n}',json.dumps(body),checksum(body),
+   self.c.execute('insert into revisions(id,strategy_id,n,name,body,checksum,reading_at,analysis,created_at) values(?,?,?,?,?,?,?,?,?)',(rid,sid,n,name or f'Snapshot {n}',json.dumps(body),checksum(body),
     reading_at,json.dumps(analysis),time.time()))
    self._log(user_id,sid,'snapshot',f'Saved snapshot {n}: {name or "Snapshot "+str(n)}')
    if request_id:self.c.execute('insert or ignore into snapshot_requests values(?,?,?,?,?)',(user_id,sid,request_id,rid,time.time()))
@@ -160,8 +168,21 @@ class Store:
  def revisions(self,user_id,sid):
   with self.lock:
    if not self.get(user_id,sid):return None
-   rows=self.c.execute('select id,n,name,checksum,reading_at,created_at,analysis from revisions where strategy_id=? order by n desc',(sid,)).fetchall()
-  return [{**{k:r[k] for k in ('id','n','name','checksum','reading_at','created_at')},'summary':_summary(json.loads(r['analysis'] or '{}'))} for r in rows]
+   rows=self.c.execute('select id,n,name,notes,checksum,reading_at,created_at,analysis from revisions where strategy_id=? order by n desc',(sid,)).fetchall()
+  return [{**{k:r[k] for k in ('id','n','name','notes','checksum','reading_at','created_at')},'summary':_summary(json.loads(r['analysis'] or '{}'))} for r in rows]
+
+ def update_revision(self,user_id,rid,name=None,notes=None):
+  """Rename a snapshot or edit its notes. Its body, analysis and checksum are immutable and never touched (GTM P18)."""
+  with self.lock:
+   r=self.c.execute('select v.id,v.strategy_id,v.n,v.name from revisions v join strategies s on s.id=v.strategy_id where v.id=? and s.user_id=?',(rid,user_id)).fetchone()
+   if not r:return None
+   if name is not None:self.c.execute('update revisions set name=? where id=?',(name,rid))
+   if notes is not None:self.c.execute('update revisions set notes=? where id=?',(notes,rid))
+   what=[f'renamed to "{name}"'] if name is not None and name!=r['name'] else []
+   if notes is not None:what.append('notes edited')
+   if what:self._log(user_id,r['strategy_id'],'snapshot_meta',f"Snapshot {r['n']}: "+', '.join(what))
+   self.c.commit()
+  return self.revision(user_id,rid)
 
  def revision(self,user_id,rid):
   with self.lock:

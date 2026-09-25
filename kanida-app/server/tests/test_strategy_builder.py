@@ -614,10 +614,10 @@ def test_lab_api_runs_a_job_validates_and_feeds_discover(pilot,monkeypatch):
  assert bad.status_code==400 and 'BANKNIFTY/FINNIFTY wait' in bad.json()['error']
  assert owner.post('/api/sb/lab/backtests',json={'template':'iron_condor','slippage_pct':0.1}).status_code==400   # never less slippage
  run=owner.post('/api/sb/lab/backtests',json={'template':'bull_call_spread','param':4,'from':'2023-01-02','to':'2025-09-01'}).json()
- assert run['status'] in ('running','completed')
+ assert run['status'] in ('queued','running','completed')
  for _ in range(100):
   got=owner.get(f"/api/sb/lab/runs/{run['id']}").json()
-  if got['status']!='running':break
+  if got['status'] not in ('queued','running'):break
   time.sleep(0.1)
  assert got['status']=='completed',got.get('error')
  assert got['result']['provenance']['label'].startswith('Model-priced') and got['result']['stats']['all']['n']>0
@@ -723,17 +723,22 @@ class FakeEngine:
  def request(self,method,url,headers=None,timeout=None,json=None,params=None):
   self.calls.append((method,url,headers,json,params))
   if self.down:raise ConnectionError('engine down')
+  if getattr(self,'silent',False):raise TimeoutError('no answer')
   if headers.get('X-Operator-Token')!='svc-token':return _Resp(403,{'detail':'operator token required'})
   path=url.split('/api/autotrade/intents',1)[1]
   if path=='/capability':
    return _Resp(200,{'live_allowed':self.live_allowed,'gates':[{'gate':'armed','label':'Operator armed this account','pass':self.live_allowed,'detail':'x'}],'arm':None})
+  if method=='GET' and path=='':
+   return _Resp(200,{'intents':[{**v,'idempotency_key':k} for k,v in self.intents.items()]})
   if method=='POST' and path=='':
    key=json['idempotency_key']
    if key in self.intents:return _Resp(200,{'intent':self.intents[key],'replayed':True})
    blocked=json['mode']=='live' and not self.live_allowed
    it={'id':f'i{len(self.intents)+1}','state':'blocked' if blocked else 'accepted','mode':json['mode'],
     'reason':'LIVE_GATES_FAILED: armed' if blocked else None,'legs':[{**l,'state':'not_sent' if blocked else 'pending'} for l in json['legs']]}
-   self.intents[key]=it;return _Resp(201,{'intent':it,'replayed':False})
+   self.intents[key]=it
+   if getattr(self,'drop_response',False):raise TimeoutError('accepted, then the response was lost')
+   return _Resp(201,{'intent':it,'replayed':False})
   iid=path.strip('/').split('/')[0];it=next(v for v in self.intents.values() if v['id']==iid)
   if path.endswith('/cancel'):it.update(state='cancelled',reason='Cancelled before dispatch')
   elif it['state']=='accepted':it.update(state='dry_run_complete',reason='Dry run - no broker order was placed',legs=[{**l,'state':'dry_run'} for l in it['legs']])

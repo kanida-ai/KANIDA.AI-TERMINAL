@@ -28,6 +28,7 @@ from . import analytics as A
 from . import charges as CH
 from .templates import BY_KEY
 from . import adjust as ADJ
+from . import exchange as XC
 from .. import implied_vol as IV
 
 log=logging.getLogger('strategy_builder.lab')
@@ -475,26 +476,134 @@ def backtest(spec,nifty,vix,lot_size,progress=lambda p:None):
 
 
 # --- replay of exact contracts ----------------------------------------------------------------------------------------
-def replay(legs,candles,entry_at=None):
- """legs: [{id,symbol,side,units,label}]; candles: {symbol: [(ts, close), ...]}. P&L path from the first common bar."""
+REPLAY_MIN_COVERAGE=0.6   # the common bars must be at least this share of the best-covered leg's bars (GTM audit P23)
+
+
+def parse_ts(t):
+ return A.parse_ist(t)
+
+
+BARS_PER_SESSION={'5minute':75,'15minute':25,'60minute':7,'day':1}
+
+
+def expected_bars(interval,since,now):
+ """Exchange session bars in [since, now] from the shared NSE calendar (partial for today's open session)."""
+ per=BARS_PER_SESSION.get(interval,25);mins={'5minute':5,'15minute':15,'60minute':60}.get(interval)
+ d=since.date();n=0
+ while d<=now.date():
+  if XC.is_trading_day(d):
+   if d<now.date():n+=per
+   else:
+    open_=now.replace(hour=9,minute=15,second=0,microsecond=0);done=max(0.0,(min(now,now.replace(hour=15,minute=30))-open_).total_seconds()/60)
+    n+=per if not mins else min(per,int(done//mins))
+  d+=timedelta(days=1)
+ return n
+
+
+def replay(legs,candles,entry_at=None,expected=None):
+ """legs: [{id,symbol,side,units,label}]; candles: {symbol: [(ts, close), ...]}. P&L path from the first common bar.
+
+ Coverage policy: every leg must have bars; the bars where ALL legs traded must be at least REPLAY_MIN_COVERAGE of the
+ best-covered leg. Below that the strategy-wide P&L is NOT reported (status insufficient_coverage) - a replay built
+ on a thin overlap would describe a different strategy. Missing bars are skipped, never filled."""
  series={l['symbol']:dict(candles.get(l['symbol']) or []) for l in legs}
  stamps=sorted(set().union(*[set(s) for s in series.values()])) if series else []
  if entry_at:stamps=[t for t in stamps if t>=entry_at]
  full=[t for t in stamps if all(t in s for s in series.values())];skipped=len(stamps)-len(full)
- if not full:return {'kind':'replay','points':[],'skipped_bars':skipped,'coverage':{k:len(v) for k,v in series.items()}}
+ detail=[{'symbol':k,'label':next((l.get('label',k) for l in legs if l['symbol']==k),k),'bars':len(v),'first':min(v) if v else None,'last':max(v) if v else None}
+  for k,v in series.items()]
+ # denominator (quant audit F5): the exchange session bars expected in the window when known - so a basket of legs
+ # that ALL barely traded cannot pass - otherwise the best-covered leg
+ best=max((d['bars'] for d in detail),default=0);denom=max(best,int(expected or 0))
+ share=round(len(full)/denom,3) if denom else 0.0
+ gap=None
+ if len(full)>1:
+  ts=[parse_ts(t) for t in full]
+  gs=[(b-a).total_seconds()/60 for a,b in zip(ts,ts[1:]) if a and b and a.date()==b.date()]
+  gap=round(max(gs)) if gs else None
+ cov={'legs':detail,'common_bars':len(full),'share':share,'minimum':REPLAY_MIN_COVERAGE,'denominator':'expected_session_bars' if expected and expected>=best else 'best_covered_leg',
+  'expected_bars':expected,'longest_intraday_gap_minutes':gap}
+ empty=[d['label'] for d in detail if not d['bars']]
+ if empty:return {'kind':'replay','status':'incomplete','points':[],'skipped_bars':skipped,'coverage':{k:len(v) for k,v in series.items()},'coverage_detail':cov,
+  'reason':'No bars for: '+', '.join(empty)+'. A replay of the remaining legs would be a different strategy, so none is shown.'}
+ if not full or share<REPLAY_MIN_COVERAGE:
+  return {'kind':'replay','status':'insufficient_coverage','points':[],'skipped_bars':skipped,'coverage':{k:len(v) for k,v in series.items()},'coverage_detail':cov,
+   'reason':f"Only {len(full)} bars have a price for every leg ({share*100:.0f}% of {'the exchange session bars in the window' if cov['denominator']=='expected_session_bars' else 'the best-covered leg'}; at least {REPLAY_MIN_COVERAGE*100:.0f}% is needed). No strategy-wide P&L is reported."}
  t0=full[0];entry={l['symbol']:series[l['symbol']][t0] for l in legs}
  pts=[{'t':t,'pnl':round(sum(l['units']*(series[l['symbol']][t]-entry[l['symbol']]) for l in legs),2)} for t in full]
  vals=[p['pnl'] for p in pts]
  return {'kind':'replay','entry_at':t0,'entry_prices':entry,'points':pts,'skipped_bars':skipped,'last':vals[-1],'best':max(vals),'worst':min(vals),
-  'coverage':{k:len(v) for k,v in series.items()},'note':'Real traded prices, gross of charges and slippage. Missing bars are skipped, never filled.'}
+  'coverage':{k:len(v) for k,v in series.items()},'coverage_detail':cov,'status':'ok','note':'Real traded prices, gross of charges and slippage. Missing bars are skipped, never filled.'}
 
 
 # --- runs (jobs) ------------------------------------------------------------------------------------------------------
+def _code_version():
+ import subprocess
+ try:return subprocess.run(['git','rev-parse','--short=12','HEAD'],cwd=str(__import__('pathlib').Path(__file__).parent),capture_output=True,text=True,timeout=3).stdout.strip() or None
+ except Exception:return None  # noqa: BLE001
+
+
+def _series_hash(s):
+ import hashlib
+ h=hashlib.sha256()
+ for k in sorted(k for k in s if isinstance(s.get(k),list)):h.update(k.encode());h.update(json.dumps(s[k],default=str).encode())
+ return h.hexdigest()[:16]
+
+
+def manifest(spec,series,vol,lot,lot_source='instrument_master',special=None):
+ """What a run was computed from, so it can be reproduced and audited (GTM audit P06/P22, quant audit F3): the
+ pricing model actually used, content hashes of both series (a data repair changes values, not ranges), the excluded
+ special sessions, the fee schedule, the lot and where it came from, the code version and an IST timestamp."""
+ from .store import checksum
+ from .exchange import now_ist
+ days=series.get('days') or [];vdays=vol.get('days') or []
+ return {'request_hash':checksum(spec),'model':MODEL,'analytics_version':A.MODEL_VERSION,'fees':CH.VERSION,'slippage':spec.get('slippage'),
+  'lot_size':lot,'lot_source':lot_source,'lot_basis':'current lot size applied to every year',
+  'underlying_days':[days[0],days[-1],len(days)] if days else None,'underlying_hash':_series_hash(series),
+  'volatility_days':[vdays[0],vdays[-1],len(vdays)] if vdays else None,'volatility_hash':_series_hash(vol),
+  'sources':series.get('sources'),'volatility_sources':vol.get('sources'),
+  'special_sessions_excluded':{'count':len(special or []),'hash':checksum(sorted(special or []))[:16]},
+  'code_version':_code_version(),'computed_at':now_ist().strftime('%Y-%m-%d %H:%M:%S')+' IST'}
+
+
+LAB_WORKERS=2           # bounded pool: Lab runs can never starve quotes/analysis of CPU threads (GTM audit P22)
+MAX_ACTIVE_PER_USER=3   # queued + running runs one user may hold at once
+RESTART_NOTE='The server restarted while this run was queued or working. Nothing was saved from it - run it again.'
+
+
+class Cancelled(Exception):pass
+
+
 class Lab:
- def __init__(self,store,market,kanida_db,derivatives_db):
+ def __init__(self,store,market,kanida_db,derivatives_db,recover=True):
   self.store=store;self.market=market;self.derivatives_db=derivatives_db;self.c=store.c;self.lock=store.lock
-  with self.lock:self.c.executescript(SCHEMA);self.c.commit()
+  self.boot=uuid.uuid4().hex[:12]
+  with self.lock:
+   self.c.executescript(SCHEMA)
+   self.c.execute('create table if not exists lab_run_owner(run_id text primary key, boot text not null)')
+   # restart recovery (quant audit F2): only runs owned by an EARLIER server process are recovered - a batch CLI or a
+   # second Lab object (recover=False) never touches runs another live process is working on
+   if recover:
+    self.c.execute("update lab_runs set status='failed',error=?,finished_at=? where status in ('queued','running') and id in "
+     "(select run_id from lab_run_owner where boot!=?)",(RESTART_NOTE,time.time(),self.boot))
+    self.c.execute("update lab_runs set status='failed',error=?,finished_at=? where status in ('queued','running') and kind='backtest' "
+     "and id not in (select run_id from lab_run_owner) and spec not like ?",(RESTART_NOTE,time.time(),'%"batch"%'))
+   self.c.commit()
   self.daily=Daily(kanida_db,store,market)
+  from concurrent.futures import ThreadPoolExecutor
+  self.pool=ThreadPoolExecutor(max_workers=LAB_WORKERS,thread_name_prefix='lab')
+
+ def _move(self,rid,frm,to,**kw):
+  """Compare-and-set a run's status: frm -> to (plus fields). False if the run is no longer in `frm`."""
+  sets=', '.join(['status=?']+[f'{k}=?' for k in kw])
+  with self.lock:
+   n=self.c.execute(f'update lab_runs set {sets} where id=? and status=?',(to,*kw.values(),rid,frm)).rowcount;self.c.commit()
+  return n==1
+
+ def _status(self,rid):
+  with self.lock:
+   r=self.c.execute('select status from lab_runs where id=?',(rid,)).fetchone()
+  return r[0] if r else None
 
  def _save(self,rid,**kw):
   with self.lock:
@@ -568,24 +677,58 @@ class Lab:
    'target_pct':num('target_pct',None,1,100,True),'stop_pct':num('stop_pct',None,1,100,True),'exit_dte':exit_dte,
    'slippage':slip,'from':f,'to':t,'split':split}
 
- def lot_size(self,underlying='NIFTY'):
+ def lot_size(self,underlying='NIFTY',with_source=False):
+  """The current lot from the instrument master. A fallback is only ever NIFTY's 65 for NIFTY; a stock without a
+  readable lot fails the run instead of silently trading NIFTY's lot (quant audit F3)."""
+  lot,src=None,'instrument_master'
   try:
    ex=self.market.expiries(underlying)['expiries']
-   return int(ex[0]['lot_size']) if ex else 65
-  except Exception:return 65  # noqa: BLE001
+   lot=int(ex[0]['lot_size']) if ex else None
+  except Exception:lot=None  # noqa: BLE001
+  if lot is None:
+   if underlying!='NIFTY':raise LabError(503,'NO_LOT_SIZE',f'The lot size of {underlying} could not be read, so the run was not started.')
+   lot,src=65,'fallback_nifty_65'
+  return (lot,src) if with_source else lot
 
  def start_backtest(self,user_id,raw,strategy_id=None):
   spec=self.validate(raw);rid=uuid.uuid4().hex[:16]
   with self.lock:
-   self.c.execute('insert into lab_runs values(?,?,?,?,?,?,?,?,?,?,?)',(rid,user_id,strategy_id,'backtest',json.dumps(spec),'running',0,None,None,time.time(),None));self.c.commit()
+   active=self.c.execute("select count(*) from lab_runs where user_id=? and status in ('queued','running')",(user_id,)).fetchone()[0]
+   if active>=MAX_ACTIVE_PER_USER:
+    raise LabError(429,'LAB_BUSY',f'You already have {active} Lab runs queued or working. Wait for one to finish, or cancel one.')
+   self.c.execute('insert into lab_runs values(?,?,?,?,?,?,?,?,?,?,?)',(rid,user_id,strategy_id,'backtest',json.dumps(spec),'queued',0,None,None,time.time(),None))
+   self.c.execute('insert or replace into lab_run_owner values(?,?)',(rid,self.boot));self.c.commit()
+  def progress(p):
+   with self.lock:
+    n=self.c.execute("update lab_runs set progress=? where id=? and status='running'",(round(p,2),rid)).rowcount;self.c.commit()
+   if not n:raise Cancelled()
   def work():
+   # every transition is a compare-and-set on the state it expects (quant audit F1): a cancel that lands at any
+   # moment wins, and a cancelled/failed run can never be overwritten as 'completed'
+   if not self._move(rid,'queued','running'):return                 # cancelled (or recovered) while it waited
    try:
-    nifty,vix=self.series_for(spec.get('underlying','NIFTY'))
-    res=backtest(spec,nifty,vix,self.lot_size(spec.get('underlying','NIFTY')),progress=lambda p:self._save(rid,progress=round(p,2)))
-    self._save(rid,status='completed',progress=1.0,result=res,finished_at=time.time())
+    u=spec.get('underlying','NIFTY');nifty,vix=self.series_for(u);lot,lot_src=self.lot_size(u,with_source=True)
+    res=backtest(spec,nifty,vix,lot,progress=progress)
+    res['manifest']=manifest(spec,nifty,vix,lot,lot_src,self.daily.special_sessions())
+    self._move(rid,'running','completed',progress=1.0,result=json.dumps(res),finished_at=time.time())
+   except Cancelled:
+    pass
    except Exception as e:  # noqa: BLE001 - a failed run is a state with its reason, never a partial 'result'
-    log.exception('lab run failed');self._save(rid,status='failed',error=getattr(e,'message',None) or type(e).__name__,finished_at=time.time())
-  threading.Thread(target=work,daemon=True,name=f'lab-{rid}').start()
+    log.exception('lab run failed');self._move(rid,'running','failed',error=getattr(e,'message',None) or type(e).__name__,finished_at=time.time())
+  self.pool.submit(work)
+  return self.run(user_id,rid)
+
+ def close(self):
+  """Stop taking work: queued runs are cancelled (never left 'queued'); a running one ends at its next progress step."""
+  with self.lock:
+   self.c.execute("update lab_runs set status='cancelled',error='Server shutting down - run it again.',finished_at=? where status in ('queued','running') and id in (select run_id from lab_run_owner where boot=?)",(time.time(),self.boot));self.c.commit()
+  self.pool.shutdown(wait=False,cancel_futures=True)
+
+ def cancel(self,user_id,rid):
+  with self.lock:
+   n=self.c.execute("update lab_runs set status='cancelled',error='Cancelled by you.',finished_at=? where id=? and user_id=? and status in ('queued','running')",
+    (time.time(),rid,user_id)).rowcount;self.c.commit()
+  if not n and not self.run(user_id,rid):raise LabError(404,'RUN_NOT_FOUND','There is no such Lab run.')
   return self.run(user_id,rid)
 
  def series_for(self,underlying):
@@ -608,9 +751,12 @@ class Lab:
   return self._stocks
 
  def run(self,user_id,rid,full=True):
-  with self.lock:r=self.c.execute('select * from lab_runs where id=? and user_id=?',(rid,user_id)).fetchone()
+  with self.lock:
+   r=self.c.execute('select * from lab_runs where id=? and user_id=?',(rid,user_id)).fetchone()
+   ahead=self.c.execute("select count(*) from lab_runs where status='queued' and created_at<?",(r['created_at'],)).fetchone()[0] if r and r['status']=='queued' else None
   if not r:return None
   d=dict(r);d['spec']=json.loads(d['spec']);res=json.loads(d['result']) if d['result'] else None
+  d['queue_ahead']=ahead
   if res and not full:res={k:res[k] for k in ('badge','stats','control','kind') if k in res}
   d['result']=res;return d
 
@@ -697,13 +843,16 @@ class Lab:
  def replay_strategy(self,user_id,strategy,interval='15minute',days=10):
   body=strategy['draft']['body']
   from . import service as S
+  body={**body,'legs':[l for l in body.get('legs',[]) if l.get('include',True)]}   # excluded legs never block a replay
   chain,legs,problems=S.hydrate(self.market,body)
+  if problems:raise LabError(409,'INCOMPLETE_BASKET','Every leg must resolve to a listed contract before a replay: '+problems[0])
   legs=[l for l in legs if l.get('include',True)]
   if not legs:raise LabError(400,'EMPTY_STRATEGY','Add at least one listed leg to replay.')
   candles={};source=None
+  now=XC.now_ist();since=(now-timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
   live=getattr(self.market,'live_market',None)
   if live and live.available()[0]:
-   to=datetime.now();fr=to-timedelta(days=days)
+   to=now;fr=to-timedelta(days=days)
    try:
     for l in legs:
      r=live._get(f"/instruments/historical/{l['token']}/{interval}",**{'from':fr.strftime('%Y-%m-%d %H:%M:%S'),'to':to.strftime('%Y-%m-%d %H:%M:%S')})
@@ -712,12 +861,26 @@ class Lab:
    except Exception as e:  # noqa: BLE001
     log.warning('replay: Kite historical failed (%s); using captured candles',type(e).__name__);candles={}
   if not candles:
-   c=sqlite3.connect(f'file:{self.derivatives_db}?mode=ro',uri=True,timeout=10)
-   for l in legs:
-    rows=c.execute('select k.bar_start,k.close from candles_15m k join contracts t on t.instrument_token=k.instrument_token where t.tradingsymbol=? order by k.bar_start',(l['symbol'],)).fetchall()
-    candles[l['symbol']]=[(r[0][:19],r[1]) for r in rows]
-   c.close();source='captured_candles_15m'
-  res=replay([{'symbol':l['symbol'],'side':l['side'],'units':A.units(l),'label':f"{'Buy' if l['side']=='B' else 'Sell'} {int(l['strike'])} {l['type']}"} for l in legs],candles)
+   c=None
+   try:
+    c=sqlite3.connect(f'file:{self.derivatives_db}?mode=ro',uri=True,timeout=10)
+    for l in legs:
+     # the requested window is honoured on the fallback too - never all captured history (GTM audit P23)
+     rows=c.execute("select k.bar_start,k.close from candles_15m k join contracts t on t.instrument_token=k.instrument_token where t.tradingsymbol=? "
+      "and replace(k.bar_start,'T',' ')>=? order by k.bar_start",(l['symbol'],since)).fetchall()
+     candles[l['symbol']]=[(r[0][:19].replace('T',' '),r[1]) for r in rows]
+   except sqlite3.Error:candles={}   # no captured-candle store here: every leg has no bars, reported as an incomplete replay
+   finally:
+    if c:c.close()
+   source='captured_candles_15m'
+  eff_interval=interval if source=='kite_historical' else '15minute'
+  res=replay([{'symbol':l['symbol'],'side':l['side'],'units':A.units(l),'label':f"{'Buy' if l['side']=='B' else 'Sell'} {int(l['strike'])} {l['type']}"} for l in legs],candles,
+   expected=expected_bars(eff_interval,now-timedelta(days=days),now))
   res['source']=source;res['legs']=[{'symbol':l['symbol'],'label':f"{'Buy' if l['side']=='B' else 'Sell'} {l['lots']}× {int(l['strike'])} {l['type']}"} for l in legs]
   res['interval']=interval if source=='kite_historical' else '15minute';res['problems']=problems
+  changed=[]
+  if res['interval']!=interval:changed.append(f"Interval: you asked for {interval}; the captured store only has 15-minute bars.")
+  if source!='kite_historical':changed.append('Source: live Kite history was unavailable, so captured candles were used.')
+  res['request']={'requested':{'interval':interval,'days':days,'from':since[:16],'to':now.strftime('%Y-%m-%d %H:%M')},
+   'effective':{'interval':res['interval'],'source':source,'from':(res.get('entry_at') or '')[:16] or None,'to':(res['points'][-1]['t'][:16] if res.get('points') else None)},'changed':changed}
   return res

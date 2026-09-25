@@ -18,8 +18,8 @@ export type Analysis={status:string;input_hash:string;underlying?:string;structu
  legs_quotes?:{id:string;bid:number|null;ask:number|null;ltp:number|null;basis_used:string}[];sd?:{sigma:number|null;bands:{k:number;low:number;high:number}[];bands_to_date?:{k:number;low:number;high:number}[]};table?:{s:number;pct:number;target:number|null;expiry:number|null}[];warnings:string[];quality?:any;price_basis?:string[]};
 export type Draft={version:number;body:Body;updated_at:number;checksum?:string};
 export type Strategy={id:string;name:string;thesis:string;tags:string[];underlying:string|null;created_at:number;updated_at:number;archived_at:number|null;source_strategy_id:string|null;draft:Draft|null};
-export type LibraryRow=Strategy&{draft_version:number;snapshots:number;paper_open:number;paper_total:number;legs:number;expiry:string|null;structure:string};
-export type Snapshot={id:string;n:number;name:string;checksum:string;reading_at:string|null;created_at:number;summary:{max_profit:number|null;max_loss:number|null;unlimited_loss:boolean;breakevens:number[]|null;premium:number|null}};
+export type LibraryRow=Strategy&{draft_version:number;snapshots:number;paper_open:number;paper_total:number;legs:number;expiry:string|null;structure:string;badges?:string[];deployments?:{open:number;attention:number;closed:number}};
+export type Snapshot={id:string;n:number;name:string;notes?:string;checksum:string;reading_at:string|null;created_at:number;summary:{max_profit:number|null;max_loss:number|null;unlimited_loss:boolean;breakevens:number[]|null;premium:number|null}};
 export type PaperRun={id:string;strategy_id:string;strategy_name:string|null;status:'open'|'closed';revision:{id:string;n:number;name:string};policy:any;opened_reading:string;closed_reading:string|null;
  fills:{leg_id:string;action:string;side:Side;units:number;price:number;basis:string;fees:number;reading_at:string}[];rows:{leg_id:string;label:string;units:number;entry:number;exit:number|null;mark:number|null;pnl:number|null}[];
  as_of:string|null;realised:number;unrealised:number|null;fees:number;net:number|null;close_now_estimate:number|null;warnings:string[]};
@@ -48,12 +48,14 @@ export const sb={
  analyze:(body:Body,signal?:AbortSignal)=>api('/api/sb/analyze',{body},{},signal) as Promise<Analysis>,
  discover:(req:any)=>api('/api/sb/discover',req) as Promise<DiscoverResult>,
  discoverUse:(candidate_id:string)=>api('/api/sb/discover/use',{candidate_id}) as Promise<Strategy>,
- list:()=>api('/api/sb/strategies') as Promise<{strategies:LibraryRow[]}>,
+ list:(sort='updated')=>api(`/api/sb/strategies?sort=${sort}`) as Promise<{strategies:LibraryRow[]}>,
  create:(body:Partial<Body>,name?:string,thesis?:string)=>api('/api/sb/strategies',{body,name,thesis}) as Promise<Strategy>,
  get:(id:string)=>api(`/api/sb/strategies/${id}`) as Promise<Detail>,
  save:(id:string,version:number,body:Body)=>api(`/api/sb/strategies/${id}/draft`,{version,body}) as Promise<Strategy>,
  meta:(id:string,m:{name?:string;thesis?:string;tags?:string[]})=>api(`/api/sb/strategies/${id}/meta`,m) as Promise<Strategy>,
  snapshot:(id:string,name?:string,guard?:{expected_version:number;input_hash?:string;request_id?:string})=>api(`/api/sb/strategies/${id}/snapshots`,{name,...(guard||{})}) as Promise<any>,
+ revision:(rid:string)=>api(`/api/sb/revisions/${rid}`) as Promise<any>,
+ revisionMeta:(rid:string,m:{name?:string;notes?:string})=>api(`/api/sb/revisions/${rid}`,m) as Promise<any>,
  restore:(id:string,revision_id:string,version:number)=>api(`/api/sb/strategies/${id}/restore`,{revision_id,version}) as Promise<Strategy>,
  duplicate:(id:string,revision_id?:string,guard?:{expected_version:number;input_hash?:string})=>api(`/api/sb/strategies/${id}/duplicate`,{revision_id,...(guard||{})}) as Promise<Strategy>,
  calendar:()=>api('/api/sb/calendar') as Promise<{version:string|null;years:number[];holidays:{date:string;description:string}[];note:string|null}>,
@@ -79,6 +81,7 @@ export type Deployment={id:string;strategy_id:string;strategy_name?:string;statu
  realised:number;unrealised:number|null;fees:number;net:number|null;marked_at:string|null;mark_basis:string;revision:{id:string;n:number;name:string}|null;live:{enabled:boolean;reason:string}};
 export type Status={live:boolean;source:string;reason:string|null;market_open:boolean;now_ist:string;live_orders:{enabled:boolean;reason:string};paper_capital:{capital:number;blocked:number;available:number}|null};
 export const exec={
+ autotradeRelease:(rid:string)=>api(`/api/sb/autotrade/routes/${rid}/release`,{confirm:true}) as Promise<AutotradeRoute>,
  status:()=>api('/api/sb/status') as Promise<Status>,
  preview:(id:string,o:{product?:string;price_policy?:string;limits?:Record<string,number>;expected_version?:number;input_hash?:string})=>api(`/api/sb/strategies/${id}/preview`,o) as Promise<Preview>,
  deploy:(id:string,p:Preview,key:string,ack=false)=>api(`/api/sb/strategies/${id}/deployments`,{preview_id:p.id,preview_hash:p.hash,idempotency_key:key,confirm:true,ack_unlimited:ack}) as Promise<Deployment>,
@@ -96,7 +99,7 @@ export const exec={
  close:(id:string,p:Preview,key:string)=>api(`/api/sb/deployments/${id}/close`,{preview_id:p.id,preview_hash:p.hash,idempotency_key:key,confirm:true}) as Promise<Deployment>,
 };
 
-export type AlertRule={id:string;strategy_id:string;strategy_name?:string;deployment_id:string|null;type:string;params:any;session:string;cooldown:number;channels:string[];state:string;version:number;
+export type AlertRule={suppressed?:string|null;id:string;strategy_id:string;strategy_name?:string;deployment_id:string|null;type:string;params:any;session:string;cooldown:number;channels:string[];state:string;version:number;
  last_eval_at:string|null;last_value:number|null;last_triggered_at:number|null;label:string;description:string;scope:'strategy'|'deployment'};
 export type AlertEvent={id:string;rule_id:string;strategy_id:string;strategy_name?:string;deployment_id:string|null;kind:string;value:number|null;message:string;occurred_at:string;created_at:number;acked_at:number|null};
 export const alerts={
@@ -104,17 +107,17 @@ export const alerts={
  unacked:()=>api('/api/sb/alerts/unacked') as Promise<{unacked:number;latest:AlertEvent[]}>,
  forStrategy:(id:string)=>api(`/api/sb/strategies/${id}/alerts`) as Promise<{rules:AlertRule[];events:AlertEvent[]}>,
  create:(id:string,body:{type:string;params:any;deployment_id?:string|null;channels?:string[]})=>api(`/api/sb/strategies/${id}/alerts`,body) as Promise<AlertRule&{now:any}>,
- update:(rid:string,body:{version:number;action?:string;params?:any})=>api(`/api/sb/alerts/${rid}`,body) as Promise<AlertRule>,
+ update:(rid:string,body:{version:number;action?:string;params?:any;cooldown?:number;session?:string;channels?:string[]})=>api(`/api/sb/alerts/${rid}`,body) as Promise<AlertRule>,
  remove:(rid:string)=>api(`/api/sb/alerts/${rid}/delete`,{}) as Promise<{ok:boolean}>,
  check:(rid:string)=>api(`/api/sb/alerts/${rid}/check`,{}) as Promise<any>,
  ack:(eid?:string)=>api('/api/sb/alert-events/ack',eid?{event_id:eid}:{}) as Promise<{acknowledged:number}>,
 };
 
 export type LabStats={n:number;expectancy?:number;ci95?:[number,number];per_100_capital?:number|null;total?:number;max_drawdown?:number;worst?:number;best?:number;win_rate?:number;avg_win?:number|null;avg_loss?:number|null;avg_hold_days?:number};
-export type LabRun={evidence?:{status:string;p:number|null;tests:number;n_oos:number;low:number|null;runs_of_rule:number;decides:boolean};id:string;strategy_id:string|null;kind:string;spec:any;status:'running'|'completed'|'failed';progress:number;error:string|null;created_at:number;finished_at:number|null;
- result:null|{kind:string;model?:string;badge:{status:string;label:string};stats:{all:LabStats;discovery:LabStats;oos:LabStats};adjustment?:any;control:{reps:number;mean_expectancy:number|null;actual_percentile:number|null;oos_mean_expectancy?:number|null;oos_actual_percentile?:number|null};
+export type LabRun={evidence?:{status:string;p:number|null;tests:number;n_oos:number;low:number|null;runs_of_rule:number;decides:boolean};id:string;strategy_id:string|null;kind:string;spec:any;status:'queued'|'running'|'completed'|'failed'|'cancelled';queue_ahead?:number|null;progress:number;error:string|null;created_at:number;finished_at:number|null;
+ result:null|{kind:string;model?:string;badge:{status:string;label:string};stats:{all:LabStats;discovery:LabStats;oos:LabStats};adjustment?:any;manifest?:any;control:{reps:number;mean_expectancy:number|null;actual_percentile:number|null;oos_mean_expectancy?:number|null;oos_actual_percentile?:number|null};
   equity?:{day:string;equity:number;split:string}[];trades?:any[];skipped?:Record<string,number>;lot_size?:number;provenance?:any}};
-export type Replay={kind:string;entry_at?:string;points:{t:string;pnl:number}[];skipped_bars:number;last?:number;best?:number;worst?:number;coverage:Record<string,number>;note?:string;source:string;legs:{symbol:string;label:string}[];interval:string;problems:string[]};
+export type Replay={status?:string;reason?:string;coverage_detail?:{legs:{symbol:string;label:string;bars:number;first:string|null;last:string|null}[];common_bars:number;share:number;minimum:number};request?:{requested:any;effective:any;changed:string[]};kind:string;entry_at?:string;points:{t:string;pnl:number}[];skipped_bars:number;last?:number;best?:number;worst?:number;coverage:Record<string,number>;note?:string;source:string;legs:{symbol:string;label:string}[];interval:string;problems:string[]};
 export const lab={
  universe:()=>api('/api/sb/lab/universe') as Promise<{underlyings:string[];lot_note:string}>,
  start:(spec:any)=>api('/api/sb/lab/backtests',spec) as Promise<LabRun>,
@@ -122,5 +125,6 @@ export const lab={
  batch:(id:string)=>api(`/api/sb/lab/batches/${id}`) as Promise<any>,
  runs:(strategyId?:string)=>api(`/api/sb/lab/runs${strategyId?`?strategy_id=${strategyId}`:''}`) as Promise<{runs:LabRun[]}>,
  run:(id:string)=>api(`/api/sb/lab/runs/${id}`) as Promise<LabRun>,
+ cancel:(id:string)=>api(`/api/sb/lab/runs/${id}/cancel`,{}) as Promise<LabRun>,
  replay:(strategyId:string,interval:string,days:number)=>api(`/api/sb/strategies/${strategyId}/replay`,{interval,days}) as Promise<Replay>,
 };

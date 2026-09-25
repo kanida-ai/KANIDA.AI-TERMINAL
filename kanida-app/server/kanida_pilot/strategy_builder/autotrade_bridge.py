@@ -26,7 +26,10 @@ create table if not exists autotrade_routes(
  unique(user_id, idem_key));
 create index if not exists ix_atr_user on autotrade_routes(user_id, strategy_id, created_at);
 '''
-TERMINAL={'completed','dry_run_complete','blocked','failed','cancelled','attention_required','refused'}
+TERMINAL={'completed','dry_run_complete','blocked','failed','cancelled','attention_required','refused','released_by_user'}
+# GTM audit P15: a transport failure AFTER the request left says nothing about whether autotrade accepted it. Those
+# errors put the hand-off in 'unknown'; it is reconciled by looking up its idempotency key - never by re-sending.
+UNKNOWN_CODES={'AUTOTRADE_NO_RESPONSE'}   # 5xx from the engine also counts: it answered after receiving it
 
 
 class BridgeError(Exception):
@@ -51,8 +54,10 @@ class Bridge:
   c=self._client or httpx
   try:
    r=c.request(method,f'{self.url}/api/autotrade/intents{path}',headers={'X-Operator-Token':self._token},timeout=TIMEOUT,**kw)
-  except Exception as e:  # noqa: BLE001 - an unreachable engine is a stated state
-   raise BridgeError(503,'AUTOTRADE_UNREACHABLE',f'AutoTrade did not answer ({type(e).__name__}).')
+  except (ConnectionError,httpx.ConnectError,httpx.ConnectTimeout) as e:   # never connected: nothing was sent
+   raise BridgeError(503,'AUTOTRADE_UNREACHABLE',f'AutoTrade could not be reached ({type(e).__name__}); nothing was sent.')
+  except Exception as e:  # noqa: BLE001 - connected, but no answer: it may have been accepted (GTM audit P15)
+   raise BridgeError(504,'AUTOTRADE_NO_RESPONSE',f'AutoTrade did not answer ({type(e).__name__}).')
   try:data=r.json()
   except ValueError:data={}
   if r.status_code>=400:
@@ -74,6 +79,10 @@ class Bridge:
    'Dry run only until every gate below passes. Live needs the operator to arm this account.'}
 
  def submit(self,basket:Dict[str,Any])->Dict[str,Any]:return self._call('POST','',json=basket)
+ def find(self,idempotency_key:str)->Optional[Dict[str,Any]]:
+  """The intent autotrade holds for this key, or None if it has none. Read-only: never re-sends anything."""
+  d=self._call('GET','',params={'source':SOURCE,'limit':200})
+  return next((i for i in (d.get('intents') or []) if i.get('idempotency_key')==idempotency_key),None)
  def get(self,iid:str)->Dict[str,Any]:return self._call('GET',f'/{iid}')
  def cancel(self,iid:str)->Dict[str,Any]:return self._call('POST',f'/{iid}/cancel',json={})
 
@@ -82,7 +91,11 @@ class AutotradeRoutes:
  """Records every hand-off to autotrade (one per idempotency key) and mirrors autotrade's state back."""
  def __init__(self,store,bridge:Bridge):
   self.store=store;self.bridge=bridge;self.c=store.c;self.lock=store.lock
-  with self.lock:self.c.executescript(SCHEMA);self.c.commit()
+  with self.lock:
+   self.c.executescript(SCHEMA)
+   # a hand-off left 'sending' by a crash or restart has an unknown outcome - it is reconciled, never left blocking
+   self.c.execute("update autotrade_routes set state='unknown',reason='Interrupted before an answer arrived (restart). Reconciling by its key; nothing will be re-sent.',updated_at=? where state='sending'",(time.time(),))
+   self.c.commit()
 
  def basket(self,user_id:str,preview:Dict[str,Any],body:Dict[str,Any],mode:str,idem:str)->Dict[str,Any]:
   orders=json.loads(preview['orders'])
@@ -102,6 +115,7 @@ class AutotradeRoutes:
    if prior:
     if prior['preview_id']!=preview_id or prior['mode']!=mode:raise ExecError(409,'IDEMPOTENCY_CONFLICT','This request key was already used for a different hand-off.')
     return self.get(user_id,prior['id'])
+  with self.lock:
    p=self.c.execute('select * from previews where id=? and user_id=?',(preview_id,user_id)).fetchone()
   if not p or p['strategy_id']!=strategy['id']:raise ExecError(404,'PREVIEW_NOT_FOUND','There is no such order preview.')
   if p['kind']!='open':raise ExecError(409,'NOT_SUPPORTED','Only opening orders can be handed to AutoTrade in this slice.')
@@ -117,15 +131,34 @@ class AutotradeRoutes:
   rid=uuid.uuid4().hex[:16];t=time.time()
   basket=self.basket(user_id,dict(p),json.loads(p['body']),mode,idem)
   with self.lock:
+   # the "nothing unresolved" check and the insert are one step under the lock (quant audit F4): two concurrent
+   # hand-offs of the same strategy can never both pass
+   pending=self.c.execute("select id from autotrade_routes where user_id=? and strategy_id=? and state in ('sending','unknown')",(user_id,strategy['id'])).fetchone();still=None
+   if pending:
+    try:self.get(user_id,pending['id'])                                  # reconcile it now (it may resolve)
+    except Exception:pass  # noqa: BLE001
+    still=self.c.execute("select id from autotrade_routes where id=? and state in ('sending','unknown')",(pending['id'],)).fetchone()
+   if pending and still:
+    raise ExecError(409,'HANDOFF_UNRESOLVED','An earlier hand-off of this strategy has an unknown outcome. It is being reconciled with AutoTrade - no new orders until it resolves.')
    self.c.execute('insert into autotrade_routes values(?,?,?,?,?,?,?,?,?,?,?,?)',(rid,user_id,strategy['id'],preview_id,idem,mode,None,'sending',None,None,t,t))
    self.store._log(user_id,strategy['id'],'autotrade_route',f"Order plan handed to AutoTrade ({'LIVE request' if mode=='live' else 'dry run'})")
    self.c.commit()
   try:
    res=self.bridge.submit(basket)
-  except BridgeError as e:
-   self._set(rid,state='refused',reason=f'{e.code}: {e.message}')
+   if not isinstance(res,dict):raise ValueError('AutoTrade answered with an unexpected body')
+  except (ValueError,TypeError,AttributeError) as e:    # it answered, but not in a form we can trust: outcome unknown
+   self._set(rid,state='unknown',reason=f'AutoTrade answered unexpectedly ({type(e).__name__}). Reconciling by its key; nothing will be re-sent.')
    return self.get(user_id,rid)
-  it=res.get('intent') or {}
+  except BridgeError as e:
+   if e.code in UNKNOWN_CODES or (e.status>=500 and e.code not in ('AUTOTRADE_UNREACHABLE','AUTOTRADE_NOT_CONFIGURED')):
+    self._set(rid,state='unknown',reason=f'{e.code}: {e.message} The outcome is unknown - reconciling by its key; nothing will be re-sent.')
+   else:
+    self._set(rid,state='refused',reason=f'{e.code}: {e.message}')
+   return self.get(user_id,rid)
+  it=res.get('intent') if isinstance(res.get('intent'),dict) else {}
+  if not it.get('id'):
+   self._set(rid,state='unknown',reason='AutoTrade answered without an intent id. Reconciling by its key; nothing will be re-sent.')
+   return self.get(user_id,rid)
   self._set(rid,intent_id=it.get('id'),state=it.get('state') or 'accepted',reason=it.get('reason'),intent=json.dumps(it))
   return self.get(user_id,rid)
 
@@ -141,6 +174,18 @@ class AutotradeRoutes:
   with self.lock:r=self.c.execute('select * from autotrade_routes where id=? and user_id=?',(rid,user_id)).fetchone()
   if not r:return None
   d=self._row(r)
+  if d['state']=='sending' and time.time()-d['created_at']>TIMEOUT*3:     # the process died mid-call: outcome unknown
+   self._set(rid,state='unknown',reason='The hand-off was interrupted before an answer arrived. Reconciling by its key; nothing will be re-sent.');d['state']='unknown'
+  if refresh and d['state']=='unknown':
+   try:
+    # found by its key = adopt it. NOT found is never taken as "not received": the engine list is bounded, so absence
+    # proves nothing (quant audit F4). It stays unknown until found, or until the user explicitly releases it.
+    it=self.bridge.find(f"{user_id}:{d['idem_key']}"[:128])
+    if it:self._set(rid,intent_id=it.get('id'),state=it.get('state') or 'accepted',reason=it.get('reason'),intent=json.dumps(it))
+    with self.lock:d=self._row(self.c.execute('select * from autotrade_routes where id=?',(rid,)).fetchone())
+   except BridgeError as e:
+    d['refresh_error']=e.message
+   return d
   if refresh and d['intent_id'] and d['state'] not in TERMINAL:
    try:
     it=self.bridge.get(d['intent_id']).get('intent') or {}
@@ -149,6 +194,20 @@ class AutotradeRoutes:
    except BridgeError as e:
     d['refresh_error']=e.message
   return d
+
+ def release(self,user_id:str,rid:str,confirm:bool)->Optional[Dict[str,Any]]:
+  """The user states they checked AutoTrade and this unknown hand-off did not create orders. Recorded as their
+  decision (never inferred by this app); it lifts the block on new hand-offs of the strategy."""
+  from .execution import ExecError
+  d=self.get(user_id,rid,refresh=True)
+  if not d:return None
+  if d['state']!='unknown':raise ExecError(409,'NOT_UNKNOWN','Only a hand-off with an unknown outcome can be released.')
+  if confirm is not True:raise ExecError(400,'CONFIRM_REQUIRED','Confirm that you checked AutoTrade and no orders exist for this hand-off.')
+  self._set(rid,state='released_by_user',reason='Released by the user after checking AutoTrade; this app never confirmed the outcome itself.')
+  with self.lock:
+   self.store._log(user_id,d['strategy_id'],'autotrade_release','Unknown AutoTrade hand-off released by the user after checking AutoTrade')
+   self.c.commit()
+  return self.get(user_id,rid,refresh=False)
 
  def list(self,user_id:str,strategy_id:Optional[str]=None)->list:
   q,p='select id from autotrade_routes where user_id=?',[user_id]

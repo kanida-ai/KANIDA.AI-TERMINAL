@@ -11,6 +11,7 @@ import {router,useLocalSearchParams} from 'expo-router';
 import {Badge,Button,C,Chip,Loading,T,s} from '../ui';
 import {lab,sb,type LabRun,type LabStats,type Replay,type Template} from './api';
 import {inr,istEpoch,num,signed} from './format';
+import {Scrollable} from './States';
 
 const WEEKDAYS:[string,string][]=[['0','Mon'],['1','Tue'],['2','Wed'],['3','Thu'],['4','Fri'],['daily','Every day']];
 const msg=(e:any)=>e?.message||'KANIDA could not complete that.';
@@ -48,7 +49,8 @@ function Backtest({strategyId,preset}:{strategyId:string;preset:{template:string
  const mapping=fromDraft?[`From your draft: ${preset.underlying||'NIFTY'} ${preset.structure||preset.template.replace(/_/g,' ')}${preset.param!=null?` (${t?.param?.label||'width'} ${preset.param})`:''}${preset.lots?`, ${preset.lots} lot${preset.lots>1?'s':''}`:''}.`,
   `This test: ${und} ${t?.name||tpl}${param!=null?` (${t?.param?.label||'width'} ${param})`:''}, one set per trade at the current lot size - results scale linearly with lots.`,
   ...(!paramSame?[`The ${t?.param?.label||'width'} differs from your draft.`]:[]),...(preset.underlying&&!universe.includes(preset.underlying)?[`${preset.underlying} is not in the Lab's universe, so it is tested on ${und}.`]:!undOk?['The underlying differs from your draft.']:[])]:[];
- useEffect(()=>{if(!run||run.status!=='running')return;const id=setInterval(()=>lab.run(run.id).then(r=>{setRun(r);if(r.status!=='running')lab.runs(strategyId||undefined).then(x=>setHistory(x.runs));}).catch(e=>setError(msg(e))),700);return()=>clearInterval(id);},[run,strategyId]);
+ const working=run?.status==='running'||run?.status==='queued';
+ useEffect(()=>{if(!run||!working)return;const id=setInterval(()=>lab.run(run.id).then(r=>{setRun(r);if(r.status!=='running'&&r.status!=='queued')lab.runs(strategyId||undefined).then(x=>setHistory(x.runs));}).catch(e=>setError(msg(e))),700);return()=>clearInterval(id);},[run,strategyId,working]);
  async function start(){setError('');
   try{const body:any={template:tpl,param,weekday,underlying:und,strategy_id:strategyId||undefined};
    for(const [k,v] of Object.entries(f))if(v.trim()!=='')body[k]=['from','to','split'].includes(k)?v:Number(v);
@@ -83,10 +85,13 @@ function Backtest({strategyId,preset}:{strategyId:string;preset:{template:string
    </View>
    <View style={[s.row,{gap:12,flexWrap:'wrap',alignItems:'flex-end'}]}>
     {field('from','First decision date',120)}{field('to','Last decision date',120,'latest')}{field('split','Out-of-sample from',120,'midpoint')}{field('slippage_pct','Slippage % (min 0.5)')}
-    <Button label="Run backtest" icon="play" onPress={start} loading={run?.status==='running'}/>
+    <Button label="Run backtest" icon="play" onPress={start} loading={working}/>
+    {working&&<Button label="Cancel run" icon="x" kind="outline" onPress={()=>lab.cancel(run!.id).then(setRun).catch(e=>setError(msg(e)))}/>}
    </View>
    <T style={{fontSize:11,color:C.muted}}>The dates bound the DECISION days. A trade decided on the last decision date is held to its own exit, which can fall after that date (up to its expiry).</T>
    {!!error&&<T style={{color:C.red,fontSize:12}}>{error}</T>}
+   {run?.status==='queued'&&<T style={{fontSize:12,color:C.amber}}>{`Queued${run.queue_ahead?` behind ${run.queue_ahead} other run${run.queue_ahead>1?'s':''}`:''} - the Lab runs two at a time so live quotes and analysis stay fast.`}</T>}
+   {run?.status==='cancelled'&&<T style={{fontSize:12,color:C.muted}}>Cancelled. Nothing from this run was saved.</T>}
    {run?.status==='running'&&<View style={{gap:4}}><View style={{height:6,backgroundColor:C.line,borderRadius:3}}><View style={{height:6,width:`${Math.round(run.progress*100)}%`,backgroundColor:C.green,borderRadius:3}}/></View>
     <T style={{fontSize:11,color:C.muted}}>{`Running · ${Math.round(run.progress*100)}% (simulation, bootstrap, random-entry control)`}</T></View>}
    {run?.status==='failed'&&<T style={{color:C.red,fontSize:12}}>{`Run failed: ${run.error}`}</T>}
@@ -108,6 +113,7 @@ function statRow(label:string,st:LabStats){
   signed(st.total),signed(st.max_drawdown),signed(st.worst),st.win_rate!=null?`${st.win_rate}%`:'—',st.avg_hold_days!=null?`${st.avg_hold_days}d`:'—'];
 }
 function Result({run}:{run:LabRun}){
+ const narrow=useWindowDimensions().width<700;
  const r=run.result!;const pv=r.provenance||{};
  const tone=r.badge.status==='model_positive'?'green':r.badge.status==='insufficient'?'amber':'neutral';
  const csv=()=>{if(Platform.OS!=='web'||!r.trades)return;const head='decision,entry,exit,expiry,reason,spot_entry,vix,legs,gross,fees,net,capital_at_risk\n';
@@ -120,9 +126,9 @@ function Result({run}:{run:LabRun}){
   <View style={{backgroundColor:C.paper,borderWidth:1,borderColor:C.line,borderRadius:14,padding:16,gap:12}}>
    <View style={[s.row,{gap:10,flexWrap:'wrap'}]}><Badge label={r.badge.label} tone={tone as any}/>
     <T style={{fontSize:12,color:C.muted}}>{`${run.spec.template}${run.spec.param!=null?` · ${run.spec.param}`:''} · ${run.spec.from}→${run.spec.to} · out-of-sample from ${run.spec.split} · lot ${r.lot_size}`}</T></View>
-   <View>{[['','Trades','Expectancy / trade','95% CI','Per ₹100 at risk','Total','Max drawdown','Worst','Win rate','Avg hold'],statRow('Discovery',r.stats.discovery),statRow('Out-of-sample',r.stats.oos),statRow('All',r.stats.all)]
+   <Scrollable narrow={narrow} min={900}><View>{[['','Trades','Expectancy / trade','95% CI','Per ₹100 at risk','Total','Max drawdown','Worst','Win rate','Avg hold'],statRow('Discovery',r.stats.discovery),statRow('Out-of-sample',r.stats.oos),statRow('All',r.stats.all)]
     .map((row,i)=><View key={i} style={[s.row,{gap:6,borderTopWidth:i?1:0,borderColor:C.line,paddingVertical:6}]}>{row.map((c,j)=><T key={j} style={{flex:j===3?2.2:j?1:1.3,fontSize:i?12:10,color:i?(j===0?C.muted:C.ink):C.muted,
-     fontFamily:i===2&&j<4?'InterSemi':'Inter',textAlign:j?'right':'left',fontVariant:['tabular-nums'] as any}}>{c}</T>)}</View>)}</View>
+     fontFamily:i===2&&j<4?'InterSemi':'Inter',textAlign:j?'right':'left',fontVariant:['tabular-nums'] as any}}>{c}</T>)}</View>)}</View></Scrollable>
    <T style={{fontSize:11,color:C.muted}}>Expectancy after charges and slippage decides; win rate is context only. The badge reads only the out-of-sample 95% lower bound and needs at least 30 out-of-sample trades.</T>
    <T style={{fontSize:12}}>{`Random-entry control (${r.control.reps} runs of the same rule on random days): mean expectancy ${signed(r.control.mean_expectancy)} per trade; this rule beat ${r.control.actual_percentile??'—'}% of them.${r.control.oos_mean_expectancy!=null?` Out of sample only: control ${signed(r.control.oos_mean_expectancy)}; this rule beat ${r.control.oos_actual_percentile??'—'}%.`:''}`}</T>
    {r.adjustment&&<AdjustmentBlock a={r.adjustment}/>}
@@ -141,6 +147,7 @@ function Result({run}:{run:LabRun}){
    {pv.volatility&&<T style={{fontSize:11,color:C.muted}}>{`Volatility: ${pv.volatility.series}`}</T>}
    {pv.expiry_calendar&&<T style={{fontSize:11,color:C.muted}}>{pv.expiry_calendar}</T>}
    {(pv.assumptions||[]).map((a:string,i:number)=><T key={i} style={{fontSize:11,color:C.muted}}>{`• ${a}`}</T>)}
+   {r.manifest&&<T style={{fontSize:11,color:C.muted}} selectable>{`Reproducible from: request ${String(r.manifest.request_hash).slice(0,12)} · ${r.manifest.model} · fees ${r.manifest.fees} · data ${r.manifest.underlying_hash} · code ${r.manifest.code_version||"?"} · lot ${r.manifest.lot_size} (${r.manifest.lot_basis})${r.manifest.underlying_days?` · underlying ${r.manifest.underlying_days[0]} → ${r.manifest.underlying_days[1]} (${r.manifest.underlying_days[2]} days)`:''}${r.manifest.volatility_days?` · volatility ${r.manifest.volatility_days[2]} days`:''} · computed ${r.manifest.computed_at}`}</T>}
   </View>
  </View>;
 }
@@ -175,7 +182,14 @@ function ReplayView({strategyId}:{strategyId:string}){
   {!!error&&<T style={{color:C.red,fontSize:12}}>{error}</T>}
   {!r?<Loading/>:<>
    <T style={{fontSize:12,color:C.muted}}>{`${r.source==='kite_historical'?'Zerodha Kite historical candles':'Captured 15-minute candles (db/derivatives.db)'} · ${r.legs.map(l=>l.label).join(', ')}`}</T>
-   {!pts.length?<T style={{color:C.amber}}>No bar where every leg traded in this window. Nothing is filled in.</T>:<>
+   {!!r.request?.changed?.length&&<View accessibilityRole="alert" style={{backgroundColor:C.amberBg,borderRadius:10,padding:10,gap:2}}>
+    <T style={{fontSize:12,color:C.amber,fontFamily:'InterSemi'}}>Not exactly what you asked for</T>
+    {r.request.changed.map((c,i)=><T key={i} style={{fontSize:12,color:C.amber}}>{c}</T>)}
+    <T style={{fontSize:11,color:C.muted}}>{`Asked: ${r.request.requested.interval}, ${r.request.requested.from} → ${r.request.requested.to}. Got: ${r.request.effective.interval}${r.request.effective.from?`, ${r.request.effective.from} → ${r.request.effective.to}`:''}.`}</T></View>}
+   {r.coverage_detail&&<View style={{gap:2}}><T style={{fontSize:11,color:C.muted}}>{`Coverage: ${r.coverage_detail.common_bars} bars with a price for every leg (${Math.round(r.coverage_detail.share*100)}% of the best-covered leg; minimum ${Math.round(r.coverage_detail.minimum*100)}%)`}</T>
+    {r.coverage_detail.legs.map(l=><T key={l.symbol} style={{fontSize:11,color:l.bars?C.muted:C.red}}>{`${l.label}: ${l.bars} bars${l.first?` (${l.first.slice(0,16)} → ${(l.last||'').slice(0,16)})`:''}`}</T>)}</View>}
+   {r.status&&r.status!=='ok'?<T accessibilityRole="alert" style={{color:C.amber}}>{r.reason}</T>:
+   !pts.length?<T style={{color:C.amber}}>No bar where every leg traded in this window. Nothing is filled in.</T>:<>
     <View onLayout={e=>setW(e.nativeEvent.layout.width)}><Svg width={w} height={H}><Line x1={40} x2={w-10} y1={Y(0)} y2={Y(0)} stroke={C.muted}/>
      <Path d={pts.map((p,i)=>`${i?'L':'M'}${X(i).toFixed(1)},${Y(p.pnl).toFixed(1)}`).join('')} stroke={C.green} strokeWidth={1.8} fill="none"/></Svg></View>
     <View style={[s.row,{gap:18,flexWrap:'wrap'}]}>
@@ -207,6 +221,7 @@ function AdjustmentBlock({a}:{a:any}){
 const WD=['Mon','Tue','Wed','Thu','Fri'];
 const ST:Record<string,[string,any]>={tested_significant:['Tested ✓','green'],tested_not_significant:['Not significant','neutral'],insufficient:['Too few trades','amber']};
 function Experiments(){
+ const narrow=useWindowDimensions().width<700;
  const [list,setList]=useState<any[]|null>(null);const [b,setB]=useState<any>(null);const [error,setError]=useState('');const [show,setShow]=useState(60);
  useEffect(()=>{lab.batches().then(r=>{setList(r.batches);if(r.batches[0])lab.batch(r.batches[0].id).then(setB).catch(e=>setError(msg(e)));}).catch(e=>setError(msg(e)));},[]);
  if(error)return <T style={{color:C.red}}>{error}</T>;
@@ -220,8 +235,8 @@ function Experiments(){
    <T style={{fontSize:12}}>{`Pre-registered ${istEpoch(b.created_at)} · plan hash ${b.plan_hash.slice(0,12)} · ${b.planned} rules planned, ${b.done} completed, ${b.failed} failed · ${b.grid.underlying} ${b.grid.from}→${b.grid.to||'latest'}, out of sample from ${b.grid.split}, slippage ${b.grid.slippage_pct}%`}</T>
    <View style={[s.row,{gap:8,flexWrap:'wrap'}]}>{Object.entries(b.counts).map(([k,v])=><Badge key={k} label={`${ST[k][0]}: ${v}`} tone={ST[k][1]}/>)}</View>
    <T style={{fontSize:11,color:C.muted}}>{`Every rule of the batch is listed. Each is one hypothesis in the ${b.grid.underlying} family (${b.family?.tests??0} rules tested in your Lab), corrected together with Benjamini-Hochberg at FDR 10%, with Johnson's skew-adjusted test and a tail stress for rarely-seen maximum losses. Model-priced (India VIX, no skew).`}</T>
-   <View>{[['Status','Structure','Decide','DTE','OOS n','Mean ₹/trade','p','95% low','Why'],...b.rules.slice(0,show).map((r:any)=>[ST[r.status][0],`${r.template.replace(/_/g,' ')}${r.param!=null?` ${r.param}`:''}`,r.weekday==='daily'?'daily':WD[r.weekday],`${r.dte[0]}-${r.dte[1]}`,String(r.n_oos),r.mean_oos==null?'—':signed(r.mean_oos),r.p==null?'—':r.p.toFixed(4),r.low==null?'—':`${r.low>0?'+':''}${r.low.toFixed(2)}`,r.reason?String(r.reason).replace(/_/g,' '):''])]
-    .map((row:string[],i:number)=><View key={i} style={[s.row,{gap:6,borderTopWidth:i?1:0,borderColor:C.line,paddingVertical:4}]}>{row.map((c:string,j:number)=><T key={j} style={{flex:[1.1,1.8,.6,.6,.6,1,.7,.8,1.2][j],fontSize:i?11:10,color:i?(j===0&&c==='Tested ✓'?C.green:C.ink):C.muted,textAlign:j>=4&&j<=7?'right':'left',fontVariant:['tabular-nums'] as any}}>{c}</T>)}</View>)}</View>
+   <Scrollable narrow={narrow} min={860}><View>{[['Status','Structure','Decide','DTE','OOS n','Mean ₹/trade','p','95% low','Why'],...b.rules.slice(0,show).map((r:any)=>[ST[r.status][0],`${r.template.replace(/_/g,' ')}${r.param!=null?` ${r.param}`:''}`,r.weekday==='daily'?'daily':WD[r.weekday],`${r.dte[0]}-${r.dte[1]}`,String(r.n_oos),r.mean_oos==null?'—':signed(r.mean_oos),r.p==null?'—':r.p.toFixed(4),r.low==null?'—':`${r.low>0?'+':''}${r.low.toFixed(2)}`,r.reason?String(r.reason).replace(/_/g,' '):''])]
+    .map((row:string[],i:number)=><View key={i} style={[s.row,{gap:6,borderTopWidth:i?1:0,borderColor:C.line,paddingVertical:4}]}>{row.map((c:string,j:number)=><T key={j} style={{flex:[1.1,1.8,.6,.6,.6,1,.7,.8,1.2][j],fontSize:i?11:10,color:i?(j===0&&c==='Tested ✓'?C.green:C.ink):C.muted,textAlign:j>=4&&j<=7?'right':'left',fontVariant:['tabular-nums'] as any}}>{c}</T>)}</View>)}</View></Scrollable>
    {b.rules.length>show&&<Button label={`Show all ${b.rules.length}`} kind="outline" onPress={()=>setShow(10000)}/>}
    {!!b.quarantine&&<View accessibilityRole="alert" style={{backgroundColor:C.amberBg,borderRadius:10,padding:10,gap:4}}>
     <T style={{fontSize:12,color:C.amber,fontFamily:'InterSemi'}}>Not usable as evidence</T><T style={{fontSize:12,color:C.amber}}>{b.quarantine}</T>

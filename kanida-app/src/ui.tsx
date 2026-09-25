@@ -37,6 +37,11 @@ export function Loading(){return <View style={{padding:60,alignItems:'center',ga
 // Escape already closes Sheet on web: RN-web 0.21 Modal listens for keyup Escape on the top-most modal and calls onRequestClose (Android back uses the same prop).
 export function Sheet({visible,onClose,title,subtitle,children,footer,wide=false}:any){
  const {width,height}=useWindowDimensions();const inset=useSafeAreaInsets();
+ // focus returns to the control that opened the panel when it closes (keyboard and screen-reader users keep their place)
+ const opener=React.useRef<any>(null);
+ React.useEffect(()=>{if(Platform.OS!=='web'||typeof document==='undefined')return;
+  if(visible){opener.current=document.activeElement;return;}
+  const el=opener.current;opener.current=null;if(el&&typeof el.focus==='function'&&document.contains(el))setTimeout(()=>{try{el.focus();}catch{}},0);},[visible]);
  const narrow=width<BREAKPOINTS.sheet;const name=typeof title==='string'?title:'Panel';
  return <Modal visible={visible} onRequestClose={onClose} transparent animationType="fade">
   <View style={{flex:1,backgroundColor:'#00070DD9',alignItems:narrow?'stretch':'flex-end',justifyContent:narrow?'flex-end':'center'}}>

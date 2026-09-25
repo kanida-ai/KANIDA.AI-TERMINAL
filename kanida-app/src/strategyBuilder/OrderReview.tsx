@@ -98,13 +98,13 @@ export function OrderReview({visible,onClose,strategyId,deployment,adjusting,onP
   </>}
  </Sheet>;
 }
-const FINAL=['completed','dry_run_complete','blocked','failed','cancelled','attention_required','refused'];
-const ROUTE_TONE:Record<string,any>={completed:'green',dry_run_complete:'neutral',accepted:'amber',dispatching:'amber',sending:'amber',blocked:'red',refused:'red',failed:'red',attention_required:'red',cancelled:'neutral'};
+const FINAL=['completed','dry_run_complete','blocked','failed','cancelled','attention_required','refused','not_received'];
+const ROUTE_TONE:Record<string,any>={completed:'green',dry_run_complete:'neutral',accepted:'amber',dispatching:'amber',sending:'amber',blocked:'red',refused:'red',failed:'red',attention_required:'red',cancelled:'neutral',unknown:'red',not_received:'neutral'};
 
 /** Slice 7: hand this exact plan to engine AutoTrade. Dry run by default; live only when AutoTrade reports every gate
  *  passing (including an operator arm this app cannot set) AND the user confirms real orders. AutoTrade decides. */
 function AutotradePanel({p,strategyId,expired}:{p:Preview;strategyId:string;expired:boolean}){
- const cap=p.live;const [route,setRoute]=useState<AutotradeRoute|null>(null);const [busy,setBusy]=useState('');const [err,setErr]=useState('');const [sure,setSure]=useState(false);
+ const cap=p.live;const [route,setRoute]=useState<AutotradeRoute|null>(null);const [rel,setRel]=useState(false);const [busy,setBusy]=useState('');const [err,setErr]=useState('');const [sure,setSure]=useState(false);
  const idem=useRef(key());
  useEffect(()=>{setRoute(null);setSure(false);idem.current=key();},[p.id]);
  useEffect(()=>{if(!route||FINAL.includes(route.state))return;const t=setInterval(async()=>{try{setRoute(await exec.autotradeGet(route.id));}catch{}},2000);return()=>clearInterval(t);},[route]);
@@ -127,7 +127,11 @@ function AutotradePanel({p,strategyId,expired}:{p:Preview;strategyId:string;expi
   {!!err&&<T style={{fontSize:12,color:C.red}}>{err}</T>}
   {route&&<View style={{backgroundColor:C.paper,borderRadius:10,padding:10,gap:4}}>
    <View style={[s.row,{gap:8,flexWrap:'wrap'}]}><Badge label={`${route.mode==='live'?'LIVE':'DRY RUN'} · ${route.state.replace(/_/g,' ').toUpperCase()}`} tone={ROUTE_TONE[route.state]||'amber'}/>
-    {!FINAL.includes(route.state)&&<T style={{fontSize:11,color:C.muted}}>Following AutoTrade…</T>}</View>
+    {!FINAL.includes(route.state)&&<T style={{fontSize:11,color:C.muted}}>{route.state==='unknown'?'Outcome unknown - reconciling with AutoTrade by its key. Nothing will be re-sent.':'Following AutoTrade…'}</T>}</View>
+   {route.state==='unknown'&&<T accessibilityRole="alert" style={{fontSize:12,color:C.red}}>The request left this app but no answer came back, so it may or may not have been accepted. No new orders for this strategy until it resolves.</T>}
+   {route.state==='unknown'&&<Checkbox checked={rel} onChange={setRel} tone={C.red} label="I checked AutoTrade and this hand-off created no orders"
+    detail="Only release it after checking AutoTrade yourself. This app cannot confirm it; releasing lets a new hand-off of this strategy go out."/>}
+   {route.state==='unknown'&&<Button label="Release this hand-off" kind="outline" disabled={!rel} onPress={async()=>{try{setRoute(await exec.autotradeRelease(route.id));}catch(e:any){setErr(e.message);}}}/>}
    {!!route.reason&&<T style={{fontSize:11,color:C.muted}}>{route.reason}</T>}
    {route.intent?.legs.map((l,i)=><T key={i} style={{fontSize:11,color:l.state==='filled'||l.state==='dry_run'?C.muted:C.amber}}>
     {`g${l.group} · ${l.side} ${l.quantity} ${l.tradingsymbol} @ ${num(l.limit_price)} · ${l.state.replace(/_/g,' ')}${l.avg_price?` @ ${num(l.avg_price)}`:''}${l.error?` · ${l.error}`:''}`}</T>)}

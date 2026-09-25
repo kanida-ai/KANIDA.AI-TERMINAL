@@ -12,7 +12,10 @@ import {ApiError} from '../model';
 import {exec,sb,type Analysis,type Basis,type Body,type Chain,type Deployment,type Detail,type Expiry,type Kind,type Leg,type PaperRun,type Side,type Status,type Template} from './api';
 import {DeploymentCard,OrderReview} from './OrderReview';
 import {AdjustSheet} from './Adjust';
-import {AboutSheet,Sketch,SpreadsSheet,TemplateIntro} from './Learn';
+import {AboutSheet,SpreadsSheet} from './Learn';
+import {TemplateSheet} from './Templates';
+import {ActionsSheet,ExpirySheet,LegSheet,SnapshotSheet} from './BuilderParts';
+import {ErrorRetry,Scrollable} from './States';
 import {AlertsPanel,useAlertNotifications} from './Alerts';
 import {ChainDrawer} from './ChainDrawer';
 import {PayoffChart} from './PayoffChart';
@@ -24,20 +27,27 @@ const msg=(e:any)=>e?.message||'KANIDA could not complete that.';
 type SaveState='saved'|'dirty'|'saving'|'conflict'|'error';
 type Tab='pnl'|'greeks'|'table'|'snapshots'|'paper'|'alerts'|'activity';
 
-export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;openTemplate?:boolean;openAdjust?:boolean}){
+export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}:{id:string;openTemplate?:boolean;openAdjust?:boolean;openChain?:boolean}){
  const {width}=useWindowDimensions();const wide=width>=1100;const coarse=width<700;
  const [detail,setDetail]=useState<Detail|null>(null);const [error,setError]=useState('');
  const [body,setBody]=useState<Body|null>(null);const [version,setVersion]=useState(0);const [save,setSave]=useState<SaveState>('saved');
  const [expiries,setExpiries]=useState<Expiry[]>([]);const [underlyings,setUnderlyings]=useState<string[]>([]);
  const [chain,setChain]=useState<Chain|null>(null);
  const [analysis,setAnalysis]=useState<Analysis|null>(null);const [pending,setPending]=useState(false);
- const [chainOpen,setChainOpen]=useState(false);const [tplOpen,setTplOpen]=useState(openTemplate);const [paperOpen,setPaperOpen]=useState(false);
+ const [chainOpen,setChainOpen]=useState(openChain);const [tplOpen,setTplOpen]=useState(openTemplate);const [paperOpen,setPaperOpen]=useState(false);
  const [tab,setTab]=useState<Tab>('pnl');const [toast,setToast]=useState('');const [undo,setUndo]=useState<{leg:Leg;index:number}|null>(null);
  const [runs,setRuns]=useState<PaperRun[]>([]);const [name,setName]=useState('');
  const [st,setSt]=useState<Status|null>(null);const [tick,setTick]=useState(0);const [deps,setDeps]=useState<Deployment[]>([]);
  const [review,setReview]=useState<{open:boolean;closing?:Deployment|null;adjusting?:Deployment|null}>({open:false});
  const [adjustFor,setAdjustFor]=useState<{open:boolean;deployment?:Deployment|null}>({open:false});
  const [spreadsOpen,setSpreadsOpen]=useState(false);const [aboutOpen,setAboutOpen]=useState(false);
+ // slice 11: undo/redo, previewed replacements and transforms, sheets (GTM audit P05, P12, P17, P18, P21)
+ const undoStack=useRef<Body[]>([]);const redoStack=useRef<Body[]>([]);const [hist,setHist]=useState({u:0,r:0});
+ const [change,setChange]=useState<{title:string;lines:string[];apply:(b:Body)=>Body;blocked?:string;base?:string}|null>(null);
+ const setPendingChange=(c:{title:string;lines:string[];apply:(b:Body)=>Body;blocked?:string}|null)=>setChange(c?{...c,base:J(bodyRef.current)}:null);
+ const [legEdit,setLegEdit]=useState<Leg|null>(null);const [actionsOpen,setActionsOpen]=useState(false);const [expiryOpen,setExpiryOpen]=useState(false);
+ const [alertsOpen,setAlertsOpen]=useState(false);const [snapView,setSnapView]=useState<string|null>(null);
+ const [chainErr,setChainErr]=useState('');const [chainRetry,setChainRetry]=useState(0);
  const adjustDeep=useRef(openAdjust);
  const bell=useAlertNotifications();
  const seq=useRef(0);const saveTimer=useRef<any>(null);const anTimer=useRef<any>(null);const ctl=useRef<AbortController|null>(null);
@@ -56,7 +66,7 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
    // than the save that just landed, or any pending edit, keeps what is on screen
    const pendingEdit=!!bodyRef.current&&J(bodyRef.current)!==ackedJson.current;
    if(d.draft&&(pendingEdit||d.draft.version<versionRef.current)){}
-   else if(d.draft){const b=d.draft.body;bodyRef.current=b;ackedJson.current=J(b);checksumRef.current=d.draft.checksum||'';versionRef.current=d.draft.version;
+   else if(d.draft){const b=d.draft.body;clearHistory();bodyRef.current=b;ackedJson.current=J(b);checksumRef.current=d.draft.checksum||'';versionRef.current=d.draft.version;
     setBody(b);setVersion(d.draft.version);setSave('saved');
     // an edit that never reached the server (reload, lost network, closed tab) is recovered, never silently dropped
     const loc=readLocal(id);
@@ -85,8 +95,8 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
    if(!body.expiry&&first)edit(b=>({...b,expiry:first.expiry}));}).catch(e=>setError(msg(e)));
   return()=>{live=false};},[body?.underlying]);// eslint-disable-line react-hooks/exhaustive-deps
  useEffect(()=>{if(!body?.underlying||!body.expiry){setChain(null);return;}const c=new AbortController();
-  sb.chain(body.underlying,body.expiry,c.signal).then(setChain).catch(e=>{if(e?.name!=='AbortError')flash(msg(e));});
-  return()=>c.abort();},[body?.underlying,body?.expiry,st?.live?tick:0]);
+  sb.chain(body.underlying,body.expiry,c.signal).then(x=>{setChain(x);setChainErr('');}).catch(e=>{if(e?.name!=='AbortError')setChainErr(msg(e));});
+  return()=>c.abort();},[body?.underlying,body?.expiry,st?.live?tick:0,chainRetry]);
 
  // analysis: the request is numbered AT THE EDIT (not after the debounce), so a late answer for an older body can never
  // clear "updating" or land as the current result. A failed recalculation keeps the old numbers visibly stale.
@@ -109,10 +119,16 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
     setSave('error');return false;}};
   const p=saveQ.current.then(run,run);saveQ.current=p.catch(()=>false);return p;},[id]);
  const persistRef=useRef(persist);persistRef.current=persist;
- function edit(fn:(b:Body)=>Body){const prev=bodyRef.current;if(!prev)return;const next=fn(prev);if(next===prev)return;
+ function edit(fn:(b:Body)=>Body,history=true){const prev=bodyRef.current;if(!prev)return;const next=fn(prev);if(next===prev)return;
+  if(history){undoStack.current=[...undoStack.current.slice(-49),prev];redoStack.current=[];setHist({u:undoStack.current.length,r:0});}
   bodyRef.current=next;setBody(next);writeLocal(id,versionRef.current,next);
   if(saveRef.current==='conflict')return;           // keep editing locally; the conflict banner decides where it goes
   setSave('dirty');clearTimeout(saveTimer.current);saveTimer.current=setTimeout(()=>persist(next),SAVE_DELAY);}
+ function clearHistory(){undoStack.current=[];redoStack.current=[];setHist({u:0,r:0});}
+ function undoEdit(){const prev=undoStack.current.pop();if(!prev||!bodyRef.current)return;redoStack.current.push(bodyRef.current);
+  setHist({u:undoStack.current.length,r:redoStack.current.length});edit(()=>prev,false);}
+ function redoEdit(){const next=redoStack.current.pop();if(!next||!bodyRef.current)return;undoStack.current.push(bodyRef.current);
+  setHist({u:undoStack.current.length,r:redoStack.current.length});edit(()=>next,false);}
  /** Flush the pending edit and wait for the server to acknowledge it. False = not saved (the caller must not act). */
  async function flush():Promise<boolean>{blurActive();clearTimeout(saveTimer.current);const cur=bodyRef.current;if(!cur)return false;
   const ok=await persist(cur);return ok&&J(bodyRef.current)===ackedJson.current;}
@@ -144,21 +160,48 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
   return {...b,legs:b.legs.map((l,i)=>({...l,lots:base[i]*next}))};});}
  function clearAll(){if(typeof window!=='undefined'&&window.confirm&&!window.confirm('Remove every leg? A snapshot keeps anything you want to restore.'))return;
   edit(b=>({...b,template:null,param:null,legs:[]}));}
+ /** Why a whole-strategy transform does not fit this structure, or null (GTM audit P05: compatible structures only). */
+ function transformBlock(kind:'shift'|'width'|'wings',b:Body):string|null{
+  const act=b.legs;if(!act.length)return 'Add legs first.';
+  const shorts=act.filter(l=>l.side==='S'),longs=act.filter(l=>l.side==='B');
+  if(kind==='width'&&act.length<2)return 'Width needs at least two legs.';
+  if(kind==='wings'&&(!shorts.length||!longs.length))return 'Wings needs short legs with long hedges (a spread, condor or butterfly).';
+  return null;}
+ function propose(kind:'shift'|'width'|'wings',k:number,b:Body):{legs:Leg[]}|{error:string}{
+  const act=b.legs;const shorts=act.filter(l=>l.side==='S');const ref=(shorts.length?shorts:act).map(l=>l.strike);const centre=ref.reduce((a,x)=>a+x,0)/ref.length;
+  const legs:Leg[]=[];
+  for(const l of act){let steps=0;
+   if(kind==='shift')steps=k;
+   else if(kind==='width'){if(l.side==='S'||!shorts.length)steps=(l.strike>centre||(l.strike===centre&&l.type==='CE'))?k:-k;else steps=(l.strike>centre?k:-k);}
+   else if(kind==='wings'&&l.side==='B'&&shorts.length)steps=l.strike>centre?k:-k;
+   if(!steps){legs.push(l);continue;}
+   const i=strikes.indexOf(l.strike);const j=i+steps;
+   if(i<0||j<0||j>=strikes.length)return {error:`${strikeText(l.strike)} ${l.type} would move past the listed strikes - nothing was changed.`};
+   legs.push({...l,strike:strikes[j]});}
+  const keys=legs.map(l=>`${l.type}${l.strike}${l.side}`);
+  if(new Set(keys).size<keys.length)return {error:'Two legs would land on the same contract - nothing was changed.'};
+  if(kind==='width'&&shorts.length){const ss=legs.filter(l=>l.side==='S');const bs=legs.filter(l=>l.side==='B');
+   if(ss.some(x=>bs.some(y=>y.type===x.type&&y.strike===x.strike)))return {error:'The legs would cross - nothing was changed.'};}
+  return {legs};}
  function adjust(kind:'shift'|'width'|'wings',k:number){
-  edit(b=>{const act=b.legs;if(!act.length)return b;
-   const shorts=act.filter(l=>l.side==='S');const ref=(shorts.length?shorts:act).map(l=>l.strike);const centre=ref.reduce((a,x)=>a+x,0)/ref.length;
-   const legs=act.map(l=>{let steps=0;
-    if(kind==='shift')steps=k;
-    else if(kind==='width'){if(l.side==='S'||!shorts.length)steps=(l.strike>centre||(l.strike===centre&&l.type==='CE'))?k:-k;else steps=(l.strike>centre?k:-k);}
-    else if(kind==='wings'&&l.side==='B'&&shorts.length)steps=l.strike>centre?k:-k;
-    return steps?{...l,strike:moveStrike(l.strike,steps)}:l;});
-   return {...b,template:null,legs};});
+  const b=bodyRef.current;if(!b)return;
+  const block=transformBlock(kind,b);if(block){flash(block);return;}
+  const r=propose(kind,k,b);
+  if('error' in r){setPendingChange({title:`${{shift:'Shift',width:'Width',wings:'Wings'}[kind]} ${k>0?'+':'−'}1`,lines:[],apply:x=>x,blocked:r.error});return;}
+  const lines=b.legs.map((l,i)=>l.strike===r.legs[i].strike?null:`${l.side==='B'?'Buy':'Sell'} ${l.type}: ${strikeText(l.strike)} → ${strikeText(r.legs[i].strike)}`).filter(Boolean) as string[];
+  if(!lines.length){flash('Nothing to change for this structure.');return;}
+  setPendingChange({title:`${{shift:'Shift',width:'Width',wings:'Wings'}[kind]} ${k>0?'+':'−'}1`,lines,apply:x=>({...x,template:null,legs:r.legs})});
  }
  async function applyTemplate(t:Template,param:number|null){
   if(!body?.underlying||!body.expiry)return;
   try{const r=await sb.resolve(t.key,body.underlying,body.expiry,param);
    const legs:Leg[]=r.legs.map((l:any)=>({id:uid(),type:l.type,side:l.side,strike:l.strike,lots:l.lots,expiry:l.expiry,price_basis:'exec',price:null,include:true}));
-   edit(b=>({...b,template:t.key,param:param??null,legs}));setTplOpen(false);flash(`${t.name} loaded - ${legs.length} legs. Everything stays editable.`);}
+   setTplOpen(false);
+   const doIt=(b:Body)=>({...b,template:t.key,param:param??null,legs});
+   if(bodyRef.current?.legs.length){
+    setPendingChange({title:`Replace ${bodyRef.current.legs.length} leg${bodyRef.current.legs.length>1?'s':''} with ${t.name}`,
+     lines:[...bodyRef.current.legs.map(l=>`Remove: ${l.side==='B'?'Buy':'Sell'} ${l.lots} × ${strikeText(l.strike)} ${l.type}`),...legs.map(l=>`Add: ${l.side==='B'?'Buy':'Sell'} ${l.lots} × ${strikeText(l.strike)} ${l.type}`)],apply:doIt});
+   }else{edit(doIt);flash(`${t.name} loaded - ${legs.length} legs. Everything stays editable.`);}}
   catch(e:any){flash(msg(e));}
  }
  async function snapshot(){afterSave(async()=>{const v=versionRef.current;
@@ -170,10 +213,22 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
  // the conflict choices act on the body ON SCREEN now (it includes edits made while the banner was showing - review F1)
  async function keepMineAsCopy(){if(!conflict)return;const mine=bodyRef.current||conflict.local;try{const c=await sb.create(mine,`${detail?.name||'Strategy'} (my edits)`);clearLocal(id);setConflict(null);
   router.replace({pathname:'/strategies',params:{id:c.id}} as any);flash('Your edits were saved as a new strategy. The original is unchanged.');}catch(e:any){flash(msg(e));}}
- async function loadNewer(){clearLocal(id);setConflict(null);saveRef.current='saved';bodyRef.current=null;ackedJson.current='';versionRef.current=0;await reload();flash('Loaded the newer saved copy. Your local edits were discarded.');}
+ async function loadNewer(){clearHistory();clearLocal(id);setConflict(null);saveRef.current='saved';bodyRef.current=null;ackedJson.current='';versionRef.current=0;await reload();flash('Loaded the newer saved copy. Your local edits were discarded.');}
  async function keepMineHere(){if(!conflict)return;const mine=bodyRef.current||conflict.local;try{const d=await sb.get(id);const s2=await sb.save(id,d.draft!.version,mine);clearLocal(id);setConflict(null);saveRef.current='saved';
-  bodyRef.current=mine;ackedJson.current=J(mine);checksumRef.current=s2.draft!.checksum||'';versionRef.current=s2.draft!.version;setBody(mine);setVersion(s2.draft!.version);setSave('saved');
+  clearHistory();bodyRef.current=mine;ackedJson.current=J(mine);checksumRef.current=s2.draft!.checksum||'';versionRef.current=s2.draft!.version;setBody(mine);setVersion(s2.draft!.version);setSave('saved');
   flash('Your version replaced the other copy as a new draft version.');}catch(e:any){flash(msg(e));}}
+ async function repairAsNew(){
+  const b=bodyRef.current;if(!b)return;const next=expiries.find(x=>(x.days_to_expiry??0)>=1);
+  if(!next){flash('No listed expiry with a full day left to repair into.');return;}
+  try{const ch=await sb.chain(b.underlying,next.expiry);const ks=ch.rows.filter(r=>r.CE?.ltp!=null||r.PE?.ltp!=null).map(r=>r.strike);
+   if(!ks.length){flash('The new expiry has no priced strikes yet.');return;}
+   const near=(k:number)=>ks.reduce((a,x)=>Math.abs(x-k)<Math.abs(a-k)?x:a,ks[0]);
+   const legs=b.legs.map(l=>({...l,expiry:next.expiry,strike:near(l.strike),price_basis:'exec' as const,price:null}));
+   const moved=b.legs.filter((l,i)=>legs[i].strike!==l.strike).length;
+   const c=await sb.create({...b,expiry:next.expiry,legs,scenario:{}},`${detail?.name||'Strategy'} (repaired to ${dayMonth(next.expiry)})`,detail?.thesis||'');
+   router.replace({pathname:'/strategies',params:{id:c.id}} as any);
+   flash(`Repaired as a NEW draft on ${dayMonth(next.expiry)}${moved?` - ${moved} strike${moved>1?'s':''} moved to the nearest listed`:''}. The expired original is unchanged.`);}
+  catch(e:any){flash(msg(e));}}
  async function rename(){if(!detail||!name.trim()||name===detail.name)return;try{const s=await sb.meta(id,{name});setDetail(d=>d?{...d,name:s.name}:d);}catch(e:any){flash(msg(e));}}
 
  if(error)return <View style={{padding:24}}><T style={{color:C.red}}>{error}</T><Button label="Back to strategies" kind="outline" onPress={()=>router.replace('/strategies' as any)}/></View>;
@@ -192,15 +247,22 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
     <SaveBadge state={save} version={version}/>
     {save==='error'&&<Button label="Retry now" icon="refresh-cw" kind="outline" onPress={()=>flush()}/>}
    </View>
+   {coarse?<View style={[s.row,{gap:8,width:'100%'}]}>
+    <Button label={st?.live?'Review orders':'Paper trade'} icon="play" onPress={()=>afterSave(()=>st?.live?setReview({open:true}):setPaperOpen(true))} disabled={!body.legs.length||!a||a.status==='invalid'}/>
+    <Button label="Undo" icon="rotate-ccw" kind="outline" disabled={!hist.u} accessibilityLabel="Undo the last change" onPress={undoEdit}/>
+    <Button label="More" icon="more-horizontal" kind="outline" accessibilityLabel="More actions" onPress={()=>setActionsOpen(true)}/>
+   </View>:
    <View style={[s.row,{flexWrap:'wrap',gap:8,width:wide?undefined:'100%'}]}>
+    <Button label="Undo" icon="rotate-ccw" kind="outline" disabled={!hist.u} accessibilityLabel="Undo the last change" onPress={undoEdit}/>
+    <Button label="Redo" icon="rotate-cw" kind="outline" disabled={!hist.r} accessibilityLabel="Redo" onPress={redoEdit}/>
     <Button label="Prove in Lab" icon="activity" kind="outline" disabled={!body.legs.length} onPress={()=>afterSave(()=>router.push({pathname:'/strategies',params:{view:'lab',strategy:id,v:String(versionRef.current),underlying:body.underlying,lots:String(Math.min(...body.legs.map(l=>l.lots))),structure:a?.structure?.name||'',
      ...(a?.structure?.exact&&a.structure.key?{template:a.structure.key,...(body.template===a.structure.key&&body.param!=null?{param:String(body.param)}:{})}:{mode:'replay'})}} as any))}/>
     <Button label="Adjust" icon="sliders" kind="outline" disabled={!body.legs.length} onPress={()=>afterSave(()=>setAdjustFor({open:true,deployment:deps.find(d=>d.status==='active')||null}))}/>
     <Button label="Save snapshot" icon="bookmark" kind="outline" onPress={snapshot} disabled={!body.legs.length}/>
-    <Button label={bell.count?`Alerts (${bell.count})`:'Alerts'} icon="bell" kind="outline" onPress={()=>afterSave(()=>router.push({pathname:'/strategies',params:{view:'alerts'}} as any))}/>
+    <Button label={bell.count?`Alerts (${bell.count})`:'Alerts'} icon="bell" kind="outline" onPress={()=>afterSave(()=>setAlertsOpen(true))}/>
     <Button label="Duplicate" icon="copy" kind="outline" onPress={duplicate}/>
     <Button label={st?.live?'Review paper orders':'Paper trade'} icon="play" onPress={()=>afterSave(()=>st?.live?setReview({open:true}):setPaperOpen(true))} disabled={!body.legs.length||!a||a.status==='invalid'}/>
-   </View>
+   </View>}
   </View>
   {conflict&&<View accessibilityRole="alert" style={{backgroundColor:C.amberBg,borderRadius:10,padding:12,gap:8}}>
    <T style={{fontSize:12,color:C.amber}}>This strategy was saved from another window or device after your last save. Your edits on this screen are kept - nothing was overwritten. Choose where they go:</T>
@@ -208,7 +270,8 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
     <Button label="Replace the other version with mine" kind="outline" onPress={keepMineHere}/><Button label="Discard mine, load the newer copy" kind="outline" onPress={loadNewer}/></View></View>}
   <DataBanner reading={reading} live={!!chain?.quality.live} status={st}/>
   {chain&&body.legs.length>0&&chain.days_to_expiry<1&&<View style={{backgroundColor:chain.days_to_expiry<=0?'#2A1519':'#2A2210',borderRadius:10,padding:10}} accessibilityRole="alert">
-   <T style={{fontSize:12,color:chain.days_to_expiry<=0?C.red:C.amber}}>{chain.days_to_expiry<=0?`Expired: the ${dayMonth(body.expiry)} contracts have settled and can no longer be traded. Pick a later expiry.`:
+   {chain.days_to_expiry<=0&&<View style={{marginBottom:6,alignSelf:'flex-start'}}><Button label="Repair as a new draft" icon="copy" kind="outline" onPress={repairAsNew}/></View>}
+   <T style={{fontSize:12,color:chain.days_to_expiry<=0?C.red:C.amber}}>{chain.days_to_expiry<=0?`Expired: the ${dayMonth(body.expiry)} contracts have settled and can no longer be traded. "Repair as a new draft" copies the structure to the next expiry and keeps this one as it is.`:
     `Expiry day: these contracts settle today at 15:30 IST. Premiums and Greeks move very fast now - small moves swing the P&L sharply.`}</T></View>}
 
   {/* market context */}
@@ -216,10 +279,20 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
    {underlyings.map(u=><Chip key={u} label={u} active={body.underlying===u} onPress={()=>{if(u!==body.underlying){if(body.legs.length&&!confirmSwitch())return;edit(b=>({...b,underlying:u,expiry:'',legs:[],template:null,scenario:{}}));}}}/>)}
   </ChipRow>
   <ChipRow wrap={wide}>
-   {expiries.slice(0,8).map(e=><Chip key={e.expiry} active={body.expiry===e.expiry} label={`${dayMonth(e.expiry)} ${e.monthly?'M':'W'} · ${Math.max(0,Math.round(e.days_to_expiry))}d`}
-    onPress={()=>edit(b=>({...b,expiry:e.expiry,legs:b.legs.map(l=>({...l,expiry:e.expiry})),scenario:{...b.scenario,at:undefined}}))}/>)}
+   {expiries.slice(0,6).map(e=><Chip key={e.expiry} active={body.expiry===e.expiry} label={`${dayMonth(e.expiry)} ${e.monthly?'M':'W'} · ${Math.max(0,Math.round(e.days_to_expiry))}d`}
+    onPress={()=>e.expiry===body.expiry?null:body.legs.length?setExpiryOpen(true):edit(b=>({...b,expiry:e.expiry,scenario:{...b.scenario,at:undefined}}))}/>)}
+   <Chip label={expiries.length>1?`All expiries (${expiries.length})`:'Expiry details'} icon="calendar" onPress={()=>setExpiryOpen(true)}/>
   </ChipRow>
 
+  {!!chainErr&&<ErrorRetry what="The option chain" error={chainErr} onRetry={()=>setChainRetry(n=>n+1)}/>}
+  {change&&<View accessibilityRole="alert" style={{backgroundColor:change.blocked?'#2A1519':C.soft,borderWidth:1,borderColor:change.blocked?C.red:C.green,borderRadius:12,padding:12,gap:6}}>
+   <T style={{fontFamily:'InterSemi',color:change.blocked?C.red:C.ink}}>{change.blocked?`${change.title}: not possible`:`Preview - ${change.title}`}</T>
+   {change.blocked?<T style={{fontSize:12,color:C.red}}>{change.blocked}</T>:change.lines.map((x,i)=><T key={i} style={{fontSize:12,fontVariant:['tabular-nums'] as any}}>{x}</T>)}
+   <View style={[s.row,{gap:8}]}>{!change.blocked&&<Button label="Apply" icon="check" onPress={()=>{const c=change;setPendingChange(null);
+     // the preview was computed from a specific body: if the strategy changed since, applying it would overwrite those edits
+     if(c.base!==J(bodyRef.current)){flash('The strategy changed after this preview, so it was not applied. Run the change again.');return;}
+     edit(c.apply);flash('Applied. Undo brings back the previous legs.');}}/>}
+    <Button label={change.blocked?'OK':'Cancel'} kind="outline" onPress={()=>setPendingChange(null)}/></View></View>}
   <View style={{flexDirection:wide?'row':'column-reverse',gap:16,alignItems:wide?'flex-start':'stretch'}}>
    {/* LEFT: legs */}
    <View style={[panel,{flex:wide?45:undefined,width:wide?undefined:'100%'}]}>
@@ -231,6 +304,11 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
     {!body.legs.length?<View style={{paddingVertical:26,alignItems:'center',gap:8}}><Icon name="layers" size={22} color={C.green}/>
       <T style={{fontFamily:'InterSemi'}}>No legs yet</T><T style={{fontSize:12,color:C.muted,textAlign:'center',maxWidth:340}}>Pick a template for a ready structure, or add exact contracts from the chain.</T></View>:
      body.legs.map(l=>{const row=a?.legs?.find(r=>r.id===l.id);const ltp=priceOf(l.strike,l.type);
+      if(coarse)return <Pressable key={l.id} accessibilityRole="button" accessibilityLabel={`Edit leg: ${l.side==='B'?'Buy':'Sell'} ${l.lots} lots ${strikeText(l.strike)} ${l.type}`} onPress={()=>setLegEdit(l)}
+       style={({pressed})=>[s.between,{borderTopWidth:1,borderColor:C.line,paddingVertical:10,minHeight:56,opacity:!l.include?.5:pressed?.7:1}]}>
+       <View style={{gap:3,flex:1}}><T style={{fontSize:14,fontFamily:'InterSemi',color:l.side==='B'?C.green:C.red}}>{`${l.side==='B'?'BUY':'SELL'} ${l.lots} × ${strikeText(l.strike)} ${l.type}${l.include?'':' (excluded)'}`}</T>
+        <T style={{fontSize:11,color:C.muted}}>{`Entry ${num(row?.entry)} ${BASIS_TAG[(a?.legs_quotes?.find(q=>q.id===l.id)?.basis_used)||'']||''} · IV ${row?.iv!=null?`${row.iv}%`:'—'} · Δ ${row?.greeks?num(row.greeks.delta,1):'—'}`}</T></View>
+       <Icon name="edit-2" size={16} color={C.muted}/></Pressable>;
       return <View key={l.id} style={{borderTopWidth:1,borderColor:C.line,paddingTop:10,gap:8,opacity:l.include?1:.5}}>
        <View style={[s.row,{flexWrap:'wrap',gap:8}]}>
         <Pressable role="checkbox" aria-checked={l.include} accessibilityLabel={`Include ${strikeText(l.strike)} ${l.type} in analysis`} onPress={()=>setLeg(l.id,{include:!l.include})}
@@ -280,13 +358,14 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
       {(['pnl','greeks','table','snapshots','paper','alerts','activity'] as Tab[]).map(t=><Chip key={t} active={tab===t} onPress={()=>setTab(t)}
        label={{pnl:'P&L by leg',greeks:'Greeks',table:'Payoff table',snapshots:`Snapshots (${detail.snapshots.length})`,paper:`Paper (${runs.length+deps.length})`,alerts:`Alerts${bell.count?` (${bell.count})`:''}`,activity:'Activity'}[t]}/>)}
      </View>
-     {tab==='pnl'&&<LegTable a={a}/>}
-     {tab==='greeks'&&<GreeksTable a={a}/>}
+     {tab==='pnl'&&<Scrollable narrow={coarse} min={720}><LegTable a={a}/></Scrollable>}
+     {tab==='greeks'&&<Scrollable narrow={coarse} min={560}><GreeksTable a={a}/></Scrollable>}
      {tab==='table'&&<PayoffTable a={a}/>}
-     {tab==='snapshots'&&<Snapshots detail={detail} onRestore={(rid)=>afterSave(async()=>{try{const s=await sb.restore(id,rid,versionRef.current);bodyRef.current=s.draft!.body;ackedJson.current=J(s.draft!.body);checksumRef.current=s.draft!.checksum||'';versionRef.current=s.draft!.version;
+     {tab==='snapshots'&&<Snapshots detail={detail} onView={setSnapView} onRestore={(rid)=>afterSave(async()=>{try{const s=await sb.restore(id,rid,versionRef.current);clearHistory();bodyRef.current=s.draft!.body;ackedJson.current=J(s.draft!.body);checksumRef.current=s.draft!.checksum||'';versionRef.current=s.draft!.version;
        setBody(s.draft!.body);setVersion(s.draft!.version);setSave('saved');flash('Snapshot restored as a new draft version.');}catch(e:any){flash(msg(e));reload();}})}
       onDuplicate={async(rid)=>{try{const c=await sb.duplicate(id,rid);router.replace({pathname:'/strategies',params:{id:c.id}} as any);}catch(e:any){flash(msg(e));}}}/>}
-     {tab==='paper'&&<View style={{gap:10}}>{deps.map(d=><DeploymentCard key={d.id} d={d} onChanged={loadRuns} onClose={(x)=>setReview({open:true,closing:x})} onAdjust={(x)=>setAdjustFor({open:true,deployment:x})}/>)}{!deps.length&&st?.live&&<T style={{fontSize:12,color:C.muted}}>No paper deployments yet. "Review paper orders" builds the exact plan from live quotes.</T>}</View>}
+     {tab==='paper'&&<View style={{gap:10}}>{deps.map(d=><View key={d.id} style={{gap:6}}><DeploymentCard d={d} onChanged={loadRuns} onClose={(x)=>setReview({open:true,closing:x})} onAdjust={(x)=>setAdjustFor({open:true,deployment:x})}/>
+      <View style={{alignSelf:'flex-start'}}><Button label="Open monitor" icon="external-link" kind="outline" onPress={()=>router.push({pathname:'/strategies',params:{view:'deployment',id:d.id}} as any)}/></View></View>)}{!deps.length&&st?.live&&<T style={{fontSize:12,color:C.muted}}>No paper deployments yet. "Review paper orders" builds the exact plan from live quotes.</T>}</View>}
      {tab==='paper'&&<PaperList runs={runs} onClose={async(run)=>{try{await sb.paperClose(run);flash('Paper run closed at the stored reading.');loadRuns();reload();}catch(e:any){flash(msg(e));}}} onOpen={()=>router.push({pathname:'/strategies',params:{view:'paper'}} as any)}/>}
      {tab==='alerts'&&<AlertsPanel strategyId={id} analysis={a} deployments={deps} expiry={body.expiry} onChanged={reload}/>}
      {tab==='activity'&&<View style={{gap:6}}>{detail.activity.map((x,i)=><View key={i} style={[s.between,{borderTopWidth:1,borderColor:C.line,paddingTop:6}]}><T style={{fontSize:12,flex:1}}>{x.detail}</T><T style={{fontSize:11,color:C.muted}}>{istEpoch(x.created_at)}</T></View>)}</View>}
@@ -296,8 +375,11 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
 
   <ChainDrawer visible={chainOpen} chain={chain} legs={body.legs} onClose={()=>setChainOpen(false)} onToggle={(k,kind,side)=>toggleFromChain(k,kind,side)}/>
   <SpreadsSheet visible={spreadsOpen} onClose={()=>setSpreadsOpen(false)} underlying={body.underlying} expiry={body.expiry} lots={Math.max(1,Math.min(...(body.legs.length?body.legs.map(l=>l.lots):[1])))}
-   onPick={(legs,tpl,w)=>{setSpreadsOpen(false);edit(b=>({...b,template:tpl,param:[2,4,6,8].includes(w)?w:null,
-    legs:legs.map((l,i)=>({id:uid(),type:l.type,side:l.side,strike:l.strike,lots:l.lots,expiry:l.expiry,price_basis:'exec' as const,price:null,include:true}))}));flash('Spread loaded - every leg stays editable.');}}/>
+   onPick={(legs,tpl,w)=>{setSpreadsOpen(false);const nl=legs.map((l,i)=>({id:uid(),type:l.type,side:l.side,strike:l.strike,lots:l.lots,expiry:l.expiry,price_basis:'exec' as const,price:null,include:true}));
+    const doIt=(b:Body)=>({...b,template:tpl,param:[2,4,6,8].includes(w)?w:null,legs:nl});
+    if(bodyRef.current?.legs.length)setPendingChange({title:`Replace ${bodyRef.current.legs.length} leg${bodyRef.current.legs.length>1?'s':''} with this spread`,
+     lines:[...bodyRef.current.legs.map(l=>`Remove: ${l.side==='B'?'Buy':'Sell'} ${l.lots} × ${strikeText(l.strike)} ${l.type}`),...nl.map(l=>`Add: ${l.side==='B'?'Buy':'Sell'} ${l.lots} × ${strikeText(l.strike)} ${l.type}`)],apply:doIt});
+    else{edit(doIt);flash('Spread loaded - every leg stays editable.');}}}/>
   <AboutSheet visible={aboutOpen} onClose={()=>setAboutOpen(false)} a={a} templateKey={a?.structure?.exact?a.structure.key:null}/>
   <AdjustSheet visible={adjustFor.open} strategyId={id} version={version} deployment={adjustFor.deployment||null} onClose={()=>setAdjustFor({open:false})}
    onApplied={async(r)=>{const dep=adjustFor.deployment;setAdjustFor({open:false});await reload();
@@ -306,6 +388,23 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
    draft={{expected_version:versionRef.current,input_hash:checksumRef.current}}
    onPlaced={(d)=>{setReview({open:false});flash(`Paper ${review.closing?'close':review.adjusting?'adjustment':'orders'} placed - deployment ${d.status.replace('_',' ')}. No order reached a broker.`);loadRuns();reload();setTab('paper');}}/>
   <TemplateSheet visible={tplOpen} onClose={()=>setTplOpen(false)} onPick={applyTemplate} replacing={body.legs.length}/>
+  <LegSheet leg={legEdit} chain={chain} moveStrike={moveStrike} onClose={()=>setLegEdit(null)} onRemove={removeLeg}
+   onApply={l=>{setLegEdit(null);edit(b=>({...b,template:null,legs:b.legs.map(x=>x.id===l.id?l:x)}));}}/>
+  <ExpirySheet visible={expiryOpen} onClose={()=>setExpiryOpen(false)} expiries={expiries} current={body.expiry} underlying={body.underlying} legs={body.legs}
+   onApply={e=>edit(b=>({...b,expiry:e,legs:b.legs.map(l=>({...l,expiry:e})),scenario:{...b.scenario,at:undefined}}))}/>
+  <SnapshotSheet rid={snapView} onClose={()=>setSnapView(null)} onSaved={reload}/>
+  <Sheet visible={alertsOpen} onClose={()=>setAlertsOpen(false)} wide title="Alerts for this strategy" subtitle="Notify only - an alert never places, changes or cancels an order.">
+   <AlertsPanel strategyId={id} analysis={a} deployments={deps} expiry={body.expiry} onChanged={reload}/>
+   <Button label="Open the alerts centre" kind="outline" onPress={()=>{setAlertsOpen(false);router.push({pathname:'/strategies',params:{view:'alerts'}} as any);}}/>
+  </Sheet>
+  <ActionsSheet visible={actionsOpen} onClose={()=>setActionsOpen(false)} actions={[
+   {label:'Redo',icon:'rotate-cw',disabled:!hist.r,onPress:redoEdit},
+   {label:'Prove in Lab',icon:'activity',disabled:!body.legs.length,onPress:()=>afterSave(()=>router.push({pathname:'/strategies',params:{view:'lab',strategy:id,v:String(versionRef.current),underlying:body.underlying,lots:String(Math.min(...body.legs.map(l=>l.lots))),structure:a?.structure?.name||'',...(a?.structure?.exact&&a.structure.key?{template:a.structure.key,...(body.template===a.structure.key&&body.param!=null?{param:String(body.param)}:{})}:{mode:'replay'})}} as any))},
+   {label:'Adjust',icon:'sliders',disabled:!body.legs.length,onPress:()=>afterSave(()=>setAdjustFor({open:true,deployment:deps.find(d=>d.status==='active')||null}))},
+   {label:'Save snapshot',icon:'bookmark',disabled:!body.legs.length,onPress:snapshot},
+   {label:bell.count?`Alerts (${bell.count})`:'Alerts',icon:'bell',onPress:()=>afterSave(()=>setAlertsOpen(true))},
+   {label:'Duplicate',icon:'copy',onPress:duplicate},
+  ]}/>
   <PaperSheet visible={paperOpen} onClose={()=>setPaperOpen(false)} a={a} body={body} chain={chain}
    onStart={async()=>{try{if(!(await flush())){flash('Your latest edit is not saved yet, so no paper run was started.');return;}const r=await sb.paperStart(id,{expected_version:versionRef.current,input_hash:checksumRef.current});setPaperOpen(false);flash(`Paper run started - ${r.fills.length} simulated fills. No order was sent.`);loadRuns();reload();setTab('paper');}catch(e:any){flash(msg(e));}}}/>
   {!!toast&&<View style={{position:'fixed' as any,bottom:24,left:0,right:0,alignItems:'center',zIndex:50}}><View style={{backgroundColor:C.paper,borderWidth:1,borderColor:C.green,borderRadius:12,paddingHorizontal:16,paddingVertical:10,maxWidth:560}}><T style={{fontSize:13}}>{toast}</T></View></View>}
@@ -359,6 +458,7 @@ function PriceField({leg,ltp,quote,onManual,onBasis}:{leg:Leg;ltp:number|null;qu
 }
 
 function RiskStrip({a,dim}:{a:Analysis|null;dim:boolean}){
+ const [more,setMore]=useState(false);
  if(!a||a.status==='no_market'||a.status==='empty')return <View style={[panel,{minHeight:84,justifyContent:'center'}]}><T style={{color:C.muted,fontSize:12}}>{a?.warnings?.[0]||'Risk numbers appear once the strategy has legs.'}</T></View>;
  if(a.status==='invalid')return <View style={panel}><T style={{color:C.red,fontSize:12}}>{a.warnings[0]}</T></View>;
  const money=(m?:any,prefix='')=>!m?'—':m.status!=='available'?(m.status==='unsupported'?'Not supported':'Unavailable'):m.unlimited?'Unlimited':signed(m.value);
@@ -367,18 +467,20 @@ function RiskStrip({a,dim}:{a:Analysis|null;dim:boolean}){
   ['Max profit',money(a.max_profit),C.green,'At expiry, gross of charges'],
   ['Breakeven',a.breakevens?.status==='available'?(a.breakevens.value.length?a.breakevens.value.map((b:number)=>num(b,0)).join(' · '):'None'):'—',C.ink,
    a.scenario?.active&&a.breakevens_target?.status==='available'?`At expiry · on the what-if date: ${a.breakevens_target.value.length?a.breakevens_target.value.map((b:number)=>num(b,0)).join(' · '):'none in range'}`:'At expiry'],
+  ['Required funds',a.margin?.status==='available'?inr(a.margin.value):'Needs live data',a.margin?.status==='available'?C.ink:C.muted,a.margin?.status==='available'?`Exchange margin (Kite) · hedge benefit ${inr(a.margin.hedge_benefit)}`:'Exchange margin - not the same as max loss'],
   ['Reward : risk',a.reward_risk?.status==='available'&&a.reward_risk.value!=null?`${num(a.reward_risk.value,2)} : 1`:'—',C.ink,a.reward_risk?.status==='available'?'Max profit ÷ max loss, at expiry':'Unbounded on one side'],
   ['Capital at risk',a.capital_at_risk?.unlimited?'Unlimited':inr(a.capital_at_risk?.value),C.ink,'Structural max loss - not exchange margin'],
   [a.premium?.direction==='credit'?'Net credit':'Net debit',inr(Math.abs(a.premium?.value||0)),C.ink,'At entry prices'],
-  ['POP (model)',a.scenario?.active&&a.pop_scenario?.status==='available'?`${a.pop_scenario.value}%`:a.pop?.status==='available'?`${a.pop.value}%`:'—',C.ink,
+  [a.scenario?.active&&a.pop_scenario?.status==='available'?'POP (model) · Scenario':'POP (model)',a.scenario?.active&&a.pop_scenario?.status==='available'?`${a.pop_scenario.value}%`:a.pop?.status==='available'?`${a.pop.value}%`:'—',C.ink,
    a.scenario?.active&&a.pop_scenario?.status==='available'?`From the what-if point · ${a.pop?.status==='available'?`${a.pop.value}% from now`:''}`:a.pop?.sigma?`Lognormal at ${a.pop.sigma}% ${a.pop.sigma_basis==='chain_atm_iv'?'chain ATM IV':'IV of the leg nearest spot (proxy)'}`:'Model value'],
   ['Charges (est.)',inr(a.charges?.value),C.ink,'Entry orders, published rates'],
-  ['Margin',a.margin?.status==='available'?inr(a.margin.value):'Needs live data',a.margin?.status==='available'?C.ink:C.muted,a.margin?.status==='available'?`Kite SPAN+exposure · hedge benefit ${inr(a.margin.hedge_benefit)}`:'Exchange margin comes from Kite when live'],
  ] as const;
  return <View style={[panel,{gap:10,opacity:dim?.5:1}]}><View style={{flexDirection:'row',flexWrap:'wrap',gap:14}}>
-  {items.map(([k,v,col,help])=><View key={k} style={{minWidth:130,flex:1,gap:2}} accessibilityLabel={`${k}: ${v}. ${help}`}>
+  {items.slice(0,more?items.length:4).map(([k,v,col,help])=><View key={k} style={{minWidth:130,flex:1,gap:2}} accessibilityLabel={`${k}: ${v}. ${help}`}>
    <T style={{fontSize:11,color:C.muted}}>{k}</T><T style={{fontFamily:'InterSemi',fontSize:16,color:col,fontVariant:['tabular-nums'] as any}}>{v}</T><T style={{fontSize:10,color:C.muted}}>{help}</T></View>)}
  </View>
+  <Pressable accessibilityRole="button" accessibilityState={{expanded:more}} onPress={()=>setMore(!more)} style={{minHeight:32,justifyContent:'center'}}>
+   <T style={{fontSize:12,color:C.green}}>{more?'Fewer numbers':'More numbers: reward:risk, capital at risk, premium, probability, charges'}</T></Pressable>
   {!!a.insights?.length&&<View style={{gap:4,borderTopWidth:1,borderColor:C.line,paddingTop:8}} accessibilityLabel="Risk warnings">
    {a.insights.map((w,i)=><View key={i} style={[s.row,{gap:6,alignItems:'flex-start'}]}><Icon name={w.level==='warn'?'alert-triangle':'info'} size={13} color={w.level==='warn'?C.amber:C.muted}/>
     <T style={{fontSize:12,flex:1,color:w.level==='warn'?C.ink:C.muted}}>{w.text}</T></View>)}</View>}
@@ -421,8 +523,9 @@ function Stepperish({children,onMinus,onPlus,what='value'}:any){const big=useCoa
  {children}<Pressable accessibilityRole="button" accessibilityLabel={`Increase scenario ${what}`} onPress={onPlus} style={{width:big?44:26,height:big?44:28,alignItems:'center',justifyContent:'center'}}><Icon name="plus" size={13} color={C.muted}/></Pressable></View>;}
 
 function Table({head,rows,right=[]}:{head:string[];rows:(string|number)[][];right?:number[]}){
- return <View>{[head,...rows].map((r,i)=><View key={i} style={[s.row,{gap:8,paddingVertical:6,borderTopWidth:i?1:0,borderColor:C.line}]}>
-  {r.map((c,j)=><T key={j} style={{flex:j===0?2:1,fontSize:i?12:10,color:i?C.ink:C.muted,textAlign:right.includes(j)?'right':'left',fontFamily:i?'Inter':'InterMedium',
+ // semantic table roles (web) so assistive tech reads header/cell relationships (GTM audit P13)
+ return <View {...({role:'table'} as any)}>{[head,...rows].map((r,i)=><View key={i} {...({role:'row'} as any)} style={[s.row,{gap:8,paddingVertical:6,borderTopWidth:i?1:0,borderColor:C.line}]}>
+  {r.map((c,j)=><T key={j} {...({role:i?(j===0?'rowheader':'cell'):'columnheader'} as any)} style={{flex:j===0?2:1,fontSize:i?12:10,color:i?C.ink:C.muted,textAlign:right.includes(j)?'right':'left',fontFamily:i?'Inter':'InterMedium',
    textTransform:i?'none':'uppercase',fontVariant:['tabular-nums'] as any}}>{String(c)}</T>)}</View>)}</View>;
 }
 function LegTable({a}:{a:Analysis|null}){
@@ -450,12 +553,13 @@ function PayoffTable({a}:{a:Analysis|null}){
  if(!a?.table?.length)return <T style={{fontSize:12,color:C.muted}}>No payoff table yet.</T>;
  return <Table head={[`${a.underlying||'Underlying'} level`,'% from spot','Scenario date','At expiry']} right={[1,2,3]} rows={a.table.map(r=>[num(r.s,0),`${r.pct>0?'+':''}${r.pct}%`,signed(r.target),signed(r.expiry)])}/>;
 }
-function Snapshots({detail,onRestore,onDuplicate}:{detail:Detail;onRestore:(id:string)=>void;onDuplicate:(id:string)=>void}){
+function Snapshots({detail,onRestore,onDuplicate,onView}:{detail:Detail;onRestore:(id:string)=>void;onDuplicate:(id:string)=>void;onView:(id:string)=>void}){
  if(!detail.snapshots.length)return <T style={{fontSize:12,color:C.muted}}>No snapshots yet. "Save snapshot" freezes the current legs and their analysis; it never changes afterwards.</T>;
  return <View style={{gap:8}}>{detail.snapshots.map(x=><View key={x.id} style={[s.between,{borderTopWidth:1,borderColor:C.line,paddingTop:8,flexWrap:'wrap'}]}>
   <View style={{gap:2,flex:1,minWidth:200}}><T style={{fontSize:13,fontFamily:'InterSemi'}}>{`#${x.n} ${x.name}`}</T>
    <T style={{fontSize:11,color:C.muted}}>{`Priced at ${istStamp(x.reading_at)} · max loss ${x.summary.unlimited_loss?'unlimited':signed(x.summary.max_loss)} · max profit ${signed(x.summary.max_profit)} · ${x.checksum.slice(0,8)}`}</T></View>
-  <View style={[s.row,{gap:6}]}><Button label="Restore" kind="outline" onPress={()=>onRestore(x.id)}/><Button label="Copy to new" kind="outline" onPress={()=>onDuplicate(x.id)}/></View></View>)}</View>;
+  {!!x.notes&&<T style={{fontSize:11,color:C.ink,width:'100%'}} numberOfLines={2}>{x.notes}</T>}
+  <View style={[s.row,{gap:6,flexWrap:'wrap'}]}><Button label="View" kind="outline" onPress={()=>onView(x.id)}/><Button label="Restore" kind="outline" onPress={()=>onRestore(x.id)}/><Button label="Copy to new" kind="outline" onPress={()=>onDuplicate(x.id)}/></View></View>)}</View>;
 }
 function PaperList({runs,onClose,onOpen}:{runs:PaperRun[];onClose:(id:string)=>void;onOpen:()=>void}){
  if(!runs.length)return <T style={{fontSize:12,color:C.muted}}>No paper runs for this strategy. "Paper trade" records simulated fills against a frozen snapshot - it never sends an order.</T>;
@@ -464,28 +568,6 @@ function PaperList({runs,onClose,onOpen}:{runs:PaperRun[];onClose:(id:string)=>v
    {r.status==='open'&&<Button label="Close (simulated)" kind="outline" onPress={()=>onClose(r.id)}/>}</View>
   <T style={{fontSize:13}}>{`Net ${signed(r.net)} (realised ${signed(r.realised)}, unrealised ${signed(r.unrealised)}, fees ${inr(r.fees)})`}{r.close_now_estimate!=null?` · if closed now ≈ ${signed(r.close_now_estimate)}`:''}</T>
  </View>)}<Button label="All paper runs" kind="outline" icon="list" onPress={onOpen}/></View>;
-}
-
-function TemplateSheet({visible,onClose,onPick,replacing}:{visible:boolean;onClose:()=>void;onPick:(t:Template,p:number|null)=>void;replacing:number}){
- const [data,setData]=useState<{templates:Template[];later:any[];legging?:string}|null>(null);const [adv,setAdv]=useState(false);const [param,setParam]=useState<Record<string,number>>({});
- const [intro,setIntro]=useState<Template|null>(null);
- useEffect(()=>{if(visible&&!data)sb.templates().then(setData).catch(()=>{});},[visible,data]);
- const groups=[['bullish','Bullish'],['bearish','Bearish'],['range','Range'],['volatility','Big move']] as const;
- return <Sheet visible={visible} onClose={onClose} wide title="Choose a template" subtitle={replacing?`Using a template replaces the ${replacing} current leg${replacing>1?'s':''} (undo with a snapshot restore).`:'A template is a recipe; it becomes exact contracts from the current chain, all editable.'}>
-  {!data?<Loading/>:<>
-   {groups.map(([k,title])=>{const list=data.templates.filter(t=>t.intent===k&&(adv||t.risk==='defined'));if(!list.length)return null;
-    return <View key={k} style={{gap:8}}><T style={label}>{title}</T>{list.map(t=><View key={t.key} style={[panel,{gap:6}]}>
-     <View style={s.between}><View style={[s.row,{gap:10}]}><Sketch pts={t.sketch}/><T style={{fontFamily:'InterSemi'}}>{t.name}</T></View><Badge label={t.risk==='defined'?'Defined risk':'UNHEDGED'} tone={t.risk==='defined'?'green':'red'}/></View>
-     <T style={{fontSize:12,color:C.muted}}>{t.recipe}</T><T style={{fontSize:12}}>{`Use: ${t.use}`}</T><T style={{fontSize:12,color:C.amber}}>{`Loses when: ${t.loses}`}</T>
-     <View style={[s.row,{flexWrap:'wrap',gap:6}]}>
-      {t.param&&<><T style={{fontSize:11,color:C.muted}}>{t.param.label}</T>{t.param.variants.map(v=><Chip key={v} label={String(v)} active={(param[t.key]??t.param!.default)===v} onPress={()=>setParam(p=>({...p,[t.key]:v}))}/>)}</>}
-      <View style={{flex:1}}/><Button label="Use" icon="arrow-right" onPress={()=>t.intro_required?setIntro(t):onPick(t,t.param?(param[t.key]??t.param.default):null)}/></View>
-    </View>)}</View>;})}
-   <Pressable accessibilityRole="button" onPress={()=>setAdv(!adv)}><T style={{fontSize:12,color:C.green}}>{adv?'Hide unhedged structures':'Show unhedged structures (short options - large or unlimited loss)'}</T></Pressable>
-   <View style={{gap:4}}><T style={label}>Later</T>{data.later.map(l=><T key={l.key} style={{fontSize:12,color:C.muted}}>{`${l.name} - ${l.reason}`}</T>)}</View>
-   <TemplateIntro t={intro} legging={data.legging||''} onCancel={()=>setIntro(null)} onConfirm={()=>{const t=intro!;setIntro(null);onPick(t,t.param?(param[t.key]??t.param.default):null);}}/>
-  </>}
- </Sheet>;
 }
 
 function PaperSheet({visible,onClose,a,body,chain,onStart}:{visible:boolean;onClose:()=>void;a:Analysis|null;body:Body;chain:Chain|null;onStart:()=>void}){

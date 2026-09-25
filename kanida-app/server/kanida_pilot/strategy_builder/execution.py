@@ -53,6 +53,8 @@ create table if not exists intents(
  created_at real not null, updated_at real not null);
 create index if not exists ix_int_dep on intents(deployment_id, state);
 create table if not exists deployment_revisions(deployment_id text not null, revision_id text not null, cause text not null, created_at real not null);
+create table if not exists deployment_marks(
+ deployment_id text primary key, marked_at text not null, unrealised real, net real, positions text not null, saved_at real not null);
 create table if not exists dfills(
  id text primary key, intent_id text not null, deployment_id text not null, leg_id text not null, side text not null, qty integer not null,
  price real not null, fees real not null, basis text not null, quote_ts text, created_at real not null);
@@ -80,7 +82,11 @@ def market_open(at=None):
 class Execution:
  def __init__(self,store,market):
   self.store=store;self.market=market;self.c=store.c;self.lock=store.lock
-  with self.lock:self.c.executescript(SCHEMA);self.c.commit()
+  with self.lock:
+   self.c.executescript(SCHEMA)
+   if 'fills' not in {r[1] for r in self.c.execute('pragma table_info(deployment_marks)').fetchall()}:
+    self.c.execute('alter table deployment_marks add column fills integer')
+   self.c.commit()
   self._stop=threading.Event();self._worker=None
 
  # --- preview ------------------------------------------------------------------------------------------------------
@@ -425,10 +431,49 @@ class Execution:
   out['unrealised']=None if missing else round(unreal,2)
   out['net']=None if missing else round(realised+unreal-fees,2)
   out['marked_at']=chain['as_of'] if chain else None
+  # GTM audit P20: a failed mark never shows as current or as zero - the last good valuation is kept, with its age
+  if mark and not missing and chain:
+   with self.lock:
+    self.c.execute('insert or replace into deployment_marks(deployment_id,marked_at,unrealised,net,positions,saved_at,fills) values(?,?,?,?,?,?,?)',(did,chain['as_of'],out['unrealised'],out['net'],
+     json.dumps([{k:x[k] for k in ('leg_id','mark','unrealised')} for x in legs]),time.time(),len(fills)));self.c.commit()
+   out['last_known']=None
+  elif mark:
+   with self.lock:lk=self.c.execute('select * from deployment_marks where deployment_id=?',(did,)).fetchone()
+   ma=A.parse_ist(lk['marked_at']) if lk else None
+   out['last_known']=({'marked_at':lk['marked_at'],'unrealised':lk['unrealised'],'net':lk['net'],'positions':json.loads(lk['positions']),
+    # age of the MARKET READING it was valued at, not of when it was saved (quant audit F7)
+    'age_seconds':round((now_ist()-ma).total_seconds()) if ma else round(time.time()-lk['saved_at']),
+    'fills_changed':lk['fills']!=len(fills) if 'fills' in lk.keys() else None} if lk else None)
+  # residual exposure: what the plan intended vs what is actually held, per leg (a partial hedge is a different risk)
+  # planned = what every order this deployment ever sent (open, adjust, close) would hold if all filled - recorded
+  # quantities, so it needs no market read and no current lot size (quant audit F6 / review M5); a working close
+  # plans 0. Held = filled quantities. Neither depends on marks, so a failed mark never hides a residual.
+  planned={}
+  for it in intents:
+   if it['state']=='cancelled':continue
+   planned[it['leg_id']]=planned.get(it['leg_id'],0)+(it['qty'] if it['side']=='B' else -it['qty'])
+  held={}
+  for f in fills:held[f['leg_id']]=held.get(f['leg_id'],0)+(f['qty'] if f['side']=='B' else -f['qty'])
+  ids=list(dict.fromkeys(list(planned)+list(held)))
+  out['exposure']=[{'leg_id':i,'label':(meta.get(i) or {}).get('strike') and f"{int(meta[i]['strike'])} {meta[i]['type']}",'planned':planned.get(i,0),'held':held.get(i,0),
+   'residual':held.get(i,0)-planned.get(i,0)} for i in ids] if out['status'] not in ('closed','cancelled') else []
+  out['exposure_mismatch']=any(e['residual'] for e in out['exposure'])
   bases={x['mark_basis'] for x in legs if x['mark_basis']}
   out['mark_basis']=('liquidation: longs at the bid, shorts at the ask' if bases<= {'bid','ask'} else
    'mixed: some legs at the last trade (no valid bid/ask) - indicative, not a liquidation value' if bases&{'bid','ask'} else
    'last traded price (no valid bid/ask) - indicative, not a liquidation value') if bases else 'no open position'
+  return out
+
+ def summaries(self,user_id):
+  """Per strategy: counts of open / needing attention / closed paper deployments (no market reads - library use)."""
+  with self.lock:
+   rows=self.c.execute('select strategy_id,status,count(*) n from deployments where user_id=? group by strategy_id,status',(user_id,)).fetchall()
+  out={}
+  for r in rows:
+   d=out.setdefault(r['strategy_id'],{'open':0,'attention':0,'closed':0})
+   if r['status']=='attention_required':d['attention']+=r['n']
+   elif r['status'] in ('closed','cancelled'):d['closed']+=r['n']
+   else:d['open']+=r['n']
   return out
 
  def deployments(self,user_id,strategy_id=None):

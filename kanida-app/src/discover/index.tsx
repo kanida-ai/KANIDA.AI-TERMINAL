@@ -61,7 +61,7 @@ export function DiscoverStrategies(){
  return <View onLayout={e=>{const w=Math.round(e.nativeEvent.layout.width),h=Math.round(e.nativeEvent.layout.height);setWidth(v=>Math.abs(v-w)<2?v:w);setPageH(v=>Math.abs(v-h)<2?v:h)}} style={{flex:1,minHeight:0,backgroundColor:C.bg}}>
   <ScrollView ref={scrollRef} style={{flex:1}} contentContainerStyle={{paddingHorizontal:mode==='stack'?12:20,paddingTop:4,paddingBottom:sheet&&sheetLink?Math.round(winW>0?420:0):40,gap:18}}>
    <View style={[s.row,{flexWrap:'wrap',gap:phone?8:10,paddingTop:phone?6:10}]}>
-    <T role="heading" aria-level={1} style={{fontFamily:'ManropeBold',fontSize:phone?20:22,lineHeight:phone?28:30,letterSpacing:-.4,marginRight:phone?0:4}}>Discover Strategies</T>
+    <T role="heading" aria-level={1} style={{fontFamily:'ManropeBold',fontSize:phone?20:22,lineHeight:phone?28:30,letterSpacing:-.4,marginRight:phone?0:4}}>Market scans</T>
     <HeaderChip ref={uniRef} label={uniLabel} a11y={`Universe: ${uniLabel}. Change universe`} expanded={menu==='universe'} onPress={()=>setMenu('universe')}/>
     <View ref={dataRef} style={{flexShrink:1,minWidth:0}}><DataAgePill variant="line" dataEnd={catalog?.data_end||undefined} ageDays={catalog?.age_days??undefined} status={product?.state?.data_status} cache={catalog||product?.state} error={catalog?'':error} expanded={dataOpen} onPress={()=>setDataOpen(o=>!o)}/></View>
     <View style={{flex:1}}/>

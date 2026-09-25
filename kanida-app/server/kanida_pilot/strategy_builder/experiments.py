@@ -122,20 +122,31 @@ def run_batch(lab,user_id:str,grid_key:str,workers:Optional[int]=None,on_progres
  special=sorted(lab.daily.special_sessions())
  by_u={}
  for sp in specs:by_u.setdefault(sp['underlying'],[]).append(sp)
- lots={u:(lab.lot_size(u) if hasattr(lab,'lot_size') else 65) for u in by_u}
+ lots={};nolot=[]
+ for u in by_u:
+  try:lots[u]=lab.lot_size(u) if hasattr(lab,'lot_size') else 65
+  except Exception:nolot.append(u)  # noqa: BLE001 - a stock without a readable lot fails its own rules, never uses NIFTY's
+ pre_failed=0
+ for u in nolot:
+  t=time.time()
+  with lab.lock:
+   for sp in by_u.pop(u):
+    lab.c.execute('insert into lab_runs values(?,?,?,?,?,?,?,?,?,?,?)',(uuid.uuid4().hex[:16],user_id,None,'backtest',json.dumps(sp),'failed',1.0,None,
+     f'NO_LOT_SIZE: the lot size of {u} could not be read',t,t));pre_failed+=1
+   lab.c.commit()
  # NIFTY has one underlying: split its rules into chunks so every worker gets some; stocks are one task per stock
  tasks=[]
  for u,sps in by_u.items():
   n=max(1,len(sps)//((os.cpu_count() or 2)*2)) if len(by_u)==1 else len(sps)
   for i in range(0,len(sps),n):tasks.append((u,sps[i:i+n],lots[u],special))
  try:
-  done,failed=_execute(lab,user_id,bid,specs,tasks,workers,nifty,vix,on_progress)
+  done,failed=_execute(lab,user_id,bid,specs,tasks,workers,nifty,vix,on_progress);failed+=pre_failed
  except Exception as e:  # noqa: BLE001 - a crashed batch is recorded as failed, never left 'running'
   with lab.lock:
    lab.c.execute("update lab_batches set status='failed',finished_at=?,error=? where id=?",(time.time(),f'{type(e).__name__}: {e}'[:300],bid));lab.c.commit()
   raise
  with lab.lock:
-  lab.c.execute("update lab_batches set status=?,finished_at=? where id=?",('completed' if not failed else 'completed_with_failures',time.time(),bid));lab.c.commit()
+  lab.c.execute("update lab_batches set status=?,finished_at=?,done=?,failed=? where id=?",('completed' if not failed else 'completed_with_failures',time.time(),done,failed,bid));lab.c.commit()
  return batch(lab,user_id,bid)
 
 
@@ -215,7 +226,7 @@ def main(argv=None):
  from .lab import Lab
  root=Path(__file__).resolve().parents[4]
  store=Store(a.db);deriv=a.derivatives_db or str(root/'db'/'derivatives.db')
- lab=Lab(store,Market(deriv),a.kanida_db or str(root/'db'/'kanida.db'),deriv)
+ lab=Lab(store,Market(deriv),a.kanida_db or str(root/'db'/'kanida.db'),deriv,recover=False)   # never recovers the server's runs
  t=time.time()
  out=run_batch(lab,a.user,a.grid,a.workers,on_progress=lambda i,n:print(f'\r{i}/{n}',end='',flush=True) if i%10==0 or i==n else None)
  print(f"\n{out['name']}: {out['done']} done, {out['failed']} failed in {time.time()-t:.0f}s; family: {out['family']}; counts: {out['counts']}")

@@ -9,7 +9,8 @@ import {webOnly} from '../layout/shared';
 import {NAV_ITEMS,navActive,type NavItem} from './routes';
 // Main navigation (FALCON_DISCOVER_SPEC §1): Falcon · Discover Strategies · Watchlist · AutoTrade. ONE component for both shells (PilotShell header pages and MainWorkspace's TopBar).
 // variant 'bar' = inline links in the top bar (desktop: icon + label; tablet 760–1049: short labels); 'tabs' = the phone (<760) bottom tab bar. Links are focusable (Tab), Enter/Space activate, focus ring = green border; aria-current marks the page.
-function go(route:string,current:boolean){if(current)return;try{router.push(route as any)}catch{}}
+// the current section's item returns to that section's root (e.g. /strategies from /strategies?id=… - GTM audit P11)
+function go(route:string,current:boolean){try{current?router.replace(route as any):router.push(route as any)}catch{}}
 function NavLink({item,on,tabs,compact}:{item:NavItem;on:boolean;tabs:boolean;compact:boolean}){
  const label=tabs||compact?item.short:item.label;
  return <Pressable accessibilityRole="link" accessibilityLabel={on?`${item.label}, current page`:item.label} accessibilityState={{selected:on}} {...webOnly({'aria-current':on?'page':undefined})} onPress={()=>go(item.route,on)}

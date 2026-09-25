@@ -561,3 +561,63 @@ Tests after the fixes:
 - full suite 673 passed, with the 6 pre-existing `test_derivatives.py` failures unchanged.
 
 **Workbook.** `docs/KANIDA_Requirements_Master_2026-09-25.xlsx` has a new "GTM audit & Slice 10" tab, a Slice column, and 5 new rows. 4 conflicts were added: the Discover naming, hiding Experiments, paper funds enforcement, and the replay status.
+
+# Slice 11 — everything the GTM audit left (26 Sep 2026)
+
+Scope: `SLICE_11_PLAN.md`, all 13 remaining GTM items, as the owner chose. The scanner is renamed "Market scans". Live trading stays gated.
+
+| GTM | What changed | Where |
+|---|---|---|
+| P22 durable Lab jobs | A bounded pool of 2 workers; runs go queued → running → completed/failed/cancelled; cancel; runs left queued or running by a restart become "failed (server restarted)"; at most 3 active runs per user (429 `LAB_BUSY`); each result carries a `manifest` (request hash, model and fee versions, lot basis, data ranges). | `lab.py`, `Lab.tsx` |
+| P23 replay coverage | An unresolved leg blocks the replay (409 `INCOMPLETE_BASKET`). A leg with no bars means `incomplete`. The common bars must be at least 60% of the best-covered leg's bars, or no strategy-wide P&L is shown. Coverage per leg. The captured fallback honours the requested window. Requested vs effective interval and window are reported, with a "not exactly what you asked for" notice. | `lab.py`, `Lab.tsx` |
+| P18 records | Snapshot name and notes (checksum untouched); a read-only snapshot view with the frozen terms and analysis; library sort (recent/name/expiry/created); expired and empty badges; open/attention paper deployments per strategy. | `store.py`, `routes.py`, `BuilderParts.tsx`, `Home.tsx` |
+| P20 monitor | `/strategies?view=deployment&id=`: residual exposure (planned vs held per leg), shown first; the last good valuation with its age when marks fail (never shown as current); links to the strategy, Alerts and Adjust. | `execution.py`, `Monitor.tsx` |
+| P21 alerts | Alerts open from the strategy header, with the scope preselected. Cooldown, session and browser channel are editable under the version guard. Each rule shows why it was suppressed and its last valid value. A failed pause, delete, ack or settings change keeps the rule on screen with Retry. A partly failed suggested batch reports "N of M added". | `alerts.py`, `Alerts.tsx`, `Builder.tsx` |
+| P15 (non-live) | Couldn't connect → `refused` (nothing was sent). Connected but no answer, or an engine 5xx → `unknown`. It is reconciled by looking up its idempotency key, never re-sent; no new hand-off for that strategy until it resolves; `not_received` when the engine has no record of it. | `autotrade_bridge.py`, `OrderReview.tsx` |
+| P17 start | Choose the underlying and expiry before anything exists. The template path creates the strategy only when a recipe is picked. Template search plus direction, leg-count and risk filters. | `Home.tsx`, `Templates.tsx` |
+| P05 safe edits | Undo/redo (50 steps). Template and spread replacements show a preview first. Shift/Width/Wings only apply where they fit, with a preview; a leg that would run past the listed strikes, or two legs landing on one contract, refuses the change with the reason (no silent clamp). A full expiry picker whose remap preview applies only if every leg is listed. Repair-as-new for an expired strategy. | `Builder.tsx`, `BuilderParts.tsx` |
+| P14 hierarchy | Four primary numbers: max loss, max profit, breakeven, required funds (exchange margin, or "needs live data"). The rest sit under "More numbers". POP says "Scenario" when a what-if is active. | `Builder.tsx` |
+| P12 phone | A compact builder header (Review · Undo · More); an actions menu; a one-leg editor sheet (Apply/Cancel); leg, Greeks, spreads and Lab tables scroll sideways inside their panel instead of squeezing. | `Builder.tsx`, `BuilderParts.tsx`, `Learn.tsx`, `Lab.tsx` |
+| P08 states | Error + Retry for the library, templates, About, the option chain, spreads, alerts (panel and centre), paper runs and deployments; no spinner under an error. | `States.tsx` + screens |
+| P11 navigation | The scanner nav is now "Market scans" (owner decision). The current section's nav item returns to its root. Destinations (Lab, Paper runs, Alerts) are buttons, separate from filters. The scanner status banner no longer shows on strategy pages. | `shell/routes.tsx`, `MainNav.tsx`, `shell/parts.tsx`, `Home.tsx` |
+| P13 a11y | Dialogs return focus to the control that opened them; table/row/cell roles on builder tables; 44 px touch targets; alert-role errors on fields; the template count is announced politely. | `ui.tsx`, `Builder.tsx` |
+| P24 evidence | `/api/sb/ops/metrics` (owner only): p50/p95/max latency and 5xx counts per route template, and the start → analyze → save → snapshot → review → deploy funnel. The only identifier is a salted hash of the session. | `ops.py` |
+
+**Verified.**
+- `test_slice11.py`, plus the slice 10, audit and strategy-builder suites.
+- Desktop 1440 px and phone 390 px screenshots on the fake-live-quote harness, with no horizontal page overflow. See `docs/screenshots/strategy_builder_2026-09-26/slice11/`.
+
+## Independent audit (dev-reviewer: FAIL → fixed; dev-quant-auditor) and fixes
+
+- **Lab status races (quant F1, review M2).** Every transition is now a compare-and-set on the state it expects (`_move`), and progress writes only while running. A cancel always wins, and a cancelled or failed run can never become "completed".
+- **The batch command orphaned server runs (F2).** Runs are owned by a server boot id. Recovery only touches runs of a dead process, and the CLI builds `Lab(recover=False)`.
+- **The manifest could not reproduce a run (F3).** It now records:
+  - the pricing model actually used (`lab-bsm-vix-v1`), not the analytics version;
+  - content hashes of both series;
+  - the volatility sources and slippage;
+  - the special-session list hash;
+  - the code version (git) and an IST timestamp;
+  - the lot source.
+
+  A stock whose lot size can't be read now fails, instead of silently borrowing NIFTY's 65. In a batch, only its own rules fail.
+- **AutoTrade "not received" could invite a duplicate basket (F4, H1, H2, M1).**
+  - A hand-off stays unknown until it's found by its key. It is never judged from a bounded list or a timer. Only an explicit user release ("I checked AutoTrade…") lifts it, and that release is recorded as the user's decision.
+  - The unresolved-check and the insert are now one locked step.
+  - Rows stuck at "sending" (a crash, a restart, or an answer we can't read) become unknown.
+  - A pending hand-off is reconciled before a new one is refused.
+- **Replay coverage (F5).** It is measured against the exchange session bars expected in the window (NSE calendar), plus the longest intraday gap. Excluded legs never block a replay. The captured fallback closes its connection and normalises ISO timestamps.
+- **Exposure (F6, M5).** Planned vs held now comes from the recorded orders and fills. It needs no market read and no current lot size, so a failed mark or a lot revision can't hide or fake a residual.
+- **Last-known valuation (F7).** Its age is the age of the market reading it used; a changed fill count is flagged.
+- **Alerts (M4).** A stale version is a 409 `VERSION_CONFLICT`, never a silently lost edit.
+- **Builder (M6–M8).**
+  - A preview remembers the body it was computed from, and refuses to apply if the strategy changed.
+  - Undo/redo is cleared whenever the server's copy replaces the screen.
+  - The expiry sheet ignores late answers for another expiry.
+- **Smaller fixes.**
+  - Start sheet: one tap creates one strategy, and a stale expiry answer is ignored.
+  - The Lab pool is shut down on app shutdown and store close (queued runs are cancelled).
+  - `ops` is described as pseudonymous (the salt sits beside the data), and events are kept for 90 days.
+  - Snapshot activity is only logged for real changes.
+- **Left open, stated.** The engine intake needs an exact lookup-by-key endpoint; its list is capped at 200. That is why unknown hand-offs wait for a human release rather than a timer.
+
+Tests: `test_slice11.py` has 19 tests. The full pilot suite is 692 passed; the same 6 `test_derivatives.py` failures predate this slice.

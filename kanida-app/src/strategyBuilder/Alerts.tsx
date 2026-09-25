@@ -7,6 +7,7 @@ import {router} from 'expo-router';
 import {Badge,Button,C,Chip,Empty,Icon,Loading,T,s} from '../ui';
 import {alerts,type Analysis,type AlertEvent,type AlertRule,type Deployment} from './api';
 import {dayMonth,inr,istEpoch,num} from './format';
+import {ErrorRetry} from './States';
 
 const TYPES:[string,string,('strategy'|'deployment')[]][]=[
  ['price_cross','Underlying crosses a level',['strategy','deployment']],['breakeven_near','Spot near a breakeven',['strategy','deployment']],
@@ -34,7 +35,8 @@ export function AlertsPanel({strategyId,analysis,deployments,expiry,onChanged}:{
  const [type,setType]=useState('price_cross');const [scope,setScope]=useState<string>('strategy');
  const [f,setF]=useState<Record<string,string>>({});const [busy,setBusy]=useState(false);const [note,setNote]=useState('');
  const active=deployments.filter(d=>!['closed','cancelled'].includes(d.status));
- const load=useCallback(()=>alerts.forStrategy(strategyId).then(setData).catch(e=>setError(msg(e))),[strategyId]);
+ const [loadErr,setLoadErr]=useState('');
+ const load=useCallback(()=>alerts.forStrategy(strategyId).then(d=>{setData(d);setLoadErr('');}).catch(e=>setLoadErr(msg(e))),[strategyId]);
  useEffect(()=>{load();const t=setInterval(load,15000);return()=>clearInterval(t);},[load]);
  const spot=analysis?.spot;
  useEffect(()=>{ // sensible defaults from the live analysis
@@ -51,13 +53,18 @@ export function AlertsPanel({strategyId,analysis,deployments,expiry,onChanged}:{
   catch(e:any){setError(msg(e));}finally{setBusy(false);}}
  async function suggested(d:Deployment){
   const loss=Math.max(500,Math.round(Math.abs(analysis?.capital_at_risk?.value||2000)*0.5/100)*100);
-  for(const [t,p] of [['breakeven_near',{points:50}],['pnl',{amount:loss,direction:'loss'}],['short_itm',{}],['expiry_time',{at:`${expiry} 13:30`}]] as [string,any][]){
-   try{await alerts.create(strategyId,{type:t,params:p,deployment_id:d.id,channels:['in_app','browser']});}catch(e:any){setError(msg(e));}}
-  setNote('Suggested alerts added for this deployment.');load();}
+  const batch=[['breakeven_near',{points:50}],['pnl',{amount:loss,direction:'loss'}],['short_itm',{}],['expiry_time',{at:`${expiry} 13:30`}]] as [string,any][];
+  const failed:string[]=[];setError('');setNote('');
+  for(const [t,p] of batch){try{await alerts.create(strategyId,{type:t,params:p,deployment_id:d.id,channels:['in_app','browser']});}catch(e:any){failed.push(`${t.replace('_',' ')}: ${msg(e)}`);}}
+  // never report success for a partly failed batch (GTM audit P21)
+  if(failed.length)setError(`${batch.length-failed.length} of ${batch.length} suggested alerts added. Not added - ${failed.join('; ')}`);
+  else setNote(`All ${batch.length} suggested alerts added for this deployment.`);
+  load();}
  const field=(k:string,label:string,w=110)=><View style={{gap:3}}><T style={{fontSize:11,color:C.muted}}>{label}</T>
   <TextInput value={f[k]||''} onChangeText={v=>setF(x=>({...x,[k]:v}))} accessibilityLabel={label} style={{width:w,height:32,borderWidth:1,borderColor:C.line,borderRadius:8,paddingHorizontal:8,color:C.ink,fontFamily:'Inter',fontSize:12}}/></View>;
- if(!data)return <Loading/>;
+ if(!data)return loadErr?<ErrorRetry what="Alerts" error={loadErr} onRetry={load}/>:<Loading/>;
  return <View style={{gap:14}}>
+  {!!loadErr&&<ErrorRetry what="The latest alert state" error={loadErr} onRetry={load}/>}
   <T style={{fontSize:11,color:C.muted}}>Alerts notify only - they never place, change or cancel an order. They fire once when the condition becomes true, re-arm after it clears, and never fire on missing data.</T>
   <View style={{backgroundColor:C.bg,borderWidth:1,borderColor:C.line,borderRadius:10,padding:12,gap:10}}>
    <View style={[s.row,{flexWrap:'wrap',gap:6}]}><T style={{fontSize:11,color:C.muted}}>Watch</T>
@@ -83,34 +90,52 @@ export function AlertsPanel({strategyId,analysis,deployments,expiry,onChanged}:{
 }
 
 export function RuleList({rules,onChanged,showStrategy}:{rules:AlertRule[];onChanged:()=>void;showStrategy?:boolean}){
- const [checked,setChecked]=useState<Record<string,string>>({});
+ const [checked,setChecked]=useState<Record<string,string>>({});const [errs,setErrs]=useState<Record<string,{text:string;retry:()=>void}>>({});const [open,setOpen]=useState<string|null>(null);
+ // a failed pause/resume/delete/settings change keeps the rule on screen with the reason and a Retry (GTM audit P21)
+ const act=async(r:AlertRule,fn:()=>Promise<any>,what:string)=>{setErrs(e=>{const n={...e};delete n[r.id];return n;});
+  try{await fn();onChanged();}catch(e:any){setErrs(x=>({...x,[r.id]:{text:`${what} failed: ${msg(e)}`,retry:()=>act(r,fn,what)}}));}};
  if(!rules.length)return <T style={{fontSize:12,color:C.muted}}>No alert rules yet.</T>;
  return <View style={{gap:8}}>{rules.map(r=><View key={r.id} style={[s.between,{flexWrap:'wrap',gap:8,borderTopWidth:1,borderColor:C.line,paddingTop:8}]}>
   <View style={{flex:1,minWidth:240,gap:3}}>
    <View style={[s.row,{gap:8,flexWrap:'wrap'}]}><Badge label={r.state.replace('_',' ').toUpperCase()} tone={tone(r.state) as any}/><T style={{fontSize:13,fontFamily:'InterSemi'}}>{r.description}</T></View>
    <T style={{fontSize:11,color:C.muted}}>{`${showStrategy&&r.strategy_name?r.strategy_name+' · ':''}${r.scope==='deployment'?'Paper deployment':'Research draft'} · ${r.session==='market'?'market hours':'always'} · cooldown ${Math.round(r.cooldown/60)}m · last checked ${r.last_eval_at?r.last_eval_at.slice(11,19)+' IST':'—'}`}</T>
+   {r.state==='data_unavailable'&&!!r.suppressed&&<T style={{fontSize:11,color:C.amber}}>{`Suppressed: ${r.suppressed}.${r.last_value!=null?` Last valid value ${num(r.last_value,2)}.`:''} It will not fire on stale data.`}</T>}
    {!!checked[r.id]&&<T style={{fontSize:11,color:C.mint}}>{checked[r.id]}</T>}
+   {!!errs[r.id]&&<View style={[s.row,{gap:8}]}><T accessibilityRole="alert" style={{fontSize:11,color:C.red,flex:1}}>{errs[r.id].text}</T><Button label="Retry" kind="outline" onPress={errs[r.id].retry}/></View>}
+   {open===r.id&&<View style={{gap:6,paddingTop:4}}>
+    <View style={[s.row,{gap:6,flexWrap:'wrap'}]}><T style={{fontSize:11,color:C.muted}}>Cooldown</T>
+     {([[300,'5 min'],[900,'15 min'],[3600,'1 hour'],[14400,'4 hours']] as [number,string][]).map(([v,l])=><Chip key={v} label={String(l)} active={r.cooldown===v} onPress={()=>act(r,()=>alerts.update(r.id,{version:r.version,cooldown:v}),'Changing the cooldown')}/>)}</View>
+    {r.type!=='expiry_time'&&<View style={[s.row,{gap:6,flexWrap:'wrap'}]}><T style={{fontSize:11,color:C.muted}}>When</T>
+     {[['market','Market hours'],['always','Always']].map(([v,l])=><Chip key={v} label={l} active={r.session===v} onPress={()=>act(r,()=>alerts.update(r.id,{version:r.version,session:v}),'Changing when it runs')}/>)}</View>}
+    <View style={[s.row,{gap:6,flexWrap:'wrap'}]}><T style={{fontSize:11,color:C.muted}}>Notify</T>
+     <Chip label="In app" active/><Chip label="Browser (tab open)" active={!!r.channels?.includes('browser')}
+      onPress={()=>act(r,()=>alerts.update(r.id,{version:r.version,channels:r.channels?.includes('browser')?['in_app']:['in_app','browser']}),'Changing notifications')}/></View>
+    <T style={{fontSize:10,color:C.muted}}>Closed-tab push, e-mail and SMS are not available in this release.</T>
+   </View>}
   </View>
   <View style={[s.row,{gap:6}]}>
    <Button label="Check now" kind="outline" onPress={async()=>{try{const x=await alerts.check(r.id);setChecked(c=>({...c,[r.id]:x.evaluated?`${x.message}${x.condition?' - condition TRUE':''}`:x.reason}));}catch(e:any){setChecked(c=>({...c,[r.id]:msg(e)}));}}}/>
-   <Button label={r.state==='paused'?'Resume':'Pause'} kind="outline" onPress={async()=>{await alerts.update(r.id,{version:r.version,action:r.state==='paused'?'resume':'pause'});onChanged();}}/>
-   <Pressable accessibilityRole="button" accessibilityLabel={`Delete alert: ${r.description}`} onPress={async()=>{await alerts.remove(r.id);onChanged();}} style={{padding:8}}><Icon name="trash-2" size={15} color={C.muted}/></Pressable>
+   <Button label="Settings" kind="outline" accessibilityState={{expanded:open===r.id}} onPress={()=>setOpen(open===r.id?null:r.id)}/>
+   <Button label={r.state==='paused'?'Resume':'Pause'} kind="outline" onPress={()=>act(r,()=>alerts.update(r.id,{version:r.version,action:r.state==='paused'?'resume':'pause'}),r.state==='paused'?'Resume':'Pause')}/>
+   <Pressable accessibilityRole="button" accessibilityLabel={`Delete alert: ${r.description}`} onPress={()=>act(r,()=>alerts.remove(r.id),'Delete')} style={{padding:12}}><Icon name="trash-2" size={16} color={C.muted}/></Pressable>
   </View></View>)}</View>;
 }
 
 export function EventList({events,onChanged,showStrategy}:{events:AlertEvent[];onChanged:()=>void;showStrategy?:boolean}){
+ const [err,setErr]=useState('');
  if(!events.length)return <T style={{fontSize:12,color:C.muted}}>No alert events yet.</T>;
  const open=events.filter(e=>!e.acked_at).length;
  return <View style={{gap:6}}>
   <View style={s.between}><T style={{fontFamily:'InterMedium',fontSize:10,letterSpacing:.6,textTransform:'uppercase',color:C.muted}}>{`Events · ${open} to acknowledge`}</T>
-   {open>0&&<Button label="Acknowledge all" kind="outline" onPress={async()=>{await alerts.ack();onChanged();}}/>}</View>
+   {open>0&&<Button label="Acknowledge all" kind="outline" onPress={async()=>{try{await alerts.ack();setErr('');}catch(e:any){setErr(msg(e));}onChanged();}}/>}</View>
+  {!!err&&<ErrorRetry what="Acknowledging" error={err} onRetry={onChanged}/>}
   {events.map(e=><View key={e.id} style={[s.row,{gap:8,alignItems:'flex-start',opacity:e.acked_at?.55:1,borderTopWidth:1,borderColor:C.line,paddingTop:6}]}>
    <Icon name={e.kind==='triggered'?'bell':e.kind==='data_unavailable'?'wifi-off':'rotate-ccw'} size={14} color={e.kind==='triggered'?C.red:e.kind==='data_unavailable'?C.amber:C.muted}/>
    <View style={{flex:1,gap:2}}><T style={{fontSize:12}}>{e.message}</T>
     <T style={{fontSize:11,color:C.muted}}>{`${showStrategy&&e.strategy_name?e.strategy_name+' · ':''}${e.occurred_at.slice(0,16)} IST · ${e.kind.replace('_',' ')}`}</T></View>
    {showStrategy&&<Pressable onPress={()=>router.push({pathname:'/strategies',params:{id:e.strategy_id}} as any)}><T style={{fontSize:11,color:C.green}}>Open</T></Pressable>}
    <Pressable accessibilityRole="button" accessibilityLabel="Adjust this strategy" onPress={()=>router.push({pathname:'/strategies',params:{id:e.strategy_id,open:'adjust'}} as any)}><T style={{fontSize:11,color:C.green}}>Adjust</T></Pressable>
-   {!e.acked_at&&<Pressable accessibilityRole="button" onPress={async()=>{await alerts.ack(e.id);onChanged();}}><T style={{fontSize:11,color:C.green}}>Acknowledge</T></Pressable>}
+   {!e.acked_at&&<Pressable accessibilityRole="button" onPress={async()=>{try{await alerts.ack(e.id);setErr('');}catch(x:any){setErr(msg(x));}onChanged();}}><T style={{fontSize:11,color:C.green}}>Acknowledge</T></Pressable>}
   </View>)}
  </View>;
 }
@@ -119,7 +144,7 @@ export function EventList({events,onChanged,showStrategy}:{events:AlertEvent[];o
 export function AlertsCenter(){
  const [data,setData]=useState<Awaited<ReturnType<typeof alerts.all>>|null>(null);const [error,setError]=useState('');
  const note=useAlertNotifications();
- const load=useCallback(()=>alerts.all().then(setData).catch(e=>setError(msg(e))),[]);
+ const load=useCallback(()=>alerts.all().then(d=>{setData(d);setError('');}).catch(e=>setError(msg(e))),[]);
  useEffect(()=>{load();const t=setInterval(load,15000);return()=>clearInterval(t);},[load]);
  return <View style={{padding:20,gap:16,maxWidth:1100,width:'100%',alignSelf:'center'}}>
   <View style={[s.row,{gap:8}]}><Button label="My Strategies" icon="chevron-left" kind="outline" onPress={()=>router.replace('/strategies' as any)}/></View>
@@ -127,8 +152,8 @@ export function AlertsCenter(){
   {note.perm==='default'&&<View style={[s.row,{gap:10,flexWrap:'wrap'}]}><Button label="Enable browser notifications" icon="bell" kind="outline" onPress={note.enable}/>
    <T style={{fontSize:11,color:C.muted}}>Shown only while a KANIDA tab is open.</T></View>}
   {note.perm==='denied'&&<T style={{fontSize:11,color:C.muted}}>Browser notifications are blocked for this site in your browser settings; alerts still appear here.</T>}
-  {!!error&&<T style={{color:C.red}}>{error}</T>}
-  {!data?<Loading/>:<>
+  {!!error&&<ErrorRetry what="Alerts" error={error} onRetry={load}/>}
+  {!data?(error?null:<Loading/>):<>
    <View style={{backgroundColor:C.paper,borderWidth:1,borderColor:C.line,borderRadius:12,padding:14,gap:10}}><EventList events={data.events} onChanged={load} showStrategy/></View>
    <View style={{backgroundColor:C.paper,borderWidth:1,borderColor:C.line,borderRadius:12,padding:14,gap:10}}>
     <T style={{fontFamily:'InterSemi'}}>Rules</T>

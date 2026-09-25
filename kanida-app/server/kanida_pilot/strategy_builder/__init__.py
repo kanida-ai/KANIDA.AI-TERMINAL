@@ -47,8 +47,16 @@ def mount(app,settings,path=None,derivatives_path=None,live=None,kanida_db=None,
   from .lab import Lab
   lab=Lab(store,market,kanida_db or os.getenv('PILOT_SB_KANIDA_DB') or str(Path(__file__).resolve().parents[4]/'db'/'kanida.db'),
    derivatives_path or settings.derivatives_database)
+  store.closers=[lab.close]
+  try:app.add_event_handler('shutdown',lab.close)
+  except Exception:pass  # noqa: BLE001
   from .autotrade_bridge import AutotradeRoutes,Bridge
   autotrade=AutotradeRoutes(store,bridge or Bridge())      # unconfigured unless PILOT_AUTOTRADE_URL + _TOKEN are set
+  from .ops import Ops,install
+  ops=Ops(store)
+  try:install(app,ops)
+  except RuntimeError:log.warning('Strategy-builder timing middleware not installed (app already started).')
+  app.state.strategy_builder_ops=ops
   before=len(app.router.routes)
   app.include_router(build_router(app,market,store,execution,alerts,lab,autotrade))
   # the pilot's catch-all GET /api/{path} and web routes are registered first; put ours ahead of them

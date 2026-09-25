@@ -204,12 +204,26 @@ class Alerts:
   except (TypeError,ValueError):raise AlertError(400,'FIELD_INVALID','version is required.')
   if version!=r['version']:raise AlertError(409,'VERSION_CONFLICT','This alert changed elsewhere. Reload it.')
   params=validate(r['type'],data['params'],r['scope']) if 'params' in data else r['params']
+  # settings (GTM audit P21): cooldown, session and channels are editable under the same version guard
+  cooldown=r['cooldown']
+  if 'cooldown' in data:
+   try:cooldown=max(60,min(86400,int(data['cooldown'])))
+   except (TypeError,ValueError):raise AlertError(400,'FIELD_INVALID','cooldown must be a number of seconds.')
+  session=r['session']
+  if 'session' in data:
+   if data['session'] not in ('market','always'):raise AlertError(400,'FIELD_INVALID','session must be market or always.')
+   session='always' if r['type']=='expiry_time' else data['session']
+  channels=r['channels']
+  if 'channels' in data:
+   channels=[c for c in (data.get('channels') or []) if c in ('in_app','browser')] or ['in_app']
   state=r['state']
   if data.get('action')=='pause':state='paused'
   elif data.get('action')=='resume':state='armed' if r['state'] in ('paused','triggered','data_unavailable') else r['state']
   elif 'params' in data and r['state']!='paused':state='armed'      # an edited rule starts fresh
   with self.lock:
-   self.c.execute('update alert_rules set params=?,state=?,version=version+1,updated_at=? where id=?',(json.dumps(params),state,time.time(),rid))
+   n=self.c.execute('update alert_rules set params=?,state=?,cooldown=?,session=?,channels=?,version=version+1,updated_at=? where id=? and version=?',
+    (json.dumps(params),state,cooldown,session,json.dumps(channels),time.time(),rid,version)).rowcount
+   if not n:raise AlertError(409,'VERSION_CONFLICT','This alert changed elsewhere. Reload it.')
    self.c.commit()
   return self.rule(user_id,rid)
 
