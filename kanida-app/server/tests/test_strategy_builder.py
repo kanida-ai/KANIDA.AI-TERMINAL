@@ -229,3 +229,215 @@ def test_scenario_at_the_reading_reprices_each_leg_at_its_entry(pilot):
  legs=owner.post('/api/sb/templates/resolve',json={'template':'iron_condor','underlying':'NIFTY','expiry':EXP}).json()['legs']
  a=owner.post('/api/sb/analyze',json={'body':{'underlying':'NIFTY','expiry':EXP,'legs':legs}}).json()
  assert a['scenario_pnl']['value']==pytest.approx(0,abs=0.5)
+
+
+# --- slice 4: order review, idempotent intents, the paper broker --------------------------------------------------
+import kanida_pilot.strategy_builder.execution as EX
+
+
+class FakeKite:
+ """A live market with fresh quotes whose depth a test can move. No network."""
+ live=True
+ def __init__(self,db):
+  self.m=Market(db);self.books={};self.fail_margin=False
+ def available(self):return True,None
+ def _now(self):return EX.now_ist().strftime('%Y-%m-%d %H:%M:%S')
+ def chain(self,u,e):
+  ch=dict(self.m.chain(u,e));rows=[]
+  for r in ch['rows']:
+   row={'strike':r['strike']}
+   for k in ('CE','PE'):
+    x=dict(r[k]);b=self.books.get(x['symbol'],(round(x['ltp']-0.5,2),round(x['ltp']+0.5,2)))
+    x['bid'],x['ask']=b;x['flags']=[];row[k]=x
+   rows.append(row)
+  ch['rows']=rows;ch['as_of']=self._now();ch['quality']={**ch['quality'],'live':True}
+  return ch
+ def quotes(self,keys):
+  out={}
+  for k in keys:
+   sym=k.split(':',1)[1];b=self.books.get(sym)
+   if b is None:
+    for r in self.m.chain('NIFTY',EXP)['rows']:
+     for x in (r['CE'],r['PE']):
+      if x['symbol']==sym:b=(round(x['ltp']-0.5,2),round(x['ltp']+0.5,2))
+   out[k]={'timestamp':self._now(),'depth':{'buy':[{'price':b[0]}],'sell':[{'price':b[1]}]}}
+  return out
+ def basket_margin(self,orders):
+  if self.fail_margin:raise RuntimeError('down')
+  per=[{'symbol':o['symbol'],'total':(o['qty']*o['price'] if o['side']=='B' else 150000.0*o['qty']/65)} for o in orders]
+  final=sum(x['total'] for x in per)*(0.6 if len(orders)>1 else 1)
+  return {'initial':sum(x['total'] for x in per),'final':final,'per_leg':per,'source':'fake'}
+ def underlyings(self):return self.m.underlyings()
+ def expiries(self,u):return self.m.expiries(u)
+ def reading(self,u):return self.m.reading(u)
+ def close(self):self.m.close()
+
+
+@pytest.fixture
+def live(tmp_path,monkeypatch):
+ db=store(str(tmp_path/'derivatives.db'))
+ settings=pilot_settings(tmp_path,derivatives_database=db,snapshots='off')
+ app=create_app(settings,evidence=Evidence())
+ fake=FakeKite(db)
+ monkeypatch.setattr(EX,'market_open',lambda at=None:True)
+ sb=mount(app,settings,str(tmp_path/'sb.db'),live=fake)
+ owner=signup(app);other=signup(app,'member@example.invalid','member');grant(app,'member@example.invalid')
+ app.state.strategy_builder_execution.stop()
+ yield app,owner,other,fake
+ app.state.db.close();sb.close()
+
+
+def strategy(owner,template='bull_call_spread',lots=1,param=None):
+ legs=owner.post('/api/sb/templates/resolve',json={'template':template,'underlying':'NIFTY','expiry':EXP,'param':param,'lots':lots}).json()['legs']
+ return owner.post('/api/sb/strategies',json={'body':{'underlying':'NIFTY','expiry':EXP,'legs':legs}}).json()
+
+
+def test_preview_needs_live_quotes(pilot):
+ _a,owner,_o=pilot
+ s=strategy(owner)
+ r=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={})
+ assert r.status_code==409 and r.json()['code']=='MARKET_DATA_NOT_LIVE'
+
+
+def test_preview_is_the_exact_plan_with_hash_expiry_sequence_and_slices(live):
+ _a,owner,_o,_f=live
+ s=strategy(owner,lots=30)                         # 30 lots x 65 = 1950 units > the 1800 freeze
+ p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ assert [c['key'] for c in p['checks'] if c['status']=='block'] in ([],['margin']) and len(p['hash'])==64 and p['ttl']==30 and p['mode']=='paper' and p['live']['enabled'] is False
+ buy,sell=p['orders']
+ assert buy['side']=='B' and buy['group']==1 and sell['group']==2
+ assert buy['slices']==[1755,195] and buy['limit']==buy['ask'] and sell['limit']==sell['bid']
+ assert p['margin']['final']>0 and {c['key'] for c in p['checks']}>={'market_open','quotes_fresh','quotes_present','spread','freeze','risk','margin'}
+ a=owner.post('/api/sb/analyze',json={'body':s['draft']['body']}).json()
+ assert a['margin']['status']=='available' and a['margin']['source'].startswith('Zerodha Kite') and a['price_basis']==['exec']
+
+
+def test_confirm_is_guarded_and_idempotent(live):
+ app,owner,other,_f=live
+ s=strategy(owner)
+ p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ url=f"/api/sb/strategies/{s['id']}/deployments"
+ assert owner.post(url,json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'k1'}).status_code==400   # no confirm
+ bad=owner.post(url,json={'preview_id':p['id'],'preview_hash':'0'*64,'idempotency_key':'k1','confirm':True})
+ assert bad.status_code==409 and bad.json()['code']=='PREVIEW_CHANGED'
+ d=owner.post(url,json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'k1','confirm':True}).json()
+ again=owner.post(url,json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'k1','confirm':True}).json()
+ assert d['id']==again['id'] and d['mode']=='paper'
+ p2=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ clash=owner.post(url,json={'preview_id':p2['id'],'preview_hash':p2['hash'],'idempotency_key':'k1','confirm':True})
+ assert clash.status_code==409 and clash.json()['code']=='IDEMPOTENCY_CONFLICT'
+ assert other.get(f"/api/sb/deployments/{d['id']}").status_code==404
+ # an edit after the preview invalidates it
+ p3=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ owner.post(f"/api/sb/strategies/{s['id']}/draft",json={'version':s['draft']['version'],'body':{**s['draft']['body'],'scenario':{'spot':23100}}})
+ stale=owner.post(url,json={'preview_id':p3['id'],'preview_hash':p3['hash'],'idempotency_key':'k3','confirm':True})
+ assert stale.status_code==409 and stale.json()['code']=='PREVIEW_CHANGED'
+ # expiry
+ p4=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ with app.state.strategy_builder_store.lock:
+  app.state.strategy_builder_store.c.execute('update previews set expires_at=0 where id=?',(p4['id'],));app.state.strategy_builder_store.c.commit()
+ exp=owner.post(url,json={'preview_id':p4['id'],'preview_hash':p4['hash'],'idempotency_key':'k4','confirm':True})
+ assert exp.status_code==409 and exp.json()['code']=='PREVIEW_EXPIRED'
+ from kanida_pilot.db import orders
+ from sqlalchemy import select,func
+ with app.state.db.tx() as c:assert c.execute(select(func.count()).select_from(orders)).scalar()==0
+
+
+def test_marketable_orders_fill_buys_first_then_sells_and_close_books_pnl(live):
+ app,owner,_o,fake=live
+ s=strategy(owner)
+ p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ d=owner.post(f"/api/sb/strategies/{s['id']}/deployments",json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'m1','confirm':True}).json()
+ assert d['status']=='active' and [f['side'] for f in d['fills']]==['B','S']
+ buy=next(o for o in p['orders'] if o['side']=='B');sell=next(o for o in p['orders'] if o['side']=='S')
+ assert d['fills'][0]['price']==buy['ask'] and d['fills'][1]['price']==sell['bid'] and d['fees']>0
+ assert d['unrealised'] is not None and d['net']<0                    # marked at liquidation prices: pays the spread
+ cp=owner.post(f"/api/sb/deployments/{d['id']}/close-preview",json={}).json()
+ assert cp['kind']=='close' and {o['side'] for o in cp['orders']}=={'B','S'} and cp['orders'][0]['side']=='B'   # buy back the short first
+ closed=owner.post(f"/api/sb/deployments/{d['id']}/close",json={'preview_id':cp['id'],'preview_hash':cp['hash'],'idempotency_key':'c1','confirm':True}).json()
+ assert closed['status']=='closed' and all(x['units']==0 for x in closed['positions'])
+ assert closed['realised']==pytest.approx(-(1.0*65)*2,abs=0.01)       # round trip at a 1.00 spread, two legs
+
+
+def test_resting_limit_waits_for_the_quote_and_cancel_leaves_no_naked_short(live):
+ app,owner,_o,fake=live
+ s=strategy(owner)
+ legs={l['side']:l for l in s['draft']['body']['legs']}
+ buy_sym=owner.get(f'/api/sb/chain?underlying=NIFTY&expiry={EXP}').json()
+ p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={'price_policy':'mid'}).json()
+ b=next(o for o in p['orders'] if o['side']=='B')
+ assert b['bid']<b['limit']<=b['ask']
+ d=owner.post(f"/api/sb/strategies/{s['id']}/deployments",json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'r1','confirm':True}).json()
+ assert d['status']=='working' and not d['fills']
+ assert all(i['state']=='created' for i in d['intents'] if i['side']=='S')    # the short waits for the hedge
+ ex=app.state.strategy_builder_execution
+ fake.books[b['symbol']]=(b['limit']-0.3,b['limit'])                        # the ask comes down to the limit
+ ex.dispatch(d['id'])
+ d=owner.get(f"/api/sb/deployments/{d['id']}").json()
+ assert any(f['side']=='B' for f in d['fills']) and d['status'] in ('working','partially_filled','active')
+ c=owner.post(f"/api/sb/deployments/{d['id']}/cancel",json={}).json()
+ assert all(i['state'] in ('filled','cancelled') for i in c['intents'])
+ assert not any(f['side']=='S' for f in c['fills']) or c['status']=='active'
+
+
+def test_unlimited_needs_ack_and_margin_beyond_paper_capital_blocks(live):
+ _a,owner,_o,fake=live
+ s=strategy(owner,'short_straddle')
+ p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ assert p['requires_ack']
+ r=owner.post(f"/api/sb/strategies/{s['id']}/deployments",json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'u1','confirm':True})
+ assert r.status_code==400 and r.json()['code']=='ACK_REQUIRED'
+ big=strategy(owner,'short_straddle',lots=10)
+ pb=owner.post(f"/api/sb/strategies/{big['id']}/preview",json={}).json()
+ assert not pb['can_submit'] and any(c['key']=='margin' and c['status']=='block' for c in pb['checks'])
+ fake.fail_margin=True
+ pm=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ assert pm['margin'] is None and any(c['key']=='margin' and c['status']=='warn' for c in pm['checks'])
+
+
+def test_a_cancelled_hedge_never_releases_the_short(live):
+ """Regression (found in the browser 25 Sep): cancelling a resting hedge let the worker acknowledge the sell group."""
+ app,owner,_o,fake=live
+ s=strategy(owner)
+ p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={'price_policy':'mid'}).json()
+ d=owner.post(f"/api/sb/strategies/{s['id']}/deployments",json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'x1','confirm':True}).json()
+ assert d['status']=='working'
+ owner.post(f"/api/sb/deployments/{d['id']}/cancel",json={})
+ ex=app.state.strategy_builder_execution
+ b=next(o for o in p['orders'] if o['side']=='B');sl=next(o for o in p['orders'] if o['side']=='S')
+ fake.books[b['symbol']]=(b['limit']-1,b['limit']-0.5);fake.books[sl['symbol']]=(sl['limit']+1,sl['limit']+1.5)   # both would now fill
+ for _ in range(3):ex.dispatch(d['id'])
+ d=owner.get(f"/api/sb/deployments/{d['id']}").json()
+ assert all(i['state']=='cancelled' for i in d['intents']) and d['fills']==[] and d['status']=='cancelled'
+
+
+def test_group_two_is_released_only_by_a_fully_filled_group_one(live):
+ app,owner,_o,fake=live
+ s=strategy(owner)
+ p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={'price_policy':'mid'}).json()
+ d=owner.post(f"/api/sb/strategies/{s['id']}/deployments",json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'x2','confirm':True}).json()
+ st=app.state.strategy_builder_store
+ with st.lock:   # the state the old worker mis-read: the hedge group finished WITHOUT filling, the short still waiting
+  st.c.execute("update intents set state='cancelled' where deployment_id=? and grp=1",(d['id'],));st.c.commit()
+ sl=next(o for o in p['orders'] if o['side']=='S');fake.books[sl['symbol']]=(sl['limit']+1,sl['limit']+1.5)
+ app.state.strategy_builder_execution.dispatch(d['id'])
+ d=owner.get(f"/api/sb/deployments/{d['id']}").json()
+ assert [i['state'] for i in d['intents'] if i['grp']==2]==['created'] and d['fills']==[]
+
+
+def test_a_close_stopped_part_way_needs_attention(live):
+ app,owner,_o,fake=live
+ s=strategy(owner)
+ p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ d=owner.post(f"/api/sb/strategies/{s['id']}/deployments",json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'a1','confirm':True}).json()
+ assert d['status']=='active'
+ cp=owner.post(f"/api/sb/deployments/{d['id']}/close-preview",json={'price_policy':'mid'}).json()
+ assert cp['structure'].startswith('Close: ') and cp['margin'] is None
+ buyback=next(o for o in cp['orders'] if o['side']=='B')
+ fake.books[buyback['symbol']]=(buyback['limit']-1,buyback['limit']-0.5)     # the buy-back fills, the long's sale rests
+ c=owner.post(f"/api/sb/deployments/{d['id']}/close",json={'preview_id':cp['id'],'preview_hash':cp['hash'],'idempotency_key':'a2','confirm':True}).json()
+ assert c['status']=='closing'
+ c=owner.post(f"/api/sb/deployments/{d['id']}/cancel",json={}).json()
+ assert c['status']=='attention_required' and any(x['units']>0 for x in c['positions'])
+ again=owner.post(f"/api/sb/deployments/{d['id']}/close-preview",json={}).json()
+ assert len(again['orders'])==1 and again['orders'][0]['side']=='S'      # only the residual long is closed

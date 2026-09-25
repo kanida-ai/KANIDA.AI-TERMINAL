@@ -129,7 +129,7 @@ def resolve(key,chain,param=None,lots=1):
   strike=min(pool,key=lambda k:abs(k-target))
   row=next(r for r in chain['rows'] if r['strike']==strike)[spec['type']]
   legs.append({'id':f'L{i+1}','type':spec['type'],'side':spec['side'],'strike':strike,'lots':lots,'lot_size':chain['lot_size'],
-   'expiry':chain['expiry'],'price':row['ltp'],'price_basis':'ltp','ltp':row['ltp'],'include':True,'token':row['token'],'symbol':row['symbol']})
+   'expiry':chain['expiry'],'price':row['ltp'],'price_basis':'exec','ltp':row['ltp'],'bid':row.get('bid'),'ask':row.get('ask'),'include':True,'token':row['token'],'symbol':row['symbol']})
  # a snapped recipe that collapses two legs onto one strike is no longer the structure it names
  shape=[(l['type'],l['strike'],l['side']) for l in legs]
  if len(set(shape))<len(shape) or (key not in ('long_straddle','short_straddle','iron_butterfly') and

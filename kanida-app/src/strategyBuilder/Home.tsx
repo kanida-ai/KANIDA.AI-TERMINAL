@@ -4,7 +4,7 @@ import {Pressable,TextInput,View,useWindowDimensions} from 'react-native';
 import {router} from 'expo-router';
 import {Badge,Button,C,Chip,Empty,Icon,Loading,T,s} from '../ui';
 import {sb,type LibraryRow} from './api';
-import {dayMonth} from './format';
+import {dayMonth,istEpoch} from './format';
 
 type Filter='research'|'paper'|'archived';
 
@@ -47,7 +47,7 @@ export function Home(){
      <T style={{flex:wide?1:undefined,fontSize:12}}>{`${r.underlying||'—'} · ${dayMonth(r.expiry)}`}</T>
      <T style={{flex:wide?1:undefined,fontSize:12,color:C.muted}}>{`${r.snapshots} snapshot${r.snapshots===1?'':'s'}`}</T>
      <View style={{flex:wide?1:undefined}}>{r.paper_open?<Badge label={`${r.paper_open} open`} tone="green"/>:r.paper_total?<Badge label={`${r.paper_total} closed`} tone="neutral"/>:<T style={{fontSize:12,color:C.muted}}>—</T>}</View>
-     <T style={{flex:wide?1:undefined,fontSize:11,color:C.muted}}>{new Date(r.updated_at*1000).toLocaleDateString()}</T>
+     <T style={{flex:wide?1:undefined,fontSize:11,color:C.muted}}>{istEpoch(r.updated_at)}</T>
      <View style={[s.row,{flex:wide?1.4:undefined,gap:6,justifyContent:'flex-end'}]}>
       <Button label="Duplicate" kind="outline" onPress={async()=>{try{await sb.duplicate(r.id);load();}catch(e:any){setError(e.message);}}}/>
       <Button label={r.archived_at?'Restore':'Archive'} kind="outline" onPress={async()=>{try{await sb.archive(r.id,!r.archived_at);load();}catch(e:any){setError(e.message);}}}/>

@@ -26,20 +26,28 @@ def _beside_pilot_db(settings):
  return None
 
 
-def mount(app,settings,path=None,derivatives_path=None):
+def mount(app,settings,path=None,derivatives_path=None,live=None):
  try:
   from .market import Market
   from .routes import build_router
   from .store import Store
+  from .kite_market import KiteMarket,MarketRouter
+  from .execution import Execution
   store=Store(path or os.getenv('PILOT_STRATEGY_BUILDER_DATABASE') or _beside_pilot_db(settings) or DEFAULT_DB)
-  market=Market(derivatives_path or settings.derivatives_database)
+  stored=Market(derivatives_path or settings.derivatives_database)
+  # live Kite quotes are OPT-IN (PILOT_SB_LIVE=kite): a test or a second machine never reaches Kite by accident
+  if live is None:live=os.getenv('PILOT_SB_LIVE','').lower()=='kite'
+  live=(KiteMarket() if live is True else None) if isinstance(live,bool) else live   # an object = an injected live market (tests)
+  market=MarketRouter(stored,live)
+  execution=Execution(store,market)
+  if live:execution.start()
   before=len(app.router.routes)
-  app.include_router(build_router(app,market,store))
+  app.include_router(build_router(app,market,store,execution))
   # the pilot's catch-all GET /api/{path} and web routes are registered first; put ours ahead of them
   added=app.router.routes[before:]
   del app.router.routes[before:]
   app.router.routes[0:0]=added
-  app.state.strategy_builder_store=store;app.state.strategy_builder_market=market
+  app.state.strategy_builder_store=store;app.state.strategy_builder_market=market;app.state.strategy_builder_execution=execution
   return store
  except Exception:
   log.exception('The strategy builder could not start; the pilot runs without it.')

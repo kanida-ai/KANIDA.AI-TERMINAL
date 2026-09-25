@@ -10,6 +10,8 @@ if [ "${2:-}" = "--build" ] || [ "${1:-}" = "--build" ]; then npx expo export --
 lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 && die "Port $PORT already has a listener."
 mkdir -p var
 export PYTHONPATH="$APP/server" PILOT_WEB_DIRECTORY="$APP/dist-pilot" PILOT_PORT="$PORT" PILOT_BIND=0.0.0.0
+# Strategy Builder live quotes: READS the engine's Kite token (never mints one). Set PILOT_SB_LIVE=off to use the stored reading.
+export PILOT_SB_LIVE="${PILOT_SB_LIVE:-kite}"
 "$PY" -m kanida_pilot.bootstrap
 nohup "$PY" -m kanida_pilot > var/pilot.stdout.log 2> var/pilot.stderr.log &
 echo $! > var/pilot-launcher.pid

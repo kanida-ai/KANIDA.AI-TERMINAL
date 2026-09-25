@@ -18,3 +18,7 @@ export const signed=(v:number|null|undefined,dp=0)=>v==null||!Number.isFinite(v)
 export const num=(v:number|null|undefined,dp=2)=>v==null||!Number.isFinite(v)?'—':v.toLocaleString('en-IN',{maximumFractionDigits:dp,minimumFractionDigits:0});
 export const pts=(v:number|null|undefined)=>v==null?'—':v.toLocaleString('en-IN',{maximumFractionDigits:2});
 export const strikeText=(k:number)=>Number.isInteger(k)?String(k):k.toFixed(2);
+
+/** An epoch (seconds) shown in IST whatever the browser's zone: 'Fri 25 Sep 10:17 IST'. */
+export function istEpoch(sec?:number|null){if(!sec)return '—';const f=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Kolkata',weekday:'short',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(new Date(sec*1000));
+ const g=(t:string)=>f.find(x=>x.type===t)?.value||'';return `${g('weekday')} ${Number(g('day'))} ${g('month')} ${g('hour')}:${g('minute')} IST`;}

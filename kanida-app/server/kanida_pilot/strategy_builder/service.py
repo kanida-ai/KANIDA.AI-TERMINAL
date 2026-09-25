@@ -8,7 +8,9 @@ from .store import checksum
 from .templates import recognise
 
 DATE=re.compile(r'^\d{4}-\d{2}-\d{2}$');SYMBOL=re.compile(r'^[A-Z0-9&-]{1,20}$')
-SLIPPAGE_PCT=0.005   # paper fills: 0.5% of price or one tick, whichever is larger (no bid/ask in the store)
+SLIPPAGE_PCT=0.005
+# entry price bases: exec = buy at the ask / sell at the bid (the price you could trade at now); mid; ltp; manual
+BASES=('exec','mid','ltp','manual')   # paper fills: 0.5% of price or one tick, whichever is larger (no bid/ask in the store)
 
 
 class Invalid(Exception):
@@ -33,8 +35,8 @@ def normalize_body(raw):
   except (TypeError,ValueError):raise Invalid('Leg strike and lots must be numbers.')
   if strike<=0 or not math.isfinite(strike):raise Invalid('Leg strike must be positive.')
   if not 1<=lots<=500:raise Invalid('Lots must be a whole number from 1 to 500.')
-  basis=str(l.get('price_basis') or 'ltp')
-  if basis not in ('ltp','manual'):raise Invalid('price_basis must be ltp or manual.')
+  basis=str(l.get('price_basis') or 'exec')
+  if basis not in BASES:raise Invalid('price_basis must be one of: '+', '.join(BASES)+'.')
   price=l.get('price')
   if basis=='manual':
    try:price=float(price)
@@ -71,12 +73,41 @@ def hydrate(market,body):
   if not row:
    problems.append(f"{int(l['strike'])} {l['type']} is not listed for {body['expiry']} - it may have expired or never existed.")
    continue
-  price=l['price'] if l['price_basis']=='manual' else row['ltp']
-  out.append({**l,'lot_size':chain['lot_size'],'ltp':row['ltp'],'price':price,'token':row['token'],'symbol':row['symbol'],
+  price,used=leg_price(l,row)
+  out.append({**l,'basis_used':used,'lot_size':chain['lot_size'],'ltp':row['ltp'],'bid':row.get('bid'),'ask':row.get('ask'),'price':price,'token':row['token'],'symbol':row['symbol'],
    # IV is solved by the analytics from THIS leg's own entry price (so the scenario at the reading reprices the leg
    # at exactly its entry); the chain's rounded display IV is not reused as a model input.
    'iv':None,'flags':row['flags']})
  return chain,out,problems
+
+
+def leg_price(l,row):
+ """(price, basis actually used). exec/mid fall back to LTP - and say so - when the quote has no bid/ask."""
+ if l['price_basis']=='manual':return l['price'],'manual'
+ bid,ask,ltp=row.get('bid'),row.get('ask'),row.get('ltp')
+ if l['price_basis']=='exec' and bid and ask:return (ask if l['side']=='B' else bid),'exec'
+ if l['price_basis']=='mid' and bid and ask:return round((bid+ask)/2,2),'mid'
+ return ltp,'ltp'
+
+
+_MARGIN={}
+def margin(market,legs,product='NRML'):
+ """Exchange margin (SPAN + exposure) from Kite's basket-margin read for these legs; cached 30 s per leg set."""
+ act=[l for l in legs if l.get('include',True) and l.get('price') is not None]
+ key=tuple(sorted((l['symbol'],l['side'],int(l['lots'])*int(l['lot_size'])) for l in act))+(product,)
+ hit=_MARGIN.get(key)
+ import time as _t
+ if hit and _t.time()-hit[0]<30:return hit[1]
+ try:
+  m=market.basket_margin([{'symbol':l['symbol'],'side':l['side'],'qty':int(l['lots'])*int(l['lot_size']),'price':l['price'],'product':product} for l in act])
+  single=sum((x.get('total') or 0) for x in m['per_leg'])
+  out=A.ok(round(m['final'],2),basis='exchange_span_exposure',source='Zerodha Kite basket margin (read-only)',
+   initial=round(m['initial'],2) if m.get('initial') is not None else None,hedge_benefit=round(single-m['final'],2) if m.get('final') is not None else None,product=product)
+ except Exception as e:  # noqa: BLE001 - unavailable margin is stated, never zero
+  out=A.na('MARGIN_UNAVAILABLE',note=f'Exchange margin could not be read ({type(e).__name__}).')
+ if len(_MARGIN)>256:_MARGIN.clear()
+ _MARGIN[key]=(_t.time(),out)
+ return out
 
 
 def analysis(market,body,table=True):
@@ -86,9 +117,11 @@ def analysis(market,body,table=True):
  reading=A.parse_ist(chain['as_of'])
  a=A.analyze(legs,chain['spot'],reading,body.get('scenario'),charges=CH.estimate,table_step=chain['strike_step'] if table else None)
  a['warnings']=problems+(a.get('warnings') or [])
+ if a.get('status') in ('ok','partial') and chain['quality'].get('live') and hasattr(market,'basket_margin'):
+  a['margin']=margin(market,legs)
  if problems and a.get('status')=='ok':a['status']='partial'
  return {**base,**a,'as_of':chain['as_of'],'underlying':chain['underlying'],'lot_size':chain['lot_size'],
-  'quality':chain['quality'],'price_basis':sorted({l['price_basis'] for l in legs})}
+  'quality':chain['quality'],'price_basis':sorted({l['basis_used'] for l in legs}),'legs_quotes':[{'id':l['id'],'bid':l.get('bid'),'ask':l.get('ask'),'ltp':l.get('ltp'),'basis_used':l['basis_used']} for l in legs]}
 
 
 # --- paper ------------------------------------------------------------------------------------------------------

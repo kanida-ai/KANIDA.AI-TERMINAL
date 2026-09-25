@@ -72,3 +72,51 @@ kanida-app pilot.
 - **Slice 5:** strategy alerts.
 - **Slice 6:** the Lab (replay, then rule backtest).
 - **Live quotes and broker margin:** after cutover.
+
+---
+
+# Slice 4 + live Kite data (25 Sep 2026)
+
+## Live market data
+- `strategy_builder/kite_market.py` is a **read-only** Kite adapter. It uses three endpoints: `/instruments/NFO`, `/quote` (with depth), and `/margins/basket` (a hypothetical basket; nothing is placed).
+- **Credentials:** the engine's single source of truth, read only: the newest `kite_tokens` row plus `KITE_API_KEY` from `~/Kanida/engine/config/.env`. It never mints a token.
+- **Enabling it:** set `PILOT_SB_LIVE=kite`. `migration/mac/start-pilot.sh` now defaults to it; tests never touch Kite.
+- **Fallback:** `MarketRouter` serves live data when the token works and the stored reading otherwise. Every response says which source it came from.
+- **Prices:** the new entry basis `exec` buys at the ask and sells at the bid (the default). `mid`, `ltp` and `manual` remain available, and each leg shows which basis it used.
+- **Margin:** the real exchange margin (SPAN + exposure) from Kite's basket-margin read, with the hedge benefit. It replaces "Needs broker" whenever data is live.
+- **Token:** minted on the Mac on 25 Sep at 10:03 IST at the owner's instruction. The engine auth worker stamped it `2026-09-24`, the Pacific date: **a Mac timezone bug in the engine's auth code**, not fixed here.
+
+## Slice 4: order review, intents, paper broker (`strategy_builder/execution.py`)
+- **Preview** (K11): the exact orders, with contract, side, qty, limit (at the quote or at the mid, editable within 20% of the quote), product, sequence group and freeze-qty slices. It carries the quotes it was built from, 7 checks, Kite margin, charges, a **SHA-256 hash** and a **30 s expiry**.
+- **Pre-trade checks:**
+  - market open;
+  - quotes at most 15 s old;
+  - live bid and ask on every leg;
+  - spread no wider than 5% (warns otherwise);
+  - freeze limits (configured; slicing applied);
+  - defined risk, with unlimited loss needing an acknowledgement;
+  - paper capital covering the margin.
+- **Confirm:** `confirm:true` plus the preview id, hash and an **idempotency key**. The system refuses a changed, expired or stale plan (draft edited since the preview). Reusing a key returns the same deployment; the same key with a different plan gets a 409.
+- **Paper broker:**
+  - A BUY fills at the ask once ask ≤ limit; a SELL fills at the bid once bid ≥ limit. Otherwise the order rests, and a worker re-checks quotes every 5 s during market hours.
+  - **Hedges (buys) go first; sells are released only when every buy has FILLED.** A cancelled hedge never releases the short.
+  - Closing buys back shorts first. A close stopped part-way leaves the deployment `attention_required`, and a new close covers only the residual.
+- **Monitor** (K12): positions from fills, marked at liquidation prices (longs at the bid, shorts at the ask), realised/unrealised/fees, each order's state, Cancel resting, Close position.
+- **Live routing:** a disabled capability. It will go through `backend/autotrade` (paper by default, certified per broker, operator-armed). **No broker order API is called anywhere in the pilot.**
+
+## Verified
+- **Tests:** 36 builder tests; the full suite is 581 passed, 1 skipped. Slice 4 adds a fake live market, and its tests cover:
+  - the plan itself (hash, expiry, sequence, slices);
+  - the confirm guards (confirm, hash, expiry, edit-after-preview);
+  - idempotency;
+  - buys-first fills;
+  - resting limits;
+  - unlimited-loss acknowledgement;
+  - a margin block;
+  - regressions for the cancel/sequence bug;
+  - a partial close needing attention.
+- **Browser against live Kite:** 25 Sep, 10:16–10:24 IST. Template → live pricing (ask/bid) and real margin → review → place:
+  - The order rested when the ask moved away.
+  - It filled at a better price when the market came back, and the sell was released after the buy.
+  - Close: the short was bought back first, and the long's sale rested.
+- **Bug found and fixed in that browser session:** cancelling a resting hedge let the worker acknowledge the short group (a race with no state guard). Group release now needs a fully filled previous group, and every state change is guarded by the state it expects.

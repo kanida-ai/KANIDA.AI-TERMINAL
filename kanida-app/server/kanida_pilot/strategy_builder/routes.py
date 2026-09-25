@@ -33,6 +33,7 @@ from . import service as S
 from .market import MarketUnavailable
 from .store import Conflict
 from .templates import ResolveError,public,recognise,resolve
+from .execution import ExecError
 
 SYMBOL=re.compile(r'^[A-Z0-9&-]{1,20}$');DATE=re.compile(r'^\d{4}-\d{2}-\d{2}$')
 NAME_MAX=80
@@ -51,7 +52,7 @@ def _name(v,fallback):
  return t or fallback
 
 
-def build_router(app,market,store):
+def build_router(app,market,store,execution=None):
  r=APIRouter()
  def me(request):return _identity(app,request)
  def own(user,sid):
@@ -125,7 +126,8 @@ def build_router(app,market,store):
  def detail(request:Request,sid:str):
   user=me(request);s=own(user,sid)
   return {**s,'snapshots':store.revisions(user['id'],sid),'activity':store.activity(user['id'],sid),
-   'paper':[_paper_row(p) for p in store.papers(user['id'],sid)]}
+   'paper':[_paper_row(p) for p in store.papers(user['id'],sid)],
+   'deployments':[_dep_row(d) for d in execution.deployments(user['id'],sid)] if execution else []}
 
  @r.post('/api/sb/strategies/{sid}/draft')
  def save_draft(request:Request,sid:str,data:dict=Body(default={})):
@@ -230,8 +232,73 @@ def build_router(app,market,store):
   store.paper_close(user['id'],run,fills,chain['as_of'])
   return S.paper_view(market,store,user['id'],run)
 
+ # --- slice 4: order review, intents, paper deployments ---------------------------------------------------------------
+ def ex(fn,*a,**k):
+  if not execution:raise PilotError(503,'EXECUTION_UNAVAILABLE','Order review is not available on this server.')
+  try:return guard(fn,*a,**k)
+  except ExecError as e:
+   if e.extra:return JSONResponse({'error':e.message,'code':e.code,**e.extra},status_code=e.status)
+   raise PilotError(e.status,e.code,e.message)
+
+ @r.get('/api/sb/status')
+ def status(request:Request):
+  me(request);st=market.status() if hasattr(market,'status') else {'live':False,'source':'stored'}
+  from .execution import LIVE_CAPABILITY,market_open,now_ist
+  return {**st,'market_open':market_open(),'now_ist':now_ist().strftime('%Y-%m-%d %H:%M:%S'),'live_orders':LIVE_CAPABILITY,
+   'paper_capital':execution.paper_capital(me(request)['id']) if execution else None}
+
+ @r.post('/api/sb/strategies/{sid}/preview')
+ def preview(request:Request,sid:str,data:dict=Body(default={})):
+  user=me(request);s=own(user,sid)
+  return ex(execution.preview,user['id'],s,{'product':data.get('product'),'price_policy':data.get('price_policy'),'limits':data.get('limits') or {}})
+
+ @r.post('/api/sb/strategies/{sid}/deployments')
+ def deploy(request:Request,sid:str,data:dict=Body(default={})):
+  user=me(request);s=own(user,sid)
+  if data.get('confirm') is not True:raise PilotError(400,'CONFIRM_REQUIRED','Confirm the exact order plan to place paper orders.')
+  return ex(execution.confirm,user['id'],s,str(data.get('preview_id') or ''),str(data.get('preview_hash') or ''),
+   str(data.get('idempotency_key') or ''),data.get('ack_unlimited') is True)
+
+ @r.get('/api/sb/deployments')
+ def deployments(request:Request):
+  user=me(request)
+  names={x['id']:x['name'] for x in store.list(user['id'])}
+  out=[]
+  for d in (execution.deployments(user['id']) if execution else []):
+   d['strategy_name']=names.get(d['strategy_id']);d.pop('revision_body',None);out.append(d)
+  return {'deployments':out,'paper_capital':execution.paper_capital(user['id']) if execution else None}
+
+ @r.get('/api/sb/deployments/{did}')
+ def deployment(request:Request,did:str):
+  user=me(request);d=ex(execution.deployment,user['id'],did)
+  if not d:raise PilotError(404,'DEPLOYMENT_NOT_FOUND','There is no such deployment.')
+  d.pop('revision_body',None);return d
+
+ @r.post('/api/sb/deployments/{did}/cancel')
+ def cancel(request:Request,did:str,data:dict=Body(default={})):
+  user=me(request);d=ex(execution.cancel,user['id'],did);d.pop('revision_body',None);return d
+
+ @r.post('/api/sb/deployments/{did}/close-preview')
+ def close_preview(request:Request,did:str,data:dict=Body(default={})):
+  user=me(request);d=execution.deployment(user['id'],did) if execution else None
+  if not d:raise PilotError(404,'DEPLOYMENT_NOT_FOUND','There is no such deployment.')
+  s=own(user,d['strategy_id'])
+  return ex(execution.preview,user['id'],s,{'product':d['product'],'price_policy':data.get('price_policy')},kind='close',deployment=d)
+
+ @r.post('/api/sb/deployments/{did}/close')
+ def close(request:Request,did:str,data:dict=Body(default={})):
+  user=me(request);d=execution.deployment(user['id'],did,mark=False) if execution else None
+  if not d:raise PilotError(404,'DEPLOYMENT_NOT_FOUND','There is no such deployment.')
+  if data.get('confirm') is not True:raise PilotError(400,'CONFIRM_REQUIRED','Confirm the exact close orders.')
+  s=own(user,d['strategy_id']);out=ex(execution.confirm,user['id'],s,str(data.get('preview_id') or ''),str(data.get('preview_hash') or ''),
+   str(data.get('idempotency_key') or ''));out.pop('revision_body',None);return out
+
  return r
 
 
 def _paper_row(p):
  return {k:p[k] for k in ('id','status','revision_id','opened_reading','closed_reading','created_at','closed_at')}
+
+
+def _dep_row(d):
+ return {k:d.get(k) for k in ('id','status','mode','product','opened_at','closed_at','net','realised','unrealised','fees','marked_at')}
