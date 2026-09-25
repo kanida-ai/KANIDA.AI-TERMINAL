@@ -1352,3 +1352,9 @@ def test_chain_carries_per_strike_greeks(pilot):
  atm=min(ch['rows'],key=lambda r:abs(r['strike']-SPOT))
  assert 0.3<atm['CE']['greeks']['delta']<0.7 and -0.7<atm['PE']['greeks']['delta']<-0.3 and atm['CE']['greeks']['theta']<0
  assert 'model BSM' in ch['greeks_basis']
+
+
+def test_every_template_is_offered_in_the_chooser():
+ """Regression (Robinhood review 25 Sep): the chooser groups bullish / bearish / range / volatility - a template with any
+ other intent is silently never shown."""
+ assert {t['intent'] for t in TEMPLATES}<={'bullish','bearish','range','volatility'}

@@ -21,7 +21,7 @@ export function Discover(){
  const [hedged,setHedged]=useState(true);const [lots,setLots]=useState(1);
  const [res,setRes]=useState<DiscoverResult|null>(null);const [error,setError]=useState('');const [busy,setBusy]=useState(false);const [pick,setPick]=useState<string[]>([]);
  useEffect(()=>{sb.underlyings().then(r=>setUnds(r.underlyings.map(x=>x.symbol))).catch(()=>{});},[]);
- useEffect(()=>{setRes(null);sb.expiries(u).then(r=>{setExps(r.expiries);setE(r.expiries[0]?.expiry||'');setAsOf(r.as_of);}).catch(x=>setError(x.message));},[u]);
+ useEffect(()=>{setRes(null);sb.expiries(u).then(r=>{setExps(r.expiries);setE((r.expiries.find(x=>(x.days_to_expiry??0)>=1)||r.expiries[0])?.expiry||'');setAsOf(r.as_of);}).catch(x=>setError(x.message));},[u]);
  useEffect(()=>{if(!e)return;sb.chain(u,e).then(c=>{setSpot(c.spot);const step=c.strike_step||50;const r=(x:number)=>String(Math.round(x/step)*step);
   setTarget(r(c.spot*1.01));setLow(r(c.spot*.99));setHigh(r(c.spot*1.01));}).catch(()=>{});},[u,e]);
  useEffect(()=>{if(!spot)return;const step=50;const r=(x:number)=>String(Math.round(x/step)*step);

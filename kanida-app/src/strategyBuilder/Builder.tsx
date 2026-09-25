@@ -59,7 +59,9 @@ export function Builder({id,openTemplate=false,openAdjust=false}:{id:string;open
  // expiries and chain follow the draft's underlying/expiry
  useEffect(()=>{if(!body?.underlying)return;let live=true;
   sb.expiries(body.underlying).then(r=>{if(!live)return;setExpiries(r.expiries);
-   if(!body.expiry&&r.expiries[0])edit(b=>({...b,expiry:r.expiries[0].expiry}));}).catch(e=>setError(msg(e)));
+   // default to the first expiry at least a day away - never same-day (0DTE) by default; it stays one click away
+   const first=r.expiries.find(x=>(x.days_to_expiry??0)>=1)||r.expiries[0];
+   if(!body.expiry&&first)edit(b=>({...b,expiry:first.expiry}));}).catch(e=>setError(msg(e)));
   return()=>{live=false};},[body?.underlying]);// eslint-disable-line react-hooks/exhaustive-deps
  useEffect(()=>{if(!body?.underlying||!body.expiry){setChain(null);return;}const c=new AbortController();
   sb.chain(body.underlying,body.expiry,c.signal).then(setChain).catch(e=>{if(e?.name!=='AbortError')flash(msg(e));});
