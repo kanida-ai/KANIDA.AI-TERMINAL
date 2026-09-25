@@ -214,3 +214,84 @@ Seven regression tests were added (`test_audit_*`). The full server suite passes
 - Against the random-entry control, the rule beat 97.5% of runs over the full period but only 70% out of sample.
 
 Before the fixes, this run reported 403 trades (a CI of −₹265 to +₹865). The extra trades came from the fabricated pre-2019 weeklies.
+
+---
+
+# Slice 7 — the live bridge to AutoTrade (25 Sep 2026, locked)
+
+Owner decisions: **"Locked bridge"** and **"defined-risk shorts only"**. The pilot never talks to a broker. It hands the exact reviewed plan to engine AutoTrade, and AutoTrade owns execution.
+
+## Engine side (`engine/backend/autotrade/intents/`, `api/intents_routes.py`; branch `feat/autotrade-strategy-intents`)
+Before this slice, AutoTrade had no intake for external baskets:
+- options were gated off as "not certified";
+- short options were disallowed;
+- there was no multi-leg sequencing;
+- there was no operator arm.
+
+The new module is additive; no existing session, ladder or exit code changed.
+- **Intake** `POST /api/autotrade/intents`, gated by the operator token.
+  - **Legs:** explicit NFO NIFTY legs, LIMIT only, on the tick, at or below the freeze quantity, one expiry, one product.
+  - **Idempotency:** idempotent on (source, key); the same key with a different payload returns 409.
+- **Policy:** defined risk only (per option type, long qty ≥ short qty); **every BUY group must precede every SELL group**; the exact max loss is computed from the expiry payoff.
+- **Gates** (all needed for live; `GET …/capability` lists them):
+  - `FALCON_AUTOTRADE_ENABLED`, `FALCON_AUTOTRADE_OPTIONS_ENABLED` and the new `AUTOTRADE_STRATEGY_INTENTS_LIVE`;
+  - the broker in the new `AUTOTRADE_STRATEGY_INTENTS_CERTIFIED` list and `registry.is_certified`;
+  - an unexpired **operator arm** (user + account, basket allowance, max-loss cap);
+  - market open;
+  - basket margin (the broker's own figure) not above free margin, checked right before the first order. An unknown margin refuses.
+  - A live request that fails any gate is **blocked, never downgraded** to a dry run.
+- **Arm:** `POST …/arm` needs a second secret, `FALCON_OPERATOR_ARM_TOKEN`, which the pilot never holds. TTL is at most 8 h, at most 20 baskets, and armed_by is required. Disarm needs only the operator token.
+- **Dispatch:** runs group by group through the existing broker adapter's `place_order`.
+  - A dry run returns DRY_RUN inside the adapter, so no order call is made.
+  - Live: the next group goes only after every leg of the previous group is COMPLETE at full quantity.
+  - Gates and the arm are re-checked before each group.
+  - Any reject, timeout, cancel or disarm cancels the current group's resting orders and sends no later group. A basket that may hold fills ends `attention_required`; nothing is auto-flattened or resubmitted.
+  - Every order is written to the order ledger (ORDER_CREATED before submission).
+- **Live placement is single-shot.** It never uses the adapter's retrying `place_order`. On an exception, the dispatcher queries the orderbook by our tag:
+  - found: the order is adopted;
+  - confirmed absent: a clean failure;
+  - lookup failed: the leg is `unknown`, which counts as a possible fill.
+  - This means a timed-out order is never sent twice.
+- **Restarts:** a startup sweep moves any basket that a restart left `dispatching` to `attention_required`.
+- **Tests:** `tests/autotrade/test_strategy_intents.py`, 34 tests using a fake broker driven through the real single-shot path. The dry run goes through the real Zerodha adapter in dry-run mode.
+
+## Independent review (dev-reviewer) and fixes
+The verdict was: *pass for dry-run, fail for live* until the first two findings below were fixed. All eight are now fixed and regression-tested.
+
+| Severity | Finding | Fix |
+|---|---|---|
+| HIGH | The adapter's retry wrapper could send a timed-out order twice (a doubled short) | Single-shot live placement plus a tag lookup; an unknown outcome is `unknown` and treated as a possible fill |
+| MED | A DB error or crash after an order id was minted could mark a live leg `not_sent`; a restart could leave a basket `dispatching` | Minted-but-unrecorded legs become `unknown`, ending `attention_required`; startup sweep |
+| MED | The broker gate checked the claimed broker, not the account's | The basket is refused before any order on a broker mismatch |
+| LOW-MED | Tenant scope on the operator path | Live needs a named user and account; arming checks that the account belongs to the user (vault) |
+| LOW | Symbol checks were loose (`NIFTYNXT50…` passed) | The symbol must encode this underlying, expiry, strike and type (weekly or monthly form) |
+| LOW | Idempotency races (500, a lost arm allowance) | 409 on a conflicting race; the arm allowance is refunded |
+| LOW | The arm token could equal the operator token | 503 if equal |
+| LOW | Sync DB calls on the event loop at intake | Intake runs in a thread |
+
+The instrument master (lot size) is not checked yet: the broker rejects wrong multiples, and the pilot builds legs from the live instrument list.
+
+## Pilot side
+- **Bridge:** `strategy_builder/autotrade_bridge.py` is the HTTP client (`PILOT_AUTOTRADE_URL`, `PILOT_AUTOTRADE_TOKEN`, `PILOT_AUTOTRADE_ACCOUNT`; unset means "not connected", stated). The route store keeps one hand-off per idempotency key and mirrors AutoTrade's state. The engine identity is `pilot:<user id>`.
+- **What it sends:** only an unexpired, hash-checked, unedited *opening* preview with no blocking check and every short covered. Live also needs `confirm_live`.
+- **Order Review:** a new AutoTrade panel shows:
+  - the gate checklist and the arm;
+  - "Send dry run to AutoTrade";
+  - "Send live", enabled only when AutoTrade reports every gate passing *and* the user ticks the real-orders confirmation;
+  - the status, followed live, with a Stop button.
+- **Fix:** "At the quote" limits are now always on the 0.05 tick (buys round up, sells round down, so they still cross). AutoTrade refuses off-tick limits.
+
+## Verified
+- The engine intent suite passes 34/34. The full autotrade suite has 1469 passed and 2 failed; both failures happen on pristine `main` too (a Rupeezy flag and a step-lock square-off), so they aren't from this change.
+- The pilot suite has 606 passed and 1 skipped, including 6 new bridge and tick tests.
+- **End to end** (the real engine router on a temp DB, the real pilot, HTTP between them, no broker):
+  - the dry run walked BUY g1 then SELL g2 and ended `dry_run_complete` with no order;
+  - a live request was `blocked`, naming all six closed gates;
+  - arming with the service token alone returned 403, and with the arm token 200. That cleared only "armed", and live stayed blocked on the switches;
+  - a naked short put was refused by the pilot (409) and directly by the engine (400).
+
+## To actually go live (owner only, in this order)
+1. Merge the engine branch after review, and deploy to the one live machine.
+2. Certify Zerodha for baskets (`AUTOTRADE_STRATEGY_INTENTS_CERTIFIED=zerodha`), options (`FALCON_AUTOTRADE_OPTIONS_ENABLED=true`) and the path (`AUTOTRADE_STRATEGY_INTENTS_LIVE=true`). `FALCON_AUTOTRADE_ENABLED` is the existing master switch.
+3. Set `FALCON_OPERATOR_ARM_TOKEN` on the engine. On the pilot, set `PILOT_AUTOTRADE_URL` / `PILOT_AUTOTRADE_TOKEN` / `PILOT_AUTOTRADE_ACCOUNT`.
+4. Arm one account for a short window with 1 basket and a small max-loss cap, then send a 1-lot debit spread first.

@@ -109,7 +109,7 @@ class Execution:
    if not bid or not ask:no_quote.append(l);continue
    mid=(bid+ask)/2;spread=(ask-bid)/mid if mid else 1
    if spread>SPREAD_WARN:wide.append(f"{int(l['strike'])} {l['type']} {spread*100:.1f}%")
-   if policy=='marketable':limit=ask if l['side']=='B' else bid
+   if policy=='marketable':limit=tick_round(ask,tick,up=True) if l['side']=='B' else tick_round(bid,tick)   # still crosses; always on the tick
    else:limit=tick_round(mid,tick,up=l['side']=='B')
    if l['id'] in overrides:
     try:o=float(overrides[l['id']])

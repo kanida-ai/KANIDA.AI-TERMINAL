@@ -26,7 +26,7 @@ def _beside_pilot_db(settings):
  return None
 
 
-def mount(app,settings,path=None,derivatives_path=None,live=None,kanida_db=None):
+def mount(app,settings,path=None,derivatives_path=None,live=None,kanida_db=None,bridge=None):
  try:
   from .market import Market
   from .routes import build_router
@@ -47,13 +47,15 @@ def mount(app,settings,path=None,derivatives_path=None,live=None,kanida_db=None)
   from .lab import Lab
   lab=Lab(store,market,kanida_db or os.getenv('PILOT_SB_KANIDA_DB') or str(Path(__file__).resolve().parents[4]/'db'/'kanida.db'),
    derivatives_path or settings.derivatives_database)
+  from .autotrade_bridge import AutotradeRoutes,Bridge
+  autotrade=AutotradeRoutes(store,bridge or Bridge())      # unconfigured unless PILOT_AUTOTRADE_URL + _TOKEN are set
   before=len(app.router.routes)
-  app.include_router(build_router(app,market,store,execution,alerts,lab))
+  app.include_router(build_router(app,market,store,execution,alerts,lab,autotrade))
   # the pilot's catch-all GET /api/{path} and web routes are registered first; put ours ahead of them
   added=app.router.routes[before:]
   del app.router.routes[before:]
   app.router.routes[0:0]=added
-  app.state.strategy_builder_store=store;app.state.strategy_builder_market=market;app.state.strategy_builder_execution=execution;app.state.strategy_builder_alerts=alerts;app.state.strategy_builder_lab=lab
+  app.state.strategy_builder_store=store;app.state.strategy_builder_market=market;app.state.strategy_builder_execution=execution;app.state.strategy_builder_alerts=alerts;app.state.strategy_builder_lab=lab;app.state.strategy_builder_autotrade=autotrade
   return store
  except Exception:
   log.exception('The strategy builder could not start; the pilot runs without it.')

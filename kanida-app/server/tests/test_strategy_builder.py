@@ -306,7 +306,7 @@ def test_preview_is_the_exact_plan_with_hash_expiry_sequence_and_slices(live):
  assert [c['key'] for c in p['checks'] if c['status']=='block'] in ([],['margin']) and len(p['hash'])==64 and p['ttl']==30 and p['mode']=='paper' and p['live']['enabled'] is False
  buy,sell=p['orders']
  assert buy['side']=='B' and buy['group']==1 and sell['group']==2
- assert buy['slices']==[1755,195] and buy['limit']==buy['ask'] and sell['limit']==sell['bid']
+ assert buy['slices']==[1755,195] and buy['limit']==EX.tick_round(buy['ask'],0.05,up=True) and sell['limit']==EX.tick_round(sell['bid'],0.05)
  assert p['margin']['final']>0 and {c['key'] for c in p['checks']}>={'market_open','quotes_fresh','quotes_present','spread','freeze','risk','margin'}
  a=owner.post('/api/sb/analyze',json={'body':s['draft']['body']}).json()
  assert a['margin']['status']=='available' and a['margin']['source'].startswith('Zerodha Kite') and a['price_basis']==['exec']
@@ -705,3 +705,121 @@ def test_replay_uses_real_bars_and_skips_gaps():
  r=LB.replay(legs,c)
  assert [p['t'] for p in r['points']]==['t1','t3'] and r['skipped_bars']==1
  assert r['points'][-1]['pnl']==65*(120-100)-65*(40-50)
+
+
+# --- slice 7: the AutoTrade bridge (engine intents; dry run by default) ----------------------------------------------
+from kanida_pilot.strategy_builder.autotrade_bridge import Bridge
+
+
+class _Resp:
+ def __init__(self,status,data):self.status_code=status;self._d=data
+ def json(self):return self._d
+
+
+class FakeEngine:
+ """Stands in for engine /api/autotrade/intents. Records every request; never a broker."""
+ def __init__(self,live_allowed=False,down=False):
+  self.calls=[];self.intents={};self.live_allowed=live_allowed;self.down=down
+ def request(self,method,url,headers=None,timeout=None,json=None,params=None):
+  self.calls.append((method,url,headers,json,params))
+  if self.down:raise ConnectionError('engine down')
+  if headers.get('X-Operator-Token')!='svc-token':return _Resp(403,{'detail':'operator token required'})
+  path=url.split('/api/autotrade/intents',1)[1]
+  if path=='/capability':
+   return _Resp(200,{'live_allowed':self.live_allowed,'gates':[{'gate':'armed','label':'Operator armed this account','pass':self.live_allowed,'detail':'x'}],'arm':None})
+  if method=='POST' and path=='':
+   key=json['idempotency_key']
+   if key in self.intents:return _Resp(200,{'intent':self.intents[key],'replayed':True})
+   blocked=json['mode']=='live' and not self.live_allowed
+   it={'id':f'i{len(self.intents)+1}','state':'blocked' if blocked else 'accepted','mode':json['mode'],
+    'reason':'LIVE_GATES_FAILED: armed' if blocked else None,'legs':[{**l,'state':'not_sent' if blocked else 'pending'} for l in json['legs']]}
+   self.intents[key]=it;return _Resp(201,{'intent':it,'replayed':False})
+  iid=path.strip('/').split('/')[0];it=next(v for v in self.intents.values() if v['id']==iid)
+  if path.endswith('/cancel'):it.update(state='cancelled',reason='Cancelled before dispatch')
+  elif it['state']=='accepted':it.update(state='dry_run_complete',reason='Dry run - no broker order was placed',legs=[{**l,'state':'dry_run'} for l in it['legs']])
+  return _Resp(200,{'intent':it})
+
+
+@pytest.fixture
+def bridged(tmp_path,monkeypatch):
+ db=store(str(tmp_path/'derivatives.db'))
+ settings=pilot_settings(tmp_path,derivatives_database=db,snapshots='off')
+ app=create_app(settings,evidence=Evidence())
+ fake=FakeKite(db);engine=FakeEngine()
+ monkeypatch.setattr(EX,'market_open',lambda at=None:True)
+ sb=mount(app,settings,str(tmp_path/'sb.db'),live=fake,bridge=Bridge(url='http://engine.test',token='svc-token',account='acct1',client=engine))
+ owner=signup(app)
+ app.state.strategy_builder_execution.stop()
+ yield app,owner,fake,engine
+ app.state.db.close();sb.close()
+
+
+def test_autotrade_unconfigured_is_stated_never_faked(live):
+ _a,owner,_o,_f=live
+ cap=owner.get('/api/sb/autotrade/capability').json()
+ assert cap['configured'] is False and cap['live_allowed'] is False and 'not connected' in cap['reason']
+ s=strategy(owner);p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ assert p['live']['configured'] is False and p['live']['enabled'] is False
+ r=owner.post(f"/api/sb/strategies/{s['id']}/autotrade",json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'k-unconf-1'}).json()
+ assert r['state']=='refused' and 'AUTOTRADE_NOT_CONFIGURED' in r['reason']
+
+
+def test_autotrade_dry_run_hands_off_the_exact_plan_once(bridged):
+ _a,owner,_f,engine=bridged
+ s=strategy(owner,'iron_condor',param=4);p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ assert p['live']['configured'] and p['live']['reachable'] and p['live']['engine_user'].startswith('pilot:')
+ body={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'k-dry-0001'}
+ r=owner.post(f"/api/sb/strategies/{s['id']}/autotrade",json=body).json()
+ assert r['mode']=='dry_run' and r['state'] in ('accepted','dry_run_complete') and r['intent_id']=='i1'
+ sent=[c for c in engine.calls if c[0]=='POST'][0][3]
+ assert sent['mode']=='dry_run' and sent['broker_account_id']=='acct1' and sent['reference']['preview_hash']==p['hash']
+ assert [l['side'] for l in sent['legs']]==['BUY','BUY','SELL','SELL'] and [l['group'] for l in sent['legs']]==[1,1,2,2]
+ assert all(l['expiry']==EXP and l['underlying']=='NIFTY' and l['exchange']=='NFO' and l['quantity']%l['lot_size']==0 for l in sent['legs'])
+ assert {o['symbol']:o['limit'] for o in p['orders']}=={l['tradingsymbol']:l['limit_price'] for l in sent['legs']}
+ again=owner.post(f"/api/sb/strategies/{s['id']}/autotrade",json=body).json()
+ assert again['id']==r['id'] and len([c for c in engine.calls if c[0]=='POST'])==1       # once, whatever the retries
+ got=owner.get(f"/api/sb/autotrade/routes/{r['id']}").json()
+ assert got['state']=='dry_run_complete' and all(l['state']=='dry_run' for l in got['intent']['legs'])
+ assert owner.get(f"/api/sb/autotrade/routes?strategy_id={s['id']}").json()['routes'][0]['id']==r['id']
+ conflict=owner.post(f"/api/sb/strategies/{s['id']}/autotrade",json={**body,'mode':'live','confirm_live':True})
+ assert conflict.status_code==409
+
+
+def test_autotrade_live_needs_confirmation_and_the_engine_decides(bridged):
+ _a,owner,_f,engine=bridged
+ s=strategy(owner,'iron_condor',param=4);p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ body={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'k-live-0001','mode':'live'}
+ assert owner.post(f"/api/sb/strategies/{s['id']}/autotrade",json=body).status_code==400
+ r=owner.post(f"/api/sb/strategies/{s['id']}/autotrade",json={**body,'confirm_live':True}).json()
+ assert r['mode']=='live' and r['state']=='blocked' and 'armed' in r['reason']       # refused by autotrade, not downgraded
+
+
+def test_autotrade_refuses_undefined_risk_and_stale_plans(bridged,monkeypatch):
+ _a,owner,_f,engine=bridged
+ s=strategy(owner,'short_put');p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ r=owner.post(f"/api/sb/strategies/{s['id']}/autotrade",json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'k-naked-01'})
+ assert r.status_code==409 and 'defined-risk' in r.json()['error']
+ s2=strategy(owner);p2=owner.post(f"/api/sb/strategies/{s2['id']}/preview",json={}).json()
+ bad=owner.post(f"/api/sb/strategies/{s2['id']}/autotrade",json={'preview_id':p2['id'],'preview_hash':'x'*64,'idempotency_key':'k-stale-01'})
+ assert bad.status_code==409
+ monkeypatch.setattr(time,'time',lambda:p2['expires_at']+1)
+ old=owner.post(f"/api/sb/strategies/{s2['id']}/autotrade",json={'preview_id':p2['id'],'preview_hash':p2['hash'],'idempotency_key':'k-stale-02'})
+ assert old.status_code==409 and 'expired' in old.json()['error']
+ assert not [c for c in engine.calls if c[0]=='POST']
+
+
+def test_autotrade_unreachable_engine_is_a_refusal(bridged):
+ _a,owner,_f,engine=bridged
+ s=strategy(owner);p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ engine.down=True
+ assert owner.get('/api/sb/autotrade/capability').json()['reachable'] is False
+ r=owner.post(f"/api/sb/strategies/{s['id']}/autotrade",json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'k-down-001'}).json()
+ assert r['state']=='refused' and 'AUTOTRADE_UNREACHABLE' in r['reason']
+
+
+def test_marketable_limits_are_always_on_the_tick(live):
+ _a,owner,_o,_f=live
+ s=strategy(owner,'iron_condor',param=4);p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ for o in p['orders']:
+  assert abs(round(o['limit']/0.05)*0.05-o['limit'])<1e-9                 # autotrade refuses off-tick limits
+  assert (o['limit']>=o['ask']) if o['side']=='B' else (o['limit']<=o['bid'])   # and it still crosses

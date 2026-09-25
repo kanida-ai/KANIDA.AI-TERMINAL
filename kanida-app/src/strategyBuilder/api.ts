@@ -52,10 +52,16 @@ export const sb={
  paperClose:(run:string)=>api(`/api/sb/paper/${run}/close`,{confirm:true}) as Promise<PaperRun>,
 };
 
+export type Gate={gate:string;label:string;pass:boolean;detail:string;deferred?:boolean};
+export type LiveCapability={enabled:boolean;reason:string;configured?:boolean;reachable?:boolean;live_allowed?:boolean;gates?:Gate[];engine_user?:string;broker_account_id?:string|null;
+ arm?:{expires_at:string;armed_by:string;max_baskets:number;baskets_used:number;max_loss_per_basket:number}|null};
+export type AutotradeLeg={tradingsymbol:string;side:string;quantity:number;limit_price:number;group:number;state:string;filled_qty?:number;avg_price?:number|null;error?:string|null};
+export type AutotradeRoute={id:string;strategy_id:string;preview_id:string;mode:'dry_run'|'live';intent_id:string|null;state:string;reason:string|null;created_at:number;updated_at:number;
+ intent:{id:string;state:string;mode:string;reason:string|null;max_loss?:number;legs:AutotradeLeg[]}|null;refresh_error?:string};
 export type Check={key:string;label:string;status:'pass'|'warn'|'block';detail:string};
 export type PreviewOrder={leg_id:string;symbol:string;type:Kind;strike:number;side:Side;qty:number;lots:number;lot_size:number;limit:number;bid:number;ask:number;group:number;slices:number[];charges:number};
 export type Preview={id:string;hash:string;kind:'open'|'close';strategy_id:string;deployment_id:string|null;product:string;price_policy:string;orders:PreviewOrder[];checks:Check[];can_submit:boolean;requires_ack:boolean;
- margin:{initial:number;final:number;per_leg:any[]}|null;charges:number;structure:string;as_of:string;spot:number;expires_at:number;ttl:number;mode:string;live:{enabled:boolean;reason:string};sequence:string;net_premium:number};
+ margin:{initial:number;final:number;per_leg:any[]}|null;charges:number;structure:string;as_of:string;spot:number;expires_at:number;ttl:number;mode:string;live:LiveCapability;sequence:string;net_premium:number};
 export type Intent={id:string;kind:string;grp:number;seq:number;leg_id:string;symbol:string;side:Side;qty:number;limit_price:number;state:string;filled_qty:number;avg_price:number|null;fees:number;reason:string|null};
 export type Deployment={id:string;strategy_id:string;strategy_name?:string;status:string;mode:string;product:string;opened_at:number;closed_at:number|null;margin:any;intents:Intent[];
  fills:{leg_id:string;side:Side;qty:number;price:number;fees:number;quote_ts:string}[];positions:{leg_id:string;label:string;units:number;avg:number|null;mark:number|null;unrealised:number|null;realised:number;fees:number}[];
@@ -69,6 +75,11 @@ export const exec={
  get:(id:string)=>api(`/api/sb/deployments/${id}`) as Promise<Deployment>,
  cancel:(id:string)=>api(`/api/sb/deployments/${id}/cancel`,{}) as Promise<Deployment>,
  closePreview:(id:string,price_policy='marketable')=>api(`/api/sb/deployments/${id}/close-preview`,{price_policy}) as Promise<Preview>,
+ autotradeCapability:()=>api('/api/sb/autotrade/capability') as Promise<LiveCapability>,
+ autotrade:(id:string,p:Preview,key:string,mode:'dry_run'|'live',confirmLive=false)=>api(`/api/sb/strategies/${id}/autotrade`,{preview_id:p.id,preview_hash:p.hash,idempotency_key:key,mode,confirm_live:confirmLive}) as Promise<AutotradeRoute>,
+ autotradeRoutes:(strategyId:string)=>api(`/api/sb/autotrade/routes?strategy_id=${encodeURIComponent(strategyId)}`) as Promise<{routes:AutotradeRoute[]}>,
+ autotradeGet:(rid:string)=>api(`/api/sb/autotrade/routes/${rid}`) as Promise<AutotradeRoute>,
+ autotradeCancel:(rid:string)=>api(`/api/sb/autotrade/routes/${rid}/cancel`,{}) as Promise<AutotradeRoute>,
  close:(id:string,p:Preview,key:string)=>api(`/api/sb/deployments/${id}/close`,{preview_id:p.id,preview_hash:p.hash,idempotency_key:key,confirm:true}) as Promise<Deployment>,
 };
 

@@ -1,10 +1,11 @@
 // K11 Order review (slice 4). The preview IS the plan: exact contracts, sides, quantities, limits, product, sequence,
 // slices, the quotes it came from, the checks, exchange margin and charges - with a hash and a 30 s expiry. Placing
-// sends that exact plan, once (idempotency key), to the PAPER broker. Live routing is shown as a disabled capability.
+// sends that exact plan, once (idempotency key), to the PAPER broker - or (slice 7) hands it to engine AutoTrade,
+// dry run by default; live only when AutoTrade's own gates pass and the user confirms.
 import React,{useCallback,useEffect,useRef,useState} from 'react';
 import {Pressable,TextInput,View} from 'react-native';
 import {Badge,Button,C,Checkbox,Chip,Icon,Loading,Sheet,T,s} from '../ui';
-import {exec,type Deployment,type Preview} from './api';
+import {exec,type AutotradeRoute,type Deployment,type Preview} from './api';
 import {inr,istEpoch,istStamp,num,signed,strikeText} from './format';
 
 const key=()=>'k'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
@@ -31,11 +32,9 @@ export function OrderReview({visible,onClose,strategyId,deployment,onPlaced}:{vi
  return <Sheet visible={visible} onClose={onClose} wide title={closing?'Close paper deployment':'Review paper orders'}
   subtitle={p?`${p.structure} · quotes ${istStamp(p.as_of)} · spot ${num(p.spot,2)} · PAPER - no order reaches a broker`:'Building the exact order plan from live quotes…'}
   footer={<View style={[s.between,{flexWrap:'wrap',gap:10}]}>
-   <View style={{gap:2,flex:1,minWidth:220}}>{p&&<T style={{fontSize:12,color:expired?C.red:C.muted}}>{expired?'Preview expired - quotes move. Refresh to review again.':`This plan is valid for ${left}s · hash ${p.hash.slice(0,10)}`}</T>}
-    {p&&<T style={{fontSize:11,color:C.muted}}>{p.live.reason}</T>}</View>
+   <View style={{gap:2,flex:1,minWidth:220}}>{p&&<T style={{fontSize:12,color:expired?C.red:C.muted}}>{expired?'Preview expired - quotes move. Refresh to review again.':`This plan is valid for ${left}s · hash ${p.hash.slice(0,10)}`}</T>}</View>
    <View style={[s.row,{gap:8,flexWrap:'wrap'}]}>
     <Button label="Refresh" icon="refresh-cw" kind="outline" onPress={load}/>
-    <Button label="Send live" icon="lock" kind="outline" disabled accessibilityHint={p?.live.reason}/>
     <Button label={closing?`Place ${n} close order${n===1?'':'s'} (paper)`:`Place ${n} paper order${n===1?'':'s'}`} icon="check" loading={busy}
      disabled={!p||!p.can_submit||expired||(p.requires_ack&&!ack)} onPress={place}/>
    </View></View>}>
@@ -73,12 +72,51 @@ export function OrderReview({visible,onClose,strategyId,deployment,onPlaced}:{vi
     <Icon name={c.status==='pass'?'check-circle':c.status==='warn'?'alert-triangle':'x-octagon'} size={14} color={c.status==='pass'?C.green:c.status==='warn'?C.amber:C.red}/>
     <View style={{flex:1}}><T style={{fontSize:12}}>{c.label}</T><T style={{fontSize:11,color:C.muted}}>{c.detail}</T></View></View>)}</View>
    {p.requires_ack&&<Checkbox checked={ack} onChange={setAck} tone={C.red} label="I understand this structure has unlimited loss" detail="Even on paper, this is how an unhedged short behaves."/>}
+   {!closing&&<AutotradePanel p={p} strategyId={strategyId} expired={expired}/>}
    <View style={{backgroundColor:C.paper,borderRadius:10,padding:12,gap:4}}>
     <T style={{fontSize:12}}>Fill rule (paper): a BUY fills at the ask once the ask is at or below your limit; a SELL fills at the bid once the bid is at or above your limit. Resting orders are re-checked against live quotes every few seconds while the market is open.</T>
     <T style={{fontSize:11,color:C.muted}}>Pressing Place sends this exact plan once. Pressing it again cannot create a second set of orders.</T>
    </View>
   </>}
  </Sheet>;
+}
+const FINAL=['completed','dry_run_complete','blocked','failed','cancelled','attention_required','refused'];
+const ROUTE_TONE:Record<string,any>={completed:'green',dry_run_complete:'neutral',accepted:'amber',dispatching:'amber',sending:'amber',blocked:'red',refused:'red',failed:'red',attention_required:'red',cancelled:'neutral'};
+
+/** Slice 7: hand this exact plan to engine AutoTrade. Dry run by default; live only when AutoTrade reports every gate
+ *  passing (including an operator arm this app cannot set) AND the user confirms real orders. AutoTrade decides. */
+function AutotradePanel({p,strategyId,expired}:{p:Preview;strategyId:string;expired:boolean}){
+ const cap=p.live;const [route,setRoute]=useState<AutotradeRoute|null>(null);const [busy,setBusy]=useState('');const [err,setErr]=useState('');const [sure,setSure]=useState(false);
+ const idem=useRef(key());
+ useEffect(()=>{setRoute(null);setSure(false);idem.current=key();},[p.id]);
+ useEffect(()=>{if(!route||FINAL.includes(route.state))return;const t=setInterval(async()=>{try{setRoute(await exec.autotradeGet(route.id));}catch{}},2000);return()=>clearInterval(t);},[route]);
+ async function send(mode:'dry_run'|'live'){setBusy(mode);setErr('');
+  try{setRoute(await exec.autotrade(strategyId,p,idem.current+mode,mode,mode==='live'&&sure));}catch(e:any){setErr(e.message);}finally{setBusy('');}}
+ const ready=!!cap.enabled&&p.can_submit&&!expired&&!p.requires_ack;
+ return <View style={{borderWidth:1,borderColor:C.line,borderRadius:12,padding:12,gap:8}}>
+  <View style={[s.between,{flexWrap:'wrap',gap:6}]}><T style={{fontFamily:'InterSemi',fontSize:13}}>AutoTrade hand-off</T>
+   <Badge label={!cap.configured?'NOT CONNECTED':!cap.reachable?'UNREACHABLE':cap.live_allowed?'LIVE POSSIBLE':'DRY RUN ONLY'} tone={cap.live_allowed?'red':cap.enabled?'neutral':'amber'}/></View>
+  <T style={{fontSize:11,color:C.muted}}>{cap.reason}</T>
+  {!!cap.gates?.length&&<View style={{gap:4}}>{cap.gates.map(g=><View key={g.gate} style={[s.row,{gap:8,alignItems:'flex-start'}]}>
+   <Icon name={g.deferred?'clock':g.pass?'check-circle':'x-circle'} size={13} color={g.deferred?C.muted:g.pass?C.green:C.muted}/>
+   <View style={{flex:1}}><T style={{fontSize:12}}>{g.label}</T><T style={{fontSize:10,color:C.muted}}>{g.detail}</T></View></View>)}</View>}
+  {cap.configured&&<T style={{fontSize:10,color:C.muted}}>{`AutoTrade identity ${cap.engine_user}${cap.broker_account_id?` · account ${cap.broker_account_id}`:''}. Only the operator can arm it, outside this app.`}</T>}
+  {cap.live_allowed&&<Checkbox checked={sure} onChange={setSure} tone={C.red} label="I confirm AutoTrade may place REAL orders on my broker account for this exact plan" detail="Hedges are bought first; sells go only after every hedge fills. AutoTrade can still refuse."/>}
+  <View style={[s.row,{gap:8,flexWrap:'wrap'}]}>
+   <Button label="Send dry run to AutoTrade" icon="send" kind="outline" loading={busy==='dry_run'} disabled={!ready||!!route} onPress={()=>send('dry_run')}/>
+   <Button label="Send live" icon={cap.live_allowed?'zap':'lock'} kind="outline" loading={busy==='live'} disabled={!ready||!cap.live_allowed||!sure||!!route} accessibilityHint={cap.reason} onPress={()=>send('live')}/>
+  </View>
+  {!!err&&<T style={{fontSize:12,color:C.red}}>{err}</T>}
+  {route&&<View style={{backgroundColor:C.paper,borderRadius:10,padding:10,gap:4}}>
+   <View style={[s.row,{gap:8,flexWrap:'wrap'}]}><Badge label={`${route.mode==='live'?'LIVE':'DRY RUN'} · ${route.state.replace(/_/g,' ').toUpperCase()}`} tone={ROUTE_TONE[route.state]||'amber'}/>
+    {!FINAL.includes(route.state)&&<T style={{fontSize:11,color:C.muted}}>Following AutoTrade…</T>}</View>
+   {!!route.reason&&<T style={{fontSize:11,color:C.muted}}>{route.reason}</T>}
+   {route.intent?.legs.map((l,i)=><T key={i} style={{fontSize:11,color:l.state==='filled'||l.state==='dry_run'?C.muted:C.amber}}>
+    {`g${l.group} · ${l.side} ${l.quantity} ${l.tradingsymbol} @ ${num(l.limit_price)} · ${l.state.replace(/_/g,' ')}${l.avg_price?` @ ${num(l.avg_price)}`:''}${l.error?` · ${l.error}`:''}`}</T>)}
+   {route.mode==='dry_run'&&FINAL.includes(route.state)&&<T style={{fontSize:10,color:C.muted}}>A dry run walks the same group order through AutoTrade's broker adapter without sending any order.</T>}
+   {!FINAL.includes(route.state)&&<Button label="Stop" kind="outline" icon="x" onPress={async()=>{try{setRoute(await exec.autotradeCancel(route.id));}catch(e:any){setErr(e.message);}}}/>}
+  </View>}
+ </View>;
 }
 function Kv({k,v,note}:{k:string;v:string;note?:string}){return <View style={{gap:1,minWidth:140}}><T style={{fontSize:11,color:C.muted}}>{k}</T><T style={{fontSize:15,fontFamily:'InterSemi'}}>{v}</T>{note&&<T style={{fontSize:10,color:C.muted}}>{note}</T>}</View>;}
 

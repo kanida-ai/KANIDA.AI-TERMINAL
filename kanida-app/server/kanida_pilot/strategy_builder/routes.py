@@ -54,7 +54,7 @@ def _name(v,fallback):
  return t or fallback
 
 
-def build_router(app,market,store,execution=None,alerts=None,lab=None):
+def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=None):
  r=APIRouter()
  def me(request):return _identity(app,request)
  def own(user,sid):
@@ -241,6 +241,44 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None):
   store.paper_close(user['id'],run,fills,chain['as_of'])
   return S.paper_view(market,store,user['id'],run)
 
+ # --- slice 7: hand a reviewed plan to engine autotrade (dry run by default; live only when autotrade's gates pass) ---
+ def _live(user_id):
+  from .execution import LIVE_CAPABILITY
+  if not autotrade:return {**LIVE_CAPABILITY,'configured':False,'live_allowed':False,'gates':[]}
+  cap=autotrade.bridge.capability(user_id)
+  return {**cap,'enabled':bool(cap['configured'] and cap['reachable'])}
+
+ @r.get('/api/sb/autotrade/capability')
+ def at_capability(request:Request):
+  return _live(me(request)['id'])
+
+ @r.post('/api/sb/strategies/{sid}/autotrade')
+ def at_route(request:Request,sid:str,data:dict=Body(default={})):
+  if not autotrade:raise PilotError(503,'AUTOTRADE_UNAVAILABLE','AutoTrade hand-off is not available on this server.')
+  user=me(request);s=own(user,sid)
+  mode='live' if data.get('mode')=='live' else 'dry_run'
+  if mode=='live' and data.get('confirm_live') is not True:
+   raise PilotError(400,'LIVE_CONFIRM_REQUIRED','A live request needs the explicit real-orders confirmation.')
+  return ex(autotrade.route,user['id'],s,str(data.get('preview_id') or ''),str(data.get('preview_hash') or ''),
+   str(data.get('idempotency_key') or ''),mode)
+
+ @r.get('/api/sb/autotrade/routes')
+ def at_routes(request:Request,strategy_id:str|None=None):
+  if not autotrade:return {'routes':[]}
+  return {'routes':autotrade.list(me(request)['id'],strategy_id)}
+
+ @r.get('/api/sb/autotrade/routes/{rid}')
+ def at_get(request:Request,rid:str):
+  d=autotrade.get(me(request)['id'],rid) if autotrade else None
+  if not d:raise PilotError(404,'ROUTE_NOT_FOUND','There is no such AutoTrade hand-off.')
+  return d
+
+ @r.post('/api/sb/autotrade/routes/{rid}/cancel')
+ def at_cancel(request:Request,rid:str):
+  d=ex(autotrade.cancel,me(request)['id'],rid) if autotrade else None
+  if not d:raise PilotError(404,'ROUTE_NOT_FOUND','There is no such AutoTrade hand-off.')
+  return d
+
  # --- slice 4: order review, intents, paper deployments ---------------------------------------------------------------
  def ex(fn,*a,**k):
   if not execution:raise PilotError(503,'EXECUTION_UNAVAILABLE','Order review is not available on this server.')
@@ -253,13 +291,15 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None):
  def status(request:Request):
   me(request);st=market.status() if hasattr(market,'status') else {'live':False,'source':'stored'}
   from .execution import LIVE_CAPABILITY,market_open,now_ist
-  return {**st,'market_open':market_open(),'now_ist':now_ist().strftime('%Y-%m-%d %H:%M:%S'),'live_orders':LIVE_CAPABILITY,
+  return {**st,'market_open':market_open(),'now_ist':now_ist().strftime('%Y-%m-%d %H:%M:%S'),'live_orders':_live(me(request)['id']),
    'paper_capital':execution.paper_capital(me(request)['id']) if execution else None}
 
  @r.post('/api/sb/strategies/{sid}/preview')
  def preview(request:Request,sid:str,data:dict=Body(default={})):
   user=me(request);s=own(user,sid)
-  return ex(execution.preview,user['id'],s,{'product':data.get('product'),'price_policy':data.get('price_policy'),'limits':data.get('limits') or {}})
+  out=ex(execution.preview,user['id'],s,{'product':data.get('product'),'price_policy':data.get('price_policy'),'limits':data.get('limits') or {}})
+  if isinstance(out,dict):out['live']=_live(user['id'])
+  return out
 
  @r.post('/api/sb/strategies/{sid}/deployments')
  def deploy(request:Request,sid:str,data:dict=Body(default={})):
