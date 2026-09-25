@@ -489,3 +489,75 @@ This closes builder gaps from the Sensibull, 5paisa and Rupeezy reconciliation (
   - push and email alerts;
   - notes screen;
   - export.
+
+# Slice 10, batch 2 — integrity: the GTM audit bound in (26 Sep 2026)
+
+Scope and reconciliation: `docs/strategy_builder_study/SLICE_10_PLAN.md`. Source: the GTM audit in `research/gtm-audit-2026-09-25/`.
+
+The three failing invariants from the audit now pass. They are copied unchanged into `server/tests/test_audit_regressions.py`:
+- crossed quote blocks review;
+- a stale live source suppresses the alert;
+- the entry price does not change current delta.
+
+| GTM | What changed | Where |
+|---|---|---|
+| P01 save barrier | **Server:** every action names the draft it acts on (`expected_version` and `input_hash` on snapshot, duplicate and preview → 409 `DRAFT_CHANGED`); snapshots are idempotent per version (`request_id`).<br>**Builder:** one ordered save lane; every action flushes and awaits the save; unmounting sends the pending save; unsaved edits are recovered after a reload; a 409 keeps your edits (keep as copy, replace, or discard); "saved" means the server acknowledged exactly the body on screen; a Retry now button. | `routes.py`, `store.py`, `Builder.tsx` |
+| P02 quote validity | `quotes.py` is the one contract: crossed, zero, missing, stale (the option's own `quote_at`, never the spot's time) and future-time quotes are rejected. Order review adds a `quotes_valid` check; the paper broker never fills on an invalid quote; the Kite chain keeps each option's timestamp. Analysis requests are numbered at the edit, so a late answer can never pass as current. | `quotes.py`, `execution.py`, `kite_market.py`, `market.py`, `Builder.tsx` |
+| P04 cost vs market | Each leg carries `price` (cost), `mark` (the mid of a valid book, else LTP) and `iv` (market IV from the mark). Greeks, POP and SD bands use market IV; the entry price moves P&L and breakevens only. POP and SD use the chain's ATM IV, or are labelled `nearest_leg_iv_proxy`. | `service.py`, `analytics.py` |
+| P10 alerts | A rule evaluates only fresh samples: the reading at most 120 s old, and P&L/delta rules need every held leg fresh. A stale sample is suppressed with a reason and never fires or re-arms. `resume_state` stops a second fire on recovery. The last valid value is kept. | `alerts.py` |
+| P09 calendar | `exchange.py`: exchange time, plus the NSE F&O 2026 holiday list (NSE holiday master, fetched 26 Sep, versioned). An unloaded year keeps executable actions blocked. The calendar is used by review, fills, alerts, evidence DTE and the what-if date stepper. `/api/sb/calendar`. | `exchange.py`, `data/nse_fo_holidays.json` |
+| P03 Discover | Results are held server-side (`result_id`, `candidate_id`). "Use as draft" goes through `/api/sb/discover/use`, which builds the candidate's own terms. An input change marks results stale and disables Use/Compare. The budget is renamed "max-loss budget", and each card notes that funds/margin are not estimated. The LTP basis is disclosed. | `discover.py`, `routes.py`, `Discover.tsx` |
+| P06 Lab | A batch that is running, abandoned or has failures is quarantined: none of its rules can be a survivor, but every planned rule still counts in the family's BH m. A failure shows as counts plus at most 3 reasons. Builder → Lab carries the underlying, width and lots, and shows the mapping. The date fields are labelled "First/Last decision date". `/api/sb/lab/universe`. | `lab.py`, `experiments.py`, `Lab.tsx` |
+| P12/P13 mobile | Order review becomes one card per order, with blockers first; Place stays disabled while a typed limit hasn't been priced. The chain phone view shows the chosen tab's data. Touch targets are 44 px. The Add from chain overflow is fixed. The payoff readout pins on tap. Verified at 390 px on a harness with fake live quotes. | `OrderReview.tsx`, `ChainDrawer.tsx`, `Builder.tsx`, `PayoffChart.tsx` |
+| P07 labels | The chain subtitle, the P&L-by-leg columns (Entry with its basis, and Mark now), the Discover live/stored label, the paper-runs copy and the deployment `mark_basis` are now driven by data. A mark that fell back to LTP is labelled "indicative". | several |
+
+**Tests (before the audit fixes below).**
+- `test_slice10_integrity.py`: 27 tests.
+- `test_audit_regressions.py`: 3 tests.
+- Full pilot suite: 666 passed.
+- The 6 failures in `test_derivatives.py` already fail on the previous commit, are date-dependent, and are flagged as a separate task.
+
+**Not claimed:**
+- live readiness (P15/P16 are gated);
+- native mobile, or real-device Safari/Chrome;
+- screen-reader and keyboard acceptance;
+- a market-open browser rehearsal (due Monday 28 Sep).
+
+## Independent audit (dev-reviewer + dev-quant-auditor) and fixes
+
+**Quant (confirmed).**
+- **F1:** the first version of the quarantine dropped an unhealthy batch's runs out of the Benjamini-Hochberg m. That is a multiple-testing leak: a 200-rule batch with one failure, plus a hand re-run of its best 3 rules, would leave m at about 3.
+  - Fixed: quarantined runs keep counting in m and keep their p in the most-conservative-run rule; they just can't be survivors.
+  - The planned rules that produced nothing are added to m (`extra_tests`).
+  - A batch stuck at "running" is swept to "abandoned" after 6 h, and a crashed batch is recorded as failed.
+- **F2:** time value is now computed from the mark, not the entry.
+- **F3:** a Kite quote without a timestamp is no longer given the host clock. `reading()` returns None, and a chain without a timestamp falls back to the stored reading with that reason.
+- **F4:** the recovery wording now names the state the alert returned to.
+
+**Quant (plausible, fixed).**
+- **P1:** a leg valued at its last trade is judged fresh by its last-trade time. The ATM reference IV is never taken from a stale last trade; it falls back to the labelled proxy.
+- **P3:** deployment P&L reaches an alert only after every freshness check passes.
+
+**Software (required).**
+- **R1:** the conflict choices use the body on screen, including edits made while the banner was showing.
+- **R2:** order review and paper start send `expected_version`/`input_hash`, and `/paper` checks them.
+- **R3:** the snapshot request id is re-checked under the store lock, so two identical concurrent requests create one revision.
+
+**Software (also fixed).**
+- **R4:** a flapping feed records at most one unavailable/recovered event per rule per 15 minutes.
+- **R5:** `/api/sb/status` reports how long the holiday list lasts, and the builder banner warns 45 days before it runs out.
+- **R6:** a reload never moves the draft backwards and never replaces unsaved edits.
+- **R7:** the local recovery copy is re-stamped after each save.
+- **R8:** `discover/use` validates through `body_of`.
+
+**Left open, stated.**
+- Discover results live in one process's memory. This is fine for the single-worker pilot; multi-worker would need SQLite.
+- Kite quote freshness for quiet far-OTM wings: the 30 s limit could block a condor preview. Measure it at Monday's open.
+- The 2027 holiday list must be loaded before 1 Jan 2027.
+- Holi (3 Mar) and Balipratipada (10 Nov) are exactly as NSE's own API serves them; the auditor's memory differed.
+
+Tests after the fixes:
+- 135 across the slice 10, audit and strategy-builder files;
+- full suite 673 passed, with the 6 pre-existing `test_derivatives.py` failures unchanged.
+
+**Workbook.** `docs/KANIDA_Requirements_Master_2026-09-25.xlsx` has a new "GTM audit & Slice 10" tab, a Slice column, and 5 new rows. 4 conflicts were added: the Discover naming, hiding Experiments, paper funds enforcement, and the replay status.

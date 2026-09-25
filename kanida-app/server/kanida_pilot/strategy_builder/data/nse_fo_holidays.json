@@ -1,0 +1,112 @@
+{
+ "version": "nse-fo-2026-v1",
+ "segment": "FO",
+ "years": [
+  2026
+ ],
+ "source": "NSE holiday master, type=trading, segment FO (https://www.nseindia.com/api/holiday-master?type=trading)",
+ "fetched_at": "2026-09-26",
+ "note": "Special sessions (e.g. Diwali Muhurat, marked * by NSE) are announced separately and are NOT open sessions here - the gate treats them as closed.",
+ "holidays": [
+  {
+   "date": "2026-01-15",
+   "weekday": "Thursday",
+   "description": "Municipal Corporation Election - Maharashtra"
+  },
+  {
+   "date": "2026-01-26",
+   "weekday": "Monday",
+   "description": "Republic Day"
+  },
+  {
+   "date": "2026-02-15",
+   "weekday": "Sunday",
+   "description": "Mahashivratri"
+  },
+  {
+   "date": "2026-03-03",
+   "weekday": "Tuesday",
+   "description": "Holi"
+  },
+  {
+   "date": "2026-03-21",
+   "weekday": "Saturday",
+   "description": "Id-Ul-Fitr (Ramadan Eid)"
+  },
+  {
+   "date": "2026-03-26",
+   "weekday": "Thursday",
+   "description": "Shri Ram Navami"
+  },
+  {
+   "date": "2026-03-31",
+   "weekday": "Tuesday",
+   "description": "Shri Mahavir Jayanti"
+  },
+  {
+   "date": "2026-04-03",
+   "weekday": "Friday",
+   "description": "Good Friday"
+  },
+  {
+   "date": "2026-04-14",
+   "weekday": "Tuesday",
+   "description": "Dr. Baba Saheb Ambedkar Jayanti"
+  },
+  {
+   "date": "2026-05-01",
+   "weekday": "Friday",
+   "description": "Maharashtra Day"
+  },
+  {
+   "date": "2026-05-28",
+   "weekday": "Thursday",
+   "description": "Bakri Id"
+  },
+  {
+   "date": "2026-06-26",
+   "weekday": "Friday",
+   "description": "Muharram"
+  },
+  {
+   "date": "2026-08-15",
+   "weekday": "Saturday",
+   "description": "Independence Day"
+  },
+  {
+   "date": "2026-09-14",
+   "weekday": "Monday",
+   "description": "Ganesh Chaturthi"
+  },
+  {
+   "date": "2026-10-02",
+   "weekday": "Friday",
+   "description": "Mahatma Gandhi Jayanti"
+  },
+  {
+   "date": "2026-10-20",
+   "weekday": "Tuesday",
+   "description": "Dussehra"
+  },
+  {
+   "date": "2026-11-08",
+   "weekday": "Sunday",
+   "description": "Diwali Laxmi Pujan*"
+  },
+  {
+   "date": "2026-11-10",
+   "weekday": "Tuesday",
+   "description": "Diwali-Balipratipada"
+  },
+  {
+   "date": "2026-11-24",
+   "weekday": "Tuesday",
+   "description": "Prakash Gurpurb Sri Guru Nanak Dev"
+  },
+  {
+   "date": "2026-12-25",
+   "weekday": "Friday",
+   "description": "Christmas"
+  }
+ ]
+}

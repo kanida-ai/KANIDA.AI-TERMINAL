@@ -28,21 +28,29 @@ export function LabPage(){
    <Chip label="Replay this strategy's contracts" active={mode==='replay'} onPress={()=>strategyId&&setMode('replay')}/>
    <Chip label="Experiments (pre-registered grids)" active={mode==='experiments'} onPress={()=>setMode('experiments')}/>
    {!strategyId&&<T style={{fontSize:11,color:C.muted}}>Open the Lab from a strategy to replay its contracts.</T>}</View>
-  {mode==='experiments'?<Experiments/>:mode==='backtest'?<Backtest strategyId={strategyId} preset={{template:String(p.template||''),param:p.param!=null&&p.param!==''?Number(p.param):undefined}}/>:<ReplayView strategyId={strategyId}/>}
+  {mode==='experiments'?<Experiments/>:mode==='backtest'?<Backtest strategyId={strategyId} preset={{template:String(p.template||''),param:p.param!=null&&p.param!==''?Number(p.param):undefined,
+   underlying:p.underlying?String(p.underlying):undefined,lots:p.lots?Number(p.lots):undefined,structure:p.structure?String(p.structure):undefined}}/>:<ReplayView strategyId={strategyId}/>}
  </View>;
 }
 
-function Backtest({strategyId,preset}:{strategyId:string;preset:{template:string;param?:number}}){
+function Backtest({strategyId,preset}:{strategyId:string;preset:{template:string;param?:number;underlying?:string;lots?:number;structure?:string}}){
  const [tpls,setTpls]=useState<Template[]>([]);const [tpl,setTpl]=useState(preset.template||'iron_condor');const [param,setParam]=useState<number|null>(preset.param??null);
+ const [universe,setUniverse]=useState<string[]>(['NIFTY']);const [und,setUnd]=useState('NIFTY');
+ useEffect(()=>{lab.universe().then(r=>{setUniverse(r.underlyings.length?r.underlyings:['NIFTY']);if(preset.underlying&&r.underlyings.includes(preset.underlying))setUnd(preset.underlying);}).catch(()=>{});},[]);// eslint-disable-line react-hooks/exhaustive-deps
  const [weekday,setWeekday]=useState('2');const [f,setF]=useState<Record<string,string>>({dte_min:'1',dte_max:'7',target_pct:'',stop_pct:'',exit_dte:'',from:'2016-01-01',to:'',split:'',slippage_pct:'0.5'});
  const [run,setRun]=useState<LabRun|null>(null);const [error,setError]=useState('');const [history,setHistory]=useState<LabRun[]>([]);
  const [adj,setAdj]=useState({rule:'',k:'2',trigger_pct:'0.3'});
  useEffect(()=>{sb.templates().then(r=>setTpls(r.templates)).catch(()=>{});lab.runs(strategyId||undefined).then(r=>setHistory(r.runs)).catch(()=>{});},[strategyId]);
  const t=tpls.find(x=>x.key===tpl);
  useEffect(()=>{if(t&&t.param&&(param==null||!t.param.variants.includes(param)))setParam(t.param.default);if(t&&!t.param)setParam(null);},[t]);// eslint-disable-line react-hooks/exhaustive-deps
+ // GTM audit P06: what the draft was vs what this rule will test, stated before Run (never a silent substitution)
+ const fromDraft=!!preset.template;const paramSame=preset.param==null||preset.param===param;const undOk=!preset.underlying||preset.underlying===und;
+ const mapping=fromDraft?[`From your draft: ${preset.underlying||'NIFTY'} ${preset.structure||preset.template.replace(/_/g,' ')}${preset.param!=null?` (${t?.param?.label||'width'} ${preset.param})`:''}${preset.lots?`, ${preset.lots} lot${preset.lots>1?'s':''}`:''}.`,
+  `This test: ${und} ${t?.name||tpl}${param!=null?` (${t?.param?.label||'width'} ${param})`:''}, one set per trade at the current lot size - results scale linearly with lots.`,
+  ...(!paramSame?[`The ${t?.param?.label||'width'} differs from your draft.`]:[]),...(preset.underlying&&!universe.includes(preset.underlying)?[`${preset.underlying} is not in the Lab's universe, so it is tested on ${und}.`]:!undOk?['The underlying differs from your draft.']:[])]:[];
  useEffect(()=>{if(!run||run.status!=='running')return;const id=setInterval(()=>lab.run(run.id).then(r=>{setRun(r);if(r.status!=='running')lab.runs(strategyId||undefined).then(x=>setHistory(x.runs));}).catch(e=>setError(msg(e))),700);return()=>clearInterval(id);},[run,strategyId]);
  async function start(){setError('');
-  try{const body:any={template:tpl,param,weekday,strategy_id:strategyId||undefined};
+  try{const body:any={template:tpl,param,weekday,underlying:und,strategy_id:strategyId||undefined};
    for(const [k,v] of Object.entries(f))if(v.trim()!=='')body[k]=['from','to','split'].includes(k)?v:Number(v);
    if(adj.rule)body.adjust={rule:adj.rule,k:ADJ_K.includes(adj.rule)?Number(adj.k):null,trigger_pct:Number(adj.trigger_pct)};
    setRun(await lab.start(body));}catch(e:any){setError(msg(e));}}
@@ -51,7 +59,12 @@ function Backtest({strategyId,preset}:{strategyId:string;preset:{template:string
    style={{width:w,height:34,borderWidth:1,borderColor:C.line,borderRadius:8,paddingHorizontal:8,color:C.ink,fontFamily:'Inter',fontSize:12,backgroundColor:C.bg}}/></View>;
  return <View style={{gap:14}}>
   <View style={{backgroundColor:C.paper,borderWidth:1,borderColor:C.line,borderRadius:14,padding:16,gap:12}}>
-   <T style={{fontSize:12,color:C.muted}}>NIFTY only in this release. Option prices are modelled from the index and India VIX - no traded option history this deep exists here.</T>
+   <T style={{fontSize:12,color:C.muted}}>{`${universe.length>1?`NIFTY and ${universe.length-1} F&O stocks (today's list - past members that left are not included)`:'NIFTY'}. Option prices are modelled from the underlying and India VIX (stocks: scaled volatility) - no traded option history this deep exists here.`}</T>
+   {universe.length>1&&<View style={[s.row,{flexWrap:'wrap',gap:6,alignItems:'center'}]}><T style={{fontSize:11,color:C.muted}}>Underlying</T>
+    {(universe.includes(und)&&und!=='NIFTY'?['NIFTY',und]:['NIFTY']).map(x=><Chip key={x} label={x} active={und===x} onPress={()=>setUnd(x)}/>)}
+    <TextInput defaultValue={und==='NIFTY'?'':und} onChangeText={v=>{const x=v.trim().toUpperCase();if(!x)setUnd('NIFTY');else if(universe.includes(x))setUnd(x);}} placeholder="Stock symbol" placeholderTextColor={C.muted} accessibilityLabel="Stock symbol for the Lab"
+     autoCapitalize="characters" style={{width:130,height:32,borderWidth:1,borderColor:C.line,borderRadius:8,paddingHorizontal:8,color:C.ink,fontFamily:'Inter',fontSize:12,backgroundColor:C.bg}}/></View>}
+   {mapping.length>0&&<View style={{backgroundColor:mapping.length>2?C.amberBg:C.soft,borderRadius:10,padding:10,gap:2}}>{mapping.map((m,i)=><T key={i} style={{fontSize:12,color:mapping.length>2&&i>1?C.amber:C.ink}}>{m}</T>)}</View>}
    <View style={[s.row,{flexWrap:'wrap',gap:6}]}>{tpls.map(x=><Chip key={x.key} label={x.name+(x.risk==='unhedged'?' ⚠':'')} active={tpl===x.key} onPress={()=>setTpl(x.key)}/>)}</View>
    {t?.param&&<View style={[s.row,{gap:6,flexWrap:'wrap'}]}><T style={{fontSize:11,color:C.muted}}>{t.param.label}</T>{t.param.variants.map(v=><Chip key={v} label={String(v)} active={param===v} onPress={()=>setParam(v)}/>)}</View>}
    {t&&<T style={{fontSize:12,color:C.muted}}>{`Rule: ${t.recipe}`}</T>}
@@ -69,9 +82,10 @@ function Backtest({strategyId,preset}:{strategyId:string;preset:{template:string
      <T style={{fontSize:11,color:C.muted,maxWidth:420}}>Applied at the next open with slippage and charges. Tested with hold-to-expiry or a time exit only, paired with the same rule without the adjustment.</T></View>}
    </View>
    <View style={[s.row,{gap:12,flexWrap:'wrap',alignItems:'flex-end'}]}>
-    {field('from','From',110)}{field('to','To',110,'latest')}{field('split','Out-of-sample from',120,'midpoint')}{field('slippage_pct','Slippage % (min 0.5)')}
+    {field('from','First decision date',120)}{field('to','Last decision date',120,'latest')}{field('split','Out-of-sample from',120,'midpoint')}{field('slippage_pct','Slippage % (min 0.5)')}
     <Button label="Run backtest" icon="play" onPress={start} loading={run?.status==='running'}/>
    </View>
+   <T style={{fontSize:11,color:C.muted}}>The dates bound the DECISION days. A trade decided on the last decision date is held to its own exit, which can fall after that date (up to its expiry).</T>
    {!!error&&<T style={{color:C.red,fontSize:12}}>{error}</T>}
    {run?.status==='running'&&<View style={{gap:4}}><View style={{height:6,backgroundColor:C.line,borderRadius:3}}><View style={{height:6,width:`${Math.round(run.progress*100)}%`,backgroundColor:C.green,borderRadius:3}}/></View>
     <T style={{fontSize:11,color:C.muted}}>{`Running · ${Math.round(run.progress*100)}% (simulation, bootstrap, random-entry control)`}</T></View>}
@@ -209,7 +223,10 @@ function Experiments(){
    <View>{[['Status','Structure','Decide','DTE','OOS n','Mean ₹/trade','p','95% low','Why'],...b.rules.slice(0,show).map((r:any)=>[ST[r.status][0],`${r.template.replace(/_/g,' ')}${r.param!=null?` ${r.param}`:''}`,r.weekday==='daily'?'daily':WD[r.weekday],`${r.dte[0]}-${r.dte[1]}`,String(r.n_oos),r.mean_oos==null?'—':signed(r.mean_oos),r.p==null?'—':r.p.toFixed(4),r.low==null?'—':`${r.low>0?'+':''}${r.low.toFixed(2)}`,r.reason?String(r.reason).replace(/_/g,' '):''])]
     .map((row:string[],i:number)=><View key={i} style={[s.row,{gap:6,borderTopWidth:i?1:0,borderColor:C.line,paddingVertical:4}]}>{row.map((c:string,j:number)=><T key={j} style={{flex:[1.1,1.8,.6,.6,.6,1,.7,.8,1.2][j],fontSize:i?11:10,color:i?(j===0&&c==='Tested ✓'?C.green:C.ink):C.muted,textAlign:j>=4&&j<=7?'right':'left',fontVariant:['tabular-nums'] as any}}>{c}</T>)}</View>)}</View>
    {b.rules.length>show&&<Button label={`Show all ${b.rules.length}`} kind="outline" onPress={()=>setShow(10000)}/>}
-   {!!b.failed_runs.length&&<T style={{fontSize:11,color:C.red}}>{`Failed runs: ${b.failed_runs.map((f:any)=>f.error).join('; ')}`}</T>}
+   {!!b.quarantine&&<View accessibilityRole="alert" style={{backgroundColor:C.amberBg,borderRadius:10,padding:10,gap:4}}>
+    <T style={{fontSize:12,color:C.amber,fontFamily:'InterSemi'}}>Not usable as evidence</T><T style={{fontSize:12,color:C.amber}}>{b.quarantine}</T>
+    {(b.failure_summary||[]).map((f:any,i:number)=><T key={i} style={{fontSize:11,color:C.muted}}>{`${f.count.toLocaleString('en-IN')} × ${f.reason}`}</T>)}
+    {b.failure_kinds>3&&<T style={{fontSize:11,color:C.muted}}>{`…and ${b.failure_kinds-3} other kinds of failure. Full diagnostics stay on the server.`}</T>}</View>}
   </View>}
  </View>;
 }

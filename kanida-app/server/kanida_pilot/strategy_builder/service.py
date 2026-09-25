@@ -4,6 +4,7 @@ from __future__ import annotations
 import math,re
 from . import analytics as A
 from . import charges as CH
+from . import quotes as Q
 from .store import checksum
 from .templates import recognise
 
@@ -83,11 +84,31 @@ def hydrate(market,body):
   # a typed research price off the exchange tick is WARNED (insights), never blocking; fill averages are exempt
   off_tick=(round(round(price/tick)*tick,2) if (used=='manual' and price is not None and not l.get('entry_from_fills')
             and abs(round(price/tick)*tick-price)>1e-6) else None)
+  mark,mark_basis=market_mark(row)
   out.append({**l,'basis_used':used,'lot_size':chain['lot_size'],'ltp':row['ltp'],'bid':row.get('bid'),'ask':row.get('ask'),'price':price,'token':row['token'],'symbol':row['symbol'],
-   # IV is solved by the analytics from THIS leg's own entry price (so the scenario at the reading reprices the leg
-   # at exactly its entry); the chain's rounded display IV is not reused as a model input.
-   'iv':None,'flags':row['flags'],'off_tick':off_tick,'tick':tick})
+   # Cost basis and market valuation are SEPARATE (GTM audit P04): `price` is what the leg cost (entry / fill /
+   # typed), `mark` is what the market says it is worth now, and `iv` is the market's implied volatility solved from
+   # that mark - never from the entry. A custom entry moves P&L and breakevens, not the Greeks.
+   'mark':mark,'mark_basis':mark_basis,'iv':row.get('iv_x'),'iv_source':('market_'+mark_basis) if row.get('iv_x') is not None else None,
+   'quote_at':row.get('quote_at'),'last_trade_time':row.get('last_trade_time'),'flags':row['flags'],'off_tick':off_tick,'tick':tick})
  return chain,out,problems
+
+
+def reference_iv(chain):
+ """The chain's ATM IV as the POP/SD reference - but only from a trustworthy ATM price: a valid-book mid, or a last
+ trade not flagged stale. Otherwise None, and the analytics fall back to a labelled proxy (quant audit P1)."""
+ if not chain.get('atm_iv') or chain.get('atm_strike') is None:return None
+ row=next((r for r in chain['rows'] if r['strike']==chain['atm_strike']),None)
+ sides=[x for x in ((row or {}).get('CE'),(row or {}).get('PE')) if x and x.get('iv') is not None]
+ if not sides or any('stale_trade' in (x.get('flags') or []) and x.get('basis')!='mid' for x in sides):return None
+ return chain['atm_iv']/100.0
+
+
+def market_mark(row):
+ """(current market value of one option unit, basis). Mid of a valid book; the last trade otherwise - and said so."""
+ bid,ask=row.get('bid'),row.get('ask')
+ if bid and ask and 0<bid<=ask:return round((bid+ask)/2,4),'mid'
+ return row.get('ltp'),'ltp'
 
 
 def leg_price(l,row):
@@ -124,13 +145,15 @@ def analysis(market,body,table=True):
  base={'input_hash':checksum(body),'structure':recognise(legs) if legs else {'key':None,'name':'Empty','exact':False}}
  if not chain:return {**base,'status':'no_market','warnings':problems or ['Choose an underlying and an expiry.']}
  reading=A.parse_ist(chain['as_of'])
- a=A.analyze(legs,chain['spot'],reading,body.get('scenario'),charges=CH.estimate,table_step=chain['strike_step'] if table else None)
+ ref=reference_iv(chain)
+ a=A.analyze(legs,chain['spot'],reading,body.get('scenario'),charges=CH.estimate,table_step=chain['strike_step'] if table else None,ref_iv=ref)
  a['warnings']=problems+(a.get('warnings') or [])
  if a.get('status') in ('ok','partial') and chain['quality'].get('live') and hasattr(market,'basket_margin'):
   a['margin']=margin(market,legs)
  if problems and a.get('status')=='ok':a['status']='partial'
  return {**base,**a,'as_of':chain['as_of'],'underlying':chain['underlying'],'lot_size':chain['lot_size'],
-  'quality':chain['quality'],'price_basis':sorted({l['basis_used'] for l in legs}),'legs_quotes':[{'id':l['id'],'bid':l.get('bid'),'ask':l.get('ask'),'ltp':l.get('ltp'),'basis_used':l['basis_used']} for l in legs]}
+  'quality':chain['quality'],'price_basis':sorted({l['basis_used'] for l in legs}),'legs_quotes':[{'id':l['id'],'bid':l.get('bid'),'ask':l.get('ask'),'ltp':l.get('ltp'),'basis_used':l['basis_used'],'mark':l.get('mark'),
+   'mark_basis':l.get('mark_basis'),'quote_at':l.get('quote_at'),'last_trade_time':l.get('last_trade_time'),'quote':Q.leg(l,A.parse_ist(chain['as_of']) or reading,'order')} for l in legs]}
 
 
 # --- paper ------------------------------------------------------------------------------------------------------

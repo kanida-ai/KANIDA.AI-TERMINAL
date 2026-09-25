@@ -32,6 +32,9 @@ create table if not exists paper_fills(
 create table if not exists activity(
  id text primary key, user_id text not null, strategy_id text not null, kind text not null, detail text not null, created_at real not null);
 create index if not exists ix_sb_activity on activity(strategy_id, created_at);
+create table if not exists snapshot_requests(
+ user_id text not null, strategy_id text not null, request_id text not null, revision_id text not null, created_at real not null,
+ primary key(user_id, strategy_id, request_id));
 '''
 MAX_STRATEGIES=200
 
@@ -79,7 +82,10 @@ class Store:
    s=self._strategy(self.c.execute('select * from strategies where id=? and user_id=?',(sid,user_id)).fetchone())
    if not s:return None
    d=self.c.execute('select version,body,updated_at from drafts where strategy_id=?',(sid,)).fetchone()
-  s['draft']={'version':d['version'],'body':json.loads(d['body']),'updated_at':d['updated_at']} if d else None
+  if d:
+   b=json.loads(d['body'])
+   s['draft']={'version':d['version'],'body':b,'updated_at':d['updated_at'],'checksum':checksum(b)}
+  else:s['draft']=None
   return s
 
  def create(self,user_id,name,body,thesis='',source=None):
@@ -126,15 +132,28 @@ class Store:
   return self.get(user_id,sid)
 
  # --- snapshots (immutable revisions) ---------------------------------------------------------------------------
- def snapshot(self,user_id,sid,name,body,reading_at,analysis):
+ def snapshot_for_request(self,user_id,sid,request_id):
+  """The revision an earlier identical snapshot request created (a repeated click never makes a second one)."""
+  with self.lock:
+   r=self.c.execute('select revision_id from snapshot_requests where user_id=? and strategy_id=? and request_id=?',(user_id,sid,request_id)).fetchone()
+  return self.revision(user_id,r[0]) if r else None
+
+ def snapshot(self,user_id,sid,name,body,reading_at,analysis,request_id=None):
   with self.lock:
    s=self.get(user_id,sid)
    if not s:return None
+   if request_id:     # re-checked under the lock: two concurrent identical requests create ONE revision (review F3)
+    done=self.c.execute('select revision_id from snapshot_requests where user_id=? and strategy_id=? and request_id=?',(user_id,sid,request_id)).fetchone()
+    if done:rid=done[0];done=True
+   else:done=None
+  if done:return {**self.revision(user_id,rid),'repeated':True}
+  with self.lock:
    n=(self.c.execute('select max(n) from revisions where strategy_id=?',(sid,)).fetchone()[0] or 0)+1
    rid=uid()
    self.c.execute('insert into revisions values(?,?,?,?,?,?,?,?,?)',(rid,sid,n,name or f'Snapshot {n}',json.dumps(body),checksum(body),
     reading_at,json.dumps(analysis),time.time()))
    self._log(user_id,sid,'snapshot',f'Saved snapshot {n}: {name or "Snapshot "+str(n)}')
+   if request_id:self.c.execute('insert or ignore into snapshot_requests values(?,?,?,?,?)',(user_id,sid,request_id,rid,time.time()))
    self.c.commit()
   return self.revision(user_id,rid)
 

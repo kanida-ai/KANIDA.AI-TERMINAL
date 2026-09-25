@@ -11,7 +11,9 @@ Rules that are never relaxed silently:
   * a candidate that loses money at the user's own target is excluded, and the exclusion is counted and named.
 """
 from __future__ import annotations
+import threading,time,uuid
 from . import analytics as A
+from .store import checksum
 from .templates import BY_KEY,ResolveError,resolve
 
 FAMILIES={'up':['long_call','bull_call_spread','bull_put_spread','call_backspread','short_put','call_ratio_spread','risk_reversal_bullish'],
@@ -20,7 +22,7 @@ FAMILIES={'up':['long_call','bull_call_spread','bull_put_spread','call_backsprea
  'big_move':['long_straddle','long_strangle','long_iron_butterfly','long_iron_condor','strip','strap']}
 VIEWS={'up':'Rise','down':'Fall','range':'Stay in a range','big_move':'Big move either way'}
 EXCLUDED={'unhedged':'unhedged (naked short) structures are off - defined-risk only','over_max_loss':'maximum loss above your limit',
- 'over_budget':'capital at risk above your budget','margin_unknown':'unlimited-risk structure with a budget set (its margin is not computable here)',
+ 'over_budget':'structural maximum loss above your max-loss budget','margin_unknown':'unlimited-risk structure with a max-loss budget set (its loss has no cap)',
  'loses_at_target':'loses money at your target','unresolvable':'not enough priced strikes in this expiry'}
 LIMIT=6
 
@@ -80,7 +82,10 @@ def run(chain,req):
     'param_label':(t['param'] or {}).get('label'),'legs':legs,
     'max_profit':a['max_profit'],'max_loss':a['max_loss'],'breakevens':a['breakevens']['value'],'premium':a['premium']['value'],
     'capital_at_risk':capital,'pop':a['pop'].get('value'),'pnl_at_view':round(fit,2),'return_on_risk':round(score*100,1) if capital else None,
-    'profit_zone_share':round(zone*100) if zone is not None else None,'charges':None,
+    'profit_zone_share':round(zone*100) if zone is not None else None,'charges':None,'price_basis':'ltp',
+    # the budget constrains STRUCTURAL maximum loss. Required funds (exchange margin) are a different number that
+    # Discover does not estimate - stated here, never implied by the budget filter (GTM audit P03)
+    'funds':{'status':'unknown','note':'Exchange margin is not estimated here. The builder and order review show it (live data only).'},
     'evidence':{'status':'model_only','label':'Model only - not tested on history'},'why':[]}
    if key not in best or score>best[key]['_score']:best[key]={**card,'_score':score}
  cards=sorted(best.values(),key=lambda c:-c['_score'])[:LIMIT]
@@ -92,12 +97,12 @@ def run(chain,req):
   'considered':considered,'candidates':cards,
   'excluded':[{'reason':k,'label':EXCLUDED[k],'count':n} for k,n in tally.items() if n],
   'binding':({'reason':binding,'label':EXCLUDED[binding],
-   'suggestion':{'over_max_loss':'Raise your maximum loss or pick a nearer expiry.','over_budget':'Raise the budget or reduce lots.',
+   'suggestion':{'over_max_loss':'Raise your maximum loss or pick a nearer expiry.','over_budget':'Raise the max-loss budget or reduce lots.',
     'loses_at_target':'Your target may be too close to spot for this expiry; try a further target or a later expiry.',
     'unhedged':'Allow unhedged structures only if you understand the tail risk.',
-    'margin_unknown':'Remove the budget to see unlimited-risk structures (margin is shown after a broker connects).',
+    'margin_unknown':'Remove the max-loss budget to see unlimited-risk structures.',
     'unresolvable':'Try another expiry with more listed strikes.'}[binding]} if binding else None),
-  'basis':'Ranked by expiry P&L at your view divided by capital at risk (structural maximum loss). Model values at the stored reading; not a forecast.'}
+  'basis':'Ranked by expiry P&L at your view divided by capital at risk (structural maximum loss). Prices are last traded (LTP) at this reading; the draft reprices at buy-at-ask / sell-at-bid where quotes exist. Model values; not a forecast.'}
 
 
 def _explain(cards,view,target,low,high):
@@ -114,3 +119,42 @@ def _explain(cards,view,target,low,high):
   elif view=='range':head=f"Average across {low:,.0f}-{high:,.0f}: {p:,.0f}; profitable on {c['profit_zone_share']}% of it"
   else:head=f"Worst of {low:,.0f} / {high:,.0f} on expiry: {p:,.0f}"
   c['why'].insert(0,head+(f" for {cap:,.0f} at risk" if cap else ''))
+
+
+class Results:
+ """Discover answers, held server-side so "Use as draft" builds EXACTLY the candidate that was shown (its own
+ underlying, expiry, legs, lots and thesis) - never the current, possibly edited, form plus old legs (GTM audit P03).
+ In-process and short-lived by design: a result older than TTL must be found again against newer prices."""
+ TTL=1800;MAX=500
+ def __init__(self):self.lock=threading.Lock();self._r={}
+
+ def put(self,user_id,req,out):
+  rid=uuid.uuid4().hex[:16];t=time.time()
+  norm={k:req.get(k) for k in ('underlying','expiry','view','target','low','high','max_loss','budget','hedged_only','lots')}
+  out['result_id']=rid;out['request_hash']=checksum({**norm,'as_of':out['as_of']});out['expires_at']=t+self.TTL
+  for i,c in enumerate(out['candidates']):c['candidate_id']=f'{rid}.{i}'
+  with self.lock:
+   if len(self._r)>=self.MAX:
+    for k in sorted(self._r,key=lambda k:self._r[k]['t'])[:self.MAX//5]:self._r.pop(k,None)
+   self._r[rid]={'user':user_id,'t':t,'out':out,'underlying':str(req.get('underlying') or '').upper()}
+  return out
+
+ def candidate(self,user_id,candidate_id):
+  """(result, candidate) or raises DiscoverError."""
+  rid,_,_i=str(candidate_id or '').partition('.')
+  with self.lock:r=self._r.get(rid)
+  if not r or r['user']!=user_id:raise DiscoverError('This result is no longer available - find strategies again.')
+  if time.time()-r['t']>self.TTL:raise DiscoverError('This result has expired (prices move) - find strategies again.')
+  c=next((c for c in r['out']['candidates'] if c['candidate_id']==candidate_id),None)
+  if not c:raise DiscoverError('There is no such candidate in this result.')
+  return r,c
+
+ def draft_body(self,user_id,candidate_id):
+  r,c=self.candidate(user_id,candidate_id);o=r['out'];inp=o['inputs']
+  legs=[{'id':f'L{i+1}','type':l['type'],'side':l['side'],'strike':l['strike'],'lots':l['lots'],'expiry':o['expiry'],
+   'price_basis':'exec','price':None,'include':True} for i,l in enumerate(c['legs'])]
+  scen={'spot':inp['target']} if o['view'] in ('up','down') and inp.get('target') else {}
+  body={'underlying':r['underlying'],'expiry':o['expiry'],'legs':legs,'scenario':scen,'template':c['template'],'param':c.get('param')}
+  thesis=(f"Discover: {o['view_label']} " + (f"to {inp['target']:,.0f}" if o['view'] in ('up','down') else f"{inp['low']:,.0f}-{inp['high']:,.0f}")
+   + f" by {o['expiry']} (reading {o['as_of']} IST; candidate priced at LTP, draft at buy-at-ask / sell-at-bid)")
+  return body,c,thesis

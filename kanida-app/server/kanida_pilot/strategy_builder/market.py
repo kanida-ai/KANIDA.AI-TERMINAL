@@ -6,7 +6,8 @@ answer names the reading it came from (`as_of`, IST) and the fields that reading
 
 Facts about the store this module states rather than hides:
   * The capture writes last traded price, OI and volume. It does not capture bid/ask, so `bid`/`ask` are null and
-    every price is flagged `basis: 'ltp'` with quality flag `no_bid_ask`.
+    every price is flagged `basis: 'ltp'` with quality flag `no_bid_ask`. Each side's `quote_at` is the capture
+    time of the reading (a stored reading is never an executable quote).
   * Expiry is stored as the exchange-local date string (YYYY-MM-DD). It is served exactly as stored and never
     converted through a UTC timestamp (the date bug seen in two competitors).
   * The first release supports index options only; stock options wait for settlement/delivery handling.
@@ -95,8 +96,8 @@ class Market:
     solved=IV.solve(float(r['ltp']),spot,k,t,r['type'],sensitivity=False)
     iv=solved.get('iv');iv_reason=solved.get('reason')
    side={'token':r['token'],'symbol':r['symbol'],'ltp':r['ltp'],'bid':r['bid'],'ask':r['ask'],'oi':r['oi'],'volume':r['volume'],
-    'last_trade_time':r['last_trade_time'],'iv':round(iv*100,2) if iv else None,'iv_reason':None if iv else iv_reason,
-    'flags':flags,'basis':'ltp'}
+    'last_trade_time':r['last_trade_time'],'iv':round(iv*100,2) if iv else None,'iv_x':iv,'iv_reason':None if iv else iv_reason,
+    'flags':flags,'basis':'ltp','quote_at':at}
    strikes.setdefault(k,{'strike':k,'CE':None,'PE':None})[r['type']]=side
   ordered=sorted(strikes.values(),key=lambda x:x['strike'])
   ks=[x['strike'] for x in ordered]

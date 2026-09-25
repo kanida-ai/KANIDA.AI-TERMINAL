@@ -113,8 +113,15 @@ def board(rows)->Dict[str,Any]:
  return board_entries(runs)
 
 
-def board_entries(runs:List[Dict[str,Any]])->Dict[str,Any]:
- """The same board from precomputed per-run entries (the Lab persists them, so ten thousand runs need no recompute)."""
+def board_entries(runs:List[Dict[str,Any]],extra_tests:Optional[Dict[str,int]]=None)->Dict[str,Any]:
+ """The same board from precomputed per-run entries (the Lab persists them, so ten thousand runs need no recompute).
+
+ Quarantine (GTM audit P06, quant audit F1): an entry flagged `quarantined` (its batch is unhealthy) still COUNTS in
+ its family's number of tests and still contributes its p to the most-conservative-run rule - it just can never make
+ a rule a survivor on its own. `extra_tests` adds, per family, the planned rules of unhealthy batches that produced
+ no p (failed or never ran): tests that were tried stay in m, so a partial batch can never make survivors look
+ stronger than the full batch would have."""
+ extra_tests=extra_tests or {}
  rules={}
  for e in runs:rules.setdefault(e['rule'],[]).append(e)
  out=[]
@@ -127,32 +134,34 @@ def board_entries(runs:List[Dict[str,Any]])->Dict[str,Any]:
    'deciding_run':worst['run_id'] if worst else None,'p':worst['p'] if worst else None,'low':worst['low'] if worst else None,
    'mean_stat':worst['mean_stat'] if worst else None,'stress':worst['stress'] if worst else None,'n_oos':worst['n_oos'] if worst else max(e['n_oos'] for e in rs),
    'mean_oos':worst['mean_oos'] if worst else None,'defined_risk':worst['defined_risk'] if worst else base['defined_risk'],
-   'unit':(worst or base)['unit'],'latest':max(e['created_at'] for e in rs)})
+   'unit':(worst or base)['unit'],'latest':max(e['created_at'] for e in rs),'quarantined':all(e.get('quarantined') for e in rs)})
  passed=set();fam_m={}
- for u in sorted({family_of(r['underlying']) for r in out}):   # one family per index, one for all stocks
-  tests=sorted([r for r in out if r['p'] is not None and family_of(r['underlying'])==u],key=lambda r:r['p']);m=len(tests);k=0
+ for u in sorted({family_of(r['underlying']) for r in out}|set(extra_tests)):   # one family per index, one for all stocks
+  tests=sorted([r for r in out if r['p'] is not None and family_of(r['underlying'])==u],key=lambda r:r['p']);m=len(tests)+int(extra_tests.get(u,0));k=0
   for i,r in enumerate(tests,1):
    if r['p']<=i/m*FDR_Q:k=i                                    # BH step-up: the largest rank that passes
   passed|={id(r) for r in tests[:k]};fam_m[u]=m
  for r in out:
   r['reason']=None
   if r['p'] is None:r['status']='insufficient'
+  elif r['quarantined']:r['status']='tested_not_significant';r['reason']='quarantined'
   elif id(r) not in passed or (r['mean_stat'] or 0)<=0:r['status']='tested_not_significant';r['reason']='not_significant'
   elif not r['defined_risk']:r['status']='tested_not_significant';r['reason']='tail_undefined'
   elif (r['stress'] or 0)<=0:r['status']='tested_not_significant';r['reason']='tail_stress'
   else:r['status']='tested_significant'
   r['tests']=fam_m.get(family_of(r['underlying']),0);r['family']=family_of(r['underlying'])
  by_run={rid:r for r in out for rid in r['run_ids']}
- fams={u:{'tests':fam_m.get(u,0),'rules':sum(1 for r in out if family_of(r['underlying'])==u),'survivors':sum(1 for r in out if family_of(r['underlying'])==u and r['status']=='tested_significant')} for u in {family_of(r['underlying']) for r in out}}
+ fams={u:{'tests':fam_m.get(u,0),'rules':sum(1 for r in out if family_of(r['underlying'])==u),'survivors':sum(1 for r in out if family_of(r['underlying'])==u and r['status']=='tested_significant'),
+  'quarantined_tests':sum(1 for r in out if family_of(r['underlying'])==u and r['quarantined'] and r['p'] is not None)+int(extra_tests.get(u,0))} for u in {family_of(r['underlying']) for r in out}|set(extra_tests)}
  n=fams.get('NIFTY',{'tests':0,'survivors':0})
  return {'rules':out,'by_run':by_run,'families':fams,'tests':n['tests'],'runs':len(runs),'survivors':n['survivors'],'fdr_q':FDR_Q,'min_oos':MIN_OOS}
 
 
 def next_session_dte(expiry:str,as_of:str)->int:
  """Calendar days to expiry from the NEXT session after the reading - the Lab enters at the next open after its
- decision. Weekends are skipped; exchange holidays are not known here (conservative by at most the holiday)."""
- d=date.fromisoformat(as_of[:10])+timedelta(days=1)
- while d.weekday()>=5:d+=timedelta(days=1)
+ decision. Weekends and NSE holidays (shared exchange calendar) are skipped."""
+ from .exchange import add_trading_days
+ d=add_trading_days(date.fromisoformat(as_of[:10]),1)
  return (date.fromisoformat(expiry)-d).days
 
 

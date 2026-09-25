@@ -637,14 +637,29 @@ class Lab:
   """Every completed plain backtest of this user, BH-corrected per family. Per-run evidence entries are computed once
   and persisted (lab_evidence); only runs without one are read in full."""
   from . import evidence as EV
+  try:
+   from .experiments import sweep_stale
+   sweep_stale(self)          # outside the lock: it takes the lock itself
+  except sqlite3.OperationalError:pass
   with self.lock:
    rows=self.c.execute("""select r.id,r.spec,r.created_at,e.entry from lab_runs r left join lab_evidence e on e.run_id=r.id
      where r.user_id=? and r.kind='backtest' and r.status='completed' order by r.created_at""",(user_id,)).fetchall()
-  entries=[];new=[]
+   # GTM audit P06 + quant audit F1: a batch that is running, abandoned or finished with ANY failed rule is QUARANTINED.
+   # Its runs can never make a rule a survivor, but they - and its planned rules that produced nothing - still count
+   # as tests in the family's Benjamini-Hochberg m. Excluding them from m would let a partial batch (or a hand-picked
+   # re-run of its best rules) pass on a smaller correction.
+   try:
+    bad={r[0]:(r[1],json.loads(r[2]).get('underlying','NIFTY')) for r in self.c.execute(
+     "select id,planned,grid from lab_batches where user_id=? and status!='completed'",(user_id,)).fetchall()}
+   except sqlite3.OperationalError:bad={}
+  entries=[];new=[];seen_bad={}
   for r in rows:
+   qb=json.loads(r['spec']).get('batch') if bad else None
+   if qb not in bad:qb=None
+   if qb:seen_bad[qb]=seen_bad.get(qb,0)+1
    if r['entry']:
     e=json.loads(r['entry'])
-    if not e.get('adjust'):entries.append(e)
+    if not e.get('adjust'):entries.append({**e,'quarantined':True} if qb else e)
     continue
    s=json.loads(r['spec'])
    if s.get('adjust'):
@@ -652,11 +667,15 @@ class Lab:
    with self.lock:res=self.c.execute('select result from lab_runs where id=?',(r['id'],)).fetchone()['result']
    res=json.loads(res) if res else None
    if not res or res.get('kind')!='backtest':continue
-   e=EV.entry(r['id'],s,res,r['created_at']);entries.append(e);new.append((r['id'],json.dumps(e)))
+   e=EV.entry(r['id'],s,res,r['created_at']);entries.append({**e,'quarantined':True} if qb else e);new.append((r['id'],json.dumps(e)))
   if new:
    with self.lock:
     self.c.executemany('insert or replace into lab_evidence values(?,?)',new);self.c.commit()
-  return EV.board_entries(entries)
+  extra={}
+  for bid,(planned,und) in bad.items():
+   miss=max(0,int(planned)-seen_bad.get(bid,0))
+   if miss:f=EV.family_of(und);extra[f]=extra.get(f,0)+miss
+  return EV.board_entries(entries,extra)
 
  def adjust_evidence_for(self,user_id,template,param,rule,k):
   """The newest completed Lab run of EXACTLY this adjustment (rule and k) on EXACTLY this structure (template and

@@ -34,7 +34,7 @@ function PaperRuns(){
  return <View style={{padding:wide?24:14,gap:16,maxWidth:1100,width:'100%',alignSelf:'center'}}>
   <View style={[s.row,{gap:8}]}><Button label="My Strategies" icon="chevron-left" kind="outline" onPress={()=>router.replace('/strategies' as any)}/></View>
   <View style={{gap:4}}><T style={{fontFamily:'ManropeBold',fontSize:22}}>Paper runs</T>
-   <T style={{fontSize:13,color:C.muted}}>Simulated ledgers only. Fills are last traded prices moved against you by slippage, with estimated charges. No order was ever sent to a broker.</T></View>
+   <T style={{fontSize:13,color:C.muted}}>Simulated ledgers only - no order was ever sent to a broker. Two kinds: paper deployments fill limit orders against live bid/ask quotes; stored-reading paper runs fill at the last traded price moved against you by slippage. Both include estimated charges.</T></View>
   {!!error&&<T style={{color:C.red}}>{error}</T>}
   {cap&&<T style={{fontSize:12,color:C.muted}}>{`Paper capital ${inr(cap.capital)} · margin blocked ${inr(cap.blocked)} · available ${inr(cap.available)}`}</T>}
   {deps.length>0&&<View style={{gap:10}}><T style={{fontFamily:'InterSemi'}}>Paper deployments (orders filled against live quotes)</T>

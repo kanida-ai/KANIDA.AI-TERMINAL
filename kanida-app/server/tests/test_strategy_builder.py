@@ -248,7 +248,7 @@ class FakeKite:
    row={'strike':r['strike']}
    for k in ('CE','PE'):
     x=dict(r[k]);b=self.books.get(x['symbol'],(round(x['ltp']-0.5,2),round(x['ltp']+0.5,2)))
-    x['bid'],x['ask']=b;x['flags']=[];row[k]=x
+    x['bid'],x['ask']=b;x['flags']=[];x['quote_at']=self._now();row[k]=x
    rows.append(row)
   ch['rows']=rows;ch['as_of']=self._now();ch['quality']={**ch['quality'],'live':True}
   return ch

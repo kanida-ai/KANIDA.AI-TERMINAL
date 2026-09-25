@@ -123,12 +123,24 @@ def run_batch(lab,user_id:str,grid_key:str,workers:Optional[int]=None,on_progres
  by_u={}
  for sp in specs:by_u.setdefault(sp['underlying'],[]).append(sp)
  lots={u:(lab.lot_size(u) if hasattr(lab,'lot_size') else 65) for u in by_u}
- done=failed=0
  # NIFTY has one underlying: split its rules into chunks so every worker gets some; stocks are one task per stock
  tasks=[]
  for u,sps in by_u.items():
   n=max(1,len(sps)//((os.cpu_count() or 2)*2)) if len(by_u)==1 else len(sps)
   for i in range(0,len(sps),n):tasks.append((u,sps[i:i+n],lots[u],special))
+ try:
+  done,failed=_execute(lab,user_id,bid,specs,tasks,workers,nifty,vix,on_progress)
+ except Exception as e:  # noqa: BLE001 - a crashed batch is recorded as failed, never left 'running'
+  with lab.lock:
+   lab.c.execute("update lab_batches set status='failed',finished_at=?,error=? where id=?",(time.time(),f'{type(e).__name__}: {e}'[:300],bid));lab.c.commit()
+  raise
+ with lab.lock:
+  lab.c.execute("update lab_batches set status=?,finished_at=? where id=?",('completed' if not failed else 'completed_with_failures',time.time(),bid));lab.c.commit()
+ return batch(lab,user_id,bid)
+
+
+def _execute(lab,user_id,bid,specs,tasks,workers,nifty,vix,on_progress):
+ done=failed=0
  with ProcessPoolExecutor(max_workers=workers or max(1,(os.cpu_count() or 2)-1),initializer=_init,initargs=(lab.daily.kanida_db,nifty,vix)) as ex:
   futs=[ex.submit(_group,tk) for tk in tasks]
   for f in as_completed(futs):
@@ -142,9 +154,20 @@ def run_batch(lab,user_id:str,grid_key:str,workers:Optional[int]=None,on_progres
      else:done+=1
     if on_progress:on_progress(done+failed,len(specs))
    with lab.lock:lab.c.execute('update lab_batches set done=?,failed=? where id=?',(done,failed,bid));lab.c.commit()
+ return done,failed
+
+
+STALE_RUNNING=6*3600   # a batch still 'running' this long after it started lost its worker (crash / restart)
+
+
+def sweep_stale(lab)->int:
+ """Mark batches whose worker died as 'abandoned' so they never sit at 'running' (quant audit F1). Returns the count."""
  with lab.lock:
-  lab.c.execute("update lab_batches set status=?,finished_at=? where id=?",('completed' if not failed else 'completed_with_failures',time.time(),bid));lab.c.commit()
- return batch(lab,user_id,bid)
+  lab.c.executescript(SCHEMA)
+  n=lab.c.execute("update lab_batches set status='abandoned',finished_at=?,error=coalesce(error,'worker stopped before the batch finished') "
+   "where status='running' and coalesce(started_at,created_at)<?",(time.time(),time.time()-STALE_RUNNING)).rowcount
+  lab.c.commit()
+ return n
 
 
 def batches(lab,user_id:str)->List[Dict[str,Any]]:
@@ -168,7 +191,16 @@ def batch(lab,user_id:str,bid:str)->Optional[Dict[str,Any]]:
  fam=board['families'].get(family_of(json.loads(b['grid'])['underlying']),{})
  order={'tested_significant':0,'tested_not_significant':1,'insufficient':2}
  rules.sort(key=lambda r:(order[r['status']],r['p'] if r['p'] is not None else 2))
- return {**dict(b),'grid':json.loads(b['grid']),'family':fam,'failed_runs':[{'id':r['id'],'error':r['error']} for r in runs if r['status']=='failed'],
+ # one concise failure summary (distinct reasons, counted) - never thousands of repeated exception strings (GTM P06)
+ from collections import Counter
+ reasons=Counter(str(r['error'] or 'unknown error').strip().splitlines()[-1][:160] for r in runs if r['status']=='failed')
+ healthy=b['status']=='completed'
+ return {**dict(b),'grid':json.loads(b['grid']),'family':fam,'healthy':healthy,
+  'quarantine':None if healthy else ('Still running - its rules cannot be survivors yet.' if b['status']=='running' else
+   'The worker stopped before this batch finished (abandoned) - none of its rules can be a survivor; its planned rules still count as tests.' if b['status'] in ('abandoned','failed') else
+   f"{b['failed']} of {b['planned']} rules failed, so no rule of this batch can be a survivor until a healthy re-run. Every planned rule still counts as a test in the multiple-testing correction."),
+  'failure_summary':[{'reason':k,'count':n} for k,n in reasons.most_common(3)],'failure_kinds':len(reasons),
+  'failed_runs':[{'id':r['id']} for r in runs if r['status']=='failed'][:5],
   'rules':[{k:r.get(k) for k in ('template','param','weekday','dte','n_oos','mean_oos','p','low','stress','status','reason','runs','tests','unit','defined_risk')} for r in rules],
   'counts':{s:sum(1 for r in rules if r['status']==s) for s in order}}
 

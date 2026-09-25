@@ -58,6 +58,7 @@ def _name(v,fallback):
 
 def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=None):
  r=APIRouter()
+ discover_results=D.Results()
  def me(request):return _identity(app,request)
  def own(user,sid):
   s=store.get(user['id'],sid)
@@ -69,6 +70,11 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
  def guard(fn,*a,**k):
   try:return fn(*a,**k)
   except MarketUnavailable as e:raise PilotError(503,'MARKET_UNAVAILABLE',str(e))
+
+ @r.get('/api/sb/calendar')
+ def exchange_calendar(request:Request):
+  me(request);from . import exchange as XC
+  return {**XC.public(),'now':XC.session()}
 
  @r.get('/api/sb/underlyings')
  def underlyings(request:Request):
@@ -144,8 +150,25 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
    out['evidence']={'tests':fam['tests'],'survivors':fam['survivors'],'fdr_q':b['fdr_q'],'min_oos':b['min_oos']}
    out['basis']=('Tier 1: "Tested ✓" defined-risk rules (surviving Benjamini-Hochberg FDR 10% across every distinct rule you tested) whose out-of-sample '
     '95% low return per ₹100 of maximum model loss is above zero, by that low. Tier 2: everything else by expiry P&L at your view divided by capital '
-    'at risk (model, at this reading). Not a forecast.')
-  return out
+    'at risk (model, at this reading). Prices are last traded (LTP); the draft reprices at buy-at-ask / sell-at-bid where quotes exist. Not a forecast.')
+  return discover_results.put(me(request)['id'],{**data,'underlying':got['underlying'],'expiry':got['expiry']},out)
+
+ @r.post('/api/sb/discover/use')
+ def discover_use(request:Request,data:dict=Body(default={})):
+  """Create a draft from a server-held candidate: its own terms, never the current form (GTM audit P03)."""
+  user=me(request)
+  try:body,c,thesis=discover_results.draft_body(user['id'],data.get('candidate_id'))
+  except D.DiscoverError as e:raise PilotError(409,'CANDIDATE_GONE',e.message)
+  from .format_util import dm
+  nb=body_of(body)
+  try:s=store.create(user['id'],_name(f"{body['underlying']} {c['name']} {dm(body['expiry'])}",c['name']),nb,thesis=thesis)
+  except ValueError as e:raise PilotError(409,'STRATEGY_LIMIT',str(e))
+  return {**s,'candidate_id':c['candidate_id']}
+
+ @r.get('/api/sb/lab/universe')
+ def lab_universe(request:Request):
+  me(request)
+  return {'underlyings':(['NIFTY']+sorted(lab.stocks())) if lab else [],'lot_note':'Each test trades ONE set of the structure at the current lot size; results scale linearly with lots.'}
 
  @r.get('/api/sb/lab/batches')
  def lab_batches(request:Request):
@@ -207,13 +230,30 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
   return store.update_meta(user['id'],sid,_name(data.get('name'),'') or None if 'name' in data else None,
    str(data.get('thesis'))[:500] if data.get('thesis') is not None else None,tags)
 
+ def expect_draft(s,data):
+  """GTM audit P01: an action taken on a draft names the version (and optionally the body checksum) the user was
+  looking at. If the server holds anything else, the action is refused instead of acting on the wrong body."""
+  ev=data.get('expected_version')
+  if ev is None:return
+  try:ev=int(ev)
+  except (TypeError,ValueError):raise PilotError(400,'FIELD_INVALID','expected_version must be a whole number.')
+  h=data.get('input_hash')
+  if s['draft']['version']!=ev or (h and h!=s['draft']['checksum']):
+   raise PilotError(409,'DRAFT_CHANGED','The saved draft is not the version on your screen. Save your latest edits and try again.')
+
  @r.post('/api/sb/strategies/{sid}/snapshots')
  def snapshot(request:Request,sid:str,data:dict=Body(default={})):
   user=me(request);s=own(user,sid);body=s['draft']['body']
+  req=str(data.get('request_id') or '')[:64] or None
+  if req:
+   done=store.snapshot_for_request(user['id'],sid,req)
+   if done:return {**done,'repeated':True}
+  expect_draft(s,data)
   if not body['legs']:raise PilotError(400,'EMPTY_STRATEGY','Add at least one leg before saving a snapshot.')
   a=guard(S.analysis,market,body,table=False)
   a.pop('curve',None)
-  return store.snapshot(user['id'],sid,_name(data.get('name'),''),body,a.get('as_of'),a)
+  snap=store.snapshot(user['id'],sid,_name(data.get('name'),''),body,a.get('as_of'),a,req)
+  return snap if snap.get('repeated') else {**snap,'draft_version':s['draft']['version']}
 
  @r.get('/api/sb/revisions/{rid}')
  def revision(request:Request,rid:str):
@@ -234,6 +274,7 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
  def duplicate(request:Request,sid:str,data:dict=Body(default={})):
   user=me(request);s=own(user,sid);body=s['draft']['body']
   rid=data.get('revision_id')
+  if not rid:expect_draft(s,data)
   if rid:
    rev=store.revision(user['id'],str(rid))
    if not rev or rev['strategy_id']!=sid:raise PilotError(404,'SNAPSHOT_NOT_FOUND','There is no such snapshot.')
@@ -248,7 +289,7 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
  # --- paper -----------------------------------------------------------------------------------------------------
  @r.post('/api/sb/strategies/{sid}/paper')
  def paper_start(request:Request,sid:str,data:dict=Body(default={})):
-  user=me(request);s=own(user,sid)
+  user=me(request);s=own(user,sid);expect_draft(s,data)
   if data.get('confirm') is not True:raise PilotError(400,'CONFIRM_REQUIRED','Confirm the simulated fills to start a paper run.')
   body=s['draft']['body']
   chain,legs,problems=guard(S.hydrate,market,body)
@@ -342,12 +383,13 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
  def status(request:Request):
   me(request);st=market.status() if hasattr(market,'status') else {'live':False,'source':'stored'}
   from .execution import LIVE_CAPABILITY,market_open,now_ist
-  return {**st,'market_open':market_open(),'now_ist':now_ist().strftime('%Y-%m-%d %H:%M:%S'),'live_orders':_live(me(request)['id']),
+  from . import exchange as XC
+  return {**st,'market_open':market_open(),'session':XC.session(),'calendar':XC.coverage(),'now_ist':now_ist().strftime('%Y-%m-%d %H:%M:%S'),'live_orders':_live(me(request)['id']),
    'paper_capital':execution.paper_capital(me(request)['id']) if execution else None}
 
  @r.post('/api/sb/strategies/{sid}/preview')
  def preview(request:Request,sid:str,data:dict=Body(default={})):
-  user=me(request);s=own(user,sid)
+  user=me(request);s=own(user,sid);expect_draft(s,data)
   out=ex(execution.preview,user['id'],s,{'product':data.get('product'),'price_policy':data.get('price_policy'),'limits':data.get('limits') or {}})
   if isinstance(out,dict):out['live']=_live(user['id'])
   return out

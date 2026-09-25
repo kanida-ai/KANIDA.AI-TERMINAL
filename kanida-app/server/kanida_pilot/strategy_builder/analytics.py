@@ -158,8 +158,14 @@ def expiry_profile(legs):
 
 # --- implied volatility per leg -------------------------------------------------------------------------------
 def leg_iv(leg,spot,t):
- """The leg's IV solved from ITS OWN entry price, or the chain IV supplied with it, or None with the reason."""
- if leg.get('iv') is not None:return float(leg['iv']),leg.get('iv_source') or 'chain'
+ """The leg's MARKET IV: supplied with it (solved from the current mark), else solved from its mark here. The entry
+ price is a cost basis and never sets the volatility (GTM audit P04). Only a leg with no market value at all
+ (a pure hypothetical) falls back to its entry - and says so. Returns (sigma or None, source or reason)."""
+ if leg.get('iv') is not None:return float(leg['iv']),leg.get('iv_source') or 'market'
+ if leg.get('mark') is not None:
+  got=IV.solve(float(leg['mark']),spot,leg['strike'],t,leg['type'],sensitivity=False)
+  if got.get('iv') is not None:return got['iv'],'market_'+(leg.get('mark_basis') or 'mark')
+  return None,got.get('reason') or 'unsolved'
  got=IV.solve(leg['price'],spot,leg['strike'],t,leg['type'],sensitivity=False)
  if got.get('iv') is not None:return got['iv'],'solved_from_entry'
  return None,got.get('reason') or 'unsolved'
@@ -186,7 +192,7 @@ def pop(legs,spot,sigma,t,profile):
 
 
 # --- the full analysis ----------------------------------------------------------------------------------------
-def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,table_step=None,table_rows=10):
+def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,table_step=None,table_rows=10,ref_iv=None):
  """Everything the Analyze panel shows, for ONE set of legs at ONE reading and ONE scenario.
 
  legs: [{id,type,strike,side,lots,lot_size,price,expiry,include,iv?,ltp?}] - excluded legs are ignored everywhere.
@@ -218,8 +224,11 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
   if sigma is None:iv_notes.append(f"{int(l['strike'])} {l['type']}: IV unavailable ({src})")
   ivs[l['id']]=(sigma,src)
  iv_ready=all(v[0] is not None for v in ivs.values())
+ # the reference volatility for POP and SD bands: the chain's true ATM IV when supplied; otherwise the included leg
+ # nearest spot - a PROXY, and labelled as one (it is not called ATM IV)
  atm=min(active,key=lambda l:abs(l['strike']-spot))
- sigma_ref=ivs[atm['id']][0] or next((v[0] for v in ivs.values() if v[0]),None)
+ if ref_iv:sigma_ref,ref_basis=ref_iv,'chain_atm_iv'
+ else:sigma_ref=ivs[atm['id']][0] or next((v[0] for v in ivs.values() if v[0]),None);ref_basis='nearest_leg_iv_proxy'
 
  def value_at(s,t):
   total=0.0
@@ -250,7 +259,7 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
   # capital at risk: the structural maximum loss. Exchange margin is NOT this and is reported separately.
   out['capital_at_risk']=ok(round(-prof['max_loss'],2),basis='structural_max_loss') if not prof['unlimited_loss'] else ok(None,unlimited=True,basis='structural_max_loss')
   p=pop(active,spot,sigma_ref,t_now,prof) if sigma_ref else None
-  out['pop']=ok(round(p*100,1),unit='percent',basis='model_lognormal_at_atm_iv',sigma=round(sigma_ref*100,2)) if p is not None else na('NO_IV')
+  out['pop']=ok(round(p*100,1),unit='percent',basis='model_lognormal_at_'+ref_basis,sigma=round(sigma_ref*100,2),sigma_basis=ref_basis) if p is not None else na('NO_IV')
   if prof['unlimited_loss']:warnings.append('Unlimited loss: this structure has no hedge on one side.')
  else:
   for key in ('max_profit','max_loss','breakevens','reward_risk','capital_at_risk','pop'):
@@ -269,7 +278,7 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
   point['target']=round(value_at(x,t_target),2) if iv_ready else None
   curve.append(point)
  out['curve']=curve
- out['sd']={'sigma':round(sigma_ref*100,2) if sigma_ref else None,'basis':'atm_iv_to_expiry',
+ out['sd']={'sigma':round(sigma_ref*100,2) if sigma_ref else None,'basis':ref_basis+'_to_expiry','sigma_basis':ref_basis,
   'bands':[{'k':k,'low':round(spot*math.exp(-k*(sigma_ref or 0)*math.sqrt(t_now)),2),
    'high':round(spot*math.exp(k*(sigma_ref or 0)*math.sqrt(t_now)),2)} for k in (1,2)] if sigma_ref and t_now>0 else []}
  # the scenario point
@@ -285,11 +294,12 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
   tv=(intrinsic(l['type'],l['strike'],target_spot) if t_target<=0 else bs_price(target_spot,l['strike'],t_target,max(0.0001,(sigma or 0)+iv_shift),l['type'])) if sigma is not None or t_target<=0 else None
   g=bs_greeks(spot,l['strike'],t_now,sigma,l['type']) if sigma is not None else None
   row={'id':l['id'],'label':f"{'Buy' if l['side']=='B' else 'Sell'} {l['lots']} x {int(l['strike']) if float(l['strike']).is_integer() else l['strike']} {l['type']}",
-   'units':q,'entry':l['price'],'ltp':l.get('ltp'),'iv':round(sigma*100,2) if sigma is not None else None,'iv_source':src,
+   'units':q,'entry':l['price'],'ltp':l.get('ltp'),'mark':l.get('mark'),'mark_basis':l.get('mark_basis'),'iv':round(sigma*100,2) if sigma is not None else None,'iv_source':src,
    'target_price':round(tv,2) if tv is not None else None,'target_pnl':round(q*(tv-l['price']),2) if tv is not None else None,
    'greeks':({k:round(v*q,4) for k,v in g.items()} if g else None),'greeks_per_unit':({k:round(v,6) for k,v in g.items()} if g else None),
    # premium split at the reading: intrinsic (what exercising now is worth) and time value (the rest, which decays)
-   'intrinsic':round(intrinsic(l['type'],l['strike'],spot),2),'time_value':round(l['price']-intrinsic(l['type'],l['strike'],spot),2)}
+   # time value is a MARKET quantity: the mark (not the cost basis) minus intrinsic; a pure hypothetical falls back to its price
+   'intrinsic':round(intrinsic(l['type'],l['strike'],spot),2),'time_value':round((l['mark'] if l.get('mark') is not None else l['price'])-intrinsic(l['type'],l['strike'],spot),2)}
   gs=bs_greeks(target_spot,l['strike'],t_target,max(0.0001,sigma+iv_shift),l['type']) if (sigma is not None and t_target>0) else None
   row['greeks_scenario']={k:round(v*q,4) for k,v in gs.items()} if gs else None
   if gs:

@@ -22,6 +22,8 @@ from . import charges as CH
 from . import service as S
 from .templates import recognise
 from . import adjust as ADJ
+from . import exchange as XC
+from . import quotes as Q
 
 log=logging.getLogger('strategy_builder.execution')
 IST=ZoneInfo('Asia/Kolkata')
@@ -63,7 +65,7 @@ class ExecError(Exception):
 
 
 def uid():return uuid.uuid4().hex[:16]
-def now_ist():return datetime.now(IST).replace(tzinfo=None)
+now_ist=XC.now_ist
 def tick_round(x,tick,up=False):
  tick=tick or 0.05;n=x/tick
  import math
@@ -71,8 +73,8 @@ def tick_round(x,tick,up=False):
 
 
 def market_open(at=None):
- at=at or now_ist()
- return at.weekday()<5 and (at.hour,at.minute)>=(9,15) and (at.hour,at.minute)<(15,30)
+ """The NSE F&O session gate from the shared exchange calendar (holidays included; an unloaded year stays closed)."""
+ return XC.market_open(at)
 
 
 class Execution:
@@ -99,19 +101,25 @@ class Execution:
   overrides=options.get('limits') or {}
   checks=[];tick=chain.get('tick_size') or 0.05
   def check(key,label,state,detail=''):checks.append({'key':key,'label':label,'status':state,'detail':detail})
-  at=now_ist();quote_at=A.parse_ist(chain['as_of'])
-  check('market_open','Market is open (09:15-15:30 IST, weekdays)','pass' if market_open(at) else 'block',
-   f"Now {at.strftime('%a %H:%M:%S')} IST")
-  age=(at-quote_at).total_seconds() if quote_at else None
-  check('quotes_fresh',f'Quotes are fresh (at most {QUOTE_MAX_AGE}s old)','pass' if age is not None and age<=QUOTE_MAX_AGE else 'block',
-   f'Quote time {chain["as_of"]} IST' + (f' ({age:.0f}s old)' if age is not None else ''))
+  at=now_ist();sess=XC.session(at)
+  check('market_open','Market is open (NSE F&O session, exchange holidays included)','pass' if market_open(at) else 'block',
+   f"Now {at.strftime('%a %d %b %H:%M:%S')} IST - {sess['reason']} (calendar {sess['calendar_version'] or 'not loaded'})")
+  sp=Q.sample(chain['as_of'],at,'spot_order')
+  check('quotes_fresh',f"The underlying reading is fresh (at most {Q.MAX_AGE['spot_order']}s old)",'pass' if sp['ok'] else 'block',
+   f'Reading time {chain["as_of"]} IST' + (f" ({sp['age']:.0f}s old)" if sp['age'] is not None else '') + (f" - {Q.describe([sp['reason']])}" if sp['reason'] else ''))
+  bad=[]
+  for l in legs:
+   v=Q.leg(l,at,'order')
+   if not v['ok'] and not (v['reasons']==['NO_BID_ASK']):bad.append(f"{int(l['strike'])} {l['type']}: {Q.describe(v['reasons'])}")
+  check('quotes_valid',f"Every option quote is valid and fresh (its own quote time, at most {Q.MAX_AGE['order']}s old; no crossed or zero book)",
+   'pass' if not bad else 'block','; '.join(bad) or 'All option quotes valid')
   orders=[];no_quote=[];wide=[]
   freeze=FREEZE_UNITS.get(body['underlying'])
   hedged=any(l['side']=='B' for l in legs) and any(l['side']=='S' for l in legs)
   for l in legs:
    bid,ask=l.get('bid'),l.get('ask')
    if not bid or not ask:no_quote.append(l);continue
-   mid=(bid+ask)/2;spread=(ask-bid)/mid if mid else 1
+   mid=(bid+ask)/2;spread=abs(ask-bid)/mid if mid else 1
    if spread>SPREAD_WARN:wide.append(f"{int(l['strike'])} {l['type']} {spread*100:.1f}%")
    if policy=='marketable':limit=tick_round(ask,tick,up=True) if l['side']=='B' else tick_round(bid,tick)   # still crosses; always on the tick
    else:limit=tick_round(mid,tick,up=l['side']=='B')
@@ -281,6 +289,7 @@ class Execution:
    d=(q.get(f"NFO:{r['symbol']}") or {}).get('depth') or {}
    bid=(d.get('buy') or [{}])[0].get('price') or None;ask=(d.get('sell') or [{}])[0].get('price') or None
    ts=str((q.get(f"NFO:{r['symbol']}") or {}).get('timestamp') or '')[:19]
+   if not Q.leg({'bid':bid,'ask':ask,'quote_at':ts},now_ist(),'order')['ok']:continue   # never fill on a crossed, zero or stale quote
    price=None
    if r['side']=='B' and ask and ask<=r['limit_price']:price=ask
    if r['side']=='S' and bid and bid>=r['limit_price']:price=bid
@@ -401,19 +410,25 @@ class Execution:
   meta={l['id']:l for l in out['leg_meta']}
   for lid,p in pos.items():
    m=marks.get(lid,{});realised+=p['realised'];fees+=p['fees']
-   liq=(m.get('bid') if p['units']>0 else m.get('ask')) or m.get('ltp')
+   side_px=m.get('bid') if p['units']>0 else m.get('ask')
+   ok_book=Q.book(m.get('bid'),m.get('ask'))['ok']
+   liq=side_px if (side_px and ok_book) else m.get('ltp')
+   basis=('bid' if p['units']>0 else 'ask') if (side_px and ok_book) else ('ltp' if m.get('ltp') is not None else None)
    u=None
    if p['units']:
     if liq is None:missing=True
     else:u=p['units']*liq-p['cost'];unreal+=u
    l=meta.get(lid,{})
    legs.append({'leg_id':lid,'label':f"{int(l.get('strike',0))} {l.get('type','')}",'units':p['units'],'avg':round(p['cost']/p['units'],2) if p['units'] else None,
-    'mark':liq,'unrealised':round(u,2) if u is not None else None,'realised':round(p['realised'],2),'fees':round(p['fees'],2)})
+    'mark':liq,'mark_basis':basis if p['units'] else None,'unrealised':round(u,2) if u is not None else None,'realised':round(p['realised'],2),'fees':round(p['fees'],2)})
   out['positions']=legs;out['realised']=round(realised,2);out['fees']=round(fees,2)
   out['unrealised']=None if missing else round(unreal,2)
   out['net']=None if missing else round(realised+unreal-fees,2)
   out['marked_at']=chain['as_of'] if chain else None
-  out['mark_basis']='liquidation: longs at the bid, shorts at the ask'
+  bases={x['mark_basis'] for x in legs if x['mark_basis']}
+  out['mark_basis']=('liquidation: longs at the bid, shorts at the ask' if bases<= {'bid','ask'} else
+   'mixed: some legs at the last trade (no valid bid/ask) - indicative, not a liquidation value' if bases&{'bid','ask'} else
+   'last traded price (no valid bid/ask) - indicative, not a liquidation value') if bases else 'no open position'
   return out
 
  def deployments(self,user_id,strategy_id=None):

@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 from .analytics import parse_ist,years_between
 from .market import INDEX_UNDERLYINGS,STALE_TRADE_SECONDS
+from . import exchange as XC
 from .. import implied_vol as IV
 
 log=logging.getLogger('strategy_builder.kite')
@@ -76,7 +77,7 @@ class KiteMarket:
 
  # --- instrument master ------------------------------------------------------------------------------------------
  def instruments(self):
-  today=datetime.now().strftime('%Y-%m-%d')
+  today=XC.now_ist().strftime('%Y-%m-%d')
   with self.lock:
    if self._instruments is not None and self._inst_day==today:return self._instruments
   text=self._get('/instruments/NFO').text
@@ -99,12 +100,12 @@ class KiteMarket:
 
  def reading(self,underlying):
   q=self.quotes([SPOT_SYMBOL[underlying]]).get(SPOT_SYMBOL[underlying])
-  if not q:return None
-  return str(q.get('timestamp') or datetime.now().strftime('%Y-%m-%d %H:%M:%S'))[:19],float(q['last_price'])
+  if not q or not q.get('timestamp'):return None      # never invent a sample time from the host clock (quant audit F3)
+  return str(q['timestamp'])[:19],float(q['last_price'])
 
  def expiries(self,underlying):
   rows=[r for r in self.instruments() if r['name']==underlying]
-  got=self.reading(underlying);at=got[0] if got else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+  got=self.reading(underlying);at=got[0] if got else XC.now_ist().strftime('%Y-%m-%d %H:%M:%S')   # only filters past expiries
   by={}
   for r in rows:by.setdefault(r['expiry'],[]).append(r)
   exps=sorted(e for e in by if e>=at[:10]);months={}
@@ -123,6 +124,7 @@ class KiteMarket:
   data=self.quotes([spot_key]+[f"NFO:{r['tradingsymbol']}" for r in rows])
   sq=data.get(spot_key)
   if not sq:return None
+  if not sq.get('timestamp'):raise KiteUnavailable('Kite returned the index quote without a time stamp.')   # router falls back, honestly
   spot=float(sq['last_price']);at=str(sq.get('timestamp'))[:19];reading_at=parse_ist(at);t=years_between(reading_at,expiry)
   strikes={}
   for r in rows:
@@ -135,14 +137,16 @@ class KiteMarket:
    lt=parse_ist(q.get('last_trade_time'))
    if ltp is None:flags.append('no_price')
    elif lt and (reading_at-lt).total_seconds()>STALE_TRADE_SECONDS:flags.append('stale_trade')
-   mid=(bid+ask)/2 if bid and ask else ltp
+   if bid and ask and bid>ask:flags.append('crossed')
+   valid_book=bool(bid and ask and bid<=ask)
+   mid=(bid+ask)/2 if valid_book else ltp       # a crossed book has no meaningful mid: value it at the last trade
    iv=None;reason=None
    if mid:
     s=IV.solve(float(mid),spot,r['strike'],t,r['instrument_type'],sensitivity=False);iv=s.get('iv');reason=s.get('reason')
    strikes.setdefault(r['strike'],{'strike':r['strike'],'CE':None,'PE':None})[r['instrument_type']]={
     'token':r['instrument_token'],'symbol':r['tradingsymbol'],'ltp':ltp,'bid':bid,'ask':ask,'oi':q.get('oi'),'volume':q.get('volume'),
-    'last_trade_time':q.get('last_trade_time'),'iv':round(iv*100,2) if iv else None,'iv_reason':None if iv else reason,'flags':flags,
-    'basis':'mid' if bid and ask else 'ltp'}
+    'last_trade_time':q.get('last_trade_time'),'iv':round(iv*100,2) if iv else None,'iv_x':iv,'iv_reason':None if iv else reason,'flags':flags,
+    'basis':'mid' if valid_book else 'ltp','quote_at':str(q.get('timestamp') or '')[:19] or None}
   ordered=sorted(strikes.values(),key=lambda x:x['strike']);ks=[x['strike'] for x in ordered]
   from collections import Counter
   steps=Counter(round(b-a,2) for a,b in zip(ks,ks[1:]));step=steps.most_common(1)[0][0] if steps else None

@@ -24,6 +24,7 @@ import json,threading,time,uuid,logging
 from datetime import datetime
 from . import analytics as A
 from .execution import market_open,now_ist
+from . import quotes as Q
 
 log=logging.getLogger('strategy_builder.alerts')
 TYPES={
@@ -36,6 +37,7 @@ TYPES={
 }
 STATES=('armed','triggered','paused','data_unavailable','expired')
 MAX_RULES_PER_USER=100
+FLAP_WINDOW=900        # seconds: at most one data_unavailable / recovered event per rule in this window
 SCHEMA='''
 create table if not exists alert_rules(
  id text primary key, user_id text not null, strategy_id text not null, deployment_id text, type text not null, params text not null,
@@ -102,6 +104,7 @@ def evaluate(rtype,p,ctx,state):
  if rtype=='expiry_time':
   due=A.parse_ist(p['at'])<=now
   return True,None,due,False,f"Reminder: {p['at']} IST"
+ if ctx.get('stale'):return False,None,False,False,ctx['stale']     # a live SOURCE is not a fresh SAMPLE (GTM audit P10)
  spot=ctx.get('spot')
  if rtype=='price_cross':
   if spot is None:return False,None,False,False,'No live spot'
@@ -133,11 +136,13 @@ def evaluate(rtype,p,ctx,state):
  return False,None,False,False,'Unknown rule'
 
 
-def step(state,available,cond,rearm_ok,last_trig,cooldown,now_ts,rtype):
- """Next state and whether to emit an event: (state, event_kind or None)."""
+def step(state,available,cond,rearm_ok,last_trig,cooldown,now_ts,rtype,resume=None):
+ """Next state and whether to emit an event: (state, event_kind or None). `resume` is the state the rule was in
+ before its inputs went unavailable: a rule that had TRIGGERED comes back triggered, so stale -> fresh with the
+ condition still true does not fire a second time (no recovery storm)."""
  if state in ('paused','expired'):return state,None
  if not available:return ('data_unavailable','data_unavailable') if state!='data_unavailable' else (state,None)
- if state=='data_unavailable':state='armed';recovered=True
+ if state=='data_unavailable':state=resume if resume in ('armed','triggered') else 'armed';recovered=True
  else:recovered=False
  if state=='armed' and cond:
   if last_trig and now_ts-last_trig<cooldown:return state,('recovered' if recovered else None)
@@ -149,7 +154,12 @@ def step(state,available,cond,rearm_ok,last_trig,cooldown,now_ts,rtype):
 class Alerts:
  def __init__(self,store,market,execution):
   self.store=store;self.market=market;self.execution=execution;self.c=store.c;self.lock=store.lock
-  with self.lock:self.c.executescript(SCHEMA);self.c.commit()
+  with self.lock:
+   self.c.executescript(SCHEMA)
+   cols={r[1] for r in self.c.execute('pragma table_info(alert_rules)').fetchall()}
+   if 'resume_state' not in cols:self.c.execute('alter table alert_rules add column resume_state text')
+   if 'suppressed' not in cols:self.c.execute('alter table alert_rules add column suppressed text')
+   self.c.commit()
   self._stop=threading.Event();self._worker=None
 
  # --- CRUD ---------------------------------------------------------------------------------------------------------
@@ -171,7 +181,8 @@ class Alerts:
    n=self.c.execute('select count(*) from alert_rules where user_id=? and deleted=0',(user_id,)).fetchone()[0]
    if n>=MAX_RULES_PER_USER:raise AlertError(409,'ALERT_LIMIT',f'You can keep up to {MAX_RULES_PER_USER} alert rules.')
    rid=uid();t=time.time()
-   self.c.execute('insert into alert_rules values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(rid,user_id,strategy_id,deployment['id'] if deployment else None,rtype,
+   self.c.execute('insert into alert_rules(id,user_id,strategy_id,deployment_id,type,params,session,cooldown,channels,state,version,'
+    'last_eval_at,last_value,last_triggered_at,note,created_at,updated_at,deleted) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(rid,user_id,strategy_id,deployment['id'] if deployment else None,rtype,
     json.dumps(params),session,cooldown,json.dumps(channels),'armed',1,None,None,None,str(data.get('note') or '')[:140],t,t,0))
    self.store._log(user_id,strategy_id,'alert_created',f'Alert created: {describe(rtype,params)}')
    self.c.commit()
@@ -244,7 +255,7 @@ class Alerts:
     cache[key]=(d,held)
    d,held=cache[key]
    if not d:return ctx
-   ctx['net']=d['net']
+   net=d['net']                       # assigned to ctx only after every freshness check passes (quant audit P3)
    body={**d['revision_body'],'legs':held}
   else:
    s=self.store.get(user_id,rule['strategy_id'])
@@ -252,7 +263,11 @@ class Alerts:
    body=s['draft']['body']
   if not body.get('legs'):
    try:
-    got=self.market.reading(body['underlying']);ctx['spot']=got[1] if got else None
+    got=self.market.reading(body['underlying'])
+    if got:
+     sm=Q.sample(got[0],now,'alert')
+     if sm['ok']:ctx['spot']=got[1]
+     else:ctx['stale']=self._stale_text('The underlying reading',got[0],sm)
    except Exception:pass  # noqa: BLE001
    return ctx
   from . import service as S
@@ -262,29 +277,52 @@ class Alerts:
    except Exception:cache[key]=None  # noqa: BLE001
   a=cache[key]
   if not a or a.get('status') not in ('ok','partial'):return ctx
+  # every input this rule reads must be a FRESH sample: the underlying reading, and each leg's own quote time
+  sm=Q.sample(a.get('as_of'),now,'alert')
+  if not sm['ok']:ctx['stale']=self._stale_text('The underlying reading',a.get('as_of'),sm);return ctx
+  if rule['type'] in ('delta','pnl'):
+   for lq in a.get('legs_quotes') or []:
+    # a leg valued at its LAST TRADE is only as fresh as that trade, not as the quote snapshot (quant audit P1)
+    lsm=Q.sample(lq.get('last_trade_time') if lq.get('mark_basis')=='ltp' else lq.get('quote_at'),now,'alert')
+    if not lsm['ok']:ctx['stale']=self._stale_text('A held leg\'s quote',lq.get('quote_at'),lsm);return ctx
   ctx['spot']=a.get('spot')
+  if rule['deployment_id']:ctx['net']=net
   if (a.get('breakevens') or {}).get('status')=='available':ctx['breakevens']=a['breakevens']['value']
   if (a.get('greeks') or {}).get('status')=='available':ctx['delta']=a['greeks']['delta']
   ctx['shorts']=[{'type':l['type'],'strike':l['strike']} for l in body['legs'] if l.get('side')=='S' and l.get('include',True)]
   return ctx
+
+ @staticmethod
+ def _stale_text(what,at,sm):
+  if sm['reason']=='STALE':return f"{what} is {sm['age']/60:.0f} min old ({at} IST) - too old to evaluate"
+  if sm['reason']=='FUTURE_TIME':return f"{what} carries a future time ({at} IST) - clock or feed problem"
+  return f"{what} has no time stamp"
 
  def evaluate_rule(self,user_id,rule,cache=None,record=True):
   cache=cache if cache is not None else {}
   if rule['session']=='market' and not market_open():return {'evaluated':False,'reason':'Outside market hours'}
   ctx=self.context(user_id,rule,cache)
   available,value,cond,rearm_ok,message=evaluate(rule['type'],rule['params'],ctx,rule['state'])
-  out={'evaluated':True,'available':available,'value':value,'condition':cond,'message':message,'at':ctx['now'].strftime('%Y-%m-%d %H:%M:%S')}
+  out={'evaluated':True,'available':available,'value':value,'condition':cond,'message':message,'at':ctx['now'].strftime('%Y-%m-%d %H:%M:%S'),
+   'suppressed':None if available else message}
   if not record:return out
-  new,event=step(rule['state'],available,cond,rearm_ok,rule['last_triggered_at'],rule['cooldown'],time.time(),rule['type'])
+  new,event=step(rule['state'],available,cond,rearm_ok,rule['last_triggered_at'],rule['cooldown'],time.time(),rule['type'],rule.get('resume_state'))
+  resume=rule['state'] if (new=='data_unavailable' and rule['state']!='data_unavailable') else (rule.get('resume_state') if new=='data_unavailable' else None)
   t=time.time()
   with self.lock:
    cur=self.c.execute('select state,version from alert_rules where id=? and deleted=0',(rule['id'],)).fetchone()
    if not cur or cur['version']!=rule['version']:return {**out,'skipped':'changed during evaluation'}   # edited meanwhile
-   self.c.execute('update alert_rules set state=?,last_eval_at=?,last_value=?,last_triggered_at=? where id=?',(new,out['at'],value,
-    t if event=='triggered' else rule['last_triggered_at'],rule['id']))
+   # last_value keeps the last VALID value; a suppressed evaluation records why instead of overwriting it
+   self.c.execute('update alert_rules set state=?,last_eval_at=?,last_value=?,last_triggered_at=?,resume_state=?,suppressed=? where id=?',(new,out['at'],
+    value if available else rule.get('last_value'),t if event=='triggered' else rule['last_triggered_at'],resume,out['suppressed'],rule['id']))
+   if event in ('data_unavailable','recovered'):
+    # a feed that flaps records at most one such event per rule per quiet window (the state still changes)
+    recent=self.c.execute('select 1 from alert_events where rule_id=? and kind=? and created_at>?',(rule['id'],event,t-FLAP_WINDOW)).fetchone()
+    if recent:event=None
    if event:
     text={'triggered':f"{describe(rule['type'],rule['params'])} - {message}",'rearmed':f"Re-armed: {message}",
-     'data_unavailable':f"Not evaluated: {message}. The alert will not fire on missing data.",'recovered':'Live inputs are back; the alert is armed.'}[event]
+     'data_unavailable':f"Not evaluated: {message}. The alert will not fire on missing data.",
+     'recovered':'Live inputs are back; the alert is armed.' if new=='armed' else 'Live inputs are back; the condition is still met, so it stays triggered (no second alert).'}[event]
     self.c.execute('insert into alert_events values(?,?,?,?,?,?,?,?,?,?,?)',(uid(),rule['id'],user_id,rule['strategy_id'],rule['deployment_id'],event,value,text,out['at'],t,
      t if event in ('rearmed','recovered') else None))
    self.c.commit()

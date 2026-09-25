@@ -1,7 +1,7 @@
 // The payoff chart: expiry P&L (solid, profit/loss shaded) and the scenario-date P&L (dashed), ±1σ/±2σ bands, spot,
 // the scenario spot and the breakevens. Display only - extrema come from the server's exact maths, never from this
 // plotted range. A hover readout gives exact values; the payoff table is the keyboard/screen-reader equivalent.
-import React,{useMemo,useState} from 'react';
+import React,{useMemo,useState,useRef} from 'react';
 import {Platform,View} from 'react-native';
 import Svg,{Line,Path,Rect,Text as SvgText} from 'react-native-svg';
 import {C,T,s} from '../ui';
@@ -12,7 +12,7 @@ const PAD={l:62,r:14,t:14,b:28};
 
 export function PayoffChart({curve,spot,scenarioSpot,breakevens,bands,height=300,dim=false,scenarioLabel}:{curve:Pt[];spot:number;scenarioSpot?:number;
  breakevens:number[];bands:{k:number;low:number;high:number}[];height?:number;dim?:boolean;scenarioLabel:string}){
- const [w,setW]=useState(640);const [hover,setHover]=useState<Pt|null>(null);
+ const [w,setW]=useState(640);const [hover,setHover]=useState<Pt|null>(null);const pinned=useRef(false);
  const g=useMemo(()=>{
   if(!curve.length)return null;
   const xs=curve.map(p=>p.s);const ys=curve.flatMap(p=>[p.expiry,p.target]).filter((v):v is number=>v!=null);
@@ -26,11 +26,14 @@ export function PayoffChart({curve,spot,scenarioSpot,breakevens,bands,height=300
   return {X,Y,x0,x1,expiry:line('expiry'),target:line('target'),up:area(1),down:area(-1),ticks,xt};
  },[curve,w,height]);
  if(!g)return <View style={{height,alignItems:'center',justifyContent:'center'}}><T style={{color:C.muted,fontSize:12}}>Add legs to draw the payoff.</T></View>;
- const onMove=(e:any)=>{if(Platform.OS!=='web')return;const r=e.currentTarget.getBoundingClientRect?.();if(!r)return;
-  const x=e.clientX-r.left;const v=g.x0+(x-PAD.l)/(w-PAD.l-PAD.r)*(g.x1-g.x0);
+ const pick=(x:number)=>{const v=g.x0+(x-PAD.l)/(w-PAD.l-PAD.r)*(g.x1-g.x0);
   let best=curve[0];for(const p of curve)if(Math.abs(p.s-v)<Math.abs(best.s-v))best=p;setHover(best);};
+ const onMove=(e:any)=>{if(Platform.OS!=='web'||pinned.current)return;const r=e.currentTarget.getBoundingClientRect?.();if(!r)return;pick(e.clientX-r.left);};
+ // touch: tap or drag pins the readout (no hover on a phone - GTM audit P12); it stays until the next tap
+ const touch={onStartShouldSetResponder:(e:any)=>e?.nativeEvent?.touches?.length>0||Platform.OS!=='web',onMoveShouldSetResponder:()=>false,
+  onResponderGrant:(e:any)=>{pinned.current=true;pick(e.nativeEvent.locationX);},onResponderMove:(e:any)=>pick(e.nativeEvent.locationX),onResponderTerminationRequest:()=>true};
  return <View onLayout={e=>setW(Math.max(280,e.nativeEvent.layout.width))} style={{opacity:dim?.45:1}}
-  {...({onMouseMove:onMove,onMouseLeave:()=>setHover(null)} as any)}
+  {...touch} {...({onMouseMove:onMove,onMouseLeave:()=>{if(!pinned.current)setHover(null);}} as any)}
   accessibilityLabel={`Payoff chart. Solid line: profit or loss at expiry. Dashed line: ${scenarioLabel}. The payoff table below lists the same values.`}>
   <Svg width={w} height={height}>
    {bands.slice().reverse().map(b=><Rect key={b.k} x={g.X(Math.max(g.x0,b.low))} y={PAD.t} width={Math.max(0,g.X(Math.min(g.x1,b.high))-g.X(Math.max(g.x0,b.low)))}
@@ -51,6 +54,7 @@ export function PayoffChart({curve,spot,scenarioSpot,breakevens,bands,height=300
   </Svg>
   <View style={[s.row,{gap:16,flexWrap:'wrap',minHeight:20}]}>
    <Legend color={C.green} label="At expiry" solid/><Legend color={C.mint} label={scenarioLabel}/><Legend color={C.amber} label="Breakeven"/>
+   {!hover&&<T style={{fontSize:10,color:C.muted}}>{Platform.OS==='web'?'Hover (or tap on a touch screen) for exact values':'Tap the chart for exact values'}</T>}
    {hover&&<T style={{fontSize:11,color:C.ink,fontVariant:['tabular-nums'] as any}}>{`${num(hover.s,0)} (${spot?`${hover.s>=spot?'+':''}${((hover.s/spot-1)*100).toFixed(2)}% from spot`:''}) · expiry ${signed(hover.expiry)} · scenario ${signed(hover.target)}`}</T>}
   </View>
  </View>;
