@@ -71,3 +71,17 @@ export const exec={
  closePreview:(id:string,price_policy='marketable')=>api(`/api/sb/deployments/${id}/close-preview`,{price_policy}) as Promise<Preview>,
  close:(id:string,p:Preview,key:string)=>api(`/api/sb/deployments/${id}/close`,{preview_id:p.id,preview_hash:p.hash,idempotency_key:key,confirm:true}) as Promise<Deployment>,
 };
+
+export type AlertRule={id:string;strategy_id:string;strategy_name?:string;deployment_id:string|null;type:string;params:any;session:string;cooldown:number;channels:string[];state:string;version:number;
+ last_eval_at:string|null;last_value:number|null;last_triggered_at:number|null;label:string;description:string;scope:'strategy'|'deployment'};
+export type AlertEvent={id:string;rule_id:string;strategy_id:string;strategy_name?:string;deployment_id:string|null;kind:string;value:number|null;message:string;occurred_at:string;created_at:number;acked_at:number|null};
+export const alerts={
+ all:()=>api('/api/sb/alerts') as Promise<{rules:AlertRule[];events:AlertEvent[];unacked:number;types:{key:string;label:string;scopes:string[]}[];boundary:string}>,
+ unacked:()=>api('/api/sb/alerts/unacked') as Promise<{unacked:number;latest:AlertEvent[]}>,
+ forStrategy:(id:string)=>api(`/api/sb/strategies/${id}/alerts`) as Promise<{rules:AlertRule[];events:AlertEvent[]}>,
+ create:(id:string,body:{type:string;params:any;deployment_id?:string|null;channels?:string[]})=>api(`/api/sb/strategies/${id}/alerts`,body) as Promise<AlertRule&{now:any}>,
+ update:(rid:string,body:{version:number;action?:string;params?:any})=>api(`/api/sb/alerts/${rid}`,body) as Promise<AlertRule>,
+ remove:(rid:string)=>api(`/api/sb/alerts/${rid}/delete`,{}) as Promise<{ok:boolean}>,
+ check:(rid:string)=>api(`/api/sb/alerts/${rid}/check`,{}) as Promise<any>,
+ ack:(eid?:string)=>api('/api/sb/alert-events/ack',eid?{event_id:eid}:{}) as Promise<{acknowledged:number}>,
+};

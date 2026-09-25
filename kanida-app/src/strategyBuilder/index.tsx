@@ -12,6 +12,7 @@ import {DeploymentCard,OrderReview} from './OrderReview';
 import {Builder} from './Builder';
 import {Discover} from './Discover';
 import {Home} from './Home';
+import {AlertsCenter} from './Alerts';
 import {inr,istStamp,num,signed} from './format';
 
 export function StrategiesTab(){
@@ -19,6 +20,7 @@ export function StrategiesTab(){
  if(id)return <Builder key={id} id={id} openTemplate={p.open==='template'}/>;
  if(view==='discover')return <Discover/>;
  if(view==='paper')return <PaperRuns/>;
+ if(view==='alerts')return <AlertsCenter/>;
  return <Home/>;
 }
 

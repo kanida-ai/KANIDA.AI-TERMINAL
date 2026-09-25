@@ -441,3 +441,95 @@ def test_a_close_stopped_part_way_needs_attention(live):
  assert c['status']=='attention_required' and any(x['units']>0 for x in c['positions'])
  again=owner.post(f"/api/sb/deployments/{d['id']}/close-preview",json={}).json()
  assert len(again['orders'])==1 and again['orders'][0]['side']=='S'      # only the residual long is closed
+
+
+# --- slice 5: alerts (notify only) --------------------------------------------------------------------------------
+import kanida_pilot.strategy_builder.alerts as AL
+
+
+def test_a_crossing_fires_once_rearms_only_after_clearing_and_respects_cooldown():
+ p={'level':23000.0,'direction':'above'};now=datetime(2026,9,25,11,0)
+ def run(state,spot,last=None,t=10_000.0):
+  ok,v,cond,clear,_m=AL.evaluate('price_cross',p,{'now':now,'spot':spot},state)
+  return AL.step(state,ok,cond,clear,last,900,t,'price_cross')
+ assert run('armed',22990)==('armed',None)
+ assert run('armed',23001)==('triggered','triggered')
+ assert run('triggered',23050)==('triggered',None)           # still true: no storm
+ assert run('triggered',22995)==('triggered',None)           # back under but inside the 0.1% hysteresis
+ assert run('triggered',22970)==('armed','rearmed')
+ assert run('armed',23010,last=9_800.0)==('armed',None)      # within the 900 s cooldown
+ assert run('armed',23010,last=9_000.0)==('triggered','triggered')
+
+
+def test_missing_inputs_never_fire_and_are_reported_once():
+ now=datetime(2026,9,25,11,0)
+ ok,v,cond,clear,m=AL.evaluate('pnl',{'amount':1000.0,'direction':'loss'},{'now':now,'net':None},'armed')
+ assert not ok and not cond
+ assert AL.step('armed',ok,cond,clear,None,900,1.0,'pnl')==('data_unavailable','data_unavailable')
+ assert AL.step('data_unavailable',ok,cond,clear,None,900,2.0,'pnl')==('data_unavailable',None)
+ ok,v,cond,clear,m=AL.evaluate('pnl',{'amount':1000.0,'direction':'loss'},{'now':now,'net':-50.0},'data_unavailable')
+ assert AL.step('data_unavailable',ok,cond,clear,None,900,3.0,'pnl')==('armed','recovered')
+
+
+def test_a_reminder_fires_once_and_expires():
+ p={'at':'2026-09-29 13:30'}
+ ok,v,cond,clear,m=AL.evaluate('expiry_time',p,{'now':datetime(2026,9,29,13,31)},'armed')
+ assert AL.step('armed',ok,cond,clear,None,900,1.0,'expiry_time')==('expired','triggered')
+ assert AL.step('expired',ok,cond,clear,None,900,2.0,'expiry_time')==('expired',None)
+
+
+def test_alert_rules_are_validated_scoped_and_versioned(pilot):
+ _a,owner,other=pilot
+ s=strategy(owner)
+ url=f"/api/sb/strategies/{s['id']}/alerts"
+ bad=owner.post(url,json={'type':'pnl','params':{'amount':500,'direction':'loss'}})
+ assert bad.status_code==400 and 'paper deployment' in bad.json()['error']
+ assert owner.post(url,json={'type':'price_cross','params':{'level':-1,'direction':'above'}}).status_code==400
+ r=owner.post(url,json={'type':'price_cross','params':{'level':23100,'direction':'above'}}).json()
+ assert r['state']=='armed' and r['scope']=='strategy' and 'rises above 23,100' in r['description'] and r['now']['evaluated'] in (True,False)
+ assert other.post(f"/api/sb/alerts/{r['id']}",json={'version':1,'action':'pause'}).status_code==404
+ pz=owner.post(f"/api/sb/alerts/{r['id']}",json={'version':1,'action':'pause'}).json()
+ assert pz['state']=='paused' and pz['version']==2
+ assert owner.post(f"/api/sb/alerts/{r['id']}",json={'version':1,'action':'resume'}).status_code==409
+ assert owner.post(f"/api/sb/alerts/{r['id']}/delete",json={}).json()['ok']
+ assert owner.get(url).json()['rules']==[]
+
+
+def test_without_live_data_an_alert_goes_unavailable_not_triggered(pilot,monkeypatch):
+ app,owner,_o=pilot
+ monkeypatch.setattr(AL,'market_open',lambda at=None:True)
+ s=strategy(owner)
+ owner.post(f"/api/sb/strategies/{s['id']}/alerts",json={'type':'price_cross','params':{'level':1,'direction':'above'}})
+ al=app.state.strategy_builder_alerts;al.stop()
+ al.cycle();al.cycle()
+ got=owner.get('/api/sb/alerts').json()
+ assert [e['kind'] for e in got['events']]==['data_unavailable'] and got['rules'][0]['state']=='data_unavailable'
+ assert 'never place' in got['boundary']
+
+
+def test_live_alerts_fire_on_the_position_and_can_be_acknowledged(live,monkeypatch):
+ app,owner,_o,fake=live
+ monkeypatch.setattr(AL,'market_open',lambda at=None:True)
+ al=app.state.strategy_builder_alerts;al.stop()
+ s=strategy(owner)
+ p=owner.post(f"/api/sb/strategies/{s['id']}/preview",json={}).json()
+ d=owner.post(f"/api/sb/strategies/{s['id']}/deployments",json={'preview_id':p['id'],'preview_hash':p['hash'],'idempotency_key':'al1','confirm':True}).json()
+ url=f"/api/sb/strategies/{s['id']}/alerts"
+ owner.post(url,json={'type':'pnl','deployment_id':d['id'],'params':{'amount':1,'direction':'loss'}})        # paying the spread is a loss
+ owner.post(url,json={'type':'price_cross','params':{'level':22990,'direction':'above'}})                   # spot 23000
+ owner.post(url,json={'type':'breakeven_near','deployment_id':d['id'],'params':{'points':5000}})
+ owner.post(url,json={'type':'delta','params':{'units':1e9}})                                              # never reached
+ al.cycle();al.cycle();al.cycle()
+ got=owner.get('/api/sb/alerts').json()
+ fired=[e for e in got['events'] if e['kind']=='triggered']
+ assert len(fired)==3 and got['unacked']==3                                                                # once each, no storm
+ assert {r['state'] for r in got['rules'] if r['type']=='delta'}=={'armed'}
+ assert owner.post('/api/sb/alert-events/ack',json={'event_id':fired[0]['id']}).json()['acknowledged']==1
+ assert owner.get('/api/sb/alerts/unacked').json()['unacked']==2
+ owner.post('/api/sb/alert-events/ack',json={})
+ assert owner.get('/api/sb/alerts/unacked').json()['unacked']==0
+ from kanida_pilot.db import orders
+ from sqlalchemy import select,func
+ with app.state.db.tx() as c:assert c.execute(select(func.count()).select_from(orders)).scalar()==0
+ with app.state.strategy_builder_store.lock:
+  assert app.state.strategy_builder_store.c.execute("select count(*) from intents where deployment_id=? and kind='close'",(d['id'],)).fetchone()[0]==0  # an alert never trades

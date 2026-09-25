@@ -40,14 +40,17 @@ def mount(app,settings,path=None,derivatives_path=None,live=None):
   live=(KiteMarket() if live is True else None) if isinstance(live,bool) else live   # an object = an injected live market (tests)
   market=MarketRouter(stored,live)
   execution=Execution(store,market)
+  from .alerts import Alerts
+  alerts=Alerts(store,market,execution)
   if live:execution.start()
+  if os.getenv('PILOT_SB_ALERTS','on').lower()!='off':alerts.start()
   before=len(app.router.routes)
-  app.include_router(build_router(app,market,store,execution))
+  app.include_router(build_router(app,market,store,execution,alerts))
   # the pilot's catch-all GET /api/{path} and web routes are registered first; put ours ahead of them
   added=app.router.routes[before:]
   del app.router.routes[before:]
   app.router.routes[0:0]=added
-  app.state.strategy_builder_store=store;app.state.strategy_builder_market=market;app.state.strategy_builder_execution=execution
+  app.state.strategy_builder_store=store;app.state.strategy_builder_market=market;app.state.strategy_builder_execution=execution;app.state.strategy_builder_alerts=alerts
   return store
  except Exception:
   log.exception('The strategy builder could not start; the pilot runs without it.')

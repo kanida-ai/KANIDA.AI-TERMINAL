@@ -11,6 +11,7 @@ import {Badge,Button,C,Chip,Icon,Loading,Sheet,T,s} from '../ui';
 import {ApiError} from '../model';
 import {exec,sb,type Analysis,type Basis,type Body,type Chain,type Deployment,type Detail,type Expiry,type Kind,type Leg,type PaperRun,type Side,type Status,type Template} from './api';
 import {DeploymentCard,OrderReview} from './OrderReview';
+import {AlertsPanel,useAlertNotifications} from './Alerts';
 import {ChainDrawer} from './ChainDrawer';
 import {PayoffChart} from './PayoffChart';
 import {addDays,dayMonth,inr,isWeekend,istEpoch,istStamp,num,signed,strikeText,weekday} from './format';
@@ -19,7 +20,7 @@ const SAVE_DELAY=800,ANALYZE_DELAY=220;
 const uid=()=>'L'+Math.random().toString(36).slice(2,8);
 const msg=(e:any)=>e?.message||'KANIDA could not complete that.';
 type SaveState='saved'|'dirty'|'saving'|'conflict'|'error';
-type Tab='pnl'|'greeks'|'table'|'snapshots'|'paper'|'activity';
+type Tab='pnl'|'greeks'|'table'|'snapshots'|'paper'|'alerts'|'activity';
 
 export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean}){
  const {width}=useWindowDimensions();const wide=width>=1100;
@@ -33,6 +34,7 @@ export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean
  const [runs,setRuns]=useState<PaperRun[]>([]);const [name,setName]=useState('');
  const [st,setSt]=useState<Status|null>(null);const [tick,setTick]=useState(0);const [deps,setDeps]=useState<Deployment[]>([]);
  const [review,setReview]=useState<{open:boolean;closing?:Deployment|null}>({open:false});
+ const bell=useAlertNotifications();
  const seq=useRef(0);const saveTimer=useRef<any>(null);const anTimer=useRef<any>(null);const ctl=useRef<AbortController|null>(null);
  const versionRef=useRef(0);versionRef.current=version;
 
@@ -124,6 +126,7 @@ export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean
    </View>
    <View style={[s.row,{flexWrap:'wrap',gap:8,width:wide?undefined:'100%'}]}>
     <Button label="Save snapshot" icon="bookmark" kind="outline" onPress={snapshot} disabled={!body.legs.length}/>
+    <Button label={bell.count?`Alerts (${bell.count})`:'Alerts'} icon="bell" kind="outline" onPress={()=>router.push({pathname:'/strategies',params:{view:'alerts'}} as any)}/>
     <Button label="Duplicate" icon="copy" kind="outline" onPress={duplicate}/>
     <Button label={st?.live?'Review paper orders':'Paper trade'} icon="play" onPress={()=>st?.live?setReview({open:true}):setPaperOpen(true)} disabled={!body.legs.length||!a||a.status==='invalid'}/>
    </View>
@@ -189,8 +192,8 @@ export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean
     {!!a?.warnings?.length&&<View style={[panel,{borderColor:'#5A4A1F',backgroundColor:C.amberBg,gap:6}]}>{a.warnings.map((w,i)=><View key={i} style={[s.row,{alignItems:'flex-start',gap:8}]}><Icon name="alert-triangle" size={13} color={C.amber}/><T style={{fontSize:12,color:C.amber,flex:1}}>{w}</T></View>)}</View>}
     <View style={panel}>
      <View style={[s.row,{flexWrap:'wrap',gap:6}]}>
-      {(['pnl','greeks','table','snapshots','paper','activity'] as Tab[]).map(t=><Chip key={t} active={tab===t} onPress={()=>setTab(t)}
-       label={{pnl:'P&L by leg',greeks:'Greeks',table:'Payoff table',snapshots:`Snapshots (${detail.snapshots.length})`,paper:`Paper (${runs.length+deps.length})`,activity:'Activity'}[t]}/>)}
+      {(['pnl','greeks','table','snapshots','paper','alerts','activity'] as Tab[]).map(t=><Chip key={t} active={tab===t} onPress={()=>setTab(t)}
+       label={{pnl:'P&L by leg',greeks:'Greeks',table:'Payoff table',snapshots:`Snapshots (${detail.snapshots.length})`,paper:`Paper (${runs.length+deps.length})`,alerts:`Alerts${bell.count?` (${bell.count})`:''}`,activity:'Activity'}[t]}/>)}
      </View>
      {tab==='pnl'&&<LegTable a={a}/>}
      {tab==='greeks'&&<GreeksTable a={a}/>}
@@ -199,6 +202,7 @@ export function Builder({id,openTemplate=false}:{id:string;openTemplate?:boolean
       onDuplicate={async(rid)=>{try{const c=await sb.duplicate(id,rid);router.replace({pathname:'/strategies',params:{id:c.id}} as any);}catch(e:any){flash(msg(e));}}}/>}
      {tab==='paper'&&<View style={{gap:10}}>{deps.map(d=><DeploymentCard key={d.id} d={d} onChanged={loadRuns} onClose={(x)=>setReview({open:true,closing:x})}/>)}{!deps.length&&st?.live&&<T style={{fontSize:12,color:C.muted}}>No paper deployments yet. "Review paper orders" builds the exact plan from live quotes.</T>}</View>}
      {tab==='paper'&&<PaperList runs={runs} onClose={async(run)=>{try{await sb.paperClose(run);flash('Paper run closed at the stored reading.');loadRuns();reload();}catch(e:any){flash(msg(e));}}} onOpen={()=>router.push({pathname:'/strategies',params:{view:'paper'}} as any)}/>}
+     {tab==='alerts'&&<AlertsPanel strategyId={id} analysis={a} deployments={deps} expiry={body.expiry} onChanged={reload}/>}
      {tab==='activity'&&<View style={{gap:6}}>{detail.activity.map((x,i)=><View key={i} style={[s.between,{borderTopWidth:1,borderColor:C.line,paddingTop:6}]}><T style={{fontSize:12,flex:1}}>{x.detail}</T><T style={{fontSize:11,color:C.muted}}>{istEpoch(x.created_at)}</T></View>)}</View>}
     </View>
    </View>

@@ -5,11 +5,13 @@ import {router} from 'expo-router';
 import {Badge,Button,C,Chip,Empty,Icon,Loading,T,s} from '../ui';
 import {sb,type LibraryRow} from './api';
 import {dayMonth,istEpoch} from './format';
+import {useAlertNotifications} from './Alerts';
 
 type Filter='research'|'paper'|'archived';
 
 export function Home(){
  const {width}=useWindowDimensions();const wide=width>=900;
+ const bell=useAlertNotifications();
  const [rows,setRows]=useState<LibraryRow[]|null>(null);const [error,setError]=useState('');const [filter,setFilter]=useState<Filter>('research');const [q,setQ]=useState('');const [busy,setBusy]=useState('');
  const load=useCallback(()=>sb.list().then(r=>setRows(r.strategies)).catch(e=>setError(e.message)),[]);
  useEffect(()=>{load();},[load]);
@@ -31,6 +33,7 @@ export function Home(){
    <View style={[s.row,{gap:8,flexWrap:'wrap'}]}>
     {(['research','paper','archived'] as Filter[]).map(f=><Chip key={f} label={{research:'All active',paper:'Paper traded',archived:'Archived'}[f]} active={filter===f} onPress={()=>setFilter(f)}/>)}
     <Chip label="Paper runs" icon="play" onPress={()=>router.push({pathname:'/strategies',params:{view:'paper'}} as any)}/>
+    <Chip label={bell.count?`Alerts (${bell.count})`:'Alerts'} icon="bell" active={bell.count>0} onPress={()=>router.push({pathname:'/strategies',params:{view:'alerts'}} as any)}/>
    </View>
    <TextInput value={q} onChangeText={setQ} placeholder="Search name, underlying, structure" placeholderTextColor={C.muted} accessibilityLabel="Search strategies"
     style={{height:40,minWidth:260,borderWidth:1,borderColor:C.line,borderRadius:10,paddingHorizontal:12,color:C.ink,fontFamily:'Inter',fontSize:13,backgroundColor:C.paper}}/>

@@ -34,6 +34,7 @@ from .market import MarketUnavailable
 from .store import Conflict
 from .templates import ResolveError,public,recognise,resolve
 from .execution import ExecError
+from .alerts import AlertError,TYPES as ALERT_TYPES
 
 SYMBOL=re.compile(r'^[A-Z0-9&-]{1,20}$');DATE=re.compile(r'^\d{4}-\d{2}-\d{2}$')
 NAME_MAX=80
@@ -52,7 +53,7 @@ def _name(v,fallback):
  return t or fallback
 
 
-def build_router(app,market,store,execution=None):
+def build_router(app,market,store,execution=None,alerts=None):
  r=APIRouter()
  def me(request):return _identity(app,request)
  def own(user,sid):
@@ -127,7 +128,8 @@ def build_router(app,market,store,execution=None):
   user=me(request);s=own(user,sid)
   return {**s,'snapshots':store.revisions(user['id'],sid),'activity':store.activity(user['id'],sid),
    'paper':[_paper_row(p) for p in store.papers(user['id'],sid)],
-   'deployments':[_dep_row(d) for d in execution.deployments(user['id'],sid)] if execution else []}
+   'deployments':[_dep_row(d) for d in execution.deployments(user['id'],sid)] if execution else [],
+   'alerts':alerts.rules(user['id'],sid) if alerts else []}
 
  @r.post('/api/sb/strategies/{sid}/draft')
  def save_draft(request:Request,sid:str,data:dict=Body(default={})):
@@ -292,6 +294,57 @@ def build_router(app,market,store,execution=None):
   if data.get('confirm') is not True:raise PilotError(400,'CONFIRM_REQUIRED','Confirm the exact close orders.')
   s=own(user,d['strategy_id']);out=ex(execution.confirm,user['id'],s,str(data.get('preview_id') or ''),str(data.get('preview_hash') or ''),
    str(data.get('idempotency_key') or ''));out.pop('revision_body',None);return out
+
+ # --- slice 5: alerts (notify only) --------------------------------------------------------------------------------------
+ def al(fn,*a,**k):
+  if not alerts:raise PilotError(503,'ALERTS_UNAVAILABLE','Alerts are not available on this server.')
+  try:return guard(fn,*a,**k)
+  except AlertError as e:raise PilotError(e.status,e.code,e.message)
+
+ @r.get('/api/sb/alerts')
+ def alerts_all(request:Request):
+  user=me(request)
+  names={x['id']:x['name'] for x in store.list(user['id'])}
+  rules=al(alerts.rules,user['id']);events=al(alerts.events,user['id'],None,100)
+  for x in rules+events:x['strategy_name']=names.get(x['strategy_id'])
+  return {'rules':rules,'events':events,'unacked':alerts.unacked(user['id']),
+   'types':[{'key':k,**v,'scopes':list(v['scopes'])} for k,v in ALERT_TYPES.items()],'boundary':'Alerts notify only. They never place, modify or cancel an order.'}
+
+ @r.get('/api/sb/alerts/unacked')
+ def alerts_unacked(request:Request):
+  user=me(request);return {'unacked':alerts.unacked(user['id']) if alerts else 0,'latest':(alerts.events(user['id'],None,5,unacked=True) if alerts else [])}
+
+ @r.get('/api/sb/strategies/{sid}/alerts')
+ def alerts_for(request:Request,sid:str):
+  user=me(request);own(user,sid)
+  return {'rules':al(alerts.rules,user['id'],sid),'events':al(alerts.events,user['id'],sid,50)}
+
+ @r.post('/api/sb/strategies/{sid}/alerts')
+ def alert_create(request:Request,sid:str,data:dict=Body(default={})):
+  user=me(request);own(user,sid);dep=None
+  if data.get('deployment_id'):
+   dep=execution.deployment(user['id'],str(data['deployment_id']),mark=False) if execution else None
+   if not dep or dep['strategy_id']!=sid:raise PilotError(404,'DEPLOYMENT_NOT_FOUND','There is no such deployment for this strategy.')
+  rule=al(alerts.create,user['id'],sid,data,dep)
+  return {**rule,'now':al(alerts.evaluate_rule,user['id'],rule,None,False)}
+
+ @r.post('/api/sb/alerts/{rid}')
+ def alert_update(request:Request,rid:str,data:dict=Body(default={})):
+  user=me(request);return al(alerts.update,user['id'],rid,data)
+
+ @r.post('/api/sb/alerts/{rid}/delete')
+ def alert_delete(request:Request,rid:str,data:dict=Body(default={})):
+  user=me(request);return al(alerts.delete,user['id'],rid)
+
+ @r.post('/api/sb/alerts/{rid}/check')
+ def alert_check(request:Request,rid:str,data:dict=Body(default={})):
+  user=me(request);rule=al(alerts.rule,user['id'],rid)
+  if not rule:raise PilotError(404,'ALERT_NOT_FOUND','There is no such alert.')
+  return al(alerts.evaluate_rule,user['id'],rule,None,False)
+
+ @r.post('/api/sb/alert-events/ack')
+ def alert_ack(request:Request,data:dict=Body(default={})):
+  user=me(request);return al(alerts.ack,user['id'],str(data['event_id']) if data.get('event_id') else None)
 
  return r
 

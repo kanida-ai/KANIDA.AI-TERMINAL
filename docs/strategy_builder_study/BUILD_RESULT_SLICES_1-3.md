@@ -120,3 +120,36 @@ kanida-app pilot.
   - It filled at a better price when the market came back, and the sell was released after the buy.
   - Close: the short was bought back first, and the long's sale rested.
 - **Bug found and fixed in that browser session:** cancelling a resting hedge let the worker acknowledge the short group (a race with no state guard). Group release now needs a fully filled previous group, and every state change is guarded by the state it expects.
+
+---
+
+# Slice 5 — strategy alerts (25 Sep 2026)
+
+`strategy_builder/alerts.py`, with routes under `/api/sb/alerts*` and the UI in `src/strategyBuilder/Alerts.tsx`. It adds an **Alerts** tab to every strategy, an Alerts button and badge, and an alerts centre at `/strategies?view=alerts`.
+
+- **Notify only.** Nothing in alerts places, modifies or cancels an order. Tests assert that no pilot order and no close intent is created.
+- **Rules:**
+
+  | Rule | Fires when | Scope |
+  |---|---|---|
+  | Underlying crosses | the spot rises above or falls below a level | draft or deployment |
+  | Near a breakeven | the spot is within X points of a breakeven | draft or deployment |
+  | Position P&L | net P&L (liquidation-marked) passes a loss or profit threshold | deployment only |
+  | Net delta | abs(net delta) reaches a limit | draft or deployment |
+  | Short in the money | a short leg goes in the money | draft or deployment |
+  | Reminder | a set time in IST arrives | draft or deployment |
+
+  Deployment-scoped rules watch the **actual filled position** at its fill prices.
+- **Firing and re-arming:**
+  - A rule fires once, on the transition into its condition.
+  - It re-arms only after the condition clears by a hysteresis margin: 0.1% for price, 1.5× the distance for breakevens, 10% for P&L, 80% for delta.
+  - Nothing fires within the cooldown (default 15 minutes).
+  - A reminder fires once and then expires.
+- **Missing data:** the rule goes `data_unavailable`, records that **once** and never fires, then records `recovered` when inputs return. Rules are evaluated only in market hours, except reminders.
+- **Evaluation:** a worker runs every 15 s on live Kite data. "Check now" shows the current value without changing any state. An edit made during an evaluation is not overwritten, because rules carry a version.
+- **Delivery:** in-app events with acknowledge and acknowledge-all, badges, and **opt-in browser notifications** while a KANIDA tab is open. Email and push are not built.
+- **Suggested alerts** for a paper deployment, in one click: near breakeven (50 points), a loss of 50% of capital at risk, short leg in the money, and an expiry-day 13:30 reminder.
+- **Verified:**
+  - 6 new tests: fire once, hysteresis re-arm, cooldown, data unavailable → recovered, reminder expiry, validation/scope/version, no live data → unavailable, and live position alerts with acknowledgement.
+  - Full suite: 587 passed, 1 skipped.
+  - **Browser against live Kite** (25 Sep, 10:35–10:37 IST): a price alert and a breakeven alert each fired exactly once on the next cycle, the badges updated, and acknowledge worked in the tab and in the centre.
