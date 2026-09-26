@@ -299,16 +299,37 @@ class SignalNoise:
         return added
 
     # --- baseline: the same test against an UNRELATED instrument's later snapshot --------------------------------------
-    def baseline(self, session, engine_version, horizon='15m'):
+    #: Below this many independent episodes a rate is labelled exploratory, never evidence (E10).
+    MIN_EPISODES = 30
+
+    @staticmethod
+    def _episodes(recs):
+        """Records grouped into EPISODES: consecutive readings of one underlying making the same claim (state, row,
+        behaviour). Repeated readings of one ongoing episode are not independent observations, so n counts
+        episodes, and each episode is judged once, at its first reading (E10)."""
+        out, last = [], {}
+        for rec in sorted(recs, key=lambda r: (r['underlying'], r['reading_at'])):
+            key = (rec['original_state'], rec['row'], rec['behaviour'])
+            if last.get(rec['underlying']) != key:
+                out.append(rec)
+            last[rec['underlying']] = key
+        return out
+
+    def baseline_detail(self, session, engine_version, horizon='15m'):
         snaps = self._snaps(session, engine_version)
         names = sorted(snaps)
         recs = self._db().execute('select * from insight_records where session=? and engine_version=? and sn_version=?',
                                   (session, engine_version, SN_VERSION)).fetchall()
+        episodes = self._episodes(recs)
         hits = n = 0
-        for rec in recs:
-            other = names[(names.index(rec['underlying']) + 1) % len(names)] if rec['underlying'] in names else None
-            if not other:
+        used = set()
+        for rec in episodes:
+            me = rec['underlying']
+            # the control is ANOTHER instrument - never the record's own (a singleton universe has no control)
+            others = [x for x in names if x != me]
+            if not others:
                 continue
+            other = next((x for x in others if x > me), others[0])
             follow = self._follow(snaps[other], rec['reading_at'], RULES['horizons'][horizon])
             if follow is None:
                 continue
@@ -318,8 +339,16 @@ class SignalNoise:
             if outcome == 'unresolved':
                 continue
             n += 1
+            used.add(me)
             hits += outcome == 'confirmed'
-        return (hits / n) if n else None, n
+        return {'rate': (hits / n) if n else None, 'episodes': n, 'rows': len(recs), 'episodes_total': len(episodes),
+                'underlyings': len(used), 'sessions': 1 if n else 0, 'unit': 'episodes',
+                'sample': 'exploratory' if n < self.MIN_EPISODES else 'exploratory (one session)'}
+
+    def baseline(self, session, engine_version, horizon='15m'):
+        """(control confirmation rate, number of independent EPISODES judged)."""
+        d = self.baseline_detail(session, engine_version, horizon)
+        return d['rate'], d['episodes']
 
     # --- the report ------------------------------------------------------------------------------------------------
     def report(self, session, engine_version):
@@ -356,7 +385,9 @@ class SignalNoise:
             by_series[r['underlying']].append(r['row'])
         for rows in by_series.values():
             flips += sum(1 for a, b, c in zip(rows, rows[1:], rows[2:]) if a == c and a != b)
-        base, base_n = self.baseline(session, engine_version, '15m')
+        base_d = self.baseline_detail(session, engine_version, '15m')
+        base, base_n = base_d['rate'], base_d['episodes']
+        episodes = len(self._episodes(recs))
         decided = sum(finals[k] for k in ('signal', 'partial_signal', 'noise'))
         conf15 = by_h['15m']['confirmed']
         judged15 = sum(v for k, v in by_h['15m'].items() if k not in ('pending', 'unresolved'))
@@ -375,7 +406,11 @@ class SignalNoise:
             'generated_at': _now(), 'insights': total, 'final': dict(finals), 'by_horizon': {h: dict(c) for h, c in by_h.items()},
             'signal_to_noise': (finals['signal'] / finals['noise']) if finals['noise'] else None,
             'confirmed_15m_rate': (conf15 / judged15) if judged15 else None,
-            'baseline_15m_rate': base, 'baseline_pairs': base_n,
+            'baseline_15m_rate': base, 'baseline_pairs': base_n, 'baseline_unit': 'episodes',
+            # E10: rows are NOT independent observations. One session, correlated readings: exploratory by label.
+            'episodes': episodes, 'sessions': 1,
+            'sample': ('exploratory - one session of correlated readings; ' + str(episodes) + ' episodes from '
+                       + str(total) + ' rows; not a measured edge'),
             'by_type': {k: dict(v) for k, v in by_type.items()},
             'by_instrument': {k: dict(v) for k, v in sorted(by_name.items(), key=lambda kv: -sum(kv[1].values()))},
             'noise_reasons': dict(reasons.most_common()), 'signal_reasons': dict(signal_reasons.most_common()),
@@ -400,8 +435,9 @@ def markdown(rep):
              f"Signal-to-noise ratio: **{'—' if rep['signal_to_noise'] is None else f'{rep['signal_to_noise']:.2f}'}**", '',
              f"15-minute confirmation rate **{'—' if rep['confirmed_15m_rate'] is None else f'{100*rep['confirmed_15m_rate']:.0f}%'}** "
              f"against a baseline of **{'—' if rep['baseline_15m_rate'] is None else f'{100*rep['baseline_15m_rate']:.0f}%'}** "
-             f"(the same test on an unrelated instrument's next reading, {rep['baseline_pairs']} pairs). "
+             f"(the same test on an unrelated instrument's next reading, {rep['baseline_pairs']} episodes). "
              'A confirmation rate no higher than the baseline is not skill.', '',
+             f"Sample: **{rep.get('sample', 'exploratory')}**.", '',
              '## Outcomes by horizon', '', '| Horizon | Confirmed | Partial | Expired | Invalidated | Unresolved | Pending |',
              '|---|---|---|---|---|---|---|']
     for h, c in rep['by_horizon'].items():

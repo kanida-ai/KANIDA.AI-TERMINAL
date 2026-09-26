@@ -62,6 +62,10 @@ STATUS_NO_PRIOR = "no prior session"
 STATUS_NO_DATA = "no data"
 STATUS_NO_SPOT = "no spot"
 STATUS_NO_OI = "no oi"
+#: Some inputs were missing (None).  A missing value is never read as zero, so
+#: a ratio over an incomplete side is not computed; the raw sums and missing
+#: counts travel with the result.
+STATUS_INCOMPLETE = "incomplete"
 
 # ---------------------------------------------------------------------------
 # Section 3.1 labels.  Exactly the four of the spec table, plus two honest
@@ -403,23 +407,56 @@ class VolumeVsTimeOfDay:
     min_sessions: int = MIN_BASELINE_SESSIONS
 
 
+#: The capture's candle interval. ``candles_15m`` holds 15-minute bars; the
+#: python reader below infers a finer interval if the bars themselves show one.
+DEFAULT_BAR_MINUTES = 15
+
+
+def _bar_interval(starts: Sequence[datetime]) -> timedelta:
+    """The bar length the data itself shows, never longer than the default.
+
+    The smallest positive gap between consecutive bars of one session is the
+    interval (5-minute bars show a 5-minute gap).  A gap LONGER than the
+    default proves nothing -- bars go missing -- so it never stretches a bar
+    past ``DEFAULT_BAR_MINUTES``.
+    """
+    default = timedelta(minutes=DEFAULT_BAR_MINUTES)
+    by_day: dict[date, list[datetime]] = {}
+    for s in starts:
+        by_day.setdefault(s.date(), []).append(s)
+    best: timedelta | None = None
+    for day_starts in by_day.values():
+        ordered = sorted(set(day_starts))
+        for a, b in zip(ordered, ordered[1:]):
+            gap = b - a
+            if gap > timedelta(0) and (best is None or gap < best):
+                best = gap
+    return min(best, default) if best is not None else default
+
+
 def cumulative_by_time_of_day(
     bars: Iterable[Mapping[str, Any]],
     *,
     cutoff: datetime,
     sessions: int = BASELINE_SESSIONS,
+    interval: timedelta | None = None,
 ) -> list[float]:
     """Per-session cumulative volume up to the same clock time as ``cutoff``.
 
-    ``bars`` are 15-minute candles for **one contract** as mappings with
-    ``bar_start`` (``datetime`` or ISO string) and ``volume``.  Sessions on or
-    after ``cutoff``'s own date are excluded -- point-in-time: today's partial
-    session can never be part of its own baseline.  The most recent ``sessions``
-    prior sessions are returned, oldest first.
+    ``bars`` are candles for **one contract** as mappings with ``bar_start``
+    (``datetime`` or ISO string) and ``volume``.  A bar counts only when it has
+    ENDED by the cutoff's clock time (``bar_start + interval <= cutoff``): the
+    09:30 mark's cumulative volume holds the 09:15-09:30 bar, so the baseline
+    must not borrow the 09:30-09:45 bar from prior days (E04).  ``interval``
+    defaults to what the bars show, capped at 15 minutes.
+
+    Sessions on or after ``cutoff``'s own date are excluded -- point-in-time:
+    today's partial session can never be part of its own baseline.  The most
+    recent ``sessions`` prior sessions are returned, oldest first.
     """
     tod = cutoff.time()
     today = cutoff.date()
-    per_session: dict[date, float] = {}
+    parsed: list[tuple[datetime, Any]] = []
     for bar in bars:
         raw = bar.get("bar_start")
         if isinstance(raw, str):
@@ -429,11 +466,16 @@ def cumulative_by_time_of_day(
                 continue
         if not isinstance(raw, datetime):
             continue
+        parsed.append((raw, bar.get("volume")))
+    step = interval if interval is not None else _bar_interval([p[0] for p in parsed])
+    per_session: dict[date, float] = {}
+    for raw, volume in parsed:
         if raw.date() >= today:
             continue
-        if raw.time() > tod:
+        end = raw + step
+        if end.date() != raw.date() or end.time() > tod:
             continue
-        vol = _num(bar.get("volume"))
+        vol = _num(volume)
         if vol is None:
             continue
         per_session[raw.date()] = per_session.get(raw.date(), 0.0) + vol
@@ -601,6 +643,19 @@ class PutCallRatio:
     strikes: int = 0
     trend: str | None = None         # filled by pcr_trend()
     trend_change: float | None = None
+    # E06 completeness: how many legs of each side carried NO value (None).  The
+    # sums above are over KNOWN values only; a ratio is computed only when both
+    # of its sides are complete.
+    ce_oi_missing: int = 0
+    pe_oi_missing: int = 0
+    ce_volume_missing: int = 0
+    pe_volume_missing: int = 0
+    ce_legs: int = 0
+    pe_legs: int = 0
+    oi_complete: bool = True
+    volume_complete: bool = True
+    pcr_oi_status: str | None = None
+    pcr_volume_status: str | None = None
 
 
 def _ratio(numerator: float, denominator: float) -> float | None:
@@ -617,27 +672,58 @@ def put_call_ratio(legs: Iterable[Mapping[str, Any]]) -> PutCallRatio:
     ``oi`` and ``volume``.  A zero call side means the ratio is undefined, and
     it is reported as ``None`` with the raw sums beside it -- not as infinity
     and not as zero.
+
+    E06: a leg whose OI (or volume) is missing (None) is NOT a zero.  Either
+    side with a missing value makes that ratio undefined (``None``) and the
+    status ``"incomplete"``; the missing counts and completeness flags travel
+    with the result, so a PCR of 0 can only come from a real zero put side.
     """
     ce_oi = pe_oi = ce_vol = pe_vol = 0.0
+    miss = {"ce_oi": 0, "pe_oi": 0, "ce_vol": 0, "pe_vol": 0}
+    n_ce = n_pe = 0
     strikes: set[Any] = set()
     for leg in legs:
         typ = str(leg.get("instrument_type", "")).upper()
         if typ not in ("CE", "PE"):
             continue
         strikes.add(leg.get("strike"))
-        oi = _num(leg.get("oi")) or 0.0
-        vol = _num(leg.get("volume")) or 0.0
-        if typ == "CE":
+        oi = _num(leg.get("oi"))
+        vol = _num(leg.get("volume"))
+        side = "ce" if typ == "CE" else "pe"
+        if side == "ce":
+            n_ce += 1
+        else:
+            n_pe += 1
+        if oi is None:
+            miss[f"{side}_oi"] += 1
+        elif side == "ce":
             ce_oi += oi
-            ce_vol += vol
         else:
             pe_oi += oi
+        if vol is None:
+            miss[f"{side}_vol"] += 1
+        elif side == "ce":
+            ce_vol += vol
+        else:
             pe_vol += vol
     if not strikes:
         return PutCallRatio(status=STATUS_NO_DATA)
-    pcr_oi = _ratio(pe_oi, ce_oi)
-    pcr_vol = _ratio(pe_vol, ce_vol)
-    status = STATUS_OK if (pcr_oi is not None or pcr_vol is not None) else STATUS_NO_DATA
+    oi_complete = n_ce > 0 and n_pe > 0 and miss["ce_oi"] == 0 and miss["pe_oi"] == 0
+    vol_complete = n_ce > 0 and n_pe > 0 and miss["ce_vol"] == 0 and miss["pe_vol"] == 0
+    pcr_oi = _ratio(pe_oi, ce_oi) if oi_complete else None
+    pcr_vol = _ratio(pe_vol, ce_vol) if vol_complete else None
+
+    def _one(value: float | None, complete: bool) -> str:
+        if not complete:
+            return STATUS_INCOMPLETE
+        return STATUS_OK if value is not None else STATUS_NO_DATA
+
+    oi_status = _one(pcr_oi, oi_complete)
+    vol_status = _one(pcr_vol, vol_complete)
+    if not (oi_complete and vol_complete):
+        status = STATUS_INCOMPLETE
+    else:
+        status = STATUS_OK if (pcr_oi is not None or pcr_vol is not None) else STATUS_NO_DATA
     return PutCallRatio(
         status=status,
         pcr_oi=pcr_oi,
@@ -647,6 +733,16 @@ def put_call_ratio(legs: Iterable[Mapping[str, Any]]) -> PutCallRatio:
         ce_volume=ce_vol,
         pe_volume=pe_vol,
         strikes=len(strikes),
+        ce_oi_missing=miss["ce_oi"],
+        pe_oi_missing=miss["pe_oi"],
+        ce_volume_missing=miss["ce_vol"],
+        pe_volume_missing=miss["pe_vol"],
+        ce_legs=n_ce,
+        pe_legs=n_pe,
+        oi_complete=oi_complete,
+        volume_complete=vol_complete,
+        pcr_oi_status=oi_status,
+        pcr_volume_status=vol_status,
     )
 
 
@@ -683,6 +779,13 @@ class MaxPain:
     total_oi: float = 0.0
     strikes_used: int = 0
     payout_by_strike: dict[float, float] = field(default_factory=dict)
+    # E06: every strike whose payout equals the minimum (a flat bottom is a
+    # RANGE, not a point), its low/high ends, and how complete the OI was.
+    tied_strikes: tuple[float, ...] = ()
+    tie_low: float | None = None
+    tie_high: float | None = None
+    oi_missing: int = 0
+    legs: int = 0
 
 
 def max_pain(
@@ -690,59 +793,100 @@ def max_pain(
     *,
     spot: float | None = None,
 ) -> MaxPain:
-    """Spec 3.6: the strike where total payout to option buyers is smallest.
+    """Spec 3.6: the settlement strike that MINIMISES the total intrinsic payout
+    owed to option holders of this expiry.
 
-    At an expiry settlement price ``S`` the buyers of the calls are paid
-    ``ce_oi_K * max(0, S - K)`` and the buyers of the puts ``pe_oi_K *
+    At an expiry settlement price ``S`` the holders of the calls are paid
+    ``ce_oi_K * max(0, S - K)`` and the holders of the puts ``pe_oi_K *
     max(0, K - S)``, summed over every strike ``K`` of that expiry.  The
-    candidate settlement prices are the listed strikes themselves.  The reported
-    strike is the one minimising that sum, with the spot distance and the total
-    OI it was computed from.
+    candidate settlement prices are the listed strikes themselves.  It is a
+    payout-minimisation arithmetic over the OI supplied -- NOT "the strike where
+    most OI expires worthless", not a pin, and not a target or forecast.
 
-    Ties (a genuinely flat payout curve) resolve to the strike nearest the spot,
-    or to the lowest strike when there is no spot.  Ties are rare with real OI
-    and the tie rule is stated rather than hidden.
+    Ties (a genuinely flat payout curve) are returned as ``tied_strikes`` with
+    ``tie_low``/``tie_high``; the single ``strike`` resolves to the tied strike
+    nearest the spot, or the lowest when there is no spot.  The tie rule is
+    stated rather than hidden.
+
+    Missing OI (None) is not zero: it is counted in ``oi_missing`` and the
+    status is ``"incomplete"`` (the strike is still computed over the known OI,
+    so a reader can see what the known part says).  Payouts use sorted prefix
+    sums: O(n log n) rather than O(n^2).
 
     ``oi_by_strike`` is either ``{strike: {"ce_oi": .., "pe_oi": ..}}`` or an
     iterable of leg mappings with ``strike``/``instrument_type``/``oi``.
     """
     table: dict[float, dict[str, float]] = {}
+    missing = 0
+    legs = 0
     if isinstance(oi_by_strike, Mapping):
         for raw_k, vals in oi_by_strike.items():
             k = _num(raw_k)
             if k is None:
                 continue
             row = table.setdefault(k, {"ce_oi": 0.0, "pe_oi": 0.0})
-            row["ce_oi"] += _num(vals.get("ce_oi")) or 0.0
-            row["pe_oi"] += _num(vals.get("pe_oi")) or 0.0
+            for key in ("ce_oi", "pe_oi"):
+                if key not in vals:
+                    continue
+                legs += 1
+                v = _num(vals.get(key))
+                if v is None:
+                    missing += 1
+                else:
+                    row[key] += v
     else:
         for leg in oi_by_strike:
             k = _num(leg.get("strike"))
             typ = str(leg.get("instrument_type", "")).upper()
             if k is None or typ not in ("CE", "PE"):
                 continue
+            legs += 1
             row = table.setdefault(k, {"ce_oi": 0.0, "pe_oi": 0.0})
-            row["ce_oi" if typ == "CE" else "pe_oi"] += _num(leg.get("oi")) or 0.0
+            v = _num(leg.get("oi"))
+            if v is None:
+                missing += 1
+            else:
+                row["ce_oi" if typ == "CE" else "pe_oi"] += v
 
     if not table:
-        return MaxPain(status=STATUS_NO_DATA)
+        return MaxPain(status=STATUS_NO_DATA, oi_missing=missing, legs=legs)
 
     total_oi = sum(r["ce_oi"] + r["pe_oi"] for r in table.values())
     if total_oi <= 0:
-        return MaxPain(status=STATUS_NO_OI, strikes_used=len(table))
+        return MaxPain(
+            status=STATUS_INCOMPLETE if missing else STATUS_NO_OI,
+            strikes_used=len(table),
+            oi_missing=missing,
+            legs=legs,
+        )
 
+    ks = sorted(table)
+    n = len(ks)
+    # calls strictly below the settle pay (S-K): S*sum(ce) - sum(ce*K) over K<S
+    # puts strictly above the settle pay (K-S): sum(pe*K) - S*sum(pe) over K>S
+    ce_cum = ce_k_cum = 0.0
+    below: list[tuple[float, float]] = []
+    for k in ks:
+        below.append((ce_cum, ce_k_cum))
+        ce_cum += table[k]["ce_oi"]
+        ce_k_cum += table[k]["ce_oi"] * k
+    pe_cum = pe_k_cum = 0.0
+    above: list[tuple[float, float]] = [(0.0, 0.0)] * n
+    for i in range(n - 1, -1, -1):
+        above[i] = (pe_cum, pe_k_cum)
+        pe_cum += table[ks[i]]["pe_oi"]
+        pe_k_cum += table[ks[i]]["pe_oi"] * ks[i]
     payouts: dict[float, float] = {}
-    for settle in sorted(table):
-        total = 0.0
-        for strike, row in table.items():
-            if settle > strike:
-                total += row["ce_oi"] * (settle - strike)
-            elif settle < strike:
-                total += row["pe_oi"] * (strike - settle)
-        payouts[settle] = total
+    for i, settle in enumerate(ks):
+        c, ck = below[i]
+        p, pk = above[i]
+        payouts[settle] = max(0.0, (settle * c - ck) + (pk - settle * p))
 
     best = min(payouts.values())
-    candidates = [k for k, v in payouts.items() if v == best]
+    # prefix sums can differ from the direct sum in the last bits; a tie is a
+    # payout within a relative 1e-12 of the minimum.
+    tol = 1e-12 * max(1.0, abs(best))
+    candidates = [k for k in ks if payouts[k] - best <= tol]
     spot_v = _num(spot)
     if len(candidates) > 1 and spot_v is not None:
         chosen = min(candidates, key=lambda k: (abs(k - spot_v), k))
@@ -751,20 +895,20 @@ def max_pain(
 
     distance = None if spot_v is None else chosen - spot_v
     return MaxPain(
-        status=STATUS_OK,
+        status=STATUS_INCOMPLETE if missing else STATUS_OK,
         strike=chosen,
-        total_payout=best,
+        total_payout=payouts[chosen],
         distance_from_spot=distance,
         distance_pct=None if (spot_v is None or spot_v == 0) else 100.0 * (chosen - spot_v) / spot_v,
         total_oi=total_oi,
         strikes_used=len(table),
         payout_by_strike=payouts,
+        tied_strikes=tuple(candidates),
+        tie_low=min(candidates),
+        tie_high=max(candidates),
+        oi_missing=missing,
+        legs=legs,
     )
-
-
-# ===========================================================================
-# 3.7  Futures OI build-up
-# ===========================================================================
 
 
 @dataclass(frozen=True)
@@ -1281,6 +1425,17 @@ class UnderlyingRollup:
     oi_change_pct_day: float | None
     oi_change_day_status: str
     headline: str
+    # E04 matched cohort: `oi_change_pct_day` compares the SAME legs now and at
+    # the prior close.  Legs that exist now with no prior close (births) and
+    # legs with a prior close but no current OI (deaths) are reported apart,
+    # never folded into the change as growth or decline.
+    oi_matched_now: float | None = None
+    oi_matched_before: float | None = None
+    oi_matched_legs: int = 0
+    oi_births: int = 0
+    oi_births_oi: float = 0.0
+    oi_deaths: int = 0
+    oi_deaths_prior_oi: float = 0.0
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -1381,14 +1536,18 @@ def roll_up_underlying(
     mp = max_pain(legs, spot=spot)
     prem = premium_rollup([m.premium for m in metrics])
 
-    oi_now = sum(m.oi for m in options if m.oi is not None)
-    oi_before_parts = [
-        (m.oi - m.buildup_day.oi_change)
-        for m in options
-        if m.oi is not None and m.buildup_day.oi_change is not None
+    # Matched cohort (E04): only legs with BOTH a current OI and a prior-close
+    # OI enter the change.  Summing every current leg against only the legs
+    # that had a prior would make a newly listed strike look like OI growth.
+    matched = [m for m in options if m.oi is not None and m.buildup_day.oi_change is not None]
+    births = [m for m in options if m.oi is not None and m.buildup_day.oi_change is None]
+    deaths = [
+        m for m in options
+        if m.oi is None and m.volume_to_oi.prev_day_oi is not None
     ]
-    if oi_before_parts and sum(oi_before_parts) > 0:
-        oi_before = sum(oi_before_parts)
+    oi_now = sum(m.oi for m in matched) if matched else None
+    oi_before = sum(m.oi - m.buildup_day.oi_change for m in matched) if matched else None
+    if oi_before is not None and oi_before > 0:
         oi_change_pct = 100.0 * (oi_now - oi_before) / oi_before
         oi_status = STATUS_OK
     else:
@@ -1412,6 +1571,13 @@ def roll_up_underlying(
         oi_change_pct_day=oi_change_pct,
         oi_change_day_status=oi_status,
         headline=_headline(underlying, unusual_ce, unusual_pe, oi_change_pct, oi_status, prem),
+        oi_matched_now=oi_now,
+        oi_matched_before=oi_before,
+        oi_matched_legs=len(matched),
+        oi_births=len(births),
+        oi_births_oi=sum(m.oi for m in births),
+        oi_deaths=len(deaths),
+        oi_deaths_prior_oi=sum(m.volume_to_oi.prev_day_oi for m in deaths),
     )
 
 
@@ -1773,7 +1939,11 @@ def load_tod_baselines(
     *,
     sessions: int = BASELINE_SESSIONS,
 ) -> dict[int, list[float]]:
-    """Per contract, the cumulative volume by this clock time in prior sessions."""
+    """Per contract, the cumulative volume by this clock time in prior sessions.
+
+    A 15-minute bar counts when it has ENDED by the mark (bar end <= mark), the
+    same rule as :func:`cumulative_by_time_of_day` (E04).
+    """
     if not table_exists(conn, "candles_15m"):
         raise LookupError("db/derivatives.db has no 'candles_15m' table yet (D1's store)")
     args: list[Any] = [captured_at.date().isoformat(), captured_at.strftime("%H:%M:%S")]
@@ -1782,7 +1952,7 @@ def load_tod_baselines(
     sql = f"""
         SELECT instrument_token, date(bar_start) AS d, SUM(volume) AS cum
         FROM candles_15m
-        WHERE date(bar_start) < ? AND time(bar_start) <= ?{token_clause}
+        WHERE date(bar_start) < ? AND time(bar_start, '+{DEFAULT_BAR_MINUTES} minutes') <= ?{token_clause}
         GROUP BY instrument_token, d
         ORDER BY instrument_token, d
     """

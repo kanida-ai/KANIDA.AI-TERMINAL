@@ -628,6 +628,22 @@ export const FLOW_LABELS:Record<string,[string,string]>={
  'PE|down|flat':['Premium fell','Open interest barely moved'],
  'PE|flat|flat':['Very little change','Positioning is unchanged'],
 };
+/** E06 (slice 14): the plain OBSERVATION behind every row, and the interpretation stated AS one. Price and OI
+ *  cannot identify who initiated a trade, so each directional row also carries "consistent with ...; who traded
+ *  is not known". Word for word FLOW_OBSERVATIONS / FLOW_ATTRIBUTIONS in server/kanida_pilot/derivatives.py. */
+export const FLOW_OBSERVATIONS:Record<string,string>={
+ 'up|building':'Premium up, open interest up','down|building':'Premium down, open interest up',
+ 'up|unwinding':'Premium up, open interest down','down|unwinding':'Premium down, open interest down',
+ 'flat|building':'Premium flat, open interest up','flat|unwinding':'Premium flat, open interest down',
+ 'up|flat':'Premium up, open interest flat','down|flat':'Premium down, open interest flat',
+ 'flat|flat':'Premium flat, open interest flat',
+};
+export const FLOW_ATTRIBUTIONS:Record<string,string>={
+ 'down|building':'Consistent with option writing; who traded is not known',
+ 'up|building':'Consistent with option buying; who traded is not known',
+ 'up|unwinding':'Consistent with short covering; who traded is not known',
+ 'down|unwinding':'Consistent with holders closing out; who traded is not known',
+};
 /** ONLY when BOTH axes are flat. A tile whose OI moved never says this - it would contradict its own chip. */
 export const FLOW_FLAT_WHAT='Very little change',FLOW_FLAT_MEANING='Positioning is unchanged';
 /** Fewer than two readings carrying a price, or carrying a ΔOI. Never guessed at. */
@@ -673,15 +689,18 @@ export function gridPriceDirection(points:GridPoint[]|null|undefined,lookback=GR
 }
 /** What is happening on this contract, and what it means - derived from the tile's own points, never from a chip. */
 export function gridFlow(optionType:unknown,points:GridPoint[]|null|undefined):
- {price_direction:GridPriceDirection;oi_direction:GridDirection;what_label:string;meaning:string}{
+ {price_direction:GridPriceDirection;oi_direction:GridDirection;what_label:string;meaning:string;
+  observation:string;attribution:string}{
  const oi=gridDirection(points),price=gridPriceDirection(points);
  const kind=String(optionType||'').toUpperCase();
  if(price===NO_DIRECTION||oi===NO_DIRECTION)return {price_direction:price,oi_direction:oi,
-  what_label:FLOW_NOT_ENOUGH,meaning:''};
+  what_label:FLOW_NOT_ENOUGH,meaning:'',observation:'',attribution:''};
  // a straight lookup: every combination has its own row, so nothing is collapsed into another one
  const found=FLOW_LABELS[`${kind}|${price}|${oi}`];
+ const axes=`${price}|${oi}`;
  return {price_direction:price,oi_direction:oi,what_label:found?found[0]:FLOW_NOT_ENOUGH,
-  meaning:found?found[1]:''};
+  meaning:found?found[1]:'',observation:found?(FLOW_OBSERVATIONS[axes]||''):'',
+  attribution:found?(FLOW_ATTRIBUTIONS[axes]||''):''};
 }
 /** The window ΔOI change one tile contributes to the block read: now against the reading `lookback` back. */
 export function gridDeltaChange(points:GridPoint[]|null|undefined,lookback=GRID_DIRECTION_LOOKBACK){
@@ -711,7 +730,7 @@ export function gridPriceSpoken(slot?:GridSlot|null){
  const flow=gridFlow(slot.option_type,slot.points);
  const last=[...(slot.points||[])].reverse().find(p=>num(p?.price)!=null);
  const premium=last?`Price ${price(last.price)}.`:'No price captured for this strike yet.';
- return `${premium} ${flow.what_label}${flow.meaning?`. ${flow.meaning}`:''}.`;
+ return `${premium} ${flow.what_label}${flow.meaning?`. ${flow.meaning}`:''}.${flow.observation?` ${flow.observation}.`:''}${flow.attribution?` ${flow.attribution}.`:''}`;
 }
 /** The chip's text, or '' when there is no baseline for one. */
 export function directionChip(direction:unknown){return DIRECTION_CHIPS[String(direction||'')]||'';}
@@ -1444,7 +1463,9 @@ export const IV_REASONS:Record<string,string>={
  no_time_value:'No volatility: at this price the contract has no time value left to solve.',
  below_intrinsic:'No volatility: the traded price is under the contract\'s intrinsic value, so no volatility reproduces it.',
  no_convergence:'No volatility: the solver did not settle on an answer for this price.',
- expiry_today:'No volatility: this contract expires today, so there is no time left to price.',
+ expiry_today:'No volatility: no time is left before this contract settles.',
+ non_finite_input:'No volatility: an input to the solver was not a finite number.',
+ future_last_trade:'No volatility: the last trade is stamped after this reading, so its price was not known then.',
 };
 /** The words for one null. An unknown reason code is said as itself rather than swallowed - a reason we cannot
  *  translate is still a reason, and the reader is owed it. */

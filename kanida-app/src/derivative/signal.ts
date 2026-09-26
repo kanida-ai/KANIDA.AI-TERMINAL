@@ -670,8 +670,9 @@ export const SIGNAL_GUIDE=[
   'Δ IV is at-the-money volatility in POINTS. It is solved from premium and spot rather than reported by '
   +'the exchange; where it could not be solved the box says so instead of showing a zero.',
   'Δ PCR is put open interest against call open interest, across the whole book.',
-  'MAX PAIN is the strike at which the most open interest would expire worthless. Context, not a target, '
-  +'and the weakest of the five.',
+  'MAX PAIN is the listed strike at which the total intrinsic payout owed to option holders at expiry '
+  +'would be smallest, from the open interest at this reading. A flat bottom is a range of strikes, not a '
+  +'point. Context, not a target (nor a pin or a forecast), and the weakest of the five.',
  ]},
  {heading:'Evidence and conflict',lines:[
   'A behaviour — writing, buying, covering — is an INTERPRETATION of open interest and premium read '

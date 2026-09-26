@@ -28,7 +28,7 @@ class MarketUnavailable(Exception):pass
 
 class Market:
  def __init__(self,path):
-  self.path=path;self.lock=threading.Lock();self._c=None;self._memo={}
+  self.path=path;self.lock=threading.Lock();self._c=None;self._memo={};self._cols=None
 
  def _conn(self):
   if self._c is None:
@@ -43,8 +43,16 @@ class Market:
  def _q(self,sql,args=()):
   with self.lock:return self._conn().execute(sql,args).fetchall()
 
+ def _columns(self):
+  """Optional columns differ between a fresh capture schema (bid/ask retired 2026-09-19) and a legacy store.
+  A column the live table does not have is read as NULL = unavailable, never fabricated (E03)."""
+  if self._cols is None:
+   self._cols={t:{r['name'] for r in self._q(f'pragma table_info({t})')} for t in ('contracts','snapshots')}
+  return self._cols
+
  def close(self):
   if self._c:self._c.close();self._c=None
+  self._cols=None
 
  def underlyings(self):
   """Indices first, then F&O stocks (physically settled - the builder says so near expiry)."""
@@ -81,8 +89,11 @@ class Market:
   at,spot=got
   key=(underlying,expiry,at)
   if key in self._memo:return self._memo[key]
-  rows=self._q("select c.instrument_token token,c.tradingsymbol symbol,c.strike,c.instrument_type type,c.lot_size,c.tick_size,"
-   "s.last_price ltp,s.bid,s.ask,s.oi,s.volume,s.last_trade_time from contracts c join snapshots s on s.instrument_token=c.instrument_token "
+  cols=self._columns()
+  opt=lambda table,col,alias:f'{table[0]}.{col} {alias}' if col in cols.get(table,()) else f'NULL {alias}'
+  rows=self._q("select c.instrument_token token,c.tradingsymbol symbol,c.strike,c.instrument_type type,c.lot_size,"
+   +opt('contracts','tick_size','tick_size')+",s.last_price ltp,"+opt('snapshots','bid','bid')+","+opt('snapshots','ask','ask')
+   +",s.oi,s.volume,"+opt('snapshots','last_trade_time','last_trade_time')+" from contracts c join snapshots s on s.instrument_token=c.instrument_token "
    "and s.captured_at=? where c.underlying=? and c.expiry=? and c.instrument_type in ('CE','PE') order by c.strike",(at,underlying,expiry))
   reading_at=parse_ist(at);t=years_between(reading_at,expiry)
   strikes={};lot=None;tick=None

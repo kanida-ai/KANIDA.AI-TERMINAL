@@ -23,7 +23,12 @@ When this module refuses
 A model output that cannot be trusted is `None` with a NAMED reason - never a guess and never a fallback
 number. Every reason is in `REASONS` with the plain sentence the card prints. The reasons:
 
-* `expiry_today`            - the option expires on the day of the reading; there is no time left to solve for.
+* `expiry_today`            - no time is left between the reading and the expiry settlement moment. An expiry-day
+                              reading taken while the session is still open HAS positive time and is solved; the
+                              gate is the actual time left, never the whole-day count.
+* `non_finite_input`        - a price, spot, strike or time that is NaN or infinite; it is rejected, never solved.
+* `future_last_trade`       - the last trade is stamped later than the reading (beyond capture lag), so the price was
+                              not knowable at that reading.
 * `no_time_value`           - the price is the intrinsic value; any volatility fits, so none is implied.
 * `price_below_intrinsic`   - the last price is under the no-arbitrage floor, so the model has no root at all.
 * `price_above_upper_bound` - the last price is at or above the no-arbitrage ceiling, same.
@@ -79,11 +84,16 @@ PRICE_EPSILON=1e-6
 #: A last trade older than one 15-minute reading means nothing changed hands in the bar the mark closes, so
 #: the "last price" is not this reading's price.
 STALE_SECONDS=900
+#: The capture runs a minute or two after a mark, so a last trade may legitimately be stamped a little after the
+#: reading's label. Beyond this many seconds the trade is in the reading's future: not knowable at the reading.
+FUTURE_TRADE_TOLERANCE_SECONDS=300
 
 #: What may be said about a reading whose implied volatility could not be solved. One entry per reason, and a
 #: point ALWAYS carries one of these when its `iv` is null - a null with no reason never leaves this module.
 REASONS={
- 'expiry_today':'This option expires today, so there is no time left for a volatility to be implied from.',
+ 'expiry_today':'No time is left before this option settles, so there is no volatility to imply.',
+ 'non_finite_input':'An input (price, spot, strike or time to expiry) is not a finite number, so nothing is solved from it.',
+ 'future_last_trade':'The last trade is stamped after this reading, so its price was not known at the reading.',
  'no_time_value':'The last price is the option\'s intrinsic value, so no volatility is implied by it.',
  'price_below_intrinsic':'The last price is below the option\'s intrinsic value, so the model has no solution.',
  'price_above_upper_bound':'The last price is at or above the most the option can be worth, so the model has no solution.',
@@ -103,7 +113,9 @@ REASONS={
 #: Every assumption, listed. A reader who disagrees with one can see exactly which number it changes.
 ASSUMPTIONS={
  'style':'European exercise — NSE index and single-stock options are both European-style.',
- 'dividend':'No dividend is subtracted. On a single stock that goes ex-dividend before expiry, this solves slightly high on calls and slightly low on puts.',
+ 'dividend':('No dividend is subtracted. A positive dividend lowers the forward, so with the observed prices held '
+  'fixed a no-dividend model solves LOWER on calls and HIGHER on puts than a dividend-aware model would. On a single '
+  'stock that goes ex-dividend before expiry (and more so for far expiries) the call/put IV gap can be partly this.'),
  'rate':RISK_FREE_RATE_SOURCE['text'],
  'day_count':f'{DAY_COUNT}, measured from the 15-minute reading to {EXPIRY_TIME_IST} IST on the expiry date.',
  'price':'The option\'s own last traded price at that reading, as the exchange reported it — never a mid, never a model price.',
@@ -114,6 +126,11 @@ ASSUMPTIONS={
 COMPUTED_TEXT=('Implied volatility is COMPUTED here, not reported by the exchange. It is solved from this '
  'option\'s own last traded price with a '+MODEL+' model. Every other number on this tab is a figure the '
  'exchange reported.')
+
+
+def _finite(x):
+ try:return math.isfinite(float(x))
+ except (TypeError,ValueError):return False
 
 
 def _norm_cdf(x):
@@ -155,19 +172,29 @@ def solve(price,spot,strike,years,option_type,rate=RISK_FREE_RATE,days_to_expiry
  (0.18 = 18% a year). `reason` is a key of REASONS and is set whenever `iv` is None — never the other way
  round, so a caller can always print WHY a reading is blank.
  """
+ age=seconds_since_last_trade
+ age_ok=age is not None and _finite(age)
+ trade_quality=('unknown' if not age_ok else 'future' if age<-FUTURE_TRADE_TOLERANCE_SECONDS
+  else 'stale' if age>STALE_SECONDS else 'current')
  out={'iv':None,'reason':None,'iv_pct':None,'years':None,'intrinsic':None,'time_value':None,
-  'iterations':0,'rate':rate,'rate_sensitivity':None,'bounds':None}
+  'iterations':0,'rate':rate,'rate_sensitivity':None,'bounds':None,'trade_time_quality':trade_quality,
+  'expiry_day':bool(days_to_expiry is not None and _finite(days_to_expiry) and days_to_expiry<=0),'invalid_input':None}
  kind=str(option_type or '').strip().upper()
  if kind not in ('CE','PE'):return {**out,'reason':'unknown_option_type'}
+ # Finite gate FIRST: NaN compares False with everything, so without it a NaN price walks straight past every
+ # bound below and comes out as a plausible-looking volatility.
+ for name,value in (('price',price),('spot',spot),('strike',strike),('years',years),('rate',rate)):
+  if value is not None and not _finite(value):return {**out,'reason':'non_finite_input','invalid_input':name}
  if strike is None or strike<=0:return {**out,'reason':'missing_strike'}
  if spot is None or spot<=0:return {**out,'reason':'missing_spot'}
  if years is None:return {**out,'reason':'missing_expiry'}
  out['years']=years
  # The staleness gate runs BEFORE the maths: a price that is not this reading's price cannot be trusted
- # however well it solves.
- if seconds_since_last_trade is not None and seconds_since_last_trade>STALE_SECONDS:
-  return {**out,'reason':'stale_last_trade'}
- if days_to_expiry is not None and days_to_expiry<=0:return {**out,'reason':'expiry_today'}
+ # however well it solves. A trade stamped in the reading's future is refused for the same reason.
+ if trade_quality=='stale':return {**out,'reason':'stale_last_trade'}
+ if trade_quality=='future':return {**out,'reason':'future_last_trade'}
+ # The expiry gate is the ACTUAL time left. An expiry-day reading at 09:30 still has six hours to settlement
+ # and is solved (flagged `expiry_day`); only a reading at or after the settlement moment has nothing to solve.
  if years<=0:return {**out,'reason':'expiry_today'}
  if price is None:return {**out,'reason':'missing_price'}
  if price<=0:return {**out,'reason':'non_positive_price'}

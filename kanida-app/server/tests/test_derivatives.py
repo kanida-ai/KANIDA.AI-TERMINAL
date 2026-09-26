@@ -15,6 +15,7 @@ store with the §2 schema and assert what the tab is allowed to say:
 """
 import re
 import sqlite3
+from datetime import date
 from pathlib import Path
 import pytest
 from kanida_pilot import derivatives as D
@@ -45,6 +46,13 @@ CREATE TABLE metrics(instrument_token INTEGER, captured_at TEXT, last_price REAL
 '''
 
 CR=D.CRORE
+
+
+@pytest.fixture(autouse=True)
+def _fixed_clock(monkeypatch):
+ """E12: the fixtures are the 18 Sep 2026 session (MARK), so the reader's 'today' is pinned to it. Without this the
+ front-expiry / live-vs-historical answers depend on the wall clock and the suite fails on any later date."""
+ monkeypatch.setattr(D,'today_ist',lambda:date(2026,9,18))
 
 
 def build_store(path,*,metrics=True):

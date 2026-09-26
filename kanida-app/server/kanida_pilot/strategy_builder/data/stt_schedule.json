@@ -1,0 +1,53 @@
+{
+  "version": "stt-2026-09-26",
+  "scope": "Securities Transaction Tax on NSE exchange-traded equity derivatives (index and stock options and futures). Each rate applies to trades executed ON OR AFTER effective_from, until the next entry.",
+  "coverage_from": "2016-01-01",
+  "coverage_note": "Dates before coverage_from are NOT covered: the start date of the 0.017% option-sale rate (Finance Act 2013) was not opened from a primary source in this pass. A cost lookup before coverage_from is refused, never guessed.",
+  "verified_at": "2026-09-26",
+  "sources": {
+    "C2016": {"url": "https://nsearchives.nseindia.com/content/circulars/FATAX32385.pdf", "title": "NSE/FATAX/32385, 16 May 2016 (Finance Act 2016)"},
+    "C2019": {"url": "https://nsearchives.nseindia.com/content/circulars/FATAX41919.pdf", "title": "NSE/FATAX/41919, 20 Aug 2019 (Finance (No.2) Act 2019: exercise base to intrinsic value)"},
+    "C2023": {"url": "https://nsearchives.nseindia.com/content/circulars/FATAX56235.pdf", "title": "NSE/FATAX/56235, 1 Apr 2023 (Finance Act 2023)"},
+    "C2024": {"url": "https://nsearchives.nseindia.com/content/circulars/FATAX63809.pdf", "title": "NSE/FATAX/63809, 9 Sep 2024 (Finance (No.2) Act 2024)"},
+    "C2026": {"url": "https://nsearchives.nseindia.com/content/circulars/FATAX73524.pdf", "title": "NSE/FATAX/73524, 31 Mar 2026 (Finance Act 2026)"},
+    "MEMO2026": {"url": "https://www.indiabudget.gov.in/doc/memo.pdf", "title": "Finance Bill 2026 memorandum, pp. 63-64"},
+    "NSEPAGE": {"url": "https://www.nseindia.com/static/products-services/equity-derivatives-securities-transaction-tax", "title": "NSE STT table (updated 01/04/2026)"}
+  },
+  "option_sale": {
+    "base": "option premium x quantity",
+    "payer": "seller",
+    "history": [
+      {"effective_from": "2016-01-01", "rate": 0.00017, "source": "C2016", "primary": true,
+       "note": "C2016 lists 0.017% as the rate up to 31-May-2016. 2016-01-01 is the start of this schedule's coverage, not the rate's statutory start (Finance Act 2013, not opened)."},
+      {"effective_from": "2016-06-01", "rate": 0.0005, "source": "C2016", "primary": true},
+      {"effective_from": "2023-04-01", "rate": 0.000625, "source": "C2023", "primary": true},
+      {"effective_from": "2024-10-01", "rate": 0.001, "source": "C2024", "primary": true},
+      {"effective_from": "2026-04-01", "rate": 0.0015, "source": "C2026", "primary": true, "also": ["MEMO2026", "NSEPAGE"]}
+    ]
+  },
+  "option_exercise": {
+    "payer": "purchaser (holder of the exercised in-the-money option)",
+    "history": [
+      {"effective_from": "2016-01-01", "rate": 0.00125, "base": "settlement_price", "source": "C2016", "primary": true,
+       "note": "0.125% on the SETTLEMENT PRICE x quantity (notional), 'No Change' in C2016. 2016-01-01 is the coverage start, the rate is older."},
+      {"effective_from": "2019-09-01", "rate": 0.00125, "base": "intrinsic_value", "source": "C2019", "primary": true,
+       "note": "Base changed to intrinsic value (settlement price minus strike) x quantity; rate unchanged."},
+      {"effective_from": "2026-04-01", "rate": 0.0015, "base": "intrinsic_value", "source": "C2026", "primary": true, "also": ["MEMO2026", "NSEPAGE"]}
+    ]
+  },
+  "futures_sale": {
+    "base": "traded price x quantity",
+    "payer": "seller",
+    "history": [
+      {"effective_from": "2016-01-01", "rate": 0.0001, "source": "C2016", "primary": true, "note": "'No Change' in C2016; 2016-01-01 is the coverage start."},
+      {"effective_from": "2023-04-01", "rate": 0.000125, "source": "C2023", "primary": true},
+      {"effective_from": "2024-10-01", "rate": 0.0002, "source": "C2024", "primary": true},
+      {"effective_from": "2026-04-01", "rate": 0.0005, "source": "C2026", "primary": true, "also": ["MEMO2026"]}
+    ]
+  },
+  "known_gaps": [
+    "Before 2016-01-01: not covered (refused).",
+    "Physically settled STOCK derivatives (from July 2018): delivery-based equity STT (0.1%) is reported by secondary sources (CBDT letter 27 Aug 2018; NSE/FATAX/38737 is a scanned image that could not be read). NOT modelled here; the builder exits stock options before expiry.",
+    "Only STT is effective-dated. Exchange transaction charges, SEBI fee, stamp duty and GST in charges.RATES are the current (Sep 2026) values applied to every date."
+  ]
+}

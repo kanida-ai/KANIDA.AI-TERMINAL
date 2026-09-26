@@ -38,6 +38,41 @@ CREATE INDEX IF NOT EXISTS ix_contracts_underlying ON contracts(underlying, expi
 CREATE INDEX IF NOT EXISTS ix_contracts_scope      ON contracts(in_scope, expiry);
 CREATE INDEX IF NOT EXISTS ix_contracts_symbol     ON contracts(tradingsymbol);
 
+-- ── vendor-token identity history (slice 14 / audit E01) ────────────────────
+-- Kite warns an instrument_token may be REUSED for a different contract after
+-- the first one expires.  `contracts` is keyed by that token, so a reuse used to
+-- overwrite the old contract's symbol/strike/expiry/lot and every historical
+-- bar silently changed identity.  Now, when a sync sees a known token carrying a
+-- different economic contract (symbol, underlying, type, strike or expiry):
+--   * the OLD identity is kept in `contracts` under a SURROGATE token (negative,
+--     never a vendor token), copied verbatim, in_scope = 0;
+--   * this table records that vendor token V meant contract C (surrogate) for
+--     sessions up to `valid_through` (the old contract's expiry), and the vendor
+--     token's own row from `valid_from` on;
+--   * a same-contract change of lot or tick size is a METADATA version: the old
+--     values are recorded here with reason 'metadata_change'.
+-- Raw rows (snapshots, candles) are never rewritten; a point-in-time reader
+-- resolves (token, session) through `DerivativesStore.contract_at`.
+-- Additive: CREATE IF NOT EXISTS on every open; nothing existing is altered.
+CREATE TABLE IF NOT EXISTS contract_token_history (
+    vendor_token     INTEGER NOT NULL,
+    contract_token   INTEGER NOT NULL,   -- the contracts row holding that identity
+    reason           TEXT    NOT NULL,   -- token_reuse | metadata_change
+    tradingsymbol    TEXT    NOT NULL,
+    underlying       TEXT,
+    instrument_type  TEXT,
+    strike           REAL,
+    expiry           TEXT,
+    lot_size         INTEGER,
+    tick_size        REAL,
+    valid_from       TEXT,               -- first session this identity/metadata applied (YYYY-MM-DD, or first_seen)
+    valid_through    TEXT,               -- last session it applied (YYYY-MM-DD)
+    detected_at      TEXT    NOT NULL,   -- UTC, the sync that noticed the change
+    snapshot_id      TEXT,
+    PRIMARY KEY (vendor_token, contract_token, reason, detected_at)
+);
+CREATE INDEX IF NOT EXISTS ix_token_history_vendor ON contract_token_history(vendor_token, valid_through);
+
 -- ── 15-minute quote snapshots (raw) ─────────────────────────────────────────
 -- captured_at is the MARK (09:30, 09:45 … 15:30, plus the post-close mark),
 -- naive IST.

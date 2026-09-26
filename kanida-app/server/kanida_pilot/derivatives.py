@@ -330,6 +330,24 @@ FLOW_LABELS={
  'PE|down|flat':('Premium fell','Open interest barely moved'),
  'PE|flat|flat':('Very little change','Positioning is unchanged'),
 }
+#: E06 (slice 14): what was OBSERVED, and the interpretation stated AS an interpretation. Price and OI read
+#: together cannot identify who initiated a trade (every contract has a buyer and a seller; delta, time decay
+#: and IV all move premium), so every directional row carries the plain observation and a "consistent with ...;
+#: who traded is not known" note beside the owner's verbatim labels above. Mirrored word for word in
+#: src/derivative/logic.ts FLOW_OBSERVATIONS / FLOW_ATTRIBUTIONS.
+FLOW_OBSERVATIONS={
+ 'up|building':'Premium up, open interest up','down|building':'Premium down, open interest up',
+ 'up|unwinding':'Premium up, open interest down','down|unwinding':'Premium down, open interest down',
+ 'flat|building':'Premium flat, open interest up','flat|unwinding':'Premium flat, open interest down',
+ 'up|flat':'Premium up, open interest flat','down|flat':'Premium down, open interest flat',
+ 'flat|flat':'Premium flat, open interest flat',
+}
+FLOW_ATTRIBUTIONS={
+ 'down|building':'Consistent with option writing; who traded is not known',
+ 'up|building':'Consistent with option buying; who traded is not known',
+ 'up|unwinding':'Consistent with short covering; who traded is not known',
+ 'down|unwinding':'Consistent with holders closing out; who traded is not known',
+}
 #: ONLY when BOTH are flat. A tile whose OI moved never says this: the sentence under a tile must never
 #: contradict the chip above it, and "positioning is unchanged" beside "↓ UNWINDING" is a false statement.
 FLOW_FLAT_WHAT='Very little change'
@@ -1908,7 +1926,10 @@ class Derivatives:
    'oi_change':oi_detail.get('change'),'price_flat_threshold':price_detail.get('price_flat_threshold'),
    'oi_flat_threshold':oi_detail.get('flat_threshold'),
    'readings_back':oi_detail.get('marks_back',price_detail.get('readings_back',DIRECTION_LOOKBACK_MARKS))}
+  axes=f'{price_direction}|{oi_direction}'
   return {'price_direction':price_direction,'oi_direction':oi_direction,'what_label':what,'meaning':meaning,
+   'observation':FLOW_OBSERVATIONS.get(axes) if what!=FLOW_NOT_ENOUGH else None,
+   'attribution':FLOW_ATTRIBUTIONS.get(axes) if what!=FLOW_NOT_ENOUGH else None,
    'detail':detail}
 
  @staticmethod

@@ -124,7 +124,9 @@ export type GridDirection='building'|'flat'|'unwinding'|'no baseline';
 export type GridPriceDirection='up'|'down'|'flat'|'no baseline';
 /** Price and OI read together: what is happening, and what it means. Never a forecast (§5). */
 export type GridFlow={price_direction:GridPriceDirection|string;oi_direction:GridDirection|string;
- what_label:string;meaning:string|null;detail:Record<string,unknown>};
+ what_label:string;meaning:string|null;
+ /** E06: the plain observation and the "consistent with ...; who traded is not known" note (optional: older servers). */
+ observation?:string|null;attribution?:string|null;detail:Record<string,unknown>};
 /** One of the ten fixed slots. An unlisted strike is still a slot: `present:false` with its own `missing_text`. */
 export type GridSlot={slot:string;option_type:'CE'|'PE';atm_offset:number;label:string;row:'calls'|'puts';
  present:boolean;tradingsymbol:string|null;instrument_token:number|null;strike:number|null;

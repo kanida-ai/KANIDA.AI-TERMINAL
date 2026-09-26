@@ -155,14 +155,15 @@ class TestVolumeVsTimeOfDay:
         assert r.status == M.STATUS_NO_BASELINE and r.ratio is None
 
     def test_cumulative_by_time_of_day_is_point_in_time(self):
-        """Bars after the clock time are excluded, and today never feeds its own
+        """Bars that have not ENDED by the clock time are excluded (E04: a bar
+        starting AT the cutoff ends after it), and today never feeds its own
         baseline."""
         bars = []
         for day in (16, 17, 18):                       # 18th is 'today'
             for hour, vol in ((9, 100), (11, 200), (14, 900)):
                 bars.append({"bar_start": datetime(2026, 9, day, hour, 15), "volume": vol})
         out = M.cumulative_by_time_of_day(bars, cutoff=datetime(2026, 9, 18, 11, 15))
-        assert out == [300.0, 300.0]       # 16th and 17th, 09:15 + 11:15 only
+        assert out == [100.0, 100.0]       # 16th and 17th: 09:15-09:30 only; 11:15-11:30 ends after 11:15
 
 
 # ===========================================================================
@@ -660,12 +661,13 @@ def db(tmp_path):
              EXPIRY.isoformat(), 250, "2026-08-01", "2026-09-18"),
         )
 
-    # Four prior sessions of candles at 09:30 and 11:15, plus a 15:15 close.
+    # Four prior sessions of candles starting 09:30 and 11:00 (the 11:00 bar
+    # ENDS at the 11:15 mark, E04), plus a 15:15 close.
     for day in (14, 15, 16, 17):
         for token, _, _ in TOKENS.values():
             for hh, mm, vol, close, oi in (
                 (9, 30, 100_000, 30.0, 440_000),
-                (11, 15, 300_000, 31.0, 445_000),
+                (11, 0, 300_000, 31.0, 445_000),
                 (15, 15, 200_000, 30.0, 450_000),
             ):
                 conn.execute(
@@ -724,7 +726,12 @@ class TestLoaders:
 
     def test_time_of_day_baseline_stops_at_the_clock_time(self, db):
         base = M.load_tod_baselines(db, MARK)
-        # 09:30 (100k) + 11:15 (300k) on each of four prior sessions; 15:15 excluded
+        # E04: a bar that STARTS at the mark ends after it and is excluded
+        db.execute("INSERT INTO candles_15m VALUES (?,?,?,?,?,?,?,?)",
+                   (1, "2026-09-17 11:15:00", 1, 1, 1, 1, 7_000_000, 1))
+        assert M.load_tod_baselines(db, MARK)[1] == base[1]
+        # 09:30 (100k) + the 11:00-11:15 bar (300k) on each of four prior
+        # sessions; 15:15 excluded
         assert base[1] == [400_000.0] * 4
 
     def test_oi_history_is_the_closing_oi_per_prior_session(self, db):

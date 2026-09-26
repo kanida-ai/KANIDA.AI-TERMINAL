@@ -53,10 +53,58 @@ create table if not exists reading_snapshots(
   engine_version text not null,
   rules_version text not null,
   created_at text not null,
-  unique(underlying, reading_at, engine_version)
+  unique(underlying, reading_at, engine_version, expiry, rules_version)
 );
-create index if not exists reading_snapshots_session on reading_snapshots(session, underlying, reading_at);
+create index if not exists reading_snapshots_session_v2 on reading_snapshots(session, underlying, reading_at);
 """
+
+#: Slice 14 (audit E03/E41 "interpretation snapshots"): the scope of a stored reading is underlying + reading +
+#: engine + EXPIRY + RULES version, so two expiries (or two rule versions) of one reading can coexist. A store
+#: created under the old key (underlying, reading_at, engine_version) is migrated by `_migrate_scope`: the old
+#: table is RENAMED and KEPT as `reading_snapshots_v1` (nothing is deleted), and every row is copied verbatim - same
+#: id, same bytes - into the new table. No stored claim is rewritten; the copy is verified by count and content
+#: checksum before it commits, and a failed check rolls the whole migration back.
+OLD_SCOPE = ('underlying', 'reading_at', 'engine_version')
+NEW_SCOPE = ('underlying', 'reading_at', 'engine_version', 'expiry', 'rules_version')
+
+
+def _unique_scopes(db, table='reading_snapshots'):
+    out = []
+    for idx in db.execute(f'pragma index_list({table})').fetchall():
+        if idx[2]:   # unique
+            out.append(tuple(r[2] for r in db.execute(f'pragma index_info("{idx[1]}")').fetchall()))
+    return out
+
+
+def _migrate_scope(db):
+    """Idempotent. Returns True when a migration ran."""
+    exists = db.execute("select 1 from sqlite_master where type='table' and name='reading_snapshots'").fetchone()
+    if not exists or OLD_SCOPE not in _unique_scopes(db):
+        return False
+    db.execute('begin immediate')
+    try:
+        if OLD_SCOPE not in _unique_scopes(db):      # another connection migrated while we waited for the lock
+            db.execute('rollback')
+            return False
+        if db.execute("select 1 from sqlite_master where name='reading_snapshots_v1'").fetchone():
+            raise RuntimeError('reading_snapshots_v1 already exists; refusing to overwrite a kept table')
+        cols = [r[1] for r in db.execute('pragma table_info(reading_snapshots)').fetchall()]
+        db.execute('alter table reading_snapshots rename to reading_snapshots_v1')
+        for stmt in [x.strip() for x in SCHEMA.split(';') if x.strip()]:
+            db.execute(stmt)
+        new_cols = {r[1] for r in db.execute('pragma table_info(reading_snapshots)').fetchall()}
+        keep = [c for c in cols if c in new_cols]
+        cl = ','.join(keep)
+        db.execute(f'insert into reading_snapshots({cl}) select {cl} from reading_snapshots_v1 order by id')
+        check = f"select count(*), total(length(coalesce(reading,''))+length(coalesce(chained,''))+length(coalesce(contracts,''))), total(id) from "
+        if db.execute(check + 'reading_snapshots').fetchone() != db.execute(check + 'reading_snapshots_v1').fetchone():
+            raise RuntimeError('snapshot scope migration copy did not verify')
+        db.execute('commit')
+        LOG.info('reading_snapshots: scope migrated to %s; old table kept as reading_snapshots_v1', NEW_SCOPE)
+        return True
+    except Exception:
+        db.execute('rollback')
+        raise
 
 
 def _now():
@@ -109,7 +157,10 @@ class SnapshotStore:
             db = sqlite3.connect(str(self.path), timeout=10, check_same_thread=False)
             db.row_factory = sqlite3.Row
             db.execute('pragma journal_mode=wal')
+            db.isolation_level = None          # explicit transactions: the scope migration controls its own
+            _migrate_scope(db)
             db.executescript(SCHEMA)
+            db.isolation_level = ''
             self._local.db = db
         return db
 
@@ -121,11 +172,16 @@ class SnapshotStore:
                    tuple(row.values()))
         db.commit()
 
-    def previous(self, underlying, session, before, engine_version):
-        return self._db().execute(
-            """select * from reading_snapshots where underlying=? and session=? and reading_at<? and engine_version=?
-               and status='ok' order by reading_at desc limit 1""",
-            (underlying, session, before, engine_version)).fetchone()
+    def previous(self, underlying, session, before, engine_version, expiry=None):
+        """The stored snapshot before `before`. With `expiry`, only the SAME expiry chains (two expiries of one
+        reading can coexist since slice 14; a context chain never crosses from one to the other)."""
+        sql = """select * from reading_snapshots where underlying=? and session=? and reading_at<? and engine_version=?
+               and status='ok'"""
+        args = [underlying, session, before, engine_version]
+        if expiry:
+            sql += ' and expiry=?'
+            args.append(expiry)
+        return self._db().execute(sql + ' order by reading_at desc limit 1', args).fetchone()
 
     def done(self, reading_at, engine_version):
         return self._db().execute('select count(*) from reading_snapshots where reading_at=? and engine_version=?',
@@ -238,7 +294,7 @@ class SnapshotWorker:
         if not reading:
             return {**base, 'status': 'unreconstructable', 'expiry': expiry, 'spot': grid.get('spot'),
                     'reason': 'the grid anchored at this reading does not end at it'}
-        prev = self.store.previous(underlying, session, at, engine_version)
+        prev = self.store.previous(underlying, session, at, engine_version, expiry=expiry or None)
         chained = self.engine.call('chain', prev=json.loads(prev['chained']) if prev else None,
                                    cur=reading)['reading']
         contracts = []

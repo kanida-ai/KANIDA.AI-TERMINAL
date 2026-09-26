@@ -411,6 +411,9 @@ def test_every_iv_rejection_reason_is_reachable_and_has_a_sentence(reason):
   'missing_expiry':dict(price=240.0,spot=spot,strike=strike,years=None,option_type='CE'),
   'non_positive_price':dict(price=0.0,spot=spot,strike=strike,years=years,option_type='CE'),
   'unknown_option_type':dict(price=240.0,spot=spot,strike=strike,years=years,option_type='FUT'),
+  'non_finite_input':dict(price=float('nan'),spot=spot,strike=strike,years=years,option_type='CE'),
+  'future_last_trade':dict(price=240.0,spot=spot,strike=strike,years=years,option_type='CE',
+   seconds_since_last_trade=-(IV.FUTURE_TRADE_TOLERANCE_SECONDS+1)),
  }
  if reason=='no_reading':
   # Not a failure of the maths: the reader raises it for a reading the store has no row for, and

@@ -238,9 +238,100 @@ class DerivativesStore:
             "fetched_at=excluded.fetched_at"
         )
         with self.transaction() as con:
+            reused = self._preserve_reused_identities(con, rows, seen_at, snapshot_id)
             con.execute("UPDATE contracts SET in_scope=0 WHERE in_scope=1")
             con.executemany(sql, rows)
+            if reused:
+                # a reused token is a NEW contract: its first_seen is this sync, not the old contract's
+                con.executemany("UPDATE contracts SET first_seen=? WHERE instrument_token=?",
+                                [(seen_at, t) for t in reused])
         return len(rows)
+
+    #: the economic identity of a contract (the derived `underlying` name is NOT
+    #: part of it: a naming change is not a new contract); a change in any of these under one
+    #: vendor token is a REUSE, not a correction (E01)
+    IDENTITY_COLUMNS = ("tradingsymbol", "instrument_type", "strike", "expiry")
+
+    def _preserve_reused_identities(self, con, rows, seen_at: str, snapshot_id: str | None) -> list[int]:
+        """Before the upsert: keep every identity a reused token would overwrite."""
+        idx = {c: i for i, c in enumerate(CONTRACT_COLUMNS)}
+        incoming = {int(r[idx["instrument_token"]]): r for r in rows}
+        if not incoming:
+            return []
+        known = {}
+        tokens = list(incoming)
+        for i in range(0, len(tokens), 900):
+            part = tokens[i:i + 900]
+            for r in con.execute(
+                    f"SELECT * FROM contracts WHERE instrument_token IN ({_placeholders(part)})", part):
+                known[int(r["instrument_token"])] = r
+        reused: list[int] = []
+        for token, old in known.items():
+            new = incoming[token]
+
+            def same(col):
+                a, b = old[col], new[idx[col]]
+                if col == "strike":
+                    return float(a or 0) == float(b or 0)
+                return str(a) == str(b)
+
+            if all(same(c) for c in self.IDENTITY_COLUMNS):
+                if not same("lot_size") or not (
+                        (old["tick_size"] is None and new[idx["tick_size"]] is None)
+                        or (old["tick_size"] is not None and new[idx["tick_size"]] is not None
+                            and float(old["tick_size"]) == float(new[idx["tick_size"]]))):
+                    # same contract, corrected metadata: version the OLD values, keep the token
+                    con.execute(
+                        "INSERT OR IGNORE INTO contract_token_history (vendor_token, contract_token, reason, "
+                        "tradingsymbol, underlying, instrument_type, strike, expiry, lot_size, tick_size, "
+                        "valid_from, valid_through, detected_at, snapshot_id) "
+                        "VALUES (?,?,'metadata_change',?,?,?,?,?,?,?,?,?,?,?)",
+                        (token, token, old["tradingsymbol"], old["underlying"], old["instrument_type"],
+                         old["strike"], old["expiry"], old["lot_size"], old["tick_size"],
+                         old["first_seen"], seen_at[:10], seen_at, snapshot_id))
+                continue
+            surrogate = self._surrogate_token(con, token)
+            cols = ", ".join(CONTRACT_COLUMNS)
+            select = ", ".join("?" if c == "instrument_token" else ("0" if c == "in_scope" else c)
+                               for c in CONTRACT_COLUMNS)
+            con.execute(f"INSERT INTO contracts ({cols}) SELECT {select} FROM contracts "
+                        "WHERE instrument_token=?", (surrogate, token))
+            con.execute(
+                "INSERT OR IGNORE INTO contract_token_history (vendor_token, contract_token, reason, "
+                "tradingsymbol, underlying, instrument_type, strike, expiry, lot_size, tick_size, "
+                "valid_from, valid_through, detected_at, snapshot_id) "
+                "VALUES (?,?,'token_reuse',?,?,?,?,?,?,?,?,?,?,?)",
+                (token, surrogate, old["tradingsymbol"], old["underlying"], old["instrument_type"],
+                 old["strike"], old["expiry"], old["lot_size"], old["tick_size"],
+                 old["first_seen"], old["expiry"], seen_at, snapshot_id))
+            LOG.warning("instrument token %s reused: %s (exp %s) -> %s (exp %s); old identity kept as %s",
+                        token, old["tradingsymbol"], old["expiry"], new[idx["tradingsymbol"]],
+                        new[idx["expiry"]], surrogate)
+            reused.append(token)
+        return reused
+
+    @staticmethod
+    def _surrogate_token(con, token: int) -> int:
+        """A contracts key that can never be a vendor token (negative) and is not taken."""
+        candidate = -abs(int(token))
+        while con.execute("SELECT 1 FROM contracts WHERE instrument_token=?", (candidate,)).fetchone():
+            candidate -= 10 ** 12
+        return candidate
+
+    def contract_at(self, token: int, at: str | date | datetime) -> sqlite3.Row | None:
+        """The contract a VENDOR token meant at session/time ``at`` (point in time, E01).
+
+        A token reused after its first contract expired resolves to the kept old
+        identity for every session up to that contract's expiry, and to the
+        current row after it.
+        """
+        day = at.isoformat()[:10] if isinstance(at, (date, datetime)) else str(at)[:10]
+        hit = self.con.execute(
+            "SELECT contract_token FROM contract_token_history WHERE vendor_token=? AND reason='token_reuse' "
+            "AND valid_through >= ? ORDER BY valid_through ASC LIMIT 1", (int(token), day)).fetchone()
+        if hit is not None:
+            return self.contract(int(hit[0]))
+        return self.contract(int(token))
 
     def scope_rows(self) -> list[sqlite3.Row]:
         return list(self.con.execute(

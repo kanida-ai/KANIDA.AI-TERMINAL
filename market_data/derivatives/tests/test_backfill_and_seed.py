@@ -18,6 +18,15 @@ from market_data.derivatives.store import DerivativesStore
 TODAY = date(2026, 9, 18)
 
 
+@pytest.fixture(autouse=True)
+def _fixed_clock(monkeypatch):
+    """E12: the fake NFO dump is the 18 Sep 2026 session (TODAY), so the backfill's
+    wall clock is pinned to that session's close.  Without it the date windows
+    (and so these results) depend on the day the suite runs."""
+    from market_data.derivatives import backfill as _bf
+    monkeypatch.setattr(_bf, "now_ist", lambda: datetime(2026, 9, 18, 16, 0))
+
+
 @pytest.fixture
 def cap(tmp_path):
     store = DerivativesStore(tmp_path / "derivatives.db")

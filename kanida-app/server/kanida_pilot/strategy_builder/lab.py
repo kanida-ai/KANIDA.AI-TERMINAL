@@ -304,7 +304,8 @@ def _adjusted_walk(spec,legs,nifty,vmap,days,n,e,x,sig,lot_size,slip,step):
   if cd>=x:
    s=nifty['close'][j]
    gross=cash+sum(u*A.intrinsic(t,k,s) for (t,k),u in pos.items())
-   fees+=sum(0.00125*A.intrinsic(t,k,s)*u for (t,k),u in pos.items() if u>0 and A.intrinsic(t,k,s)>0)
+   # STT on exercise of ITM longs, at the rate AND base in force on the expiry day (E07, point in time)
+   fees+=sum(CH.exercise_stt(A.intrinsic(t,k,s)*u,cd,notional_value=s*u) for (t,k),u in pos.items() if u>0 and A.intrinsic(t,k,s)>0)
    return {'exit':cd,'reason':'expiry','gross':gross,'fees':fees,'adjustment':info}
   cs=nifty['close'][j];cv=vmap.get(cd,sig)/100.0
   dte=(date.fromisoformat(x)-date.fromisoformat(cd)).days
@@ -314,7 +315,7 @@ def _adjusted_walk(spec,legs,nifty,vmap,days,n,e,x,sig,lot_size,slip,step):
    for (t,k),u in pos.items():
     if not u:continue
     side='S' if u>0 else 'B';px=_fill(_price(no,k,tn,cv,t),'B' if u>0 else 'S',False,slip)
-    cash+=u*px;fees+=CH.leg_charges(side,px,abs(u))['total']
+    cash+=u*px;fees+=CH.leg_charges(side,px,abs(u),days[j+1])['total']
    return {'exit':days[j+1],'reason':'time','gross':cash,'fees':fees,'adjustment':info}
   g=generic();tst=ADJ.tested(g,cs) if g else None
   if info is None and tst and tst[1]<=trigger and j+1<n and days[j+1]<=x:
@@ -330,7 +331,7 @@ def _adjusted_walk(spec,legs,nifty,vmap,days,n,e,x,sig,lot_size,slip,step):
      u=o['lots']*lot_size*(1 if o['side']=='B' else -1)
      model=_price(no,o['strike'],tn,cv,o['type']);px=max(0.05,model);mv=max(0.05,px*slip)
      px=round(px+mv if o['side']=='B' else max(0.05,px-mv),2)
-     cash-=u*px;fees+=CH.leg_charges(o['side'],px,abs(u))['total']
+     cash-=u*px;fees+=CH.leg_charges(o['side'],px,abs(u),days[j+1])['total']
      pos[(o['type'],o['strike'])]=pos.get((o['type'],o['strike']),0)+u
      done.append({'side':o['side'],'type':o['type'],'strike':o['strike'],'lots':o['lots'],'price':px})
     info={'day':days[j+1],'trigger_day':cd,'applied':True,'note':note,'distance_pct':round(tst[1]*100,2),'orders':done}
@@ -385,7 +386,7 @@ def simulate(spec,nifty,vix,lot_size,entry_days=None,rng=None,cal=None):
   for l in legs:
    l['units']=(1 if l['side']=='B' else -1)*lot_size*l.get('mult',1)
    l['entry']=_fill(_price(spot,l['strike'],t,sigma,l['type']),l['side'],True,slip,stock,spot)
-  fees=sum(CH.leg_charges(l['side'],l['entry'],abs(l['units']))['total'] for l in legs)
+  fees=sum(CH.leg_charges(l['side'],l['entry'],abs(l['units']),ed)['total'] for l in legs)   # charged at the entry day's rates
   prof=A.expiry_profile([{**l,'lots':l.get('mult',1),'lot_size':lot_size,'price':l['entry']} for l in legs])
   max_loss=None if prof['unlimited_loss'] else -prof['max_loss'];max_profit=None if prof['unlimited_profit'] else prof['max_profit']
   if spec.get('adjust'):
@@ -410,7 +411,7 @@ def simulate(spec,nifty,vix,lot_size,entry_days=None,rng=None,cal=None):
    cd=days[j] if j<n else None
    if cd is None:break
    if cd>=x:                                       # expiry session: settle at its close, intrinsic
-    s=nifty['close'][j];exit_day=cd;reason='expiry';exit_px=[A.intrinsic(l['type'],l['strike'],s) for l in legs];break
+    s=nifty['close'][j];settle=s;exit_day=cd;reason='expiry';exit_px=[A.intrinsic(l['type'],l['strike'],s) for l in legs];break
    cs=nifty['close'][j];cv=vmap.get(cd,sig)/100.0;tt=_years(cd,x,at_open=False)
    mark=sum(l['units']*(_price(cs,l['strike'],tt,cv,l['type'])-l['entry']) for l in legs)
    dte=(date.fromisoformat(x)-date.fromisoformat(cd)).days
@@ -431,8 +432,9 @@ def simulate(spec,nifty,vix,lot_size,entry_days=None,rng=None,cal=None):
    skipped['data_break']=skipped.get('data_break',0)+1
    i=days.index(exit_day) if exit_day in days else j;continue
   gross=sum(l['units']*(p-l['entry']) for l,p in zip(legs,exit_px))
-  if reason!='expiry':fees+=sum(CH.leg_charges('S' if l['side']=='B' else 'B',p,abs(l['units']))['total'] for l,p in zip(legs,exit_px))
-  else:fees+=sum(0.00125*p*abs(l['units']) for l,p in zip(legs,exit_px) if l['side']=='B' and p>0)   # STT on exercise of ITM longs
+  if reason!='expiry':fees+=sum(CH.leg_charges('S' if l['side']=='B' else 'B',p,abs(l['units']),exit_day)['total'] for l,p in zip(legs,exit_px))
+  else:   # STT on exercise of ITM longs at the rate and base in force on the expiry day (E07; was a fixed 0.125% of intrinsic)
+   fees+=sum(CH.exercise_stt(p*abs(l['units']),exit_day,notional_value=settle*abs(l['units'])) for l,p in zip(legs,exit_px) if l['side']=='B' and p>0)
   net=gross-fees
   trades.append({'decision':d,'entry':ed,'exit':exit_day,'expiry':x,'expiry_source':src,'reason':reason,'spot_entry':spot,'vix':sig,
    'legs':[{'side':l['side'],'type':l['type'],'strike':l['strike'],'entry':l['entry'],'exit':round(p,2)} for l,p in zip(legs,exit_px)],
@@ -644,6 +646,16 @@ def _series_hash(s):
  return h.hexdigest()[:16]
 
 
+def fees_superseded(fees_version):
+ """A run charged under another fee schedule (e.g. the pre-slice-14 static STT) is SUPERSEDED evidence: retained and
+ shown, but it can never make a rule a survivor until the rule is re-run (E07)."""
+ return fees_version!=CH.VERSION
+
+
+def _superseded(e):
+ return (e.get('model') or MODEL)!=model_for(e.get('underlying','NIFTY')) or fees_superseded(e.get('fees'))
+
+
 def manifest(spec,series,vol,lot,lot_source='instrument_master',special=None):
  """What a run was computed from, so it can be reproduced and audited (GTM audit P06/P22, quant audit F3): the
  pricing model actually used, content hashes of both series (a data repair changes values, not ranges), the excluded
@@ -739,6 +751,8 @@ class Lab:
    try:date.fromisoformat(x)
    except ValueError:raise LabError(400,'FIELD_INVALID','from/to must be YYYY-MM-DD.')
   if f>=t:raise LabError(400,'FIELD_INVALID','from must be before to.')
+  if f<CH.STT_COVERAGE_FROM.isoformat():
+   raise LabError(400,'COST_SCHEDULE_GAP',f'Costs are charged at the STT rate in force on each trade date; the verified schedule starts {CH.STT_COVERAGE_FROM.isoformat()}, so the period must start on or after it.')
   split=str(raw.get('split') or '')
   if split:
    try:date.fromisoformat(split)
@@ -886,6 +900,17 @@ class Lab:
    and s.get('target_pct') is None and s.get('stop_pct') is None and s.get('exit_dte') is None and not s.get('adjust')]
   if not same:return None
   r,s=same[0];res=json.loads(r['result']);o=res['stats']['oos']
+  out=self._evidence_for_row(r,s,res,o,same)
+  fees=(res.get('manifest') or {}).get('fees')
+  if fees_superseded(fees):
+   # E07: retained and shown, never current - the net figures were charged under another fee schedule
+   out.update(status='superseded',label='Re-run needed: charged under an older fee schedule',oos_ci95=None,
+    superseded={'fees':fees,'current':CH.VERSION},
+    note='Superseded - charged under an older cost schedule (STT not effective-dated); re-run the rule. '+out['note'])
+  return out
+
+ @staticmethod
+ def _evidence_for_row(r,s,res,o,same):
   return {'run_id':r['id'],'status':res['badge']['status'],'label':res['badge']['label'],'n_oos':o.get('n',0),'oos_ci95':o.get('ci95'),
    'period':[s['from'],s['to']],'schedule':{'weekday':s['weekday'],'dte':[s['dte_min'],s['dte_max']]},'runs_tried':len(same),
    'note':f"Held to expiry; decisions on {'every day' if s['weekday']=='daily' else ['Mon','Tue','Wed','Thu','Fri'][int(s['weekday'])]}, {s['dte_min']}-{s['dte_max']} days to expiry; {len(same)} run(s) of this rule tried"}
@@ -918,7 +943,7 @@ class Lab:
     e=json.loads(r['entry'])
     if e.get('adjust'):continue
     if e.get('ev')==EV.EVIDENCE_VERSION:
-     stale=(e.get('model') or MODEL)!=model_for(e.get('underlying','NIFTY'))   # a run of an older Lab model is not current evidence
+     stale=_superseded(e)   # an older Lab model or fee schedule is not current evidence (kept, never a survivor)
      entries.append({**e,'quarantined':True} if (qb or stale) else e)
      continue
     # older statistics version: fall through and recompute from the stored result
@@ -929,7 +954,7 @@ class Lab:
    res=json.loads(res) if res else None
    if not res or res.get('kind')!='backtest':continue
    e=EV.entry(r['id'],s,res,r['created_at'])
-   stale=(e.get('model') or MODEL)!=model_for(e.get('underlying','NIFTY'))
+   stale=_superseded(e)
    entries.append({**e,'quarantined':True} if (qb or stale) else e);new.append((r['id'],json.dumps(e)))
   if new:
    with self.lock:
@@ -955,6 +980,8 @@ class Lab:
   if not same:return None
   r,s=same[0];res=json.loads(r['result']);a=res.get('adjustment') or {}
   m=len(family);b=adjust_badge(a.get('oos_diffs') or [],m,random.Random(20260925))
+  if fees_superseded((res.get('manifest') or {}).get('fees')):
+   b={'status':'superseded','label':'Re-run needed: charged under an older fee schedule','ci':None,'tests':m}
   return {'run_id':r['id'],'status':b['status'],'label':b['label'],'n_oos_triggered':len(a.get('oos_diffs') or []),'ci_corrected':b.get('ci'),
    'trigger_pct':s['adjust']['trigger_pct'],'dte':[s['dte_min'],s['dte_max']],'weekday':s['weekday'],'runs_tried':m,'period':[s['from'],s['to']],
    'note':f"Lab: triggered when the tested short was within {s['adjust']['trigger_pct']:g}% of spot at a close ({s['dte_min']}-{s['dte_max']} days to expiry at entry), applied at the next open, once per trade; {m} adjustment run(s) on this structure counted as tests"}

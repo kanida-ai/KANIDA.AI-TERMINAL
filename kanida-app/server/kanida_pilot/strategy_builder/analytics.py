@@ -63,13 +63,31 @@ def intrinsic(kind,strike,s):
 # --- Black-Scholes-Merton (European, no dividend) -------------------------------------------------------------
 def _pdf(x):return math.exp(-0.5*x*x)/math.sqrt(2*math.pi)
 def bs_price(s,k,t,sigma,kind,r=RATE):
- if t<=0 or sigma<=0:return intrinsic(kind,k,s)
+ """Two different boundaries, never merged (E05): at/after settlement (t<=0) the option is worth its intrinsic
+ value against the spot; with time left but zero volatility the outcome is deterministic and the value is the
+ DISCOUNTED-strike payoff, (S - K e^{-rT})+ for a call and (K e^{-rT} - S)+ for a put."""
+ if t<=0:return intrinsic(kind,k,s)
+ if sigma<=0:
+  disc=k*math.exp(-r*t)
+  return max(s-disc,0.0) if kind=='CE' else max(disc-s,0.0)
  return IV.price_bs(s,k,t,r,sigma,kind)
 def bs_greeks(s,k,t,sigma,kind,r=RATE):
- """Per ONE option unit: delta (per 1 point), gamma, theta (INR per calendar day), vega (INR per 1 IV point)."""
- if t<=0 or sigma<=0 or s<=0:
+ """Per ONE option unit: delta (per 1 point), gamma, theta (INR per calendar day), vega (INR per 1 IV point).
+
+ t<=0 is settlement (intrinsic; delta is the exercise indicator, a convention - exactly at the strike it is not a
+ smooth sensitivity). sigma<=0 with t>0 is the deterministic discounted-strike value: moneyness is against
+ K e^{-rT}, gamma and vega are 0, and theta is the carry on the discounted strike."""
+ if t<=0 or s<=0:
   itm=(s>k) if kind=='CE' else (s<k)
   return {'delta':(1.0 if itm else 0.0) if kind=='CE' else (-1.0 if itm else 0.0),'gamma':0.0,'theta':0.0,'vega':0.0}
+ if sigma<=0:
+  disc=k*math.exp(-r*t)
+  itm=(s>disc) if kind=='CE' else (s<disc)
+  if not itm:return {'delta':0.0,'gamma':0.0,'theta':0.0,'vega':0.0}
+  # d/dt of (S - K e^{-rt}) is r K e^{-rt}; theta is value change per calendar day as time PASSES (t shrinks).
+  carry=r*disc/365.0
+  return ({'delta':1.0,'gamma':0.0,'theta':-carry,'vega':0.0} if kind=='CE'
+   else {'delta':-1.0,'gamma':0.0,'theta':carry,'vega':0.0})
  root=sigma*math.sqrt(t)
  d1=(math.log(s/k)+(r+0.5*sigma*sigma)*t)/root;d2=d1-root
  n1=IV._norm_cdf(d1);pdf=_pdf(d1);disc=math.exp(-r*t)
