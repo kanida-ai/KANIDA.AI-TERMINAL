@@ -87,7 +87,16 @@ def normalize_body(raw):
  param=raw.get('param') if tpl else None
  if param is not None:
   param=_whole(param,'param')
- return {'underlying':u,'expiry':e,'legs':legs,'scenario':scenario,'template':tpl,'param':param,'linked':bool(raw.get('linked',False))}
+ out={'underlying':u,'expiry':e,'legs':legs,'scenario':scenario,'template':tpl,'param':param,'linked':bool(raw.get('linked',False))}
+ og=raw.get('origin')
+ if isinstance(og,dict) and og.get('source')=='discover':      # P15: bounded, known keys only
+  num=lambda v:(float(v) if isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v) else None)
+  sh=og.get('shown') if isinstance(og.get('shown'),dict) else {}
+  out['origin']={'source':'discover','candidate_id':str(og.get('candidate_id') or '')[:40],'view':str(og.get('view') or '')[:12],
+   'view_label':str(og.get('view_label') or '')[:40],'target':num(og.get('target')),'low':num(og.get('low')),'high':num(og.get('high')),
+   'max_loss':num(og.get('max_loss')),'lots':num(og.get('lots')),'as_of':str(og.get('as_of') or '')[:19],'template':str(og.get('template') or '')[:40],
+   'shown':{k:num(sh.get(k)) for k in ('pop','max_loss','max_profit','premium')}}
+ return out
 
 
 def hydrate(market,body):
@@ -262,6 +271,19 @@ def analysis(market,body,table=True):
  if a.get('status') in ('ok','partial') and chain['quality'].get('live') and hasattr(market,'basket_margin'):
   a['margin']=margin(market,legs)
  if problems and a.get('status')=='ok':a['status']='partial'
+ # P09: gross AND an estimated net view. Exit charges are estimated as closing every leg at its current market mark (a
+ # named assumption); options held to expiry may settle instead. Gross numbers are unchanged and stay available.
+ act=[l for l in legs if l.get('include',True)]
+ if act and a.get('status') in ('ok','partial'):
+  try:
+   entry=(a.get('charges') or {}).get('value') or 0.0
+   ex=CH.estimate([{**l,'side':'S' if l['side']=='B' else 'B','price':(l.get('mark') if l.get('mark') is not None else l['price'])} for l in act])['total']
+   rt=round(entry+ex,2)
+   netv=lambda m:(round(m['value']-rt,2) if (m or {}).get('status')=='available' and m.get('value') is not None else None)
+   a['costs']={'entry':round(entry,2),'exit_estimate':round(ex,2),'round_trip':rt,'basis':'exit_at_current_mark',
+    'note':'Entry at your entry prices plus an exit at today\'s market marks, from published rates and Rs 20 per order. Holding to expiry may cost less (settlement) or more (exercise STT).',
+    'max_profit_net':netv(a.get('max_profit')),'max_loss_net':netv(a.get('max_loss'))}
+  except Exception:a['costs']=A.na('COSTS_UNAVAILABLE')
  return {**base,**a,'as_of':chain['as_of'],'underlying':chain['underlying'],'lot_size':chain['lot_size'],
   'quality':chain['quality'],'price_basis':sorted({l['basis_used'] for l in legs}),'legs_quotes':[{'id':l['id'],'bid':l.get('bid'),'ask':l.get('ask'),'ltp':l.get('ltp'),'basis_used':l['basis_used'],'mark':l.get('mark'),
    'mark_basis':l.get('mark_basis'),'quote_at':l.get('quote_at'),'last_trade_time':l.get('last_trade_time'),'contract_id':l.get('contract_id'),
@@ -321,9 +343,20 @@ def paper_view(market,store,user_id,run):
     px=fill_price(m,'B' if f['units']>0 else 'S',chain.get('tick_size') if chain else 0.05,opening=False)
     close_now+=f['units']*(px-f['price'])-CH.leg_charges(exit_side,px,abs(f['units']))['total']
   lm=meta.get(f['leg_id'],{})
-  rows.append({'leg_id':f['leg_id'],'label':f"{'Buy' if f['units']>0 else 'Sell'} {int(lm.get('strike',0))} {lm.get('type','')}",
+  rows.append({'leg_id':f['leg_id'],'label':f"{'Buy' if f['units']>0 else 'Sell'} {int(lm.get('strike',0))} {lm.get('type','')}"+(f" {A.expiry_moment(lm['expiry']).strftime('%d %b').lstrip('0')}" if lm.get('expiry') else ''),
    'units':f['units'],'entry':f['price'],'exit':c['price'] if c else None,'mark':None if c else marks.get(f['leg_id']),'pnl':None if pnl is None else round(pnl,2)})
- return {**r,'strategy_name':None,'revision':{'id':rev['id'],'n':rev['n'],'name':rev['name']},'rows':rows,
+ # P08: the mode is named, and ACTION time (when the user acted) is kept apart from MARKET time (the prices used). A
+ # practice run is priced from a stored reading; what it can and cannot do is stated, never implied.
+ from datetime import datetime as _dt,timedelta as _td,timezone as _tz
+ stamp=lambda t:_dt.fromtimestamp(t,_tz(_td(hours=5,minutes=30))).strftime('%Y-%m-%d %H:%M:%S') if t else None
+ times={'opened_action_at':stamp(r.get('created_at')),'opened_market_at':r.get('opened_reading'),
+        'closed_action_at':stamp(r.get('closed_at')),'closed_market_at':r.get('closed_reading')}
+ eligible={'close':{'ok':r['status']=='open','reason':None if r['status']=='open' else 'Already closed.'},
+  'monitor':{'ok':False,'reason':'Practice runs use stored prices; the live monitor is for live-quote paper deployments.'},
+  'alerts':{'ok':False,'reason':'Alerts watch live-quote deployments or a strategy draft - not a stored-price practice run.'},
+  'adjust':{'ok':False,'reason':'Adjust the strategy itself, or deploy it as live-quote paper to adjust a held position.'}}
+ return {**r,'mode':'practice_stored','mode_label':'Stored-price practice',**times,'eligible':eligible,
+  'strategy_name':None,'revision':{'id':rev['id'],'n':rev['n'],'name':rev['name']},'rows':rows,
   'as_of':chain['as_of'] if chain else None,'realised':round(realised,2),'unrealised':None if missing else round(unreal,2),'fees':round(fees,2),
   'net':None if missing else round(realised+unreal-fees,2),'close_now_estimate':None if (missing or r['status']!='open') else round(realised+close_now-fees,2),
   'warnings':problems+(['A leg has no mark at the newest reading; unrealised P&L is unavailable, not zero.'] if missing else [])}

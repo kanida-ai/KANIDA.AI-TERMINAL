@@ -57,8 +57,7 @@ export function Discover(){
    <View style={[s.row,{flexWrap:'wrap',gap:12}]}>
     {(view==='up'||view==='down')&&field(`Target on expiry (${view==='up'?'above':'below'} spot)`,target,setTarget)}
     {(view==='range'||view==='big_move')&&<>{field(view==='range'?'Range low':'Move below',low,setLow)}{field(view==='range'?'Range high':'Move above',high,setHigh)}</>}
-    {field('Maximum loss I accept (₹, optional)',maxLoss,setMaxLoss,'e.g. 5000')}
-    {field('Max-loss budget (₹, optional)',budget,setBudget,'e.g. 20000')}
+    {field('Most I am willing to lose (₹, optional)',maxLoss,setMaxLoss,'e.g. 5000')}
     <View style={{gap:4}}><T style={{fontSize:11,color:C.muted}}>Lots</T><View style={[s.row,{gap:6}]}><Button label="−" kind="outline" onPress={()=>setLots(Math.max(1,lots-1))}/><T style={{minWidth:24,textAlign:'center'}}>{lots}</T><Button label="+" kind="outline" onPress={()=>setLots(Math.min(50,lots+1))}/></View></View>
    </View>
    <Checkbox checked={hedged} onChange={setHedged} label="Defined risk only (recommended)" detail="Leaves out naked short options, whose loss is unlimited (calls) or runs to a zero price (puts)."/>
@@ -76,7 +75,9 @@ export function Discover(){
     <T style={{color:C.muted,fontSize:11}}>{res.excluded.map(x=>`${x.count} × ${x.label}`).join(' · ')}</T></View>}
    <View style={{flexDirection:wide?'row':'column',flexWrap:'wrap',gap:12}}>
     {res.candidates.map((c,i)=><View key={c.template} style={{flexBasis:wide?'31%':'auto',flexGrow:1,backgroundColor:C.paper,borderWidth:1,borderColor:pick.includes(c.template)?C.green:C.line,borderRadius:14,padding:14,gap:8}}>
-     <View style={s.between}><T style={{fontFamily:'InterSemi',fontSize:15}}>{c.name}</T><Badge label={c.evidence.label} tone={({tested_significant:'green',tested_not_significant:'neutral'} as any)[c.evidence.status]||'amber'}/></View>
+     {/* P10: the title and the evidence badge stack and wrap inside the card - a long badge never runs outside it */}
+     <View style={{gap:6}}><T style={{fontFamily:'InterSemi',fontSize:15}}>{c.name}</T>
+      <View style={{flexDirection:'row',flexWrap:'wrap',maxWidth:'100%'}}><View style={{flexShrink:1,maxWidth:'100%'}}><Badge label={c.evidence.label} tone={({tested_significant:'green',tested_not_significant:'neutral'} as any)[c.evidence.status]||'amber'}/></View></View></View>
      {!!c.evidence.note&&<T style={{fontSize:11,color:C.muted}}>{c.evidence.note}</T>}
      <T style={{fontSize:10,color:C.muted}}>{c.evidence.status==='tested_significant'?'Model-priced Lab history (one IV, no skew). Past results do not guarantee future results.':c.evidence.status==='tested_not_significant'?'Tested in your Lab; the out-of-sample result does not survive the correction for everything tested.':'Model only - no reliable history for this structure. Numbers are model values at this reading.'}</T>
      <T style={{fontSize:12,color:C.muted}}>{c.recipe}{c.param!=null?` · ${c.param_label} ${c.param}`:''}</T>

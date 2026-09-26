@@ -32,6 +32,18 @@ create table if not exists paper_fills(
 create table if not exists activity(
  id text primary key, user_id text not null, strategy_id text not null, kind text not null, detail text not null, created_at real not null);
 create index if not exists ix_sb_activity on activity(strategy_id, created_at);
+-- slice 14: the immutable decision log (the moat's data clock). Every strategy decision and outcome, append-only: no
+-- UPDATE or DELETE is possible (triggers abort), and each row chains the previous row's hash so tampering is detectable.
+-- research_consent is copied from the user at write time; pooled research may only ever read rows where it is 1.
+create table if not exists decision_log(
+ seq integer primary key autoincrement, id text not null unique, user_id text not null, strategy_id text, kind text not null,
+ action_at real not null, market_sample_at text, mode text, payload text not null, research_consent integer not null default 0,
+ prev_hash text not null, hash text not null);
+create index if not exists ix_sb_decisions on decision_log(user_id, action_at);
+create table if not exists research_consent(user_id text primary key, consent integer not null, policy_version text not null, updated_at real not null);
+create table if not exists research_consent_history(user_id text not null, consent integer not null, policy_version text not null, at real not null);
+create trigger if not exists decision_log_no_update before update on decision_log begin select raise(abort,'decision_log is append-only'); end;
+create trigger if not exists decision_log_no_delete before delete on decision_log begin select raise(abort,'decision_log is append-only'); end;
 create table if not exists snapshot_requests(
  user_id text not null, strategy_id text not null, request_id text not null, revision_id text not null, created_at real not null,
  primary key(user_id, strategy_id, request_id));
@@ -66,6 +78,57 @@ class Store:
 
  def _log(self,user_id,sid,kind,detail):
   self.c.execute('insert into activity values(?,?,?,?,?,?)',(uid(),user_id,sid,kind,detail,time.time()))
+
+ # --- the immutable decision log (slice 14) ----------------------------------------------------------------------
+ DECISIONS=('strategy_created','snapshot','paper_open','paper_close','deployment_open','fill','adjustment_chosen',
+            'deployment_close','exit_rule_fired','alert_triggered','settlement')
+
+ def decide(self,user_id,kind,payload,strategy_id=None,market_sample_at=None,mode=None,consent=False,commit=True):
+  """Append one decision or outcome. Never raises into the caller's flow: a log failure is logged, the action stands."""
+  if kind not in self.DECISIONS:raise ValueError(f'unknown decision kind {kind}')
+  try:
+   with self.lock:
+    prev=self.c.execute('select hash from decision_log order by seq desc limit 1').fetchone()
+    prev=prev[0] if prev else '0'*64;did=uid();at=time.time()
+    body=json.dumps(payload,sort_keys=True,separators=(',',':'),default=str)
+    h=hashlib.sha256('|'.join([prev,did,user_id,strategy_id or '',kind,f'{at:.6f}',market_sample_at or '',mode or '',body,str(int(bool(consent)))]).encode()).hexdigest()
+    self.c.execute('insert into decision_log(id,user_id,strategy_id,kind,action_at,market_sample_at,mode,payload,research_consent,prev_hash,hash) values(?,?,?,?,?,?,?,?,?,?,?)',
+     (did,user_id,strategy_id,kind,at,market_sample_at,mode,body,int(bool(consent)),prev,h))
+    if commit:self.c.commit()
+   return did
+  except Exception:
+   import logging;logging.getLogger('strategy_builder.decisions').exception('decision log write failed (%s)',kind);return None
+
+ CONSENT_POLICY='research-consent-v1'
+
+ def consent(self,user_id)->bool:
+  """Opt-in only: pooled research may use a user's decisions only after they said yes. Default False."""
+  with self.lock:r=self.c.execute('select consent from research_consent where user_id=?',(user_id,)).fetchone()
+  return bool(r and r[0])
+
+ def set_consent(self,user_id,on):
+  with self.lock:
+   t=time.time()
+   self.c.execute('insert or replace into research_consent values(?,?,?,?)',(user_id,int(bool(on)),self.CONSENT_POLICY,t))
+   self.c.execute('insert into research_consent_history values(?,?,?,?)',(user_id,int(bool(on)),self.CONSENT_POLICY,t))
+   self.c.commit()
+  return {'consent':bool(on),'policy_version':self.CONSENT_POLICY,'updated_at':t}
+
+ def decisions(self,user_id,strategy_id=None,limit=500):
+  with self.lock:
+   q='select seq,id,strategy_id,kind,action_at,market_sample_at,mode,payload,research_consent from decision_log where user_id=?'+(' and strategy_id=?' if strategy_id else '')+' order by seq desc limit ?'
+   rows=self.c.execute(q,(user_id,strategy_id,limit) if strategy_id else (user_id,limit)).fetchall()
+  return [{**dict(r),'payload':json.loads(r['payload'])} for r in rows]
+
+ def verify_decisions(self):
+  """(ok, rows checked, first bad seq): recompute the hash chain end to end."""
+  with self.lock:rows=self.c.execute('select * from decision_log order by seq').fetchall()
+  prev='0'*64
+  for r in rows:
+   h=hashlib.sha256('|'.join([prev,r['id'],r['user_id'],r['strategy_id'] or '',r['kind'],f"{r['action_at']:.6f}",r['market_sample_at'] or '',r['mode'] or '',r['payload'],str(r['research_consent'])]).encode()).hexdigest()
+   if r['prev_hash']!=prev or r['hash']!=h:return False,len(rows),r['seq']
+   prev=h
+  return True,len(rows),None
 
  # --- strategies ------------------------------------------------------------------------------------------------
  def _strategy(self,r):
@@ -105,6 +168,8 @@ class Store:
     (sid,user_id,name,thesis,'[]',body.get('underlying'),source,t,t))
    self.c.execute('insert into drafts values(?,?,?,?)',(sid,1,json.dumps(body),t))
    self._log(user_id,sid,'created',f'Created "{name}"'+(' as a copy' if source else ''))
+   self.decide(user_id,'strategy_created',{'name':name,'body':body,'source_strategy_id':source,'thesis':thesis},strategy_id=sid,
+    mode='research',consent=self.consent(user_id),commit=False)
    self.c.commit()
   return self.get(user_id,sid)
 
@@ -161,6 +226,8 @@ class Store:
    self.c.execute('insert into revisions(id,strategy_id,n,name,body,checksum,reading_at,analysis,created_at) values(?,?,?,?,?,?,?,?,?)',(rid,sid,n,name or f'Snapshot {n}',json.dumps(body),checksum(body),
     reading_at,json.dumps(analysis),time.time()))
    self._log(user_id,sid,'snapshot',f'Saved snapshot {n}: {name or "Snapshot "+str(n)}')
+   self.decide(user_id,'snapshot',{'revision_id':rid,'n':n,'name':name,'body':body,'analysis':_summary(analysis or {})},strategy_id=sid,
+    market_sample_at=reading_at,mode='research',consent=self.consent(user_id),commit=False)
    if request_id:self.c.execute('insert or ignore into snapshot_requests values(?,?,?,?,?)',(user_id,sid,request_id,rid,time.time()))
    self.c.commit()
   return self.revision(user_id,rid)
@@ -206,6 +273,8 @@ class Store:
     self.c.execute('insert into paper_fills values(?,?,?,?,?,?,?,?,?,?,?,?)',(uid(),run,i,f['leg_id'],'open',f['side'],f['units'],f['price'],
      f['basis'],f['fees'],reading_at,t))
    self._log(user_id,sid,'paper_open',f'Started a paper run on snapshot at reading {reading_at}')
+   self.decide(user_id,'paper_open',{'run_id':run,'revision_id':rid,'fills':fills,'policy':policy},strategy_id=sid,market_sample_at=reading_at,
+    mode='practice_stored',consent=self.consent(user_id),commit=False)
    self.c.commit()
   return self.paper(user_id,run)
 
@@ -219,6 +288,8 @@ class Store:
      f['basis'],f['fees'],reading_at,t))
    self.c.execute("update paper_runs set status='closed',closed_reading=?,closed_at=? where id=?",(reading_at,t,run))
    self._log(user_id,r['strategy_id'],'paper_close',f'Closed a paper run at reading {reading_at}')
+   self.decide(user_id,'paper_close',{'run_id':run,'fills':fills},strategy_id=r['strategy_id'],market_sample_at=reading_at,
+    mode='practice_stored',consent=self.consent(user_id),commit=False)
    self.c.commit()
   return self.paper(user_id,run)
 

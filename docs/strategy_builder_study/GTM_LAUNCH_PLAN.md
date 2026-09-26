@@ -52,10 +52,11 @@ never rewritten nightly from that day's winners.
 | 14 | Engine integrity (E03–E07, E10, E12) + Strategies lifecycle/UX (P08–P15) + **an immutable decision log** (every strategy, adjustment, paper fill and outcome, with consent flags), so the data clock starts now |
 | 15 | Cloud move (AWS Mumbai): Postgres, queue workers, shared quote cache, auth, observability, 10k-concurrent load test; E01 identity/master, E02 immutable archive |
 | 16 | **Adjustment Decision screen**: keep/reduce/hedge/roll/exit on one screen, common horizon and assumptions, original loss visible, assumption sliders ("does the improvement survive?"), plain-language trade-offs; comprehension test with users |
-| 17 | **Historical branching lab** on the 10-year bhavcopy: pre-registered triggers and objectives, point-in-time, costs, and every branch followed |
-| 18 | **Live paper lab**: thousands of branching experiments daily across stocks, strategies and triggers (structured randomisation), realistic fills (spread, cost, partials), failures and non-fills kept |
-| 19 | **Principles registry**: candidate principles tested out of sample on unseen periods; promote/weaken/retire with human approval; drives the "in comparable experiments…" evidence on the slice-16 screen |
-| later | Thesis Continuity, Protection Frontier, live-trading certification (P17–P19/E08–E09, when the broker agreement lands), Pressure Transport / Liquidity Survival |
+| 17 | **Live paper lab**: thousands of branching experiments daily across stocks, strategies and triggers (structured randomisation), realistic fills (spread, cost, partials), failures and non-fills kept |
+| 18 | **Principles registry**: candidate principles tested out of sample on unseen periods; promote/weaken/retire with human approval; drives the "in comparable experiments…" evidence on the slice-16 screen |
+
+Owner focus (26 Sep): engine fixes, the adjustment IP + live paper lab moat, and launch readiness for millions. The 10-year historical backtest is parked.
+| later | **Historical branching lab on the 10-year bhavcopy (parked by owner 26 Sep)**, Thesis Continuity, Protection Frontier, live-trading certification (P17–P19/E08–E09, when the broker agreement lands), Pressure Transport / Liquidity Survival |
 
 (This supersedes the earlier slice 16 = live certification and 17–19 = Atlas/Thesis/Frontier ordering above.)
 

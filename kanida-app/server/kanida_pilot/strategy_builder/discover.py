@@ -157,7 +157,13 @@ class Results:
   legs=[{'id':f'L{i+1}','type':l['type'],'side':l['side'],'strike':l['strike'],'lots':l['lots'],'expiry':o['expiry'],
    'price_basis':'exec','price':None,'include':True} for i,l in enumerate(c['legs'])]
   scen={'spot':inp['target']} if o['view'] in ('up','down') and inp.get('target') else {}
-  body={'underlying':r['underlying'],'expiry':o['expiry'],'legs':legs,'scenario':scen,'template':c['template'],'param':c.get('param')}
+  # P15: the draft keeps WHY it exists - the view, limits and the candidate's numbers at its reading - so a later reprice
+  # can be compared with what was originally shown, and the original cap re-checked
+  origin={'source':'discover','candidate_id':candidate_id,'view':o['view'],'view_label':o['view_label'],'target':inp.get('target'),'low':inp.get('low'),
+   'high':inp.get('high'),'max_loss':inp.get('max_loss'),'lots':inp.get('lots'),'as_of':o['as_of'],'template':c['template'],
+   'shown':{'pop':c.get('pop'),'max_loss':(c.get('max_loss') or {}).get('value'),'max_profit':(c.get('max_profit') or {}).get('value'),
+            'premium':c.get('premium'),'price_basis':c.get('price_basis'),'reference':c.get('reference')}}
+  body={'underlying':r['underlying'],'expiry':o['expiry'],'legs':legs,'scenario':scen,'template':c['template'],'param':c.get('param'),'origin':origin}
   thesis=(f"Discover: {o['view_label']} " + (f"to {inp['target']:,.0f}" if o['view'] in ('up','down') else f"{inp['low']:,.0f}-{inp['high']:,.0f}")
    + f" by {o['expiry']} (reading {o['as_of']} IST; candidate priced at LTP, draft at buy-at-ask / sell-at-bid)")
   return body,c,thesis

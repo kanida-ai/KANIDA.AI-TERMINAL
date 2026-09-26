@@ -5,7 +5,8 @@ export type Side='B'|'S';export type Kind='CE'|'PE';
 export type Basis='exec'|'mid'|'ltp'|'manual';
 export type Leg={id:string;type:Kind;side:Side;strike:number;lots:number;expiry:string;price_basis:Basis;price:number|null;include:boolean};
 export type Scenario={spot?:number;at?:string;iv_shift?:number};
-export type Body={underlying:string;expiry:string;legs:Leg[];scenario:Scenario;template?:string|null;param?:number|null;linked?:boolean};
+export type Origin={source:'discover';candidate_id:string;view:string;view_label:string;target:number|null;low:number|null;high:number|null;max_loss:number|null;lots:number|null;as_of:string;template:string;shown:{pop:number|null;max_loss:number|null;max_profit:number|null;premium:number|null}};
+export type Body={underlying:string;expiry:string;legs:Leg[];scenario:Scenario;template?:string|null;param?:number|null;linked?:boolean;origin?:Origin};
 export type Metric={status:'available'|'unavailable'|'unsupported';value?:any;unit?:string;basis?:string;reason?:string;unlimited?:boolean;[k:string]:any};
 export type ChainSide={token:number;symbol:string;ltp:number|null;bid:number|null;ask:number|null;oi:number|null;volume:number|null;iv:number|null;iv_reason:string|null;flags:string[];basis:string;last_trade_time:string|null};
 export type ChainRow={strike:number;CE:ChainSide|null;PE:ChainSide|null};
@@ -64,6 +65,8 @@ export const sb={
  archive:(id:string,archived:boolean)=>api(`/api/sb/strategies/${id}/archive`,{archived}) as Promise<Strategy>,
  paperStart:(id:string,guard?:{expected_version:number;input_hash?:string})=>api(`/api/sb/strategies/${id}/paper`,{confirm:true,...(guard||{})}) as Promise<PaperRun>,
  paperList:()=>api('/api/sb/paper') as Promise<{runs:PaperRun[]}>,
+ consent:()=>api('/api/sb/consent') as Promise<{consent:boolean;policy_version:string;explain:string}>,
+ setConsent:(on:boolean)=>api('/api/sb/consent',{consent:on}) as Promise<{consent:boolean}>,
  paperClose:(run:string)=>api(`/api/sb/paper/${run}/close`,{confirm:true}) as Promise<PaperRun>,
 };
 

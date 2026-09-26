@@ -16,7 +16,7 @@ export function Home(){
  const {width}=useWindowDimensions();const wide=width>=900;
  const bell=useAlertNotifications();
  const [rows,setRows]=useState<LibraryRow[]|null>(null);const [error,setError]=useState('');const [loadErr,setLoadErr]=useState('');const [filter,setFilter]=useState<Filter>('research');const [q,setQ]=useState('');
- const [sort,setSort]=useState('updated');const [startKind,setStartKind]=useState<'scratch'|'template'|null>(null);
+ const [sort,setSort]=useState('updated');const [copied,setCopied]=useState<{id:string;name:string}|null>(null);const [startKind,setStartKind]=useState<'scratch'|'template'|null>(null);
  const load=useCallback(()=>{setLoadErr('');sb.list(sort).then(r=>setRows(r.strategies)).catch(e=>setLoadErr(e.message));},[sort]);
  useEffect(()=>{load();},[load]);
  // "Paper traded" includes both paper systems: stored-reading runs AND live-quote deployments (fresh audit P16)
@@ -66,12 +66,16 @@ export function Home(){
      <View style={{flex:wide?1:undefined}}>{(r.paper_open||r.deployments?.open)?<Badge label={`${(r.paper_open||0)+(r.deployments?.open||0)} open`} tone="green"/>:(r.paper_total||r.deployments?.closed)?<Badge label={`${(r.paper_total||0)+(r.deployments?.closed||0)} closed`} tone="neutral"/>:<T style={{fontSize:12,color:C.muted}}>—</T>}</View>
      <T style={{flex:wide?1:undefined,fontSize:11,color:C.muted}}>{istEpoch(r.updated_at)}</T>
      <View style={[s.row,{flex:wide?1.4:undefined,gap:6,justifyContent:'flex-end'}]}>
-      <Button label="Duplicate" kind="outline" onPress={async()=>{try{await sb.duplicate(r.id);load();}catch(e:any){setError(e.message);}}}/>
+      <Button label="Duplicate" kind="outline" onPress={async()=>{try{const c=await sb.duplicate(r.id);load();setCopied({id:c.id,name:c.name});}catch(e:any){setError(e.message);}}}/>
       <Button label={r.archived_at?'Restore':'Archive'} kind="outline" onPress={async()=>{try{await sb.archive(r.id,!r.archived_at);load();}catch(e:any){setError(e.message);}}}/>
      </View>
     </Pressable>)}
    </View>}
+  {!!copied&&<View accessibilityRole="alert" style={[s.row,{gap:10,flexWrap:'wrap',backgroundColor:C.soft,borderRadius:10,padding:10,alignItems:'center'}]}>
+   <T style={{fontSize:13,flex:1}}>{`Copied as "${copied.name}". The copy keeps the legs and scenario, not the snapshots or paper history.`}</T>
+   <Button label="Open the copy" kind="outline" onPress={()=>router.push({pathname:'/strategies',params:{id:copied.id}} as any)}/><Button label="Dismiss" kind="outline" onPress={()=>setCopied(null)}/></View>}
   <T style={{fontSize:11,color:C.muted}}>Archive hides a strategy; it never deletes its snapshots or paper history, and never closes a paper deployment.</T>
+  <ConsentCard/>
   <StartSheet kind={startKind} onClose={()=>setStartKind(null)} onError={setError}/>
  </View>;
 }
@@ -110,4 +114,18 @@ function StartCard({icon,title,detail,onPress,busy}:{icon:string;title:string;de
   <View style={{alignSelf:'flex-start',padding:10,borderRadius:12,backgroundColor:C.soft}}><Icon name={icon} size={18} color={C.green}/></View>
   <T style={{fontFamily:'InterSemi',fontSize:15}}>{title}</T><T style={{fontSize:12,color:C.muted}}>{detail}</T>
  </Pressable>;
+}
+
+/** Research sharing (slice 14): opt-in, off by default, changeable any time; applies to records made after the change. */
+function ConsentCard(){
+ const [c,setC]=useState<{consent:boolean;explain:string}|null>(null);const [busy,setBusy]=useState(false);const [err,setErr]=useState('');
+ useEffect(()=>{sb.consent().then(setC).catch(()=>{});},[]);
+ if(!c)return null;
+ return <View style={{borderWidth:1,borderColor:C.line,borderRadius:12,padding:12,gap:6}}>
+  <View style={[s.between,{flexWrap:'wrap',gap:8}]}><T style={{fontFamily:'InterSemi'}}>Help measure which adjustments work</T>
+   <Button label={c.consent?'Sharing: on - turn off':'Sharing: off - turn on'} kind="outline" loading={busy}
+    onPress={async()=>{setBusy(true);setErr('');try{const r=await sb.setConsent(!c.consent);setC({...c,consent:r.consent});}catch(e:any){setErr(e.message);}finally{setBusy(false);}}}/></View>
+  <T style={{fontSize:12,color:C.muted}}>{c.explain}</T>
+  {!!err&&<T accessibilityRole="alert" style={{fontSize:12,color:C.red}}>{err}</T>}
+ </View>;
 }

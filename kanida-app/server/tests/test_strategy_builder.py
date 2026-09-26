@@ -262,7 +262,8 @@ class FakeKite:
     for r in self.m.chain('NIFTY',EXP)['rows']:
      for x in (r['CE'],r['PE']):
       if x['symbol']==sym:b=(round(x['ltp']-0.5,2),round(x['ltp']+0.5,2))
-   out[k]={'timestamp':self._now(),'depth':{'buy':[{'price':b[0]}],'sell':[{'price':b[1]}]}}
+   qty=getattr(self,'depth_qty',{}).get(sym,100000)          # displayed size at the top level (slice 14: fills take only this)
+   out[k]={'timestamp':self._now(),'depth':{'buy':[{'price':b[0],'quantity':qty}],'sell':[{'price':b[1],'quantity':qty}]}}
   return out
  def basket_margin(self,orders):
   if self.fail_margin:raise RuntimeError('down')
@@ -1031,7 +1032,8 @@ def test_audit_evidence_needs_matching_conditions_and_is_corrected_for_runs(live
  good=[500.0+i for i in range(40)]                                     # a clearly positive OOS improvement
  def put(rid,trigger,rule='add_hedge_wing',k=2):
   spec=lab.validate({'template':'short_strangle','adjust':{'rule':rule,'k':k,'trigger_pct':trigger}})
-  res={'badge':{'status':'x','label':'x'},'stats':{'oos':{'n':40}},'adjustment':{'oos_diffs':good,'badge':{}}}
+  from kanida_pilot.strategy_builder import charges as _CH   # a current run names its fee schedule (slice 14 / E07)
+  res={'badge':{'status':'x','label':'x'},'stats':{'oos':{'n':40}},'adjustment':{'oos_diffs':good,'badge':{}},'manifest':{'fees':_CH.VERSION}}
   with lab.lock:
    lab.c.execute("insert into lab_runs(id,user_id,kind,spec,status,result,created_at) values(?,?,?,?,?,?,?)",(rid,owner_id,'backtest',json.dumps(spec),'completed',json.dumps(res),time.time()));lab.c.commit()
   time.sleep(0.01);return spec
@@ -1082,7 +1084,9 @@ def fake_run(rid,template,param,nets,split='2024-01-01',dte=(1,7),exits=None,at=
  trades+=[{'entry':'2023-06-01','net':-999.0,'capital_at_risk':capital}]                   # a discovery trade: never in the test
  spec={'template':template,'param':param,'weekday':weekday,'dte_min':dte[0],'dte_max':dte[1],'target_pct':None,'stop_pct':None,'exit_dte':None,
   'slippage':0.005,'from':period[0],'to':period[1],'split':split,'adjust':adjust,**(exits or {})}
- return (rid,json.dumps(spec),json.dumps({'kind':'backtest','trades':trades}),at)
+ # a CURRENT run names the fee schedule it was charged under (slice 14 / E07: another schedule is superseded evidence)
+ from kanida_pilot.strategy_builder import charges as _CH
+ return (rid,json.dumps(spec),json.dumps({'kind':'backtest','trades':trades,'manifest':{'fees':_CH.VERSION}}),at)
 
 
 def noisy(seed,n=40,mu=0.0,sd=300.0):

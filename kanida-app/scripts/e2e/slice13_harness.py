@@ -32,6 +32,9 @@ miss=c.post('/api/sb/strategies',json={'name':'Slice13 missing hedge','body':{'u
  {'id':'a','type':'CE','side':'S','strike':23000},{'id':'b','type':'CE','side':'B','strike':30000}]}}).json()
 vert=c.post('/api/sb/strategies',json={'name':'Slice13 vertical','body':{'underlying':'NIFTY','expiry':EXP,'legs':[
  {'id':'a','type':'CE','side':'B','strike':23000},{'id':'b','type':'CE','side':'S','strike':23200}]}}).json()
-json.dump({'calendar':cal['id'],'calendar_phone':cal2['id'],'missing':miss['id'],'vertical':vert['id']},open(str(OUT/'ids.json'),'w'))
+run=c.post(f"/api/sb/strategies/{vert['id']}/paper",json={'confirm':True,'expected_version':vert['draft']['version']}).json()
+disc=c.post('/api/sb/discover',json={'underlying':'NIFTY','expiry':EXP,'view':'up','target':23300,'max_loss':6000,'lots':1}).json()
+fromd=c.post('/api/sb/discover/use',json={'candidate_id':disc['candidates'][0]['candidate_id']}).json() if disc.get('candidates') else {'id':None}
+json.dump({'paper_run':run.get('id'),'from_discover':fromd['id'],'calendar':cal['id'],'calendar_phone':cal2['id'],'missing':miss['id'],'vertical':vert['id']},open(str(OUT/'ids.json'),'w'))
 print('ready',flush=True)
 uvicorn.run(app,host='127.0.0.1',port=8093,log_level='warning')

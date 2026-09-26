@@ -349,6 +349,24 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
  def archive(request:Request,sid:str,data:dict=Body(default={})):
   user=me(request);own(user,sid);return store.archive(user['id'],sid,data.get('archived',True) is not False)
 
+ # --- slice 14: research consent + the user's own decision history ----------------------------------------------
+ @r.get('/api/sb/consent')
+ def consent_get(request:Request):
+  user=me(request);return {'consent':store.consent(user['id']),'policy_version':store.CONSENT_POLICY,
+   'explain':'If you agree, your strategies, paper trades and adjustments are used - without your name or account - to measure which adjustments help or hurt across many traders. You can change this at any time; it applies to new records.'}
+
+ @r.post('/api/sb/consent')
+ def consent_set(request:Request,data:dict=Body(default={})):
+  user=me(request)
+  if not isinstance(data.get('consent'),bool):raise PilotError(400,'FIELD_INVALID','consent must be true or false.')
+  return store.set_consent(user['id'],data['consent'])
+
+ @r.get('/api/sb/decisions')
+ def decisions(request:Request,strategy_id:str|None=None,limit:int=200):
+  user=me(request)
+  if strategy_id:own(user,strategy_id)
+  return {'decisions':store.decisions(user['id'],strategy_id,max(1,min(1000,limit)))}
+
  # --- paper -----------------------------------------------------------------------------------------------------
  @r.post('/api/sb/strategies/{sid}/paper')
  def paper_start(request:Request,sid:str,data:dict=Body(default={})):

@@ -229,6 +229,8 @@ class Execution:
      p['product'],preview_id,idem_key,p['margin'],t,None))
     self._intents(did,preview_id,'open',orders,t)
     self.store._log(user_id,strategy['id'],'paper_deploy',f'Paper deployment: {sum(len(o["slices"]) for o in orders)} orders created')
+    self.store.decide(user_id,'deployment_open',{'deployment_id':did,'revision_id':rev['id'],'body':body,'orders':orders,'checks':checks,'margin':p['margin']},
+     strategy_id=strategy['id'],mode='paper_live',consent=self.store.consent(user_id),commit=False)
     self.c.commit()
   elif p['kind']=='adjust':
    did=p['deployment_id']
@@ -242,6 +244,8 @@ class Execution:
     self.c.execute("update deployments set status='adjusting',revision_id=?,margin=? where id=? and status='active'",(rev['id'],p['margin'],did))
     self.c.execute('insert into deployment_revisions values(?,?,?,?)',(did,rev['id'],'adjust',t))
     self._intents(did,preview_id,'adjust',orders,t)
+    self.store.decide(user_id,'adjustment_chosen',{'deployment_id':did,'revision_id':rev['id'],'body':json.loads(p['body']),'orders':orders,'checks':checks},
+     strategy_id=strategy['id'],mode='paper_live',consent=self.store.consent(user_id),commit=False)
     self.store._log(user_id,strategy['id'],'paper_adjust',f'Adjustment orders created for paper deployment {did[:6]}: {sum(len(o["slices"]) for o in orders)} orders')
     self.c.commit()
   else:
@@ -252,6 +256,8 @@ class Execution:
     self.c.execute("update deployments set status='closing' where id=?",(did,))
     self._intents(did,preview_id,'close',orders,t)
     self.store._log(user_id,strategy['id'],'paper_close',f'Close orders created for paper deployment {did[:6]}')
+    self.store.decide(user_id,'deployment_close',{'deployment_id':did,'orders':orders,'checks':checks},strategy_id=strategy['id'],
+     mode='paper_live',consent=self.store.consent(user_id),commit=False)
     self.c.commit()
   self.dispatch(did)
   return self.deployment(user_id,did)
@@ -293,20 +299,40 @@ class Execution:
   try:q=self.market.live_market.quotes([f"NFO:{r['symbol']}" for r in live])
   except Exception as e:  # noqa: BLE001 - no quote means no fill, never a fill at zero
    log.warning('paper fill: quotes unavailable (%s)',type(e).__name__);return
+  used={}          # depth consumed THIS cycle per symbol+side: two intents never fill against the same displayed size
   for r in live:
-   d=(q.get(f"NFO:{r['symbol']}") or {}).get('depth') or {}
+   qd=q.get(f"NFO:{r['symbol']}") or {};d=qd.get('depth') or {}
    bid=(d.get('buy') or [{}])[0].get('price') or None;ask=(d.get('sell') or [{}])[0].get('price') or None
-   ts=str((q.get(f"NFO:{r['symbol']}") or {}).get('timestamp') or '')[:19]
+   ts=str(qd.get('timestamp') or '')[:19]
    if not Q.leg({'bid':bid,'ask':ask,'quote_at':ts},now_ist(),'order')['ok']:continue   # never fill on a crossed, zero or stale quote
-   price=None
-   if r['side']=='B' and ask and ask<=r['limit_price']:price=ask
-   if r['side']=='S' and bid and bid>=r['limit_price']:price=bid
-   if price is None:continue
-   qty=r['qty']-r['filled_qty'];fees=CH.leg_charges(r['side'],price,qty)['total'];t=time.time()
+   # E08 fill realism: walk the displayed book within the limit and take ONLY the quantity shown there; the rest stays
+   # resting (partially filled) for later cycles. A book with no displayed quantity fills nothing.
+   levels=d.get('sell') if r['side']=='B' else d.get('buy')
+   key=(r['symbol'],r['side']);taken=used.get(key,0)
+   want=r['qty']-r['filled_qty'];got=0;cost=0.0;skip=taken
+   for lv in levels or []:
+    px=lv.get('price');avail=int(lv.get('quantity') or 0)
+    if not px or avail<=0:continue
+    if (r['side']=='B' and px>r['limit_price']) or (r['side']=='S' and px<r['limit_price']):break
+    if skip>=avail:skip-=avail;continue
+    avail-=skip;skip=0
+    n=min(avail,want-got)
+    if n<=0:break
+    got+=n;cost+=n*px
+    if got>=want:break
+   if got<=0:continue
+   used[key]=taken+got
+   price=round(cost/got,4);fees=CH.leg_charges(r['side'],price,got)['total'];t=time.time()
+   full=(r['filled_qty']+got)>=r['qty']
    with self.lock:
-    done=self.c.execute("update intents set state='filled',filled_qty=qty,avg_price=?,fees=fees+?,updated_at=? where id=? and state in ('acknowledged','partially_filled')",
-     (price,round(fees,2),t,r['id'])).rowcount
-    if done:self.c.execute('insert into dfills values(?,?,?,?,?,?,?,?,?,?,?)',(uid(),r['id'],did,r['leg_id'],r['side'],qty,price,round(fees,2),'paper_quote_cross',ts,t))
+    done=self.c.execute("update intents set state=?,filled_qty=filled_qty+?,avg_price=CASE WHEN filled_qty>0 THEN (avg_price*filled_qty+?*?)/(filled_qty+?) ELSE ? END,fees=fees+?,updated_at=? where id=? and state in ('acknowledged','partially_filled') and filled_qty=?",
+     ('filled' if full else 'partially_filled',got,price,got,got,price,round(fees,2),t,r['id'],r['filled_qty'])).rowcount
+    if done:
+     self.c.execute('insert into dfills values(?,?,?,?,?,?,?,?,?,?,?)',(uid(),r['id'],did,r['leg_id'],r['side'],got,price,round(fees,2),'paper_quote_depth',ts,t))
+     uidr=self.c.execute('select user_id,strategy_id from deployments where id=?',(did,)).fetchone()
+     if uidr:self.store.decide(uidr['user_id'],'fill',{'deployment_id':did,'intent_id':r['id'],'leg_id':r['leg_id'],'symbol':r['symbol'],'side':r['side'],
+      'qty':got,'price':price,'fees':round(fees,2),'partial':not full,'basis':'paper_quote_depth'},strategy_id=uidr['strategy_id'],market_sample_at=ts,
+      mode='paper_live',consent=self.store.consent(uidr['user_id']),commit=False)
     self.c.commit()
 
  def _roll_up(self,did):
@@ -417,7 +443,7 @@ class Execution:
      if e not in chains:chains[e]=self.market.chain(rb['underlying'],e)
      rows={(r['strike']):r for r in (chains[e] or {}).get('rows',[])}
      q=(rows.get(l['strike']) or {}).get(l['type']) or {}
-     marks[l['id']]={'bid':q.get('bid'),'ask':q.get('ask'),'ltp':q.get('ltp')}
+     marks[l['id']]={'bid':q.get('bid'),'ask':q.get('ask'),'ltp':q.get('ltp'),'quote_at':q.get('quote_at'),'live':bool(((chains[e] or {}).get('quality') or {}).get('live'))}
     live_ch=[c for c in chains.values() if c]            # an expired reference expiry must not blank the lot size (review H2)
     out['lot_size']=live_ch[0]['lot_size'] if live_ch else None
     chain=chain or (live_ch[0] if live_ch else None)
@@ -427,6 +453,11 @@ class Execution:
   meta={l['id']:l for l in out['leg_meta']}
   for lid,p in pos.items():
    m=marks.get(lid,{});realised+=p['realised'];fees+=p['fees']
+   # E08: each contract's OWN quote time decides whether its mark is current. On live data a quote older than the alert
+   # limit (or with no/future time) is not a current mark - the position falls back to the dated last-known valuation
+   # and numeric rules pause, instead of an old number passing as now.
+   qs=Q.sample(m.get('quote_at'),now_ist(),'alert') if m.get('live') else {'ok':True,'reason':None,'age':None}
+   if m and not qs['ok']:m={**m,'bid':None,'ask':None,'ltp':None}
    side_px=m.get('bid') if p['units']>0 else m.get('ask')
    ok_book=Q.book(m.get('bid'),m.get('ask'))['ok']
    liq=side_px if (side_px and ok_book) else m.get('ltp')
@@ -437,7 +468,8 @@ class Execution:
     else:u=p['units']*liq-p['cost'];unreal+=u
    l=meta.get(lid,{})
    legs.append({'leg_id':lid,'label':f"{int(l.get('strike',0))} {l.get('type','')}",'units':p['units'],'avg':round(p['cost']/p['units'],2) if p['units'] else None,
-    'mark':liq,'mark_basis':basis if p['units'] else None,'unrealised':round(u,2) if u is not None else None,'realised':round(p['realised'],2),'fees':round(p['fees'],2)})
+    'mark':liq,'mark_basis':basis if p['units'] else None,'mark_at':marks.get(lid,{}).get('quote_at'),'mark_age_s':qs.get('age'),
+    'mark_stale':None if qs['ok'] else qs['reason'],'unrealised':round(u,2) if u is not None else None,'realised':round(p['realised'],2),'fees':round(p['fees'],2)})
   out['positions']=legs;out['realised']=round(realised,2);out['fees']=round(fees,2)
   out['unrealised']=None if missing else round(unreal,2)
   out['net']=None if missing else round(realised+unreal-fees,2)
@@ -515,10 +547,11 @@ class Execution:
   rule=self.exit_rules(did)
   if not rule or not market_open():return None
   d=self.deployment(user_id,did)
-  if not d or d['status']!='active' or d['unrealised'] is None:return None
+  if not d or d['status']!='active' or d.get('net') is None:return None
   prof=self._profile(d)
   if not prof:return None
-  hit=None;u=d['unrealised']
+  # E08: rules judge NET P&L (realised + unrealised - fees so far), the number the trader actually has, not gross unrealised
+  hit=None;u=d['net']
   if rule['target_pct'] and prof['max_profit'] and u>=prof['max_profit']*rule['target_pct']/100:hit='target'
   elif rule['stop_pct'] and prof['max_loss'] and u<=prof['max_loss']*rule['stop_pct']/100:hit='stop'
   if not hit:return None
@@ -527,12 +560,14 @@ class Execution:
    p=self.preview(user_id,strategy,{'price_policy':'marketable'},kind='close',deployment=d)
    if not p['can_submit']:raise ExecError(409,'CHECKS_FAILED','; '.join(c['label'] for c in p['checks'] if c['status']=='block'))
    self.confirm(user_id,strategy,p['id'],p['hash'],f'exit-{hit}-{did}')
-   note=f"{hit} rule met (unrealised {u:,.0f}); close orders placed (paper)"
+   note=f"{hit} rule met (net {u:,.0f}); close orders placed (paper)"
+   self.store.decide(user_id,'exit_rule_fired',{'deployment_id':did,'rule':hit,'net':u,'target_pct':rule['target_pct'],'stop_pct':rule['stop_pct']},
+    strategy_id=d['strategy_id'],mode='paper_live',consent=self.store.consent(user_id))
   except ExecError as e:
-   note=f"{hit} rule met (unrealised {u:,.0f}) but the close is blocked: {e.message} - retried next cycle"
+   note=f"{hit} rule met (net {u:,.0f}) but the close is blocked: {e.message} - retried next cycle"
   with self.lock:
    self.c.execute('update deployment_exit_rules set last_note=? where deployment_id=?',(note,did))
-   short=note.split(' (unrealised')[0]+(' - blocked' if 'blocked' in note else '')
+   short=note.split(' (net')[0]+(' - blocked' if 'blocked' in note else '')
    if self._rule_notes.get(did)!=short:          # the activity log records a CHANGE, not every retry (review M2)
     self._rule_notes[did]=short;self.store._log(user_id,d['strategy_id'],'paper_exit_rule',f'Deployment {did[:6]}: {note}')
    self.c.commit()
@@ -583,7 +618,8 @@ class Execution:
     self.c.execute("update intents set state='cancelled',reason='expired',updated_at=? where deployment_id=? and leg_id in (%s) and state in ('created','acknowledged','partially_filled')"%','.join('?'*len(legs)),(t,did,*legs))
     for lid in legs:
      units=held[lid];m=meta.get(lid,{});px=A.intrinsic(m['type'],m['strike'],spot);side='S' if units>0 else 'B';q=abs(units)
-     fees=round(0.00125*px*q,2) if (units>0 and px>0) else 0.0      # STT on exercise of ITM longs
+     # STT on exercise of ITM longs, at the rate in force on the expiry date (effective-dated schedule, slice 14 E07)
+     fees=round((CH.exercise_stt(px*q,e) if hasattr(CH,'exercise_stt') else 0.00125*px*q),2) if (units>0 and px>0) else 0.0
      self.c.execute('insert into dfills values(?,?,?,?,?,?,?,?,?,?,?)',(uid(),'settle',did,lid,side,q,px,fees,
       'expiry_settlement' if u in INDEX_UNDERLYINGS else 'expiry_settlement_physical_standin',at,t))
      held[lid]=0
@@ -591,6 +627,8 @@ class Execution:
     if not open_left:
      self.c.execute("update intents set state='cancelled',reason='expired',updated_at=? where deployment_id=? and state in ('created','acknowledged','partially_filled')",(t,did))
      self.c.execute("update deployments set status='closed',closed_at=? where id=? and status not in ('closed','cancelled')",(t,did))
+    self.store.decide(user_id,'settlement',{'deployment_id':did,'expiry':e,'spot':spot,'spot_at':at,'legs':legs},strategy_id=d['strategy_id'],
+     market_sample_at=at,mode='paper_live',consent=self.store.consent(user_id),commit=False)
     self.store._log(user_id,d['strategy_id'],'paper_settled',f'Deployment {did[:6]}: {len(legs)} leg(s) of the {e} expiry settled at intrinsic, {u} {spot:,.2f} at {at}'+
      ('' if u in INDEX_UNDERLYINGS else ' (stock options are physically settled - this paper settlement stands in for delivery)')+('' if not open_left else '; later-expiry legs stay open'))
     self.c.commit();settled=True
@@ -618,7 +656,9 @@ class Execution:
   with self.lock:
    rows=self.c.execute("select margin from deployments where user_id=? and status in ('submitting','working','partially_filled','active','adjusting','closing','attention_required')",(user_id,)).fetchall()
   used=sum((json.loads(r['margin'] or 'null') or {}).get('final') or 0 for r in rows)
-  return {'capital':PAPER_CAPITAL,'blocked':round(used,2),'available':round(PAPER_CAPITAL-used,2)}
+  # P08: this balance covers live-quote paper deployments ONLY (stored-price practice runs have no capital account)
+  return {'capital':PAPER_CAPITAL,'blocked':round(used,2),'available':round(PAPER_CAPITAL-used,2),'scope':'paper_live',
+   'policy':'Fixed simulated capital of 10,00,000 for live-quote paper deployments; margin from the broker read blocks it while positions are open.'}
 
  # --- the worker: rests orders until live quotes cross them --------------------------------------------------------
  def start(self):

@@ -376,6 +376,7 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
    {/* RIGHT: analysis */}
    <View style={{flex:wide?55:undefined,width:wide?undefined:'100%',gap:16}}>
     <RiskStrip a={a} dim={dim} onFix={applyFix}/>
+    {!!body.origin&&<OriginPanel o={body.origin} a={a} edited={body.template!==body.origin.template}/>}
     <EvidenceLine id={id} version={version} onOpen={(rid)=>router.push({pathname:'/strategies',params:{view:'lab',strategy:id}} as any)}/>
     <View style={panel}>
      <View style={s.between}><T style={label}>Payoff</T>{pending&&<T style={{fontSize:11,color:C.amber}}>{a?'Updating…':'Calculating…'}</T>}
@@ -468,7 +469,7 @@ function DataBanner({reading,live,status}:{reading?:string;live:boolean;status:S
  return <View style={[s.row,{flexWrap:'wrap',gap:8,backgroundColor:live?C.soft:C.amberBg,borderRadius:10,paddingHorizontal:12,paddingVertical:8}]}>
   <Icon name={live?'radio':'clock'} size={13} color={live?C.green:C.amber}/>
   {!!(status as any)?.calendar?.warning&&<T style={{fontSize:12,color:C.red,width:'100%'}}>{(status as any).calendar.warning}</T>}
-  <T style={{fontSize:12,color:live?C.green:C.amber,flex:1}}>{live?`Live · Zerodha Kite · quotes ${istStamp(reading)} · refreshes every 10 s · market ${status?.market_open?'open':'closed'}. Prices: buy at the ask, sell at the bid. Orders here are paper only.`:`Stored reading · ${istStamp(reading)} · not live${status?.reason?` (${status.reason})`:''}. Prices are last traded (no bid/ask). Research and paper only - nothing here sends an order.`}</T>
+  <T style={{fontSize:12,color:live?C.green:C.amber,flex:1}}>{live?`Live · Zerodha Kite · quotes ${istStamp(reading)} · refreshes every 10 s · market ${status?.market_open?'open':'closed'}. Prices: buy at the ask, sell at the bid. Orders here are paper only.`:`${(status as any)?.user_message||'Live option prices are unavailable.'} Showing prices from ${istStamp(reading)} (last traded, no bid/ask). Research and practice only - nothing here sends an order.`}</T>
  </View>;
 }
 // touch screens get 44 px targets (GTM audit P13); a mouse keeps the compact desktop control with a larger hit area
@@ -479,6 +480,18 @@ function Stepper({label:l,a11y,onMinus,onPlus}:{label:string;a11y:string;onMinus
  return <View style={[s.row,{gap:0,borderWidth:1,borderColor:C.line,borderRadius:7,height:h}]}>{b('minus',onMinus,'decrease')}<T style={{fontSize:12,fontFamily:'InterMedium',minWidth:44,textAlign:'center',fontVariant:['tabular-nums'] as any}}>{l}</T>{b('plus',onPlus,'increase')}</View>;
 }
 function Mini({k,v}:{k:string;v:string}){return <View style={[s.row,{gap:5}]}><T style={{fontSize:11,color:C.muted}}>{k}</T><T style={{fontSize:12,fontVariant:['tabular-nums'] as any}}>{v}</T></View>;}
+/** P15: why this draft exists - the Discover view and limits, and the numbers shown then vs now at today's prices. */
+function OriginPanel({o,a,edited}:{o:NonNullable<Body['origin']>;a:Analysis|null;edited:boolean}){
+ const nowLoss=a?.max_loss?.status==='available'?a.max_loss.value:null;const nowPop=a?.pop?.status==='available'?a.pop.value:null;
+ const capBroken=o.max_loss!=null&&(a?.max_loss?.unlimited||(nowLoss!=null&&-nowLoss>o.max_loss));
+ const view=o.view==='up'||o.view==='down'?`${o.view_label} to ${num(o.target,0)}`:`${o.view_label} ${num(o.low,0)}-${num(o.high,0)}`;
+ return <View style={[panel,{gap:4}]}>
+  <T style={{fontSize:11,color:C.muted}}>{`FROM DISCOVER · ${istStamp(o.as_of)}${edited?' · edited since':''}`}</T>
+  <T style={{fontSize:13}}>{`Your view: ${view}${o.max_loss!=null?` · loss limit ${inr(o.max_loss)}`:''}`}</T>
+  <T style={{fontSize:12,color:C.muted}}>{`Shown then: max loss ${o.shown.max_loss!=null?signed(o.shown.max_loss):'—'}, chance of profit ${o.shown.pop!=null?`${o.shown.pop}%`:'—'}. Now: max loss ${nowLoss!=null?signed(nowLoss):a?.max_loss?.unlimited?'unlimited':'—'}, chance of profit ${nowPop!=null?`${nowPop}%`:'—'} (today's prices${edited?' and your edits':''}).`}</T>
+  {capBroken&&<T accessibilityRole="alert" style={{fontSize:12,color:C.red}}>{`The current max loss is beyond your original ${inr(o.max_loss!)} limit.`}</T>}
+ </View>;
+}
 /** The short name of the horizon strategy-wide numbers are valued at (fresh audit P03): exact expiry, or the model. */
 function horizonShort(a:Analysis|null){return a?.horizon?.kind==='model_near_expiry'?`Model at ${dayMonth(a.horizon.expiry)} expiry`:'At expiry';}
 const NEXT:Record<string,Basis>={exec:'mid',mid:'ltp',ltp:'exec',manual:'exec'};
@@ -522,7 +535,8 @@ function RiskStrip({a,dim,onFix}:{a:Analysis|null;dim:boolean;onFix?:(f:any)=>vo
   [a.premium?.direction==='credit'?'Net credit':'Net debit',inr(Math.abs(a.premium?.value||0)),C.ink,'At entry prices'],
   [a.scenario?.active&&a.pop_scenario?.status==='available'?'POP (model) · Scenario':'POP (model)',a.scenario?.active&&a.pop_scenario?.status==='available'?`${a.pop_scenario.value}%`:a.pop?.status==='available'?`${a.pop.value}%`:'—',C.ink,
    a.scenario?.active&&a.pop_scenario?.status==='available'?`From the what-if point · ${a.pop?.status==='available'?`${a.pop.value}% from now`:''}`:a.pop?.sigma?`Lognormal at ${a.pop.sigma}% ${a.pop.sigma_basis==='chain_atm_iv'?'chain ATM IV':'IV of the leg nearest spot (proxy)'}`:'Model value'],
-  ['Charges (est.)',inr(a.charges?.value),C.ink,'Entry orders, published rates'],
+  ['Charges (est.)',(a as any).costs?.round_trip!=null?`${inr((a as any).costs.round_trip)} round trip`:inr(a.charges?.value),C.ink,(a as any).costs?.round_trip!=null?`Entry ${inr((a as any).costs.entry)} + exit ${inr((a as any).costs.exit_estimate)} at today's marks (estimate)`:'Entry orders, published rates'],
+  ['Net after costs (est.)',(a as any).costs?.max_loss_net!=null||(a as any).costs?.max_profit_net!=null?`${(a as any).costs.max_loss_net!=null?signed((a as any).costs.max_loss_net):'—'} / ${(a as any).costs.max_profit_net!=null?signed((a as any).costs.max_profit_net):'—'}`:'—',C.ink,'Max loss / max profit less the round-trip estimate'],
   ['Chance of loss (model)',(a as any).outcomes?.status==='available'?`${(a as any).outcomes.value.loss}%`:'—',C.ink,(a as any).outcomes?.status==='available'?
    `Profit ${(a as any).outcomes.value.profit}% · loss ${(a as any).outcomes.value.loss}%${(a as any).outcomes.value.max_loss!=null?` · max loss ${(a as any).outcomes.value.max_loss}%`:''}${(a as any).outcomes.value.max_profit!=null?` · max profit ${(a as any).outcomes.value.max_profit}%`:''} · ${horizonShort(a).toLowerCase()}`:'Model value'],
  ] as const;
@@ -591,7 +605,7 @@ function LegTable({a}:{a:Analysis|null}){
   <T style={{fontSize:11,color:C.muted}}>{`Scenario: ${a.scenario?num(a.scenario.spot,2):''} on ${a.scenario?istStamp(a.scenario.at):''}. Entry is each leg's cost basis (ask/bid = executable estimate, mid, LTP = last trade, manual = typed); Mark now is the market value (bid/ask mid, or LTP when there is no valid book) that the Greeks and IV use. Charges ${inr(a.charges?.value)} not included.`}</T></View>;
 }
 function GreeksTable({a}:{a:Analysis|null}){
- const [at,setAt]=useState<'now'|'whatif'>('now');
+ const [at,setAt]=useState<'now'|'whatif'>('now');const [unit,setUnit]=useState<'strategy'|'lot'|'unit'>('strategy');
  if(!a?.legs?.length)return <T style={{fontSize:12,color:C.muted}}>No legs.</T>;
  if(a.greeks?.status!=='available')return <T style={{fontSize:12,color:C.amber}}>{`Greeks unavailable: ${a.greeks?.reason||''}`}</T>;
  const w=at==='whatif'&&a.greeks_scenario?.status==='available';const G=w?a.greeks_scenario:a.greeks;
@@ -600,7 +614,11 @@ function GreeksTable({a}:{a:Analysis|null}){
    <Chip label="At the what-if" active={at==='whatif'} onPress={()=>setAt('whatif')}/>
    {at==='whatif'&&a.greeks_scenario?.status!=='available'&&<T style={{fontSize:11,color:C.muted}}>{a.greeks_scenario?.reason==='AT_EXPIRY'?'Not defined at expiry - the position is settled.':'Unavailable'}</T>}</View>
   <Table head={['Leg','Delta','Gamma','Theta ₹/day','Vega ₹/IV pt']} right={[1,2,3,4]}
-  rows={at==='whatif'&&!w?a.legs.map(l=>[l.label,'—','—','—','—']):[...a.legs.map(l=>{const g=w?(l as any).greeks_scenario:l.greeks;return [l.label,num(g?.delta,1),num(g?.gamma,3),num(g?.theta,0),num(g?.vega,0)];}),['Strategy total',num(G.delta,1),num(G.gamma,3),num(G.theta,0),num(G.vega,0)]]}/>
+  rows={at==='whatif'&&!w?a.legs.map(l=>[l.label,'—','—','—','—']):unit!=='strategy'&&!w?a.legs.map(l=>{const pu=(l as any).greeks_per_unit;const sign=(l.units||0)<0?-1:1;const k=unit==='lot'?sign*(a.lot_size||1):sign;
+    return [l.label,num(pu?pu.delta*k:null,unit==='lot'?1:3),num(pu?pu.gamma*k:null,unit==='lot'?3:5),num(pu?pu.theta*k:null,2),num(pu?pu.vega*k:null,2)];}):
+   [...a.legs.map(l=>{const g=w?(l as any).greeks_scenario:l.greeks;return [l.label,num(g?.delta,1),num(g?.gamma,3),num(g?.theta,0),num(g?.vega,0)];}),['Strategy total',num(G.delta,1),num(G.gamma,3),num(G.theta,0),num(G.vega,0)]]}/>
+  {!w&&<View style={[s.row,{gap:6,flexWrap:'wrap'}]}>{([['strategy','Whole strategy'],['lot','Per lot'],['unit','Per unit']] as const).map(([k,l])=><Chip key={k} label={l} active={unit===k} onPress={()=>setUnit(k)}/>)}
+   <T style={{fontSize:11,color:C.muted}}>{unit==='strategy'?'Signed, all lots of each leg.':unit==='lot'?`Signed, one lot (${a.lot_size||'?'} units) of each leg.`:'Signed, one unit (share) of each leg.'}</T></View>}
   {w&&<T style={{fontSize:11,color:C.muted}}>{`At ${num(a.greeks_scenario.spot,2)} on ${istStamp(a.greeks_scenario.at)}${a.greeks_scenario.iv_shift?`, IV ${a.greeks_scenario.iv_shift>0?'+':''}${a.greeks_scenario.iv_shift} pts`:''}.`}</T>}
   <T style={{fontSize:11,color:C.muted}}>Whole-strategy units (lots × lot size). Delta in underlying units per 1 point; theta per calendar day; vega per 1 percentage point of IV. {w?'Model values at the what-if point.':'Model values at the reading.'}</T></View>;
 }

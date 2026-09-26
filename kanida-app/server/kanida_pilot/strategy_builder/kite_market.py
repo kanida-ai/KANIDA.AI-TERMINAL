@@ -201,9 +201,17 @@ class MarketRouter:
    if ok:return self.live_market
   return self.stored
  def status(self):
-  if not self.live_market:return {'live':False,'source':'stored','reason':'Live data is not configured.'}
+  # P11: users see WHAT is affected and what to do; the technical reason stays for the operator view (`reason`)
+  if not self.live_market:return {'live':False,'source':'stored','reason':'Live data is not configured.','code':'NOT_CONFIGURED',
+   'user_message':'Live option prices are not connected on this server. You are seeing stored prices.'}
   ok,reason=self.live_market.available()
-  return {'live':ok,'source':'kite' if ok else 'stored','reason':None if ok else reason}
+  if ok:return {'live':True,'source':'kite','reason':None,'code':None,'user_message':None}
+  r=(reason or '').lower()
+  code='AUTH_EXPIRED' if ('token' in r or 'rejected' in r or '403' in r) else 'NETWORK' if ('timeout' in r or 'connect' in r or 'network' in r) else 'UNAVAILABLE'
+  msg={'AUTH_EXPIRED':'The live options connection needs to be renewed (it resets every morning). You are seeing stored prices until it reconnects.',
+       'NETWORK':'The live options connection is not responding. You are seeing stored prices; it retries automatically.',
+       'UNAVAILABLE':'Live option prices are unavailable right now. You are seeing stored prices.'}[code]
+  return {'live':False,'source':'stored','reason':reason,'code':code,'user_message':msg}
  def _call(self,name,*a):
   m=self.current
   try:return getattr(m,name)(*a)

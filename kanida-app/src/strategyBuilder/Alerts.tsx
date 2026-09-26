@@ -6,7 +6,7 @@ import {Platform,Pressable,TextInput,View} from 'react-native';
 import {router} from 'expo-router';
 import {Badge,Button,C,Chip,Empty,Icon,Loading,T,s} from '../ui';
 import {alerts,type Analysis,type AlertEvent,type AlertRule,type Deployment} from './api';
-import {dayMonth,inr,istEpoch,num} from './format';
+import {istStamp,dayMonth,inr,istEpoch,num} from './format';
 import {ErrorRetry} from './States';
 
 const TYPES:[string,string,('strategy'|'deployment')[]][]=[
@@ -80,7 +80,7 @@ export function AlertsPanel({strategyId,analysis,deployments,expiry,onChanged}:{
     {type==='short_itm'&&<T style={{fontSize:12,color:C.muted}}>Fires when the underlying moves past any short strike.</T>}
     <Button label="Create alert" icon="bell" loading={busy} onPress={()=>create()}/>
    </View>
-   {spot!=null&&<T style={{fontSize:11,color:C.muted}}>{`Now: spot ${num(spot,2)}${analysis?.breakevens?.value?.length?` · breakevens ${analysis.breakevens.value.map((b:number)=>num(b,0)).join(' / ')}`:''}${analysis?.greeks?.delta!=null?` · delta ${num(analysis.greeks.delta,1)}`:''}`}</T>}
+   {spot!=null&&<T style={{fontSize:11,color:C.muted}}>{`${(analysis as any)?.quality?.live?`Live at ${istStamp(analysis?.as_of)}`:`Stored reading from ${istStamp(analysis?.as_of)} (not live)`}: spot ${num(spot,2)}${analysis?.breakevens?.value?.length?` · breakevens ${analysis.breakevens.value.map((b:number)=>num(b,0)).join(' / ')}`:''}${analysis?.greeks?.delta!=null?` · delta ${num(analysis.greeks.delta,1)}`:''}`}</T>}
    {active.map(d=><Button key={d.id} label="Add suggested alerts for the paper deployment" kind="outline" icon="zap" onPress={()=>suggested(d)}/>)}
    {!!note&&<T style={{fontSize:12,color:C.green}}>{note}</T>}{!!error&&<T style={{fontSize:12,color:C.red}}>{error}</T>}
   </View>
