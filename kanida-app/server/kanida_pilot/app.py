@@ -295,6 +295,8 @@ def create_app(settings=None,http=None,evidence=None):
   user=owner(request);raw=auth.invite(data.get('email'),'member')
   with db.tx() as c:record(c,user['id'],'account','Pilot invitation created','A single-use invitation was generated. No email was sent.')
   return {'url':settings.origin+'/signup?invite='+raw,'expires_in_hours':72}
+ from .admin_panel import install as install_admin_panel
+ install_admin_panel(app,db,auth,settings,owner)      # codes, access requests, users, jobs & health (cloud preview)
  @app.post('/api/admin/access')
  def pilot_access(request:Request,data:dict=Body(...)):
   acting=owner(request)

@@ -27,6 +27,11 @@ def email_value(value):
 def password_value(value):
  if not isinstance(value,str) or not 12<=len(value)<=256:raise PilotError(400,'PASSWORD','Use a password between 12 and 256 characters.')
  return value
+CODE_SHAPE=re.compile(r'KANIDA-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}')
+def normalize_code(raw):return re.sub(r'\s+','',str(raw or '')).upper()
+def new_code():
+ alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';s=''.join(secrets.choice(alphabet) for _ in range(12))
+ return f'KANIDA-{s[:4]}-{s[4:8]}-{s[8:]}'
 def public_user(user):return {k:user[k] for k in ('id','email','name','role','onboarded','preferences','created')}
 
 class Auth:
@@ -52,9 +57,20 @@ class Auth:
    raise PilotError(403,'INVITE_REQUIRED','Use a valid private-pilot invitation for this email.')
   c.execute(invites.update().where(invites.c.hash==invite['hash']).values(used=now()))
   return invite['role']
+ def consume_code(self,c,raw):
+  """A shareable invite CODE (admin panel): not email-bound, limited uses, may expire or be revoked. Always 'member'."""
+  from .db import invite_codes
+  code=row(c,select(invite_codes).where(invite_codes.c.hash==digest(normalize_code(raw))).with_for_update())
+  if not code or code['revoked'] or (code['expires'] and code['expires']<=now()) or code['uses']>=code['uses_max']:return None
+  c.execute(invite_codes.update().where(invite_codes.c.id==code['id']).values(uses=code['uses']+1))
+  return 'member'
  def registration_role(self,c,invite,email):
   # Explicit invitations retain their role and single-use validation in either mode.
   # Public signup never derives authority from an email address or request field.
+  if invite and CODE_SHAPE.fullmatch(normalize_code(invite)):
+   role=self.consume_code(c,invite)
+   if role:return role
+   raise PilotError(403,'INVITE_REQUIRED','That invite code is not valid, has expired, or has been used up.')
   if invite or self.settings.invitation_required:return self.consume_invite(c,invite,email)
   return 'member'
  def create_user(self,c,email,name,role,password_hash=None,sub=None):

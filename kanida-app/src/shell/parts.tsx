@@ -7,9 +7,10 @@ import {C,T,s,Button} from '../ui';
 import {api,Match} from '../model';
 import {AgentMark} from '../TraderShell';
 import {IconButton,Popover,MenuList,connectionView,type MenuItem} from '../layout/index';
+import {CompassLogo} from '../CompassLogo';
 // Small top-bar parts shared by both shells (PilotShell header pages and MainWorkspace). Existing controls only: home mark (→ Falcon "/"), watch toggle (existing /api/product/watch), Open on iPhone, the account menu, and the research-unavailable banner.
 /** markOnly: just the mark (tablet top bars, where the nav needs the room); the accessible name stays. */
-export function ShellMark({compact=false,markOnly=false}:{compact?:boolean;markOnly?:boolean}){return <Pressable accessibilityRole="link" accessibilityLabel="KANIDA home, Falcon" onPress={()=>router.push('/')} style={(st:any)=>[s.row,{gap:8,borderRadius:8,borderWidth:1,borderColor:st.focused?C.green:'transparent',paddingRight:markOnly?0:4}]}><AgentMark size={compact?28:32}/>{!markOnly&&<T style={{fontFamily:'InterMedium',fontSize:compact?16:18,letterSpacing:2}}>KANIDA{!compact&&<T style={{fontSize:11,color:C.muted}}>.AI</T>}</T>}</Pressable>;}
+export function ShellMark({compact=false,markOnly=false}:{compact?:boolean;markOnly?:boolean}){return <Pressable accessibilityRole="link" accessibilityLabel="KANIDA home, Falcon" onPress={()=>router.push('/')} style={(st:any)=>[s.row,{gap:8,borderRadius:8,borderWidth:1,borderColor:st.focused?C.green:'transparent',paddingRight:markOnly?0:4}]}><CompassLogo size={compact?26:30}/>{!markOnly&&<T style={{fontFamily:'InterMedium',fontSize:compact?16:18,letterSpacing:2}}>KANIDA{!compact&&<T style={{fontSize:11,color:C.muted}}>.AI</T>}</T>}</Pressable>;}
 /** Account menu: Account and billing · Manage strategies (owner only, §6) · Open on iPhone (when the top bar has no separate button). */
 export function AccountButton({connect=false}:{connect?:boolean}){
  const auth=useAuth(),path=usePathname(),[open,setOpen]=useState(false),ref=useRef<any>(null),close=useCallback(()=>setOpen(false),[]);

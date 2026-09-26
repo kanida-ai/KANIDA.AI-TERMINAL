@@ -54,6 +54,14 @@ strategies=Table('pilot_strategies',meta,Column('key',String(64),primary_key=Tru
  Column('source_type',String(30),nullable=False),Column('source_config',JSON,nullable=False,default=dict),Column('audience',String(10),nullable=False),
  Column('min_trades',Integer,nullable=False,default=10),Column('default_slot',String(1)),Column('position',Integer,nullable=False,default=0),
  Column('enabled',Boolean,nullable=False,default=False),Column('created_by',String(32)),Column('created',BigInteger,nullable=False),Column('updated',BigInteger,nullable=False))
+# Access administration (cloud preview): shareable invite CODES (stored hashed; shown once), and the request-access waitlist.
+invite_codes=Table('pilot_invite_codes',meta,Column('id',String(32),primary_key=True),Column('hash',String(64),unique=True,nullable=False),
+ Column('last4',String(8),nullable=False),Column('uses_max',Integer,nullable=False,default=1),Column('uses',Integer,nullable=False,default=0),
+ Column('expires',BigInteger),Column('revoked',BigInteger),Column('note',String(200),nullable=False,default=''),Column('created_by',String(32)),Column('created',BigInteger,nullable=False))
+access_requests=Table('pilot_access_requests',meta,Column('id',String(32),primary_key=True),Column('email',String(254),nullable=False),
+ Column('name',String(80),nullable=False,default=''),Column('note',String(500),nullable=False,default=''),Column('status',String(12),nullable=False,default='pending'),
+ Column('created',BigInteger,nullable=False),Column('decided',BigInteger),Column('decided_by',String(32)),Column('invite_url_issued',Boolean,nullable=False,default=False))
+Index('idx_pilot_access_requests_status',access_requests.c.status,access_requests.c.created)
 schema=Table('pilot_schema',meta,Column('version',Integer,primary_key=True),Column('applied',BigInteger,nullable=False))
 for table in (sessions,audit,subscriptions,plans,orders):
  Index('idx_'+table.name+'_user',table.c.user_id)

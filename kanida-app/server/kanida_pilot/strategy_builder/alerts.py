@@ -160,7 +160,7 @@ class Alerts:
    if 'resume_state' not in cols:self.c.execute('alter table alert_rules add column resume_state text')
    if 'suppressed' not in cols:self.c.execute('alter table alert_rules add column suppressed text')
    self.c.commit()
-  self._stop=threading.Event();self._worker=None
+  self._stop=threading.Event();self._worker=None;self.last_cycle_at=None;self.last_error=None;self.every=15
 
  # --- CRUD ---------------------------------------------------------------------------------------------------------
  def _row(self,r):
@@ -351,12 +351,13 @@ class Alerts:
 
  def start(self,every=15):
   if self._worker:return
+  self.every=every
   def run():
    while not self._stop.wait(every):
-    try:self.cycle()
+    try:self.cycle();self.last_cycle_at=__import__('time').time();self.last_error=None
     except Exception:
      if self._stop.is_set():break                     # shutting down: the store may already be closing
-     log.exception('alert cycle failed; retrying next cycle')
+     self.last_error=__import__('time').time();log.exception('alert cycle failed; retrying next cycle')
   self._worker=threading.Thread(target=run,daemon=True,name='sb-alerts');self._worker.start()
 
  def stop(self,timeout=5.0):

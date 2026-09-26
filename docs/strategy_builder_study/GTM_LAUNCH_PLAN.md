@@ -35,6 +35,18 @@ Input: the fresh audit `research/gtm-audit-fresh-2026-09-25-2355/` (P01–P20). 
 
 
 
+
+## Cloud preview decisions (owner, 26 Sep)
+- Only the NEW app (Strategies, kanida-app) goes to the cloud, at **strategies.kanida.ai**, in the same AWS account (Mumbai), as its own separate service with its own database.
+- The OLD app (engine / Power User portal, api.kanida.ai, kanida-prod-svc) is NOT deployed with it. It keeps running untouched; we switch it off together later (backup first, step by step).
+- The old app's parts are reused INSIDE the new app as its own features (copied/adapted, not linked): logo/branding, Google sign-in + invite codes + waitlist, admin panel (invites, waitlist, users), jobs panel, plus the AWS infrastructure pattern (ECS/ALB/ECR/CI). The two apps are never mixed.
+- Users start fresh: the owner is the only admin and invites testers from the new admin panel.
+- Market data: capture runs in the cloud (Kite credentials entered by the owner into AWS Secrets Manager; the Mac capture stops at switch-over, outside market hours).
+- Mobile: native iOS + Android (Expo EAS; TestFlight + Play internal testing; owner creates the Apple/Google developer accounts).
+- Sized for speed (CDN for web, fast storage, shared quote cache). Access restricted: invite-only.
+
+Cloud preview steps: (1) sign-in/invites/admin/jobs panel/logo inside the new app → (2) container + AWS service at strategies.kanida.ai (private) → (3) cloud capture → (4) iOS/Android test builds → (5) owner iterates → Zerodha.
+
 ## REVISED ORDER (owner-approved 26 Sep) — the adjustment-evidence product
 
 **Product:** an intelligent options strategy simulator (not automated trading). The core screen is for a trader already in a

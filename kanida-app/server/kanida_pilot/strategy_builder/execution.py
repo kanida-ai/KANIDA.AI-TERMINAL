@@ -89,7 +89,7 @@ class Execution:
    if 'fills' not in {r[1] for r in self.c.execute('pragma table_info(deployment_marks)').fetchall()}:
     self.c.execute('alter table deployment_marks add column fills integer')
    self.c.commit()
-  self._stop=threading.Event();self._worker=None;self._pending_logged=set();self._rule_notes={}
+  self._stop=threading.Event();self._worker=None;self._pending_logged=set();self._rule_notes={};self.last_cycle_at=None;self.last_error=None
 
  # --- preview ------------------------------------------------------------------------------------------------------
  def preview(self,user_id,strategy,options,kind='open',deployment=None):
@@ -674,9 +674,10 @@ class Execution:
      for uid_,did in ruled:
       try:self.check_exit_rules(uid_,did)
       except Exception:log.exception('exit rule check failed for %s',did)
+     self.last_cycle_at=time.time()
     except Exception:
      if self._stop.is_set():break
-     log.exception('paper worker cycle failed; it retries next cycle')
+     self.last_error=time.time();log.exception('paper worker cycle failed; it retries next cycle')
   self._worker=threading.Thread(target=run,daemon=True,name='sb-paper-broker');self._worker.start()
 
  def stop(self,timeout=5.0):

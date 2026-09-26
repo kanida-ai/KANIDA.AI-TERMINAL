@@ -26,7 +26,23 @@ export function SignIn({signup=false}:any){
   {auth.device&&<Button label="I’ve approved this device" kind="soft" loading={busy} onPress={device}/>}
   <Button label={signup?'Already have an account? Sign in':gated?'Have an invitation? Create an account':'New to KANIDA? Create an account'} kind="ghost" onPress={()=>router.replace({pathname:signup?'/signin':'/signup',params:{...(params.returnTo?{returnTo:String(params.returnTo)}:{})}})}/>
   {!signup&&<T style={{fontSize:13,color:C.muted}}>Forgot your password? Ask the pilot owner for an account recovery link. Broker passwords never belong here.</T>}
+  {gated&&<RequestAccess/>}
  </FormPage>
+}
+/** No invitation yet? Ask for one (the owner sees it in Admin → Access requests). Never reveals whether an account exists. */
+function RequestAccess(){
+ const [open,setOpen]=useState(false);const [email,setEmail]=useState('');const [name,setName]=useState('');const [note,setNote]=useState('');
+ const [busy,setBusy]=useState(false);const [done,setDone]=useState(false);const [error,setError]=useState('');
+ if(done)return <T accessibilityRole="alert" style={{fontSize:14,color:C.green}}>Thanks - your request is in. You'll receive an invitation link if it's approved.</T>;
+ if(!open)return <Button label="No invitation? Request access" kind="ghost" onPress={()=>setOpen(true)}/>;
+ return <View style={{gap:10,borderTopWidth:1,borderColor:C.line,paddingTop:12}}>
+  <T style={{fontFamily:'InterSemi',fontSize:15}}>Request access</T>
+  <Field label="Your name" value={name} onChangeText={setName} autoCapitalize="words"/>
+  <Field label="Email" value={email} onChangeText={setEmail} keyboardType="email-address" autoComplete="email"/>
+  <Field label="How do you trade options? (optional)" value={note} onChangeText={setNote}/>
+  {!!error&&<T accessibilityRole="alert" style={{color:C.red,fontSize:13}}>{error}</T>}
+  <Button label="Send request" loading={busy} disabled={!email} onPress={async()=>{setBusy(true);setError('');try{await api('/api/access/request',{email,name,note});setDone(true);}catch(e:any){setError(e.message);}finally{setBusy(false);}}}/>
+ </View>;
 }
 export function Onboarding(){const auth=useAuth();const [name,setName]=useState(auth.user?.name||''),[frames,setFrames]=useState<string[]>([...TIMEFRAMES]),[consent,setConsent]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState('');async function save(){setBusy(true);try{await api('/api/account/onboarding',{name,timeframes:frames,acknowledge_pilot:consent,policy_version:auth.config?.policy_version});await auth.refresh();router.replace('/account?welcome=1')}catch(e:any){setError(e.message)}finally{setBusy(false)}}return <FormPage title="Make it your workspace." detail="Choose your chart horizons. Discover starts with these timeframes, and you can explore research before connecting a broker.">
  <Field label="What should we call you?" value={name} onChangeText={setName}/><T style={{fontSize:14,color:C.muted}}>Timeframes to follow</T><View style={[s.row,{flexWrap:'wrap'}]}>{TIMEFRAMES.map(tf=><Button key={tf} label={tf} kind={frames.includes(tf)?'soft':'outline'} onPress={()=>setFrames(frames.includes(tf)?frames.filter(f=>f!==tf):[...frames,tf])}/>)}</View>
