@@ -634,8 +634,13 @@ class Execution:
      for uid_,did in ruled:
       try:self.check_exit_rules(uid_,did)
       except Exception:log.exception('exit rule check failed for %s',did)
-    except Exception:log.exception('paper worker cycle failed; it retries next cycle')
+    except Exception:
+     if self._stop.is_set():break
+     log.exception('paper worker cycle failed; it retries next cycle')
   self._worker=threading.Thread(target=run,daemon=True,name='sb-paper-broker');self._worker.start()
 
- def stop(self):
+ def stop(self,timeout=5.0):
   self._stop.set()
+  w=self._worker
+  if w and w.is_alive() and w is not threading.current_thread():w.join(timeout)
+  self._worker=None

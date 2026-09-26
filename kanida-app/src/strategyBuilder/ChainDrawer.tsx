@@ -7,9 +7,12 @@ import type {Chain,ChainSide,Kind,Leg,Side} from './api';
 import {dayMonth,istStamp,num,strikeText} from './format';
 
 const WINDOW=12;
+// liquidity is judged PER OPTION SIDE (fresh audit P05): a strike row stays when either side passes, but the side
+// that fails is not actionable under "Liquid only"
+const liquidSide=(live:boolean)=>(x:ChainSide|null)=>!!x&&x.ltp!=null&&(x.oi||0)>0&&(!live||(!!x.bid&&!!x.ask&&x.bid>0&&x.bid<=x.ask));
 
 export function ChainDrawer({visible,chain,legs,onToggle,onClose}:{visible:boolean;chain:Chain|null;legs:Leg[];
- onToggle:(strike:number,kind:Kind,side:Side,price:number)=>void;onClose:()=>void}){
+ onToggle:(strike:number,kind:Kind,side:Side,price:number,expiry:string)=>void;onClose:()=>void}){
  const narrow=useWindowDimensions().width<600;
  const [all,setAll]=useState(false);const [view,setView]=useState<'price'|'oi'|'greeks'>('price');
  // B3 chain filter: a strike search, a range around spot, and "liquid only" (a priced side with open interest; on live
@@ -18,7 +21,7 @@ export function ChainDrawer({visible,chain,legs,onToggle,onClose}:{visible:boole
  const rows=useMemo(()=>{
   if(!chain)return [];
   const live=!!chain.quality?.live;
-  const ok=(x:ChainSide|null)=>!!x&&x.ltp!=null&&(x.oi||0)>0&&(!live||(!!x.bid&&!!x.ask&&x.bid<=x.ask));
+  const ok=liquidSide(live);
   let rs=chain.rows;
   if(liquid)rs=rs.filter(r=>ok(r.CE)||ok(r.PE));
   if(range)rs=rs.filter(r=>Math.abs(r.strike/chain.spot-1)<=range/100);
@@ -34,10 +37,16 @@ export function ChainDrawer({visible,chain,legs,onToggle,onClose}:{visible:boole
  // open centred on the ATM strike, not at the top of the list
  useEffect(()=>{if(!visible||!chain)return;const i=rows.findIndex(r=>r.strike===chain.atm_strike);
   const t=setTimeout(()=>scroller.current?.scrollTo?.({y:Math.max(0,i*ROW-200),animated:false}),60);return()=>clearTimeout(t);},[visible,chain,rows]);
- const picked=(k:number,kind:Kind)=>legs.find(l=>l.strike===k&&l.type===kind);
+ // a contract is (expiry, strike, type): this chain shows ONE expiry, so only legs in that expiry are "added" here
+ // (fresh audit P01 - a 6 Oct leg is never shown as, or removed as, the 29 Sep contract at the same strike)
+ const inChain=(l:Leg)=>!!chain&&(l.expiry||chain.expiry)===chain.expiry;
+ const picked=(k:number,kind:Kind)=>legs.find(l=>inChain(l)&&l.strike===k&&l.type===kind);
+ const others=legs.filter(l=>!inChain(l));
+ const okSide=liquidSide(!!chain?.quality?.live);
+ const act=(x:ChainSide|null)=>!liquid||okSide(x);
  return <Sheet visible={visible} onClose={onClose} wide title="Add from the option chain"
   subtitle={chain?`${chain.underlying} · expiry ${dayMonth(chain.expiry)} · spot ${num(chain.spot,2)} · ${istStamp(chain.as_of)} · ${chain.quality.live?'Live (Kite): the chain shows last traded prices; an added leg is priced at buy-at-ask / sell-at-bid':'Stored reading: last traded prices only (this reading has no bid/ask)'}`:'Loading…'}
-  footer={<View style={[s.between,{flexWrap:'wrap'}]}><T style={{fontSize:12,color:C.muted}}>{`${legs.length} leg${legs.length===1?'':'s'} in this strategy`}</T><Button label="Done" icon="check" onPress={onClose}/></View>}>
+  footer={<View style={[s.between,{flexWrap:'wrap'}]}><T style={{fontSize:12,color:C.muted}}>{`${legs.length} leg${legs.length===1?'':'s'} in this strategy${others.length?` · ${others.length} in other expiries (${[...new Set(others.map(l=>dayMonth(l.expiry)))].join(', ')}) - not shown in this ${chain?dayMonth(chain.expiry):''} chain`:''}`}</T><Button label="Done" icon="check" onPress={onClose}/></View>}>
   <View style={[s.row,{flexWrap:'wrap',gap:8}]}>
    <Chip label="Price & IV" active={view==='price'} onPress={()=>setView('price')}/><Chip label="Open interest" active={view==='oi'} onPress={()=>setView('oi')}/><Chip label="Greeks" active={view==='greeks'} onPress={()=>setView('greeks')}/>
    <Chip label={all?'Near the money':'All strikes'} active={all} onPress={()=>setAll(!all)} icon="list"/>
@@ -59,9 +68,9 @@ export function ChainDrawer({visible,chain,legs,onToggle,onClose}:{visible:boole
      return <View key={r.strike} style={[s.row,{gap:0,paddingHorizontal:8,height:ROW,borderTopWidth:1,borderColor:C.line,backgroundColor:atm?C.soft:'transparent'}]}>
       {!narrow&&<Cell flex={1.2} tone={itmCall}>{view==='price'?(r.CE?.iv!=null?`${r.CE.iv}%`:'—'):view==='oi'?compactOi(r.CE?.oi):greek((r.CE as any)?.greeks)}</Cell>}
       {narrow?<Two flex={fl.ltp} tone={itmCall} a={r.CE?.ltp!=null?num(r.CE.ltp,2):'—'} b={second(r.CE)}/>:<Cell flex={1.2} tone={itmCall} strong>{r.CE?.ltp!=null?num(r.CE.ltp,2):'—'}</Cell>}
-      <Pair big={narrow} flex={fl.pair} side={r.CE} picked={picked(r.strike,'CE')} label={`${strikeText(r.strike)} call`} onPress={(sd)=>r.CE?.ltp!=null&&onToggle(r.strike,'CE',sd,r.CE.ltp)}/>
+      <Pair big={narrow} flex={fl.pair} side={act(r.CE)?r.CE:null} picked={picked(r.strike,'CE')} label={`${strikeText(r.strike)} call ${dayMonth(chain.expiry)}`} onPress={(sd)=>r.CE?.ltp!=null&&onToggle(r.strike,'CE',sd,r.CE.ltp,chain.expiry)}/>
       <View style={{flex:fl.strike,alignItems:'center'}}><T style={{fontFamily:'InterSemi',fontSize:13,fontVariant:['tabular-nums'] as any}}>{strikeText(r.strike)}</T>{atm&&<T style={{fontSize:9,color:C.green}}>ATM</T>}</View>
-      <Pair big={narrow} flex={fl.pair} side={r.PE} picked={picked(r.strike,'PE')} label={`${strikeText(r.strike)} put`} onPress={(sd)=>r.PE?.ltp!=null&&onToggle(r.strike,'PE',sd,r.PE.ltp)}/>
+      <Pair big={narrow} flex={fl.pair} side={act(r.PE)?r.PE:null} picked={picked(r.strike,'PE')} label={`${strikeText(r.strike)} put ${dayMonth(chain.expiry)}`} onPress={(sd)=>r.PE?.ltp!=null&&onToggle(r.strike,'PE',sd,r.PE.ltp,chain.expiry)}/>
       {narrow?<Two flex={fl.ltp} right tone={!itmCall&&!atm} a={r.PE?.ltp!=null?num(r.PE.ltp,2):'—'} b={second(r.PE)}/>:<Cell flex={1.2} right tone={!itmCall&&!atm} strong>{r.PE?.ltp!=null?num(r.PE.ltp,2):'—'}</Cell>}
       {!narrow&&<Cell flex={1.2} right tone={!itmCall&&!atm}>{view==='price'?(r.PE?.iv!=null?`${r.PE.iv}%`:'—'):view==='oi'?compactOi(r.PE?.oi):greek((r.PE as any)?.greeks)}</Cell>}
      </View>;})}

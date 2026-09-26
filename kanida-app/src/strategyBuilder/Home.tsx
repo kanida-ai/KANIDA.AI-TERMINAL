@@ -19,7 +19,8 @@ export function Home(){
  const [sort,setSort]=useState('updated');const [startKind,setStartKind]=useState<'scratch'|'template'|null>(null);
  const load=useCallback(()=>{setLoadErr('');sb.list(sort).then(r=>setRows(r.strategies)).catch(e=>setLoadErr(e.message));},[sort]);
  useEffect(()=>{load();},[load]);
- const shown=useMemo(()=>(rows||[]).filter(r=>filter==='archived'?!!r.archived_at:!r.archived_at&&(filter==='paper'?r.paper_total>0:true))
+ // "Paper traded" includes both paper systems: stored-reading runs AND live-quote deployments (fresh audit P16)
+ const shown=useMemo(()=>(rows||[]).filter(r=>filter==='archived'?!!r.archived_at:!r.archived_at&&(filter==='paper'?((r.paper_total||0)+(r.deployments?.open||0)+(r.deployments?.attention||0)+(r.deployments?.closed||0))>0:true))
   .filter(r=>!q||`${r.name} ${r.underlying||''} ${r.structure}`.toLowerCase().includes(q.toLowerCase())),[rows,filter,q]);
 
  return <View style={{padding:wide?24:14,gap:18,maxWidth:1200,width:'100%',alignSelf:'center'}}>

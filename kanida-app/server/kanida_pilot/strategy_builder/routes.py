@@ -67,6 +67,9 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
  def body_of(raw):
   try:return S.normalize_body(raw)
   except S.Invalid as e:raise PilotError(400,e.code,e.message)
+ def ticks(body):
+  try:S.check_ticks(market,body)
+  except S.Invalid as e:raise PilotError(400,e.code,e.message)
  def guard(fn,*a,**k):
   try:return fn(*a,**k)
   except MarketUnavailable as e:raise PilotError(503,'MARKET_UNAVAILABLE',str(e))
@@ -149,7 +152,7 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
 
  @r.post('/api/sb/analyze')
  def analyze(request:Request,data:dict=Body(default={})):
-  me(request);return guard(S.analysis,market,body_of(data.get('body')))
+  me(request);body=body_of(data.get('body'));ticks(body);return guard(S.analysis,market,body)
 
  @r.post('/api/sb/discover')
  def discover(request:Request,data:dict=Body(default={})):
@@ -249,7 +252,7 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
 
  @r.post('/api/sb/strategies')
  def create(request:Request,data:dict=Body(default={})):
-  user=me(request);body=body_of(data.get('body') or {})
+  user=me(request);body=body_of(data.get('body') or {});ticks(body)
   name=_name(data.get('name'),f"Untitled {body['underlying'] or 'NIFTY'} strategy")
   try:return store.create(user['id'],name,body,thesis=str(data.get('thesis') or '')[:500])
   except ValueError as e:raise PilotError(409,'STRATEGY_LIMIT',str(e))
@@ -264,7 +267,7 @@ def build_router(app,market,store,execution=None,alerts=None,lab=None,autotrade=
 
  @r.post('/api/sb/strategies/{sid}/draft')
  def save_draft(request:Request,sid:str,data:dict=Body(default={})):
-  user=me(request);own(user,sid);body=body_of(data.get('body'))
+  user=me(request);own(user,sid);body=body_of(data.get('body'));ticks(body)
   try:version=int(data.get('version'))
   except (TypeError,ValueError):raise PilotError(400,'FIELD_INVALID','version is required.')
   try:return store.save_draft(user['id'],sid,version,body)

@@ -14,12 +14,12 @@ import {DeploymentCard,OrderReview} from './OrderReview';
 import {AdjustSheet} from './Adjust';
 import {AboutSheet,SpreadsSheet} from './Learn';
 import {TemplateSheet} from './Templates';
-import {ActionsSheet,ExpirySheet,LegSheet,SnapshotSheet,UnderlyingPicker} from './BuilderParts';
+import {ActionsSheet,ExpirySheet,LegSheet,SnapshotSheet,UnderlyingPicker,snap} from './BuilderParts';
 import {ErrorRetry,Scrollable} from './States';
 import {AlertsPanel,useAlertNotifications} from './Alerts';
 import {ChainDrawer} from './ChainDrawer';
 import {PayoffChart} from './PayoffChart';
-import {addDays,dayMonth,inr,isWeekend,istEpoch,istStamp,num,signed,strikeText,weekday} from './format';
+import {legText,addDays,dayMonth,inr,isWeekend,istEpoch,istStamp,num,signed,strikeText,weekday} from './format';
 
 const SAVE_DELAY=800,ANALYZE_DELAY=220;
 const uid=()=>'L'+Math.random().toString(36).slice(2,8);
@@ -140,16 +140,19 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
   const h=(e:any)=>{if(bodyRef.current&&J(bodyRef.current)!==ackedJson.current){e.preventDefault();e.returnValue='';}};
   window.addEventListener('beforeunload',h);return()=>window.removeEventListener('beforeunload',h);},[]);
 
- const priceOf=(k:number,kind:Kind)=>chain?.rows.find(r=>r.strike===k)?.[kind]?.ltp??null;
+ // a leg's price comes from ITS contract (fresh audit P01): the chain on screen is one expiry, so a later-expiry leg is
+ // priced from the analysis' own per-contract quote, never from the same strike in the near chain
+ const priceOf=(k:number,kind:Kind,exp?:string,lid?:string)=>(!exp||exp===chain?.expiry)?(chain?.rows.find(r=>r.strike===k)?.[kind]?.ltp??null):(analysis?.legs_quotes?.find(q=>q.id===lid)?.ltp??null);
  const strikes=useMemo(()=>chain?.rows.map(r=>r.strike)??[],[chain]);
  const moveStrike=(k:number,steps:number)=>{if(!strikes.length)return k;const i=strikes.indexOf(k);const j=Math.max(0,Math.min(strikes.length-1,(i<0?strikes.findIndex(x=>x>=k):i)+steps));return strikes[j];};
 
- function toggleFromChain(strike:number,kind:Kind,side:Side){
-  edit(b=>{const hit=b.legs.find(l=>l.strike===strike&&l.type===kind);
+ function toggleFromChain(strike:number,kind:Kind,side:Side,expiry:string){
+  // identity = (expiry, strike, type): the same strike in another expiry is a different contract (fresh audit P01)
+  edit(b=>{const hit=b.legs.find(l=>(l.expiry||b.expiry)===expiry&&l.strike===strike&&l.type===kind);
    if(hit&&hit.side===side)return {...b,legs:b.legs.filter(l=>l!==hit)};
    if(hit)return {...b,legs:b.legs.map(l=>l===hit?{...l,side}:l)};
    if(b.legs.length>=8){flash('At most 8 legs are supported in this release.');return b;}
-   return {...b,template:null,legs:[...b.legs,{id:uid(),type:kind,side,strike,lots:1,expiry:b.expiry,price_basis:'exec',price:null,include:true}]};});
+   return {...b,template:null,legs:[...b.legs,{id:uid(),type:kind,side,strike,lots:1,expiry,price_basis:'exec',price:null,include:true}]};});
  }
  const setLeg=(lid:string,patch:Partial<Leg>)=>edit(b=>({...b,template:null,legs:b.legs.map(l=>l.id===lid?{...l,...patch}:l)}));
  function removeLeg(lid:string){if(!body)return;const index=body.legs.findIndex(l=>l.id===lid);const leg=body.legs[index];setUndo({leg,index});
@@ -178,7 +181,7 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
    const i=strikes.indexOf(l.strike);const j=i+steps;
    if(i<0||j<0||j>=strikes.length)return {error:`${strikeText(l.strike)} ${l.type} would move past the listed strikes - nothing was changed.`};
    legs.push({...l,strike:strikes[j]});}
-  const keys=legs.map(l=>`${l.type}${l.strike}${l.side}`);
+  const keys=legs.map(l=>`${l.expiry}|${l.type}${l.strike}${l.side}`);
   if(new Set(keys).size<keys.length)return {error:'Two legs would land on the same contract - nothing was changed.'};
   if(kind==='width'&&shorts.length){const ss=legs.filter(l=>l.side==='S');const bs=legs.filter(l=>l.side==='B');
    if(ss.some(x=>bs.some(y=>y.type===x.type&&y.strike===x.strike)))return {error:'The legs would cross - nothing was changed.'};}
@@ -206,14 +209,14 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
     const hedgeExp=shortLegs.map(l=>l.expiry).sort().reverse()[0]||b.expiry;
     adds.push({id:uid(),type:k,side:'B',strike:strikes[j],lots:-net,expiry:hedgeExp,price_basis:'exec',price:null,include:true});}
    if(!adds.length){flash('Nothing to hedge.');return;}
-   setPendingChange({title:'Add a hedge',lines:adds.map(l=>`Add: Buy ${l.lots} × ${strikeText(l.strike)} ${l.type} (two strikes beyond the furthest short)`),apply:x=>({...x,template:null,legs:[...x.legs,...adds]})});
+   setPendingChange({title:'Add a hedge',lines:adds.map(l=>`Add: ${legText(l)} (two strikes beyond the furthest short)`),apply:x=>({...x,template:null,legs:[...x.legs,...adds]})});
   }}
  function adjust(kind:'shift'|'width'|'wings',k:number){
   const b=bodyRef.current;if(!b)return;
   const block=transformBlock(kind,b);if(block){flash(block);return;}
   const r=propose(kind,k,b);
   if('error' in r){setPendingChange({title:`${{shift:'Shift',width:'Width',wings:'Wings'}[kind]} ${k>0?'+':'−'}1`,lines:[],apply:x=>x,blocked:r.error});return;}
-  const lines=b.legs.map((l,i)=>l.strike===r.legs[i].strike?null:`${l.side==='B'?'Buy':'Sell'} ${l.type}: ${strikeText(l.strike)} → ${strikeText(r.legs[i].strike)}`).filter(Boolean) as string[];
+  const lines=b.legs.map((l,i)=>l.strike===r.legs[i].strike?null:`${l.side==='B'?'Buy':'Sell'} ${l.type} ${dayMonth(l.expiry)}: ${strikeText(l.strike)} → ${strikeText(r.legs[i].strike)}`).filter(Boolean) as string[];
   if(!lines.length){flash('Nothing to change for this structure.');return;}
   setPendingChange({title:`${{shift:'Shift',width:'Width',wings:'Wings'}[kind]} ${k>0?'+':'−'}1`,lines,apply:x=>({...x,template:null,legs:r.legs})});
  }
@@ -225,7 +228,7 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
    const doIt=(b:Body)=>({...b,template:t.key,param:param??null,legs});
    if(bodyRef.current?.legs.length){
     setPendingChange({title:`Replace ${bodyRef.current.legs.length} leg${bodyRef.current.legs.length>1?'s':''} with ${t.name}`,
-     lines:[...bodyRef.current.legs.map(l=>`Remove: ${l.side==='B'?'Buy':'Sell'} ${l.lots} × ${strikeText(l.strike)} ${l.type}`),...legs.map(l=>`Add: ${l.side==='B'?'Buy':'Sell'} ${l.lots} × ${strikeText(l.strike)} ${l.type}`)],apply:doIt});
+     lines:[...bodyRef.current.legs.map(l=>`Remove: ${legText(l)}`),...legs.map(l=>`Add: ${legText(l)}`)],apply:doIt});
    }else{edit(doIt);flash(`${t.name} loaded - ${legs.length} legs. Everything stays editable.`);}}
   catch(e:any){flash(msg(e));}
  }
@@ -327,10 +330,11 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
       <Button label="Spreads" icon="list" kind="outline" onPress={()=>setSpreadsOpen(true)} disabled={!body.expiry||!chain}/><Button label="Add from chain" icon="plus" kind="soft" onPress={()=>setChainOpen(true)} disabled={!chain}/></View></View>
     {!body.legs.length?<View style={{paddingVertical:26,alignItems:'center',gap:8}}><Icon name="layers" size={22} color={C.green}/>
       <T style={{fontFamily:'InterSemi'}}>No legs yet</T><T style={{fontSize:12,color:C.muted,textAlign:'center',maxWidth:340}}>Pick a template for a ready structure, or add exact contracts from the chain.</T></View>:
-     body.legs.map(l=>{const row=a?.legs?.find(r=>r.id===l.id);const ltp=priceOf(l.strike,l.type);
-      if(coarse)return <Pressable key={l.id} accessibilityRole="button" accessibilityLabel={`Edit leg: ${l.side==='B'?'Buy':'Sell'} ${l.lots} lots ${strikeText(l.strike)} ${l.type}`} onPress={()=>setLegEdit(l)}
+     body.legs.map(l=>{const row=a?.legs?.find(r=>r.id===l.id);const ltp=priceOf(l.strike,l.type,l.expiry,l.id);
+      if(coarse)return <Pressable key={l.id} accessibilityRole="button" accessibilityLabel={`Edit leg: ${legText(l)}`} onPress={()=>setLegEdit(l)}
        style={({pressed})=>[s.between,{borderTopWidth:1,borderColor:C.line,paddingVertical:10,minHeight:56,opacity:!l.include?.5:pressed?.7:1}]}>
-       <View style={{gap:3,flex:1}}><T style={{fontSize:14,fontFamily:'InterSemi',color:l.side==='B'?C.green:C.red}}>{`${l.side==='B'?'BUY':'SELL'} ${l.lots} × ${strikeText(l.strike)} ${l.type}${l.include?'':' (excluded)'}`}</T>
+       <View style={{gap:3,flex:1}}><T style={{fontSize:14,fontFamily:'InterSemi',color:l.side==='B'?C.green:C.red}}>{`${l.side==='B'?'BUY':'SELL'} ${l.lots} × ${strikeText(l.strike)} ${l.type} · ${dayMonth(l.expiry)}${l.include?'':' (excluded)'}`}</T>
+       <T style={{fontSize:11,color:C.muted}}>{`${l.lots} lot${l.lots>1?'s':''} × ${chain?.lot_size||'?'} = ${chain?.lot_size?l.lots*chain.lot_size:'?'} units`}</T>
         <T style={{fontSize:11,color:C.muted}}>{`Entry ${num(row?.entry)} ${BASIS_TAG[(a?.legs_quotes?.find(q=>q.id===l.id)?.basis_used)||'']||''} · IV ${row?.iv!=null?`${row.iv}%`:'—'} · Δ ${row?.greeks?num(row.greeks.delta,1):'—'}`}</T></View>
        <Icon name="edit-2" size={16} color={C.muted}/></Pressable>;
       return <View key={l.id} style={{borderTopWidth:1,borderColor:C.line,paddingTop:10,gap:8,opacity:l.include?1:.5}}>
@@ -349,7 +353,7 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
         <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${strikeText(l.strike)} ${l.type}`} onPress={()=>removeLeg(l.id)} style={{padding:coarse?14:6}}><Icon name="trash-2" size={15} color={C.muted}/></Pressable>
        </View>
        <View style={[s.row,{flexWrap:'wrap',gap:14}]}>
-        <PriceField leg={l} ltp={ltp} quote={a?.legs_quotes?.find(q=>q.id===l.id)} onManual={(v)=>setLeg(l.id,{price_basis:'manual',price:v})} onBasis={(b)=>setLeg(l.id,{price_basis:b,price:null})}/>
+        <PriceField leg={l} ltp={ltp} quote={a?.legs_quotes?.find(q=>q.id===l.id)} tick={chain?.tick_size} onManual={(v,from)=>{setLeg(l.id,{price_basis:'manual',price:v});if(from!=null)flash(`Rounded ${from} to ${v}, on the ${chain?.tick_size||0.05} exchange tick.`);}} onBasis={(b)=>setLeg(l.id,{price_basis:b,price:null})}/>
         <Mini k="IV" v={row?.iv!=null?`${row.iv}%`:'—'}/><Mini k="Δ" v={row?.greeks?num(row.greeks.delta,1):'—'}/>
         <Mini k="Units" v={row?String(row.units):String(l.lots*(chain?.lot_size||0))}/>
        </View>
@@ -377,7 +381,7 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
      <View style={s.between}><T style={label}>Payoff</T>{pending&&<T style={{fontSize:11,color:C.amber}}>{a?'Updating…':'Calculating…'}</T>}
       {!pending&&!!anFailed&&<View style={[s.row,{gap:8}]}><T style={{fontSize:11,color:C.red}}>{a?'Not updated - these numbers are for an earlier version':'Could not calculate'}{` (${anFailed})`}</T><Button label="Retry" kind="outline" onPress={()=>setAnRetry(n=>n+1)}/></View>}</View>
      <PayoffChart curve={a?.curve||[]} spot={a?.spot||chain?.spot||0} scenarioSpot={a?.scenario?.spot} breakevens={a?.breakevens?.value||[]} bands={(a?.scenario?.active&&a?.sd?.bands_to_date?.length?a.sd.bands_to_date:a?.sd?.bands)||[]} dim={dim}
-      scenarioLabel={a?.scenario?.is_expiry?'Scenario (expiry)':`Scenario ${a?.scenario?istStamp(a.scenario.at):''}`}/>
+      scenarioLabel={a?.scenario?.is_expiry?'Scenario (expiry)':`Scenario ${a?.scenario?istStamp(a.scenario.at):''}`} expiryLabel={horizonShort(a)} empty={a?.status==='incomplete'?'No payoff: a leg is not a listed contract, and the rest is a different position.':undefined}/>
      <ScenarioBar body={body} chain={chain} expiry={body.expiry} onChange={sc=>edit(b=>({...b,scenario:sc}))} result={a}/>
     </View>
     {!!a?.warnings?.length&&<View style={[panel,{borderColor:'#5A4A1F',backgroundColor:C.amberBg,gap:6}]}>{a.warnings.map((w,i)=><View key={i} style={[s.row,{alignItems:'flex-start',gap:8}]}><Icon name="alert-triangle" size={13} color={C.amber}/><T style={{fontSize:12,color:C.amber,flex:1}}>{w}</T></View>)}</View>}
@@ -386,9 +390,14 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
       {(['pnl','greeks','table','snapshots','paper','alerts','activity'] as Tab[]).map(t=><Chip key={t} active={tab===t} onPress={()=>setTab(t)}
        label={{pnl:'P&L by leg',greeks:'Greeks',table:'Payoff table',snapshots:`Snapshots (${detail.snapshots.length})`,paper:`Paper (${runs.length+deps.length})`,alerts:`Alerts${bell.count?` (${bell.count})`:''}`,activity:'Activity'}[t]}/>)}
      </View>
-     {tab==='pnl'&&<Scrollable narrow={coarse} min={720}><LegTable a={a}/></Scrollable>}
-     {tab==='greeks'&&<Scrollable narrow={coarse} min={560}><GreeksTable a={a}/></Scrollable>}
-     {tab==='table'&&<PayoffTable a={a}/>}
+     {/* one calculation state for every dependent output (fresh audit P12): loading is never "No legs", and a table
+         for an earlier leg set is dimmed and labelled, exactly like the risk strip and the chart */}
+     {(tab==='pnl'||tab==='greeks'||tab==='table')&&(!a&&pending?<T style={{fontSize:12,color:C.muted}} accessibilityLiveRegion="polite">Calculating…</T>:
+      a?.status==='incomplete'?<T style={{fontSize:12,color:C.red}}>Unavailable until every included leg resolves to a listed contract.</T>:
+      <View style={{opacity:dim?.5:1}}>{dim&&<T style={{fontSize:11,color:C.amber}}>{pending?'Updating - these values are for the previous version.':'Not updated - these values are for an earlier version.'}</T>}
+       {tab==='pnl'&&<Scrollable narrow={coarse} min={720}><LegTable a={a}/></Scrollable>}
+       {tab==='greeks'&&<Scrollable narrow={coarse} min={560}><GreeksTable a={a}/></Scrollable>}
+       {tab==='table'&&<PayoffTable a={a}/>}</View>)}
      {tab==='snapshots'&&<Snapshots detail={detail} onView={setSnapView} onRestore={(rid)=>afterSave(async()=>{try{const s=await sb.restore(id,rid,versionRef.current);clearHistory();bodyRef.current=s.draft!.body;ackedJson.current=J(s.draft!.body);checksumRef.current=s.draft!.checksum||'';versionRef.current=s.draft!.version;
        setBody(s.draft!.body);setVersion(s.draft!.version);setSave('saved');flash('Snapshot restored as a new draft version.');}catch(e:any){flash(msg(e));reload();}})}
       onDuplicate={async(rid)=>{try{const c=await sb.duplicate(id,rid);router.replace({pathname:'/strategies',params:{id:c.id}} as any);}catch(e:any){flash(msg(e));}}}/>}
@@ -401,12 +410,12 @@ export function Builder({id,openTemplate=false,openAdjust=false,openChain=false}
    </View>
   </View>
 
-  <ChainDrawer visible={chainOpen} chain={chain} legs={body.legs} onClose={()=>setChainOpen(false)} onToggle={(k,kind,side)=>toggleFromChain(k,kind,side)}/>
+  <ChainDrawer visible={chainOpen} chain={chain} legs={body.legs} onClose={()=>setChainOpen(false)} onToggle={(k,kind,side,_p,exp)=>toggleFromChain(k,kind,side,exp)}/>
   <SpreadsSheet visible={spreadsOpen} onClose={()=>setSpreadsOpen(false)} underlying={body.underlying} expiry={body.expiry} lots={Math.max(1,Math.min(...(body.legs.length?body.legs.map(l=>l.lots):[1])))}
    onPick={(legs,tpl,w)=>{setSpreadsOpen(false);const nl=legs.map((l,i)=>({id:uid(),type:l.type,side:l.side,strike:l.strike,lots:l.lots,expiry:l.expiry,price_basis:'exec' as const,price:null,include:true}));
     const doIt=(b:Body)=>({...b,template:tpl,param:[2,4,6,8].includes(w)?w:null,legs:nl});
     if(bodyRef.current?.legs.length)setPendingChange({title:`Replace ${bodyRef.current.legs.length} leg${bodyRef.current.legs.length>1?'s':''} with this spread`,
-     lines:[...bodyRef.current.legs.map(l=>`Remove: ${l.side==='B'?'Buy':'Sell'} ${l.lots} × ${strikeText(l.strike)} ${l.type}`),...nl.map(l=>`Add: ${l.side==='B'?'Buy':'Sell'} ${l.lots} × ${strikeText(l.strike)} ${l.type}`)],apply:doIt});
+     lines:[...bodyRef.current.legs.map(l=>`Remove: ${legText(l)}`),...nl.map(l=>`Add: ${legText(l)}`)],apply:doIt});
     else{edit(doIt);flash('Spread loaded - every leg stays editable.');}}}/>
   <AboutSheet visible={aboutOpen} onClose={()=>setAboutOpen(false)} a={a} templateKey={a?.structure?.exact?a.structure.key:null}/>
   <AdjustSheet visible={adjustFor.open} strategyId={id} version={version} deployment={adjustFor.deployment||null} onClose={()=>setAdjustFor({open:false})}
@@ -470,14 +479,17 @@ function Stepper({label:l,a11y,onMinus,onPlus}:{label:string;a11y:string;onMinus
  return <View style={[s.row,{gap:0,borderWidth:1,borderColor:C.line,borderRadius:7,height:h}]}>{b('minus',onMinus,'decrease')}<T style={{fontSize:12,fontFamily:'InterMedium',minWidth:44,textAlign:'center',fontVariant:['tabular-nums'] as any}}>{l}</T>{b('plus',onPlus,'increase')}</View>;
 }
 function Mini({k,v}:{k:string;v:string}){return <View style={[s.row,{gap:5}]}><T style={{fontSize:11,color:C.muted}}>{k}</T><T style={{fontSize:12,fontVariant:['tabular-nums'] as any}}>{v}</T></View>;}
+/** The short name of the horizon strategy-wide numbers are valued at (fresh audit P03): exact expiry, or the model. */
+function horizonShort(a:Analysis|null){return a?.horizon?.kind==='model_near_expiry'?`Model at ${dayMonth(a.horizon.expiry)} expiry`:'At expiry';}
 const NEXT:Record<string,Basis>={exec:'mid',mid:'ltp',ltp:'exec',manual:'exec'};
-function PriceField({leg,ltp,quote,onManual,onBasis}:{leg:Leg;ltp:number|null;quote?:{bid:number|null;ask:number|null;ltp:number|null;basis_used:string};onManual:(v:number)=>void;onBasis:(b:Basis)=>void}){
+function PriceField({leg,ltp,quote,tick,onManual,onBasis}:{leg:Leg;ltp:number|null;quote?:{bid:number|null;ask:number|null;ltp:number|null;basis_used:string};tick?:number|null;onManual:(v:number,roundedFrom?:number)=>void;onBasis:(b:Basis)=>void}){
  const onLtp=()=>onBasis('exec');
  const shown=quote?(quote.basis_used==='exec'?(leg.side==='B'?quote.ask:quote.bid):quote.basis_used==='mid'&&quote.bid&&quote.ask?Math.round((quote.bid+quote.ask)*50)/100:quote.ltp):ltp;
  const tag=leg.price_basis==='manual'?'manual':quote?.basis_used==='exec'?(leg.side==='B'?'ask':'bid'):quote?.basis_used||leg.price_basis;
  const [text,setText]=useState(leg.price_basis==='manual'?String(leg.price):'');
  useEffect(()=>{setText(leg.price_basis==='manual'?String(leg.price):'');},[leg.price_basis,leg.price]);
- const commit=()=>{const v=Number(text);if(text.trim()===''){onLtp();return;}if(Number.isFinite(v)&&v>=0)onManual(v);};
+ // tick before calculate (Blueprint A): the typed price snaps to the tick before it is calculated or saved
+ const commit=()=>{const v=Number(text);if(text.trim()===''){onLtp();return;}if(Number.isFinite(v)&&v>=0){const t=snap(v,tick);setText(String(t));onManual(t,t!==v?v:undefined);}};
  return <View style={[s.row,{gap:6}]}>
   <T style={{fontSize:11,color:C.muted}}>Entry</T>
   <TextInput value={leg.price_basis==='manual'?text:(shown!=null?String(shown):'')} onChangeText={setText} onFocus={()=>{if(leg.price_basis!=='manual')setText(shown!=null?String(shown):'');}}
@@ -491,23 +503,32 @@ function RiskStrip({a,dim,onFix}:{a:Analysis|null;dim:boolean;onFix?:(f:any)=>vo
  const [more,setMore]=useState(false);
  if(!a||a.status==='no_market'||a.status==='empty')return <View style={[panel,{minHeight:84,justifyContent:'center'}]}><T style={{color:C.muted,fontSize:12}}>{a?.warnings?.[0]||'Risk numbers appear once the strategy has legs.'}</T></View>;
  if(a.status==='invalid')return <View style={panel}><T style={{color:C.red,fontSize:12}}>{a.warnings[0]}</T></View>;
+ // fail closed (fresh audit P04): a leg that did not resolve means NO strategy-wide numbers - never the survivors'
+ if(a.status==='incomplete')return <View style={[panel,{gap:6,borderColor:'#5A2A30'}]} accessibilityRole="alert">
+  <T style={{color:C.red,fontFamily:'InterSemi',fontSize:13}}>Risk unavailable - a leg is not a listed contract</T>
+  {(a.unresolved||[]).map(u=><T key={u.leg_id} style={{color:C.red,fontSize:12}}>{`• ${u.label}`}</T>)}
+  <T style={{color:C.muted,fontSize:12}}>Max loss, profit and breakevens need every included leg. Change the strike or expiry of the missing leg, or untick "Include" to explore the rest deliberately.</T></View>;
+ const hz=a.horizon;const model=hz?.kind==='model_near_expiry';
+ const at=hz?hz.label:'At expiry, gross';
  const money=(m?:any,prefix='')=>!m?'—':m.status!=='available'?(m.status==='unsupported'?'Not supported':'Unavailable'):m.unlimited?'Unlimited':signed(m.value);
  const items=[
-  ['Max loss',money(a.max_loss),a.max_loss?.unlimited?C.red:C.red,'At expiry, gross of charges'],
-  ['Max profit',money(a.max_profit),C.green,'At expiry, gross of charges'],
+  ['Max loss',money(a.max_loss),a.max_loss?.unlimited?C.red:C.red,model?`${at} · modelled at today's IV, not a guaranteed floor`:`${at} of charges`],
+  ['Max profit',money(a.max_profit),C.green,model?`${at} · modelled at today's IV, not a guaranteed cap`:`${at} of charges`],
   ['Breakeven',a.breakevens?.status==='available'?(a.breakevens.value.length?a.breakevens.value.map((b:number)=>num(b,0)).join(' · '):'None'):'—',C.ink,
-   a.scenario?.active&&a.breakevens_target?.status==='available'?`At expiry · on the what-if date: ${a.breakevens_target.value.length?a.breakevens_target.value.map((b:number)=>num(b,0)).join(' · '):'none in range'}`:'At expiry'],
+   a.scenario?.active&&a.breakevens_target?.status==='available'?`${horizonShort(a)} · on the what-if date: ${a.breakevens_target.value.length?a.breakevens_target.value.map((b:number)=>num(b,0)).join(' · '):'none in range'}`:at],
   ['Required funds',a.margin?.status==='available'?inr(a.margin.value):'Needs live data',a.margin?.status==='available'?C.ink:C.muted,a.margin?.status==='available'?`Exchange margin (Kite) · hedge benefit ${inr(a.margin.hedge_benefit)}`:'Exchange margin - not the same as max loss'],
-  ['Reward : risk',a.reward_risk?.status==='available'&&a.reward_risk.value!=null?`${num(a.reward_risk.value,2)} : 1`:'—',C.ink,a.reward_risk?.status==='available'?'Max profit ÷ max loss, at expiry':'Unbounded on one side'],
-  ['Capital at risk',a.capital_at_risk?.unlimited?'Unlimited':inr(a.capital_at_risk?.value),C.ink,'Structural max loss - not exchange margin'],
+  ['Reward : risk',a.reward_risk?.status==='available'&&a.reward_risk.value!=null?`${num(a.reward_risk.value,2)} : 1`:'—',C.ink,a.reward_risk?.status==='available'?`Max profit ÷ max loss · ${horizonShort(a).toLowerCase()}`:'Unbounded on one side'],
+  ['Capital at risk',a.capital_at_risk?.unlimited?'Unlimited':inr(a.capital_at_risk?.value),C.ink,model?'Modelled max loss at the near expiry - not exchange margin':'Structural max loss - not exchange margin'],
   [a.premium?.direction==='credit'?'Net credit':'Net debit',inr(Math.abs(a.premium?.value||0)),C.ink,'At entry prices'],
   [a.scenario?.active&&a.pop_scenario?.status==='available'?'POP (model) · Scenario':'POP (model)',a.scenario?.active&&a.pop_scenario?.status==='available'?`${a.pop_scenario.value}%`:a.pop?.status==='available'?`${a.pop.value}%`:'—',C.ink,
    a.scenario?.active&&a.pop_scenario?.status==='available'?`From the what-if point · ${a.pop?.status==='available'?`${a.pop.value}% from now`:''}`:a.pop?.sigma?`Lognormal at ${a.pop.sigma}% ${a.pop.sigma_basis==='chain_atm_iv'?'chain ATM IV':'IV of the leg nearest spot (proxy)'}`:'Model value'],
   ['Charges (est.)',inr(a.charges?.value),C.ink,'Entry orders, published rates'],
   ['Chance of loss (model)',(a as any).outcomes?.status==='available'?`${(a as any).outcomes.value.loss}%`:'—',C.ink,(a as any).outcomes?.status==='available'?
-   `Profit ${(a as any).outcomes.value.profit}% · loss ${(a as any).outcomes.value.loss}%${(a as any).outcomes.value.max_loss!=null?` · max loss ${(a as any).outcomes.value.max_loss}%`:''}${(a as any).outcomes.value.max_profit!=null?` · max profit ${(a as any).outcomes.value.max_profit}%`:''} at expiry`:'Model value'],
+   `Profit ${(a as any).outcomes.value.profit}% · loss ${(a as any).outcomes.value.loss}%${(a as any).outcomes.value.max_loss!=null?` · max loss ${(a as any).outcomes.value.max_loss}%`:''}${(a as any).outcomes.value.max_profit!=null?` · max profit ${(a as any).outcomes.value.max_profit}%`:''} · ${horizonShort(a).toLowerCase()}`:'Model value'],
  ] as const;
- return <View style={[panel,{gap:10,opacity:dim?.5:1}]}><View style={{flexDirection:'row',flexWrap:'wrap',gap:14}}>
+ return <View style={[panel,{gap:10,opacity:dim?.5:1}]}>
+  {model&&<View style={[s.row,{gap:8,alignItems:'flex-start'}]}><Badge label="MODEL" tone="amber"/><T style={{fontSize:12,color:C.amber,flex:1}}>{`${hz!.label}. ${hz!.note}`}</T></View>}
+  <View style={{flexDirection:'row',flexWrap:'wrap',gap:14}}>
   {items.slice(0,more?items.length:4).map(([k,v,col,help])=><View key={k} style={{minWidth:130,flex:1,gap:2}} accessibilityLabel={`${k}: ${v}. ${help}`}>
    <T style={{fontSize:11,color:C.muted}}>{k}</T><T style={{fontFamily:'InterSemi',fontSize:16,color:col,fontVariant:['tabular-nums'] as any}}>{v}</T><T style={{fontSize:10,color:C.muted}}>{help}</T></View>)}
  </View>
@@ -585,7 +606,7 @@ function GreeksTable({a}:{a:Analysis|null}){
 }
 function PayoffTable({a}:{a:Analysis|null}){
  if(!a?.table?.length)return <T style={{fontSize:12,color:C.muted}}>No payoff table yet.</T>;
- return <Table head={[`${a.underlying||'Underlying'} level`,'% from spot','Scenario date','At expiry']} right={[1,2,3]} rows={a.table.map(r=>[num(r.s,0),`${r.pct>0?'+':''}${r.pct}%`,signed(r.target),signed(r.expiry)])}/>;
+ return <Table head={[`${a.underlying||'Underlying'} level`,'% from spot','Scenario date',horizonShort(a)]} right={[1,2,3]} rows={a.table.map(r=>[num(r.s,0),`${r.pct>0?'+':''}${r.pct}%`,signed(r.target),signed(r.expiry)])}/>;
 }
 function Snapshots({detail,onRestore,onDuplicate,onView}:{detail:Detail;onRestore:(id:string)=>void;onDuplicate:(id:string)=>void;onView:(id:string)=>void}){
  if(!detail.snapshots.length)return <T style={{fontSize:12,color:C.muted}}>No snapshots yet. "Save snapshot" freezes the current legs and their analysis; it never changes afterwards.</T>;

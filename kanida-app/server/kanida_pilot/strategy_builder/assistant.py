@@ -27,38 +27,9 @@ class AssistError(Exception):
   super().__init__(message);self.status = status;self.code = code;self.message = message
 
 
-def _intr(t, k, x):
- return max(x - k, 0.0) if t == 'CE' else max(k - x, 0.0)
-
-
-def _pnl(x, legs, lot):
- """Expiry P&L of legs [{type, strike, units(+/-lots), price}] at spot x, in rupees."""
- return sum(l['units'] * lot * (_intr(l['type'], l['strike'], x) - l['price']) for l in legs)
-
-
-def _profile(legs, lot, fees):
- """Exact worst case and breakevens of a piecewise-linear expiry P&L (kinks at strikes)."""
- ks = sorted({float(l['strike']) for l in legs})
- if not ks:
-  return {'worst': round(-fees, 2), 'unlimited_loss': False, 'breakevens': [], 'best': round(-fees, 2)}
- pts = [0.0] + ks + [ks[-1] * 2]
- vals = [_pnl(x, legs, lot) - fees for x in pts]
- slope_up = sum(l['units'] for l in legs if l['type'] == 'CE')          # lots of net calls beyond the top strike
- bes = [pts[-1]] if vals[-1] == 0 else []
- for (x0, v0), (x1, v1) in zip(zip(pts, vals), zip(pts[1:], vals[1:])):
-  if v0 == 0:
-   bes.append(x0)
-  elif (v0 < 0) != (v1 < 0):
-   bes.append(x0 + (x1 - x0) * (-v0) / (v1 - v0))
- return {'worst': None if slope_up < 0 else round(min(vals), 2), 'unlimited_loss': slope_up < 0,
-         'best': None if slope_up > 0 else round(max(vals), 2), 'breakevens': sorted({round(b, 2) for b in bes})}
-
-
 def _exec_price(row, side):
- bid, ask, ltp = row.get('bid'), row.get('ask'), row.get('ltp')
- if bid and ask:
-  return (ask if side == 'B' else bid), 'exec'
- return ltp, 'ltp'
+ px, basis, _ = S.exec_price(row, side)     # one quote policy with research pricing (audit P05)
+ return px, basis
 
 
 def _value(x):
@@ -132,10 +103,16 @@ def candidates(market, body: Dict[str, Any], evidence=None, held=False, adjusted
    ch = market.chain(body['underlying'], e)
    chains_rows[e] = {r['strike']: r for r in (ch or {}).get('rows', [])}
   return chains_rows[e]
- cur = [{'type': l['type'], 'strike': l['strike'], 'units': (1 if l['side'] == 'B' else -1) * int(l['lots']), 'price': l['price']} for l in legs]
- if any(c['price'] is None for c in cur):
+ if any(l.get('price') is None for l in legs):
   raise AssistError(409, 'NO_PRICE', 'A leg has no price in the reading, so its entry cannot be valued.')
- cur_prof = _profile(cur, lot, 0.0)
+ # ONE valuation with the builder (audit P02): current and proposed positions are valued at the SAME horizon - the
+ # position's nearest expiry, exact there for one expiry, the near-expiry model (later legs by BSM at their market
+ # IV) for several - with the builder's own probability reference. Never a terminal-intrinsic shortcut.
+ reading = A.parse_ist(chain['as_of']);ref = S.reference_iv(chain)
+ cur_prof = A.horizon_profile(legs, spot, reading, ref)
+ if cur_prof is None:
+  raise AssistError(409, 'NO_IV', 'A later-expiry leg has no implied volatility, so the position cannot be valued at its near expiry.')
+ horizon = cur_prof['horizon']
  a_cur = S.analysis(market, body, table=False)
  t = ADJ.tested(legs, spot)
  st = recognise(legs)
@@ -163,11 +140,20 @@ def candidates(market, body: Dict[str, Any], evidence=None, held=False, adjusted
    qty = o['lots'] * lot;basis.add(b)
    f = CH.leg_charges(o['side'], px, qty)['total'];fees += f
    cash += (-1 if o['side'] == 'B' else 1) * px * qty
-   priced.append({**o, 'symbol': row['symbol'], 'qty': qty, 'price': px, 'basis': b, 'charges': round(f, 2)})
+   priced.append({**o, 'symbol': row['symbol'], 'qty': qty, 'price': px, 'basis': b, 'charges': round(f, 2), 'iv': row.get('iv_x'),
+                  'contract_id': S.contract_id(body['underlying'], o.get('expiry') or chain['expiry'], o['strike'], o['type'])})
   if missing:
    out.append({**cand, 'available': False, 'reason': 'No executable price for ' + ', '.join(missing)});continue
-  after = cur + [{'type': o['type'], 'strike': o['strike'], 'units': (1 if o['side'] == 'B' else -1) * o['lots'], 'price': o['price']} for o in priced]
-  prof = _profile(after, lot, fees)
+  # the position after = the current legs from their entries + the delta orders at today's prices (a closing order
+  # nets its contract to zero, leaving the realised difference), each order keeping ITS expiry and market IV
+  after = legs + [{'id': f'o{i}', 'type': o['type'], 'strike': o['strike'], 'side': o['side'], 'lots': o['lots'], 'lot_size': lot,
+                   'expiry': o.get('expiry') or chain['expiry'], 'price': o['price'], 'iv': o.get('iv'), 'mark': o['price'], 'include': True}
+                  for i, o in enumerate(priced)]
+  prof = A.horizon_profile(after, spot, reading, ref, fees=fees)
+  if prof is None:
+   out.append({**cand, 'available': False, 'reason': 'A new leg has no implied volatility, so it cannot be valued at the common horizon.'});continue
+  if prof['horizon']['expiry'] != horizon['expiry']:
+   out.append({**cand, 'available': False, 'reason': 'This adjustment cannot be valued at the same horizon as the current position.'});continue
   new_body = {**body, 'legs': [{k2: v for k2, v in l.items() if k2 in ('id', 'type', 'side', 'strike', 'lots', 'expiry', 'price_basis', 'price', 'include')}
                                | ({'price_basis': 'exec', 'price': None} if not held else {}) for l in new_legs],
               'template': None, 'param': None, 'scenario': {}}
@@ -181,10 +167,10 @@ def candidates(market, body: Dict[str, Any], evidence=None, held=False, adjusted
   ev = _conditioned(evidence(template, param, rule, k), t, chain, adjusted_before) if (evidence and template) else None
   out.append({**cand, 'available': True, 'note': note, 'orders': priced, 'price_basis': sorted(basis),
    'cash': round(cash, 2), 'charges': round(fees, 2),
-   'after': {'worst': prof['worst'], 'unlimited_loss': prof['unlimited_loss'], 'best': prof['best'], 'breakevens': prof['breakevens']},
+   'after': {'worst': prof['worst'], 'unlimited_loss': prof['unlimited_loss'], 'best': prof['best'], 'unlimited_profit': prof['unlimited_profit'], 'breakevens': prof['breakevens']},
    'delta': {'current': d_cur, 'after': d_new, 'change': round(d_new - d_cur, 2) if d_cur is not None and d_new is not None else None},
    'margin': {'current': m_cur, 'after': m_new, 'change': round(m_new - m_cur, 2) if m_cur is not None and m_new is not None else None},
-   'overlay': [{'s': x, 'current': round(_pnl(x, cur, lot), 2), 'after': round(_pnl(x, after, lot) - fees, 2)} for x in xs],
+   'overlay': [{'s': x, 'current': round(cur_prof['value'](x), 2), 'after': round(prof['value'](x), 2)} for x in xs],
    'structure_after': recognise(new_legs)['name'] if new_legs else 'Flat',
    'body': new_body,
    'evidence': ev or {'status': 'model_only', 'label': 'Model only - no Lab run of this adjustment rule on this structure'}})
@@ -192,10 +178,11 @@ def candidates(market, body: Dict[str, Any], evidence=None, held=False, adjusted
  return {'as_of': chain['as_of'], 'spot': spot, 'lot_size': lot, 'quality': chain['quality'], 'structure': st['name'],
   'template': template, 'param': param, 'held': held,
   'tested': None if not t else {'leg_id': t[0].get('id'), 'label': f"{t[0]['strike']:g} {t[0]['type']} short", 'distance_pct': round(t[1] * 100, 2)},
-  'current': {'worst': cur_prof['worst'], 'unlimited_loss': cur_prof['unlimited_loss'], 'breakevens': cur_prof['breakevens'],
+  'horizon': horizon,
+  'current': {'worst': cur_prof['worst'], 'best': cur_prof['best'], 'unlimited_loss': cur_prof['unlimited_loss'], 'unlimited_profit': cur_prof['unlimited_profit'], 'breakevens': cur_prof['breakevens'],
               'delta': (a_cur.get('greeks') or {}).get('delta'), 'margin': _value(a_cur.get('margin'))},
   'entry_basis': 'deployment fills (average price)' if held else 'each leg\'s own price basis at this reading',
   'candidates': out + unavailable,
   'notes': ['P&L after an adjustment = the current legs from their entry prices + the delta orders at today\'s executable prices, net of estimated charges on the delta orders.',
-            'Expiry P&L; before expiry the model value differs. Delta is the model delta in rupees per 1-point move.',
+            f"One horizon for the current position and every proposal: {horizon['label']}. {horizon['note']} Delta is the model delta per 1-point move.",
             'Nothing is ordered here. Choosing an adjustment writes a new version; a paper deployment then reviews only the delta orders.']}

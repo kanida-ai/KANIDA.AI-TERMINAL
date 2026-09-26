@@ -176,7 +176,7 @@ def test_use_as_draft_builds_the_server_held_candidate_not_the_current_form(pilo
  r=owner.post('/api/sb/discover',json={'underlying':'NIFTY','expiry':EXP,'view':'up','target':23300,'lots':2}).json()
  assert r['result_id'] and r['request_hash'] and r['candidates']
  c=r['candidates'][0]
- assert c['candidate_id'].startswith(r['result_id']) and c['funds']['status']=='unknown' and c['price_basis']=='ltp'
+ assert c['candidate_id'].startswith(r['result_id']) and c['funds']['status']=='unknown' and c['price_basis']==['ltp']   # slice 13: the basis actually used per leg (P06)
  s=owner.post('/api/sb/discover/use',json={'candidate_id':c['candidate_id']}).json()
  b=s['draft']['body']
  assert b['underlying']=='NIFTY' and b['expiry']==EXP and b['template']==c['template']

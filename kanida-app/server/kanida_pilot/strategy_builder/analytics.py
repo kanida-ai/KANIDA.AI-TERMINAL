@@ -140,12 +140,13 @@ def _slopes(legs):
  return left,right
 
 
-def expiry_profile(legs):
- """Max profit, max loss and breakevens of the expiry payoff, exactly. Spot is bounded below by 0, unbounded above."""
+def expiry_profile(legs,offset=0.0):
+ """Max profit, max loss and breakevens of the expiry payoff less a constant `offset` (e.g. charges), exactly.
+ Spot is bounded below by 0, unbounded above."""
  strikes=sorted({float(l['strike']) for l in legs})
  _left,right=_slopes(legs)
  points=[0.0]+strikes
- values=[expiry_pnl(legs,x) for x in points]
+ values=[expiry_pnl(legs,x)-offset for x in points]
  hi=max(values);lo=min(values)
  unlimited_profit=right>1e-9
  unlimited_loss=right<-1e-9
@@ -227,7 +228,8 @@ def near_expiry_profile(legs,spot,sigma,t,f,n=1600):
  left,right=_slopes(legs)
  span=max(0.5,6*sigma*math.sqrt(max(t,1/365)))
  lo=max(0.01,spot*math.exp(-span));hi=spot*math.exp(span)
- xs=[0.01]+[lo+(hi-lo)*i/n for i in range(n+1)]
+ # the strikes are kinks: on the grid, a piecewise-linear (same-expiry) payoff's extremes and roots are exact
+ xs=sorted({0.01,*(lo+(hi-lo)*i/n for i in range(n+1)),*(float(l['strike']) for l in legs if 0.01<float(l['strike'])<hi)})
  vs=[f(x) for x in xs]
  roots=[]
  for (a,va),(b,vb) in zip(zip(xs,vs),zip(xs[1:],vs[1:])):
@@ -254,6 +256,67 @@ def pop(legs,spot,sigma,t,profile):
  return max(0.0,min(1.0,total))
 
 
+# --- one valuation contract ------------------------------------------------------------------------------------
+def horizon_of(expiry,same_expiry):
+ """The horizon every strategy-wide number is valued at, with the label the UI shows beside it (audit P03)."""
+ at=expiry_moment(expiry);when=at.strftime('%d %b %H:%M').lstrip('0')
+ if same_expiry:
+  return {'kind':'expiry_exact','expiry':expiry,'at':at.strftime('%Y-%m-%d %H:%M'),'label':f'At expiry - {when} IST, gross',
+   'extrema':'exact','note':'Exact payoff at expiry from the entry prices, before charges.'}
+ return {'kind':'model_near_expiry','expiry':expiry,'at':at.strftime('%Y-%m-%d %H:%M'),'label':f'Model at near expiry - {when} IST',
+  'extrema':'modelled','note':"Later legs valued by Black-Scholes at today's implied volatility. Max profit and loss are modelled at that IV, not guaranteed caps."}
+
+
+def valuation(active,spot,reading_at,ref_iv=None):
+ """The shared valuation of a leg set: horizon (the nearest expiry), each leg's time beyond it, market IVs, the
+ probability reference and value_at(S, t, iv_shift). analyze() and the adjustment assistant BOTH use this, so the
+ builder and Adjust can never value the same position two ways (audit P02)."""
+ expiries=sorted({l['expiry'] for l in active})
+ same_expiry=len(expiries)==1;expiry=expiries[0]
+ t_now=years_between(reading_at,expiry)
+ # each leg's extra time beyond the NEAR expiry (0 for same-expiry strategies)
+ off={l['id']:max(0.0,(expiry_moment(l['expiry'])-expiry_moment(expiry)).total_seconds()/SECONDS_PER_YEAR) for l in active}
+ ivs={};iv_notes=[]
+ for l in active:
+  sigma,src=leg_iv(l,spot,t_now+off[l['id']])
+  if sigma is None:iv_notes.append(f"{int(l['strike'])} {l['type']}: IV unavailable ({src})")
+  ivs[l['id']]=(sigma,src)
+ iv_ready=all(x[0] is not None for x in ivs.values())
+ # the reference volatility for POP and SD bands: the chain's true ATM IV when supplied; otherwise the included leg
+ # nearest spot - a PROXY, and labelled as one (it is not called ATM IV)
+ atm=min(active,key=lambda l:abs(l['strike']-spot))
+ if ref_iv:sigma_ref,ref_basis=ref_iv,'chain_atm_iv'
+ else:sigma_ref=ivs[atm['id']][0] or next((x[0] for x in ivs.values() if x[0]),None);ref_basis='nearest_leg_iv_proxy'
+
+ def value_at(s,t,iv_shift=0.0):
+  total=0.0
+  for l in active:
+   sigma=ivs[l['id']][0];tt=t+off[l['id']]
+   x=intrinsic(l['type'],l['strike'],s) if tt<=0 else bs_price(s,l['strike'],tt,max(0.0001,sigma+iv_shift),l['type'])
+   total+=units(l)*(x-l['price'])
+  return total
+ return {'expiry':expiry,'same_expiry':same_expiry,'t_now':t_now,'off':off,'ivs':ivs,'iv_notes':iv_notes,'iv_ready':iv_ready,
+  'sigma_ref':sigma_ref,'ref_basis':ref_basis,'value_at':value_at,'horizon':horizon_of(expiry,same_expiry)}
+
+
+def horizon_profile(legs,spot,reading_at,ref_iv=None,fees=0.0):
+ """Worst, best and breakevens of a position AT ITS HORIZON, net of `fees` (a constant, e.g. an adjustment's
+ charges): exact at expiry for one expiry, the near-expiry model for several - the builder's own numbers when
+ fees=0. Returns None when a later leg has no IV (the model cannot value it)."""
+ active=[l for l in legs if l.get('include',True)]
+ if not active:return None
+ v=valuation(active,spot,reading_at,ref_iv)
+ if v['same_expiry']:
+  p=expiry_profile(active,fees)
+  prof={'max_profit':p['max_profit'],'max_loss':p['max_loss'],'unlimited_profit':p['unlimited_profit'],'unlimited_loss':p['unlimited_loss'],'breakevens':p['breakevens']}
+ elif not v['iv_ready']:return None
+ else:prof=near_expiry_profile(active,spot,v['sigma_ref'] or 0.15,v['t_now'],lambda x:v['value_at'](x,0.0)-fees)
+ f0=(lambda x:expiry_pnl(active,x)-fees) if v['same_expiry'] else (lambda x:v['value_at'](x,0.0)-fees)
+ return {'worst':None if prof['unlimited_loss'] else round(prof['max_loss'],2),'best':None if prof['unlimited_profit'] else round(prof['max_profit'],2),
+  'unlimited_loss':prof['unlimited_loss'],'unlimited_profit':prof['unlimited_profit'],'breakevens':sorted({round(b,2) for b in prof['breakevens']}),
+  'horizon':v['horizon'],'value':f0}
+
+
 # --- the full analysis ----------------------------------------------------------------------------------------
 def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,table_step=None,table_rows=10,ref_iv=None):
  """Everything the Analyze panel shows, for ONE set of legs at ONE reading and ONE scenario.
@@ -270,12 +333,9 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
  missing=[l for l in active if l.get('price') is None]
  if missing:return {'status':'invalid','model_version':MODEL_VERSION,
   'warnings':['A leg has no price in the stored reading, so it cannot be valued. Remove it or enter a price.']}
- expiries=sorted({l['expiry'] for l in active})
- same_expiry=len(expiries)==1
- expiry=expiries[0]
- t_now=years_between(reading_at,expiry)
- # each leg's extra time beyond the NEAR expiry (0 for same-expiry strategies)
- off={l['id']:max(0.0,(expiry_moment(l['expiry'])-expiry_moment(expiry)).total_seconds()/SECONDS_PER_YEAR) for l in active}
+ v=valuation(active,spot,reading_at,ref_iv)
+ expiry,same_expiry,t_now,off=v['expiry'],v['same_expiry'],v['t_now'],v['off']
+ ivs,iv_notes,iv_ready,sigma_ref,ref_basis=v['ivs'],v['iv_notes'],v['iv_ready'],v['sigma_ref'],v['ref_basis']
  target_at=parse_ist(scenario.get('at')) or reading_at
  if target_at>expiry_moment(expiry):target_at=expiry_moment(expiry)
  if target_at<reading_at:target_at=reading_at
@@ -283,27 +343,9 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
  target_spot=float(scenario.get('spot') or spot)
  iv_shift=float(scenario.get('iv_shift') or 0.0)/100.0
 
- ivs={};iv_notes=[]
- for l in active:
-  sigma,src=leg_iv(l,spot,t_now+off[l['id']])
-  if sigma is None:iv_notes.append(f"{int(l['strike'])} {l['type']}: IV unavailable ({src})")
-  ivs[l['id']]=(sigma,src)
- iv_ready=all(v[0] is not None for v in ivs.values())
- # the reference volatility for POP and SD bands: the chain's true ATM IV when supplied; otherwise the included leg
- # nearest spot - a PROXY, and labelled as one (it is not called ATM IV)
- atm=min(active,key=lambda l:abs(l['strike']-spot))
- if ref_iv:sigma_ref,ref_basis=ref_iv,'chain_atm_iv'
- else:sigma_ref=ivs[atm['id']][0] or next((v[0] for v in ivs.values() if v[0]),None);ref_basis='nearest_leg_iv_proxy'
+ def value_at(s,t):return v['value_at'](s,t,iv_shift)
 
- def value_at(s,t):
-  total=0.0
-  for l in active:
-   sigma=ivs[l['id']][0];tt=t+off[l['id']]
-   v=intrinsic(l['type'],l['strike'],s) if tt<=0 else bs_price(s,l['strike'],tt,max(0.0001,sigma+iv_shift),l['type'])
-   total+=units(l)*(v-l['price'])
-  return total
-
- out={'status':'ok','model_version':MODEL_VERSION,'expiry':expiry,'same_expiry':same_expiry,
+ out={'status':'ok','model_version':MODEL_VERSION,'expiry':expiry,'same_expiry':same_expiry,'horizon':v['horizon'],
   'reading_at':reading_at.strftime('%Y-%m-%d %H:%M'),'spot':spot,
   'scenario':{'spot':target_spot,'at':target_at.strftime('%Y-%m-%d %H:%M'),'iv_shift':iv_shift*100,
    'days_to_expiry':round(t_target*365,2),'is_expiry':t_target<=0}}
@@ -377,7 +419,8 @@ def analyze(legs,spot,reading_at,scenario=None,charges=None,grid_points=241,tabl
   tt=t_target+off[l['id']]
   tv=(intrinsic(l['type'],l['strike'],target_spot) if tt<=0 else bs_price(target_spot,l['strike'],tt,max(0.0001,(sigma or 0)+iv_shift),l['type'])) if sigma is not None or tt<=0 else None
   g=bs_greeks(spot,l['strike'],t_now+off[l['id']],sigma,l['type']) if sigma is not None else None
-  row={'id':l['id'],'label':f"{'Buy' if l['side']=='B' else 'Sell'} {l['lots']} x {int(l['strike']) if float(l['strike']).is_integer() else l['strike']} {l['type']}",
+  # every leg label carries its expiry (fresh audit P01): equal strike/type in two expiries are two contracts
+  row={'id':l['id'],'contract_id':l.get('contract_id'),'expiry':l['expiry'],'label':f"{'Buy' if l['side']=='B' else 'Sell'} {l['lots']} x {int(l['strike']) if float(l['strike']).is_integer() else l['strike']} {l['type']} {expiry_moment(l['expiry']).strftime('%d %b').lstrip('0')}",
    'units':q,'entry':l['price'],'ltp':l.get('ltp'),'mark':l.get('mark'),'mark_basis':l.get('mark_basis'),'iv':round(sigma*100,2) if sigma is not None else None,'iv_source':src,
    'target_price':round(tv,2) if tv is not None else None,'target_pnl':round(q*(tv-l['price']),2) if tv is not None else None,
    'greeks':({k:round(v*q,4) for k,v in g.items()} if g else None),'greeks_per_unit':({k:round(v,6) for k,v in g.items()} if g else None),

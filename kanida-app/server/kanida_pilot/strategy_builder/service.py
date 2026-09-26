@@ -18,13 +18,38 @@ class Invalid(Exception):
  def __init__(self,message,code='FIELD_INVALID'):super().__init__(message);self.message=message;self.code=code
 
 
+def _finite(v,name):
+ """A finite number, or a structured 400 - never NaN/Infinity, never a bool, never a silent default (audit P07)."""
+ if isinstance(v,bool):raise Invalid(f'{name} must be a number.')
+ try:x=float(v)
+ except (TypeError,ValueError):raise Invalid(f'{name} must be a number.')
+ if not math.isfinite(x):raise Invalid(f'{name} must be a finite number.')
+ return x
+
+
+def _whole(v,name):
+ """A whole number; 1.9 is rejected, never truncated to 1 (audit P07). '2' and 2.0 are accepted."""
+ x=_finite(v,name)
+ if not x.is_integer():raise Invalid(f'{name} must be a whole number (got {v}).')
+ return int(x)
+
+
+def _real_date(text):
+ if not DATE.match(text):return False
+ from datetime import date
+ try:date.fromisoformat(text);return True
+ except ValueError:return False
+
+
 def normalize_body(raw):
  """A draft body the server will store: validated types, bounded sizes, nothing it does not understand."""
  if not isinstance(raw,dict):raise Invalid('The strategy body must be an object.')
  u=str(raw.get('underlying') or '').strip().upper()
  if u and not SYMBOL.match(u):raise Invalid('underlying is not a valid symbol.')
  e=str(raw.get('expiry') or '').strip()
- if e and not DATE.match(e):raise Invalid('expiry must be YYYY-MM-DD (the exchange-local expiry date).')
+ if e and not _real_date(e):raise Invalid('expiry must be a real date, YYYY-MM-DD (the exchange-local expiry date).')
+ if not isinstance(raw.get('legs') or [],list):raise Invalid('legs must be a list.')
+ if not isinstance(raw.get('scenario') or {},dict):raise Invalid('scenario must be an object.')
  legs=[]
  for i,l in enumerate(raw.get('legs') or []):
   if i>=A.MAX_LEGS:raise Invalid(f'At most {A.MAX_LEGS} legs are supported in this release.')
@@ -32,37 +57,36 @@ def normalize_body(raw):
   kind=str(l.get('type') or '').upper();side=str(l.get('side') or '').upper()
   if kind not in ('CE','PE'):raise Invalid('Leg type must be CE or PE (futures are not in this release).')
   if side not in ('B','S'):raise Invalid('Leg side must be B or S.')
-  try:strike=float(l.get('strike'));lots=int(1 if l.get('lots') is None else l.get('lots'))
-  except (TypeError,ValueError):raise Invalid('Leg strike and lots must be numbers.')
-  if strike<=0 or not math.isfinite(strike):raise Invalid('Leg strike must be positive.')
+  strike=_finite(l.get('strike'),'Leg strike')
+  if strike<=0:raise Invalid('Leg strike must be positive.','FIELD_INVALID')
+  lots=_whole(1 if l.get('lots') is None else l.get('lots'),'Lots')
   if not 1<=lots<=500:raise Invalid('Lots must be a whole number from 1 to 500.')
   basis=str(l.get('price_basis') or 'exec')
   if basis not in BASES:raise Invalid('price_basis must be one of: '+', '.join(BASES)+'.')
   price=l.get('price')
   if basis=='manual':
-   try:price=float(price)
-   except (TypeError,ValueError):raise Invalid('A manual price must be a number.')
-   if price<0 or not math.isfinite(price):raise Invalid('A manual price cannot be negative.')
+   price=_finite(price,'A manual price')
+   if price<0:raise Invalid('A manual price cannot be negative.')
+  le=str(l.get('expiry') or e).strip()
+  if le and not _real_date(le):raise Invalid(f'Leg expiry {le[:12]} is not a real date (YYYY-MM-DD).')
   legs.append({'id':str(l.get('id') or f'L{i+1}')[:12],'type':kind,'side':side,'strike':strike,'lots':lots,
-   'expiry':str(l.get('expiry') or e)[:10],'price_basis':basis,'price':price if basis=='manual' else None,'include':bool(l.get('include',True))})
+   'expiry':le[:10],'price_basis':basis,'price':price if basis=='manual' else None,'include':bool(l.get('include',True))})
  if len({l['id'] for l in legs})!=len(legs):raise Invalid('Leg ids must be unique.')
  sc=raw.get('scenario') or {}
  scenario={}
  if sc.get('spot') not in (None,''):
-  try:scenario['spot']=float(sc['spot'])
-  except (TypeError,ValueError):raise Invalid('Scenario spot must be a number.')
+  scenario['spot']=_finite(sc['spot'],'Scenario spot')
   if scenario['spot']<=0:raise Invalid('Scenario spot must be positive.')
  if sc.get('at'):
   if not A.parse_ist(sc['at']):raise Invalid('Scenario time must be YYYY-MM-DD HH:MM (IST).')
   scenario['at']=str(sc['at'])[:16]
  if sc.get('iv_shift') not in (None,''):
-  try:scenario['iv_shift']=max(-50.0,min(50.0,float(sc['iv_shift'])))
-  except (TypeError,ValueError):raise Invalid('IV shift must be a number of percentage points.')
+  scenario['iv_shift']=_finite(sc['iv_shift'],'IV shift')
+  if not -50<=scenario['iv_shift']<=50:raise Invalid('IV shift must be between -50 and +50 percentage points.')
  tpl=str(raw.get('template') or '')[:40] or None
  param=raw.get('param') if tpl else None
  if param is not None:
-  try:param=int(param)
-  except (TypeError,ValueError):raise Invalid('param must be a whole number.')
+  param=_whole(param,'param')
  return {'underlying':u,'expiry':e,'legs':legs,'scenario':scenario,'template':tpl,'param':param,'linked':bool(raw.get('linked',False))}
 
 
@@ -91,19 +115,46 @@ def hydrate(market,body):
   if not row:
    problems.append(f"{int(l['strike'])} {l['type']} is not listed for {l['expiry']} - it may have expired or never existed.")
    continue
-  price,used=leg_price(l,row)
-  tick=ch.get('tick_size') or chain.get('tick_size') or 0.05
-  # a typed research price off the exchange tick is WARNED (insights), never blocking; fill averages are exempt
-  off_tick=(round(round(price/tick)*tick,2) if (used=='manual' and price is not None and not l.get('entry_from_fills')
-            and abs(round(price/tick)*tick-price)>1e-6) else None)
-  mark,mark_basis=market_mark(row)
-  out.append({**l,'basis_used':used,'lot_size':ch['lot_size'] or chain['lot_size'],'ltp':row['ltp'],'bid':row.get('bid'),'ask':row.get('ask'),'price':price,'token':row['token'],'symbol':row['symbol'],
-   # Cost basis and market valuation are SEPARATE (GTM audit P04): `price` is what the leg cost (entry / fill /
-   # typed), `mark` is what the market says it is worth now, and `iv` is the market's implied volatility solved from
-   # that mark - never from the entry. A custom entry moves P&L and breakevens, not the Greeks.
-   'mark':mark,'mark_basis':mark_basis,'iv':row.get('iv_x'),'iv_source':('market_'+mark_basis) if row.get('iv_x') is not None else None,
-   'quote_at':row.get('quote_at'),'last_trade_time':row.get('last_trade_time'),'flags':row['flags'],'off_tick':off_tick,'tick':tick})
+  out.append(_resolved(l,row,ch,chain))
  return chain,out,problems
+
+
+def _resolved(l,row,ch,chain):
+ """One leg joined to its listed contract: lot, tick, quotes, entry price by its basis, market mark and market IV.
+ The ONE place a leg is priced, so the builder, Discover and spreads see identical legs (audit P06)."""
+ price,used=leg_price(l,row)
+ tick=ch.get('tick_size') or chain.get('tick_size') or 0.05
+ # a typed research price off the exchange tick is WARNED (insights) on stored bodies; new input is rejected at the
+ # API (check_ticks). Fill averages are exempt.
+ off_tick=(round(round(price/tick)*tick,2) if (used=='manual' and price is not None and not l.get('entry_from_fills')
+           and abs(round(price/tick)*tick-price)>1e-6) else None)
+ mark,mark_basis=market_mark(row)
+ return {**l,'basis_used':used,'lot_size':ch.get('lot_size') or chain.get('lot_size'),'ltp':row['ltp'],'bid':row.get('bid'),'ask':row.get('ask'),'price':price,'token':row.get('token'),'symbol':row.get('symbol'),
+  # Cost basis and market valuation are SEPARATE (GTM audit P04): `price` is what the leg cost (entry / fill /
+  # typed), `mark` is what the market says it is worth now, and `iv` is the market's implied volatility solved from
+  # that mark - never from the entry. A custom entry moves P&L and breakevens, not the Greeks.
+  'mark':mark,'mark_basis':mark_basis,'iv':row.get('iv_x'),'iv_source':('market_'+mark_basis) if row.get('iv_x') is not None else None,
+  'quote_at':row.get('quote_at'),'last_trade_time':row.get('last_trade_time'),'flags':row.get('flags') or [],'off_tick':off_tick,'tick':tick,
+  'contract_id':contract_id(chain.get('underlying'),l.get('expiry') or ch.get('expiry'),l['strike'],l['type'])}
+
+
+def contract_id(underlying,expiry,strike,kind):
+ """The canonical identity of one listed option: exchange|underlying|expiry|strike|type (audit P01). Equal strike and
+ type in different expiries are DIFFERENT contracts everywhere - selection, edits, orders, snapshots."""
+ k=float(strike);ks=str(int(k)) if k.is_integer() else f'{k:g}'
+ return f"NFO|{underlying}|{expiry}|{ks}|{kind}"
+
+
+def analyze_on_chain(chain,legs,scenario=None,**kw):
+ """Analytics for legs resolved in ONE chain, joined and priced exactly as the builder joins them, with the same
+ probability reference (the chain's ATM IV) - Discover, spreads and the builder agree by construction (audit P06)."""
+ rows={r['strike']:r for r in chain['rows']}
+ joined=[]
+ for l in legs:
+  row=(rows.get(l['strike']) or {}).get(l['type']) if (l.get('expiry') or chain['expiry'])==chain['expiry'] else None
+  joined.append(_resolved({**l,'expiry':l.get('expiry') or chain['expiry']},row,chain,chain) if row else l)
+ reading=A.parse_ist(chain['as_of'])
+ return joined,A.analyze(joined,chain['spot'],reading,scenario,ref_iv=reference_iv(chain),**kw)
 
 
 def reference_iv(chain):
@@ -119,17 +170,27 @@ def reference_iv(chain):
 def market_mark(row):
  """(current market value of one option unit, basis). Mid of a valid book; the last trade otherwise - and said so."""
  bid,ask=row.get('bid'),row.get('ask')
- if bid and ask and 0<bid<=ask:return round((bid+ask)/2,4),'mid'
+ if Q.book(bid,ask)['ok']:return round((bid+ask)/2,4),'mid'
  return row.get('ltp'),'ltp'
 
 
-def leg_price(l,row):
- """(price, basis actually used). exec/mid fall back to LTP - and say so - when the quote has no bid/ask."""
- if l['price_basis']=='manual':return l['price'],'manual'
+def exec_price(row,side):
+ """(price, basis, reason) where one could trade now: buy at the ask, sell at the bid - ONLY from a valid book
+ (quotes.book: no crossed, zero or missing sides). Otherwise the last trade, labelled 'ltp' with the reason, so an
+ indicative price can never pass as executable (audit P05). Shared by research pricing, spreads and the assistant."""
  bid,ask,ltp=row.get('bid'),row.get('ask'),row.get('ltp')
- if l['price_basis']=='exec' and bid and ask:return (ask if l['side']=='B' else bid),'exec'
- if l['price_basis']=='mid' and bid and ask:return round((bid+ask)/2,2),'mid'
- return ltp,'ltp'
+ b=Q.book(bid,ask)
+ if b['ok']:return (ask if side=='B' else bid),'exec',None
+ return ltp,'ltp',b['reason']
+
+
+def leg_price(l,row):
+ """(price, basis actually used). exec/mid need a valid book; otherwise LTP - and the basis says so."""
+ if l['price_basis']=='manual':return l['price'],'manual'
+ if l['price_basis']=='exec':
+  px,basis,_=exec_price(row,l['side']);return px,basis
+ if l['price_basis']=='mid' and Q.book(row.get('bid'),row.get('ask'))['ok']:return round((row['bid']+row['ask'])/2,2),'mid'
+ return row.get('ltp'),'ltp'
 
 
 _MARGIN={}
@@ -152,10 +213,42 @@ def margin(market,legs,product='NRML'):
  return out
 
 
+POSITION_KEYS=('max_profit','max_loss','breakevens','reward_risk','capital_at_risk','pop','outcomes','scenario_pnl','greeks',
+ 'greeks_scenario','pop_scenario','breakevens_target','premium','charges','margin')
+
+
+def check_ticks(market,body):
+ """Tick before calculate (Blueprint A): a NEW typed price off the contract's tick is a 400 naming the nearest valid
+ price - never calculated or saved. The UI snaps on blur, so users meet this only through the API. Fill averages
+ (entry_from_fills) are exempt; bodies already stored keep their warning."""
+ if not any(l['price_basis']=='manual' for l in body.get('legs') or []):return
+ try:_c,legs,_p=hydrate(market,body)
+ except Exception:return                     # no reading to check against: the draft is validated on its next analysis
+ bad=[l for l in legs if l.get('off_tick') is not None]
+ if bad:
+  l=bad[0]
+  raise Invalid(f"{int(l['strike'])} {l['type']}: the price {l['price']} is not on the {l['tick']} tick; use {l['off_tick']}.",'OFF_TICK')
+
+
 def analysis(market,body,table=True):
  chain,legs,problems=hydrate(market,body)
- base={'input_hash':checksum(body),'structure':recognise(legs) if legs else {'key':None,'name':'Empty','exact':False}}
+ wanted=[l for l in body.get('legs') or [] if l.get('include',True)]
+ # the structure is what the USER asked for, never what happened to resolve (audit P04)
+ base={'input_hash':checksum(body),'structure':recognise(wanted) if wanted else {'key':None,'name':'Empty','exact':False}}
  if not chain:return {**base,'status':'no_market','warnings':problems or ['Choose an underlying and an expiry.']}
+ got={l['id'] for l in legs}
+ unresolved=[l for l in wanted if l['id'] not in got]
+ if unresolved:
+  # fail closed: a strategy with an included leg that did not resolve has NO strategy-wide numbers. The survivors'
+  # payoff is a different position (a spread missing its hedge is a naked option) and is never shown as this one.
+  ids=[{'leg_id':l['id'],'contract_id':contract_id(body['underlying'],l['expiry'],l['strike'],l['type']),
+        'label':f"{'Buy' if l['side']=='B' else 'Sell'} {l['strike']:g} {l['type']} {A.expiry_moment(l['expiry']).strftime('%d %b %Y').lstrip('0')}"} for l in unresolved]
+  na=A.na('LEG_UNRESOLVED',note='Strategy-wide numbers need every included leg to resolve to a listed contract.',unresolved=ids)
+  return {**base,'status':'incomplete','model_version':A.MODEL_VERSION,**{k:na for k in POSITION_KEYS},'curve':[],'table':[],'legs':[],
+   'insights':[],'unresolved':ids,'as_of':chain['as_of'],'underlying':chain['underlying'],'lot_size':chain['lot_size'],'quality':chain['quality'],
+   'warnings':problems+['Fix or exclude the missing leg: strategy-wide risk is unavailable until every included leg resolves.'],
+   'legs_quotes':[{'id':l['id'],'bid':l.get('bid'),'ask':l.get('ask'),'ltp':l.get('ltp'),'basis_used':l['basis_used'],'mark':l.get('mark'),
+    'mark_basis':l.get('mark_basis'),'quote_at':l.get('quote_at'),'contract_id':l.get('contract_id')} for l in legs]}
  reading=A.parse_ist(chain['as_of'])
  ref=reference_iv(chain)
  a=A.analyze(legs,chain['spot'],reading,body.get('scenario'),charges=CH.estimate,table_step=chain['strike_step'] if table else None,ref_iv=ref)
@@ -171,7 +264,8 @@ def analysis(market,body,table=True):
  if problems and a.get('status')=='ok':a['status']='partial'
  return {**base,**a,'as_of':chain['as_of'],'underlying':chain['underlying'],'lot_size':chain['lot_size'],
   'quality':chain['quality'],'price_basis':sorted({l['basis_used'] for l in legs}),'legs_quotes':[{'id':l['id'],'bid':l.get('bid'),'ask':l.get('ask'),'ltp':l.get('ltp'),'basis_used':l['basis_used'],'mark':l.get('mark'),
-   'mark_basis':l.get('mark_basis'),'quote_at':l.get('quote_at'),'last_trade_time':l.get('last_trade_time'),'quote':Q.leg(l,A.parse_ist(chain['as_of']) or reading,'order')} for l in legs]}
+   'mark_basis':l.get('mark_basis'),'quote_at':l.get('quote_at'),'last_trade_time':l.get('last_trade_time'),'contract_id':l.get('contract_id'),
+   'symbol':l.get('symbol'),'quote':Q.leg(l,A.parse_ist(chain['as_of']) or reading,'order')} for l in legs]}
 
 
 # --- paper ------------------------------------------------------------------------------------------------------

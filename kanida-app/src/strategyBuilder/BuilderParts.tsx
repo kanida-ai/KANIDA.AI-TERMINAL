@@ -4,26 +4,44 @@ import React,{useEffect,useState} from 'react';
 import {Pressable,TextInput,View} from 'react-native';
 import {Badge,Button,C,Checkbox,Chip,Icon,Sheet,T,s} from '../ui';
 import {sb,type Basis,type Chain,type Expiry,type Leg} from './api';
-import {dayMonth,istEpoch,istStamp,num,signed,strikeText} from './format';
+import {legText,dayMonth,istEpoch,istStamp,num,signed,strikeText} from './format';
 import {LoadState} from './States';
+
+/** Tick before calculate (Blueprint A): a typed price snaps to the contract's tick; the server rejects anything else. */
+export const snap=(v:number,tick?:number|null)=>{const t=tick||0.05;return Math.round(Math.round(v/t)*t*100)/100;};
 
 const BASES:[Basis,string][]=[['exec','Buy at ask / sell at bid'],['mid','Mid'],['ltp','Last traded'],['manual','Type a price']];
 
 /** One leg, edited on its own sheet (phones): nothing changes until Apply; Cancel leaves the strategy untouched. */
 export function LegSheet({leg,chain,moveStrike,onApply,onClose,onRemove,expiries=[]}:{leg:Leg|null;chain:Chain|null;moveStrike:(k:number,n:number)=>number;
  onApply:(l:Leg)=>void;onClose:()=>void;onRemove:(id:string)=>void;expiries?:Expiry[]}){
- const [d,setD]=useState<Leg|null>(leg);const [price,setPrice]=useState('');const [err,setErr]=useState('');
- useEffect(()=>{setD(leg);setPrice(leg?.price_basis==='manual'&&leg.price!=null?String(leg.price):'');setErr('');},[leg]);
+ const [d,setD]=useState<Leg|null>(leg);const [price,setPrice]=useState('');const [err,setErr]=useState('');const [snapped,setSnapped]=useState('');
+ useEffect(()=>{setD(leg);setPrice(leg?.price_basis==='manual'&&leg.price!=null?String(leg.price):'');setErr('');setSnapped('');},[leg]);
+ // the contract's details come from ITS expiry's chain (fresh audit P01): after an expiry change the old contract's
+ // symbol, LTP and lot are never shown - it reads "Loading" until the selected expiry's chain arrives
+ const [other,setOther]=useState<{expiry:string;chain:Chain|null;err?:string}|null>(null);
+ const exp=d?.expiry||chain?.expiry||'';
+ useEffect(()=>{if(!chain||!exp||exp===chain.expiry){setOther(null);return;}
+  const ac=new AbortController();setOther({expiry:exp,chain:null});
+  sb.chain(chain.underlying,exp,ac.signal).then(c=>setOther({expiry:exp,chain:c})).catch(e=>{if(!ac.signal.aborted)setOther({expiry:exp,chain:null,err:e.message||'unavailable'});});
+  return()=>ac.abort();},[chain,exp]);
  if(!leg||!d)return null;
- const q=chain?.rows.find(r=>r.strike===d.strike)?.[d.type];
+ const ch=!chain||exp===chain.expiry?chain:(other?.expiry===exp?other.chain:null);
+ const pending=!ch&&!!chain&&exp!==chain.expiry&&!other?.err;
+ const q=ch?.rows.find(r=>r.strike===d.strike)?.[d.type];
+ const missing=!!ch&&!q;
  const symbol=q?.symbol||`${chain?.underlying||''} ${dayMonth(d.expiry)} ${strikeText(d.strike)} ${d.type}`;
+ const lot=ch?.lot_size;
  function apply(){
+  if(pending){setErr('The selected expiry is still loading.');return;}
+  if(other?.err&&exp!==chain?.expiry){setErr(`The ${dayMonth(exp)} chain could not be read (${other.err}).`);return;}
+  if(missing){setErr(`${strikeText(d!.strike)} ${d!.type} is not listed for ${dayMonth(exp)}. Choose a listed strike or another expiry.`);return;}
   let next={...d!};
-  if(next.price_basis==='manual'){const v=Number(price);if(!price.trim()||!Number.isFinite(v)||v<0){setErr('Type a price of 0 or more, or choose another price basis.');return;}next={...next,price:v};}
+  if(next.price_basis==='manual'){const v=Number(price);if(!price.trim()||!Number.isFinite(v)||v<0){setErr('Type a price of 0 or more, or choose another price basis.');return;}next={...next,price:snap(v,ch?.tick_size)};}
   else next={...next,price:null};
   onApply(next);}
  const big={minHeight:44};
- return <Sheet visible onClose={onClose} title="Edit leg" subtitle={`${symbol} · ${d.lots} lot${d.lots>1?'s':''} × ${chain?.lot_size||'?'} = ${d.lots*(chain?.lot_size||0)} units`}
+ return <Sheet visible onClose={onClose} title="Edit leg" subtitle={pending?`Loading the ${dayMonth(exp)} contract…`:`${symbol} · ${d.lots} lot${d.lots>1?'s':''} × ${lot||'?'} = ${lot?d.lots*lot:'?'} units`}
   footer={<View style={[s.between,{gap:8,flexWrap:'wrap'}]}><Button label="Remove leg" icon="trash-2" kind="outline" onPress={()=>{onRemove(d.id);onClose();}}/>
    <View style={[s.row,{gap:8}]}><Button label="Cancel" kind="outline" onPress={onClose}/><Button label="Apply" icon="check" onPress={apply}/></View></View>}>
   <View style={{gap:14}}>
@@ -37,17 +55,19 @@ export function LegSheet({leg,chain,moveStrike,onApply,onClose,onRemove,expiries
     <Button label="+" accessibilityLabel="Higher strike" kind="outline" onPress={()=>setD({...d,strike:moveStrike(d.strike,1)})}/></View>
    {expiries.length>1&&<View style={{gap:6}}><T style={{fontSize:12,color:C.muted}}>Expiry (a leg in another expiry makes a calendar or diagonal)</T>
     <View style={[s.row,{gap:8,flexWrap:'wrap'}]}>{expiries.slice(0,8).map(x=><Chip key={x.expiry} label={`${dayMonth(x.expiry)} · ${Math.max(0,Math.round(x.days_to_expiry))}d`} active={d.expiry===x.expiry} onPress={()=>setD({...d,expiry:x.expiry})}/>)}</View>
-    {d.expiry!==leg.expiry&&<T style={{fontSize:11,color:C.amber}}>The strike must be listed in that expiry - it is checked when the strategy is analysed.</T>}</View>}
+    {d.expiry!==leg.expiry&&d.price_basis==='manual'&&<T style={{fontSize:11,color:C.amber}}>{`Your typed entry price (${price||'—'}) is kept for the ${dayMonth(exp)} contract. Change it or choose a market basis if it no longer applies.`}</T>}</View>}
    <View style={[s.row,{gap:8,alignItems:'center'}]}><T style={{fontSize:12,color:C.muted,width:60}}>Lots</T>
     <Button label="−" accessibilityLabel="Fewer lots" kind="outline" onPress={()=>setD({...d,lots:Math.max(1,d.lots-1)})}/>
     <T style={{fontFamily:'InterSemi',fontSize:16,minWidth:70,textAlign:'center'}}>{d.lots}</T>
     <Button label="+" accessibilityLabel="More lots" kind="outline" onPress={()=>setD({...d,lots:Math.min(500,d.lots+1)})}/></View>
    <View style={{gap:8}}><T style={{fontSize:12,color:C.muted}}>Entry price basis</T>
     <View style={[s.row,{gap:8,flexWrap:'wrap'}]}>{BASES.map(([k,l])=><Chip key={k} label={l} active={d.price_basis===k} onPress={()=>setD({...d,price_basis:k})}/>)}</View>
-    {d.price_basis==='manual'&&<TextInput value={price} onChangeText={v=>{setPrice(v);setErr('');}} keyboardType="decimal-pad" accessibilityLabel="Manual entry price"
+    {d.price_basis==='manual'&&<TextInput value={price} onChangeText={v=>{setPrice(v);setErr('');setSnapped('');}} keyboardType="decimal-pad" accessibilityLabel="Manual entry price"
+     onBlur={()=>{const v=Number(price);if(price.trim()&&Number.isFinite(v)&&v>=0){const t=snap(v,ch?.tick_size);if(t!==v){setPrice(String(t));setSnapped(`Rounded from ${price} to the ${ch?.tick_size||0.05} tick.`);}}}}
      style={{...big,borderWidth:1,borderColor:err?C.red:C.line,borderRadius:10,paddingHorizontal:12,color:C.ink,fontFamily:'InterSemi',fontSize:15,backgroundColor:C.paper}}/>}
+    {!!snapped&&<T accessibilityLiveRegion="polite" style={{color:C.amber,fontSize:12}}>{snapped}</T>}
     {!!err&&<T accessibilityRole="alert" style={{color:C.red,fontSize:12}}>{err}</T>}
-    <T style={{fontSize:11,color:C.muted}}>{q?`Bid ${num(q.bid)} · Ask ${num(q.ask)} · LTP ${num(q.ltp)}${chain?.quality.live?'':' (stored reading - no bid/ask)'}`:'This strike has no quote in the current chain.'}</T></View>
+    <T style={{fontSize:11,color:missing?C.red:C.muted}}>{pending?`Loading the ${dayMonth(exp)} quote…`:other?.err&&exp!==chain?.expiry?`The ${dayMonth(exp)} chain could not be read.`:q?`${dayMonth(exp)} · Bid ${num(q.bid)} · Ask ${num(q.ask)} · LTP ${num(q.ltp)}${ch?.quality.live?'':' (stored reading - no bid/ask)'}`:`${strikeText(d.strike)} ${d.type} is not listed for ${dayMonth(exp)}.`}</T></View>
    <Checkbox checked={d.include} onChange={v=>setD({...d,include:v})} label="Include in the analysis" detail="An excluded leg stays in the strategy but is left out of every number."/>
   </View>
  </Sheet>;
@@ -116,7 +136,7 @@ export function SnapshotSheet({rid,onClose,onSaved}:{rid:string|null;onClose:()=
      {!!saveErr&&<T accessibilityRole="alert" style={{color:C.red,fontSize:12}}>{`Not saved: ${saveErr}. Your text is kept - try again.`}</T>}
     </View>
     <View style={{gap:4}}><T style={{fontFamily:'InterSemi'}}>{`${rev.body.underlying} · expiry ${dayMonth(rev.body.expiry)}`}</T>
-     {rev.body.legs.map((l:Leg)=><T key={l.id} style={{fontSize:13,fontVariant:['tabular-nums'] as any}}>{`${l.include?'':'(excluded) '}${l.side==='B'?'Buy':'Sell'} ${l.lots} × ${strikeText(l.strike)} ${l.type} · entry ${l.price_basis==='manual'?`${num(l.price)} (manual)`:l.price_basis}`}</T>)}</View>
+     {rev.body.legs.map((l:Leg)=><T key={l.id} style={{fontSize:13,fontVariant:['tabular-nums'] as any}}>{`${l.include?'':'(excluded) '}${legText(l)} · entry ${l.price_basis==='manual'?`${num(l.price)} (manual)`:l.price_basis}`}</T>)}</View>
     <View style={[s.row,{gap:18,flexWrap:'wrap'}]}>
      {[['Max loss',m(a.max_loss)],['Max profit',m(a.max_profit)],['Breakeven',a.breakevens?.value?.map((b:number)=>num(b,0)).join(' · ')||'—'],['Premium',a.premium?signed(a.premium.value):'—'],
       ['POP (model)',a.pop?.status==='available'?`${a.pop.value}%`:'—'],['Spot then',num(a.spot,2)]].map(([k,v])=><View key={k} style={{gap:1}}><T style={{fontSize:11,color:C.muted}}>{k}</T><T style={{fontFamily:'InterSemi'}}>{v}</T></View>)}

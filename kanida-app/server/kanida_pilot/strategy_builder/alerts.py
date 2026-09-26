@@ -354,7 +354,15 @@ class Alerts:
   def run():
    while not self._stop.wait(every):
     try:self.cycle()
-    except Exception:log.exception('alert cycle failed; retrying next cycle')
+    except Exception:
+     if self._stop.is_set():break                     # shutting down: the store may already be closing
+     log.exception('alert cycle failed; retrying next cycle')
   self._worker=threading.Thread(target=run,daemon=True,name='sb-alerts');self._worker.start()
 
- def stop(self):self._stop.set()
+ def stop(self,timeout=5.0):
+  """Stop and JOIN the worker, so the store is never closed under a running cycle (fresh audit P17: closed-database
+  error at shutdown)."""
+  self._stop.set()
+  w=self._worker
+  if w and w.is_alive() and w is not threading.current_thread():w.join(timeout)
+  self._worker=None

@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from . import analytics as A
+from . import service as S
 from . import charges as CH
 
 KINDS = {('CE', 'debit'): ('bull_call_spread', 'Bull Call Spread'), ('CE', 'credit'): ('bear_call_spread', 'Bear Call Spread'),
@@ -27,10 +28,8 @@ class SpreadsError(Exception):
 
 
 def _px(q, side):
-    bid, ask, ltp = q.get('bid'), q.get('ask'), q.get('ltp')
-    if bid and ask:
-        return (ask if side == 'B' else bid), 'exec'
-    return ltp, 'ltp'
+    px, basis, _ = S.exec_price(q, side)     # one quote policy: a crossed/zero book is never 'exec' (audit P05)
+    return px, basis
 
 
 def build(chain: Dict[str, Any], kind: str, side: str, width: int, lots: int = 1) -> Dict[str, Any]:
@@ -73,7 +72,7 @@ def build(chain: Dict[str, Any], kind: str, side: str, width: int, lots: int = 1
         if abs(net) >= (k2 - k1):
             inconsistent += 1                                                         # a premium at/over the width is impossible:
             continue                                                                  # stale last-trade prices, never shown as a spread
-        a = A.analyze(legs, spot, reading, grid_points=3)
+        _j, a = S.analyze_on_chain(chain, [{**l, 'price_basis': 'manual'} for l in legs], grid_points=3)   # same reference as the builder (P06)
         if a.get('status') != 'ok':
             continue
         units = lots * lot
@@ -81,7 +80,7 @@ def build(chain: Dict[str, Any], kind: str, side: str, width: int, lots: int = 1
         ml, mp = a['max_loss'], a['max_profit']
         risk = -ml['value'] if ml.get('value') is not None else None
         g = a.get('greeks') or {}
-        out.append({'anchor': k1, 'strikes': [k1, k2], 'distance_pct': round((k1 / spot - 1) * 100, 2), 'atm': k1 == atm,
+        out.append({'anchor': k1, 'strikes': [k1, k2], 'points': k2 - k1, 'executable': basis == {'exec'}, 'distance_pct': round((k1 / spot - 1) * 100, 2), 'atm': k1 == atm,
                     'net': round(net * units, 2), 'net_per_unit': round(net, 2), 'direction': 'credit' if net > 0 else 'debit',
                     'max_profit': mp.get('value'), 'max_loss': ml.get('value'), 'breakevens': (a['breakevens'] or {}).get('value'),
                     'pop': (a['pop'] or {}).get('value'), 'return_on_risk': round((mp['value'] / risk) * 100, 1) if (risk and mp.get('value') is not None) else None,

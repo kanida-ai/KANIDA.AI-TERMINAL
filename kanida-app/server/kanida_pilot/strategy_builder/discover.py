@@ -13,6 +13,7 @@ Rules that are never relaxed silently:
 from __future__ import annotations
 import threading,time,uuid
 from . import analytics as A
+from . import service as S
 from .store import checksum
 from .templates import BY_KEY,ResolveError,resolve
 
@@ -61,7 +62,8 @@ def run(chain,req):
    try:res=resolve(key,chain,v,lots)
    except ResolveError:tally['unresolvable']+=1;continue
    legs=res['legs']
-   a=A.analyze(legs,spot,reading,{'at':A.expiry_moment(chain['expiry']).strftime('%Y-%m-%d %H:%M')},grid_points=3)
+   # joined, priced and referenced exactly as the builder will analyse the same draft (audit P06)
+   legs,a=S.analyze_on_chain(chain,legs,{'at':A.expiry_moment(chain['expiry']).strftime('%Y-%m-%d %H:%M')},grid_points=3)
    if a.get('status')!='ok':tally['unresolvable']+=1;continue
    unlimited=bool(a['max_loss'].get('unlimited'))
    if hedged and t['risk']!='defined':tally['unhedged']+=1;continue
@@ -82,7 +84,8 @@ def run(chain,req):
     'param_label':(t['param'] or {}).get('label'),'legs':legs,
     'max_profit':a['max_profit'],'max_loss':a['max_loss'],'breakevens':a['breakevens']['value'],'premium':a['premium']['value'],
     'capital_at_risk':capital,'pop':a['pop'].get('value'),'pnl_at_view':round(fit,2),'return_on_risk':round(score*100,1) if capital else None,
-    'profit_zone_share':round(zone*100) if zone is not None else None,'charges':None,'price_basis':'ltp',
+    'profit_zone_share':round(zone*100) if zone is not None else None,'charges':None,'price_basis':sorted({l.get('basis_used') or 'ltp' for l in legs}),'pop_basis':(a['pop'] or {}).get('basis'),
+    'reference':{'iv':(a['pop'] or {}).get('sigma'),'source':(a['pop'] or {}).get('sigma_basis'),'as_of':chain['as_of'],'model_version':a.get('model_version')},
     # the budget constrains STRUCTURAL maximum loss. Required funds (exchange margin) are a different number that
     # Discover does not estimate - stated here, never implied by the budget filter (GTM audit P03)
     'funds':{'status':'unknown','note':'Exchange margin is not estimated here. The builder and order review show it (live data only).'},

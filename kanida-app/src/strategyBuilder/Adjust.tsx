@@ -29,9 +29,12 @@ export function AdjustSheet({visible,onClose,strategyId,version,deployment,onApp
   {!!error&&<View style={{backgroundColor:'#2A1519',borderRadius:10,padding:12}}><T style={{color:C.red,fontSize:13}}>{error}</T></View>}
   {!r&&!error&&<Loading/>}
   {r&&<>
+   {!!r.horizon&&<View style={[s.row,{gap:8,alignItems:'flex-start'}]}><Badge label={r.horizon.kind==='model_near_expiry'?'MODEL':'EXACT'} tone={r.horizon.kind==='model_near_expiry'?'amber':'green'}/>
+    <T style={{fontSize:12,color:r.horizon.kind==='model_near_expiry'?C.amber:C.muted,flex:1}}>{`Current and every proposal share one horizon: ${r.horizon.label}. ${r.horizon.note}`}</T></View>}
    <View style={[s.row,{flexWrap:'wrap',gap:18}]}>
     <Kv k="Tested" v={r.tested?r.tested.label:'No short leg'} note={r.tested?`${r.tested.distance_pct>=0?num(r.tested.distance_pct,2)+'% from the money':num(-r.tested.distance_pct,2)+'% in the money'}`:'Only resizing or closing applies'}/>
-    <Kv k="Worst case now (expiry)" v={r.current.unlimited_loss?'Unlimited':inr(r.current.worst)}/>
+    <Kv k="Worst case now" v={r.current.unlimited_loss?'Unlimited':inr(r.current.worst)}/>
+    <Kv k="Best case now" v={r.current.unlimited_profit?'Unlimited':r.current.best==null?'—':inr(r.current.best)}/>
     <Kv k="Breakevens now" v={r.current.breakevens.length?r.current.breakevens.map(b=>num(b,0)).join(' / '):'—'}/>
     <Kv k="Delta now" v={r.current.delta==null?'Unavailable':num(r.current.delta,2)} note={r.current.delta==null?'A leg\'s IV cannot be solved from its price':'Model, ₹ per 1-point move'}/>
     <Kv k="Margin now" v={r.current.margin==null?'Unavailable':inr(r.current.margin)} note={r.current.margin==null?'Needs a live broker margin read':'Kite basket margin'}/>
@@ -46,6 +49,7 @@ export function AdjustSheet({visible,onClose,strategyId,version,deployment,onApp
      <View style={[s.row,{flexWrap:'wrap',gap:14}]}>
       <Kv k={(c.cash||0)>=0?'Credit':'Debit'} v={inr(Math.abs(c.cash||0))} note={`charges ${inr(c.charges||0)}`}/>
       <Kv k="Worst case after" v={c.after?.unlimited_loss?'Unlimited':inr(c.after?.worst??0)}/>
+      <Kv k="Best case after" v={c.after?.unlimited_profit?'Unlimited':c.after?.best==null?'—':inr(c.after.best)}/>
       <Kv k="Breakevens after" v={c.after?.breakevens.length?c.after.breakevens.map(b=>num(b,0)).join(' / '):'—'}/>
       <Kv k="Delta change" v={c.delta?.change==null?'Unavailable':signed(c.delta.change)} note={c.delta?.change==null?'Model delta not computable':undefined}/>
       <Kv k="Margin change" v={c.margin?.change==null?'Unavailable':signed(c.margin.change)}/>
@@ -64,7 +68,7 @@ export function AdjustSheet({visible,onClose,strategyId,version,deployment,onApp
 
 function Kv({k,v,note}:{k:string;v:string;note?:string}){return <View style={{gap:1,minWidth:110}}><T style={{fontSize:11,color:C.muted}}>{k}</T><T style={{fontSize:14,fontFamily:'InterSemi'}}>{v}</T>{!!note&&<T style={{fontSize:10,color:C.muted}}>{note}</T>}</View>;}
 
-/** Expiry P&L now (dashed) vs after the adjustment (solid), with the zero line and spot. */
+/** P&L at the common horizon now (dashed) vs after the adjustment (solid), with the zero line and spot. */
 function Overlay({points,spot,height=150}:{points:{s:number;current:number;after:number}[];spot:number;height?:number}){
  const [w,setW]=useState(420);
  const g=useMemo(()=>{if(points.length<2)return null;

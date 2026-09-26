@@ -47,8 +47,9 @@ def mount(app,settings,path=None,derivatives_path=None,live=None,kanida_db=None,
   from .lab import Lab
   lab=Lab(store,market,kanida_db or os.getenv('PILOT_SB_KANIDA_DB') or str(Path(__file__).resolve().parents[4]/'db'/'kanida.db'),
    derivatives_path or settings.derivatives_database)
-  store.closers=[lab.close]
-  try:app.add_event_handler('shutdown',lab.close)
+  store.closers=[alerts.stop,execution.stop,lab.close]      # workers stop (and join) BEFORE the store closes
+  try:
+   for fn in (alerts.stop,execution.stop,lab.close):app.add_event_handler('shutdown',fn)
   except Exception:pass  # noqa: BLE001
   from .autotrade_bridge import AutotradeRoutes,Bridge
   autotrade=AutotradeRoutes(store,bridge or Bridge())      # unconfigured unless PILOT_AUTOTRADE_URL + _TOKEN are set

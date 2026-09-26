@@ -1393,15 +1393,19 @@ def test_spreads_mode_rows_are_correct_and_priced_to_execute(live):
  assert recognise(s['draft']['body']['legs'])['key']=='bull_call_spread'
 
 
-def test_manual_price_off_the_tick_is_warned_not_blocking(pilot):
+def test_manual_price_off_the_tick_is_rejected_before_calculation(pilot):
+ # slice 13 (fresh audit P07, Blueprint A tick-before-calculate): new input off the tick is a 400 naming the nearest
+ # valid price - it is neither calculated nor saved. The UI snaps on blur, so users never see this path.
  _a,owner,_o=pilot
  s=strategy(owner)
  body=s['draft']['body'];body['legs'][0]={**body['legs'][0],'price_basis':'manual','price':101.03}
- a=owner.post('/api/sb/analyze',json={'body':body}).json()
- assert a['status']=='ok' and any(i['key']=='off_tick' and '101.05' in i['text'] for i in a['insights'])
+ r=owner.post('/api/sb/analyze',json={'body':body})
+ assert r.status_code==400 and r.json()['code']=='OFF_TICK' and '101.05' in r.json()['error']
+ r=owner.post(f"/api/sb/strategies/{s['id']}/draft",json={'version':s['draft']['version'],'body':body})
+ assert r.status_code==400 and r.json()['code']=='OFF_TICK'
  body['legs'][0]['price']=101.05
  a=owner.post('/api/sb/analyze',json={'body':body}).json()
- assert not any(i['key']=='off_tick' for i in a['insights'])
+ assert a['status']=='ok' and not any(i['key']=='off_tick' for i in a['insights'])
 
 
 def test_templates_carry_sketch_monitoring_and_intro_flags(pilot):

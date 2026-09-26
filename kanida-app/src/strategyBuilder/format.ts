@@ -22,3 +22,7 @@ export const strikeText=(k:number)=>Number.isInteger(k)?String(k):k.toFixed(2);
 /** An epoch (seconds) shown in IST whatever the browser's zone: 'Fri 25 Sep 10:17 IST'. */
 export function istEpoch(sec?:number|null){if(!sec)return '—';const f=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Kolkata',weekday:'short',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(new Date(sec*1000));
  const g=(t:string)=>f.find(x=>x.type===t)?.value||'';return `${g('weekday')} ${Number(g('day'))} ${g('month')} ${g('hour')}:${g('minute')} IST`;}
+
+/** One leg as text, ALWAYS with its expiry (fresh audit P01): the same strike and type in two expiries are two contracts. */
+export function legText(l:{side:string;lots:number;strike:number;type:string;expiry?:string}){
+ return `${l.side==='B'?'Buy':'Sell'} ${l.lots} × ${strikeText(l.strike)} ${l.type} ${l.expiry?dayMonth(l.expiry):''}`.trim();}

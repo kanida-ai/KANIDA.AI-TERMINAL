@@ -12,7 +12,8 @@ export type ChainRow={strike:number;CE:ChainSide|null;PE:ChainSide|null};
 export type Chain={underlying:string;expiry:string;as_of:string;spot:number;lot_size:number;tick_size:number;strike_step:number;atm_strike:number;atm_iv:number|null;days_to_expiry:number;rows:ChainRow[];quality:{bid_ask:string;source:string;live:boolean}};
 export type Expiry={expiry:string;lot_size:number;contracts:number;monthly:boolean;days_to_expiry:number};
 export type LegRow={id:string;label:string;units:number;entry:number;ltp:number|null;iv:number|null;iv_source:string;target_price:number|null;target_pnl:number|null;greeks:Record<string,number>|null};
-export type Analysis={status:string;input_hash:string;underlying?:string;structure:{key:string|null;name:string;exact:boolean};model_version?:string;as_of?:string;spot?:number;expiry?:string;lot_size?:number;
+export type Horizon={kind:'expiry_exact'|'model_near_expiry';expiry:string;at:string;label:string;extrema:'exact'|'modelled';note:string};
+export type Analysis={status:string;input_hash:string;horizon?:Horizon;unresolved?:{leg_id:string;contract_id:string;label:string}[];underlying?:string;structure:{key:string|null;name:string;exact:boolean};model_version?:string;as_of?:string;spot?:number;expiry?:string;lot_size?:number;
  scenario?:{spot:number;at:string;iv_shift:number;days_to_expiry:number;is_expiry:boolean;active?:boolean};greeks_scenario?:any;pop_scenario?:Metric;breakevens_target?:Metric;insights?:{key:string;level:'warn'|'info';text:string}[];premium?:Metric;charges?:Metric;max_profit?:Metric;max_loss?:Metric;breakevens?:Metric;
  reward_risk?:Metric;capital_at_risk?:Metric;pop?:Metric;margin?:Metric;scenario_pnl?:Metric;greeks?:any;legs?:LegRow[];curve?:{s:number;expiry:number|null;target:number|null}[];
  legs_quotes?:{id:string;bid:number|null;ask:number|null;ltp:number|null;basis_used:string}[];sd?:{sigma:number|null;bands:{k:number;low:number;high:number}[];bands_to_date?:{k:number;low:number;high:number}[]};table?:{s:number;pct:number;target:number|null;expiry:number|null}[];warnings:string[];quality?:any;price_basis?:string[]};
@@ -32,10 +33,10 @@ export type DiscoverResult={result_id?:string;request_hash?:string;expires_at?:n
 
 export type AdjustOrder={id:string;type:Kind;strike:number;side:Side;lots:number;qty:number;symbol:string;price:number;basis:string;charges:number;effect:'open'|'close'};
 export type AdjustCandidate={rule:string;k:number|null;name:string;explain:string;available:boolean;reason?:string;note?:string;orders?:AdjustOrder[];price_basis?:string[];cash?:number;charges?:number;
- after?:{worst:number|null;unlimited_loss:boolean;best:number|null;breakevens:number[]};delta?:{current:number|null;after:number|null;change:number|null};margin?:{current:number|null;after:number|null;change:number|null};
+ after?:{worst:number|null;unlimited_loss:boolean;best:number|null;unlimited_profit?:boolean;breakevens:number[]};delta?:{current:number|null;after:number|null;change:number|null};margin?:{current:number|null;after:number|null;change:number|null};
  overlay?:{s:number;current:number;after:number}[];structure_after?:string;evidence:{status?:string;label:string;note?:string;run_id?:string;runs_tried?:number}};
 export type AdjustResult={as_of:string;spot:number;lot_size:number;structure:string;template:string|null;param:number|null;held:boolean;tested:{leg_id:string;label:string;distance_pct:number}|null;
- current:{worst:number|null;unlimited_loss:boolean;breakevens:number[];delta:number|null;margin:number|null};entry_basis:string;candidates:AdjustCandidate[];notes:string[];deployment_id:string|null;draft_version:number};
+ horizon?:Horizon;current:{worst:number|null;best?:number|null;unlimited_loss:boolean;unlimited_profit?:boolean;breakevens:number[];delta:number|null;margin:number|null};entry_basis:string;candidates:AdjustCandidate[];notes:string[];deployment_id:string|null;draft_version:number};
 export const sb={
  spreads:(u:string,e:string,type:string,side:string,width:number,lots=1)=>api(`/api/sb/spreads?underlying=${encodeURIComponent(u)}&expiry=${e}&type=${type}&side=${side}&width=${width}&lots=${lots}`) as Promise<any>,
  adjustCandidates:(id:string,deploymentId?:string)=>api(`/api/sb/strategies/${id}/adjust/candidates`,{deployment_id:deploymentId||null}) as Promise<AdjustResult>,

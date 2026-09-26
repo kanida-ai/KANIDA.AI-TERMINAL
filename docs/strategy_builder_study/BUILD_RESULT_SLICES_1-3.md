@@ -699,3 +699,28 @@ Tests: `test_slice12.py` has 45 tests. The full pilot suite is 737 passed; the 6
 - The stocks v2 grid waits for NSE's symbol-change list (owner approval), so renamed stocks keep their pre-rename F&O history.
 
 **Also fixed before these runs.** A quarantined batch that produced NO result at all (`stocks_v1`, which crashed on a code error before any rule ran) no longer adds its 9,856 planned rules to the stock family's m. Nothing was seen from it. A batch with any results still counts every unfinished rule.
+
+## Slice 13 — correctness (fresh GTM audit P01–P07, P12, P16), 26 Sep 2026
+
+Input: `research/gtm-audit-fresh-2026-09-25-2355`. Plan: `GTM_LAUNCH_PLAN.md`. Owner direction: launch-ready; fix calendars rather than hiding them.
+
+| Ticket | What changed | Proof |
+|---|---|---|
+| P01 contract identity | `contract_id` (NFO\|underlying\|expiry\|strike\|type) on every resolved leg, quote and unresolved leg. The chain drawer selects and removes only legs in its own expiry, and names legs in other expiries. The leg editor loads the selected expiry's chain and shows "Loading" rather than the old contract. It blocks Apply when the contract is missing. Leg cards price later-expiry legs from their own quote. Every leg label carries its expiry, and mobile cards show lots × lot = units. | `test_equal_strike_and_type_in_two_expiries_are_two_contracts`; browser checks 4–6 and 9 |
+| P02 Adjust valuation | `analytics.valuation()` / `horizon_profile()` is ONE valuation shared by the builder and the assistant. The terminal-intrinsic `_profile` is removed. Current and proposed positions are valued at one horizon, with each order's own expiry and IV; a proposal that can't be valued is unavailable. | Builder = Adjust on a calendar: +₹5,566 / −₹5,298 / 22,801·23,249 (browser and `test_calendar_adjustment_profile_agrees_with_builder_horizon`) |
+| P03 horizon labels | Every analysis carries `horizon` {kind, label, note}. The risk strip, payoff legend, payoff table and Adjust show "Model at near expiry — 29 Sep 15:30 IST" plus a MODEL badge and "not a guaranteed cap". | browser check 1 |
+| P04 fail closed | An unresolved included leg returns `status: incomplete`, with every strategy-wide metric unavailable, no curve or table, and the missing contract named. The structure shown is the one the user asked for. Excluding the leg is the deliberate way to explore what's left. | audit probe 4 verbatim; browser check 7 |
+| P05 quote policy | `service.exec_price` requires a valid book (`quotes.book`); crossed or zero books fall back to a labelled LTP. Research, spreads and the assistant share it. The chain's "Liquid only" filter disables the failing option side. | audit probe 1 verbatim |
+| P06 probability reference | `service.analyze_on_chain` joins and prices legs exactly as the builder does, using the chain's ATM IV. Discover and spreads use it. Cards carry `reference` {iv, source, as_of, model_version}; spread rows carry `points` and `executable`. | Discover = spreads = builder POP (`test_discovery_and_builder_share_probability_reference`) |
+| P07 validation | Structured 400s: 1.9 lots, NaN/±Inf, bool, zero or negative lots, impossible dates, >8 legs, IV shift outside ±50 (no clamping). Off-tick typed prices are rejected by the API (`OFF_TICK` names the nearest tick); the UI snaps on blur and says "Rounded 120.12 to 120.1". | audit probes 2–3 verbatim + 11 parametrised; browser check 8 |
+| P12 calculation state | P&L, Greeks and payoff tables show "Calculating…" instead of "No legs". Stale tables are dimmed and labelled like the risk strip. | browser (loading) |
+| P16 filter | "Paper traded" includes deployments. | code |
+| P17 shutdown | The alerts and paper workers stop and join before the store closes. The closed-database error is gone from the suite. | full suite log |
+
+**Audit probes.** The audit's own file now shows 4 passing. Probes 5 and 6 still fail by construction: they call `assistant._profile` (deleted) and a bare `analyze()` without the chain reference (no longer the Discover path). `server/tests/test_gtm_fresh.py` asserts the same requirements through the real code paths (20 tests).
+
+**Browser.** `scripts/e2e/slice13_harness.py` (isolated temp DBs, two-expiry reading, fixture owner) and `scripts/e2e/slice13_browser.py`: 9 of 9 checks pass. Screenshots are in `docs/screenshots/strategy_builder_2026-09-26/slice13/`.
+
+**Tests.** 757 passed, 3 skipped; the 6 older `test_derivatives.py` failures are unchanged. The TypeScript typecheck is clean.
+
+**Not in this slice (slice 14 per the plan):** P08 unified paper ledger, P09 costs/units, P10 mobile badge and duplicate risk inputs, P11 status wording, P13 Lab eligibility and replay copy, P14 alert sample age, P15 intent handoff.
