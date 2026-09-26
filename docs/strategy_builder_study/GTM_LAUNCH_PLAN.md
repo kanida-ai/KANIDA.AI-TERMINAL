@@ -33,7 +33,65 @@ Input: the fresh audit `research/gtm-audit-fresh-2026-09-25-2355/` (P01–P20). 
 - Fix the alerts worker's closed-database error on shutdown.
 - **Proof:** the six audit probes copied into `server/tests/test_gtm_fresh.py`, plus Playwright checks for the wrong-expiry pick, the edited-expiry header and stale results.
 
-## Slice 14 — lifecycle and UX
+
+
+## REVISED ORDER (owner-approved 26 Sep) — the adjustment-evidence product
+
+**Product:** an intelligent options strategy simulator (not automated trading). The core screen is for a trader already in a
+position: compare **keep / reduce / hedge / roll / exit** on the same assumptions, with the original loss always visible.
+It says what each choice helps, hurts, costs and still leaves at risk. Analysis, never instructions.
+
+**Moat:** a growing, validated record of when adjustments help, hurt, or have insufficient evidence. It comes from
+**branching experiments**: the same position is split into every choice and each branch follows the same future market.
+History (the 10-year NSE bhavcopy, daily) gives years of conditions now; the live paper lab adds realistic fills going
+forward. Principles are pre-registered, tested on later unseen periods, and promoted or retired only with human approval -
+never rewritten nightly from that day's winners.
+
+| Slice | Scope |
+|---|---|
+| 14 | Engine integrity (E03–E07, E10, E12) + Strategies lifecycle/UX (P08–P15) + **an immutable decision log** (every strategy, adjustment, paper fill and outcome, with consent flags), so the data clock starts now |
+| 15 | Cloud move (AWS Mumbai): Postgres, queue workers, shared quote cache, auth, observability, 10k-concurrent load test; E01 identity/master, E02 immutable archive |
+| 16 | **Adjustment Decision screen**: keep/reduce/hedge/roll/exit on one screen, common horizon and assumptions, original loss visible, assumption sliders ("does the improvement survive?"), plain-language trade-offs; comprehension test with users |
+| 17 | **Historical branching lab** on the 10-year bhavcopy: pre-registered triggers and objectives, point-in-time, costs, and every branch followed |
+| 18 | **Live paper lab**: thousands of branching experiments daily across stocks, strategies and triggers (structured randomisation), realistic fills (spread, cost, partials), failures and non-fills kept |
+| 19 | **Principles registry**: candidate principles tested out of sample on unseen periods; promote/weaken/retire with human approval; drives the "in comparable experiments…" evidence on the slice-16 screen |
+| later | Thesis Continuity, Protection Frontier, live-trading certification (P17–P19/E08–E09, when the broker agreement lands), Pressure Transport / Liquidity Survival |
+
+(This supersedes the earlier slice 16 = live certification and 17–19 = Atlas/Thesis/Frontier ordering above.)
+
+## Bound in: Derivatives Intelligence study (research/derivatives-intelligence-2026-09-26), 26 Sep
+
+Probes re-run on `7094f68`: **2 pass / 10 fail** (unchanged; slice 13 touched Strategies, not the engine).
+
+### Engine integrity gates E01–E12 → where each lands
+| Gate | What | Slice |
+|---|---|---|
+| E03 schema/reader | Builder crashes on a FRESH capture DB (`no such column: s.bid`); the cloud DB starts empty. Optional columns + reader contract tests on fresh and migrated schemas | **14 (first)** |
+| E07 costs | Option sale STT 0.1% → 0.15% and exercise 0.125% → 0.15% (NSE, from 1 Apr 2026); futures sale 0.05%. Effective-dated schedule (the Lab also uses point-in-time rates back to 2016); bump EVIDENCE_VERSION; re-run grids, keeping superseded reports | **14** |
+| E05 pricing | σ=0 with T>0 uses the discounted strike; NaN price → no IV; positive intraday time on expiry morning; corrected dividend wording | **14** |
+| E04 time/population | Volume baseline cut at bar END; matched-cohort ΔOI (births/deaths separate); explicit coverage | **14** |
+| E06 metrics/language | A missing PCR side is never 0; Max Pain help = payout minimisation (range + ties); price/OI labels say "consistent with writing", never who did it | **14** |
+| E10 evidence validity | S/N control never uses itself; episode/session-level counts; 4 sessions labelled exploratory | **14** |
+| E12 reproducibility | Fixed-clock fixtures (the 6 date-sensitive `test_derivatives.py` failures I've been carrying) | **14** |
+| E01 identity/master | Permanent contract ID + effective-dated vendor-token alias (Kite reuses tokens); lot/tick versions | **15** (designed into the Postgres schema) |
+| E02 immutable archive | Append-only observations with source revisions; cold checksummed archive before hot prune; as-known replay | **15** |
+| Snapshot scope | Interpretation snapshot key gains expiry + rules version (two expiries coexist) | **15** (migration) |
+| E08 paper realism | Depth-constrained partial fills, per-contract mark age, exit rules on NET P&L (realised + unrealised − costs), trailing/time rules | **14** (mark age, net basis) / **16** (depth fills) |
+| E09 margin/settlement | = P19/P18 | **16** |
+| E11 rule/hedge lifecycle | Typed EQ/FUT/OPT legs, versioned rules | **17–19** |
+
+### IP build (after the integrity gate G0, in the study's dependency order)
+| Slice | Product | Gate |
+|---|---|---|
+| 17 | **State Transition Atlas**, descriptive first (A1–A5): versioned episodes, matched-contract features, a comparable-history panel that says "history insufficient" rather than invent a confidence | G1 |
+| 18 | **Thesis Continuity Engine** (T1–T6): immutable entry thesis with predicates → supported/contradicted/unknown/expired; incidents; review timeline. Builds on the slice-14 unified paper ledger | G2 |
+| 19 | **Protection Frontier** (H1–H6): typed EQ/FUT/OPT holdings, five hedge templates with exact identities, Pareto frontier, transition funding | G3 |
+| later | Pressure Transport, Liquidity Survival (need BBO/depth history), Demand Attribution (needs trade prints - not faked from OI) | research |
+| gated | **G5 validated historical intelligence**: calibrated probabilities are released only after prospective validation on enough independent sessions. The data clock starts when capture starts | time |
+
+Moat action that cannot wait: history cannot be reconstructed later, so capture of timestamped BBO/depth for a liquid universe must start as early as possible (owner decision on scope/cost).
+
+## Slice 14 — engine integrity (E03–E07, E10, E12) + lifecycle and UX
 - **P08:** the unified paper ledger. `created_at`, `action_at` and `market_sample_at` are stored separately; capital is scoped to its ledger; every run gets Monitor, Alerts, Adjust and Close, or a stated reason.
 - **P09:** gross/net with a named exit-cost assumption; per unit / per lot / whole-strategy Greeks and quantities; spread cards show point width, basis and age; rounding reconciles.
 - **P10:** evidence badge wrapping (320/390/768 px and 200% text); a single risk cap; a compact grouped expiry picker; a curated beginner recipe list with advanced options behind it.
